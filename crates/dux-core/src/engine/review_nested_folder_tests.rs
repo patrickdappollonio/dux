@@ -296,7 +296,11 @@ fn a_resumed_removal_does_not_kill_an_unrelated_program_that_reused_a_session_nu
             label: "gone".to_string(),
             project_path: repo.to_string_lossy().into_owned(),
             managed: session.workspace.as_managed().unwrap().clone(),
-            delete_branch: None,
+            branches: crate::branch_history::BranchPlan::legacy(
+                session.workspace.as_managed().unwrap(),
+                None,
+                None,
+            ),
             process_sessions: vec![recorded],
             process_snapshot: Vec::new(),
             process_registry: crate::process_sessions::RegistrySnapshot::default(),
@@ -450,7 +454,11 @@ fn review9_a_removal_resumed_after_a_reboot_ends_nothing_of_this_boot() {
             label: "gone".to_string(),
             project_path: repo.to_string_lossy().into_owned(),
             managed: session.workspace.as_managed().unwrap().clone(),
-            delete_branch: None,
+            branches: crate::branch_history::BranchPlan::legacy(
+                session.workspace.as_managed().unwrap(),
+                None,
+                None,
+            ),
             process_sessions: vec![crate::process_sessions::ProcessSession {
                 sid: pid,
                 started_at: start,

@@ -4,6 +4,7 @@
 
 import { forceConnectedQuery } from "./attached"
 import { createJsonRequest } from "./jsonRequest"
+import type { BranchOrigin } from "./deleteAgent"
 import type { Prose } from "./prose"
 import type {
   AcceptedOperation,
@@ -179,18 +180,54 @@ export interface PullRequestCloneDestination {
   review_copy?: ReviewCopyOutlook
 }
 
-// The answer to `GET /api/v1/sessions/:id/branch-unpushed`. `branches` is every
-// branch the delete would remove (two for a drifted agent) and the count is
-// their union, so the dialog can name exactly what would go.
-export type BranchUnpushed = {
-  branches: string[]
-  // `null` when git could not answer. The count travels with the has-remote flag
-  // because it means a different thing without it: with nowhere to have pushed to,
-  // the count is simply the whole history.
-  unpushed: { count: number; has_remote_refs: boolean } | null
-  // Why git could not count, when it could not; the dialog says so in place of
-  // a number. Absent from a server that predates it, which reads as no reason.
-  unpushed_error?: string | null
+// One branch the delete dialog offers, pinned to the commit a tick deletes, and
+// who the server judged made it.
+export interface OfferedBranch {
+  name: string
+  oid: string
+  origin: BranchOrigin
+}
+
+type UnpushedPayload = { count: number; has_remote_refs: boolean }
+
+// The answer to `GET /api/v1/sessions/:id/branch-unpushed`: the branch the
+// worktree is on (the first box, `null` when git could not read it) and every
+// other branch it has been on (the second box), each box with how much of its
+// work exists on no remote, or why git could not count it.
+export interface BranchOffer {
+  // The branch the worktree was on when this was read.
+  current_name: string
+  current: OfferedBranch | null
+  current_unpushed: UnpushedPayload | null
+  current_unpushed_error: string | null
+  others: OfferedBranch[]
+  others_unpushed: UnpushedPayload | null
+  others_unpushed_error: string | null
+  // What ticking both boxes loses.
+  both_unpushed: UnpushedPayload | null
+  both_unpushed_error: string | null
+  // Branches the agent was on that are the project's own: offered in no box,
+  // and never deleted.
+  protected: string[]
+}
+
+// One box's answer on a delete. A ticked box carries exactly the entries the
+// offer pinned; an unticked one carries none. `unchecked` says why a box had
+// no offer to answer from (still checking, or the check failed), and the
+// server then keeps every branch.
+export interface BranchBoxAnswer {
+  delete: boolean
+  branches: { name: string; oid: string }[]
+  unchecked?: "pending" | "failed" | "not_offered"
+  // Every branch the box showed, ticked or not.
+  offered?: string[]
+}
+
+// Both boxes' answers. Both are always sent: a box left out means nobody was
+// asked, and the server would then apply its own default.
+export interface DeleteBranchAnswers {
+  current: BranchBoxAnswer
+  others: BranchBoxAnswer
 }
 
 export const sessionsApi = {
@@ -224,26 +261,25 @@ export const sessionsApi = {
       "/api/v1/pull-requests/clone-destination",
       body,
     ),
-  // `deleteBranch` is the delete dialog's "also delete the branch" answer.
-  // `null` means nobody was asked (a standalone agent, whose dialog has no
-  // checkbox), and the server then keeps its provenance default.
+  // `branches` is the delete dialog's two branch boxes, sent as the body. `null`
+  // means no box was on screen (the worktree is kept, or a standalone agent),
+  // and the request then carries no body at all.
   remove: (
     id: string,
     deleteWorktree: boolean,
-    deleteBranch: boolean | null,
+    branches: DeleteBranchAnswers | null,
     accepted: readonly string[] | null = null,
   ) =>
     request<void>(
       "DELETE",
       `/api/v1/sessions/${encodeURIComponent(id)}?delete_worktree=${deleteWorktree}` +
-        (deleteBranch === null ? "" : `&delete_branch=${deleteBranch}`) +
         forceConnectedQuery(accepted, false),
+      branches === null ? undefined : { branches },
     ),
-  // How much work ticking that box would destroy: the branches the delete removes and
-  // how many of their commits no remote-tracking ref reaches. A `null` count means git
-  // could not answer, and the dialog then says nothing rather than guessing.
+  // What the delete dialog's branch boxes offer, each pinned to the commit a
+  // tick deletes, and how much work each would destroy.
   branchUnpushed: (id: string) =>
-    request<BranchUnpushed>(
+    request<BranchOffer>(
       "GET",
       `/api/v1/sessions/${encodeURIComponent(id)}/branch-unpushed`,
     ),

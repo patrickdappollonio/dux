@@ -371,7 +371,7 @@ dux projects worktrees ls <p>       # The project's worktrees, and which agent h
 dux agents ls                       # Also: --project <p>, --worktrees; show <a>, stop <a>, start <a>
 dux agents add --project <p> --name feat   # Also: --existing-branch, --copy-uncommitted, --from-pr <pr> [--review-copy], --from-worktree <path>, --fork <a>, --standalone <folder> [--provider]
 dux agents add --from-pr <url>        # No project needed: clones the repository (or adds a checkout of it) when none has it; also: --path <folder>, --review-copy
-dux agents rm <a> --delete-worktree --keep-branch   # Neither branch flag: the branch goes only if dux created it
+dux agents rm <a> --delete-worktree --keep-branch   # Also: --delete-branch, --delete-other-branches, --keep-other-branches; with no branch flag only the branch dux created goes
 dux agents tabs ls <a>              # Also: add <a> [--provider], rm|start|stop <a> <tab>
 dux terminals ls                    # Also: add [--agent <a> | --project <p>], rm <t>
 ```

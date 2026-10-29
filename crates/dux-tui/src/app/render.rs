@@ -1442,6 +1442,10 @@ fn resource_monitor_columns(inner_width: u16) -> ResourceMonitorColumns {
 /// would drift until the height stopped matching the contents.
 pub(super) const DELETE_AGENT_WORKTREE_LABEL: &str = "Also delete the worktree";
 
+/// How far a delete-agent branch box's warning is indented: the body margin
+/// and the check mark, so it reads under the label it is about.
+const DELETE_AGENT_WARNING_INDENT: &str = "     ";
+
 /// The add-project "check out the default branch first" checkbox label. One
 /// function because the dialog measures the label before it renders it.
 fn checkout_default_label(default_branch: &str) -> Prose {
@@ -1478,27 +1482,6 @@ pub(super) fn delete_agent_branch_checkbox_prose(branches: &[&str]) -> Prose {
     label
 }
 
-/// Whether the branch box needs a warning under it, and what it says.
-///
-/// Two reasons to warn, either enough on its own: the branch predates the agent,
-/// so it was never dux's to delete, or the agent has drifted, so the tick removes
-/// a second branch. A branch dux created for an agent that stayed on it gets
-/// nothing.
-///
-/// The danger lives in this sentence rather than in a red checkbox. `unpushed` is
-/// `None` while the count is being computed, and the count sentence is absent
-/// then; when git could not count, the sentence says so and why: the dialog
-/// never guesses a number.
-#[cfg(test)]
-pub(super) fn delete_agent_branch_warning(
-    provenance: dux_core::model::BranchProvenance,
-    branches: &[&str],
-    unpushed: Option<dux_core::git::UnpushedCommits>,
-) -> Option<String> {
-    delete_agent_branch_warning_prose(provenance, branches, unpushed.map(Ok).as_ref())
-        .map(|prose| prose.plain())
-}
-
 /// The sentence saying the branch was never dux's to delete, `None` for one
 /// dux created. Mirrors `BranchProvenance::kept_reason`, in the dialog's own
 /// voice. `branches` lists the current branch first and the birth one second,
@@ -1523,94 +1506,6 @@ pub(super) fn branch_not_duxs_prose(
         _ => " existed before the agent.",
     });
     Some(text)
-}
-
-/// [`delete_agent_branch_warning`] with every branch it names marked as a name.
-pub(super) fn delete_agent_branch_warning_prose(
-    provenance: dux_core::model::BranchProvenance,
-    branches: &[&str],
-    unpushed: Option<&Result<dux_core::git::UnpushedCommits, String>>,
-) -> Option<Prose> {
-    let drifted = branches.len() > 1;
-    let predates = !provenance.dux_may_delete_branch();
-    if !drifted && !predates {
-        return None;
-    }
-    let mut text = Prose::new();
-    if let [current, birth, ..] = branches {
-        text.push_text("The worktree moved from ");
-        text.push_name(*birth);
-        text.push_text(" onto ");
-        text.push_name(*current);
-        text.push_text(", so deleting the agent removes both.");
-    }
-    if let Some(reason) = branch_not_duxs_prose(provenance, branches) {
-        if !text.is_empty() {
-            text.push_text(" ");
-        }
-        text = text.then(reason);
-    }
-    let spread = if drifted {
-        BranchSpread::Drifted
-    } else {
-        BranchSpread::Single
-    };
-    match unpushed {
-        Some(Ok(answer)) => {
-            if let Some(sentence) = unpushed_commits_sentence(Some(*answer), spread) {
-                text.push_text(sentence);
-            }
-        }
-        Some(Err(reason)) => {
-            text.push_text(" ");
-            text = text.then(dux_core::delete_agent_prose::unpushed_count_failure_prose(
-                branches, reason,
-            ));
-        }
-        None => {}
-    }
-    Some(text)
-}
-
-/// What the delete warning says about commits the branches are holding, or
-/// `None` when there is nothing to say.
-///
-/// A repository with no remote-tracking refs has not held anything back; it has
-/// nowhere to have pushed to, and the count is its whole history. Saying "not
-/// pushed anywhere" there reads as an accusation about work that was never going
-/// anywhere, so the sentence says what is true instead.
-fn unpushed_commits_sentence(
-    unpushed: Option<dux_core::git::UnpushedCommits>,
-    spread: BranchSpread,
-) -> Option<String> {
-    let answer = unpushed?;
-    let count = answer.count;
-    if count == 0 {
-        return None;
-    }
-    if answer.has_remote_refs {
-        let plural = if count == 1 { "commit" } else { "commits" };
-        return Some(if spread == BranchSpread::Drifted {
-            format!(" They have {count} {plural} not pushed anywhere between them.")
-        } else {
-            format!(" It has {count} {plural} not pushed anywhere.")
-        });
-    }
-    let (subject, possessive) = if spread == BranchSpread::Drifted {
-        ("them", "their")
-    } else {
-        ("it", "its")
-    };
-    // A single commit gets its own clause: "all 1 of its commits" is the
-    // sentence admitting it was assembled rather than written.
-    let existence = if count == 1 {
-        format!("{possessive} one commit exists")
-    } else {
-        format!("all {count} of {possessive} commits exist")
-    };
-    Some(format!(
-        " Nothing on {subject} has been pushed anywhere: {existence} only on this machine."
-    ))
 }
 
 /// The status line confirming a project's environment save, counting the
@@ -1945,13 +1840,85 @@ enum Truncation {
     Whole,
 }
 
-/// How many branches a delete warning about unpushed commits covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BranchSpread {
-    /// Two: the agent drifted off the branch it was born on.
-    Drifted,
-    /// One.
-    Single,
+/// The delete dialog's two branch boxes, read off git's answer: each box's
+/// label, whether it shows ticked, and the warning under it. A box whose label
+/// is `None` is not painted, which is every box until git has answered.
+pub(super) struct DeleteAgentBranchBoxes {
+    pub(super) current_label: Option<Prose>,
+    pub(super) current_ticked: bool,
+    pub(super) current_warning: Option<Prose>,
+    pub(super) others_label: Option<Prose>,
+    pub(super) others_ticked: bool,
+    pub(super) others_warning: Option<Prose>,
+    /// What deleting the boxes ticked right now loses, which changes with
+    /// every tick.
+    pub(super) loss: Option<Prose>,
+}
+
+impl DeleteAgentBranchBoxes {
+    /// The boxes for `offer` (`None` while there is nothing to offer) under
+    /// the dialog's two answers, each `None` while untouched.
+    pub(super) fn of(
+        offer: Option<&dux_core::branch_history::BranchOffer>,
+        delete_branch: Option<bool>,
+        delete_other_branches: Option<bool>,
+    ) -> Self {
+        use dux_core::delete_agent_prose as copy;
+        let Some(offer) = offer else {
+            return Self {
+                current_label: None,
+                current_ticked: false,
+                current_warning: None,
+                others_label: None,
+                others_ticked: false,
+                others_warning: None,
+                loss: None,
+            };
+        };
+        let others_ticked = delete_other_branches.unwrap_or_else(|| offer.others_default());
+        let others: Vec<(&str, dux_core::branch_history::BranchOrigin)> = offer
+            .others
+            .iter()
+            .map(|other| (other.name.as_str(), other.origin))
+            .collect();
+        let names: Vec<&str> = others.iter().map(|(name, _)| *name).collect();
+        let current = offer.current.as_ref();
+        let current_ticked = delete_branch.unwrap_or_else(|| offer.current_default());
+        Self {
+            current_label: current.map(|current| copy::current_branch_label_prose(&current.name)),
+            current_ticked,
+            current_warning: current
+                .and_then(|current| copy::current_branch_warning_prose(current.origin)),
+            others_label: (!names.is_empty()).then(|| copy::other_branches_label_prose(&names)),
+            others_ticked,
+            others_warning: (!others.is_empty())
+                .then(|| {
+                    copy::other_branches_warning_prose(
+                        &others,
+                        if others_ticked {
+                            copy::BoxState::Ticked
+                        } else {
+                            copy::BoxState::Unticked
+                        },
+                    )
+                })
+                .filter(|prose| !prose.is_empty()),
+            loss: offer
+                .lost(
+                    if current_ticked {
+                        copy::BoxState::Ticked
+                    } else {
+                        copy::BoxState::Unticked
+                    },
+                    if others_ticked {
+                        copy::BoxState::Ticked
+                    } else {
+                        copy::BoxState::Unticked
+                    },
+                )
+                .map(|(deleted, lost)| copy::branch_loss_prose(&deleted, lost)),
+        }
+    }
 }
 
 /// Whether the sidebar has a Terminals section under the agents.
@@ -2087,6 +2054,7 @@ impl App {
             // No checkbox exists, so none can be clicked.
             checkbox: None,
             branch_checkbox: None,
+            other_branches_checkbox: None,
         };
     }
 
@@ -12491,7 +12459,8 @@ impl App {
             focus,
             delete_worktree,
             delete_branch,
-            unpushed_commits,
+            delete_other_branches,
+            offer,
             attached,
             ..
         } = &self.prompt
@@ -12500,7 +12469,7 @@ impl App {
         };
         let inner_width = confirm_inner_width(frame.area());
         let offers_checkbox = target.offers_worktree_checkbox();
-        // The branch box comes and goes with the worktree box, so the measured
+        // The branch boxes come and go with the worktree box, so the measured
         // height has to ask the same question the renderer and the focus ring
         // ask, or the dialog's frame stops matching its contents.
         let on_delete = if *delete_worktree {
@@ -12508,43 +12477,142 @@ impl App {
         } else {
             dux_core::engine::WorktreeOnDelete::Keep
         };
-        let offers_branch_checkbox = target.offers_branch_checkbox(on_delete);
-        let warned_branches = target.warned_branches();
-        let branch_label = delete_agent_branch_checkbox_prose(&warned_branches);
-        // ONE measuring pass over every checkbox that will be painted, so a
-        // second box cannot silently overflow the frame the first one sized.
-        // Each box is measured as the same widget it is painted as.
-        let measure = |checkbox: Checkbox<'_>, checked: bool, focused: bool| {
-            let state = if focused {
-                CheckboxState::Focused
-            } else {
-                CheckboxState::Normal
-            };
-            let checkbox = checkbox.checked(CheckMark::from(checked)).state(state);
-            checkbox.height_at(inner_width)
-        };
-        let checkbox_height = if offers_checkbox {
-            measure(
-                Checkbox::new(DELETE_AGENT_WORKTREE_LABEL),
-                *delete_worktree,
-                *focus == DeleteAgentFocus::WorktreeCheckbox,
-            )
+        let branch_boxes = target.offers_branch_checkbox(on_delete);
+        let ready = offer.ready().filter(|_| branch_boxes);
+        let branches = DeleteAgentBranchBoxes::of(ready, *delete_branch, *delete_other_branches);
+        // Under the worktree box: that git has not answered about the
+        // branches, or could not, and which of them are the project's own.
+        let status_lines = if branch_boxes {
+            self.delete_agent_branch_status_lines(offer, inner_width)
         } else {
-            0
+            Vec::new()
         };
-        let branch_checkbox_height = if offers_branch_checkbox {
-            measure(
-                Checkbox::with_prose(&branch_label, &self.theme),
-                *delete_branch,
-                *focus == DeleteAgentFocus::BranchCheckbox,
-            )
-        } else {
-            0
-        };
+        let [current_warning, others_warning] =
+            self.delete_agent_branch_warnings(&branches, inner_width);
+        let [
+            checkbox_height,
+            branch_checkbox_height,
+            other_checkbox_height,
+        ] = self.delete_agent_checkbox_heights(
+            inner_width,
+            *focus,
+            offers_checkbox.then_some(*delete_worktree),
+            &branches,
+        );
+        let height = |lines: &[Line<'_>]| u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        let heights = [
+            checkbox_height,
+            height(&status_lines),
+            branch_checkbox_height,
+            height(&current_warning),
+            other_checkbox_height,
+            height(&others_warning),
+        ];
 
-        // Body: question text + conditional warning/hint/shared note.
-        // Long warning text is split into two explicit Lines so it
-        // renders correctly even at narrow dialog widths.
+        // Folder targets render first because they need `&mut self`; only managed
+        // targets reach this borrowed match. A STANDALONE agent has no managed
+        // identity, and every "also remove the worktree" affordance hangs off
+        // one: there is no removal to offer, so there is no checkbox to render
+        // and none to tick.
+        if matches!(target, DeleteAgentTarget::Folder { .. }) {
+            return;
+        }
+        let body_lines = self.delete_agent_body(
+            agent_label,
+            target,
+            on_delete,
+            attached,
+            confirm_inner_width(frame.area()),
+        );
+        let confirm_label = guarded_confirm_label("Delete", attached);
+        let layout = self.render_confirm_dialog(
+            frame,
+            &ConfirmDialog {
+                title: "Delete Agent",
+                body: body_lines,
+                controls_height: heights.iter().sum(),
+                cancel: delete_agent_cancel_button(*focus),
+                act: delete_agent_delete_button(*focus, &confirm_label),
+                reserve_labels: &[],
+            },
+        );
+        self.paint_delete_agent_controls(
+            frame,
+            &layout,
+            heights,
+            [status_lines, current_warning, others_warning],
+            &branches,
+        );
+    }
+
+    /// Paint the delete dialog's controls in the area its frame left for them,
+    /// top to bottom: the worktree box, the line standing in for the branch
+    /// boxes, and each branch box with its warning, and publish what a click
+    /// can land on.
+    fn paint_delete_agent_controls(
+        &mut self,
+        frame: &mut Frame<'_>,
+        layout: &crate::app::confirm_dialog::ConfirmLayout,
+        heights: [u16; 6],
+        [status_lines, current_warning, others_warning]: [Vec<Line<'static>>; 3],
+        branches: &DeleteAgentBranchBoxes,
+    ) {
+        let offers_checkbox = matches!(
+            &self.prompt,
+            PromptState::ConfirmDeleteAgent { target, .. } if target.offers_worktree_checkbox()
+        );
+        let [
+            checkbox_area,
+            status_area,
+            branch_checkbox_area,
+            current_warning_area,
+            other_checkbox_area,
+            others_warning_area,
+        ] = stack_rows(layout.controls, heights);
+        for (lines, area) in [
+            (status_lines, status_area),
+            (current_warning, current_warning_area),
+            (others_warning, others_warning_area),
+        ] {
+            Paragraph::new(lines).render(area, frame.buffer_mut());
+        }
+
+        let [checkbox_rect, branch_checkbox_rect, other_checkbox_rect] = self
+            .render_delete_agent_checkboxes(
+                frame,
+                [
+                    offers_checkbox.then_some(checkbox_area),
+                    branches
+                        .current_label
+                        .is_some()
+                        .then_some(branch_checkbox_area),
+                    branches
+                        .others_label
+                        .is_some()
+                        .then_some(other_checkbox_area),
+                ],
+                branches,
+            );
+
+        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
+            cancel_button: layout.cancel,
+            delete_button: layout.act,
+            checkbox: checkbox_rect,
+            branch_checkbox: branch_checkbox_rect,
+            other_branches_checkbox: other_checkbox_rect,
+        };
+    }
+
+    /// The delete dialog's body above its controls: the question, what becomes
+    /// of the worktree, and who confirming would cut off.
+    fn delete_agent_body(
+        &self,
+        agent_label: &str,
+        target: &DeleteAgentTarget,
+        on_delete: dux_core::engine::WorktreeOnDelete,
+        attached: &[dux_core::attachments::Blocker],
+        width: u16,
+    ) -> Vec<Line<'static>> {
         let mut body_lines = vec![
             Line::from(""),
             Line::from(vec![
@@ -12554,76 +12622,142 @@ impl App {
             ]),
             Line::from(""),
         ];
-        // Folder targets render first because they need `&mut self`; only managed
-        // targets reach this borrowed match. A STANDALONE agent has no managed
-        // identity, and every "also remove the worktree" affordance hangs off
-        // one: there is no removal to offer, so there is no checkbox to render
-        // and none to tick.
-        if matches!(target, DeleteAgentTarget::Folder { .. }) {
-            return;
-        }
-        body_lines.extend(self.delete_agent_worktree_note(
-            target,
-            &warned_branches,
-            on_delete,
-            unpushed_commits.as_ref(),
-            inner_width,
-        ));
-        body_lines.extend(self.attached_section(attached, confirm_inner_width(frame.area())));
-        let confirm_label = guarded_confirm_label("Delete", attached);
-        let layout = self.render_confirm_dialog(
-            frame,
-            &ConfirmDialog {
-                title: "Delete Agent",
-                body: body_lines,
-                controls_height: checkbox_height + branch_checkbox_height,
-                cancel: delete_agent_cancel_button(*focus),
-                act: delete_agent_delete_button(*focus, &confirm_label),
-                reserve_labels: &[],
-            },
-        );
-        let [checkbox_area, branch_checkbox_area] =
-            stack_rows(layout.controls, [checkbox_height, branch_checkbox_height]);
+        body_lines.extend(self.delete_agent_worktree_note(target, on_delete));
+        body_lines.extend(self.attached_section(attached, width));
+        body_lines
+    }
 
-        let [checkbox_rect, branch_checkbox_rect] = self.render_delete_agent_checkboxes(
-            frame,
-            [
-                offers_checkbox.then_some(checkbox_area),
-                offers_branch_checkbox.then_some(branch_checkbox_area),
-            ],
-            &branch_label,
-        );
-
-        self.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
-            cancel_button: layout.cancel,
-            delete_button: layout.act,
-            checkbox: checkbox_rect,
-            branch_checkbox: branch_checkbox_rect,
+    /// The warning under each branch box, hung under its label past the check
+    /// mark.
+    fn delete_agent_branch_warnings(
+        &self,
+        branches: &DeleteAgentBranchBoxes,
+        inner_width: u16,
+    ) -> [Vec<Line<'static>>; 2] {
+        let warning = Style::default().fg(self.theme.warning_fg);
+        let lines = |prose: &Option<Prose>| {
+            prose
+                .as_ref()
+                .map(|prose| {
+                    self.hanging_prose_lines(
+                        prose,
+                        warning,
+                        DELETE_AGENT_WARNING_INDENT,
+                        inner_width,
+                    )
+                })
+                .unwrap_or_default()
         };
+        // What the ticks lose goes last, under whichever boxes are there.
+        let mut last = lines(&branches.others_warning);
+        last.extend(lines(&branches.loss));
+        [lines(&branches.current_warning), last]
+    }
+
+    /// ONE measuring pass over every checkbox the delete dialog will paint
+    /// (the worktree box, when `worktree` says whether it is ticked, and the
+    /// two branch boxes), so a second box cannot silently overflow the frame
+    /// the first one sized. Each box is measured as the same widget it is
+    /// painted as; a box that is not painted measures 0.
+    fn delete_agent_checkbox_heights(
+        &self,
+        inner_width: u16,
+        focus: DeleteAgentFocus,
+        worktree: Option<bool>,
+        branches: &DeleteAgentBranchBoxes,
+    ) -> [u16; 3] {
+        let measure = |checkbox: Checkbox<'_>, checked: bool, stop: DeleteAgentFocus| {
+            checkbox
+                .checked(CheckMark::from(checked))
+                .state(CheckboxState::of(focus, stop))
+                .height_at(inner_width)
+        };
+        let prose_box = |label: Option<&Prose>, checked: bool, stop: DeleteAgentFocus| {
+            label.map_or(0, |label| {
+                measure(Checkbox::with_prose(label, &self.theme), checked, stop)
+            })
+        };
+        [
+            worktree.map_or(0, |ticked| {
+                measure(
+                    Checkbox::new(DELETE_AGENT_WORKTREE_LABEL),
+                    ticked,
+                    DeleteAgentFocus::WorktreeCheckbox,
+                )
+            }),
+            prose_box(
+                branches.current_label.as_ref(),
+                branches.current_ticked,
+                DeleteAgentFocus::BranchCheckbox,
+            ),
+            prose_box(
+                branches.others_label.as_ref(),
+                branches.others_ticked,
+                DeleteAgentFocus::OtherBranchesCheckbox,
+            ),
+        ]
+    }
+
+    /// What stands in for the branch boxes while git has not answered about
+    /// them, or could not.
+    fn delete_agent_branch_status_lines(
+        &self,
+        offer: &crate::app::DeleteBranchOffer,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        use dux_core::delete_agent_prose as copy;
+        let warning = Style::default().fg(self.theme.warning_fg);
+        let quiet = Style::default().fg(self.theme.hint_desc_fg);
+        match offer {
+            crate::app::DeleteBranchOffer::Pending => {
+                self.indented_prose_lines(&copy::branches_checking_prose(), quiet, inner_width)
+            }
+            crate::app::DeleteBranchOffer::Failed(reason) => self.indented_prose_lines(
+                &copy::branches_check_failed_prose(reason),
+                warning,
+                inner_width,
+            ),
+            crate::app::DeleteBranchOffer::Ready(offer) => {
+                let mut lines = Vec::new();
+                // Decided from the name the offer was read for, never from
+                // where the worktree is by now.
+                let current_protected = offer.protected.contains(&offer.current_name);
+                if offer.current.is_none() && !current_protected {
+                    lines.extend(self.indented_prose_lines(
+                        &copy::branches_check_failed_prose("git could not read the branch"),
+                        warning,
+                        inner_width,
+                    ));
+                }
+                if !offer.protected.is_empty() {
+                    let names: Vec<&str> = offer.protected.iter().map(String::as_str).collect();
+                    lines.extend(self.indented_prose_lines(
+                        &copy::protected_branches_prose(&names),
+                        quiet,
+                        inner_width,
+                    ));
+                }
+                lines
+            }
+        }
     }
 
     /// What the delete dialog says about the agent's worktree: that it is
-    /// shared and stays, that its unsaved work goes with it (and why its
-    /// branches are worth a second look), or that it stays on disk.
+    /// shared and stays, that its unsaved work goes with it, or that it stays
+    /// on disk. What the branches hold is said under each branch box.
     fn delete_agent_worktree_note(
         &self,
         target: &DeleteAgentTarget,
-        warned_branches: &[&str],
         on_delete: dux_core::engine::WorktreeOnDelete,
-        unpushed_commits: Option<&Result<dux_core::git::UnpushedCommits, String>>,
-        inner_width: u16,
     ) -> Vec<Line<'static>> {
         let DeleteAgentTarget::Managed {
-            branch_provenance,
-            worktree_shared,
-            ..
+            worktree_shared, ..
         } = target
         else {
             return Vec::new();
         };
-        let (branch_provenance, worktree_shared) = (*branch_provenance, *worktree_shared);
         let mut body_lines = Vec::new();
-        if worktree_shared {
+        if *worktree_shared {
             body_lines.push(Line::from(Span::styled(
                 " Worktree is shared with another agent and will be preserved.",
                 Style::default().fg(self.theme.hint_desc_fg),
@@ -12637,20 +12771,6 @@ impl App {
                 " worktree will be permanently lost.",
                 Style::default().fg(self.theme.warning_fg),
             )));
-            // The branch box below decides the branches, so the only thing left
-            // to say is why these are ones to think twice about. When there is
-            // nothing to say the helper says nothing.
-            if let Some(warning) = delete_agent_branch_warning_prose(
-                branch_provenance,
-                warned_branches,
-                unpushed_commits,
-            ) {
-                body_lines.extend(self.indented_prose_lines(
-                    &warning,
-                    Style::default().fg(self.theme.warning_fg),
-                    inner_width,
-                ));
-            }
         } else {
             body_lines.push(Line::from(Span::styled(
                 " Worktree and branch will be preserved on disk.",
@@ -12660,25 +12780,25 @@ impl App {
         body_lines
     }
 
-    /// The delete dialog's worktree box and branch box, each painted only in
-    /// the area it is offered (`None` when it is not), so a click cannot land
-    /// on a control the user cannot see. Returns what each publishes.
+    /// The delete dialog's worktree box and its two branch boxes, each painted
+    /// only in the area it is offered (`None` when it is not), so a click
+    /// cannot land on a control the user cannot see. Returns what each
+    /// publishes.
     fn render_delete_agent_checkboxes(
         &self,
         frame: &mut Frame<'_>,
-        [checkbox_area, branch_checkbox_area]: [Option<Rect>; 2],
-        branch_label: &Prose,
-    ) -> [Option<OverlayCheckbox>; 2] {
+        [checkbox_area, branch_checkbox_area, other_checkbox_area]: [Option<Rect>; 3],
+        branches: &DeleteAgentBranchBoxes,
+    ) -> [Option<OverlayCheckbox>; 3] {
         let PromptState::ConfirmDeleteAgent {
             focus,
             delete_worktree,
-            delete_branch,
             ..
         } = &self.prompt
         else {
-            return [None, None];
+            return [None, None, None];
         };
-        let (focus, delete_worktree, delete_branch) = (*focus, *delete_worktree, *delete_branch);
+        let (focus, delete_worktree) = (*focus, *delete_worktree);
         let checkbox = checkbox_area.map(|area| {
             let (rect, _) = self.render_overlay_checkbox(
                 frame,
@@ -12693,21 +12813,37 @@ impl App {
                 rect,
             }
         });
-        let branch = branch_checkbox_area.map(|area| {
+        let mut prose_box = |area: Option<Rect>,
+                             label: Option<&Prose>,
+                             ticked: bool,
+                             stop: DeleteAgentFocus,
+                             id: OverlayCheckboxId| {
+            let (area, label) = (area?, label?);
             let (rect, _) = self.render_overlay_prose_checkbox(
                 frame,
                 area,
-                branch_label,
-                CheckMark::from(delete_branch),
-                CheckboxState::of(focus, DeleteAgentFocus::BranchCheckbox),
+                label,
+                CheckMark::from(ticked),
+                CheckboxState::of(focus, stop),
                 None,
             );
-            OverlayCheckbox {
-                id: OverlayCheckboxId::DeleteAgentBranch,
-                rect,
-            }
-        });
-        [checkbox, branch]
+            Some(OverlayCheckbox { id, rect })
+        };
+        let branch = prose_box(
+            branch_checkbox_area,
+            branches.current_label.as_ref(),
+            branches.current_ticked,
+            DeleteAgentFocus::BranchCheckbox,
+            OverlayCheckboxId::DeleteAgentBranch,
+        );
+        let others = prose_box(
+            other_checkbox_area,
+            branches.others_label.as_ref(),
+            branches.others_ticked,
+            DeleteAgentFocus::OtherBranchesCheckbox,
+            OverlayCheckboxId::DeleteAgentOtherBranches,
+        );
+        [checkbox, branch, others]
     }
 
     fn render_name_new_agent_prompt(&mut self, frame: &mut Frame<'_>) {
@@ -27645,41 +27781,6 @@ mod tests {
         assert!(title.contains("Edit Macro:  greet "), "got {title:?}");
     }
 
-    /// A drifted agent gives up two branches, and the box names both: the one
-    /// the worktree moved onto goes with the one it was born on, so naming one
-    /// of them would ask permission for half of what happens.
-    #[test]
-    fn the_branch_box_names_every_branch_a_drifted_delete_removes() {
-        let mut app = test_app(default_bindings());
-        app.prompt = PromptState::ConfirmDeleteAgent {
-            attached: Vec::new(),
-            session_id: "s1".to_string(),
-            agent_label: "feature-x".to_string(),
-            target: crate::app::DeleteAgentTarget::Managed {
-                branch_name: "feature-x".to_string(),
-                initial_branch: "main".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::Adopted,
-                worktree_shared: false,
-            },
-            focus: super::DeleteAgentFocus::WorktreeCheckbox,
-            delete_worktree: true,
-            delete_branch: false,
-            unpushed_commits: None,
-        };
-        let screen = rendered_screen(&mut app);
-        assert!(
-            screen.contains(&on_screen(&super::delete_agent_branch_checkbox_prose(&[
-                "feature-x",
-                "main"
-            ]))),
-            "the box names every branch the tick would delete:\n{screen}"
-        );
-        assert!(
-            screen.contains("Also delete the branches"),
-            "the box says what it does:\n{screen}"
-        );
-    }
-
     /// The worktree manager's removal confirmation says what the web dialog
     /// says: forcible removal, the uncommitted-work sentence when dirty, and
     /// what happens to the branch, with the checkbox naming it.
@@ -27834,47 +27935,63 @@ mod tests {
         );
     }
 
-    /// A delete-agent prompt in a chosen state, for the rendering tests below.
+    /// A delete-agent prompt in a chosen state, for the rendering tests below:
+    /// git has answered that the agent is on `feature`, made by `origin`, and
+    /// was also on each of `others`, made by `others_origin`.
     fn delete_agent_prompt(
-        provenance: dux_core::model::BranchProvenance,
+        origin: dux_core::branch_history::BranchOrigin,
         worktree: dux_core::engine::WorktreeOnDelete,
-        branch_removal: dux_core::worktree_manager::BranchRemoval,
-        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
+        others: &[&str],
+        others_origin: dux_core::branch_history::BranchOrigin,
+        others_unpushed: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
-        delete_agent_prompt_on(
-            provenance,
-            "feature",
-            "feature",
+        let offered = |name: &str, origin| dux_core::branch_history::OfferedBranch {
+            name: name.to_string(),
+            oid: "a".repeat(40),
+            origin,
+        };
+        let none_unpushed = dux_core::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        };
+        delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+                current_name: String::new(),
+                current: Some(offered("feature", origin)),
+                current_unpushed: Ok(none_unpushed),
+                others: others
+                    .iter()
+                    .map(|name| offered(name, others_origin))
+                    .collect(),
+                others_unpushed: Ok(others_unpushed.unwrap_or(none_unpushed)),
+                both_unpushed: Ok(dux_core::git::UnpushedCommits {
+                    count: 0,
+                    has_remote_refs: true,
+                }),
+                newly_seen: Vec::new(),
+                protected: Vec::new(),
+            }),
             worktree,
-            branch_removal,
-            unpushed_commits,
         )
     }
 
-    /// The same, with the branch pair spelled out, so a DRIFTED agent (the two
-    /// differ) can be rendered.
-    fn delete_agent_prompt_on(
-        provenance: dux_core::model::BranchProvenance,
-        branch_name: &str,
-        initial_branch: &str,
+    fn delete_agent_prompt_with(
+        offer: crate::app::DeleteBranchOffer,
         worktree: dux_core::engine::WorktreeOnDelete,
-        branch_removal: dux_core::worktree_manager::BranchRemoval,
-        unpushed_commits: Option<dux_core::git::UnpushedCommits>,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
+            offer,
             attached: Vec::new(),
             session_id: "s1".to_string(),
             agent_label: "b".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
-                branch_name: branch_name.to_string(),
-                initial_branch: initial_branch.to_string(),
-                branch_provenance: provenance,
+                branch_name: "feature".to_string(),
                 worktree_shared: false,
             },
             focus: super::DeleteAgentFocus::WorktreeCheckbox,
             delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
-            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
-            unpushed_commits: unpushed_commits.map(Ok),
+            delete_branch: None,
+            delete_other_branches: None,
         }
     }
 
@@ -27930,11 +28047,13 @@ mod tests {
     /// height stops matching its contents.
     #[test]
     fn the_delete_checkbox_labels_come_from_one_helper_each() {
+        use dux_core::branch_history::BranchOrigin;
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
-            dux_core::model::BranchProvenance::CreatedByDux,
+            BranchOrigin::Dux,
             dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Delete,
+            &["spike"],
+            BranchOrigin::After,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -27943,44 +28062,116 @@ mod tests {
             "the rendered worktree label must be the constant's:\n{screen}"
         );
         assert!(
-            screen.contains(&on_screen(&super::delete_agent_branch_checkbox_prose(&[
-                "feature"
-            ]))),
+            screen.contains(&on_screen(
+                &dux_core::delete_agent_prose::current_branch_label_prose("feature")
+            )),
             "the rendered branch label must be the helper's:\n{screen}"
+        );
+        // Wide enough to wrap, so its first row is what is matched.
+        let other = on_screen(&dux_core::delete_agent_prose::other_branches_label_prose(
+            &["spike"],
+        ));
+        assert!(
+            screen.contains(other.trim_end_matches(" spike ").trim_end()),
+            "the rendered other-branches label must be the helper's:\n{screen}"
         );
     }
 
-    /// The branch is its own decision, so it is its own box, and it exists only
-    /// while the worktree is going: git will not delete a branch that is still
-    /// checked out in a worktree.
+    /// The branches are their own decisions, so they are their own boxes, and
+    /// they exist only while the worktree is going: git will not delete a
+    /// branch that is still checked out in a worktree.
     #[test]
-    fn the_branch_box_appears_only_once_the_worktree_box_is_ticked() {
+    fn the_branch_boxes_appear_only_once_the_worktree_box_is_ticked() {
+        use dux_core::branch_history::BranchOrigin;
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt(
-            dux_core::model::BranchProvenance::CreatedByDux,
+            BranchOrigin::Dux,
             dux_core::engine::WorktreeOnDelete::Keep,
-            dux_core::worktree_manager::BranchRemoval::Delete,
+            &["spike"],
+            BranchOrigin::Dux,
             None,
         );
         let screen = rendered_screen(&mut app);
         assert!(
-            !screen.contains("Also delete the branch"),
+            !screen.contains("Also delete the branch") && !screen.contains("other branch"),
             "with the worktree kept there is nothing on offer:\n{screen}"
         );
     }
 
-    /// A branch that predates its agent is still offered, with the sentence
-    /// that says why it deserves a second look; a branch dux made gets none,
-    /// because there is no prior owner to warn about.
+    /// The count says what the boxes ticked right now lose, and follows a
+    /// tick: with both ticked it counts every commit both boxes hold.
     #[test]
-    fn the_delete_dialog_warns_only_about_a_branch_that_predates_its_agent() {
+    fn the_delete_dialog_says_what_the_ticked_boxes_lose() {
+        use dux_core::branch_history::BranchOrigin;
         let mut app = test_app(default_bindings());
-        app.prompt = delete_agent_prompt(
-            dux_core::model::BranchProvenance::AttachedExisting,
+        let mut prompt = delete_agent_prompt(
+            BranchOrigin::Dux,
             dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Keep,
+            &["born"],
+            BranchOrigin::Dux,
             None,
         );
+        if let PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Ready(offer),
+            ..
+        } = &mut prompt
+        {
+            let lost = |count| {
+                Ok(dux_core::git::UnpushedCommits {
+                    count,
+                    has_remote_refs: true,
+                })
+            };
+            offer.current_unpushed = lost(1);
+            offer.others_unpushed = lost(0);
+            offer.both_unpushed = lost(4);
+        }
+        app.prompt = prompt;
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("loses 4 commits"), "{screen}");
+        if let PromptState::ConfirmDeleteAgent {
+            delete_other_branches,
+            ..
+        } = &mut app.prompt
+        {
+            *delete_other_branches = Some(false);
+        }
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("loses 1 commit "), "{screen}");
+    }
+
+    /// Until git has answered there is nothing to pin a branch to, so no
+    /// branch box is offered and the dialog says it is still checking; when
+    /// git could not be asked it says that, and that the branches stay.
+    #[test]
+    fn the_branch_boxes_wait_for_git_and_say_so() {
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Pending,
+            dux_core::engine::WorktreeOnDelete::Remove,
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("Checking the branches"), "{screen}");
+        assert!(!screen.contains("Also delete the branch"), "{screen}");
+
+        app.prompt = delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Failed("git could not be run".to_string()),
+            dux_core::engine::WorktreeOnDelete::Remove,
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("so they will be kept"), "{screen}");
+        assert!(!screen.contains("Also delete the branch"), "{screen}");
+    }
+
+    /// A branch dux cannot vouch for is still offered, with the sentence that
+    /// says why it deserves a second look; a branch dux made gets none.
+    #[test]
+    fn the_delete_dialog_warns_only_about_branches_dux_cannot_vouch_for() {
+        use dux_core::branch_history::BranchOrigin;
+        let remove = dux_core::engine::WorktreeOnDelete::Remove;
+        let mut app = test_app(default_bindings());
+        app.prompt =
+            delete_agent_prompt(BranchOrigin::Attached, remove, &[], BranchOrigin::Dux, None);
         let screen = rendered_screen(&mut app);
         assert!(
             screen.contains("existed before the agent"),
@@ -27988,21 +28179,10 @@ mod tests {
         );
 
         app.prompt = delete_agent_prompt(
-            dux_core::model::BranchProvenance::Adopted,
-            dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Keep,
-            None,
-        );
-        let screen = rendered_screen(&mut app);
-        assert!(
-            screen.contains("came with the worktree"),
-            "an adopted branch gets its own sentence:\n{screen}"
-        );
-
-        app.prompt = delete_agent_prompt(
-            dux_core::model::BranchProvenance::CreatedByDux,
-            dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Delete,
+            BranchOrigin::Dux,
+            remove,
+            &["spike"],
+            BranchOrigin::After,
             None,
         );
         let screen = rendered_screen(&mut app);
@@ -28010,231 +28190,25 @@ mod tests {
             !screen.contains("existed before the agent"),
             "dux's own branch has no prior owner to warn about:\n{screen}"
         );
-    }
-
-    /// A counted answer from a repository that HAS remote-tracking refs, which
-    /// is what "not pushed anywhere" is allowed to be said about.
-    fn pushed_nowhere(count: u32) -> dux_core::git::UnpushedCommits {
-        dux_core::git::UnpushedCommits {
-            count,
-            has_remote_refs: true,
-        }
-    }
-
-    #[test]
-    fn the_unpushed_sentence_says_nothing_without_a_counted_commit() {
-        assert_eq!(
-            super::unpushed_commits_sentence(None, BranchSpread::Single),
-            None
-        );
-        assert_eq!(
-            super::unpushed_commits_sentence(Some(pushed_nowhere(0)), BranchSpread::Single),
-            None
-        );
-    }
-
-    #[test]
-    fn the_unpushed_sentence_counts_and_pluralizes_per_branch_count() {
-        assert_eq!(
-            super::unpushed_commits_sentence(Some(pushed_nowhere(1)), BranchSpread::Single)
-                .unwrap(),
-            " It has 1 commit not pushed anywhere."
-        );
-        assert_eq!(
-            super::unpushed_commits_sentence(Some(pushed_nowhere(3)), BranchSpread::Drifted)
-                .unwrap(),
-            " They have 3 commits not pushed anywhere between them."
-        );
-    }
-
-    #[test]
-    fn the_unpushed_sentence_drops_the_accusation_without_remote_refs() {
-        let never_pushed = |count| {
-            Some(dux_core::git::UnpushedCommits {
-                count,
-                has_remote_refs: false,
-            })
-        };
-        assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(1), BranchSpread::Single).unwrap(),
-            " Nothing on it has been pushed anywhere: its one commit exists only on this machine."
-        );
-        assert_eq!(
-            super::unpushed_commits_sentence(never_pushed(4), BranchSpread::Drifted).unwrap(),
-            " Nothing on them has been pushed anywhere: all 4 of their commits exist only on this machine."
-        );
-    }
-
-    /// A count git could not give is said, with every branch it was about as a
-    /// name and git's reason, rather than left out.
-    #[test]
-    fn the_delete_dialog_says_when_the_commits_could_not_be_counted() {
-        let failed = Err("fatal: bad revision".to_string());
-        let said = |provenance, branches: &[&str]| {
-            super::delete_agent_branch_warning_prose(provenance, branches, Some(&failed))
-                .expect("a warning")
-        };
-        let single = said(
-            dux_core::model::BranchProvenance::AttachedExisting,
-            &["feature"],
-        );
-        assert_eq!(
-            single.plain(),
-            "This branch existed before the agent. dux could not count the unpushed commits on \
-             feature (fatal: bad revision); check it before deleting it."
-        );
         assert!(
-            single
-                .segments()
-                .iter()
-                .any(|segment| matches!(segment, dux_core::prose::ProseSegment::Name { name, .. } if name == "feature")),
-            "the branch is a name, so it renders as a chip"
-        );
-        assert!(
-            said(
-                dux_core::model::BranchProvenance::CreatedByDux,
-                &["develop-next", "develop"],
-            )
-            .plain()
-            .ends_with(
-                "dux could not count the unpushed commits on develop-next and develop \
-                 (fatal: bad revision); check them before deleting them."
-            )
+            screen.contains("cannot tell who did"),
+            "a branch made after the agent is not proof dux made it:\n{screen}"
         );
     }
 
-    /// The count is a git answer that lands after the dialog is already up, so
-    /// the warning grows a sentence rather than waiting for it, and says
-    /// nothing at all when there is nothing to say.
-    #[test]
-    fn the_delete_dialog_names_unpushed_commits_once_they_are_counted() {
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["feature"],
-                Some(pushed_nowhere(3))
-            )
-            .as_deref(),
-            Some("This branch existed before the agent. It has 3 commits not pushed anywhere.")
-        );
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["feature"],
-                Some(pushed_nowhere(1))
-            )
-            .as_deref(),
-            Some("This branch existed before the agent. It has 1 commit not pushed anywhere.")
-        );
-        for unknown in [None, Some(pushed_nowhere(0))] {
-            assert_eq!(
-                super::delete_agent_branch_warning(
-                    dux_core::model::BranchProvenance::AttachedExisting,
-                    &["feature"],
-                    unknown
-                )
-                .as_deref(),
-                Some("This branch existed before the agent."),
-                "neither an uncounted nor an empty answer may invent a number"
-            );
-        }
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::Unknown,
-                &["feature"],
-                None
-            )
-            .as_deref(),
-            Some("This branch is not one dux created."),
-            "a provenance this binary has never heard of says only what is known"
-        );
-    }
-
-    /// In a repository with no remote-tracking refs the count is the whole
-    /// history, because there was nowhere to push it to. "N commits not pushed
-    /// anywhere" is true there and reads as an accusation about work that was
-    /// never going anywhere, so the sentence says what is actually the case.
-    #[test]
-    fn the_delete_dialog_words_the_count_honestly_without_a_remote() {
-        let nowhere_to_push = Some(dux_core::git::UnpushedCommits {
-            count: 12,
-            has_remote_refs: false,
-        });
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["feature"],
-                nowhere_to_push
-            )
-            .as_deref(),
-            Some(
-                "This branch existed before the agent. Nothing on it has been pushed \
-                 anywhere: all 12 of its commits exist only on this machine."
-            )
-        );
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["develop-next", "develop"],
-                nowhere_to_push
-            )
-            .as_deref()
-            .map(|text| text.contains(
-                "Nothing on them has been pushed anywhere: all 12 of their commits exist \
-                 only on this machine."
-            )),
-            Some(true)
-        );
-    }
-
-    /// One commit is still a whole history, and "all 1 of its commits" is the
-    /// sentence admitting a number was slotted into a plural.
-    #[test]
-    fn the_delete_dialog_counts_a_single_commit_in_the_singular() {
-        let one_commit = Some(dux_core::git::UnpushedCommits {
-            count: 1,
-            has_remote_refs: false,
-        });
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["feature"],
-                one_commit
-            )
-            .as_deref(),
-            Some(
-                "This branch existed before the agent. Nothing on it has been pushed \
-                 anywhere: its one commit exists only on this machine."
-            )
-        );
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["develop-next", "develop"],
-                one_commit
-            )
-            .as_deref()
-            .map(|text| text.contains(
-                "Nothing on them has been pushed anywhere: their one commit exists only \
-                 on this machine."
-            )),
-            Some(true)
-        );
-    }
-
-    /// The warning is one runtime-assembled sentence long enough to wrap, and
-    /// every row of it must share the left edge the rest of the body has. The
-    /// `Paragraph` would indent the first row alone and leave the rest flush
-    /// against the frame, which reads as a paragraph that lost its footing.
+    /// The second box's warning is one runtime-assembled sentence long enough
+    /// to wrap, and every row of it must share the left edge the rest of the
+    /// body has. A `Paragraph` would indent the first row alone and leave the
+    /// rest flush against the frame.
     #[test]
     fn the_delete_warning_paragraph_keeps_one_left_edge() {
+        use dux_core::branch_history::BranchOrigin;
         let mut app = test_app(default_bindings());
-        app.prompt = delete_agent_prompt_on(
-            dux_core::model::BranchProvenance::AttachedExisting,
-            "develop-next",
-            "develop",
+        app.prompt = delete_agent_prompt(
+            BranchOrigin::Dux,
             dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Delete,
+            &["develop-next", "develop"],
+            BranchOrigin::Before,
             Some(dux_core::git::UnpushedCommits {
                 count: 12,
                 has_remote_refs: false,
@@ -28244,31 +28218,38 @@ mod tests {
         let rows: Vec<&str> = screen.lines().collect();
         let first = rows
             .iter()
-            .position(|row| row.contains("The worktree moved from"))
+            .position(|row| row.contains("existed before the"))
             .unwrap_or_else(|| panic!("the warning must be on screen:\n{screen}"));
         let last = rows
             .iter()
-            .rposition(|row| row.contains("machine."))
+            .rposition(|row| row.contains("ordinary branches."))
             .unwrap_or_else(|| panic!("the warning must end on screen:\n{screen}"));
         assert!(
             last > first,
             "the warning must actually wrap for this test to mean anything:\n{screen}"
         );
-        // The column the first row's text starts at, counted in characters
-        // because every row is full of box-drawing glyphs.
-        let byte = rows[first]
-            .find("The worktree moved from")
-            .expect("the row");
-        let column = rows[first][..byte].chars().count();
+        // The dialog's left frame is the last one before the warning's text
+        // on its first row; every row then indents the same distance from it,
+        // one more where a row opens on a chip's own pad.
+        let first_row: Vec<char> = rows[first].chars().collect();
+        let text_at = rows[first][..rows[first].find("develop-next").expect("the name")]
+            .chars()
+            .count();
+        let frame = first_row[..text_at]
+            .iter()
+            .rposition(|cell| *cell == '│')
+            .expect("a frame");
+        let indent = |row: &str| {
+            row.chars()
+                .skip(frame + 1)
+                .take_while(|cell| *cell == ' ')
+                .count()
+        };
+        let expected = indent(rows[first]) - 1;
         for row in &rows[first..=last] {
-            let cells: Vec<char> = row.chars().collect();
-            // A row may open on a chip, whose left pad is an ordinary space
-            // followed by the name: that is the chip, not a deeper indent.
-            let indented_further = cells[column] == ' ' && cells[column + 1] == ' ';
-            assert_eq!(
-                (cells[column - 2], cells[column - 1], indented_further),
-                ('│', ' ', false),
-                "every warning row starts one column in from the frame, {row:?} does not:\n{screen}"
+            assert!(
+                (expected..=expected + 1).contains(&indent(row)),
+                "every warning row hangs at one indent, {row:?} does not:\n{screen}"
             );
         }
     }
@@ -28422,85 +28403,6 @@ mod tests {
             super::indented_body_lines("supercalifragilistic", 8),
             vec![" superca", " lifragi", " listic"],
             "a word wider than the line is broken, never overflowed"
-        );
-    }
-
-    /// THE CONSENT PIN, terminal half. A drifted agent's delete removes the
-    /// branch the worktree moved onto AND the one it was born on, so the box
-    /// names both and the count covers both: a label promising one deletion
-    /// would be taking consent for the other.
-    #[test]
-    fn the_delete_dialog_names_both_branches_of_a_drifted_agent() {
-        let mut app = test_app(default_bindings());
-        app.prompt = delete_agent_prompt_on(
-            dux_core::model::BranchProvenance::AttachedExisting,
-            "develop-next",
-            "develop",
-            dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Delete,
-            Some(pushed_nowhere(4)),
-        );
-        let screen = rendered_screen(&mut app);
-        // The chips make the label wrap at this width, so the label is read
-        // across the rows the checkbox takes, joined the way the wrap split it.
-        let label_rows = screen
-            .lines()
-            .skip_while(|row| !row.contains("[x] Also delete the branches"))
-            .take(2)
-            .map(|row| row.trim_matches(|c: char| c == '│' || c == ' '))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let label_words = |text: &str| {
-            text.split(|c: char| c.is_whitespace())
-                .filter(|word| !word.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        assert!(
-            label_words(&label_rows).contains(&label_words(&on_screen(
-                &super::delete_agent_branch_checkbox_prose(&["develop-next", "develop"])
-            ))),
-            "the box must name every branch the tick would delete:\n{screen}"
-        );
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::AttachedExisting,
-                &["develop-next", "develop"],
-                Some(pushed_nowhere(4))
-            )
-            .as_deref(),
-            Some(
-                "The worktree moved from develop onto develop-next, so deleting the agent \
-                 removes both. develop existed before the agent. They have 4 commits not \
-                 pushed anywhere between them."
-            )
-        );
-    }
-
-    /// Drift warns even about a branch dux created, because the branch the
-    /// worktree moved onto is not one dux made and the tick takes it too.
-    #[test]
-    fn a_drifted_agent_warns_even_when_dux_created_its_branch() {
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::CreatedByDux,
-                &["dux/s1-next", "dux/s1"],
-                None
-            )
-            .as_deref(),
-            Some(
-                "The worktree moved from dux/s1 onto dux/s1-next, so deleting the agent \
-                 removes both."
-            )
-        );
-        assert_eq!(
-            super::delete_agent_branch_warning(
-                dux_core::model::BranchProvenance::CreatedByDux,
-                &["dux/s1"],
-                Some(pushed_nowhere(9))
-            ),
-            None,
-            "a branch dux created for an agent that stayed on it warns about nothing"
         );
     }
 

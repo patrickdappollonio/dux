@@ -408,17 +408,15 @@ fn delete_agent_prompt(
     worktree: dux_core::engine::WorktreeOnDelete,
 ) -> PromptState {
     PromptState::ConfirmDeleteAgent {
+        offer: crate::app::DeleteBranchOffer::Pending,
         attached: Vec::new(),
         session_id: "s1".to_string(),
         agent_label: "launch-at-login".to_string(),
         target,
         focus: DeleteAgentFocus::Cancel,
         delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
-        delete_branch: true,
-        unpushed_commits: Some(Ok(dux_core::git::UnpushedCommits {
-            count: 2,
-            has_remote_refs: true,
-        })),
+        delete_branch: Some(true),
+        delete_other_branches: None,
     }
 }
 
@@ -600,22 +598,43 @@ fn the_quit_dialog_names_who_is_attached_and_offers_to_quit_anyway() {
 
 #[test]
 fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
+    use dux_core::branch_history::{BranchOffer, BranchOrigin, OfferedBranch};
     let mut app = test_app(default_bindings());
-    let buf = open(
-        &mut app,
-        delete_agent_prompt(
-            DeleteAgentTarget::Managed {
-                branch_name: "now-br".to_string(),
-                initial_branch: "born-br".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
-                worktree_shared: false,
-            },
-            dux_core::engine::WorktreeOnDelete::Remove,
-        ),
+    let offered = |name: &str, origin| OfferedBranch {
+        name: name.to_string(),
+        oid: "a".repeat(40),
+        origin,
+    };
+    let counted = Ok(dux_core::git::UnpushedCommits {
+        count: 0,
+        has_remote_refs: true,
+    });
+    let mut prompt = delete_agent_prompt(
+        DeleteAgentTarget::Managed {
+            branch_name: "now-br".to_string(),
+            worktree_shared: false,
+        },
+        dux_core::engine::WorktreeOnDelete::Remove,
     );
+    if let PromptState::ConfirmDeleteAgent { offer, .. } = &mut prompt {
+        *offer = crate::app::DeleteBranchOffer::Ready(BranchOffer {
+            current_name: String::new(),
+            current: Some(offered("now-br", BranchOrigin::Dux)),
+            current_unpushed: counted.clone(),
+            others: vec![offered("born-br", BranchOrigin::Before)],
+            others_unpushed: counted,
+            both_unpushed: Ok(dux_core::git::UnpushedCommits {
+                count: 0,
+                has_remote_refs: true,
+            }),
+            newly_seen: Vec::new(),
+            protected: Vec::new(),
+        });
+    }
+    let buf = open(&mut app, prompt);
     assert_chipped(&app, &buf, "launch-at-login");
-    // Named in the branch checkbox AND in the drift warning above it.
     assert_chipped(&app, &buf, "now-br");
+    // Named in the second box AND in the warning under it.
     assert_chipped(&app, &buf, "born-br");
     assert!(occurrences(&buf, "born-br").len() >= 2, "{}", screen(&buf));
     assert!(screen(&buf).contains("Delete"), "{}", screen(&buf));

@@ -533,7 +533,7 @@ pub(crate) struct App {
     /// The delete-agent dialog's pending unpushed-commit count. One-shot: set
     /// when the dialog opens on branches its warning would say something about,
     /// cleared by `drain_unpushed_count` when the answer lands.
-    pub(crate) unpushed_count_rx: Option<mpsc::Receiver<UnpushedCountAnswer>>,
+    pub(crate) unpushed_count_rx: Option<mpsc::Receiver<BranchOfferAnswer>>,
     /// The rename dialog's pending "was this branch pushed?" answer, tagged
     /// with the agent it was asked for. One-shot, like the count above.
     pub(crate) rename_pushed_rx: Option<mpsc::Receiver<(String, bool)>>,
@@ -2792,15 +2792,9 @@ pub(crate) enum ConfigReloadFailedFocus {
 pub(crate) enum DeleteAgentTarget {
     /// A managed working copy dux owns.
     Managed {
+        /// The branch the worktree is on, which the first branch box names
+        /// before git has answered about it.
         branch_name: String,
-        /// The branch the agent was born on, needed by the copy: when it
-        /// differs from `branch_name` the agent drifted, and a kept-branch
-        /// delete keeps both of them.
-        initial_branch: String,
-        /// Where the branch came from. Decides whether the checkbox promises to
-        /// delete the branch or to keep it (see
-        /// [`super::render::delete_agent_checkbox_label`]).
-        branch_provenance: dux_core::model::BranchProvenance,
         /// True when one or more other sessions share this worktree. In that
         /// case the worktree is always preserved regardless of the user's
         /// choice, so the checkbox is hidden and a note is shown instead.
@@ -2843,56 +2837,146 @@ impl DeleteAgentTarget {
         worktree == dux_core::engine::WorktreeOnDelete::Remove && self.offers_worktree_checkbox()
     }
 
-    /// The branch answer this dialog sends with its delete request, given the
-    /// state of its two boxes.
+    /// Both branch boxes' answers as this dialog sends them, given the
+    /// worktree box and what git answered.
     ///
-    /// `None` means nobody was asked, and the engine then keeps the provenance
-    /// default. That is not the same as `Some(false)`: an answer nobody was
-    /// asked for is a decision made on a click that never happened, and it
-    /// would override the default in a dialog that showed no control to
-    /// override it with. So the answer travels only where the box was actually
-    /// on screen, which is the same question the renderer and the focus ring
-    /// ask.
-    pub(crate) fn branch_answer(
+    /// `None` means nobody was asked: the boxes were not on screen (the
+    /// worktree stays, it is shared, or there is no branch at all), and that
+    /// is not the same as unticked. While git has not answered, or could not,
+    /// both boxes say so and pin nothing, so nothing is deleted on a guess.
+    pub(crate) fn branch_answers(
         &self,
         worktree: dux_core::engine::WorktreeOnDelete,
-        branch: dux_core::worktree_manager::BranchRemoval,
-    ) -> Option<bool> {
-        self.offers_branch_checkbox(worktree)
-            .then_some(branch == dux_core::worktree_manager::BranchRemoval::Delete)
-    }
-
-    /// Every branch the box names and the unpushed count is about: the one the
-    /// worktree is on now and, when the agent has drifted, the one it was born
-    /// on. Both are deleted, so both are named. Mirrors
-    /// `BranchDeleteInputs::warned_branches` in the engine, so what the dialog
-    /// says, what the count covers and what the delete removes cannot disagree.
-    /// Empty for a standalone agent, which has no branch at all.
-    pub(crate) fn warned_branches(&self) -> Vec<&str> {
-        match self {
-            Self::Managed {
-                branch_name,
-                initial_branch,
-                ..
-            } => {
-                let mut branches = vec![branch_name.as_str()];
-                if !initial_branch.is_empty() && initial_branch != branch_name {
-                    branches.push(initial_branch.as_str());
-                }
-                branches
-            }
-            Self::Folder { .. } => Vec::new(),
+        offer: &DeleteBranchOffer,
+        delete_branch: Option<bool>,
+        delete_other_branches: Option<bool>,
+    ) -> Option<dux_core::branch_history::BranchAnswersWire> {
+        use dux_core::branch_history::{BoxWire, BranchAnswersWire, PinnedBranch, Unchecked};
+        if !self.offers_branch_checkbox(worktree) {
+            return None;
         }
+        let unchecked = |why| BoxWire {
+            unchecked: Some(why),
+            ..BoxWire::default()
+        };
+        let offer = match offer {
+            DeleteBranchOffer::Pending | DeleteBranchOffer::Failed(_) => {
+                let why = if matches!(offer, DeleteBranchOffer::Pending) {
+                    Unchecked::Pending
+                } else {
+                    Unchecked::Failed
+                };
+                return Some(BranchAnswersWire {
+                    current: Some(unchecked(why)),
+                    others: Some(unchecked(why)),
+                });
+            }
+            DeleteBranchOffer::Ready(offer) => offer,
+        };
+        let pinned =
+            |ticked: bool, branches: &[&dux_core::branch_history::OfferedBranch]| BoxWire {
+                delete: ticked,
+                branches: if ticked {
+                    branches
+                        .iter()
+                        .map(|branch| PinnedBranch {
+                            name: branch.name.clone(),
+                            oid: branch.oid.clone(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                unchecked: None,
+                offered: branches.iter().map(|branch| branch.name.clone()).collect(),
+            };
+        let current = match &offer.current {
+            Some(current) => pinned(
+                delete_branch.unwrap_or_else(|| offer.current_default()),
+                &[current],
+            ),
+            // The project's own branch is offered in no box; any other branch
+            // git could not read is a failed check.
+            // Decided from the name the offer was read for.
+            None if offer.protected.contains(&offer.current_name) => {
+                unchecked(Unchecked::NotOffered)
+            }
+            None => unchecked(Unchecked::Failed),
+        };
+        let others = if offer.others.is_empty() {
+            unchecked(Unchecked::NotOffered)
+        } else {
+            let others: Vec<&dux_core::branch_history::OfferedBranch> =
+                offer.others.iter().collect();
+            pinned(
+                delete_other_branches.unwrap_or_else(|| offer.others_default()),
+                &others,
+            )
+        };
+        Some(BranchAnswersWire {
+            current: Some(current),
+            others: Some(others),
+        })
     }
 }
 
-/// A landed unpushed-commit count, tagged with the agent it was computed for so
-/// a stale one cannot be rendered against a different branch.
+/// What the delete dialog knows about the agent's branches: still asking git,
+/// git's answer, or why git could not be asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UnpushedCountAnswer {
+pub(crate) enum DeleteBranchOffer {
+    /// The worker has not answered yet.
+    Pending,
+    /// The branches, each pinned to the commit a tick would delete.
+    Ready(dux_core::branch_history::BranchOffer),
+    /// Why git could not be asked.
+    Failed(String),
+}
+
+impl DeleteBranchOffer {
+    /// git's answer, when it has landed.
+    pub(crate) fn ready(&self) -> Option<&dux_core::branch_history::BranchOffer> {
+        match self {
+            Self::Ready(offer) => Some(offer),
+            Self::Pending | Self::Failed(_) => None,
+        }
+    }
+
+    /// Whether there is a first box: git answered and read the branch the
+    /// worktree is on (the project's own branch is offered in no box).
+    pub(crate) fn offers_current(&self) -> bool {
+        self.ready().is_some_and(|offer| offer.current.is_some())
+    }
+
+    /// Whether the first box shows ticked: the answer, else its default.
+    pub(crate) fn current_ticked(&self, answer: Option<bool>) -> bool {
+        answer.unwrap_or_else(|| {
+            self.ready()
+                .is_some_and(dux_core::branch_history::BranchOffer::current_default)
+        })
+    }
+
+    /// Whether the second box shows ticked: the answer, else its default.
+    pub(crate) fn others_ticked(&self, answer: Option<bool>) -> bool {
+        answer.unwrap_or_else(|| {
+            self.ready()
+                .is_some_and(dux_core::branch_history::BranchOffer::others_default)
+        })
+    }
+
+    /// Whether there is a second box at all: git answered and the agent was
+    /// on another branch that is still there.
+    pub(crate) fn offers_others(&self) -> bool {
+        self.ready().is_some_and(|offer| !offer.others.is_empty())
+    }
+}
+
+/// A landed branch offer, tagged with the agent it was read for so a stale one
+/// cannot be rendered against a different agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BranchOfferAnswer {
     pub(crate) session_id: String,
-    /// The count, or why git could not give one, which the dialog says.
-    pub(crate) count: Result<dux_core::git::UnpushedCommits, String>,
+    /// What git answered.
+    pub(crate) offer: dux_core::branch_history::BranchOffer,
 }
 
 /// Which selectable element has focus in the Delete Agent confirmation modal.
@@ -2907,6 +2991,9 @@ pub(crate) enum DeleteAgentFocus {
     /// The "also delete the branch" box, which exists only while the worktree
     /// box is ticked.
     BranchCheckbox,
+    /// The "also delete the other branches" box, which exists only while the
+    /// worktree box is ticked and the agent was on another branch.
+    OtherBranchesCheckbox,
 }
 
 /// The folder browser's path-completion lookup still out, if any. The lookup
@@ -3245,20 +3332,19 @@ pub(crate) enum PromptState {
         target: DeleteAgentTarget,
         focus: DeleteAgentFocus,
         delete_worktree: bool,
-        /// The "also delete the branch" answer. Starts in the provenance
-        /// default (ticked for a branch dux made, unticked for one that
-        /// predates the agent) and is overridable in both directions, which is
-        /// what makes it a control rather than a label. Only meaningful while
+        /// The first branch box's answer, `None` while untouched, when it shows
+        /// its default: ticked only for a branch dux can prove is its own, or
+        /// one the agent switched onto that git proves was made after it.
+        /// Overridable in both directions. Only meaningful while
         /// `delete_worktree` is set: git will not delete a branch that is still
         /// checked out in a worktree, so the box is not offered otherwise.
-        delete_branch: bool,
-        /// Commits on those branches reachable from no remote-tracking ref,
-        /// once the background worker has answered, and whether the repository
-        /// has any such ref to be reachable from. `None` until the answer
-        /// lands, and the dialog says nothing about commits meanwhile; an
-        /// `Err` is why git could not count, which the dialog says rather than
-        /// guessing a number.
-        unpushed_commits: Option<Result<dux_core::git::UnpushedCommits, String>>,
+        delete_branch: Option<bool>,
+        /// The second branch box's answer, `None` while untouched: its default
+        /// is ticked only when dux can prove every other branch is its own.
+        delete_other_branches: Option<bool>,
+        /// What git answered about the agent's branches, which both boxes
+        /// wait for: until it lands they are disabled and pin nothing.
+        offer: DeleteBranchOffer,
         /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
     },
@@ -4208,6 +4294,8 @@ pub(crate) enum OverlayCheckboxId {
     /// The delete-agent dialog's "also delete the branch" box. Distinct from
     /// [`Self::DeleteWorktreeBranch`], which is the worktree manager's.
     DeleteAgentBranch,
+    /// The delete-agent dialog's "also delete the other branches" box.
+    DeleteAgentOtherBranches,
     DeleteWorktreeBranch,
     /// The left-over folder delete's "also delete the branch" box.
     DeleteLeftoverFolderBranches,
@@ -4363,9 +4451,12 @@ pub(crate) enum OverlayMouseLayout {
         cancel_button: Rect,
         delete_button: Rect,
         checkbox: Option<OverlayCheckbox>,
-        /// The branch box, published only where it is actually painted, which
-        /// is only while the worktree box is ticked.
+        /// The branch box, published only where it is actually painted and
+        /// enabled, which is only while the worktree box is ticked and git has
+        /// answered.
         branch_checkbox: Option<OverlayCheckbox>,
+        /// The other-branches box, published on the same terms.
+        other_branches_checkbox: Option<OverlayCheckbox>,
     },
     ConfirmDeleteTerminal {
         cancel_button: Rect,
@@ -9111,62 +9202,6 @@ mod tests {
         assert_eq!(
             app.status.text().as_bytes(),
             b"Checked out \"main\" for project \"app\". New worktrees branch from \"main\" now."
-        );
-    }
-
-    /// The answer the delete request carries, in the three states the dialog
-    /// can be in. The absent case is the load-bearing one: it is what keeps the
-    /// engine's provenance default, and sending `Some(false)` there would
-    /// override a default from a dialog that offered no control to override it
-    /// with.
-    #[test]
-    fn the_delete_dialog_sends_a_branch_answer_only_where_it_asked_for_one() {
-        let managed = |shared: bool| DeleteAgentTarget::Managed {
-            branch_name: "feature".to_string(),
-            initial_branch: "feature".to_string(),
-            branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
-            worktree_shared: shared,
-        };
-        assert_eq!(
-            managed(false).branch_answer(
-                dux_core::engine::WorktreeOnDelete::Remove,
-                dux_core::worktree_manager::BranchRemoval::Delete
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            managed(false).branch_answer(
-                dux_core::engine::WorktreeOnDelete::Remove,
-                dux_core::worktree_manager::BranchRemoval::Keep
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            managed(false).branch_answer(
-                dux_core::engine::WorktreeOnDelete::Keep,
-                dux_core::worktree_manager::BranchRemoval::Delete
-            ),
-            None,
-            "with the worktree kept there is no branch box, so nothing was asked"
-        );
-        assert_eq!(
-            managed(true).branch_answer(
-                dux_core::engine::WorktreeOnDelete::Remove,
-                dux_core::worktree_manager::BranchRemoval::Delete
-            ),
-            None,
-            "a shared worktree is preserved whatever is ticked, so no box is shown"
-        );
-        assert_eq!(
-            DeleteAgentTarget::Folder {
-                folder_label: "~/notes".to_string(),
-            }
-            .branch_answer(
-                dux_core::engine::WorktreeOnDelete::Remove,
-                dux_core::worktree_manager::BranchRemoval::Delete
-            ),
-            None,
-            "a standalone agent has no branch to answer about"
         );
     }
 

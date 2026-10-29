@@ -2368,6 +2368,9 @@ pub(crate) const BRANCH_SYNC_SLICE_MS: u64 = 3_000;
 pub struct BranchSyncWait {
     pub(crate) slice_ms: AtomicU64,
     pub(crate) waits_started: AtomicU64,
+    /// Agents whose branch history failed to save: the loop forgets where it
+    /// stopped reading their HEAD reflog, so the next pass reads it again.
+    pub(crate) history_rescan: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for BranchSyncWait {
@@ -2375,6 +2378,7 @@ impl Default for BranchSyncWait {
         Self {
             slice_ms: AtomicU64::new(BRANCH_SYNC_SLICE_MS),
             waits_started: AtomicU64::new(0),
+            history_rescan: Mutex::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -3474,6 +3478,11 @@ impl Engine {
         // loop knows what "consecutive" means here: one pass of the snapshot is
         // one cycle, and a worktree that answers again clears its own count.
         let mut streaks = crate::poller_status::FailureStreaks::default();
+        // Where each worktree's HEAD reflog was last read up to.
+        let mut cursors: HashMap<String, crate::branch_history::ReflogCursor> = HashMap::new();
+        // Agents whose birth branch git cannot prove, not asked about again
+        // until their branch changes or dux restarts.
+        let mut unprovable: HashSet<String> = HashSet::new();
         self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "branch-sync".into(),
@@ -3536,10 +3545,15 @@ impl Engine {
                             crate::poller_status::branch_sync_recovered(&entry.worktree_path),
                         ));
                     }
-                    if let Ok(actual) = read
-                        && actual != entry.branch_name
-                    {
-                        updates.push((entry.session_id.clone(), actual));
+                    let Ok(actual) = read else { continue };
+                    if let Some(update) = branch_sync_update(
+                        entry,
+                        &actual,
+                        &mut cursors,
+                        &mut unprovable,
+                        &wait.history_rescan,
+                    ) {
+                        updates.push(update);
                     }
                 }
                 if !updates.is_empty() && tx.send(WorkerEvent::BranchSyncReady(updates)).is_err() {
@@ -3549,6 +3563,103 @@ impl Engine {
             },
         );
     }
+}
+
+/// One branch-sync pass over one agent whose branch was read as `actual`: the
+/// switch, when there was one, and every branch its HEAD reflog shows it on
+/// since the pass before (read from the cursor on, or again from the agent's
+/// creation when the engine asked for a rescan), each with its identity.
+///
+/// It also captures the identity of a birth branch dux has none for, when git
+/// can prove which ref it is: the worktree is on it, or its own creation entry
+/// is from the moment the agent was created. A birth branch git cannot prove
+/// is remembered in `unprovable` and not asked about again until the agent's
+/// branch changes or dux restarts. `None` when the pass learned nothing. A
+/// reflog git cannot read leaves the cursor where it was, so the next pass
+/// tries again.
+fn branch_sync_update(
+    entry: &BranchSyncEntry,
+    actual: &str,
+    cursors: &mut HashMap<String, crate::branch_history::ReflogCursor>,
+    unprovable: &mut HashSet<String>,
+    rescan: &Mutex<HashSet<String>>,
+) -> Option<crate::worker::BranchSyncUpdate> {
+    let worktree = Path::new(&entry.worktree_path);
+    if rescan
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&entry.session_id)
+    {
+        cursors.remove(&entry.worktree_path);
+    }
+    let moved_to = (actual != entry.branch_name).then(|| actual.to_string());
+    if moved_to.is_some() {
+        unprovable.remove(&entry.session_id);
+    }
+    let mut names = match crate::branch_history::scan_head_reflog(
+        worktree,
+        entry.created_at,
+        cursors.get(&entry.worktree_path),
+    ) {
+        Ok((seen, cursor)) => {
+            if let Some(cursor) = cursor {
+                cursors.insert(entry.worktree_path.clone(), cursor);
+            }
+            seen
+        }
+        Err(err) => {
+            crate::logger::warn(&format!(
+                "branch sync could not read the HEAD reflog of {}: {err:#}",
+                worktree.display()
+            ));
+            Vec::new()
+        }
+    };
+    if let Some(moved_to) = &moved_to
+        && !names.contains(moved_to)
+    {
+        names.push(moved_to.clone());
+    }
+    let mut seen = crate::branch_history::identities_of(worktree, names);
+    // A row with no identity moves its tip only to a descendant of it.
+    for sighting in &mut seen {
+        if let Some((_, recorded)) = entry
+            .recorded_tips
+            .iter()
+            .find(|(n, _)| *n == sighting.name)
+            && !crate::branch_history::descends_from(worktree, &sighting.name, recorded)
+        {
+            sighting.tip = None;
+        }
+    }
+    let birth_identity = entry
+        .unidentified_birth
+        .as_deref()
+        .filter(|_| !unprovable.contains(&entry.session_id))
+        .and_then(|birth| {
+            let proven = crate::branch_history::branch_creation_entry(worktree, birth)
+                .ok()
+                .flatten()
+                .filter(|identity| {
+                    birth == actual
+                        || crate::branch_history::within_legacy_window(
+                            identity.unix,
+                            entry.created_at,
+                        )
+                });
+            if proven.is_none() {
+                unprovable.insert(entry.session_id.clone());
+            }
+            proven.map(|identity| (birth.to_string(), identity))
+        });
+    (moved_to.is_some() || !seen.is_empty() || birth_identity.is_some()).then(|| {
+        crate::worker::BranchSyncUpdate {
+            session_id: entry.session_id.clone(),
+            moved_to,
+            seen,
+            birth_identity,
+        }
+    })
 }
 
 /// Tell the engine a poller found an agent's directory gone.
@@ -5311,10 +5422,31 @@ impl Engine {
                 .filter(|s| !self.working_copy_missing(&s.id))
                 .filter_map(|s| {
                     let managed = s.workspace.as_managed()?;
+                    let history = self
+                        .session_store
+                        .load_branch_history(&s.id)
+                        .unwrap_or_default();
+                    let unidentified_birth = (managed.branch_provenance
+                        == crate::model::BranchProvenance::CreatedByDux)
+                        .then(|| {
+                            history
+                                .iter()
+                                .find(|entry| entry.born_here && entry.identity.is_none())
+                                .map(|entry| entry.name.clone())
+                        })
+                        .flatten();
+                    let recorded_tips = history
+                        .iter()
+                        .filter(|entry| entry.identity.is_none())
+                        .filter_map(|entry| Some((entry.name.clone(), entry.tip.clone()?)))
+                        .collect();
                     Some(BranchSyncEntry {
                         session_id: s.id.clone(),
                         worktree_path: managed.worktree_path.clone(),
                         branch_name: managed.branch_name.clone(),
+                        created_at: s.created_at,
+                        unidentified_birth,
+                        recorded_tips,
                     })
                 })
                 .collect();
@@ -8344,6 +8476,7 @@ mod tests {
                 pty_size: (24, 80),
                 scrollback_lines: 100,
                 kind: crate::worker::AgentLaunchKind::Create {
+                    birth_identity: None,
                     status_message: StatusText::default(),
                     status_warns: false,
                     status_notes: None,
@@ -11363,6 +11496,166 @@ mod tests {
         assert_eq!(engine.branch_sync_interval_secs.load(Ordering::Relaxed), 5);
     }
 
+    /// A branch the worktree visited and left between two branch checks never
+    /// changes the branch name the poller compares; the pass still records
+    /// it from the HEAD reflog, and once recorded a pass reads only what came
+    /// after.
+    #[test]
+    fn a_branch_sync_pass_records_a_branch_only_the_reflog_shows() {
+        let (mut engine, tmp) = test_engine();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = crate::test_git::fixture_git()
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        );
+        let worktree = tmp.path().join("wt");
+        git(
+            &repo,
+            &["worktree", "add", "-b", "feat", worktree.to_str().unwrap()],
+        );
+        let mut session = sample_session("s1", "p1", "feat");
+        session.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        session.workspace.as_managed_mut().unwrap().worktree_path =
+            worktree.to_string_lossy().to_string();
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session.clone());
+        git(&worktree, &["switch", "-c", "visited"]);
+        git(&worktree, &["switch", "feat"]);
+
+        let entry = BranchSyncEntry {
+            session_id: "s1".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            branch_name: "feat".to_string(),
+            created_at: session.created_at,
+            unidentified_birth: None,
+            recorded_tips: Vec::new(),
+        };
+        let mut cursors = HashMap::new();
+        let mut unprovable = HashSet::new();
+        let rescan = Mutex::new(HashSet::new());
+        let update = branch_sync_update(&entry, "feat", &mut cursors, &mut unprovable, &rescan)
+            .expect("the pass saw the visit");
+        assert_eq!(update.moved_to, None, "the branch name did not change");
+        engine.process_worker_event(WorkerEvent::BranchSyncReady(vec![update]));
+        let names: Vec<String> = engine
+            .session_store
+            .load_branch_history("s1")
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert!(names.contains(&"visited".to_string()), "{names:?}");
+        assert_eq!(
+            branch_sync_update(&entry, "feat", &mut cursors, &mut unprovable, &rescan),
+            None,
+            "nothing new since the last pass"
+        );
+    }
+
+    /// A sighting of a name recorded with no identity moves its recorded tip
+    /// only to a descendant of it: a branch that does not descend from where
+    /// the agent left it is never written over that record.
+    #[test]
+    fn a_sighting_off_the_recorded_tip_does_not_move_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = crate::test_git::fixture_git()
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&repo, &["init", "--initial-branch=main"]);
+        let commit = |message: &str| {
+            git(
+                &repo,
+                &[
+                    "-c",
+                    "user.email=t@e",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+            );
+        };
+        commit("base");
+        commit("recorded");
+        let recorded = git(&repo, &["rev-parse", "HEAD"]);
+        let worktree = tmp.path().join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                worktree.to_str().unwrap(),
+                "HEAD~1",
+            ],
+        );
+        git(&worktree, &["switch", "-c", "spike"]);
+        git(&worktree, &["switch", "feat"]);
+        let entry = BranchSyncEntry {
+            session_id: "s1".to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            branch_name: "feat".to_string(),
+            created_at: chrono::Utc::now() - chrono::Duration::hours(1),
+            unidentified_birth: None,
+            recorded_tips: vec![("spike".to_string(), recorded)],
+        };
+        let update = branch_sync_update(
+            &entry,
+            "feat",
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &Mutex::new(HashSet::new()),
+        )
+        .expect("the pass saw spike");
+        let spike = update
+            .seen
+            .iter()
+            .find(|seen| seen.name == "spike")
+            .expect("spike seen");
+        assert_eq!(
+            spike.tip, None,
+            "spike does not descend from the recorded tip"
+        );
+    }
+
     /// The running loop re-reads the shared interval on every wait slice, so a
     /// retune reaches a thread that is already napping on the old value.
     #[test]
@@ -11383,6 +11676,9 @@ mod tests {
             .lock()
             .expect("branch sync sessions")
             .push(BranchSyncEntry {
+                created_at: chrono::Utc::now(),
+                unidentified_birth: None,
+                recorded_tips: Vec::new(),
                 session_id: "session-1".to_string(),
                 worktree_path: worktree.to_string_lossy().to_string(),
                 branch_name: format!("{actual}-stale"),
@@ -11436,6 +11732,9 @@ mod tests {
             .lock()
             .expect("branch sync sessions")
             .push(BranchSyncEntry {
+                created_at: chrono::Utc::now(),
+                unidentified_birth: None,
+                recorded_tips: Vec::new(),
                 session_id: "session-1".to_string(),
                 worktree_path: worktree_path.clone(),
                 branch_name: "agent-branch".to_string(),

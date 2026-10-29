@@ -443,6 +443,9 @@ pub enum AgentLaunchKind {
         /// `DispatchCreateAgentRequest` dispatch through the worker so the
         /// launch-ready / launch-failed handlers can resolve the op's final.
         status_op_id: String,
+        /// The agent's birth branch as git had it right after the create: the
+        /// identity of the ref when dux made it, and where it points.
+        birth_identity: Option<Box<crate::branch_history::SeenBranch>>,
     },
     /// A relaunch of a detached agent.
     Reconnect {
@@ -845,7 +848,7 @@ pub enum WorkerEvent {
     },
     /// Agents whose worktree is on a branch other than the recorded one, as
     /// session id and branch.
-    BranchSyncReady(Vec<(String, String)>),
+    BranchSyncReady(Vec<BranchSyncUpdate>),
     /// A git branch rename for an agent finished.
     BranchRenameCompleted {
         /// The agent renamed.
@@ -1219,6 +1222,28 @@ pub struct BranchSyncEntry {
     pub(crate) session_id: String,
     pub(crate) worktree_path: String,
     pub(crate) branch_name: String,
+    /// When the agent was created: the HEAD reflog is read back to here.
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    /// The birth branch of a dux-made agent whose identity is not recorded
+    /// yet, read while the worktree is on it (see
+    /// [`crate::branch_history::BranchIdentity`]).
+    pub(crate) unidentified_birth: Option<String>,
+    /// The recorded tip of each row with no identity, which a sighting must
+    /// descend from to move it: nothing else says it is the same branch.
+    pub(crate) recorded_tips: Vec<(String, String)>,
+}
+
+/// What one branch-sync pass learned about one agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchSyncUpdate {
+    pub(crate) session_id: String,
+    /// The branch the worktree is on now, when it differs from the recorded one.
+    pub(crate) moved_to: Option<String>,
+    /// Branches the worktree's HEAD reflog shows it on since the last pass
+    /// (the one it moved to among them), each with its identity.
+    pub(crate) seen: Vec<crate::branch_history::SeenBranch>,
+    /// The identity of an unidentified birth branch the worktree is on.
+    pub(crate) birth_identity: Option<(String, crate::branch_history::BranchIdentity)>,
 }
 
 /// The identity of a manually attached ("pinned") pull request, carried on a
@@ -1351,6 +1376,25 @@ pub enum ProjectPersistenceAction {
         /// global ones.
         env: BTreeMap<String, String>,
     },
+}
+
+#[cfg(test)]
+impl WorkerEvent {
+    /// A branch-sync pass that saw each `(session, branch)` switch and nothing
+    /// else.
+    pub(crate) fn branch_sync_moved(moves: Vec<(String, String)>) -> Self {
+        Self::BranchSyncReady(
+            moves
+                .into_iter()
+                .map(|(session_id, branch)| BranchSyncUpdate {
+                    session_id,
+                    moved_to: Some(branch),
+                    seen: Vec::new(),
+                    birth_identity: None,
+                })
+                .collect(),
+        )
+    }
 }
 
 #[cfg(test)]

@@ -89,27 +89,26 @@ describe("sessionsApi", () => {
     const fetchMock = stubOkFetch(204, null)
     await sessionsApi.remove("s 1", true, null)
     const c = lastCall(fetchMock)
-    // No branch answer, no `delete_branch`: an absent parameter is what tells
-    // the server nobody was asked, so it keeps its provenance default.
+    // No branch boxes on screen, no body: nobody was asked about a branch.
     expect(c.url).toBe("/api/v1/sessions/s%201?delete_worktree=true")
     expect(c.method).toBe("DELETE")
+    expect(c.body).toBeUndefined()
     expect(c.headers["x-connection-id"]).toBe("conn-123")
   })
 
-  it("remove carries an explicit branch answer in both directions", async () => {
-    for (const answer of [true, false]) {
-      const fetchMock = stubOkFetch(204, null)
-      await sessionsApi.remove("s1", true, answer)
-      expect(lastCall(fetchMock).url).toBe(
-        `/api/v1/sessions/s1?delete_worktree=true&delete_branch=${answer}`,
-      )
+  it("remove carries both branch boxes as a JSON body and never delete_branch", async () => {
+    const branches = {
+      current: { delete: true, branches: [{ name: "feat", oid: "a".repeat(40) }] },
+      others: { delete: false, branches: [] },
     }
-    // The override names exactly who the dialog showed.
     const fetchMock = stubOkFetch(204, null)
-    await sessionsApi.remove("s1", false, null, ["k1", "k2"])
-    expect(lastCall(fetchMock).url).toBe(
-      "/api/v1/sessions/s1?delete_worktree=false&force_connected=k1,k2",
+    await sessionsApi.remove("s1", true, branches, ["k1", "k2"])
+    const c = lastCall(fetchMock)
+    expect(c.url).toBe(
+      "/api/v1/sessions/s1?delete_worktree=true&force_connected=k1,k2",
     )
+    expect(c.headers["content-type"]).toBe("application/json")
+    expect(c.body).toEqual({ branches })
   })
 
   it("patch PATCHes the session with the title/provider/auto_reopen body", async () => {

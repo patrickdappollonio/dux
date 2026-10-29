@@ -1808,7 +1808,7 @@ pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duratio
 /// flag: with no remote-tracking refs at all, `--not --remotes` excludes nothing
 /// and the count is the branch's whole history, which reads as an accusation
 /// about work that was never going anywhere.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct UnpushedCommits {
     /// How many commits on the branch no remote-tracking ref holds.
     pub count: u32,
@@ -1860,10 +1860,40 @@ pub(crate) fn has_remote_tracking_refs(repo_path: &Path) -> bool {
 ///
 /// Fails when git cannot be run, `rev-list` fails, or it prints something other than a count.
 pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<UnpushedCommits> {
+    let revisions: Vec<String> = branches
+        .iter()
+        .map(|branch| format!("refs/heads/{branch}"))
+        .collect();
+    count_unpushed(repo_path, &revisions)
+}
+
+/// How many commits reachable from `oids` are reachable from no
+/// remote-tracking ref and from none of the `keep` branches: what deleting
+/// the branches the delete dialog pinned loses, counted from the very commits
+/// a delete would remove rather than from wherever the names point by now. An
+/// object id is hex, and each kept branch is a fully qualified `^refs/heads/`
+/// exclusion, so neither can be read as an option.
+///
+/// # Errors
+///
+/// Fails when git cannot be run, `rev-list` fails, or it prints something other than a count.
+pub fn unpushed_commits_at(
+    repo_path: &Path,
+    oids: &[&str],
+    keep: &[&str],
+) -> Result<UnpushedCommits> {
+    let mut revisions: Vec<String> = oids.iter().map(|oid| (*oid).to_string()).collect();
+    if !revisions.is_empty() {
+        revisions.extend(keep.iter().map(|branch| format!("^refs/heads/{branch}")));
+    }
+    count_unpushed(repo_path, &revisions)
+}
+
+fn count_unpushed(repo_path: &Path, revisions: &[String]) -> Result<UnpushedCommits> {
     // No branches means nothing would be deleted, so nothing is at risk. Git
     // would refuse an empty revision list, and an error here would read to the
     // caller as "git could not answer" about a question nobody asked.
-    if branches.is_empty() {
+    if revisions.is_empty() {
         return Ok(UnpushedCommits {
             count: 0,
             has_remote_refs: has_remote_tracking_refs(repo_path),
@@ -1876,7 +1906,7 @@ pub fn unpushed_commit_count(repo_path: &Path, branches: &[&str]) -> Result<Unpu
         "rev-list".to_string(),
         "--count".to_string(),
     ];
-    args.extend(branches.iter().map(|branch| format!("refs/heads/{branch}")));
+    args.extend(revisions.iter().cloned());
     args.push("--not".to_string());
     args.push("--remotes".to_string());
     args.push("--".to_string());
@@ -4005,8 +4035,12 @@ pub fn branch_checked_out_in(repo_path: &Path, branch_name: &str) -> Result<Opti
 /// Delete a branch kept with a left-over folder, only while it still points at
 /// `kept.oid`: `update-ref -d` with the old value, so a branch somebody moved
 /// since is kept. A branch another worktree has checked out is refused first,
-/// as `git branch -D` would. The ref is fully qualified and after `--`, so a
-/// dash-leading name is read as a ref (measured on git 2.53).
+/// as `git branch -D` would; a checkout landing between that look and the
+/// delete is not caught, which is `git branch -D`'s own gap too, so the two run
+/// back to back. `--no-deref`, so a symbolic ref swapped in at the name is
+/// removed as itself and its target is never followed. The ref is fully
+/// qualified and after `--`, so a dash-leading name is read as a ref (measured
+/// on git 2.53).
 ///
 /// # Errors
 ///
@@ -4035,6 +4069,7 @@ pub fn delete_kept_branch(repo_path: &Path, kept: &KeptBranch) -> Result<KeptBra
             "-C",
             repo_path.to_string_lossy().as_ref(),
             "update-ref",
+            "--no-deref",
             "-d",
             "--",
             &reference,

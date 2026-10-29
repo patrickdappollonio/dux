@@ -500,6 +500,7 @@ mod tests {
             session,
             dux_core::model::ConversationStart::Fresh,
             dux_core::worker::AgentLaunchKind::Create {
+                birth_identity: None,
                 status_message: "Created agent.".to_string().into(),
                 status_warns: false,
                 status_notes: None,

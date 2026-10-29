@@ -246,14 +246,15 @@ fn every_removal_path_keeps_a_folder_a_dormant_agents_worktree_lives_in() {
         "a/c",
     );
     let gone = engine.sessions.remove(0);
+    let managed = gone.workspace.as_managed().unwrap().clone();
     engine
         .session_store
         .insert_pending_worktree_removal(&crate::storage::PendingWorktreeRemoval {
             session_id: gone.id.clone(),
             label: "a".to_string(),
             project_path: repo_path.to_string_lossy().into_owned(),
-            managed: gone.workspace.as_managed().unwrap().clone(),
-            delete_branch: Some(true),
+            managed: managed.clone(),
+            branches: crate::branch_history::BranchPlan::legacy(&managed, None, Some(true)),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
             process_registry: crate::process_sessions::RegistrySnapshot::default(),

@@ -780,22 +780,26 @@ pub(crate) fn agents(
             delete_worktree,
             delete_branch,
             keep_branch,
+            delete_other_branches,
+            keep_other_branches,
             guarded,
         } => {
-            // Neither flag leaves it to how the branch came to be, as the
-            // delete dialogs do.
-            let branch = match (delete_branch, keep_branch) {
+            // Neither flag of a pair leaves that box to how the branch came
+            // to be, as the delete dialogs' defaults do.
+            let answer = |delete: bool, keep: bool| match (delete, keep) {
                 (true, _) => Some(true),
                 (_, true) => Some(false),
                 _ => None,
             };
+            let branch = answer(delete_branch, keep_branch);
+            let others = answer(delete_other_branches, keep_other_branches);
             let worktree = if delete_worktree {
                 workspace::Worktrees::Delete
             } else {
                 workspace::Worktrees::Keep
             };
             guarded_on_dux(selection, err, &guarded, |client, force| {
-                workspace::agents_rm(client, &agent, worktree, branch, force)
+                workspace::agents_rm(client, &agent, worktree, branch, others, force)
             })
         }
         AgentsSub::Stop { agent, guarded } => {

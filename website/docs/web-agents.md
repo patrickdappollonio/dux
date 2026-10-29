@@ -403,27 +403,60 @@ reaches the same action with the `detach-agent` palette command on the selected 
 confirms first. The confirmation includes an unchecked "also delete the git worktree" box, so
 by default your worktree survives a delete.
 
-Tick it and a second box appears, named after the branch. It only appears there because git
-will not delete a branch that is still checked out in a worktree, so with the worktree
-staying there is nothing to offer. Where the branch box starts depends on where the branch
-came from:
+Tick it and the branch boxes appear. They only appear then because git will not delete a
+branch that is still checked out in a worktree, so with the worktree staying there is nothing
+to offer. dux keeps a list of every branch the agent's worktree has been on, including one
+it only passed through between two of dux's checks, so the dialog can offer all of them:
 
-- **Ticked**, for a branch dux created for the agent. Untick it to keep the branch.
-- **Unticked**, for a branch that already existed, or that was adopted along with an existing
-  worktree. Underneath it dux says which of the two it is, and adds "It has N commits not
-  pushed anywhere" when there are any (in a repository with no remotes it says so
-  differently, because there the count is the branch's whole history). Tick it and the branch
-  goes anyway; this is the only way to remove such a branch from dux once its worktree is
-  gone.
+- **"Also delete the branch …"** names the branch the worktree is on now.
+- **"Also delete the other branches this agent was on: …"** names every other branch the
+  worktree has been on that still exists. It appears only when there is at least one.
 
-Edge cases:
+Until dux has read the branches from git, which takes a moment, the dialog says "Checking the
+branches…" (the browser shows the first box disabled; the terminal UI shows no branch box
+yet). Press **Delete** before that, or after git could not be asked, and every branch is kept.
 
-- **The worktree moved onto another branch since the agent was created.** The tick removes
-  **both**: the branch it is on now and the one it was born on, which is what keeps creating
-  an agent under the old name from failing with "branch already exists". The box names both,
-  dux says which one predates the agent, and the commit count covers the two together.
-- **Git refuses to delete a branch dux tried to remove.** dux says which branch is still
+Where each box starts depends on whether dux can prove the branch is its own:
+
+- **The first box is ticked** for the branch dux created for the agent, and for a branch the
+  agent switched onto that git shows was created after the agent started. It is **unticked**
+  for a branch that already existed, came with an adopted worktree, or whose age git cannot
+  tell, with a line saying which.
+- **The second box is ticked** only when every branch in it is one dux created for this agent.
+  Any other branch leaves it unticked, and the line under it names the ones dux cannot vouch
+  for. A branch created after the agent started is one of those, because another worktree
+  may have made it.
+
+Under the boxes one line says what deleting the branches ticked right now loses: their commits
+on no remote and no local branch that stays. It changes as you tick, and with both boxes ticked
+it counts everything the two hold together, which can be more than either box alone. Ticking a
+box is the only way to remove such a branch from dux once its worktree is gone.
+
+What dux deletes, and what it never does:
+
+- **Only what the dialog showed.** Each branch is deleted only while it still points at the
+  commit the dialog counted. One that moved since is kept, and dux says so. A branch dux
+  noticed only after the dialog opened is kept too.
+- **Never the project's own branch**, and never a branch another worktree has checked out. The
+  dialog names a project branch the agent was on as kept rather than offering it.
+- **Never a different branch under an old name.** If the agent was once on `spike` and a
+  different `spike` exists now, the dialog does not offer it, and the message after the delete
+  says it was kept because a different branch now has that name. When git no longer keeps the
+  record that would say, a branch that has not moved on from where the agent left it still
+  counts as the same one; anything else is kept, with the reason that dux cannot confirm it.
+  So a branch dux could not fingerprint that was later rewritten (rebased or amended) is kept
+  and named as one dux cannot confirm.
+- **Git refuses to delete a branch dux tried to remove:** dux says which branch is still
   there and why, rather than reporting a deletion that did not happen.
+- **After the delete**, the message names every branch that was kept, each with its own
+  reason and the `git branch -D` command to remove it yourself.
+
+> [!IMPORTANT]
+> Deleting a project, and any delete where nobody was asked (the command line with no
+> branch flag, say), removes only the branch dux created for the agent, and only while dux
+> can prove the branch under that name is still the one it made. Every other branch the
+> worktree was on is kept and named. dux's own renames of the branch are followed; a branch
+> you rename yourself and then recreate under the old name is not dux's.
 
 ### When somebody else is connected
 

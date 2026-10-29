@@ -18,6 +18,7 @@ pub mod background_serve;
 pub mod base_branch;
 pub mod bidi;
 pub(crate) mod bounded_command;
+pub mod branch_history;
 pub mod browser;
 pub mod changes_lane;
 pub mod changes_status;

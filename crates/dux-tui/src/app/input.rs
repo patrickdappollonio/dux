@@ -5161,12 +5161,20 @@ impl App {
             focus,
             delete_worktree,
             delete_branch,
+            delete_other_branches,
+            offer,
             target,
             ..
         } = &mut self.prompt
         else {
             return None;
         };
+        // A disabled box (git has not answered, or could not) is no stop.
+        let branch_boxes = target.offers_branch_checkbox(if *delete_worktree {
+            dux_core::engine::WorktreeOnDelete::Remove
+        } else {
+            dux_core::engine::WorktreeOnDelete::Keep
+        });
         let ring = [
             (DeleteAgentFocus::Cancel, true),
             (DeleteAgentFocus::Delete, true),
@@ -5176,11 +5184,11 @@ impl App {
             ),
             (
                 DeleteAgentFocus::BranchCheckbox,
-                target.offers_branch_checkbox(if *delete_worktree {
-                    dux_core::engine::WorktreeOnDelete::Remove
-                } else {
-                    dux_core::engine::WorktreeOnDelete::Keep
-                }),
+                branch_boxes && offer.offers_current(),
+            ),
+            (
+                DeleteAgentFocus::OtherBranchesCheckbox,
+                branch_boxes && offer.offers_others(),
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -5196,7 +5204,12 @@ impl App {
                     // because the worktree box had focus), so the worktree box
                     // is where it stays.
                 }
-                DeleteAgentFocus::BranchCheckbox => *delete_branch = !*delete_branch,
+                DeleteAgentFocus::BranchCheckbox => {
+                    *delete_branch = Some(!offer.current_ticked(*delete_branch));
+                }
+                DeleteAgentFocus::OtherBranchesCheckbox => {
+                    *delete_other_branches = Some(!offer.others_ticked(*delete_other_branches));
+                }
                 DeleteAgentFocus::Cancel => {
                     return Some(self.resolve_confirm_delete_agent(ConfirmAnswer::Cancel));
                 }
@@ -7480,11 +7493,15 @@ impl App {
                 delete_button,
                 checkbox,
                 branch_checkbox,
+                other_branches_checkbox,
             } => {
-                if let Some(branch_checkbox) = branch_checkbox
-                    && contains_point(branch_checkbox.rect, column, row)
+                for branch_box in [branch_checkbox, other_branches_checkbox]
+                    .into_iter()
+                    .flatten()
                 {
-                    return Some(PromptMouseTarget::Checkbox(branch_checkbox.id));
+                    if contains_point(branch_box.rect, column, row) {
+                        return Some(PromptMouseTarget::Checkbox(branch_box.id));
+                    }
                 }
                 Self::checkbox_before_buttons_target(
                     checkbox,
@@ -8921,27 +8938,27 @@ impl App {
     }
 
     pub(super) fn resolve_confirm_delete_agent(&mut self, answer: ConfirmAnswer) -> bool {
-        let (session_id, delete_worktree, branch_answer) = match &self.prompt {
+        let (session_id, delete_worktree, branch_answers) = match &self.prompt {
             PromptState::ConfirmDeleteAgent {
                 session_id,
                 delete_worktree,
                 delete_branch,
+                delete_other_branches,
+                offer,
                 target,
                 ..
             } => (
                 session_id.clone(),
                 *delete_worktree,
-                target.branch_answer(
+                target.branch_answers(
                     if *delete_worktree {
                         dux_core::engine::WorktreeOnDelete::Remove
                     } else {
                         dux_core::engine::WorktreeOnDelete::Keep
                     },
-                    if *delete_branch {
-                        dux_core::worktree_manager::BranchRemoval::Delete
-                    } else {
-                        dux_core::worktree_manager::BranchRemoval::Keep
-                    },
+                    offer,
+                    *delete_branch,
+                    *delete_other_branches,
                 ),
             ),
             _ => return false,
@@ -8959,7 +8976,7 @@ impl App {
                     } else {
                         dux_core::engine::WorktreeOnDelete::Keep
                     },
-                    branch_answer,
+                    branch_answers,
                 )
             });
             if let Some(refused) = refused {
@@ -10071,6 +10088,41 @@ impl App {
         }
     }
 
+    /// A click on one of the delete-agent dialog's two branch boxes, which
+    /// toggles it only while it is offered and enabled.
+    fn toggle_delete_agent_branch_box(&mut self, checkbox_id: OverlayCheckboxId) {
+        let PromptState::ConfirmDeleteAgent {
+            delete_worktree,
+            delete_branch,
+            delete_other_branches,
+            offer,
+            focus,
+            target,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        if !target.offers_branch_checkbox(if *delete_worktree {
+            dux_core::engine::WorktreeOnDelete::Remove
+        } else {
+            dux_core::engine::WorktreeOnDelete::Keep
+        }) {
+            return;
+        }
+        match checkbox_id {
+            OverlayCheckboxId::DeleteAgentBranch if offer.offers_current() => {
+                *delete_branch = Some(!offer.current_ticked(*delete_branch));
+                *focus = DeleteAgentFocus::BranchCheckbox;
+            }
+            OverlayCheckboxId::DeleteAgentOtherBranches if offer.offers_others() => {
+                *delete_other_branches = Some(!offer.others_ticked(*delete_other_branches));
+                *focus = DeleteAgentFocus::OtherBranchesCheckbox;
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_overlay_checkbox(&mut self, checkbox_id: OverlayCheckboxId) {
         match checkbox_id {
             OverlayCheckboxId::DeleteAgentWorktree => {
@@ -10086,23 +10138,8 @@ impl App {
                     *focus = DeleteAgentFocus::WorktreeCheckbox;
                 }
             }
-            OverlayCheckboxId::DeleteAgentBranch => {
-                if let PromptState::ConfirmDeleteAgent {
-                    delete_worktree,
-                    delete_branch,
-                    focus,
-                    target,
-                    ..
-                } = &mut self.prompt
-                    && target.offers_branch_checkbox(if *delete_worktree {
-                        dux_core::engine::WorktreeOnDelete::Remove
-                    } else {
-                        dux_core::engine::WorktreeOnDelete::Keep
-                    })
-                {
-                    *delete_branch = !*delete_branch;
-                    *focus = DeleteAgentFocus::BranchCheckbox;
-                }
+            OverlayCheckboxId::DeleteAgentBranch | OverlayCheckboxId::DeleteAgentOtherBranches => {
+                self.toggle_delete_agent_branch_box(checkbox_id);
             }
             OverlayCheckboxId::RecreateRestartTabs => {
                 if let PromptState::ConfirmRecreateWorkingCopy {
@@ -14225,6 +14262,7 @@ mod tests {
 
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
             branch_checkbox: None,
+            other_branches_checkbox: None,
             cancel_button: hit,
             delete_button: hit,
             checkbox: Some(checkbox),
@@ -14964,6 +15002,7 @@ not_a_real_action = ["x"]
     fn install_confirm_delete_overlay(app: &mut App) {
         app.overlay_layout.active = OverlayMouseLayout::ConfirmDeleteAgent {
             branch_checkbox: None,
+            other_branches_checkbox: None,
             cancel_button: Rect::new(34, 10, 16, 3),
             delete_button: Rect::new(52, 10, 16, 3),
             checkbox: Some(OverlayCheckbox {
@@ -19050,6 +19089,7 @@ not_a_real_action = ["x"]
             session.clone(),
             dux_core::model::ConversationStart::Resume,
             AgentLaunchKind::Create {
+                birth_identity: None,
                 status_message: "imported".to_string().into(),
                 status_warns: false,
                 status_notes: None,
@@ -27007,9 +27047,10 @@ cyan = "#00ffff"
         // immediate feedback for cursor moves and toggles.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -27020,8 +27061,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -27035,8 +27074,8 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::ConfirmDeleteAgent {
-                delete_branch: false,
-                unpushed_commits: None,
+                offer: crate::app::DeleteBranchOffer::Pending,
+                delete_branch: Some(false),
                 delete_worktree,
                 ..
             } => {
@@ -30012,9 +30051,10 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_cancel_button_closes_prompt() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -30025,8 +30065,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -30045,9 +30083,10 @@ cyan = "#00ffff"
     fn mouse_click_delete_dialog_checkbox_toggles_delete_worktree() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -30058,8 +30097,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -30071,8 +30108,8 @@ cyan = "#00ffff"
 
         match &app.prompt {
             PromptState::ConfirmDeleteAgent {
-                delete_branch: false,
-                unpushed_commits: None,
+                offer: crate::app::DeleteBranchOffer::Pending,
+                delete_branch: Some(false),
                 delete_worktree,
                 focus,
                 ..
@@ -30091,9 +30128,10 @@ cyan = "#00ffff"
 
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -30104,8 +30142,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -30121,6 +30157,7 @@ cyan = "#00ffff"
         let (checkbox, cancel_button) = match app.overlay_layout.active {
             OverlayMouseLayout::ConfirmDeleteAgent {
                 branch_checkbox: None,
+                other_branches_checkbox: None,
                 checkbox: Some(checkbox),
                 cancel_button,
                 ..
@@ -30146,27 +30183,59 @@ cyan = "#00ffff"
         );
     }
 
+    /// What git answers about an agent on `develop`, made by `origin`, that
+    /// was also on each of `others` (all made by `others_origin`).
+    fn branch_offer(
+        origin: dux_core::branch_history::BranchOrigin,
+        others: &[&str],
+        others_origin: dux_core::branch_history::BranchOrigin,
+    ) -> dux_core::branch_history::BranchOffer {
+        let offered = |name: &str, origin| dux_core::branch_history::OfferedBranch {
+            name: name.to_string(),
+            oid: "a".repeat(40),
+            origin,
+        };
+        let counted = Ok(dux_core::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        });
+        dux_core::branch_history::BranchOffer {
+            current_name: "develop".to_string(),
+            current: Some(offered("develop", origin)),
+            current_unpushed: counted.clone(),
+            others: others
+                .iter()
+                .map(|name| offered(name, others_origin))
+                .collect(),
+            others_unpushed: counted,
+            both_unpushed: Ok(dux_core::git::UnpushedCommits {
+                count: 0,
+                has_remote_refs: true,
+            }),
+            newly_seen: Vec::new(),
+            protected: Vec::new(),
+        }
+    }
+
     /// A delete-agent prompt on a managed agent in a chosen state.
     fn delete_agent_prompt_state(
         app: &App,
-        provenance: dux_core::model::BranchProvenance,
+        offer: crate::app::DeleteBranchOffer,
         worktree: dux_core::engine::WorktreeOnDelete,
-        branch_removal: dux_core::worktree_manager::BranchRemoval,
     ) -> PromptState {
         PromptState::ConfirmDeleteAgent {
+            offer,
             attached: Vec::new(),
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: "agent".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
                 branch_name: "develop".to_string(),
-                initial_branch: "develop".to_string(),
-                branch_provenance: provenance,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
             delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
-            delete_branch: branch_removal == dux_core::worktree_manager::BranchRemoval::Delete,
-            unpushed_commits: None,
+            delete_branch: None,
+            delete_other_branches: None,
         }
     }
 
@@ -30177,107 +30246,192 @@ cyan = "#00ffff"
         }
     }
 
-    /// The branch box is a focus stop only while it is painted, so the ring
-    /// asks the same question the renderer does.
-    #[test]
-    fn the_branch_box_is_a_focus_stop_only_while_the_worktree_is_going() {
-        let mut app = test_app(default_bindings());
-        app.prompt = delete_agent_prompt_state(
-            &app,
-            dux_core::model::BranchProvenance::AttachedExisting,
-            dux_core::engine::WorktreeOnDelete::Keep,
-            dux_core::worktree_manager::BranchRemoval::Keep,
-        );
-        // Cancel, Delete, worktree box, and back to Cancel: three stops.
-        for expected in [
-            DeleteAgentFocus::Delete,
-            DeleteAgentFocus::WorktreeCheckbox,
-            DeleteAgentFocus::Cancel,
-        ] {
+    fn tab_through(app: &mut App, expected: &[DeleteAgentFocus], why: &str) {
+        for expected in expected {
             app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
                 .unwrap();
-            assert_eq!(delete_agent_focus(&app), expected);
-        }
-
-        app.prompt = delete_agent_prompt_state(
-            &app,
-            dux_core::model::BranchProvenance::AttachedExisting,
-            dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Keep,
-        );
-        for expected in [
-            DeleteAgentFocus::Delete,
-            DeleteAgentFocus::WorktreeCheckbox,
-            DeleteAgentFocus::BranchCheckbox,
-            DeleteAgentFocus::Cancel,
-        ] {
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-                .unwrap();
-            assert_eq!(
-                delete_agent_focus(&app),
-                expected,
-                "the branch box joins the ring once the worktree is going"
-            );
+            assert_eq!(delete_agent_focus(app), *expected, "{why}");
         }
     }
 
-    /// Space acts on the focused control, which is the universal convention
-    /// every dialog follows.
+    /// A branch box is a focus stop only while it is painted and enabled, so
+    /// the ring asks the same questions the renderer does: the worktree is
+    /// going, git has answered, and (for the second box) the agent was on
+    /// another branch.
     #[test]
-    fn space_toggles_the_focused_delete_agent_checkbox() {
-        let mut app = test_app(default_bindings());
-        app.prompt = delete_agent_prompt_state(
-            &app,
-            dux_core::model::BranchProvenance::AttachedExisting,
-            dux_core::engine::WorktreeOnDelete::Remove,
-            dux_core::worktree_manager::BranchRemoval::Keep,
-        );
-        app.prompt = match app.prompt {
-            PromptState::ConfirmDeleteAgent {
-                session_id,
-                agent_label,
-                target,
-                delete_worktree,
-                delete_branch,
-                unpushed_commits,
-                ..
-            } => PromptState::ConfirmDeleteAgent {
-                attached: Vec::new(),
-                session_id,
-                agent_label,
-                target,
-                focus: DeleteAgentFocus::BranchCheckbox,
-                delete_worktree,
-                delete_branch,
-                unpushed_commits,
-            },
-            other => panic!("expected delete-agent confirmation, got {other:?}"),
+    fn the_branch_boxes_are_focus_stops_only_while_they_are_offered() {
+        use DeleteAgentFocus::{
+            BranchCheckbox, Cancel, Delete, OtherBranchesCheckbox, WorktreeCheckbox,
         };
+        use dux_core::branch_history::BranchOrigin;
+        use dux_core::engine::WorktreeOnDelete::{Keep, Remove};
+        let ready = |others: &[&str]| {
+            crate::app::DeleteBranchOffer::Ready(branch_offer(
+                BranchOrigin::Dux,
+                others,
+                BranchOrigin::After,
+            ))
+        };
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_state(&app, ready(&["a"]), Keep);
+        tab_through(
+            &mut app,
+            &[Delete, WorktreeCheckbox, Cancel],
+            "the worktree stays",
+        );
+
+        app.prompt =
+            delete_agent_prompt_state(&app, crate::app::DeleteBranchOffer::Pending, Remove);
+        tab_through(
+            &mut app,
+            &[Delete, WorktreeCheckbox, Cancel],
+            "git has not answered",
+        );
+
+        app.prompt = delete_agent_prompt_state(&app, ready(&[]), Remove);
+        tab_through(
+            &mut app,
+            &[Delete, WorktreeCheckbox, BranchCheckbox, Cancel],
+            "no other branch, no second box",
+        );
+
+        app.prompt = delete_agent_prompt_state(&app, ready(&["a"]), Remove);
+        tab_through(
+            &mut app,
+            &[
+                Delete,
+                WorktreeCheckbox,
+                BranchCheckbox,
+                OtherBranchesCheckbox,
+                Cancel,
+            ],
+            "both boxes",
+        );
+    }
+
+    /// Space acts on the focused control, and a box starts in its default:
+    /// the second box over a branch dux cannot vouch for starts unticked.
+    #[test]
+    fn space_toggles_the_focused_branch_box_from_its_default() {
+        use dux_core::branch_history::BranchOrigin;
+        let mut app = test_app(default_bindings());
+        let offer = crate::app::DeleteBranchOffer::Ready(branch_offer(
+            BranchOrigin::Dux,
+            &["visited"],
+            BranchOrigin::After,
+        ));
+        app.prompt =
+            delete_agent_prompt_state(&app, offer, dux_core::engine::WorktreeOnDelete::Remove);
+        if let PromptState::ConfirmDeleteAgent { focus, .. } = &mut app.prompt {
+            *focus = DeleteAgentFocus::OtherBranchesCheckbox;
+        }
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
             .unwrap();
         match &app.prompt {
             PromptState::ConfirmDeleteAgent {
                 delete_branch,
-                delete_worktree,
+                delete_other_branches,
                 ..
             } => {
-                assert!(*delete_branch, "Space must tick the focused branch box");
-                assert!(
-                    *delete_worktree,
-                    "and must not disturb the box it does not have focus on"
-                );
+                assert_eq!(*delete_other_branches, Some(true), "ticked from unticked");
+                assert_eq!(*delete_branch, None, "the first box is untouched");
             }
             other => panic!("expected delete-agent confirmation, got {other:?}"),
         }
+    }
+
+    /// What the dialog sends: each ticked box pins exactly the branches it
+    /// named, an unticked one pins nothing, and a dialog git has not answered
+    /// yet says so for both boxes rather than falling back to a default.
+    #[test]
+    fn the_delete_dialog_sends_pinned_answers_and_fails_closed() {
+        use dux_core::branch_history::{BoxWire, BranchOrigin, Unchecked};
+        let target = crate::app::DeleteAgentTarget::Managed {
+            branch_name: "develop".to_string(),
+            worktree_shared: false,
+        };
+        let remove = dux_core::engine::WorktreeOnDelete::Remove;
+        let offer = crate::app::DeleteBranchOffer::Ready(branch_offer(
+            BranchOrigin::Dux,
+            &["visited"],
+            BranchOrigin::After,
+        ));
+        let answers = target.branch_answers(remove, &offer, None, None).unwrap();
+        let current = answers.current.unwrap();
+        assert!(current.delete);
+        assert_eq!(current.branches[0].name, "develop");
+        assert_eq!(
+            answers.others.unwrap(),
+            BoxWire {
+                delete: false,
+                branches: Vec::new(),
+                unchecked: None,
+                offered: vec!["visited".to_string()],
+            },
+            "dux cannot vouch for a branch made after the agent"
+        );
+        let answers = target
+            .branch_answers(remove, &offer, None, Some(true))
+            .unwrap();
+        assert_eq!(answers.others.unwrap().branches[0].name, "visited");
+
+        let pending = target
+            .branch_answers(
+                remove,
+                &crate::app::DeleteBranchOffer::Pending,
+                Some(true),
+                None,
+            )
+            .unwrap();
+        for answer in [pending.current.unwrap(), pending.others.unwrap()] {
+            assert_eq!(answer.unchecked, Some(Unchecked::Pending));
+            assert_eq!(answer.branches, Vec::new());
+        }
+        assert_eq!(
+            target.branch_answers(dux_core::engine::WorktreeOnDelete::Keep, &offer, None, None),
+            None,
+            "with the worktree kept no box was on screen, so nothing was asked"
+        );
+
+        // A box the dialog does not show says so, the same value the web
+        // sends: nothing it would have covered is deleted.
+        let not_offered = BoxWire {
+            unchecked: Some(Unchecked::NotOffered),
+            ..BoxWire::default()
+        };
+        let lone = crate::app::DeleteBranchOffer::Ready(branch_offer(
+            BranchOrigin::Dux,
+            &[],
+            BranchOrigin::After,
+        ));
+        let answers = target.branch_answers(remove, &lone, None, None).unwrap();
+        assert_eq!(answers.others, Some(not_offered.clone()));
+        let mut own = branch_offer(BranchOrigin::Dux, &["visited"], BranchOrigin::After);
+        own.current = None;
+        own.protected = vec!["develop".to_string()];
+        let answers = target
+            .branch_answers(
+                remove,
+                &crate::app::DeleteBranchOffer::Ready(own),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            answers.current,
+            Some(not_offered),
+            "the project's own branch is offered in no box, not a failed check"
+        );
     }
 
     #[test]
     fn shift_tab_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -30288,8 +30442,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -30329,9 +30481,10 @@ cyan = "#00ffff"
     fn tab_with_shift_moves_delete_agent_focus_backwards() {
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: app.engine.sessions[0].id.clone(),
             agent_label: app.engine.sessions[0]
                 .branch_name()
@@ -30342,8 +30495,6 @@ cyan = "#00ffff"
                     .branch_name()
                     .expect("managed test session")
                     .to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,
@@ -42022,15 +42173,14 @@ cyan = "#00ffff"
         // ── ConfirmDeleteAgent: Cancel -> Delete -> Checkbox.
         let mut app = test_app(default_bindings());
         app.prompt = PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Pending,
             attached: Vec::new(),
-            delete_branch: false,
-            unpushed_commits: None,
+            delete_branch: Some(false),
+            delete_other_branches: None,
             session_id: "s1".to_string(),
             agent_label: "b".to_string(),
             target: crate::app::DeleteAgentTarget::Managed {
                 branch_name: "b".to_string(),
-                initial_branch: "wt-branch".to_string(),
-                branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                 worktree_shared: false,
             },
             focus: DeleteAgentFocus::Cancel,

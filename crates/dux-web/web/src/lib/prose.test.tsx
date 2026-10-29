@@ -14,7 +14,18 @@ import {
 import { attachedEntryProse, attachedLeadProse } from "./attached"
 import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
-import { unpushedCountFailureProse } from "./deleteAgent"
+import {
+  type BranchOrigin,
+  branchesCheckFailedProse,
+  branchesCheckingProse,
+  currentBranchLabelProse,
+  currentBranchWarningProse,
+  otherBranchesLabelProse,
+  otherBranchesWarningProse,
+  protectedBranchesProse,
+  branchLossProse,
+  unpushedCountFailureProse,
+} from "./deleteAgent"
 import { detachConfirmProse } from "./detachAgent"
 import {
   leftoverBranchFateProse,
@@ -187,6 +198,30 @@ describe("the sentences both surfaces print", () => {
           args.branches as string[],
           args.reason as string,
         )
+      case "delete_current_branch_label":
+        return currentBranchLabelProse(args.branch as string)
+      case "delete_other_branches_label":
+        return otherBranchesLabelProse(args.branches as string[])
+      case "delete_current_branch_warning":
+        return currentBranchWarningProse(args.origin as BranchOrigin) ?? []
+      case "delete_other_branches_warning":
+        return otherBranchesWarningProse(
+          args.others as { name: string; origin: BranchOrigin }[],
+          args.ticked as boolean,
+        )
+      case "delete_branch_loss":
+        return branchLossProse(
+          args.branches as string[],
+          args.lost as
+            | { count: number; has_remote_refs: boolean }
+            | { failed: string },
+        )
+      case "delete_branches_checking":
+        return branchesCheckingProse()
+      case "delete_branches_check_failed":
+        return branchesCheckFailedProse(args.reason as string)
+      case "delete_protected_branches":
+        return protectedBranchesProse(args.branches as string[])
       case "attached_lead":
         return attachedLeadProse()
       case "attached_entry":

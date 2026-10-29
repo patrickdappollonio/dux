@@ -234,7 +234,11 @@ fn a_resumed_removal_that_never_starts_gives_its_busy_a_final() {
             label: "gone".to_string(),
             project_path: repo.to_string_lossy().into_owned(),
             managed: session.workspace.as_managed().unwrap().clone(),
-            delete_branch: None,
+            branches: crate::branch_history::BranchPlan::legacy(
+                session.workspace.as_managed().unwrap(),
+                None,
+                None,
+            ),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
             process_registry: crate::process_sessions::RegistrySnapshot::default(),

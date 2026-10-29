@@ -3241,6 +3241,7 @@ mod tests {
                 status_message: String::new().into(),
             },
             AgentLaunchKind::Create {
+                birth_identity: None,
                 status_message: String::new().into(),
                 status_warns: false,
                 status_notes: None,

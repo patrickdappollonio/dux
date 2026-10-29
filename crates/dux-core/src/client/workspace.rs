@@ -1541,17 +1541,251 @@ pub fn existing_branch_refusal(error: CliError) -> CliError {
     }
 }
 
-/// `dux agents rm <a>`. `delete_branch` is the dialogs' answer: `None`
-/// leaves it to how the branch came to be.
+/// What `branch-unpushed` answers: the branches a delete would offer, each
+/// pinned to the commit it points at, and what ticking each box loses.
+#[derive(Deserialize)]
+struct BranchOfferReply {
+    #[serde(default)]
+    current_name: String,
+    current: Option<crate::branch_history::OfferedBranch>,
+    #[serde(default)]
+    current_unpushed: Option<crate::git::UnpushedCommits>,
+    #[serde(default)]
+    current_unpushed_error: Option<String>,
+    others: Vec<crate::branch_history::OfferedBranch>,
+    #[serde(default)]
+    others_unpushed: Option<crate::git::UnpushedCommits>,
+    #[serde(default)]
+    others_unpushed_error: Option<String>,
+    #[serde(default)]
+    both_unpushed: Option<crate::git::UnpushedCommits>,
+    #[serde(default)]
+    both_unpushed_error: Option<String>,
+    #[serde(default)]
+    protected: Vec<String>,
+}
+
+/// A count as the server answered it, or why it could not count.
+fn count_answer(
+    count: Option<crate::git::UnpushedCommits>,
+    error: Option<&String>,
+) -> crate::delete_agent_prose::UnpushedAnswer {
+    count.ok_or_else(|| {
+        error
+            .cloned()
+            .unwrap_or_else(|| "no count came back".to_string())
+    })
+}
+
+impl BranchOfferReply {
+    /// The first box's default, as the dialogs show it.
+    fn current_default(&self) -> bool {
+        self.current.as_ref().is_some_and(|current| {
+            matches!(
+                current.origin,
+                crate::branch_history::BranchOrigin::Dux
+                    | crate::branch_history::BranchOrigin::After
+            )
+        })
+    }
+
+    /// The second box's default, as the dialogs show it.
+    fn others_default(&self) -> bool {
+        !self.others.is_empty() && self.others.iter().all(|other| other.origin.is_duxs())
+    }
+}
+
+/// One box over `branches` with its answer: a ticked box pins every branch
+/// to the commit the offer read, and either way it says what it showed.
+fn box_over(
+    branches: &[&crate::branch_history::OfferedBranch],
+    state: crate::delete_agent_prose::BoxState,
+) -> crate::branch_history::BoxWire {
+    let delete = state == crate::delete_agent_prose::BoxState::Ticked;
+    crate::branch_history::BoxWire {
+        delete,
+        branches: if delete {
+            branches
+                .iter()
+                .map(|branch| crate::branch_history::PinnedBranch {
+                    name: branch.name.clone(),
+                    oid: branch.oid.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        unchecked: None,
+        offered: branches.iter().map(|branch| branch.name.clone()).collect(),
+    }
+}
+
+fn not_offered() -> crate::branch_history::BoxWire {
+    crate::branch_history::BoxWire {
+        unchecked: Some(crate::branch_history::Unchecked::NotOffered),
+        ..crate::branch_history::BoxWire::default()
+    }
+}
+
+/// Both boxes' answers for a delete that deletes a branch, exactly as the
+/// dialogs would send them: each box the flags named, ticked or not as they
+/// say, and each box they did not name at the default the dialogs show. The
+/// question gains what becomes of every branch, and the notice what deleting
+/// them loses.
+struct BranchAnswersPlan {
+    answers: crate::branch_history::BranchAnswersWire,
+    question: String,
+    notice: Option<String>,
+}
+
+/// What deleting the branches the two answers tick loses, as the line before
+/// the question, using the count for exactly that tick combination; `None`
+/// when they tick nothing.
+fn loss_note(
+    offer: &BranchOfferReply,
+    current: &crate::branch_history::BoxWire,
+    others: &crate::branch_history::BoxWire,
+) -> Option<String> {
+    let mut deleted: Vec<&str> = Vec::new();
+    if current.delete {
+        deleted.extend(offer.current.iter().map(|current| current.name.as_str()));
+    }
+    if others.delete {
+        deleted.extend(offer.others.iter().map(|other| other.name.as_str()));
+    }
+    let lost = match (current.delete, others.delete) {
+        (true, true) => count_answer(offer.both_unpushed, offer.both_unpushed_error.as_ref()),
+        (true, false) => count_answer(
+            offer.current_unpushed,
+            offer.current_unpushed_error.as_ref(),
+        ),
+        (false, true) => count_answer(offer.others_unpushed, offer.others_unpushed_error.as_ref()),
+        (false, false) => return None,
+    };
+    Some(crate::delete_agent_prose::branch_loss_prose(&deleted, &lost).plain())
+}
+
+fn plan_branch_answers(
+    offer: &BranchOfferReply,
+    delete_branch: Option<bool>,
+    delete_other_branches: Option<bool>,
+    agent: &str,
+) -> Result<BranchAnswersPlan, CliError> {
+    use crate::delete_agent_prose::BoxState;
+    let state = |ticked: bool| {
+        if ticked {
+            BoxState::Ticked
+        } else {
+            BoxState::Unticked
+        }
+    };
+    let mut question = String::new();
+    let mut notes: Vec<String> = Vec::new();
+    let current_ticked = delete_branch.unwrap_or_else(|| offer.current_default());
+    let current = match &offer.current {
+        Some(current) => {
+            let _ = write!(
+                question,
+                ", {} its branch {}",
+                if current_ticked {
+                    "deleting"
+                } else {
+                    "keeping"
+                },
+                current.name
+            );
+            box_over(&[current], state(current_ticked))
+        }
+        None if offer.protected.contains(&offer.current_name) => not_offered(),
+        None if delete_branch == Some(true) => {
+            return Err(CliError::new(
+                Exit::Failed,
+                format!(
+                    "dux could not read the branch agent {agent} is on, so nothing was deleted"
+                ),
+            ));
+        }
+        None => {
+            question.push_str(", keeping its branch");
+            if !offer.current_name.is_empty() {
+                let _ = write!(question, " {}", offer.current_name);
+            }
+            crate::branch_history::BoxWire {
+                unchecked: Some(crate::branch_history::Unchecked::Failed),
+                ..crate::branch_history::BoxWire::default()
+            }
+        }
+    };
+    let others_ticked = delete_other_branches.unwrap_or_else(|| offer.others_default());
+    let others = if offer.others.is_empty() {
+        if delete_other_branches == Some(true) {
+            notes.push("It was on no other branch to delete.".to_string());
+        }
+        not_offered()
+    } else {
+        let names: Vec<&str> = offer.others.iter().map(|o| o.name.as_str()).collect();
+        let _ = write!(
+            question,
+            ", {} the other {} it was on: {}",
+            if others_ticked { "deleting" } else { "keeping" },
+            if names.len() == 1 {
+                "branch"
+            } else {
+                "branches"
+            },
+            names.join(", ")
+        );
+        let others: Vec<&crate::branch_history::OfferedBranch> = offer.others.iter().collect();
+        box_over(&others, state(others_ticked))
+    };
+    // The project's own branches the agent was on, which the dialogs name as
+    // kept too.
+    if !offer.protected.is_empty() {
+        let _ = write!(
+            question,
+            ", keeping the project's own {} {}",
+            if offer.protected.len() == 1 {
+                "branch"
+            } else {
+                "branches"
+            },
+            offer.protected.join(", ")
+        );
+    }
+    notes.extend(loss_note(offer, &current, &others));
+    Ok(BranchAnswersPlan {
+        answers: crate::branch_history::BranchAnswersWire {
+            current: Some(current),
+            others: Some(others),
+        },
+        question,
+        notice: (!notes.is_empty()).then(|| notes.join(" ")),
+    })
+}
+
+/// `dux agents rm <a>`. `delete_branch` answers for the branch the worktree
+/// is on and `delete_other_branches` for every other branch it has been on, as
+/// the delete dialogs' two boxes do.
+///
+/// Any branch flag makes the command read the branches from the running dux
+/// first and answer BOTH boxes as the dialogs would, the box no flag named at
+/// its default, so the question names every branch that goes and every branch
+/// that stays, and the line before it says what deleting them loses. A
+/// standalone agent has no branch of its own, and a worktree that stays keeps
+/// every branch, so neither reads anything. With no flag
+/// at all, only the branch dux made for the agent goes, and only while dux can
+/// prove it.
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+/// Fails when the dux cannot be reached or refuses, `query` names no single
+/// agent, or a branch it was asked to delete cannot be read.
 pub fn agents_rm(
     client: &Client,
     query: &str,
     worktree: Worktrees,
     delete_branch: Option<bool>,
+    delete_other_branches: Option<bool>,
     if_attached: IfAttached,
 ) -> Result<Planned, CliError> {
     let delete_worktree = worktree.deleted();
@@ -1564,15 +1798,38 @@ pub fn agents_rm(
     if delete_worktree {
         let _ = write!(question, " and its worktree {}", agent.directory());
     }
-    match delete_branch {
-        Some(true) => question.push_str(", deleting its branch"),
-        Some(false) => question.push_str(", keeping its branch"),
-        None => {}
+    let flagged = delete_branch.is_some() || delete_other_branches.is_some();
+    let managed = matches!(agent.workspace, Workspace::Managed { .. });
+    if !flagged || !managed || !delete_worktree {
+        // The older single answer, exactly as before the boxes: with no flag
+        // the server decides, a standalone agent has no branch of its own, and
+        // a worktree that stays keeps every branch, as the dialogs offer no
+        // box for it.
+        let answer = match (delete_branch, delete_other_branches) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (None, None) => None,
+        };
+        match answer {
+            Some(true) => question.push_str(", deleting its branch"),
+            Some(false) => question.push_str(", keeping its branch"),
+            None => {}
+        }
+        if let Some(delete) = answer {
+            let _ = write!(path, "&delete_branch={delete}");
+        }
+        return Ok(Planned::new(question, Method::Delete, path, None).forced(if_attached));
     }
-    if let Some(delete) = delete_branch {
-        let _ = write!(path, "&delete_branch={delete}");
-    }
-    Ok(Planned::new(question, Method::Delete, path, None).forced(if_attached))
+    let offer: BranchOfferReply = client.get_json(&format!(
+        "/api/v1/sessions/{}/branch-unpushed",
+        segment(&agent.id)
+    ))?;
+    let plan = plan_branch_answers(&offer, delete_branch, delete_other_branches, &agent.name())?;
+    question.push_str(&plan.question);
+    let body = json!({ "branches": plan.answers });
+    let mut planned = Planned::new(question, Method::Delete, path, Some(body)).forced(if_attached);
+    planned.notice = plan.notice;
+    Ok(planned)
 }
 
 /// `dux agents stop <a>`.
@@ -2410,6 +2667,244 @@ mod pull_request_anywhere_tests {
                 .ends_with("gh did not answer. Add --project to choose one."),
             "{}",
             refused.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod agents_rm_tests {
+    use super::*;
+    use crate::client::connect::{Target, connect};
+    use crate::client::test_server::{FakeDux, Reply, private_dir};
+
+    const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
+    const AGENTS: &str = r#"[{"id":"a1","title":"feat","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p1","branch_name":"main","worktree_path":"/wt/feat"}}]"#;
+
+    /// `dux agents rm` against a dux whose branch offer answers `offer`.
+    fn plan(offer: &'static str, delete: Option<bool>, others: Option<bool>) -> Planned {
+        plan_with(offer, Worktrees::Delete, delete, others)
+    }
+
+    fn plan_with(
+        offer: &'static str,
+        worktree: Worktrees,
+        delete: Option<bool>,
+        others: Option<bool>,
+    ) -> Planned {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/sessions" => Reply::json(200, AGENTS),
+            "/api/v1/sessions/a1/branch-unpushed" => Reply::json(200, offer),
+            _ => Reply::json(404, "{}"),
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let _lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        agents_rm(
+            &client,
+            "feat",
+            worktree,
+            delete,
+            others,
+            IfAttached::Refuse,
+        )
+        .unwrap()
+    }
+
+    /// The project's own branch is offered in no box: the command line says
+    /// so, sends what the dialogs send, and deletes nothing it would cover.
+    #[test]
+    fn delete_branch_on_the_projects_own_branch_says_so_and_sends_not_offered() {
+        let planned = plan(
+            r#"{"current_name":"main","current":null,"others":[],"protected":["main"]}"#,
+            Some(true),
+            Some(true),
+        );
+        assert!(
+            planned
+                .question
+                .ends_with(", keeping the project's own branch main"),
+            "{}",
+            planned.question
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["current"]["unchecked"], "not_offered");
+        assert_eq!(body["branches"]["others"]["unchecked"], "not_offered");
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some("It was on no other branch to delete."),
+            "nothing is deleted, so nothing is lost"
+        );
+    }
+
+    /// The agent on its dux-made `agent-x` (3 commits of its own) that also
+    /// visited `spike`: `--delete-other-branches` alone leaves the first box at
+    /// the default the dialogs show, ticked, so the question names `agent-x`
+    /// too and the line before it counts what deleting both loses.
+    #[test]
+    fn one_delete_flag_answers_the_other_box_at_the_dialogs_default() {
+        let planned = plan(
+            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed":{"count":3,"has_remote_refs":true},
+               "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"after"}],
+               "others_unpushed":{"count":1,"has_remote_refs":true},
+               "both_unpushed":{"count":4,"has_remote_refs":true},"protected":[]}"#,
+            None,
+            Some(true),
+        );
+        assert!(
+            planned.question.contains(", deleting its branch agent-x")
+                && planned
+                    .question
+                    .contains(", deleting the other branch it was on: spike"),
+            "{}",
+            planned.question
+        );
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "Deleting agent-x and spike loses 4 commits that are on no remote and no branch \
+                 that stays."
+            )
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(
+            body["branches"]["current"]["branches"][0]["name"],
+            "agent-x"
+        );
+        assert_eq!(body["branches"]["others"]["branches"][0]["name"], "spike");
+    }
+
+    /// After a switch onto `drifted`, `--delete-branch` alone leaves the
+    /// second box at its default: ticked, since dux made `agent-x`.
+    #[test]
+    fn delete_branch_alone_after_a_switch_also_answers_the_second_box() {
+        let planned = plan(
+            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+               "current_unpushed":{"count":1,"has_remote_refs":true},
+               "others":[{"name":"agent-x","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":0,"has_remote_refs":true},
+               "both_unpushed":{"count":4,"has_remote_refs":true},"protected":[]}"#,
+            Some(true),
+            None,
+        );
+        assert!(
+            planned
+                .question
+                .contains(", deleting the other branch it was on: agent-x"),
+            "{}",
+            planned.question
+        );
+        assert!(
+            planned
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("loses 4 commits")),
+            "{:?}",
+            planned.notice
+        );
+        assert_eq!(
+            planned.body.unwrap()["branches"]["others"]["branches"][0]["name"],
+            "agent-x"
+        );
+    }
+
+    /// `--keep-other-branches` alone keeps the other branches and leaves the
+    /// first box at the default the dialogs show: ticked over the branch dux
+    /// made, so the question names it as deleted.
+    #[test]
+    fn a_keep_flag_alone_answers_the_other_box_at_the_dialogs_default() {
+        let planned = plan(
+            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed":{"count":3,"has_remote_refs":true},
+               "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":1,"has_remote_refs":true},
+               "both_unpushed":{"count":4,"has_remote_refs":true},"protected":[]}"#,
+            None,
+            Some(false),
+        );
+        assert!(
+            planned.question.contains(", deleting its branch agent-x")
+                && planned
+                    .question
+                    .contains(", keeping the other branch it was on: spike"),
+            "{}",
+            planned.question
+        );
+        assert!(!planned.path.contains("delete_branch="), "{}", planned.path);
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["current"]["delete"], true);
+        assert_eq!(body["branches"]["others"]["delete"], false);
+        assert_eq!(body["branches"]["others"]["offered"][0], "spike");
+    }
+
+    /// A worktree that stays keeps every branch: a keep flag without
+    /// --delete-worktree reads nothing and sends the older answer.
+    #[test]
+    fn a_keep_flag_with_the_worktree_staying_reads_nothing() {
+        let planned = plan_with("{}", Worktrees::Keep, Some(false), None);
+        assert!(planned.body.is_none());
+        assert!(
+            planned.path.ends_with("&delete_branch=false"),
+            "{}",
+            planned.path
+        );
+    }
+
+    /// The branch the agent is on could not be read: the first box says so,
+    /// and the question says that branch is kept.
+    #[test]
+    fn a_current_branch_that_could_not_be_read_is_named_as_kept() {
+        let planned = plan(
+            r#"{"current_name":"agent-x","current":null,"others":[],"protected":[]}"#,
+            None,
+            Some(false),
+        );
+        assert!(
+            planned.question.ends_with(", keeping its branch agent-x"),
+            "{}",
+            planned.question
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["current"]["unchecked"], "failed");
+    }
+
+    /// Both boxes ticked: the line before the question counts what deleting
+    /// both loses, not either box's own count.
+    #[test]
+    fn the_notice_counts_what_the_ticked_boxes_lose_together() {
+        let planned = plan(
+            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+               "current_unpushed":{"count":1,"has_remote_refs":true},
+               "others":[{"name":"born","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":0,"has_remote_refs":true},
+               "both_unpushed":{"count":4,"has_remote_refs":true},"protected":[]}"#,
+            Some(true),
+            Some(true),
+        );
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "Deleting drifted and born loses 4 commits that are on no remote and no branch \
+                 that stays."
+            )
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["others"]["offered"][0], "born");
+        assert_eq!(
+            body["branches"]["current"]["branches"][0]["name"],
+            "drifted"
         );
     }
 }

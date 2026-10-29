@@ -1160,15 +1160,14 @@ pub(super) mod tests {
             (
                 "ConfirmDeleteAgent",
                 PromptState::ConfirmDeleteAgent {
+                    offer: crate::app::DeleteBranchOffer::Pending,
                     attached: Vec::new(),
-                    delete_branch: false,
-                    unpushed_commits: None,
+                    delete_branch: Some(false),
+                    delete_other_branches: None,
                     session_id: "s1".to_string(),
                     agent_label: "my cool agent".to_string(),
                     target: crate::app::DeleteAgentTarget::Managed {
                         branch_name: "b".to_string(),
-                        initial_branch: "wt-branch".to_string(),
-                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                         worktree_shared: false,
                     },
                     focus: DeleteAgentFocus::Cancel,

@@ -29,6 +29,7 @@ import {
 } from "./projectsApi"
 import { type AttachedBlocker, AttachedError } from "./attached"
 import {
+  type DeleteBranchAnswers,
   existingBranchConflict,
   type PullRequestCloneOffer,
   type ReviewCopyOutlook,
@@ -5536,16 +5537,15 @@ export function closeDelete(): void {
 
 // Ask the server to delete an agent session. `deleteWorktree` opts into the
 // destructive removal of the git worktree on disk (default off in the UI).
-// `deleteBranch` is the dialog's branch answer, or `null` when it had no
-// checkbox to answer with.
+// `branches` is the dialog's two branch boxes, or `null` when it showed none.
 export function deleteSession(
   sessionId: string,
   deleteWorktree: boolean,
-  deleteBranch: boolean | null = null,
+  branches: DeleteBranchAnswers | null = null,
   accepted: readonly string[] | null = null,
 ): Promise<AttachedBlocker[] | null> {
   return guardedChange(
-    sessionsApi.remove(sessionId, deleteWorktree, deleteBranch, accepted),
+    sessionsApi.remove(sessionId, deleteWorktree, branches, accepted),
     (e) => {
       // A 409 is a refusal (a tab is still launching, or a delete is already in
       // flight). The server already surfaces that message over the `/ws/events`

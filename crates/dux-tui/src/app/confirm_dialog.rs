@@ -642,18 +642,14 @@ mod tests {
             (
                 "ConfirmDeleteAgent(worktree, existing branch)",
                 PromptState::ConfirmDeleteAgent {
+                    offer: crate::app::DeleteBranchOffer::Pending,
                     attached: Vec::new(),
-                    delete_branch: false,
-                    unpushed_commits: Some(Ok(dux_core::git::UnpushedCommits {
-                        count: 3,
-                        has_remote_refs: true,
-                    })),
+                    delete_branch: Some(false),
+                    delete_other_branches: None,
                     session_id: "s1".to_string(),
                     agent_label: "my cool agent".to_string(),
                     target: DeleteAgentTarget::Managed {
                         branch_name: "feature/drifted-name".to_string(),
-                        initial_branch: "feature/original-name".to_string(),
-                        branch_provenance: dux_core::model::BranchProvenance::AttachedExisting,
                         worktree_shared: false,
                     },
                     focus: DeleteAgentFocus::Cancel,
@@ -663,15 +659,14 @@ mod tests {
             (
                 "ConfirmDeleteAgent(shared worktree)",
                 PromptState::ConfirmDeleteAgent {
+                    offer: crate::app::DeleteBranchOffer::Pending,
                     attached: Vec::new(),
-                    delete_branch: false,
-                    unpushed_commits: None,
+                    delete_branch: Some(false),
+                    delete_other_branches: None,
                     session_id: "s1".to_string(),
                     agent_label: "my cool agent".to_string(),
                     target: DeleteAgentTarget::Managed {
                         branch_name: "b".to_string(),
-                        initial_branch: "b".to_string(),
-                        branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
                         worktree_shared: true,
                     },
                     focus: DeleteAgentFocus::Cancel,
@@ -681,9 +676,10 @@ mod tests {
             (
                 "ConfirmDeleteAgent(standalone)",
                 PromptState::ConfirmDeleteAgent {
+                    offer: crate::app::DeleteBranchOffer::Pending,
                     attached: Vec::new(),
-                    delete_branch: false,
-                    unpushed_commits: None,
+                    delete_branch: Some(false),
+                    delete_other_branches: None,
                     session_id: "s1".to_string(),
                     agent_label: "my cool agent".to_string(),
                     target: DeleteAgentTarget::Folder {

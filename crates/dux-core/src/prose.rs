@@ -382,6 +382,85 @@ mod tests {
         crate::engine::rename_branch_note_prose(branch, args["open_pr"].as_u64(), pushed)
     }
 
+    /// The delete-agent dialog's branch-box sentences.
+    const DELETE_AGENT_BOX_SENTENCES: &[&str] = &[
+        "delete_current_branch_label",
+        "delete_other_branches_label",
+        "delete_current_branch_warning",
+        "delete_other_branches_warning",
+        "delete_branches_checking",
+        "delete_branches_check_failed",
+        "unpushed_count_failure",
+        "delete_protected_branches",
+        "delete_branch_loss",
+    ];
+
+    fn build_delete_agent_box(sentence: &str, args: &Value) -> Prose {
+        let s = |key: &str| args[key].as_str().expect(key).to_string();
+        match sentence {
+            "delete_current_branch_label" => {
+                crate::delete_agent_prose::current_branch_label_prose(&s("branch"))
+            }
+            "delete_other_branches_label" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                crate::delete_agent_prose::other_branches_label_prose(&branches)
+            }
+            "delete_current_branch_warning" => {
+                crate::delete_agent_prose::current_branch_warning_prose(fixture_origin(
+                    &args["origin"],
+                ))
+                .unwrap_or_default()
+            }
+            "delete_branch_loss" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                let lost = fixture_unpushed(&args["lost"]).expect("a count or a failure");
+                crate::delete_agent_prose::branch_loss_prose(&branches, &lost)
+            }
+            "delete_other_branches_warning" => {
+                let others: Vec<(String, crate::branch_history::BranchOrigin)> = args["others"]
+                    .as_array()
+                    .expect("others")
+                    .iter()
+                    .map(|other| {
+                        (
+                            other["name"].as_str().expect("name").to_string(),
+                            fixture_origin(&other["origin"]),
+                        )
+                    })
+                    .collect();
+                let others: Vec<(&str, crate::branch_history::BranchOrigin)> = others
+                    .iter()
+                    .map(|(name, origin)| (name.as_str(), *origin))
+                    .collect();
+                crate::delete_agent_prose::other_branches_warning_prose(
+                    &others,
+                    if args["ticked"].as_bool().expect("ticked") {
+                        crate::delete_agent_prose::BoxState::Ticked
+                    } else {
+                        crate::delete_agent_prose::BoxState::Unticked
+                    },
+                )
+            }
+            "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
+            "delete_branches_check_failed" => {
+                crate::delete_agent_prose::branches_check_failed_prose(&s("reason"))
+            }
+            "unpushed_count_failure" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                crate::delete_agent_prose::unpushed_count_failure_prose(&branches, &s("reason"))
+            }
+            "delete_protected_branches" => {
+                let branches = strings(&args["branches"]);
+                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                crate::delete_agent_prose::protected_branches_prose(&branches)
+            }
+            other => panic!("not a delete-agent box sentence: {other}"),
+        }
+    }
+
     /// Build one fixture case's sentence the way the terminal UI does.
     fn build(sentence: &str, args: &Value) -> Prose {
         let s = |key: &str| args[key].as_str().expect(key).to_string();
@@ -455,10 +534,8 @@ mod tests {
                 &s("repository"),
                 s("number").parse().expect("number"),
             ),
-            "unpushed_count_failure" => {
-                let branches = strings(&args["branches"]);
-                let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
-                crate::delete_agent_prose::unpushed_count_failure_prose(&branches, &s("reason"))
+            delete_box if DELETE_AGENT_BOX_SENTENCES.contains(&delete_box) => {
+                build_delete_agent_box(delete_box, args)
             }
             "attached_lead" => crate::attached_prose::attached_lead_prose(),
             "attached_entry" => {
@@ -484,6 +561,23 @@ mod tests {
             }
             other => panic!("the fixture names a sentence this test cannot build: {other}"),
         }
+    }
+
+    fn fixture_origin(value: &Value) -> crate::branch_history::BranchOrigin {
+        serde_json::from_value(value.clone()).expect("a branch origin")
+    }
+
+    fn fixture_unpushed(value: &Value) -> Option<crate::delete_agent_prose::UnpushedAnswer> {
+        if value.is_null() {
+            return None;
+        }
+        if let Some(reason) = value["failed"].as_str() {
+            return Some(Err(reason.to_string()));
+        }
+        Some(Ok(crate::git::UnpushedCommits {
+            count: u32::try_from(value["count"].as_u64().expect("count")).expect("a count"),
+            has_remote_refs: value["has_remote_refs"].as_bool().expect("has_remote_refs"),
+        }))
     }
 
     /// The other half of the pin in the browser's `prose.test.tsx`. Both read

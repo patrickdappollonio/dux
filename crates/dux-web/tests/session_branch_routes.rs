@@ -2,10 +2,9 @@
 //! a real router, a real git repository and real worktrees in a temp dir:
 //!
 //! - `GET    /api/v1/sessions/:id/branch-unpushed`: the branches a delete would
-//!   remove and how much of their work exists only here.
-//! - `DELETE /api/v1/sessions/:id?delete_branch=`:  where an ABSENT answer and
-//!   an explicit `false` part company, which is the compatibility claim the
-//!   parameter rests on and the one a client actually enters through.
+//!   offer, each pinned, and how much of their work exists only here.
+//! - `DELETE /api/v1/sessions/:id`: an absent answer, the older
+//!   `?delete_branch=`, and the body carrying both boxes' pinned answers.
 //! - `GET    /api/v1/sessions/:id/branch-pushed`: whether a branch rename would
 //!   leave a pushed copy behind on the old name.
 //! - `PATCH  /api/v1/sessions/:id` with `rename_branch`: the rename dialog's
@@ -377,45 +376,53 @@ async fn assert_session_gone(addr: SocketAddr, id: &str) {
     );
 }
 
-/// The route names every branch the delete would remove, and counts them as one
-/// set: a drifted agent gives up both, so an answer about one of them would
-/// understate what the tick costs.
+/// The route offers the branch the worktree is on and every other branch it
+/// has been on, each pinned to the commit a tick would delete and with who
+/// made it, and counts each box's work on its own.
 #[tokio::test]
-async fn branch_unpushed_names_both_branches_of_a_drifted_agent() {
+async fn branch_unpushed_offers_both_boxes_pinned() {
     let f = boot().await;
     let (status, body) = branch_unpushed(f.addr, "drifted").await;
     assert_eq!(status, 200, "{body}");
+    assert_eq!(body["current"]["name"], "develop-next", "{body}");
     assert_eq!(
-        body["branches"],
-        serde_json::json!(["develop-next", "develop"]),
+        body["current"]["oid"].as_str().unwrap(),
+        rev(&f.repo, "develop-next"),
         "{body}"
     );
-    // No remote-tracking refs at all here, so the count is the whole history:
-    // the initial commit plus the one made on `develop-next`.
-    assert_eq!(body["unpushed"]["count"], 2, "{body}");
-    assert_eq!(body["unpushed"]["has_remote_refs"], false, "{body}");
-    assert_eq!(body["unpushed_error"], serde_json::Value::Null, "{body}");
+    // Made just before the agent's record was: before it, or in the same
+    // second, which proves nothing either way. Never dux's.
+    assert!(
+        matches!(
+            body["current"]["origin"].as_str(),
+            Some("before" | "unknown")
+        ),
+        "{body}"
+    );
+    assert_eq!(body["others"][0]["name"], "develop", "{body}");
+    assert_eq!(body["others"][0]["origin"], "attached", "{body}");
+    assert_eq!(body["others"].as_array().unwrap().len(), 1, "{body}");
+    // Each count is what that box's deletion loses: the commit made on
+    // `develop-next` is on no other branch, while the initial commit `develop`
+    // holds is on `main` too, so deleting `develop` loses nothing.
+    assert_eq!(body["current_unpushed"]["count"], 1, "{body}");
+    assert_eq!(body["others_unpushed"]["count"], 0, "{body}");
+    // Both ticked loses what neither box leaves behind.
+    assert_eq!(body["both_unpushed"]["count"], 1, "{body}");
+    assert_eq!(body["current_name"], "develop-next", "{body}");
+    assert_eq!(body["protected"], serde_json::json!([]), "{body}");
+    assert_eq!(body["others_unpushed"]["has_remote_refs"], false, "{body}");
 }
 
-/// A count git cannot give is answered with git's reason rather than left
-/// out, so the dialog can say it could not count instead of saying nothing.
+/// A branch the worktree was on but that no longer exists is not offered: there
+/// is nothing left to orphan, or to count.
 #[tokio::test]
-async fn branch_unpushed_says_why_git_could_not_count() {
+async fn branch_unpushed_does_not_offer_a_branch_that_is_gone() {
     let f = boot().await;
-    // The drifted agent's birth branch is not checked out anywhere, so it can
-    // go out from under the count.
     git(&f.repo, &["branch", "-D", "develop"]);
     let (status, body) = branch_unpushed(f.addr, "drifted").await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body["branches"],
-        serde_json::json!(["develop-next", "develop"]),
-        "{body}"
-    );
-    assert_eq!(body["unpushed"], serde_json::Value::Null, "{body}");
-    let reason = body["unpushed_error"].as_str().expect("a reason");
-    assert!(reason.starts_with("fatal: bad revision"), "{reason}");
-    assert!(!reason.contains('\n'), "one line: {reason}");
+    assert_eq!(body["others"], serde_json::json!([]), "{body}");
 }
 
 /// A standalone agent has no branch, so there is no question to answer. It is
@@ -435,12 +442,39 @@ async fn branch_unpushed_refuses_a_session_that_does_not_exist() {
     assert_eq!(status, 404);
 }
 
-/// THE COMPATIBILITY CLAIM, at the layer a client actually enters through: an
-/// ABSENT `delete_branch` keeps the provenance default, so a caller written
-/// before the parameter existed behaves exactly as it did. `develop` predates
-/// the agent, so it survives, and so does the branch the worktree drifted onto.
+fn rev(repo: &Path, branch: &str) -> String {
+    let out = dux_core::test_git::fixture_git()
+        .args(["rev-parse", &format!("refs/heads/{branch}")])
+        .current_dir(repo)
+        .output()
+        .expect("run git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The delete with both boxes' answers in its body.
+async fn delete_with_body(
+    addr: SocketAddr,
+    id: &str,
+    body: &serde_json::Value,
+    connection: &str,
+) -> u16 {
+    reqwest::Client::new()
+        .delete(format!(
+            "http://{addr}/api/v1/sessions/{id}?delete_worktree=true"
+        ))
+        .header("x-connection-id", connection)
+        .json(body)
+        .send()
+        .await
+        .expect("send the request")
+        .status()
+        .as_u16()
+}
+
+/// Nobody was asked: neither the branch the worktree moved onto nor the one it
+/// was attached to is dux's, so both survive, each named with its reason.
 #[tokio::test]
-async fn an_absent_branch_answer_keeps_the_provenance_default() {
+async fn an_absent_branch_answer_keeps_every_branch_dux_did_not_make() {
     let f = boot().await;
     let (mut ws, connection) = events_socket(f.addr).await;
     assert_eq!(
@@ -449,25 +483,20 @@ async fn an_absent_branch_answer_keeps_the_provenance_default() {
     );
     let status = wait_for_delete_status(&mut ws, "drifted").await;
     assert!(
-        status.contains("\"develop-next\" was created inside this agent's worktree and was kept")
+        status.contains("Its branch \"develop-next\" was kept: this agent was on it, but nobody")
             && status.contains("\"develop\" existed before this agent and was kept"),
         "the outcome must name both kept branches with their reasons: {status}"
     );
     assert_session_gone(f.addr, "drifted").await;
     let listed = branches(&f.repo);
     assert!(
-        listed.contains(&"develop".to_string()),
-        "a branch that predates the agent is not dux's to delete: {listed:?} ({status})"
-    );
-    assert!(
-        listed.contains(&"develop-next".to_string()),
-        "and neither is the one the worktree drifted onto: {listed:?} ({status})"
+        listed.contains(&"develop".to_string()) && listed.contains(&"develop-next".to_string()),
+        "{listed:?} ({status})"
     );
 }
 
-/// The same request with an explicit `false` is a different thing from an
-/// absent one only when the default would have deleted: dux made this branch,
-/// so unasked it would go, and the answer is what spares it.
+/// The older single answer still works: an explicit `false` spares a branch
+/// dux created, which unasked it would delete.
 #[tokio::test]
 async fn an_explicit_false_spares_a_branch_dux_created() {
     let f = boot().await;
@@ -490,60 +519,69 @@ async fn an_explicit_false_spares_a_branch_dux_created() {
     assert_session_gone(f.addr, "duxs").await;
     assert!(
         branches(&f.repo).contains(&"dux/made-this".to_string()),
-        "the answer must override the provenance default: {:?} ({status})",
+        "the answer must override the default: {:?} ({status})",
         branches(&f.repo)
     );
 }
 
-/// And in the other direction: a branch dux would have kept goes when the user
-/// asks, which is the only way to remove it once the worktree is gone. Both of
-/// the drifted agent's branches go, because both were named.
+/// Both boxes ticked over what the route offered delete exactly those branches,
+/// each only at the commit it was offered at: one that moved since is kept.
 #[tokio::test]
-async fn an_explicit_true_removes_every_branch_the_route_named() {
+async fn ticked_boxes_delete_exactly_the_pinned_branches_still_where_they_were() {
     let f = boot().await;
-    let (_, body) = branch_unpushed(f.addr, "drifted").await;
-    let named: Vec<String> = body["branches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|b| b.as_str().unwrap().to_string())
-        .collect();
-    let before = branches(&f.repo);
+    let (_, offer) = branch_unpushed(f.addr, "drifted").await;
+    let body = serde_json::json!({ "branches": {
+        "current": { "delete": true, "branches": [ {
+            "name": offer["current"]["name"], "oid": offer["current"]["oid"] } ] },
+        "others": { "delete": true, "branches": offer["others"].as_array().unwrap().iter()
+            .map(|o| serde_json::json!({ "name": o["name"], "oid": o["oid"] }))
+            .collect::<Vec<_>>() },
+    } });
+    // `develop` moves after the dialog read it.
+    git(
+        &f.repo,
+        &[
+            "update-ref",
+            "refs/heads/develop",
+            "refs/heads/develop-next",
+        ],
+    );
 
     let (mut ws, connection) = events_socket(f.addr).await;
     assert_eq!(
-        delete(
-            f.addr,
-            "drifted",
-            "delete_worktree=true&delete_branch=true",
-            &connection
-        )
-        .await,
+        delete_with_body(f.addr, "drifted", &body, &connection).await,
         204
     );
-    // The outcome message first: it settles the branches AND says in git's own
-    // words when git refused one, which the list below cannot.
     let status = wait_for_delete_status(&mut ws, "drifted").await;
     assert!(
         status.contains("deleted its branch \"develop-next\"")
-            && status.contains("Its original branch \"develop\" was deleted too"),
-        "the outcome must report both branches deleted: {status}"
+            && status.contains("\"develop\" was kept because it moved after you were shown it"),
+        "{status}"
     );
-    assert_session_gone(f.addr, "drifted").await;
+    let listed = branches(&f.repo);
+    assert!(!listed.contains(&"develop-next".to_string()), "{listed:?}");
+    assert!(listed.contains(&"develop".to_string()), "{listed:?}");
+}
 
-    let after = branches(&f.repo);
-    let mut gone: Vec<String> = before
-        .iter()
-        .filter(|b| !after.contains(b))
-        .cloned()
-        .collect();
-    gone.sort();
-    let mut named = named;
-    named.sort();
-    assert_eq!(
-        gone, named,
-        "the route must remove exactly the branches it named ({status})"
-    );
+/// A ticked box that pins nothing, or pins a short commit, is refused whole:
+/// a malformed answer is never read as a delete without a pin.
+#[tokio::test]
+async fn a_malformed_branch_answer_is_refused_and_deletes_nothing() {
+    let f = boot().await;
+    let (_, connection) = events_socket(f.addr).await;
+    for body in [
+        serde_json::json!({ "branches": { "current": { "delete": true, "branches": [] } } }),
+        serde_json::json!({ "branches": { "current": { "delete": true,
+            "branches": [ { "name": "develop-next", "oid": "abc123" } ] } } }),
+    ] {
+        assert_eq!(
+            delete_with_body(f.addr, "drifted", &body, &connection).await,
+            400,
+            "{body}"
+        );
+    }
+    let (status, _) = branch_unpushed(f.addr, "drifted").await;
+    assert_eq!(status, 200, "the agent is still there");
 }
 
 async fn branch_pushed(addr: SocketAddr, id: &str) -> (u16, serde_json::Value) {

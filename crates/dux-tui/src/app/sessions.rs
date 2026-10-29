@@ -1,19 +1,19 @@
 use super::text_input::TextInput;
 use super::{
-    App, BrowsePurpose, CenterMode, ChangeAgentProviderMode, ChangeAgentProviderOption,
-    ChangeAgentProviderPrompt, ChangeDefaultProviderOption, ChangeDefaultProviderPrompt,
-    ChangeProjectDefaultProviderOption, ChangeProjectDefaultProviderPrompt, ChangeThemePrompt,
-    CloneDraft, CloneProjectFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt,
-    ConfirmNonDefaultBranchFocus, DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, FocusPane,
-    FullscreenOverlay, InputTarget, KillRunningAction, KillRunningFocus, KillRunningPrompt,
-    KillableRuntime, KillableRuntimeKind, LaunchView, LeftItem, NameNewAgentFocus, PendingDiff,
-    PersistFinalOutcome, PickProjectWorktreePrompt, PrLookupFinalOutcome, ProjectAction,
-    ProjectActionsPrompt, ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent,
-    PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus, ReviewCopyQuestion,
-    RuntimeTargetId, SLOW_DIFF_READ, SearchableList, StartupCommandLogPrompt, StartupLogViewer,
-    TuiCheckoutInspectOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, UnpushedCountAnswer,
-    WorktreesFinalOutcome, diff_read_busy, kill_running_matches, pick_project_matches,
-    preflight_server_listeners,
+    App, BranchOfferAnswer, BrowsePurpose, CenterMode, ChangeAgentProviderMode,
+    ChangeAgentProviderOption, ChangeAgentProviderPrompt, ChangeDefaultProviderOption,
+    ChangeDefaultProviderPrompt, ChangeProjectDefaultProviderOption,
+    ChangeProjectDefaultProviderPrompt, ChangeThemePrompt, CloneDraft, CloneProjectFocus,
+    ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
+    DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, FocusPane, FullscreenOverlay, InputTarget,
+    KillRunningAction, KillRunningFocus, KillRunningPrompt, KillableRuntime, KillableRuntimeKind,
+    LaunchView, LeftItem, NameNewAgentFocus, PendingDiff, PersistFinalOutcome,
+    PickProjectWorktreePrompt, PrLookupFinalOutcome, ProjectAction, ProjectActionsPrompt,
+    ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent, PromptState,
+    PullRequestInputFocus, RecreateWorkingCopyFocus, ReviewCopyQuestion, RuntimeTargetId,
+    SLOW_DIFF_READ, SearchableList, StartupCommandLogPrompt, StartupLogViewer,
+    TuiCheckoutInspectOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
+    diff_read_busy, kill_running_matches, pick_project_matches, preflight_server_listeners,
 };
 use crate::app::ui_jobs::RequestKind;
 use crate::config::provider_config;
@@ -2426,8 +2426,6 @@ impl App {
                 });
                 crate::app::DeleteAgentTarget::Managed {
                     branch_name: managed.branch_name.clone(),
-                    initial_branch: managed.initial_branch.clone(),
-                    branch_provenance: managed.branch_provenance,
                     worktree_shared,
                 }
             }
@@ -2439,12 +2437,7 @@ impl App {
                 }
             }
         };
-        // The branch box starts in the provenance default: ticked for a branch
-        // dux made, unticked for one that predates the agent. Both are
-        // overridable, which is the whole point of it being a control.
-        let delete_branch = session
-            .branch_provenance()
-            .is_some_and(|provenance| provenance.dux_may_delete_branch());
+        let offers_branches = target.offers_worktree_checkbox();
         self.prompt = PromptState::ConfirmDeleteAgent {
             attached: Vec::new(),
             session_id: session.id.clone(),
@@ -2452,53 +2445,40 @@ impl App {
             target,
             focus: DeleteAgentFocus::Cancel, // Cancel is the safe default
             delete_worktree: false,          // Opt-in destructive action
-            delete_branch,
-            unpushed_commits: None,
+            delete_branch: None,
+            delete_other_branches: None,
+            offer: crate::app::DeleteBranchOffer::Pending,
         };
-        // Asked only where the warning could use it: a branch that predates the
-        // agent, or an agent that drifted so the tick takes a second branch with
-        // it. A branch dux created for an agent still on it warns about nothing,
-        // so counting its commits would buy a git call to say nothing new.
-        let drifted = matches!(
-            &self.prompt,
-            PromptState::ConfirmDeleteAgent { target, .. } if target.warned_branches().len() > 1
-        );
-        if !delete_branch || drifted {
-            self.spawn_unpushed_commit_count(&session.id);
+        if offers_branches {
+            self.spawn_branch_offer(&session.id);
         }
     }
 
-    /// Count the commits on the branches the delete would remove that no
-    /// remote-tracking ref reaches, off the UI thread, and hand the answer back
-    /// through a one-shot channel that `drain_unpushed_count` reads.
-    ///
-    /// Every branch at once, because a drifted delete removes two and a number
-    /// covering one of them understates what the tick costs. One-shot rather than
-    /// a stored fact: the number goes stale the moment the user commits or
-    /// pushes, and it is rendered only by the dialog that asked for it.
-    fn spawn_unpushed_commit_count(&mut self, session_id: &str) {
+    /// Ask git, off the UI thread, what the delete dialog's branch boxes offer:
+    /// every branch the agent's worktree has been on, each pinned to the commit
+    /// a tick would delete, who made it, and how much work each box holds that
+    /// exists on no remote. The answer comes back through a one-shot channel
+    /// that `drain_unpushed_count` reads; until then both boxes are disabled.
+    fn spawn_branch_offer(&mut self, session_id: &str) {
         let Some(inputs) = self.engine.branch_delete_inputs(session_id) else {
+            if let PromptState::ConfirmDeleteAgent { offer, .. } = &mut self.prompt {
+                *offer = crate::app::DeleteBranchOffer::Failed(
+                    "the agent's project is gone".to_string(),
+                );
+            }
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.unpushed_count_rx = Some(rx);
         let session_id = session_id.to_string();
         std::thread::spawn(move || {
-            let count = dux_core::git::unpushed_commit_count(
-                std::path::Path::new(&inputs.project_path),
-                &inputs.warned_branches(),
-            )
-            .map_err(|err| {
-                logger::warn(&format!(
-                    "could not count the unpushed commits for the delete dialog: {err:#}"
-                ));
-                dux_core::git::unpushed_count_failure_reason(&err)
-            });
-            let _ = tx.send(UnpushedCountAnswer { session_id, count });
+            let offer = dux_core::branch_history::delete_branch_offer(&inputs);
+            let _ = tx.send(BranchOfferAnswer { session_id, offer });
         });
     }
 
-    /// Fold a landed unpushed-commit count into the dialog that asked for it.
+    /// Fold a landed branch offer into the dialog that asked for it, and record
+    /// the branches it found that the agent's list did not have yet.
     ///
     /// Tagged with the session id and dropped when it does not match: the user
     /// can close this dialog and open another while the git call is still
@@ -2508,19 +2488,30 @@ impl App {
         let Some(rx) = self.unpushed_count_rx.as_ref() else {
             return;
         };
-        let Ok(answer) = rx.try_recv() else {
-            return;
+        let answer = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.unpushed_count_rx = None;
+                if let PromptState::ConfirmDeleteAgent { offer, .. } = &mut self.prompt {
+                    *offer = crate::app::DeleteBranchOffer::Failed(
+                        "the branch check stopped unexpectedly".to_string(),
+                    );
+                }
+                self.mark_frame_dirty();
+                return;
+            }
         };
         self.unpushed_count_rx = None;
         self.mark_frame_dirty();
+        self.engine
+            .record_offered_branches(&answer.session_id, &answer.offer.newly_seen);
         if let PromptState::ConfirmDeleteAgent {
-            session_id,
-            unpushed_commits,
-            ..
+            session_id, offer, ..
         } = &mut self.prompt
             && *session_id == answer.session_id
         {
-            *unpushed_commits = Some(answer.count);
+            *offer = crate::app::DeleteBranchOffer::Ready(answer.offer);
         }
     }
 
@@ -2539,7 +2530,7 @@ impl App {
         worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
     ) -> Result<()> {
-        self.begin_delete_session(session_id, worktree, delete_branch);
+        self.begin_delete_session_asking(session_id, worktree, delete_branch, None);
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         while self.pending_delete_ops.contains_key(session_id)
             || self.engine.pending_deletions.contains(session_id)
@@ -2624,12 +2615,25 @@ impl App {
         &mut self,
         session_id: &str,
         worktree: dux_core::engine::WorktreeOnDelete,
+        branches: Option<dux_core::branch_history::BranchAnswersWire>,
+    ) -> Option<dux_core::engine::Attached> {
+        self.begin_delete_session_asking(session_id, worktree, None, branches)
+    }
+
+    /// [`Self::begin_delete_session`] with the older single branch answer too,
+    /// which only a test still sends.
+    fn begin_delete_session_asking(
+        &mut self,
+        session_id: &str,
+        worktree: dux_core::engine::WorktreeOnDelete,
         delete_branch: Option<bool>,
+        branches: Option<dux_core::branch_history::BranchAnswersWire>,
     ) -> Option<dux_core::engine::Attached> {
         match self.engine.apply(Command::BeginDeleteSession {
             session_id: session_id.to_string(),
             delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
             delete_branch,
+            branches,
         }) {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(e) => match super::attachment_presence::attached_refusal(e) {

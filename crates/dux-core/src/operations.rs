@@ -1175,6 +1175,31 @@ pub(crate) fn agent_delete_parts(
             branches: RemovedBranches::Kept(_),
         } => vec![worktree(PartOutcome::Removed), kept_branch()],
         WorktreeRemoval::Performed {
+            branches: RemovedBranches::Outcomes(outcomes),
+        } => {
+            let mut parts = vec![worktree(PartOutcome::Removed)];
+            parts.extend(outcomes.iter().map(|outcome| {
+                use crate::branch_history::BranchFate;
+                let (outcome_kind, reason) = match &outcome.fate {
+                    BranchFate::Deleted => (PartOutcome::Deleted, None),
+                    BranchFate::AlreadyGone => (PartOutcome::AlreadyGone, None),
+                    BranchFate::Refused { reason } => (PartOutcome::Refused, Some(reason.clone())),
+                    BranchFate::Moved => (
+                        PartOutcome::Kept,
+                        Some("it moved after the dialog read it".to_string()),
+                    ),
+                    BranchFate::Kept(because) => (PartOutcome::Kept, Some(because.reason())),
+                };
+                OperationPart {
+                    part: PartKind::Branch,
+                    subject: outcome.name.clone(),
+                    outcome: outcome_kind,
+                    reason,
+                }
+            }));
+            parts
+        }
+        WorktreeRemoval::Performed {
             branches: RemovedBranches::Deleted(result),
         } => {
             let mut parts = vec![
@@ -1928,6 +1953,7 @@ mod tests {
             let outcome = engine
                 .apply_wire_operation(
                     WireCommand::DeleteSession {
+                        branches: None,
                         session_id: "s1".to_string(),
                         delete_worktree: false,
                         delete_branch: None,
@@ -2053,6 +2079,7 @@ mod tests {
             let outcome = engine
                 .apply_wire_operation(
                     WireCommand::DeleteSession {
+                        branches: None,
                         session_id: "s1".to_string(),
                         delete_worktree: true,
                         delete_branch: Some(true),
@@ -2119,6 +2146,48 @@ mod tests {
                 "a finished delete is no longer removing anything"
             );
         }
+    }
+
+    /// Every branch an agent's delete reported is its own part, and a kept
+    /// one carries why, which the command line prints beside it.
+    #[test]
+    fn agent_delete_parts_carry_why_each_branch_was_kept() {
+        use crate::branch_history::{BranchFate, BranchOutcome, BranchRole, KeptBecause};
+        use crate::engine::{RemovedBranches, WorktreeRemoval};
+        let outcome = |name: &str, fate| BranchOutcome {
+            role: BranchRole::Other,
+            name: name.to_string(),
+            fate,
+        };
+        let removal = WorktreeRemoval::Performed {
+            branches: RemovedBranches::Outcomes(vec![
+                outcome("feat", BranchFate::Deleted),
+                outcome("spike", BranchFate::Kept(KeptBecause::NotOffered)),
+                outcome("wip", BranchFate::Moved),
+            ]),
+        };
+        let reasons: Vec<(String, PartOutcome, Option<String>)> =
+            agent_delete_parts("/w", "feat", "feat", &removal)
+                .into_iter()
+                .skip(1)
+                .map(|part| (part.subject, part.outcome, part.reason))
+                .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                ("feat".to_string(), PartOutcome::Deleted, None),
+                (
+                    "spike".to_string(),
+                    PartOutcome::Kept,
+                    Some("the dialog did not offer it".to_string())
+                ),
+                (
+                    "wip".to_string(),
+                    PartOutcome::Kept,
+                    Some("it moved after the dialog read it".to_string())
+                ),
+            ]
+        );
     }
 
     #[test]

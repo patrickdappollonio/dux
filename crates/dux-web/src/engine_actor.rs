@@ -308,6 +308,10 @@ pub(crate) enum EngineRequest {
     /// sentences, and queues whatever status it owes on its own worker lane, so
     /// the terminal UI sees the same warning this browser does.
     NoteChangedFilesOutcome(String, Option<String>),
+    /// Branches a delete dialog's offer found in an agent's HEAD reflog that
+    /// its recorded list did not have, for the delete that follows to decide
+    /// over too.
+    RecordOfferedBranches(String, Vec<dux_core::branch_history::SeenBranch>),
     /// A status a web-side producer owes to BOTH surfaces, put onto the
     /// engine's own worker lane rather than straight onto the web's broadcast.
     /// [`EngineRequest::EmitStatus`] is the web-only door; this one is for a
@@ -1785,6 +1789,21 @@ impl EngineHandle {
             .await;
     }
 
+    /// See [`EngineRequest::RecordOfferedBranches`]. Fire and forget.
+    pub async fn record_offered_branches(
+        &self,
+        session_id: String,
+        names: Vec<dux_core::branch_history::SeenBranch>,
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        let _ = self
+            .req_tx
+            .send(EngineRequest::RecordOfferedBranches(session_id, names))
+            .await;
+    }
+
     pub(crate) async fn session_git_access(
         &self,
         session_id: String,
@@ -2599,6 +2618,8 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // The changed-files failure streak is engine state no `SpineView` field
         // reads; the status it may raise travels the worker lane.
         | EngineRequest::NoteChangedFilesOutcome(..)
+        // Writes the agent's branch list, which no `SpineView` field reads.
+        | EngineRequest::RecordOfferedBranches(..)
         // Puts a status on the worker lane and touches nothing else.
         | EngineRequest::PostStatus(..)
 
@@ -4730,6 +4751,9 @@ fn handle_request(
         EngineRequest::NoteChangedFilesOutcome(session_id, failure) => {
             engine.post_changed_files_outcome(&session_id, failure.as_deref());
         }
+        EngineRequest::RecordOfferedBranches(session_id, names) => {
+            engine.record_offered_branches(&session_id, &names);
+        }
         EngineRequest::PostStatus(status) => engine.post_status(status),
         EngineRequest::SessionMissingDirectoryReason(session_id, reply) => {
             answer(reply, missing_directory_reason(engine, &session_id));
@@ -5606,6 +5630,7 @@ mod tests {
                 .build()
                 .expect("a runtime")
                 .block_on(handle.apply_wire(WireCommand::DeleteSession {
+                    branches: None,
                     session_id: "s-cli".to_string(),
                     delete_worktree: false,
                     delete_branch: None,

@@ -153,8 +153,9 @@ pub(crate) struct PendingWorktreeRemoval {
     pub label: String,
     pub project_path: String,
     pub managed: crate::model::ManagedWorkspace,
-    /// The delete dialog's branch answer, `None` when nobody was asked.
-    pub delete_branch: Option<bool>,
+    /// What the removal does with the agent's branches, decided when the
+    /// delete was admitted.
+    pub branches: crate::branch_history::BranchPlan,
     /// The sessions the agent's processes ran in, so a later start can end
     /// whatever of them outlived dux.
     pub process_sessions: Vec<crate::process_sessions::ProcessSession>,
@@ -244,12 +245,14 @@ impl SessionStore {
         self.migrate_session_state_columns()?;
         self.migrate_pull_request_tables()?;
         self.migrate_housekeeping_tables()?;
+        self.migrate_branch_history()?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
         // that says why it stopped.
         self.sweep_orphan_agent_tabs()?;
         self.sweep_orphan_minted_branch_renames()?;
+        self.sweep_orphan_branch_history()?;
         self.backfill_slot_tabs()?;
         self.heal_slot_tab_pointers()?;
         Ok(())
@@ -703,6 +706,15 @@ impl SessionStore {
             "process_registry",
             "text not null default ''",
         )?;
+        // What the removal does with the agent's branches, decided when the
+        // delete was admitted (see `crate::branch_history::BranchPlan`). Empty
+        // on a row an older dux wrote, which keeps its `delete_branch` answer.
+        ensure_column(
+            &self.conn,
+            "pending_worktree_removals",
+            "branch_plan",
+            "text not null default ''",
+        )?;
         // A worktree folder a delete could not finish (git let go of the
         // worktree, something kept writing into the folder), with the branches
         // kept because of it and the folder's identity, so the worktree
@@ -774,6 +786,296 @@ impl SessionStore {
             )
             .context("failed to sweep branch rename rows whose agent no longer exists")?;
         Ok(())
+    }
+
+    /// Drop any branch-history row whose session is gone, for the same reason
+    /// as [`Self::sweep_orphan_minted_branch_renames`].
+    fn sweep_orphan_branch_history(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "delete from session_branch_history \
+                 where session_id not in (select id from agent_sessions)",
+                [],
+            )
+            .context("failed to sweep branch history rows whose agent no longer exists")?;
+        Ok(())
+    }
+
+    /// Every branch each agent's worktree has been on (see
+    /// [`crate::branch_history`]): derived runtime state, never config.
+    ///
+    /// The table is detected, created and seeded in ONE transaction, so two
+    /// processes opening the file together cannot both seed it. The seed runs
+    /// only in the open that creates it: `initial_branch` never changes, so
+    /// seeding again would bring back a name a dux rename already replaced.
+    ///
+    /// A seeded birth row carries no identity (a legacy row): the database
+    /// cannot tell a genuine `initial_branch` from one an older backfill
+    /// froze from whatever branch the agent was on, so a legacy birth row
+    /// counts as dux's only while the agent's worktree is still on it. An
+    /// agent dux renamed and that then switched branches before this table
+    /// existed has lost the rename record, so its renamed birth branch cannot
+    /// be recovered as dux's, and is kept.
+    fn migrate_branch_history(&self) -> Result<()> {
+        let tx =
+            immediate_tx(&self.conn).context("failed to start the branch history migration")?;
+        let exists: bool = tx.query_row(
+            "select exists(select 1 from sqlite_master \
+             where type = 'table' and name = 'session_branch_history')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.execute_batch(
+                r"
+                create table session_branch_history (
+                    session_id text not null,
+                    branch_name text not null,
+                    born_here integer not null default 0,
+                    identity_unix integer,
+                    identity_oid text,
+                    tip_oid text,
+                    first_seen_at text not null,
+                    primary key (session_id, branch_name)
+                );
+                ",
+            )?;
+            let now = Utc::now().to_rfc3339();
+            // The birth row, under the name a dux rename gave it.
+            tx.execute(
+                "insert or ignore into session_branch_history \
+                 (session_id, branch_name, born_here, first_seen_at) \
+                 select s.id, coalesce(r.branch_name, s.initial_branch), 1, ?1 \
+                 from agent_sessions s \
+                 left join session_minted_branch_renames r on r.session_id = s.id \
+                 where s.workspace_kind = 'managed' \
+                   and coalesce(r.branch_name, s.initial_branch) <> ''",
+                params![now],
+            )?;
+            tx.execute(
+                "insert or ignore into session_branch_history \
+                 (session_id, branch_name, born_here, first_seen_at) \
+                 select id, branch_name, 0, ?1 from agent_sessions \
+                 where workspace_kind = 'managed' and branch_name <> ''",
+                params![now],
+            )?;
+            Self::seed_branch_tips(&tx)?;
+        }
+        tx.commit()
+            .context("failed to commit the branch history migration")?;
+        Ok(())
+    }
+
+    /// Where each seeded row's branch points now, read from git once while the
+    /// table is created, so a later check can tell whether the branch under
+    /// the name has moved off it. A row git cannot answer for keeps no tip.
+    fn seed_branch_tips(conn: &Connection) -> Result<()> {
+        let rows: Vec<(String, String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "select h.session_id, h.branch_name, s.worktree_path, \
+                 coalesce(s.project_path, '') \
+                 from session_branch_history h join agent_sessions s on s.id = h.session_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (session_id, name, worktree, project) in rows {
+            let tip = [worktree, project]
+                .iter()
+                .filter(|dir| !dir.is_empty() && std::path::Path::new(dir).is_dir())
+                .find_map(|dir| {
+                    crate::git::resolve_branch_oid(std::path::Path::new(dir), &name)
+                        .ok()
+                        .flatten()
+                });
+            if let Some(tip) = tip {
+                conn.execute(
+                    "update session_branch_history set tip_oid = ?3 \
+                     where session_id = ?1 and branch_name = ?2",
+                    params![session_id, name, tip],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record branches an agent's worktree has been on. A name already
+    /// recorded keeps its row.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database write fails.
+    pub(crate) fn record_branches_seen(
+        &self,
+        session_id: &str,
+        seen: &[crate::branch_history::SeenBranch],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = immediate_tx(&self.conn)?;
+        for seen in seen.iter().filter(|seen| !seen.name.is_empty()) {
+            let unix = seen.identity.as_ref().map(|identity| identity.unix);
+            let oid = seen.identity.as_ref().map(|identity| identity.oid.as_str());
+            tx.execute(
+                "insert or ignore into session_branch_history \
+                 (session_id, branch_name, born_here, identity_unix, identity_oid, tip_oid, \
+                  first_seen_at) values (?1, ?2, 0, ?3, ?4, ?5, ?6)",
+                params![session_id, seen.name, unix, oid, seen.tip, now],
+            )?;
+            // Where it points now, but only while it is the branch recorded
+            // under the name: a different branch never moves the recorded tip.
+            // A row with no identity is moved only by a sighting with none
+            // either (one carrying a creation entry is the name made again)
+            // whose tip the caller checked descends from the one recorded (it
+            // sends none otherwise).
+            tx.execute(
+                "update session_branch_history set tip_oid = ?5 \
+                 where session_id = ?1 and branch_name = ?2 and ?5 is not null \
+                   and ((identity_oid is null and ?4 is null) \
+                        or (identity_oid = ?4 and identity_unix = ?3))",
+                params![session_id, seen.name, unix, oid, seen.tip],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record `name` as the agent's birth branch, with the identity of the ref
+    /// dux made (`None` when it could not be read), replacing any earlier
+    /// birth row.
+    fn set_birth_branch_in(
+        conn: &Connection,
+        session_id: &str,
+        name: &str,
+        seen: Option<&crate::branch_history::SeenBranch>,
+    ) -> Result<()> {
+        let identity = seen.and_then(|seen| seen.identity.as_ref());
+        let tip = seen.and_then(|seen| seen.tip.as_deref());
+        conn.execute(
+            "update session_branch_history set born_here = 0, identity_unix = null, \
+             identity_oid = null where session_id = ?1 and born_here = 1",
+            params![session_id],
+        )?;
+        conn.execute(
+            "insert into session_branch_history \
+             (session_id, branch_name, born_here, identity_unix, identity_oid, tip_oid, \
+              first_seen_at) values (?1, ?2, 1, ?3, ?4, ?5, ?6) \
+             on conflict(session_id, branch_name) do update set born_here = 1, \
+             identity_unix = excluded.identity_unix, \
+             identity_oid = excluded.identity_oid, \
+             tip_oid = excluded.tip_oid",
+            params![
+                session_id,
+                name,
+                identity.map(|identity| identity.unix),
+                identity.map(|identity| identity.oid.as_str()),
+                tip,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the identity of a legacy birth row (one recorded with none),
+    /// read while the agent's worktree is on that branch. A row that already
+    /// has one keeps it.
+    pub(crate) fn fill_birth_identity(
+        &self,
+        session_id: &str,
+        name: &str,
+        identity: &crate::branch_history::BranchIdentity,
+    ) -> Result<()> {
+        self.conn.execute(
+            "update session_branch_history set identity_unix = ?3, identity_oid = ?4 \
+             where session_id = ?1 and branch_name = ?2 and born_here = 1 \
+               and identity_oid is null",
+            params![session_id, name, identity.unix, identity.oid],
+        )?;
+        Ok(())
+    }
+
+    /// A dux rename moved `old` to `new`: the row follows it, birth flag and
+    /// identity included, because `git branch -m` keeps the branch's reflog.
+    pub(crate) fn rename_history_branch(
+        &self,
+        session_id: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<()> {
+        type Row = (bool, Option<i64>, Option<String>, Option<String>, String);
+        let tx = immediate_tx(&self.conn)?;
+        let row: Option<Row> = tx
+            .query_row(
+                "select born_here, identity_unix, identity_oid, tip_oid, first_seen_at \
+                 from session_branch_history where session_id = ?1 and branch_name = ?2",
+                params![session_id, old],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((born_here, unix, oid, tip, first_seen_at)) = row {
+            tx.execute(
+                "delete from session_branch_history where session_id = ?1 and branch_name = ?2",
+                params![session_id, old],
+            )?;
+            tx.execute(
+                "insert into session_branch_history \
+                 (session_id, branch_name, born_here, identity_unix, identity_oid, tip_oid, \
+                  first_seen_at) values (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                 on conflict(session_id, branch_name) do update set \
+                 born_here = max(born_here, excluded.born_here), \
+                 identity_unix = coalesce(excluded.identity_unix, identity_unix), \
+                 identity_oid = coalesce(excluded.identity_oid, identity_oid), \
+                 tip_oid = coalesce(excluded.tip_oid, tip_oid)",
+                params![session_id, new, born_here, unix, oid, tip, first_seen_at],
+            )?;
+        } else {
+            tx.execute(
+                "insert or ignore into session_branch_history \
+                 (session_id, branch_name, born_here, first_seen_at) values (?1, ?2, 0, ?3)",
+                params![session_id, new, Utc::now().to_rfc3339()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every branch recorded for an agent, the birth branch first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
+    pub fn load_branch_history(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::branch_history::BranchHistoryEntry>> {
+        let mut stmt = self.conn.prepare(
+            "select branch_name, born_here, identity_unix, identity_oid, tip_oid \
+             from session_branch_history where session_id = ?1 \
+             order by born_here desc, first_seen_at, branch_name",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let unix: Option<i64> = row.get(2)?;
+            let oid: Option<String> = row.get(3)?;
+            Ok(crate::branch_history::BranchHistoryEntry {
+                name: row.get(0)?,
+                born_here: row.get(1)?,
+                identity: unix
+                    .zip(oid)
+                    .map(|(unix, oid)| crate::branch_history::BranchIdentity { unix, oid }),
+                tip: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read an agent's branch history")
     }
 
     /// Give every session that predates the slot pointer a real first-tab row,
@@ -1037,8 +1339,8 @@ impl SessionStore {
                 "insert or replace into pending_worktree_removals \
                  (session_id, label, project_id, project_path, worktree_path, source_branch, \
                   branch_name, initial_branch, branch_provenance, delete_branch, \
-                  process_sessions, process_snapshot, process_registry, created_at) \
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                  process_sessions, process_snapshot, process_registry, created_at, branch_plan) \
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     row.session_id,
                     row.label,
@@ -1049,12 +1351,16 @@ impl SessionStore {
                     managed.branch_name,
                     managed.initial_branch,
                     managed.branch_provenance.as_str(),
-                    row.delete_branch,
+                    // What a dux that predates plans reads if it finishes this
+                    // removal: its own answer, never NULL (which it would
+                    // read as "decide by provenance").
+                    Some(row.branches.old_rule_answer(managed)),
                     sessions,
                     encode_identities(&row.process_snapshot),
                     serde_json::to_string(&row.process_registry)
                         .context("failed to encode a pending removal's processes")?,
                     Utc::now().to_rfc3339(),
+                    row.branches.encode()?,
                 ],
             )
             .context("failed to record a pending worktree removal")?;
@@ -1265,6 +1571,29 @@ impl SessionStore {
                     params![session_id, old, new],
                 )
                 .context("failed to follow a branch rename into a pending removal")?;
+            let stored: Option<String> = self
+                .conn
+                .query_row(
+                    "select branch_plan from pending_worktree_removals where session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(stored) = stored.filter(|stored| !stored.is_empty())
+                && let Ok(plan) = crate::branch_history::BranchPlan::decode(&stored)
+            {
+                let renamed = plan.renamed(|name| {
+                    if name == old {
+                        new.to_string()
+                    } else {
+                        name.to_string()
+                    }
+                });
+                self.conn.execute(
+                    "update pending_worktree_removals set branch_plan = ?2 where session_id = ?1",
+                    params![session_id, renamed.encode()?],
+                )?;
+            }
             Ok(())
         })
     }
@@ -1446,27 +1775,36 @@ impl SessionStore {
         let mut stmt = self.conn.prepare(
             "select session_id, label, project_id, project_path, worktree_path, source_branch, \
              branch_name, initial_branch, branch_provenance, delete_branch, process_sessions, \
-             process_snapshot, process_registry from pending_worktree_removals \
+             process_snapshot, process_registry, branch_plan from pending_worktree_removals \
              order by created_at",
         )?;
         let rows = stmt.query_map([], |row| {
             let sessions: String = row.get(10)?;
+            let managed = crate::model::ManagedWorkspace {
+                project_id: row.get(2)?,
+                project_path: None,
+                worktree_path: row.get(4)?,
+                source_branch: row.get(5)?,
+                branch_name: row.get(6)?,
+                initial_branch: row.get(7)?,
+                branch_provenance: crate::model::BranchProvenance::from_str(
+                    &row.get::<_, String>(8)?,
+                ),
+            };
+            let stored_plan: String = row.get(13)?;
+            // A row an older dux wrote has no plan, only its one answer. A
+            // plan that cannot be read deletes nothing rather than guess.
+            let branches = if stored_plan.is_empty() {
+                crate::branch_history::BranchPlan::legacy(&managed, None, row.get(9)?)
+            } else {
+                crate::branch_history::BranchPlan::decode(&stored_plan).unwrap_or_default()
+            };
             Ok(PendingWorktreeRemoval {
                 session_id: row.get(0)?,
                 label: row.get(1)?,
                 project_path: row.get(3)?,
-                managed: crate::model::ManagedWorkspace {
-                    project_id: row.get(2)?,
-                    project_path: None,
-                    worktree_path: row.get(4)?,
-                    source_branch: row.get(5)?,
-                    branch_name: row.get(6)?,
-                    initial_branch: row.get(7)?,
-                    branch_provenance: crate::model::BranchProvenance::from_str(
-                        &row.get::<_, String>(8)?,
-                    ),
-                },
-                delete_branch: row.get(9)?,
+                managed,
+                branches,
                 process_sessions: sessions
                     .split(',')
                     .filter_map(|entry| {
@@ -2036,6 +2374,11 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
+        tx.execute(
+            "delete from session_branch_history where session_id in \
+             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
+            params![project_id],
+        )?;
         // Drop the per-session changed-files rev counters BEFORE the sessions
         // themselves (the subquery resolves the ids while the rows still exist),
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
@@ -2385,6 +2728,24 @@ impl SessionStore {
     /// Fails when the transaction cannot start, a write fails or the commit fails; nothing is
     /// written then.
     pub fn create_session(&self, session: &AgentSession) -> Result<()> {
+        self.create_session_with_birth(session, None)
+    }
+
+    /// [`Self::create_session`], recording the identity of the branch dux
+    /// made for a managed agent (see [`crate::branch_history::BranchIdentity`])
+    /// in the same transaction as the agent's birth-branch row. `None` records
+    /// the birth row without one, which then counts as dux's only while the
+    /// agent's worktree is on it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the transaction cannot start, a write fails or the commit fails; nothing is
+    /// written then.
+    pub(crate) fn create_session_with_birth(
+        &self,
+        session: &AgentSession,
+        birth_identity: Option<&crate::branch_history::SeenBranch>,
+    ) -> Result<()> {
         let tx = immediate_tx(&self.conn).context("failed to start creating the agent")?;
         tx.execute(
             "insert into agent_tabs (id, session_id, provider, sort_order, created_at) \
@@ -2398,6 +2759,12 @@ impl SessionStore {
         )
         .with_context(|| format!("failed to write the first tab of agent {}", session.id))?;
         Self::upsert_session_in(&tx, session)?;
+        if let Some(managed) = session.workspace.as_managed()
+            && !managed.initial_branch.is_empty()
+        {
+            Self::set_birth_branch_in(&tx, &session.id, &managed.initial_branch, birth_identity)
+                .with_context(|| format!("failed to record the branch of agent {}", session.id))?;
+        }
         tx.commit().context("failed to commit the new agent")?;
         Ok(())
     }
@@ -2430,7 +2797,8 @@ impl SessionStore {
         session_id: &str,
         branch_name: &str,
     ) -> Result<()> {
-        self.conn
+        let tx = immediate_tx(&self.conn)?;
+        let updated = tx
             .execute(
                 "update agent_sessions set branch_provenance = ?2, initial_branch = ?3 \
                  where id = ?1 and workspace_kind = 'managed'",
@@ -2443,6 +2811,12 @@ impl SessionStore {
             .with_context(|| {
                 format!("failed to record the recreated branch of agent {session_id}")
             })?;
+        // The birth row moves with it. Its identity is left to the branch-sync
+        // poller, which reads it while the recreated worktree is on the branch.
+        if updated > 0 {
+            Self::set_birth_branch_in(&tx, session_id, branch_name, None)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2849,6 +3223,10 @@ impl SessionStore {
             "delete from session_minted_branch_renames where session_id = ?1",
             params![id],
         )?;
+        tx.execute(
+            "delete from session_branch_history where session_id = ?1",
+            params![id],
+        )?;
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
         tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
@@ -3070,6 +3448,150 @@ mod tests {
     use crate::model::{AgentWorkspace, FolderWorkspace};
     use chrono::Duration;
 
+    fn history_names(store: &SessionStore, id: &str) -> Vec<(String, bool)> {
+        store
+            .load_branch_history(id)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.name, entry.born_here))
+            .collect()
+    }
+
+    /// An agent that predates the branch list starts with the two branches
+    /// dux already knew, the birth one under the name a dux rename gave it,
+    /// and the seed runs once: a later open does not bring a renamed-away
+    /// name back.
+    #[test]
+    fn the_branch_list_is_seeded_once_from_what_an_agent_already_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("sessions.sqlite3");
+        let store = SessionStore::open(&path).unwrap();
+        let now = Utc::now();
+        let mut drifted = test_session("s1", now, now);
+        drifted.workspace.as_managed_mut().unwrap().branch_name = "moved".to_string();
+        store.upsert_session(&drifted).unwrap();
+        let mut renamed = test_session("s2", now, now);
+        renamed.workspace.as_managed_mut().unwrap().branch_name = "renamed".to_string();
+        store.upsert_session(&renamed).unwrap();
+        store.set_minted_branch_rename("s2", "renamed").unwrap();
+        store
+            .conn
+            .execute_batch("drop table session_branch_history")
+            .unwrap();
+        drop(store);
+
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(
+            history_names(&store, "s1"),
+            vec![
+                ("branch-s1".to_string(), true),
+                ("moved".to_string(), false)
+            ]
+        );
+        assert_eq!(
+            history_names(&store, "s2"),
+            vec![("renamed".to_string(), true)]
+        );
+        assert!(
+            store.load_branch_history("s1").unwrap()[0]
+                .identity
+                .is_none(),
+            "a seeded birth row cannot vouch for the ref under its name"
+        );
+        store
+            .conn
+            .execute(
+                "delete from session_branch_history where session_id = 's1'",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let store = SessionStore::open(&path).unwrap();
+        assert_eq!(history_names(&store, "s1"), Vec::new(), "not seeded again");
+    }
+
+    /// A dux rename renames the row in place, birth flag and identity with it.
+    #[test]
+    fn a_dux_rename_renames_the_branch_list_entry_in_place() {
+        let store = test_store();
+        let now = Utc::now();
+        let session = test_session("s1", now, now);
+        let identity = crate::branch_history::BranchIdentity {
+            unix: 42,
+            oid: "a".repeat(40),
+        };
+        store
+            .create_session_with_birth(
+                &session,
+                Some(&crate::branch_history::SeenBranch {
+                    name: "branch-s1".to_string(),
+                    identity: Some(identity.clone()),
+                    tip: Some("b".repeat(40)),
+                }),
+            )
+            .unwrap();
+        store
+            .record_branches_seen(
+                "s1",
+                &[crate::branch_history::SeenBranch {
+                    name: "other".to_string(),
+                    identity: None,
+                    tip: None,
+                }],
+            )
+            .unwrap();
+        store
+            .rename_history_branch("s1", "branch-s1", "branch-new")
+            .unwrap();
+        let history = store.load_branch_history("s1").unwrap();
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert_eq!(history[0].name, "branch-new");
+        assert!(history[0].born_here);
+        assert_eq!(history[0].identity.as_ref(), Some(&identity));
+        store.delete_session("s1").unwrap();
+        assert_eq!(store.load_branch_history("s1").unwrap(), Vec::new());
+    }
+
+    /// A row recorded with no identity follows an identity-less sighting, but
+    /// one carrying a creation entry is the name made again and never moves
+    /// the recorded tip.
+    #[test]
+    fn a_recreated_name_does_not_move_an_identity_less_rows_tip() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .create_session_with_birth(&test_session("s1", now, now), None)
+            .unwrap();
+        let seen = |identity, tip: &str| crate::branch_history::SeenBranch {
+            name: "spike".to_string(),
+            identity,
+            tip: Some(tip.to_string()),
+        };
+        let tip = || {
+            store
+                .load_branch_history("s1")
+                .unwrap()
+                .into_iter()
+                .find(|entry| entry.name == "spike")
+                .and_then(|entry| entry.tip)
+        };
+        store
+            .record_branches_seen("s1", &[seen(None, &"a".repeat(40))])
+            .unwrap();
+        store
+            .record_branches_seen("s1", &[seen(None, &"b".repeat(40))])
+            .unwrap();
+        assert_eq!(tip(), Some("b".repeat(40)));
+        let made_again = crate::branch_history::BranchIdentity {
+            unix: 42,
+            oid: "c".repeat(40),
+        };
+        store
+            .record_branches_seen("s1", &[seen(Some(made_again), &"d".repeat(40))])
+            .unwrap();
+        assert_eq!(tip(), Some("b".repeat(40)));
+    }
+
     #[test]
     fn a_panic_inside_an_immediate_transaction_leaves_no_transaction_open() {
         let store = test_store();
@@ -3129,7 +3651,7 @@ mod tests {
                 branch_provenance: crate::model::BranchProvenance::AttachedExisting,
                 worktree_path: "/wt/feat".to_string(),
             },
-            delete_branch: None,
+            branches: crate::branch_history::BranchPlan::default(),
             process_sessions: vec![
                 crate::process_sessions::ProcessSession {
                     sid: 41,

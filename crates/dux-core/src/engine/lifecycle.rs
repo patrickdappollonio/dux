@@ -230,11 +230,9 @@ pub struct DeferredWorktreeRemoval {
     /// has no value of this type to offer, so no delete of a standalone agent
     /// can construct a removal for the user's folder.
     pub managed: crate::model::ManagedWorkspace,
-    /// The delete dialog's "also delete the branch" answer, captured when the
-    /// delete was requested. `None` for a caller with no dialog behind it,
-    /// which keeps the provenance default. See
-    /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
-    pub delete_branch: Option<bool>,
+    /// What the removal does with the agent's branches, decided when the
+    /// delete was requested and carried unchanged to the worker.
+    pub branches: crate::branch_history::BranchPlan,
     /// The Busy status message to show while the removal runs (set when the
     /// worker is finally spawned, after the PTY is reaped).
     pub busy_message: crate::status_text::StatusText,
@@ -8747,7 +8745,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             removal: DeferredWorktreeRemoval {
-                delete_branch: None,
+                branches: crate::branch_history::BranchPlan::default(),
                 session_id: "s1".to_string(),
                 project_path: "/tmp/p".to_string(),
                 managed: crate::model::ManagedWorkspace {

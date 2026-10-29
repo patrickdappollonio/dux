@@ -296,30 +296,10 @@ impl BranchProvenance {
     /// answer for a caller with no dialog in front of it, and the state the
     /// delete dialogs' "also delete the branch" checkbox starts in.
     ///
-    /// It is no longer the last word. A user who ticks the box on a dialog
-    /// that named the branch and warned about it has answered the question
-    /// themselves, and [`BranchProvenance::resolve_branch_deletion`] is where
-    /// the two are folded together.
+    /// It is no longer the last word: a ticked or unticked box answers the
+    /// question for the branches it names (see [`crate::branch_history`]).
     pub fn dux_may_delete_branch(&self) -> bool {
         matches!(self, Self::CreatedByDux)
-    }
-
-    /// What a delete request actually does to this agent's branches, once the
-    /// user's own answer is folded into the provenance default.
-    ///
-    /// `requested` is the delete dialog's "also delete the branch" checkbox.
-    /// `None` means nobody was asked: the project-removal cascade, the create
-    /// rollback and factory reset all run with no dialog in front of them, and
-    /// they keep the provenance default exactly as they always have.
-    ///
-    /// `Some(true)` against a pre-existing branch is the ONE thing that deletes
-    /// a branch dux did not create from an agent delete. That is deliberate:
-    /// it is the same explicit act the worktree manager's checkbox already is,
-    /// made where the user is standing rather than only in a dialog they have
-    /// to go and find. `Some(false)` against a branch dux did create is the
-    /// mirror, and it is why the box is a real control rather than a label.
-    pub(crate) fn resolve_branch_deletion(self, requested: Option<bool>) -> bool {
-        requested.unwrap_or_else(|| self.dux_may_delete_branch())
     }
 
     /// Why this agent's pre-existing branch is not dux's to delete, as a
@@ -1697,47 +1677,6 @@ mod tests {
             !note.contains("existed before this agent"),
             "and nothing this binary cannot know, got {note:?}"
         );
-    }
-
-    /// The delete dialogs' checkbox starts in the provenance default, and the
-    /// callers with no dialog behind them keep it.
-    #[test]
-    fn unanswered_branch_deletion_follows_the_provenance() {
-        for provenance in [
-            BranchProvenance::CreatedByDux,
-            BranchProvenance::AttachedExisting,
-            BranchProvenance::Adopted,
-            BranchProvenance::Unknown,
-        ] {
-            assert_eq!(
-                provenance.resolve_branch_deletion(None),
-                provenance.dux_may_delete_branch(),
-                "an unasked delete must behave exactly as it did before the checkbox existed, \
-                 for {provenance:?}"
-            );
-        }
-    }
-
-    /// The checkbox is a real control in both directions: it can spare a branch
-    /// dux created, and it is the only thing that removes one dux did not.
-    #[test]
-    fn an_answered_branch_deletion_wins_over_the_provenance() {
-        assert!(!BranchProvenance::CreatedByDux.resolve_branch_deletion(Some(false)));
-        assert!(BranchProvenance::CreatedByDux.resolve_branch_deletion(Some(true)));
-        for provenance in [
-            BranchProvenance::AttachedExisting,
-            BranchProvenance::Adopted,
-            BranchProvenance::Unknown,
-        ] {
-            assert!(
-                !provenance.resolve_branch_deletion(Some(false)),
-                "{provenance:?} unticked keeps the branch"
-            );
-            assert!(
-                provenance.resolve_branch_deletion(Some(true)),
-                "{provenance:?} ticked is the explicit override the dialog exists to offer"
-            );
-        }
     }
 
     /// "Not dux's branch" and "you said no" are different sentences, and the

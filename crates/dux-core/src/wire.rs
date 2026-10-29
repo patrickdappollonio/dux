@@ -138,9 +138,13 @@ pub enum WireCommand {
         /// The delete dialog's "also delete the branch" answer. ABSENT means
         /// nobody was asked, which keeps the provenance default and is what a
         /// caller that only knows about `delete_worktree` gets. See
-        /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
+        /// [`crate::branch_history::BranchDeleteRequest::from_legacy`].
         #[serde(default)]
         delete_branch: Option<bool>,
+        /// Both delete-dialog boxes' answers, each over the branches it pinned.
+        /// Absent means the caller predates them and `delete_branch` speaks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branches: Option<crate::branch_history::BranchAnswersWire>,
     },
     /// Replace the global `[env]` table with these variables.
     PersistGlobalEnv {
@@ -1692,6 +1696,45 @@ impl DeleteReportFacts {
     }
 }
 
+/// The message for a worktree-removing delete that reported every branch's
+/// fate: the current branch folded into the opening, the rest after it.
+fn branch_outcomes_message(
+    opening: StatusText,
+    outcomes: &[crate::branch_history::BranchOutcome],
+) -> StatusText {
+    use crate::branch_history::{BranchFate, BranchRole};
+    let current = outcomes
+        .iter()
+        .find(|outcome| outcome.role == BranchRole::Current);
+    let mut message = match current.map(|outcome| (&outcome.name, &outcome.fate)) {
+        Some((name, BranchFate::Deleted)) => crate::status_text![
+            opening,
+            ", removed its worktree and deleted its branch ",
+            q(name),
+            "."
+        ],
+        Some((name, BranchFate::AlreadyGone)) => crate::status_text![
+            opening,
+            " and removed its worktree. Its branch ",
+            q(name),
+            " was already gone."
+        ],
+        Some((name, BranchFate::Refused { reason })) => crate::status_text![
+            opening,
+            " and removed its worktree, but its branch ",
+            q(name),
+            " is still there. ",
+            crate::git::branch_refusal_note(name, reason)
+        ],
+        _ => crate::status_text![opening, " and removed its worktree."],
+    };
+    if let Some(note) = crate::branch_history::branch_outcomes_note(outcomes) {
+        message.push(" ");
+        message.push(note);
+    }
+    message
+}
+
 /// User-facing message for a completed session deletion, varying by what
 /// happened to the worktree.
 ///
@@ -1730,6 +1773,9 @@ pub fn delete_session_status_message(
                 reason.kept_branches_note(branch, &facts.initial_branch)
             ]
         }
+        WorktreeRemoval::Performed {
+            branches: crate::engine::RemovedBranches::Outcomes(outcomes),
+        } => branch_outcomes_message(opening, outcomes),
         WorktreeRemoval::Performed {
             branches: crate::engine::RemovedBranches::Deleted(branches),
         } => {
@@ -5643,10 +5689,12 @@ impl Engine {
                 session_id,
                 delete_worktree,
                 delete_branch,
+                branches,
             } => Command::BeginDeleteSession {
                 session_id,
                 delete_worktree,
                 delete_branch,
+                branches,
             },
             // Rename, Reconnect, CheckoutProjectDefaultBranch and
             // ChangeAgentProvider are NOT reconstructible into a single
@@ -7137,6 +7185,7 @@ mod tests {
         assert_eq!(
             cmd,
             WireCommand::DeleteSession {
+                branches: None,
                 session_id: "s1".to_string(),
                 delete_worktree: true,
                 delete_branch: None,
@@ -7156,6 +7205,7 @@ mod tests {
             assert_eq!(
                 cmd,
                 WireCommand::DeleteSession {
+                    branches: None,
                     session_id: "s1".to_string(),
                     delete_worktree: true,
                     delete_branch: expected,
@@ -13108,6 +13158,7 @@ mod tests {
 
         let outcome = engine
             .apply_wire(WireCommand::DeleteSession {
+                branches: None,
                 session_id: "s1".to_string(),
                 delete_worktree: false,
                 delete_branch: None,

@@ -112,7 +112,7 @@ fn rollback_created_worktree(
         session_id,
         &repo_path.to_string_lossy(),
         managed,
-        None,
+        &crate::branch_history::BranchPlan::legacy(managed, None, None),
         &processes,
         crate::engine::RemovalCoordinationInputs {
             claim,
@@ -3066,6 +3066,7 @@ fn run_create_standalone_agent_job(
             owns_worktree: false,
             startup_result: None,
             status_op_id: create_key,
+            birth_identity: None,
         },
         wants_fullscreen: false,
         // Loud: dux's promise about never touching the user's folder is the
@@ -3224,6 +3225,30 @@ struct ProvisionedCreate {
     registry: crate::process_sessions::AgentProcessRegistry,
 }
 
+/// A new agent's birth branch as git has it right after the create: which ref
+/// dux made (only for a branch dux created) and where it points, so a later
+/// delete can tell it from a different branch that comes to carry the name.
+fn birth_identity_of(
+    session: &AgentSession,
+    repo_path: &Path,
+) -> Option<crate::branch_history::SeenBranch> {
+    let managed = session.workspace.as_managed()?;
+    let identity = (managed.branch_provenance == BranchProvenance::CreatedByDux)
+        .then(|| {
+            crate::branch_history::branch_creation_entry(repo_path, &managed.branch_name)
+                .ok()
+                .flatten()
+        })
+        .flatten();
+    Some(crate::branch_history::SeenBranch {
+        name: managed.branch_name.clone(),
+        identity,
+        tip: crate::git::resolve_branch_oid(repo_path, &managed.branch_name)
+            .ok()
+            .flatten(),
+    })
+}
+
 impl ProvisionedCreate {
     /// Resolve the agent's environment, run the project's startup command, and
     /// launch the provider, reporting each step to `worker_tx` under
@@ -3312,6 +3337,7 @@ impl ProvisionedCreate {
         });
         // crossterm::terminal::size() returns (cols, rows).
         let (cols, rows) = term_size;
+        let birth_identity = birth_identity_of(&session, &repo_path).map(Box::new);
         let request = AgentLaunchRequest {
             // Create is always the session-slot tab, effective provider ==
             // session.provider. (Evaluated before `session` is moved.)
@@ -3333,6 +3359,7 @@ impl ProvisionedCreate {
                 owns_worktree,
                 startup_result,
                 status_op_id: create_key.to_string(),
+                birth_identity,
             },
             // A freshly created agent lands focused-but-minimized;
             // only fullscreen-seeking gestures set this, and create is never one.

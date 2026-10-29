@@ -380,6 +380,7 @@ mod tests {
 
         let held: &[&str] = &["op-held", "stopping an agent"];
         let delete = |id: &str| Command::BeginDeleteSession {
+            branches: None,
             session_id: id.to_string(),
             delete_worktree: false,
             delete_branch: None,

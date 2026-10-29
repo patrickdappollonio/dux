@@ -42,9 +42,11 @@ pub enum Command {
         session_id: String,
         /// Whether its worktree goes too.
         delete_worktree: bool,
-        /// The delete dialog's "also delete the branch" answer. See
-        /// [`crate::model::BranchProvenance::resolve_branch_deletion`].
+        /// The older single "also delete the branch" answer. See
+        /// [`crate::branch_history::BranchDeleteRequest::from_legacy`].
         delete_branch: Option<bool>,
+        /// Both delete-dialog boxes' answers, when the caller sends them.
+        branches: Option<crate::branch_history::BranchAnswersWire>,
     },
     /// Persist a project mutation. `Add` is handled inline: the handler writes
     /// SQLite and config.toml in `apply` and returns
@@ -648,13 +650,19 @@ impl Engine {
                 session_id,
                 delete_worktree,
                 delete_branch,
+                branches,
             } => {
                 let worktree = if delete_worktree {
                     crate::engine::WorktreeOnDelete::Remove
                 } else {
                     crate::engine::WorktreeOnDelete::Keep
                 };
-                let outcome = self.begin_delete_session(&session_id, worktree, delete_branch);
+                let request = crate::branch_history::BranchAnswersWire::to_request(
+                    branches.as_ref(),
+                    delete_branch,
+                )
+                .map_err(|reason| anyhow::anyhow!("The agent was not deleted: {reason}."))?;
+                let outcome = self.begin_delete_session_with(&session_id, worktree, &request);
                 Ok(EventReaction::BeginDeleteSessionView(Box::new(
                     BeginDeleteSessionView {
                         session_id,

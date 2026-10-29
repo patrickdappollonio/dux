@@ -109,7 +109,7 @@ impl Engine {
             label: label.to_string(),
             project_path: removal.project_path.clone(),
             managed: removal.managed.clone(),
-            delete_branch: removal.delete_branch,
+            branches: removal.branches.clone(),
             process_sessions: sessions,
             process_snapshot: known,
             // Filled in below, and kept current from then on, by the registry's
@@ -331,7 +331,7 @@ impl Engine {
                 &row.session_id,
                 &row.project_path,
                 &row.managed,
-                row.delete_branch,
+                &row.branches,
                 &processes,
                 super::events::RemovalCoordinationInputs {
                     claim,

@@ -1124,6 +1124,295 @@
         },
         "."
       ]
+    },
+    {
+      "what": "the delete dialog's first box",
+      "sentence": "delete_current_branch_label",
+      "args": {
+        "branch": "feat/login"
+      },
+      "segments": [
+        "Also delete the branch ",
+        {
+          "name": "feat/login",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the delete dialog's second box over one branch",
+      "sentence": "delete_other_branches_label",
+      "args": {
+        "branches": [
+          "spike"
+        ]
+      },
+      "segments": [
+        "Also delete the other branch this agent was on: ",
+        {
+          "name": "spike",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the delete dialog's second box over three branches",
+      "sentence": "delete_other_branches_label",
+      "args": {
+        "branches": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "segments": [
+        "Also delete the other branches this agent was on: ",
+        {
+          "name": "a",
+          "quoted": false
+        },
+        ", ",
+        {
+          "name": "b",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "c",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the first box's warning for a branch the agent switched onto that predates it",
+      "sentence": "delete_current_branch_warning",
+      "args": {
+        "origin": "before"
+      },
+      "segments": [
+        "This branch existed before the agent."
+      ]
+    },
+    {
+      "what": "the first box's warning when git cannot say when the branch was made",
+      "sentence": "delete_current_branch_warning",
+      "args": {
+        "origin": "unknown"
+      },
+      "segments": [
+        "dux cannot tell when this branch was made, so it may not be this agent's."
+      ]
+    },
+    {
+      "what": "the first box says nothing for a branch dux made",
+      "sentence": "delete_current_branch_warning",
+      "args": {
+        "origin": "dux"
+      },
+      "segments": []
+    },
+    {
+      "what": "the second box's warning over branches dux cannot vouch for, unticked",
+      "sentence": "delete_other_branches_warning",
+      "args": {
+        "others": [
+          {
+            "name": "main-fix",
+            "origin": "before"
+          },
+          {
+            "name": "spike",
+            "origin": "after"
+          },
+          {
+            "name": "old",
+            "origin": "unknown"
+          }
+        ],
+        "ticked": false
+      },
+      "segments": [
+        {
+          "name": "main-fix",
+          "quoted": false
+        },
+        " existed before the agent. dux did not make ",
+        {
+          "name": "spike",
+          "quoted": false
+        },
+        ", and cannot tell who did. dux cannot tell when ",
+        {
+          "name": "old",
+          "quoted": false
+        },
+        " was made. Unticked, they stay as ordinary branches."
+      ]
+    },
+    {
+      "what": "the second box over the birth branch dux made, ticked, says nothing",
+      "sentence": "delete_other_branches_warning",
+      "args": {
+        "others": [
+          {
+            "name": "feat",
+            "origin": "dux"
+          }
+        ],
+        "ticked": true
+      },
+      "segments": []
+    },
+    {
+      "what": "the branch boxes while the dialog is still asking git",
+      "sentence": "delete_branches_checking",
+      "args": {},
+      "segments": [
+        "Checking the branches…"
+      ]
+    },
+    {
+      "what": "the branch boxes when git could not be asked",
+      "sentence": "delete_branches_check_failed",
+      "args": {
+        "reason": "git could not be run"
+      },
+      "segments": [
+        "dux could not check the branches (git could not be run), so they will be kept."
+      ]
+    },
+    {
+      "what": "the delete dialog naming the project's own branch the agent was on",
+      "sentence": "delete_protected_branches",
+      "args": {
+        "branches": [
+          "main"
+        ]
+      },
+      "segments": [
+        {
+          "name": "main",
+          "quoted": false
+        },
+        " is the project's own branch, so dux keeps it."
+      ]
+    },
+    {
+      "what": "the delete dialog naming two of the project's own branches",
+      "sentence": "delete_protected_branches",
+      "args": {
+        "branches": [
+          "main",
+          "develop"
+        ]
+      },
+      "segments": [
+        {
+          "name": "main",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "develop",
+          "quoted": false
+        },
+        " are the project's own branches, so dux keeps them."
+      ]
+    },
+    {
+      "what": "what deleting both ticked boxes loses",
+      "sentence": "delete_branch_loss",
+      "args": {
+        "branches": [
+          "drifted",
+          "born"
+        ],
+        "lost": {
+          "count": 3,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "Deleting ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "born",
+          "quoted": false
+        },
+        " loses 3 commits that are on no remote and no branch that stays."
+      ]
+    },
+    {
+      "what": "what deleting one branch loses, one commit, no remote",
+      "sentence": "delete_branch_loss",
+      "args": {
+        "branches": [
+          "wip"
+        ],
+        "lost": {
+          "count": 1,
+          "has_remote_refs": false
+        }
+      },
+      "segments": [
+        "Deleting ",
+        {
+          "name": "wip",
+          "quoted": false
+        },
+        " loses 1 commit that is on no branch that stays, and this repository has no remote."
+      ]
+    },
+    {
+      "what": "what deleting a fully kept branch loses",
+      "sentence": "delete_branch_loss",
+      "args": {
+        "branches": [
+          "feat"
+        ],
+        "lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "Deleting ",
+        {
+          "name": "feat",
+          "quoted": false
+        },
+        " loses no commits: every one is also on a remote or a branch that stays."
+      ]
+    },
+    {
+      "what": "what deleting branches loses when git could not count",
+      "sentence": "delete_branch_loss",
+      "args": {
+        "branches": [
+          "a",
+          "b"
+        ],
+        "lost": {
+          "failed": "fatal: bad object"
+        }
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "a",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "b",
+          "quoted": false
+        },
+        " (fatal: bad object); check them before deleting them."
+      ]
     }
   ]
 }

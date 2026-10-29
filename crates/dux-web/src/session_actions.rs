@@ -8,8 +8,9 @@
 //! The create route honors `Idempotency-Key`, followed (`?operation=1`) or not, and
 //! discriminates its body on
 //! `new`, `fork`, `from_worktree` or `from_pr`. Delete takes `?delete_worktree=`
-//! and `?delete_branch=`, and an absent `delete_branch` keeps the provenance
-//! default. `POST /api/v1/pull-requests/resolve` is a READ among these writes: it
+//! and either a JSON body carrying both delete-dialog boxes' answers, each over
+//! the branches it pinned, or the older `?delete_branch=`; with neither, only
+//! the branch dux can prove it made goes. `POST /api/v1/pull-requests/resolve` is a READ among these writes: it
 //! starts nothing, so it answers the client directly rather than going through a
 //! wire command and a toast, and the client then posts the create with the project
 //! it settled on.
@@ -647,21 +648,30 @@ struct CreatedRef {
 // ── Branch risk (read) ───────────────────────────────────────────────────────
 
 /// What the delete dialog says about the branches it is offering to remove.
+/// What the delete dialog offers about the agent's branches: the one the
+/// worktree is on (the first box) and every other one it has been on (the
+/// second box), each pinned to the commit a tick would delete, with how much
+/// work each box holds that exists on no remote.
 #[derive(Serialize)]
-struct BranchUnpushedResponse {
-    /// Every branch the delete would remove, which is what the dialog names.
-    /// A drifted agent gives up two, and the dialog renders THIS list rather
-    /// than working the pair out again from its own copy of the session, so
-    /// what the user is asked about is what the server would delete.
-    branches: Vec<String>,
-    /// Commits on those branches reachable from no remote-tracking ref, counted as a
-    /// union, or `null` when git could not answer. The count and whether the
-    /// repository has remote-tracking refs at all travel as one object, because the
-    /// number means a different thing without the flag.
-    unpushed: Option<UnpushedPayload>,
-    /// Why git could not count, when it could not: the dialog says so in place of
-    /// a number rather than guessing one. `null` beside a count.
-    unpushed_error: Option<String>,
+struct BranchOfferResponse {
+    /// The name of the branch the worktree was on when this was read.
+    current_name: String,
+    /// The branch the worktree is on, `null` when git could not read it or it
+    /// is the project's own.
+    current: Option<dux_core::branch_history::OfferedBranch>,
+    /// What ticking only the first box loses.
+    current_unpushed: Option<UnpushedPayload>,
+    current_unpushed_error: Option<String>,
+    /// The other branches, each still there and none the project's own.
+    others: Vec<dux_core::branch_history::OfferedBranch>,
+    /// What ticking only the second box loses.
+    others_unpushed: Option<UnpushedPayload>,
+    others_unpushed_error: Option<String>,
+    /// What ticking both boxes loses.
+    both_unpushed: Option<UnpushedPayload>,
+    both_unpushed_error: Option<String>,
+    /// Branches the agent was on that are the project's own, offered in no box.
+    protected: Vec<String>,
 }
 
 /// The wire shape of [`dux_core::git::UnpushedCommits`].
@@ -671,7 +681,23 @@ struct UnpushedPayload {
     has_remote_refs: bool,
 }
 
-/// How much work would be lost by ticking "also delete the branch".
+fn unpushed_payload(
+    answer: Result<dux_core::git::UnpushedCommits, String>,
+) -> (Option<UnpushedPayload>, Option<String>) {
+    match answer {
+        Ok(answer) => (
+            Some(UnpushedPayload {
+                count: answer.count,
+                has_remote_refs: answer.has_remote_refs,
+            }),
+            None,
+        ),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+/// The branches the delete dialog offers, and how much work ticking each box
+/// would destroy.
 ///
 /// A read, run off the reactor because it shells out to git. Answered only for
 /// a managed agent with a project behind it; a standalone agent has no branch
@@ -683,43 +709,37 @@ async fn session_branch_unpushed(
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    let Some(inputs) = state.engine.session_branch_delete_inputs(id).await else {
+    let Some(inputs) = state.engine.session_branch_delete_inputs(id.clone()).await else {
         return unknown_session();
     };
-    let branches: Vec<String> = inputs
-        .warned_branches()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    let repo = std::path::PathBuf::from(&inputs.project_path);
-    let counted = {
-        let branches = branches.clone();
-        tokio::task::spawn_blocking(move || {
-            let refs: Vec<&str> = branches.iter().map(String::as_str).collect();
-            dux_core::git::unpushed_commit_count(&repo, &refs).map_err(|err| {
-                dux_core::logger::warn(&format!(
-                    "could not count the unpushed commits for the delete dialog: {err:#}"
-                ));
-                dux_core::git::unpushed_count_failure_reason(&err)
-            })
-        })
-        .await
-        .unwrap_or_else(|err| Err(format!("the count stopped unexpectedly: {err}")))
+    let Ok(offer) =
+        tokio::task::spawn_blocking(move || dux_core::branch_history::delete_branch_offer(&inputs))
+            .await
+    else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the branch check stopped unexpectedly",
+        )
+            .into_response();
     };
-    let (unpushed, unpushed_error) = match counted {
-        Ok(answer) => (
-            Some(UnpushedPayload {
-                count: answer.count,
-                has_remote_refs: answer.has_remote_refs,
-            }),
-            None,
-        ),
-        Err(reason) => (None, Some(reason)),
-    };
-    axum::Json(BranchUnpushedResponse {
-        branches,
-        unpushed,
-        unpushed_error,
+    state
+        .engine
+        .record_offered_branches(id, offer.newly_seen.clone())
+        .await;
+    let (current_unpushed, current_unpushed_error) = unpushed_payload(offer.current_unpushed);
+    let (others_unpushed, others_unpushed_error) = unpushed_payload(offer.others_unpushed);
+    let (both_unpushed, both_unpushed_error) = unpushed_payload(offer.both_unpushed);
+    axum::Json(BranchOfferResponse {
+        current_name: offer.current_name,
+        current: offer.current,
+        current_unpushed,
+        current_unpushed_error,
+        others: offer.others,
+        others_unpushed,
+        others_unpushed_error,
+        both_unpushed,
+        both_unpushed_error,
+        protected: offer.protected,
     })
     .into_response()
 }
@@ -770,6 +790,19 @@ struct DeleteQuery {
     delete_branch: Option<bool>,
 }
 
+/// The most a delete's body may hold: the branch answers, a few branch names
+/// and commit ids each.
+const DELETE_BODY_LIMIT: usize = 256 * 1024;
+
+/// The optional JSON body of a delete: both delete-dialog boxes' answers,
+/// each over the branches it pinned to the commits it showed. Absent (or an
+/// empty body) means the caller predates the boxes and the query speaks.
+#[derive(Default, Deserialize)]
+struct DeleteBody {
+    #[serde(default)]
+    branches: Option<dux_core::branch_history::BranchAnswersWire>,
+}
+
 async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -777,10 +810,45 @@ async fn delete_session(
     Query(operation): Query<OperationQuery>,
     Query(force): Query<ForceConnectedQuery>,
     client: crate::server::SocketClient,
-    headers: HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
+    }
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let Ok(body) = axum::body::to_bytes(body, DELETE_BODY_LIMIT).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "The agent was not deleted: the request body could not be read.",
+        )
+            .into_response();
+    };
+    let body: DeleteBody = if body.is_empty() {
+        DeleteBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(body) => body,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("The agent was not deleted: the request body is not valid: {err}."),
+                )
+                    .into_response();
+            }
+        }
+    };
+    // Refused here, before anything is dispatched, so a malformed pin is a
+    // 400 and never a delete without one.
+    if let Err(reason) = dux_core::branch_history::BranchAnswersWire::to_request(
+        body.branches.as_ref(),
+        q.delete_branch,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("The agent was not deleted: {reason}."),
+        )
+            .into_response();
     }
     if let Err(resp) = resolve_worktree(&state, id.clone()).await {
         return resp.into_response();
@@ -789,6 +857,7 @@ async fn delete_session(
         session_id: id.clone(),
         delete_worktree: q.delete_worktree,
         delete_branch: q.delete_branch,
+        branches: body.branches,
     };
     let result = match dispatch_guarded(
         &state,

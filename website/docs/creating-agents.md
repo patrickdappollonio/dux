@@ -143,7 +143,7 @@ instead, which is what you want when continuing work that already started.
 > existed first, so the delete dialog's "also delete the branch" box starts **unticked**
 > for it, with a line saying the branch predates the agent and how many of its commits
 > are pushed nowhere. Tick it and the branch goes anyway; leave it and the worktree goes
-> alone. The [delete section of Web agents](/docs/web-agents#kill-versus-delete) has the full rules.
+> alone. A second box covers the other branches the agent's worktree has been on. The [delete section of Web agents](/docs/web-agents#kill-versus-delete) has the full rules.
 
 ### Changing the base branch
 

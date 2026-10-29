@@ -1119,6 +1119,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
     // in: they outlive the agent rows they came from.
     let mut kept_with_leftovers: Vec<(PathBuf, dux_core::leftover_folders::LeftoverFolderRecord)> =
         Vec::new();
+    let mut histories = BranchHistories::new();
     if paths.sessions_db_path.exists() {
         let db = paths.sessions_db_path.display();
         let store = SessionStore::open(&paths.sessions_db_path).map_err(|error| {
@@ -1159,6 +1160,7 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         );
         recorded_folders.extend(projects.iter().map(|project| PathBuf::from(&project.path)));
         kept_with_leftovers = branches_kept_with_leftovers(&store, &projects, paths)?;
+        histories = branch_histories(&store, &sessions);
         recorded = store
             .load_process_registry_strict()
             .map_err(|error| ResetRefused::unknown(format_args!("{error}")))?
@@ -1178,7 +1180,12 @@ fn reset_agent_data(paths: &DuxPaths, report: &mut ResetReport) -> Result<()> {
         let Some(managed) = session.workspace.as_managed() else {
             continue;
         };
-        match remove_session_worktree(paths, managed, &occupied_folders, report) {
+        let plan = dux_core::branch_history::unasked_plan(
+            managed,
+            session.created_at,
+            histories.get(&session.id).map_or(&[][..], Vec::as_slice),
+        );
+        match remove_session_worktree(paths, managed, &plan, &occupied_folders, report) {
             SessionWorktreeReset::Removed => removed.push(PathBuf::from(&managed.worktree_path)),
             SessionWorktreeReset::Skipped => {}
             SessionWorktreeReset::Left(failed) => {
@@ -1543,6 +1550,29 @@ fn removed_worktrees_line(removed: usize) -> String {
     format!("removed {}", count_of(removed, "session worktree"))
 }
 
+/// Every branch each managed agent's worktree was on, by agent.
+type BranchHistories =
+    std::collections::HashMap<String, Vec<dux_core::branch_history::BranchHistoryEntry>>;
+
+/// Every branch each managed agent's worktree was on, which decides what the
+/// reset may delete. A list that cannot be read leaves the agent's own two
+/// recorded branches, which keeps more rather than less.
+fn branch_histories(
+    store: &SessionStore,
+    sessions: &[dux_core::model::AgentSession],
+) -> BranchHistories {
+    sessions
+        .iter()
+        .filter(|session| session.workspace.as_managed().is_some())
+        .map(|session| {
+            (
+                session.id.clone(),
+                store.load_branch_history(&session.id).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
 /// What the reset did with one agent's managed worktree.
 enum SessionWorktreeReset {
     Removed,
@@ -1555,6 +1585,7 @@ enum SessionWorktreeReset {
 fn remove_session_worktree(
     paths: &DuxPaths,
     managed: &dux_core::model::ManagedWorkspace,
+    plan: &dux_core::branch_history::BranchPlan,
     occupied: &[PathBuf],
     report: &mut ResetReport,
 ) -> SessionWorktreeReset {
@@ -1580,22 +1611,18 @@ fn remove_session_worktree(
     // branch is deleted afterward. Continue-on-error: a factory reset must
     // press on past any single failure.
     if let Some(project_path) = managed.project_path.as_deref() {
-        // The same branch-ownership gate the engine's delete applies: a reset
-        // that left a drifted agent's own original branch behind would not be a
-        // reset, and one that deleted the user's `develop` because an agent was
-        // once attached to it would be data loss.
+        // The same no-dialog plan the engine's unasked delete runs: only the
+        // branch dux made for the agent goes, pinned and only while git can
+        // prove it is still that branch. A reset that deleted the user's
+        // `develop` because an agent was once on it would be data loss.
         let remove = || {
-            if managed.branch_provenance.dux_may_delete_branch() {
-                git::remove_worktree(
-                    Path::new(project_path),
-                    worktree,
-                    &managed.branch_name,
-                    Some(managed.initial_branch.as_str()),
-                )
-                .map(|_| ())
-            } else {
-                git::remove_worktree_keep_branch(Path::new(project_path), worktree)
-            }
+            dux_core::branch_history::remove_worktree_with_plan(
+                Path::new(project_path),
+                worktree,
+                plan,
+                managed.branch_provenance,
+            )
+            .map(|_| ())
         };
         let first = remove();
         // Belt-and-suspenders for the factory-reset guarantee: ensure the
@@ -3884,6 +3911,14 @@ mod tests {
                 .workspace
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
+            &dux_core::branch_history::unasked_plan(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("the fixture builds a managed agent"),
+                session.created_at,
+                &[],
+            ),
             &[],
             &mut ResetReport::discarding(),
         );
@@ -3985,6 +4020,14 @@ mod tests {
                 .workspace
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
+            &dux_core::branch_history::unasked_plan(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("the fixture builds a managed agent"),
+                session.created_at,
+                &[],
+            ),
             &[],
             &mut ResetReport::discarding(),
         );
@@ -4023,6 +4066,117 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&worktrees.stdout).contains(removed_registration.as_ref()),
             "no stale worktree registration for the removed path may remain in the repo",
+        );
+    }
+
+    /// A reset nobody was asked about deletes only the branch dux can prove it
+    /// made: an agent that moved onto the user's own `develop` leaves it.
+    #[test]
+    fn factory_reset_of_a_drifted_agent_deletes_its_birth_branch_and_keeps_the_users() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = dux_core::test_git::fixture_git()
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+
+        let worktrees_root = tempdir.path().join("worktrees");
+        fs::create_dir_all(&worktrees_root).expect("worktrees root");
+        let worktree = worktrees_root.join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "branch-wt",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        // The worktree moved onto the user's own branch, which predates it.
+        git(&repo, &["branch", "develop", "main"]);
+        git(&worktree, &["switch", "develop"]);
+
+        let paths = DuxPaths {
+            config_path: tempdir.path().join("config.toml"),
+            sessions_db_path: tempdir.path().join("sessions.sqlite3"),
+            worktrees_root: worktrees_root.clone(),
+            lock_path: tempdir.path().join("dux.lock"),
+            socket_path: tempdir.path().join("dux.sock"),
+            root: tempdir.path().to_path_buf(),
+        };
+        let now = Utc::now();
+        let session = AgentSession {
+            id: "wt".to_string(),
+            slot_tab_id: "wt-slot".to_string(),
+            provider: ProviderKind::new("claude"),
+            title: None,
+            started_providers: Vec::new(),
+            desired_running: false,
+            auto_reopen_enabled: true,
+            status: SessionStatus::Active,
+            created_at: now,
+            updated_at: now,
+            last_focused_tab: None,
+            workspace: dux_core::model::AgentWorkspace::Managed(
+                dux_core::model::ManagedWorkspace {
+                    project_id: "proj".to_string(),
+                    project_path: Some(repo.to_string_lossy().to_string()),
+                    source_branch: "main".to_string(),
+                    branch_name: "develop".to_string(),
+                    initial_branch: "branch-wt".to_string(),
+                    branch_provenance: dux_core::model::BranchProvenance::CreatedByDux,
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                },
+            ),
+        };
+
+        remove_session_worktree(
+            &paths,
+            session
+                .workspace
+                .as_managed()
+                .expect("the fixture builds a managed agent"),
+            &dux_core::branch_history::unasked_plan(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("the fixture builds a managed agent"),
+                session.created_at,
+                &[],
+            ),
+            &[],
+            &mut ResetReport::discarding(),
+        );
+
+        assert!(!worktree.exists(), "the worktree directory must be removed");
+        let listed = |name: &str| {
+            let out = dux_core::test_git::fixture_git()
+                .args(["-C", repo.to_str().unwrap(), "branch", "--list", name])
+                .output()
+                .expect("git branch --list");
+            !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+        };
+        assert!(
+            !listed("branch-wt"),
+            "the branch dux made for the agent goes"
+        );
+        assert!(
+            listed("develop"),
+            "the user's branch the agent moved onto stays"
         );
     }
 
@@ -4165,7 +4319,13 @@ mod tests {
             worktree_path: worktree.to_string_lossy().to_string(),
         };
 
-        remove_session_worktree(&paths, &managed, &[], &mut ResetReport::discarding());
+        remove_session_worktree(
+            &paths,
+            &managed,
+            &dux_core::branch_history::unasked_plan(&managed, chrono::Utc::now(), &[]),
+            &[],
+            &mut ResetReport::discarding(),
+        );
 
         assert!(!worktree.exists(), "the reset deletes the left-over folder");
         assert!(
@@ -4258,6 +4418,14 @@ mod tests {
                 .workspace
                 .as_managed()
                 .expect("the fixture builds a managed agent"),
+            &dux_core::branch_history::unasked_plan(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("the fixture builds a managed agent"),
+                session.created_at,
+                &[],
+            ),
             &[],
             &mut ResetReport::discarding(),
         );

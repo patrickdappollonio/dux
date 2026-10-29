@@ -60,6 +60,46 @@ enum Vetted {
 /// or a module above it.
 const VETTED: &[(&str, Vetted, &str)] = &[
     (
+        "dux_core::branch_history::BranchAnswersWire",
+        Vetted::Type("crates/dux-core/src/branch_history.rs", "BranchAnswersWire"),
+        "both delete-dialog boxes' answers as a request carries them, and their validation",
+    ),
+    (
+        "dux_core::branch_history::BranchOrigin",
+        Vetted::Type("crates/dux-core/src/branch_history.rs", "BranchOrigin"),
+        "who made a branch the delete dialog offers, and whether dux vouches for it",
+    ),
+    (
+        "dux_core::branch_history::Unchecked",
+        Vetted::Data,
+        "why a delete-dialog box pinned nothing; it has no code of its own",
+    ),
+    (
+        "dux_core::delete_agent_prose",
+        Vetted::Module("crates/dux-core/src/delete_agent_prose.rs"),
+        "the delete dialog's sentences, built as prose from what it is given",
+    ),
+    (
+        "dux_core::branch_history::BoxWire",
+        Vetted::Data,
+        "one delete-dialog box's answer; it has no code of its own",
+    ),
+    (
+        "dux_core::branch_history::PinnedBranch",
+        Vetted::Data,
+        "a branch name and the commit it was read at",
+    ),
+    (
+        "dux_core::branch_history::OfferedBranch",
+        Vetted::Data,
+        "a branch the delete dialog offers, as a server answers with it",
+    ),
+    (
+        "dux_core::git::UnpushedCommits",
+        Vetted::Data,
+        "a count of commits a server answers with; it has no code of its own",
+    ),
+    (
         "dux_tui::run_config",
         Vetted::Exception,
         "dux config: edits config.toml on this machine. Only `dux config reset --all` opens \

@@ -498,21 +498,40 @@ pub(crate) enum AgentsSub {
     Show { agent: String },
     /// Create an agent and print its id last.
     Add(AddAgentArgs),
-    /// Delete an agent. With neither --delete-branch nor --keep-branch, a
-    /// branch dux created goes with the worktree and one it found is kept.
+    /// Delete an agent. With no branch flag, only the branch dux made for the
+    /// agent goes with the worktree, and only while dux can prove it is still
+    /// that branch; every other branch is kept.
     #[command(visible_alias = "remove")]
     Rm {
         agent: String,
         /// Also remove the agent's worktree.
         #[arg(long)]
         delete_worktree: bool,
-        /// Delete its branch with the worktree. Needs --delete-worktree: git
-        /// will not delete a branch a worktree still has checked out.
+        /// Delete the branch its worktree is on, at the commit it points at
+        /// now. Needs --delete-worktree: git will not delete a branch a
+        /// worktree still has checked out.
         #[arg(long, conflicts_with = "keep_branch", requires = "delete_worktree")]
         delete_branch: bool,
-        /// Keep its branch.
+        /// Keep the branch its worktree is on. With --delete-worktree, the
+        /// other branches it has been on are still decided as the delete
+        /// dialog would tick them, unless --keep-other-branches or
+        /// --delete-other-branches says otherwise.
         #[arg(long)]
         keep_branch: bool,
+        /// Delete every other branch its worktree has been on, each at the
+        /// commit it points at now. Needs --delete-worktree.
+        #[arg(
+            long,
+            conflicts_with = "keep_other_branches",
+            requires = "delete_worktree"
+        )]
+        delete_other_branches: bool,
+        /// Keep every other branch its worktree has been on. With
+        /// --delete-worktree, the branch it is on now is still decided as the
+        /// delete dialog would tick it, unless --keep-branch or
+        /// --delete-branch says otherwise.
+        #[arg(long)]
+        keep_other_branches: bool,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
     },
@@ -1009,6 +1028,15 @@ mod tests {
         &["agents", "rm", "a", "--keep-branch"],
         &[
             "agents",
+            "rm",
+            "a",
+            "--delete-worktree",
+            "--delete-branch",
+            "--delete-other-branches",
+        ],
+        &["agents", "rm", "a", "--keep-other-branches"],
+        &[
+            "agents",
             "tabs",
             "stop",
             "a",
@@ -1052,6 +1080,15 @@ mod tests {
         ],
         &["agents", "rm", "a", "--delete-branch", "--keep-branch"],
         &["agents", "rm", "a", "--delete-branch"],
+        &[
+            "agents",
+            "rm",
+            "a",
+            "--delete-worktree",
+            "--delete-other-branches",
+            "--keep-other-branches",
+        ],
+        &["agents", "rm", "a", "--delete-other-branches"],
         &["terminals", "add", "--agent", "a", "--project", "p"],
     ];
 

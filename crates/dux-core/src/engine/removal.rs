@@ -671,7 +671,12 @@ impl Engine {
                     session_id: session.id.clone(),
                     project_path: repo_path.to_string(),
                     managed: managed.clone(),
-                    delete_branch: None,
+                    // Nobody was asked: only the branch dux just made goes.
+                    branches: crate::branch_history::BranchPlan::legacy(
+                        managed,
+                        Some(session.created_at),
+                        None,
+                    ),
                     busy_message: crate::status_text![
                         "Removing worktree for agent ",
                         q(label.clone()),
@@ -1180,8 +1185,8 @@ mod tests {
         engine.dispatch_deferred_worktree_removal(crate::engine::DeferredWorktreeRemoval {
             session_id: "s-agent".into(),
             project_path: engine.projects[0].path.clone(),
+            branches: crate::branch_history::BranchPlan::legacy(&managed, None, None),
             managed,
-            delete_branch: None,
             busy_message: "Removing\u{2026}".to_string().into(),
             processes: crate::engine::RemovalProcesses::none(),
         });
@@ -1465,6 +1470,7 @@ mod tests {
                     pty_size: (24, 80),
                     scrollback_lines: 100,
                     kind: crate::worker::AgentLaunchKind::Create {
+                        birth_identity: None,
                         status_message: StatusText::default(),
                         status_warns: false,
                         status_notes: None,
@@ -1551,6 +1557,7 @@ mod tests {
                     pty_size: (24, 80),
                     scrollback_lines: 100,
                     kind: crate::worker::AgentLaunchKind::Create {
+                        birth_identity: None,
                         status_message: StatusText::default(),
                         status_warns: false,
                         status_notes: None,
@@ -1592,7 +1599,7 @@ mod tests {
         assert!(matches!(
             done,
             EventReaction::WorktreeRemoveSucceeded {
-                branches: RemovedBranches::Deleted(_),
+                branches: RemovedBranches::Outcomes(_),
                 ..
             }
         ));

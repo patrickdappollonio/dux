@@ -762,7 +762,15 @@ fn a_removal_is_recorded_until_it_has_run() {
     let rows = pending_rows(&fx.engine);
     assert_eq!(rows.len(), 1, "recorded the moment the delete is accepted");
     assert_eq!(rows[0].managed.worktree_path, fx.worktree.to_string_lossy());
-    assert_eq!(rows[0].delete_branch, Some(true));
+    assert!(
+        rows[0]
+            .branches
+            .resolve
+            .iter()
+            .any(|later| later.rule == crate::branch_history::ResolveRule::Legacy),
+        "with the branch answer it was asked with: {:?}",
+        rows[0].branches
+    );
     assert!(
         !rows[0].process_sessions.is_empty(),
         "with the sessions to end"
@@ -898,7 +906,14 @@ fn a_left_over_removal_never_takes_a_directory_another_agent_now_uses() {
                 .as_managed()
                 .expect("managed test session")
                 .clone(),
-            delete_branch: Some(true),
+            branches: crate::branch_history::BranchPlan::legacy(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("managed test session"),
+                None,
+                Some(true),
+            ),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
             process_registry: crate::process_sessions::RegistrySnapshot::default(),
@@ -981,7 +996,14 @@ fn a_resumed_removal_claims_the_folder_and_waits_for_work_in_it() {
                 .as_managed()
                 .expect("managed test session")
                 .clone(),
-            delete_branch: Some(true),
+            branches: crate::branch_history::BranchPlan::legacy(
+                session
+                    .workspace
+                    .as_managed()
+                    .expect("managed test session"),
+                None,
+                Some(true),
+            ),
             process_sessions: Vec::new(),
             process_snapshot: Vec::new(),
             process_registry: crate::process_sessions::RegistrySnapshot::default(),
