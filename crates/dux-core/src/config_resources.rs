@@ -441,6 +441,7 @@ mod tests {
                 row("codex", "built in", "codex"),
                 row("opencode", "built in", "opencode"),
                 row("copilot", "built in", "copilot"),
+                row("grok", "built in", "grok"),
             ]
         );
     }

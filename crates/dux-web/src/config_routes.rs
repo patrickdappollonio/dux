@@ -2214,8 +2214,8 @@ mod tests {
         assert!(raw.contains("provider = \"codex\""), "raw: {raw}");
     }
 
-    // Test engines default to the four built-in providers (claude, codex,
-    // opencode, copilot; see `Config::default()`/`default_provider_commands()`),
+    // Test engines default to the five built-in providers (claude, codex,
+    // opencode, copilot, grok; see `Config::default()`/`default_provider_commands()`),
     // so a name outside that set is unconfigured and must be rejected with a
     // plain-text 400, mirroring `set_settings_rejects_unknown_enum_value_with_400`
     // for `pr_banner_position`.

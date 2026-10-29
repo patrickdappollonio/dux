@@ -6298,11 +6298,11 @@ impl App {
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Any CLI tool can be a provider: Claude, Codex, Copilot,",
+            "Any CLI tool can be a provider: Claude, Codex,",
             body_style,
         )));
         lines.push(Line::from(Span::styled(
-            "OpenCode, or anything else you configure.",
+            "Copilot, Grok, OpenCode, or anything else you configure.",
             body_style,
         )));
         lines.push(Line::from(""));

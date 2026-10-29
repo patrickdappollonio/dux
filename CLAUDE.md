@@ -115,7 +115,7 @@ The web UI (`crates/dux-web/web/`, React + Vite + Tailwind) has its own conventi
 
 - **A provider is supported if and only if it supports PTY mode.** dux embeds the CLI's interactive session in a pseudo-terminal; that is the only thing a provider has to support.
 - **Any CLI tool can be a provider.** Configure `command` in `config.toml` and dux spawns it. No adapters, no protocol layer. Adding a new provider is a config-only change, not a code change.
-- **Claude, Codex, OpenCode, and Copilot are the defaults.**
+- **Claude, Codex, OpenCode, Copilot, and Grok are the defaults.**
 - **No protocol layer.** No JSON-RPC, no custom message format, no adapter binaries. The CLI runs exactly as it would in a normal terminal.
 
 ### Standalone Agents
@@ -192,7 +192,7 @@ The current app provides:
 - Commented user config in the platform-specific dux config directory (`~/.dux/` on macOS, `~/.config/dux/` on Linux)
 - Session persistence in `sessions.sqlite3` alongside the config
 - Logging in `dux.log` alongside the config
-- PTY-based agent startup: spawns CLI tools (`claude`, `codex`, `opencode`, `copilot`) directly in a pseudo-terminal
+- PTY-based agent startup: spawns CLI tools (`claude`, `codex`, `opencode`, `copilot`, `grok`) directly in a pseudo-terminal
 
 ## Important Constraints
 

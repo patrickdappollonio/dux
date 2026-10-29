@@ -360,7 +360,8 @@ RUN curl -sSfL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
  && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
 
 # Then your agent CLIs, installed the way each project documents. Claude Code,
-# Codex, OpenCode and Copilot ship as npm packages today.
+# Codex, OpenCode and Copilot ship as npm packages today; Grok installs with its
+# own curl script (https://x.ai/cli/install.sh).
 
 WORKDIR /root/code
 ```

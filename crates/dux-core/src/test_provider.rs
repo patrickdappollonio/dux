@@ -1,7 +1,7 @@
 //! Keeps every test away from the developer's real agent CLIs.
 //!
 //! A test that drives agent creation or a launch with the stock provider table
-//! would otherwise exec the real `claude` (or `codex`, `opencode`, `copilot`)
+//! would otherwise exec the real `claude` (or `codex`, `opencode`, `copilot`, `grok`)
 //! found on the developer's `PATH`, in whatever directory the test happened to
 //! point it at, including the home directory. Two halves stop that:
 //!

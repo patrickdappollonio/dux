@@ -360,6 +360,7 @@ UI, dropping a file onto the window is your terminal emulator's job.
 | Claude Code | `bare` | Strips one matching quote pair and undoes backslash escapes; never splits on whitespace. |
 | OpenCode | `bare` | Strips quote characters, resolves `file://` and undoes backslash escapes; a space is harmless. |
 | Codex | `single_quoted` | Lexes the text with POSIX shell rules and accepts exactly one token. |
+| Grok CLI | `bare` (assumed) | dux treats it like Claude Code and uses Claude's measured form; **not measured separately**. |
 | Copilot CLI | `bare` (a guess) | Closed source, so **not verified**; `bare` is the do-nothing option. |
 
 Anything else, including a provider you add yourself, gets `bare`.

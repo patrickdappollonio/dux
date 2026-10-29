@@ -51,7 +51,7 @@ agent's shared worktree, and they all behave the same. This is the strip in the 
 ## How resume works
 
 A provider's "continue where we left off" flag is tied to the *directory* **and to that
-provider**, not to a specific conversation. Claude, Codex (on a recent enough build) and
+provider**, not to a specific conversation. Claude, Codex (on a recent enough build), Grok (its `--continue` is per directory) and
 OpenCode each keep their own history scoped to the worktree, so a Claude tab and a Codex
 tab can both resume at once. Two tabs of the *same* provider would both reopen the
 identical conversation.

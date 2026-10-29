@@ -1448,6 +1448,8 @@ pub struct ProviderCommandConfig {
 /// | Claude Code 2.1.220 | Trims, strips ONE surrounding matching quote pair, unescapes `\X`, then  | `bare`          |
 /// |                     | matches the extension. Never splits on whitespace, so a space is        |                 |
 /// |                     | harmless bare.                                                          |                 |
+/// | Grok CLI            | Not measured separately; dux treats it like the Claude CLI and follows   | `bare` assumed  |
+/// |                     | Claude's measured form.                                                 |                 |
 /// | `OpenCode`            | Strips ALL leading and trailing quote characters, resolves `file://`,   | `bare`          |
 /// |                     | unescapes `\X`. No shell splitting, so a space is harmless bare.        |                 |
 /// | Codex (shlex 1.3.0) | Strips one matching quote pair, resolves `file://`, otherwise runs the   | `single_quoted` |
@@ -2498,9 +2500,9 @@ pub(crate) fn default_terminal_args() -> Vec<String> {
 ///
 /// `web_dragdrop_paste` here is the MEASURED result of running each CLI's own path
 /// normalizer over the bytes dux sends. The table of what each one does, and the
-/// caveat that Copilot's value is a guess because it is closed source, lives on
+/// caveat that Copilot's and Grok's values are assumptions rather than measurements, lives on
 /// [`WebDragDropPaste`]. Read it before changing a value here.
-pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4] {
+pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 5] {
     [
         (
             "claude",
@@ -2558,6 +2560,23 @@ pub fn default_provider_commands() -> [(&'static str, ProviderCommandConfig); 4]
                 forward_scroll: None,
                 // NOT measured: Copilot CLI is closed source. `bare` is the
                 // do-nothing option and what two of the three verified CLIs want.
+                web_dragdrop_paste: Some(WebDragDropPaste::Bare.as_str().to_string()),
+            },
+        ),
+        (
+            "grok",
+            ProviderCommandConfig {
+                command: "grok".to_string(),
+                args: Vec::new(),
+                // Grok's --continue resumes the most recent session for the
+                // current working directory.
+                resume_args: Some(vec!["--continue".to_string()]),
+                resume_wait_timeout_ms: Some(3_000),
+                install_hint: Some("curl -fsSL https://x.ai/cli/install.sh | bash".to_string()),
+                forward_scroll: None,
+                // NOT measured: assumed to read a pasted path like the Claude
+                // CLI, which it behaves like. `bare` is also the do-nothing
+                // option.
                 web_dragdrop_paste: Some(WebDragDropPaste::Bare.as_str().to_string()),
             },
         ),
@@ -9707,6 +9726,7 @@ mod agent_tabs_cap_tests {
             ("opencode", WebDragDropPaste::Bare),
             ("codex", WebDragDropPaste::SingleQuoted),
             ("copilot", WebDragDropPaste::Bare),
+            ("grok", WebDragDropPaste::Bare),
         ] {
             assert_eq!(
                 providers

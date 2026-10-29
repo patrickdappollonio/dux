@@ -4158,6 +4158,35 @@ agent_scrollback_lines = 10000
     }
 
     #[test]
+    fn ensure_defaults_adds_grok_and_keeps_a_hand_written_grok_block() {
+        let mut without = ProvidersConfig {
+            commands: IndexMap::new(),
+        };
+        without.ensure_defaults();
+        assert_eq!(without.get("grok").expect("grok added").command, "grok");
+
+        let own = ProviderCommandConfig {
+            command: "grok".to_string(),
+            args: vec!["--model".to_string(), "x".to_string()],
+            resume_args: None,
+            resume_wait_timeout_ms: None,
+            install_hint: Some("mine".to_string()),
+            forward_scroll: None,
+            web_dragdrop_paste: None,
+        };
+        let mut with = ProvidersConfig {
+            commands: IndexMap::from([("grok".to_string(), own)]),
+        };
+        with.ensure_defaults();
+        let kept = with.get("grok").unwrap();
+        assert_eq!(kept.args, ["--model", "x"]);
+        assert_eq!(kept.install_hint.as_deref(), Some("mine"));
+        assert_eq!(kept.resume_args, Some(vec!["--continue".to_string()]));
+        assert_eq!(kept.resume_wait_timeout_ms, Some(3_000));
+        assert_eq!(kept.web_dragdrop_paste.as_deref(), Some("bare"));
+    }
+
+    #[test]
     fn built_in_opencode_ships_resume_timeout() {
         let config = Config::default();
         let opencode = config
@@ -4247,7 +4276,7 @@ oneshot_output = "stdout"
     #[test]
     fn default_provider_commands_excludes_retired_gemini() {
         let providers = default_provider_commands();
-        assert_eq!(providers.len(), 4, "four providers ship as defaults");
+        assert_eq!(providers.len(), 5, "five providers ship as defaults");
         assert!(
             providers.iter().all(|(name, _)| *name != "gemini"),
             "gemini was retired and must not ship as a default provider"

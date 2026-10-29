@@ -270,7 +270,7 @@ export const spine: Spine = {
 }
 
 export const bootstrap: Bootstrap = {
-  available_providers: ["claude", "codex", "opencode", "copilot"],
+  available_providers: ["claude", "codex", "opencode", "copilot", "grok"],
   macros: [],
   welcome_tips: [],
   dux_version: "development",

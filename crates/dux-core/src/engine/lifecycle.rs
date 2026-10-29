@@ -3562,7 +3562,7 @@ mod recreate_tests {
             }
         }
         engine.sessions[0].provider = crate::model::ProviderKind::new(slot);
-        for provider in ["claude", "codex", "opencode", "copilot"] {
+        for provider in ["claude", "codex", "opencode", "copilot", "grok"] {
             engine.sessions[0].mark_provider_started(&crate::model::ProviderKind::new(provider));
         }
         let spawn = || {

@@ -78,6 +78,8 @@ Some agents need a one-line setting before they emit anything dux can see:
   v1.0.55), which dux reads with no setup. Its turn-completion bell went quiet by
   default in v1.0.60, so turn the terminal bell back on in Copilot's config if you want
   a finished turn flagged.
+- **Grok**: whether it emits a signal dux can read has not been verified, so its rows may
+  not light up on their own.
 - **OpenCode**: no capturable signal out of the box today, because its notifications go
   through plugins. Its rows do not light up on their own. If a future version rings a
   bell or emits a notification, dux picks it up with no change on your side.
@@ -171,8 +173,9 @@ Work down this list before concluding it is broken:
    the indicator lights up, dux works end to end and the silence is the agent's
    configuration. If even that does nothing, check that `attention_indicator` is still
    `true`.
-5. **Know which silences are expected.** OpenCode has no capturable signal, and
-   Copilot's turn-completion bell ships disabled.
+5. **Know which silences are expected.** OpenCode has no capturable signal,
+   Copilot's turn-completion bell ships disabled, and Grok's needs-you signal is not
+   verified yet.
 
 > [!CAUTION]
 > These signals are only bytes in the agent's output, so anything the agent displays that

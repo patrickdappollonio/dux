@@ -252,19 +252,24 @@ fn providers_joined(names: &[String], last: &str) -> Prose {
     joined
 }
 
+/// The CLIs, by command file name, whose running tab follows a recreated working
+/// copy by itself. The web keeps the same set in `recreateWorkingCopy.ts`.
+const FOLDER_FOLLOWING_CLIS: [&str; 2] = ["claude", "grok"];
+
 /// What one tab still running in a deleted working copy does once the copy is
 /// back, decided per CLI.
 ///
 /// Measured against the real CLIs. The Claude CLI never notices its directory
 /// going, and once one exists at the same path again it keeps working in it with
-/// its conversation intact. The Codex CLI answers every turn with "invalid cwd"
+/// its conversation intact; the Grok CLI behaves like it, which is assumed from
+/// the CLI's description rather than measured separately. The Codex CLI answers every turn with "invalid cwd"
 /// from the moment the directory goes and stays stuck there after the recreate,
 /// until it is quit and resumed in the new folder. `OpenCode` and Copilot have not
 /// been measured, so they get the cautious answer rather than a promise, and so
 /// does any other CLI configured as a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RunningTabFate {
-    /// It follows the folder by itself: Claude.
+    /// It follows the folder by itself: Claude and Grok.
     Follows,
     /// It cannot follow the folder, and its CLI picks its conversation back up
     /// in the same directory, so stopping and starting it again continues it.
@@ -280,7 +285,10 @@ impl RunningTabFate {
     /// provider's configuration carries resume arguments, the same answer
     /// every launch asks.
     pub(crate) fn of(command: &str, resume: ConversationResume) -> Self {
-        if command.eq_ignore_ascii_case("claude") {
+        if FOLDER_FOLLOWING_CLIS
+            .iter()
+            .any(|cli| command.eq_ignore_ascii_case(cli))
+        {
             Self::Follows
         } else if resume == ConversationResume::Resumes {
             Self::Restartable
@@ -905,6 +913,10 @@ mod tests {
     /// left running, whatever its name, a custom provider included.
     #[test]
     fn a_running_tab_is_sorted_by_its_cli() {
+        assert_eq!(
+            RunningTabFate::of("grok", crate::working_copy::ConversationResume::Resumes),
+            RunningTabFate::Follows
+        );
         assert_eq!(
             RunningTabFate::of("claude", crate::working_copy::ConversationResume::Resumes),
             RunningTabFate::Follows

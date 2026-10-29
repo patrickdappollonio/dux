@@ -24,6 +24,10 @@ export function canRecreateWorkingCopy(workspace: AgentWorkspaceWire): boolean {
   })
 }
 
+/** The CLIs whose running tab follows a recreated working copy by itself,
+ * mirroring `FOLDER_FOLLOWING_CLIS` in dux-core's `working_copy`. */
+const FOLDER_FOLLOWING_CLIS = ["claude", "grok"]
+
 /** What the confirmation is written from: the server's sorted running tabs and
  * restart offer. Which CLI follows the folder and which can resume is the
  * server's answer, so the browser never decides it. A server that predates the
@@ -35,7 +39,8 @@ export function recreateView(
 ): RecreateWire {
   if (workspace.recreate) return workspace.recreate
   const running: RunningTabs = { follows: [], restartable: [], left_running: [] }
-  if (provider.toLowerCase() === "claude") running.follows.push(provider)
+  if (FOLDER_FOLLOWING_CLIS.includes(provider.toLowerCase()))
+    running.follows.push(provider)
   else if (workspace.conversation_resumes === true)
     running.restartable.push(provider)
   else running.left_running.push(provider)
@@ -89,7 +94,8 @@ function leftRunningProse(providers: string[]): Prose {
  *
  * Measured against the real CLIs. The Claude CLI never notices its directory
  * going, and once one exists at the same path again it keeps working in it with
- * its conversation intact. The Codex CLI answers every turn with "invalid cwd"
+ * its conversation intact; Grok behaves like it, assumed rather than measured
+ * separately. The Codex CLI answers every turn with "invalid cwd"
  * from the moment the directory goes and stays stuck there after the recreate,
  * until it is quit and resumed in the new folder. OpenCode and Copilot have not
  * been measured, so they get the cautious answer rather than a promise. */

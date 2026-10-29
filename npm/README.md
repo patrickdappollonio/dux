@@ -6,7 +6,7 @@ Your AI agents deserve a proper office. **dux** (pronounced "dooks") runs multip
 
 No protocol layers. No adapters. No JSON-RPC. Just real CLIs running in real terminals.
 
-dux is fast and keeps resource usage low, leaving more RAM for Claude, Codex, Copilot, OpenCode, or any other agent CLI you bring.
+dux is fast and keeps resource usage low, leaving more RAM for Claude, Codex, Copilot, Grok, OpenCode, or any other agent CLI you bring.
 
 ## Why dux?
 

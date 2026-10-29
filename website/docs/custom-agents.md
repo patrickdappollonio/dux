@@ -5,7 +5,7 @@ group: Guides
 order: 50
 ---
 
-A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, and Copilot are
+A provider is the CLI behind an agent. Claude Code, Codex, OpenCode, Copilot, and Grok are
 configured out of the box, and **any other CLI can be a provider**. Adding one is a
 config change, not a code change.
 

@@ -226,7 +226,7 @@ The confirmation spells out all three cases, and the message afterwards names th
 
 **If the agent is still running**, you can recreate anyway; what happens next is the CLI's own answer. dux tells the CLIs apart by the command a provider runs, not by the provider's name, so a provider of your own whose command is `claude` counts as Claude.
 
-- **Claude** never notices. A running Claude tab carries on in the recreated folder with its conversation intact.
+- **Claude** never notices. A running Claude tab carries on in the recreated folder with its conversation intact. dux treats **Grok** the same way, which it has not measured separately.
 - **Codex** cannot follow the folder. It answers every turn with an invalid-directory error from the moment the folder goes, and stays stuck after the recreate until it is restarted.
 - **OpenCode**, and any other CLI that can pick its conversation back up, gets the same cautious treatment as Codex.
 - **Copilot**, and any CLI that cannot pick a conversation back up, is never restarted, because that would lose its conversation. The confirmation says it is left running. If it cannot follow the folder, stop and start that tab yourself.

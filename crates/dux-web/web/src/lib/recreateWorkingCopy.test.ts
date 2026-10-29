@@ -198,6 +198,12 @@ describe("recreateView", () => {
       restart_offer: [],
     })
     expect(
+      recreateView({ ...managed, conversation_resumes: false }, "grok"),
+    ).toEqual({
+      running: running({ follows: ["grok"] }),
+      restart_offer: [],
+    })
+    expect(
       recreateView({ ...managed, conversation_resumes: true }, "codex"),
     ).toEqual({
       running: running({ restartable: ["codex"] }),

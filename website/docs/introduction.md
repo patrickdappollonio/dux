@@ -7,7 +7,7 @@ order: 1
 
 `dux` runs multiple AI coding agents in parallel, usually one git worktree each, and
 straight in a folder you already have when you want that instead. It spawns the real
-CLI for each agent (Claude Code, Codex, Copilot, OpenCode, or anything else you can run
+CLI for each agent (Claude Code, Codex, Copilot, Grok, OpenCode, or anything else you can run
 in a terminal) inside an embedded pseudo-terminal. No protocol layer, no adapters, no
 JSON-RPC. Just the tools you already use, side by side, each in its own branch.
 
@@ -52,7 +52,7 @@ dux has three nouns:
   **standalone agent** is the exception you ask for by name: it runs in a folder you
   already have, with no branch and no worktree of dux's, and dux never creates, moves
   or removes that folder. See [Creating agents](/docs/creating-agents).
-- **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, and Copilot
+- **Providers** are the CLIs that power agents. Claude, Codex, OpenCode, Copilot, and Grok
   ship configured out of the box, and you can wire up any other command yourself.
 
 The flow is: add a project, spin up an agent, pick a provider. dux creates the worktree,
@@ -124,8 +124,8 @@ would normally name the project.
 You can run `recreate-working-copy` under a running agent. What happens to each running tab
 depends on its CLI:
 
-- **Claude** never notices the folder going and carries on in the recreated one with its
-  conversation intact.
+- **Claude and Grok** never notice the folder going and carry on in the recreated one with
+  their conversation intact (Grok is assumed to behave like Claude, not measured separately).
 - **Codex, OpenCode and any other CLI that can pick its conversation back up** cannot follow
   the folder. The confirmation offers to restart those tabs, *ticked by default*: once the
   working copy is back, dux shuts them down politely and starts each again so it continues

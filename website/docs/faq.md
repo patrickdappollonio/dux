@@ -38,7 +38,7 @@ Two things do reach the network, and both are yours to switch off:
 
 ### Which AI tools can I use?
 
-Claude Code, Codex, OpenCode, and Copilot are wired in out of the box, and any
+Claude Code, Codex, OpenCode, Copilot, and Grok are wired in out of the box, and any
 other CLI that runs an interactive session in a terminal can be added. See
 [Custom CLI Agents](/docs/custom-agents).
 

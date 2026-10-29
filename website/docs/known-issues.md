@@ -26,6 +26,8 @@ sign-in link, and what to do with it depends on the CLI:
   - run `codex login --device-auth`, if your organisation allows device-code sign-in.
 - **OpenCode**: its browser sign-ins also return to the dux machine (ChatGPT accounts use
   port `1455`), so the same advice as Codex applies.
+- **Grok**: its first-run sign-in opens a browser on the dux machine. Run
+  `grok login --device-auth` instead, which xAI documents for headless and remote machines.
 - **Copilot**: set a GitHub token in the environment as `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`
   or `GITHUB_TOKEN`.
   - It has to be a fine-grained personal access token with the "Copilot Requests"

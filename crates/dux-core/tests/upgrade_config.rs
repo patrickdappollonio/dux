@@ -199,7 +199,7 @@ fn a_retired_stock_provider_stops_being_offered_after_the_upgrade() {
         config.providers.commands.keys().collect::<Vec<_>>()
     );
     // ...while the providers dux does ship are all present.
-    for shipped in ["claude", "codex", "opencode", "copilot"] {
+    for shipped in ["claude", "codex", "opencode", "copilot", "grok"] {
         assert!(
             config.providers.commands.contains_key(shipped),
             "{shipped} must be restored by ensure_defaults"

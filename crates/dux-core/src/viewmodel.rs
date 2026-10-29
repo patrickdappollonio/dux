@@ -2929,8 +2929,8 @@ mod tests {
 
         let boot = engine.bootstrap();
 
-        // A default Config configures these four providers.
-        for provider in ["claude", "codex", "copilot", "opencode"] {
+        // A default Config configures these five providers.
+        for provider in ["claude", "codex", "copilot", "opencode", "grok"] {
             assert!(
                 boot.available_providers.iter().any(|p| p == provider),
                 "available_providers should contain {provider}: {:?}",
