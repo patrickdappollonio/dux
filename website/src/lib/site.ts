@@ -6,7 +6,7 @@
 // differentiator and never gets cut for length.
 
 export const SITE_TITLE =
-  "dux: run multiple Claude Code, Codex & Copilot agents in parallel, terminal or browser | getdux.app";
+  "dux: run multiple Claude Code, Codex & Grok agents in parallel, terminal or browser | getdux.app";
 
 export const SITE_DESCRIPTION =
   "dux runs multiple AI coding agents (Claude Code, Codex, Copilot, Grok, OpenCode, or any CLI) in parallel, a git worktree each or straight in a folder you already have. Two front ends over one workspace: a terminal UI, and a web UI you start with dux server, both driving the same agents, phone included. Real CLIs, real PTYs, no protocol layers.";
