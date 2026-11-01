@@ -17,10 +17,13 @@ export interface RegisteredLanguage {
   filenames?: readonly string[] | null
 }
 
-/// One row in the picker.
+/// One row in the picker, with the registry's other names for it, which the
+/// picker's search also matches.
 export interface LanguageChoice {
   id: string
   label: string
+  aliases: readonly string[]
+  extensions: readonly string[]
 }
 
 /// Monaco's id for "no language", and what dux calls it. The registry's own
@@ -45,7 +48,12 @@ export function languagePickerEntries(
   langs: readonly RegisteredLanguage[],
 ): LanguageChoice[] {
   return langs
-    .map((lang) => ({ id: lang.id, label: languageLabel(lang) }))
+    .map((lang) => ({
+      id: lang.id,
+      label: languageLabel(lang),
+      aliases: lang.aliases ?? [],
+      extensions: lang.extensions ?? [],
+    }))
     .sort(
       (a, b) =>
         a.label.localeCompare(b.label, undefined, {
@@ -53,6 +61,38 @@ export function languagePickerEntries(
           numeric: true,
         }) || a.id.localeCompare(b.id),
     )
+}
+
+/// The picker's search: the rows a query keeps, best first. A query matches,
+/// case-insensitively, a row's label, any of its aliases, or any of its file
+/// extensions with or without the leading dot, so "ts" finds TypeScript and
+/// "yml" finds YAML. A row whose name equals the query ranks first, then one
+/// a name starts with, then one a name merely contains; within a rank the
+/// rows keep the order they came in, which is the list's name order. A blank
+/// query keeps every row.
+export function matchLanguageChoices(
+  choices: readonly LanguageChoice[],
+  query: string,
+): LanguageChoice[] {
+  const q = query.trim().toLowerCase()
+  if (q === "") return [...choices]
+  const bare = q.replace(/^\.+/, "")
+  const ranked: LanguageChoice[][] = [[], [], []]
+  for (const choice of choices) {
+    let best = Infinity
+    const consider = (name: string, needle: string): void => {
+      if (needle === "") return
+      const n = name.toLowerCase()
+      if (n === needle) best = Math.min(best, 0)
+      else if (n.startsWith(needle)) best = Math.min(best, 1)
+      else if (n.includes(needle)) best = Math.min(best, 2)
+    }
+    consider(choice.label, q)
+    for (const alias of choice.aliases) consider(alias, q)
+    for (const ext of choice.extensions) consider(ext.replace(/^\.+/, ""), bare)
+    if (best !== Infinity) ranked[best].push(choice)
+  }
+  return ranked.flat()
 }
 
 /// The language Monaco would infer for a path from the registered grammars: an

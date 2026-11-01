@@ -7,6 +7,7 @@ import {
   languageLabel,
   languageOverrideFor,
   languagePickerEntries,
+  matchLanguageChoices,
   pruneLanguageOverrides,
   retargetLanguageOverrides,
   PLAIN_TEXT_ID,
@@ -80,6 +81,53 @@ describe("languagePickerEntries", () => {
 
   it("handles an empty registry (nothing has been read yet)", () => {
     expect(languagePickerEntries([])).toEqual([])
+  })
+})
+
+describe("matchLanguageChoices", () => {
+  const SEARCHABLE: RegisteredLanguage[] = [
+    ...REGISTRY,
+    { id: "yaml", aliases: ["YAML", "yaml"], extensions: [".yaml", ".yml"] },
+    { id: "javascript", aliases: ["JavaScript", "js"], extensions: [".js", ".mjs"] },
+    { id: "json", aliases: ["JSON"], extensions: [".json"] },
+  ]
+  const choices = languagePickerEntries(SEARCHABLE)
+  const ids = (query: string) => matchLanguageChoices(choices, query).map((c) => c.id)
+
+  it("keeps every language, in list order, for an empty or blank query", () => {
+    expect(ids("")).toEqual(choices.map((c) => c.id))
+    expect(ids("   ")).toEqual(choices.map((c) => c.id))
+  })
+
+  it("matches the display name case-insensitively", () => {
+    expect(ids("toml")).toEqual(["toml"])
+    expect(ids("RuSt")).toEqual(["rust"])
+  })
+
+  it("matches an alias that is not the display name", () => {
+    expect(ids("ts")[0]).toBe("typescript")
+    expect(ids("sh")).toEqual(["shell"])
+  })
+
+  it("matches a file extension with or without its dot", () => {
+    expect(ids("yml")).toEqual(["yaml"])
+    expect(ids(".yml")).toEqual(["yaml"])
+    expect(ids(".RS")).toEqual(["rust"])
+  })
+
+  it("ranks exact before prefix before substring", () => {
+    // "js": JavaScript's alias exactly, JSON's name by prefix; "json" also
+    // reaches JSON exactly, and nothing else contains it.
+    expect(ids("js")).toEqual(["javascript", "json"])
+    expect(ids("script")).toEqual(["duckscript", "javascript", "typescript"])
+    expect(ids("type")).toEqual(["typescript"])
+    // "t": Plain text (by its "text" alias), TOML and TypeScript start with
+    // it and lead in name order; the rest only contain it.
+    expect(ids("t").slice(0, 3)).toEqual(["plaintext", "toml", "typescript"])
+  })
+
+  it("is empty when nothing matches", () => {
+    expect(ids("cobol")).toEqual([])
   })
 })
 

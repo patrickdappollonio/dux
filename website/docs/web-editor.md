@@ -118,11 +118,11 @@ Only what applies is shown:
 
 ### Syntax language
 
-The status bar shows the file's syntax language as a dropdown. dux guesses from the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config file with no extension) you can pick the right one from the full list.
+The status bar shows the file's syntax language as a dropdown. dux guesses from the file name, and when the guess is wrong (a `Cargo.lock` that is really TOML, a config file with no extension) you can pick the right one from the full list. Start typing to search it by name or by file extension: `yml` finds YAML, `ts` finds TypeScript.
 
 - The choice applies to the open file, including its diff view, and follows a rename or move.
 - It lasts until you close the file.
-- **Auto** at the top of the list hands the decision back to automatic detection.
+- **Auto** stays at the top of the list whatever you type, and hands the decision back to automatic detection.
 
 ## Tabs
 

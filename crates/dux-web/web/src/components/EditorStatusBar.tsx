@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { ChevronDown, Code2, FileType, Laptop, Loader2 } from "lucide-react"
 
+import { LanguagePickerList } from "@/components/LanguagePickerList"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { Button } from "@/components/ui/button"
@@ -9,6 +10,12 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import type { LanguageChoice } from "@/lib/editorLanguage"
 import {
   cursorLabel,
   formatFileSize,
@@ -111,16 +118,23 @@ export function EditorStatusBar({
   plan,
   editor,
   languageLabel,
-  languageItems,
+  languagePicker,
   encodingItems = null,
   localEditor = null,
 }: {
   plan: StatusBarPlan
   editor: StatusBarEditor | null
   languageLabel: string
-  // The picker's rows, shared with the phone fold's submenu so the two
-  // cannot drift.
-  languageItems: React.ReactNode
+  // What the language picker lists and does, handed to the same list the
+  // phone fold's sheet renders so the two cannot drift.
+  languagePicker: {
+    choices: readonly LanguageChoice[]
+    current: string | undefined
+    onPick: (id: string | null) => void
+    // Where focus goes when the picker is taken away while it is open (an
+    // image tab), so it does not drop to the page body.
+    fallbackFocus?: () => HTMLElement | null
+  }
   // The encoding menu's rows (reopen, save with). Shown while the plan names
   // an encoding, on every screen: this selector is their only home.
   encodingItems?: React.ReactNode
@@ -129,6 +143,23 @@ export function EditorStatusBar({
   localEditor?: { items: React.ReactNode; opening: boolean } | null
 }) {
   const status = useEditorCursorStatus(plan.editing ? editor : null)
+  const [languageOpen, setLanguageOpen] = useState(false)
+  // Closed with the picker when the bar stops offering it (an image tab, or
+  // no file), so it never comes back open by itself on the next text file.
+  if (!plan.language && languageOpen) setLanguageOpen(false)
+  // Set while the picker is open, read when it is taken away.
+  const languageWasOpen = useRef(false)
+  function changeLanguageOpen(open: boolean): void {
+    languageWasOpen.current = open
+    setLanguageOpen(open)
+  }
+  const { fallbackFocus } = languagePicker
+  useLayoutEffect(() => {
+    if (plan.language || !languageWasOpen.current) return
+    languageWasOpen.current = false
+    const at = document.activeElement
+    if (at === null || at === document.body) fallbackFocus?.()?.focus()
+  }, [plan.language, fallbackFocus])
   return (
     // One fixed height whatever it carries, so the content above it never
     // jumps as items come and go. A finger, at any width, gets the 40px
@@ -232,9 +263,12 @@ export function EditorStatusBar({
         )}
         {plan.language && (
           <span className={cn("inline-flex", DESKTOP_ONLY)}>
-            <DropdownMenu>
+            {/* A popover rather than a menu: its search field would fight a
+                menu's typeahead and focus handling. Same trigger, same place,
+                and it opens upward like the selectors beside it. */}
+            <Popover open={languageOpen} onOpenChange={changeLanguageOpen}>
               <SimpleTooltip content={`Syntax language: ${languageLabel}`}>
-                <DropdownMenuTrigger
+                <PopoverTrigger
                   render={
                     // Ghost and under the 40px floor on the vertical axis for
                     // a fine pointer only: above it is the editor surface,
@@ -253,12 +287,24 @@ export function EditorStatusBar({
                   <Code2 />
                   {languageLabel}
                   <ChevronDown />
-                </DropdownMenuTrigger>
+                </PopoverTrigger>
               </SimpleTooltip>
-              <DropdownMenuContent align="end" side="top">
-                {languageItems}
-              </DropdownMenuContent>
-            </DropdownMenu>
+              <PopoverContent
+                align="end"
+                side="top"
+                className="w-64 p-0"
+                aria-label="Syntax language"
+              >
+                <LanguagePickerList
+                  choices={languagePicker.choices}
+                  current={languagePicker.current}
+                  onPick={(id) => {
+                    languagePicker.onPick(id)
+                    changeLanguageOpen(false)
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
           </span>
         )}
         {localEditor !== null && (

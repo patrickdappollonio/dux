@@ -30,7 +30,6 @@ import {
   SaveAll,
   Search,
   SquareTerminal,
-  Wand2,
   X,
 } from "lucide-react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
@@ -121,6 +120,8 @@ import { uploadDroppedFile } from "@/lib/fileDropApi"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { LanguagePickerList } from "@/components/LanguagePickerList"
+import { Popover, PopoverContent } from "@/components/ui/popover"
 import { useObjectUrl } from "@/hooks/use-object-url"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import type { MonacoInstance } from "@/components/CodeEditor"
@@ -169,7 +170,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -623,6 +623,18 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       to,
     )
   }
+  // The phone fold's language sheet, and whether the fold is closing to hand
+  // focus to it (read once the fold has finished closing).
+  const [languageSheetOpen, setLanguageSheetOpen] = useState(false)
+  const languageSheetPendingRef = useRef(false)
+  // Whether the fold's close-focus pass must leave focus to the sheet.
+  const languageSheetKeepsFocusRef = useRef(false)
+  // The fold's trigger, where focus goes back when the sheet closes.
+  const mobileFoldRef = useRef<HTMLButtonElement | null>(null)
+  const languageFieldRef = useRef<HTMLInputElement | null>(null)
+  // Closed with the picker when there is nothing to pick for (an image tab,
+  // no tab at all), so it never comes back open by itself on the next file.
+  if (!showLanguagePicker && languageSheetOpen) setLanguageSheetOpen(false)
   function pickLanguage(id: string | null): void {
     if (languageTabPath === null) return
     editorSyncView(root, languageTabPath, { language: id })
@@ -1454,40 +1466,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
 
   const openPath = activeTabPath
 
-  // The language menu's rows, shared by the desktop trigger and the phone
-  // fold's submenu so the two cannot drift. "Auto" first, above a separator,
-  // because it is the state every file starts in and the one a user goes
-  // looking for to undo a pick; it CLEARS the override rather than selecting
-  // a language, so it is checked exactly when no override is set.
-  function languagePickerItems(): React.ReactNode {
-    return (
-      <>
-        <DropdownMenuItem
-          aria-current={activeLanguageOverride === undefined ? "true" : undefined}
-          onClick={() => pickLanguage(null)}
-        >
-          <Wand2 />
-          Auto
-          {activeLanguageOverride === undefined && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        {languageChoices.map((choice) => (
-          <DropdownMenuItem
-            key={choice.id}
-            aria-current={
-              activeLanguageOverride === choice.id ? "true" : undefined
-            }
-            onClick={() => pickLanguage(choice.id)}
-          >
-            <Code2 />
-            {choice.label}
-            {activeLanguageOverride === choice.id && (
-              <Check className="ml-auto" />
-            )}
-          </DropdownMenuItem>
-        ))}
-      </>
-    )
+  // What the language picker lists and does, handed to the one list both the
+  // status bar's popover and the phone fold's sheet render.
+  const languagePicker = {
+    choices: languageChoices,
+    current: activeLanguageOverride,
+    onPick: pickLanguage,
+    fallbackFocus: () => contentRef.current,
   }
 
   // The encoding menu's rows, behind the status bar's encoding selector on
@@ -1691,76 +1676,135 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function renderMobileActions(): React.ReactNode {
     if (activeTab === null) return null
     return (
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              size="icon"
-              variant="outline"
-              className={cn(HEADER_ICON_CONTROL, "md:hidden max-md:size-10")}
-              aria-label="More editor actions"
-            />
-          }
+      <>
+        <DropdownMenu
+          onOpenChangeComplete={(open) => {
+            if (open || !languageSheetPendingRef.current) return
+            languageSheetPendingRef.current = false
+            languageFieldRef.current?.focus()
+          }}
         >
-          <Ellipsis />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          {!isImageTab && showViewSwitch && (
-            <>
-              <DropdownMenuItem
-                aria-current={activeTab.mode === "file" ? "true" : undefined}
-                onClick={chooseFileView}
-              >
-                <FileText />
-                File view
-                {activeTab.mode === "file" && <Check className="ml-auto" />}
+          <DropdownMenuTrigger
+            ref={mobileFoldRef}
+            render={
+              <Button
+                size="icon"
+                variant="outline"
+                className={cn(HEADER_ICON_CONTROL, "md:hidden max-md:size-10")}
+                aria-label="More editor actions"
+              />
+            }
+          >
+            <Ellipsis />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            // The language sheet takes focus once this menu has closed;
+            // handing it back to the trigger first would flash it there.
+            finalFocus={() => {
+              const keep = languageSheetKeepsFocusRef.current
+              languageSheetKeepsFocusRef.current = false
+              return !keep
+            }}
+          >
+            {!isImageTab && showViewSwitch && (
+              <>
+                <DropdownMenuItem
+                  aria-current={activeTab.mode === "file" ? "true" : undefined}
+                  onClick={chooseFileView}
+                >
+                  <FileText />
+                  File view
+                  {activeTab.mode === "file" && <Check className="ml-auto" />}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  aria-current={activeTab.mode === "diff" ? "true" : undefined}
+                  onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
+                >
+                  <GitCompare />
+                  Diff view
+                  {activeTab.mode === "diff" && <Check className="ml-auto" />}
+                </DropdownMenuItem>
+              </>
+            )}
+            {hasDiff && activeTab.mode === "diff" && diffStale && (
+              <DropdownMenuItem onClick={refreshDiff}>
+                <CircleAlert />
+                Reload diff
               </DropdownMenuItem>
-              <DropdownMenuItem
-                aria-current={activeTab.mode === "diff" ? "true" : undefined}
-                onClick={() => editorSetTabMode(root, activeTab.id, "diff")}
-              >
-                <GitCompare />
-                Diff view
-                {activeTab.mode === "diff" && <Check className="ml-auto" />}
+            )}
+            {canPreview && (
+              <DropdownMenuItem onClick={togglePreview}>
+                {showPreview && activeTab.mode === "file" ? <Pencil /> : <Eye />}
+                {showPreview ? "Hide preview" : "Show preview"}
               </DropdownMenuItem>
-            </>
-          )}
-          {hasDiff && activeTab.mode === "diff" && diffStale && (
-            <DropdownMenuItem onClick={refreshDiff}>
-              <CircleAlert />
-              Reload diff
-            </DropdownMenuItem>
-          )}
-          {canPreview && (
-            <DropdownMenuItem onClick={togglePreview}>
-              {showPreview && activeTab.mode === "file" ? <Pencil /> : <Eye />}
-              {showPreview ? "Hide preview" : "Show preview"}
-            </DropdownMenuItem>
-          )}
-          {showLanguagePicker && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+            )}
+            {showLanguagePicker && (
+              // Opens the searchable sheet below rather than a submenu: a
+              // search field inside a menu fights its typeahead and focus.
+              <DropdownMenuItem
+                // The sheet opens at once; its field takes focus once this
+                // menu has finished closing, because a modal menu pulls focus
+                // back into itself while it is up.
+                onClick={() => {
+                  languageSheetPendingRef.current = true
+                  languageSheetKeepsFocusRef.current = true
+                  setLanguageSheetOpen(true)
+                }}
+              >
                 <Code2 />
-                {activeLanguageLabel}
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {languagePickerItems()}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )}
-          {localAccess && (
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={openingEditor}>
-                <Laptop />
-                Open local editor
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {localEditorMenuItems()}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
+                {activeLanguageLabel}…
+              </DropdownMenuItem>
+            )}
+            {localAccess && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={openingEditor}>
+                  <Laptop />
+                  Open local editor
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {localEditorMenuItems()}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {showLanguagePicker && (
+          // The phone's language picker: the shared bottom sheet a popover
+          // becomes on a phone, as the macro picker's is, so the search field
+          // stays pinned at its top and the list scrolls under it; the
+          // viewport resizes for the soft keyboard, and the sheet's height cap
+          // follows it.
+          <Popover open={languageSheetOpen} onOpenChange={setLanguageSheetOpen}>
+            <PopoverContent
+              // Back to the fold the sheet was opened from: it has no trigger
+              // of its own to return to.
+              finalFocus={mobileFoldRef}
+              // No Trigger of its own: placed against the fold it opens from.
+              anchor={mobileFoldRef}
+              aria-label="Syntax language"
+              // The search field, not the sheet: the picker opens ready to
+              // type, soft keyboard and all.
+              initialFocus={languageFieldRef}
+              className={
+                isMobile
+                  ? "flex flex-col overflow-hidden p-0 pb-[max(env(safe-area-inset-bottom),0.25rem)]"
+                  : "w-64 p-0"
+              }
+            >
+              <LanguagePickerList
+                choices={languagePicker.choices}
+                current={languagePicker.current}
+                fieldRef={languageFieldRef}
+                onPick={(id) => {
+                  pickLanguage(id)
+                  setLanguageSheetOpen(false)
+                }}
+              />
+            </PopoverContent>
+          </Popover>
+        )}
+      </>
     )
   }
 
@@ -2243,7 +2287,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           plan={statusPlan}
           editor={codeEditor}
           languageLabel={activeLanguageLabel}
-          languageItems={languagePickerItems()}
+          languagePicker={languagePicker}
           encodingItems={encodingMenuItems()}
           // Spawns an editor on the server, so it is offered only where the
           // page was opened at a local address.

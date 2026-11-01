@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import {
@@ -78,8 +78,9 @@ vi.mock("@/components/CodeEditor", codeEditorStub)
 vi.mock("./CodeEditor", codeEditorStub)
 // The language picker's registry read would otherwise load real Monaco, which
 // cannot run under jsdom.
+let registeredLanguages: Array<{ id: string; aliases?: string[]; extensions?: string[] }> = []
 vi.mock("@/lib/monacoLanguages", () => ({
-  loadRegisteredLanguages: async () => [],
+  loadRegisteredLanguages: async () => registeredLanguages,
 }))
 
 // Panel props recorded at render time. This shell is the UNCAPPED half of the
@@ -454,6 +455,85 @@ describe("the standalone editor shell", () => {
     )
     render(<StandaloneEditorShell />)
     expect(screen.getByText(/agent not found/i)).toBeTruthy()
+  })
+})
+
+// The phone's language picker: the fold's entry opens the shared searchable
+// list as a bottom sheet.
+describe("the phone's language sheet", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    vi.stubGlobal("innerWidth", 390)
+    registeredLanguages = [
+      { id: "typescript", aliases: ["TypeScript"], extensions: [".ts"] },
+      { id: "yaml", aliases: ["YAML", "yaml"], extensions: [".yaml", ".yml"] },
+    ]
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    registeredLanguages = []
+  })
+
+  async function openSheet() {
+    const fold = screen.getByRole("button", { name: /more editor actions/i })
+    fireEvent.click(fold)
+    fireEvent.click(await screen.findByRole("menuitem", { name: /typescript…/i }))
+    const field = await screen.findByRole("combobox", { name: "Search languages" })
+    return { fold, field }
+  }
+
+  it("searches in a sheet, and hands focus back to the fold after a pick", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    const { fold, field } = await openSheet()
+    const sheet = field.closest("[data-slot=popover-content]") as HTMLElement
+    expect(sheet.className).toContain("rounded-t-2xl")
+    // Positioned, so shown: an unanchored positioner stays transparent.
+    await waitFor(() => expect(sheet.parentElement?.style.opacity).not.toBe("0"))
+    // The search takes focus at once, so the soft keyboard comes up with it.
+    await waitFor(() => expect(document.activeElement).toBe(field))
+    fireEvent.change(field, { target: { value: "yml" } })
+    fireEvent.click(screen.getByRole("option", { name: /^YAML$/ }))
+    await waitFor(() => expect(document.activeElement).toBe(fold))
+    fireEvent.click(fold)
+    expect(await screen.findByRole("menuitem", { name: /^YAML…$/ })).toBeTruthy()
+  })
+
+  it("does not reopen by itself once its file has gone", async () => {
+    await seedState({})
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    const { openModals } = await import("@/lib/modalHistory")
+    const view = render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+    await openSheet()
+    const showTab = (path: string) => {
+      baseState({
+        editorTabs: {
+          [rootKey(agentRoot(SESSION))]: {
+            tabs: [{ id: "t1", path, dirty: false, preview: false, mode: "file" }],
+            activeId: "t1",
+          },
+        },
+      })
+      view.rerender(<StandaloneEditorShell />)
+    }
+    showTab("assets/logo.png")
+    await screen.findByRole("img")
+    await waitFor(() => expect(openModals()).toEqual([]))
+    // Focus goes back to the fold the sheet came from, not the page body.
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /more editor actions/i }),
+    )
+    showTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect(screen.queryByRole("combobox", { name: "Search languages" })).toBeNull()
   })
 })
 

@@ -88,13 +88,60 @@ function renderBar(plan: StatusBarPlan, editor: StatusBarEditor | null) {
       plan={plan}
       editor={editor}
       languageLabel="Rust"
-      languageItems={null}
+      languagePicker={{ choices: [], current: undefined, onPick: () => {} }}
     />,
   )
 }
 
 describe("the editor status bar", () => {
   afterEach(cleanup)
+
+  it("does not reopen the language picker by itself once it has been taken away, and puts focus somewhere real", async () => {
+    const { openModals } = await import("@/lib/modalHistory")
+    const fallback = document.createElement("div")
+    fallback.tabIndex = -1
+    document.body.appendChild(fallback)
+    const bar = (language: boolean) => (
+      <EditorStatusBar
+        plan={{ ...FULL, language }}
+        editor={null}
+        languageLabel="Rust"
+        languagePicker={{
+          choices: [],
+          current: undefined,
+          onPick: () => {},
+          fallbackFocus: () => fallback,
+        }}
+      />
+    )
+    const view = render(bar(true))
+    fireEvent.click(screen.getByRole("button", { name: "Syntax language: Rust" }))
+    await screen.findByRole("combobox", { name: "Search languages" })
+    view.rerender(bar(false))
+    await waitFor(() => expect(openModals()).toEqual([]))
+    expect(document.activeElement).toBe(fallback)
+    view.rerender(bar(true))
+    expect(screen.queryByRole("combobox", { name: "Search languages" })).toBeNull()
+    fallback.remove()
+  })
+
+  it("names the language popup, and focuses its search on every pointer", async () => {
+    const { stubMatchMedia } = await import("@/test/matchMedia")
+    for (const coarse of [false, true]) {
+      const media = stubMatchMedia({ "(pointer: coarse)": coarse })
+      const view = renderBar(FULL, null)
+      fireEvent.click(screen.getByRole("button", { name: "Syntax language: Rust" }))
+      expect(await screen.findByRole("dialog", { name: "Syntax language" })).toBeTruthy()
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByRole("combobox", { name: "Search languages" }),
+        ),
+      )
+      view.unmount()
+      media.restore()
+    }
+  })
+
 
   it("shows the path, the live cursor, the line count, indentation, line endings, size and language", () => {
     const fake = fakeEditor()
@@ -140,7 +187,7 @@ describe("the editor status bar", () => {
         plan={FULL}
         editor={editor}
         languageLabel="Rust"
-        languageItems={null}
+        languagePicker={{ choices: [], current: undefined, onPick: () => {} }}
       />
     )
     rerender(bar(null))
@@ -264,7 +311,7 @@ describe("the editor status bar", () => {
         plan={{ ...FULL, encoding: "Windows-1252" }}
         editor={fakeEditor().editor}
         languageLabel="Rust"
-        languageItems={null}
+        languagePicker={{ choices: [], current: undefined, onPick: () => {} }}
         encodingItems={<div role="menuitem">Reopen with encoding</div>}
       />,
     )

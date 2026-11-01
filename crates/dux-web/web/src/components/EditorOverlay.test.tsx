@@ -361,6 +361,7 @@ const LANGUAGES = [
   { id: "plaintext", aliases: ["Plain Text", "text"], extensions: [".txt"] },
   { id: "typescript", aliases: ["TypeScript"], extensions: [".ts"] },
   { id: "toml", aliases: ["TOML"], extensions: [".toml"] },
+  { id: "yaml", aliases: ["YAML", "yaml"], extensions: [".yaml", ".yml"] },
 ]
 vi.mock("@/lib/monacoSetup", () => ({
   monaco: { languages: { getLanguages: () => LANGUAGES } },
@@ -2007,7 +2008,7 @@ describe("the status bar's language picker", () => {
     await mountWithTab(PATH)
     await screen.findByTestId("code-editor")
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),
@@ -2020,14 +2021,14 @@ describe("the status bar's language picker", () => {
     await mountWithTab(PATH)
     await screen.findByTestId("code-editor")
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),
       ).toBe("toml"),
     )
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^Auto$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^Auto$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),
@@ -2058,7 +2059,7 @@ describe("the status bar's language picker", () => {
     const view = await mountWithTab(PATH)
     await screen.findByTestId("code-editor")
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),
@@ -2142,7 +2143,7 @@ describe("the status bar's language picker", () => {
     view.rerender(<EditorOverlay />)
     await screen.findByTestId("code-editor")
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("code-editor").getAttribute("data-language"),
@@ -2189,7 +2190,7 @@ describe("the status bar's language picker", () => {
     await mountWithTab(PATH, "diff")
     await screen.findByTestId("diff-viewer")
     fireEvent.click(await picker())
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() =>
       expect(
         screen.getByTestId("diff-viewer").getAttribute("data-language"),
@@ -2208,6 +2209,81 @@ describe("the status bar's language picker", () => {
     expect(
       await screen.findByRole("menuitem", { name: /plain text/i }),
     ).toBeTruthy()
+  })
+
+  function search(): HTMLElement {
+    return screen.getByRole("combobox", { name: "Search languages" })
+  }
+  function shownLanguages(): string[] {
+    return screen.getAllByRole("option").map((o) => o.textContent ?? "")
+  }
+
+  it("opens on a focused search that filters by extension as you type, Auto pinned above", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    await waitFor(() => expect(document.activeElement).toBe(search()))
+    fireEvent.change(search(), { target: { value: "yml" } })
+    expect(shownLanguages()).toEqual(["Auto", "YAML"])
+    fireEvent.change(search(), { target: { value: "" } })
+    expect(shownLanguages()).toEqual(["Auto", "Plain text", "TOML", "TypeScript", "YAML"])
+  })
+
+  it("picks the best match on Enter, and checks it the next time it opens", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.change(search(), { target: { value: "yml" } })
+    fireEvent.keyDown(search(), { key: "Enter" })
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("yaml"),
+    )
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull())
+    fireEvent.click(await picker())
+    expect(
+      (await screen.findByRole("option", { name: /^YAML$/ })).getAttribute("data-checked"),
+    ).toBe("true")
+    expect(
+      screen.getByRole("option", { name: /^Auto$/ }).getAttribute("data-checked"),
+    ).toBe("false")
+  })
+
+  it("moves the highlight through the matches with the arrow keys", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    // "t" leads with Plain text (its "text" alias), then TOML.
+    fireEvent.change(search(), { target: { value: "t" } })
+    fireEvent.keyDown(search(), { key: "ArrowDown" })
+    fireEvent.keyDown(search(), { key: "Enter" })
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("code-editor").getAttribute("data-language"),
+      ).toBe("toml"),
+    )
+  })
+
+  it("closes on Escape without changing the language", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.change(search(), { target: { value: "toml" } })
+    fireEvent.keyDown(search(), { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull())
+    expect(
+      screen.getByTestId("code-editor").getAttribute("data-language"),
+    ).toBe("")
+  })
+
+  it("says so when nothing matches, and still offers Auto", async () => {
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    fireEvent.click(await picker())
+    fireEvent.change(search(), { target: { value: "cobol" } })
+    expect(screen.getByText("No language matches that search.")).toBeTruthy()
+    expect(shownLanguages()).toEqual(["Auto"])
   })
 
   it("does not render for an image tab, which has no language to pick", async () => {
@@ -4179,7 +4255,7 @@ describe("the editor's view travels with its address", () => {
     await mountRouted(PATH)
     await screen.findByTestId("code-editor")
     fireEvent.click(await screen.findByRole("button", { name: /^syntax language:/i }))
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(async () =>
       expect((await newTabLink()).getAttribute("href")).toBe(
         "#/editor/agent/s1/file/src%2Fbig.txt?lang=toml",
@@ -4302,7 +4378,7 @@ describe("the editor's view and the store, end to end", () => {
     const store = await openReal(PATH)
     await screen.findByTestId("code-editor")
     fireEvent.click(await screen.findByRole("button", { name: /^syntax language:/i }))
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^TOML$/ }))
+    fireEvent.click(await screen.findByRole("option", { name: /^TOML$/ }))
     await waitFor(() => expect(location.hash).toContain("lang=toml"))
 
     const tree = await screen.findByTestId("file-tree-drop-surface")
