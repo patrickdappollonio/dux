@@ -1851,7 +1851,7 @@ pub(super) struct DeleteAgentBranchBoxes {
     pub(super) others_ticked: bool,
     pub(super) others_warning: Option<Prose>,
     /// What deleting the boxes ticked right now loses, which changes with
-    /// every tick.
+    /// every tick; `None` when it loses no commit.
     pub(super) loss: Option<Prose>,
 }
 
@@ -1916,7 +1916,7 @@ impl DeleteAgentBranchBoxes {
                         copy::BoxState::Unticked
                     },
                 )
-                .map(|(deleted, lost)| copy::branch_loss_prose(&deleted, lost)),
+                .and_then(|(deleted, lost)| copy::branch_loss_prose(&deleted, lost)),
         }
     }
 }
@@ -28099,7 +28099,8 @@ mod tests {
     }
 
     /// The count says what the boxes ticked right now lose, and follows a
-    /// tick: with both ticked it counts every commit both boxes hold.
+    /// tick: with both ticked it counts every commit both boxes hold, and a
+    /// tick that loses nothing says nothing.
     #[test]
     fn the_delete_dialog_says_what_the_ticked_boxes_lose() {
         use dux_core::branch_history::BranchOrigin;
@@ -28138,6 +28139,17 @@ mod tests {
         }
         let screen = rendered_screen(&mut app);
         assert!(screen.contains("loses 1 commit "), "{screen}");
+        if let PromptState::ConfirmDeleteAgent {
+            delete_branch,
+            delete_other_branches,
+            ..
+        } = &mut app.prompt
+        {
+            *delete_branch = Some(false);
+            *delete_other_branches = Some(true);
+        }
+        let screen = rendered_screen(&mut app);
+        assert!(!screen.contains("loses"), "{screen}");
     }
 
     /// Until git has answered there is nothing to pin a branch to, so no

@@ -435,6 +435,9 @@ describe("DeleteSessionDialog", () => {
     ).toBeTruthy()
     fireEvent.click(currentBox())
     expect(screen.queryByText(/^Deleting /)).toBeNull()
+    fireEvent.click(othersBox()!)
+    expect(othersBox()!.getAttribute("aria-checked")).toBe("true")
+    expect(screen.queryByText(/^Deleting /)).toBeNull()
   })
 
   // Whether a missing first box is the project's own branch is decided from

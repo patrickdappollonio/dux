@@ -605,10 +605,12 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
         oid: "a".repeat(40),
         origin,
     };
-    let counted = Ok(dux_core::git::UnpushedCommits {
-        count: 0,
-        has_remote_refs: true,
-    });
+    let counted = |count| {
+        Ok(dux_core::git::UnpushedCommits {
+            count,
+            has_remote_refs: true,
+        })
+    };
     let mut prompt = delete_agent_prompt(
         DeleteAgentTarget::Managed {
             branch_name: "now-br".to_string(),
@@ -620,20 +622,20 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
         *offer = crate::app::DeleteBranchOffer::Ready(BranchOffer {
             current_name: String::new(),
             current: Some(offered("now-br", BranchOrigin::Dux)),
-            current_unpushed: counted.clone(),
+            current_unpushed: counted(2),
             others: vec![offered("born-br", BranchOrigin::Before)],
-            others_unpushed: counted,
-            both_unpushed: Ok(dux_core::git::UnpushedCommits {
-                count: 0,
-                has_remote_refs: true,
-            }),
+            others_unpushed: counted(0),
+            both_unpushed: counted(2),
             newly_seen: Vec::new(),
             protected: Vec::new(),
         });
     }
     let buf = open(&mut app, prompt);
     assert_chipped(&app, &buf, "launch-at-login");
+    // Named in the first box AND in the line saying what deleting it loses.
     assert_chipped(&app, &buf, "now-br");
+    assert!(screen(&buf).contains("loses 2 commits"), "{}", screen(&buf));
+    assert!(occurrences(&buf, "now-br").len() >= 2, "{}", screen(&buf));
     // Named in the second box AND in the warning under it.
     assert_chipped(&app, &buf, "born-br");
     assert!(occurrences(&buf, "born-br").len() >= 2, "{}", screen(&buf));

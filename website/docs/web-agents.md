@@ -428,9 +428,10 @@ Where each box starts depends on whether dux can prove the branch is its own:
   may have made it.
 
 Under the boxes one line says what deleting the branches ticked right now loses: their commits
-on no remote and no local branch that stays. It changes as you tick, and with both boxes ticked
-it counts everything the two hold together, which can be more than either box alone. Ticking a
-box is the only way to remove such a branch from dux once its worktree is gone.
+on no remote and no local branch that stays. The line changes as you tick, and with both boxes
+ticked it counts everything the two hold together, which can be more than either box alone.
+When deleting them loses no commit there is no line at all. Ticking a box is the only way to
+remove such a branch from dux once its worktree is gone.
 
 What dux deletes, and what it never does:
 

@@ -62,7 +62,7 @@ function lossAnswer(
 }
 
 // What deleting the boxes ticked right now loses, or `null` with nothing
-// ticked; it changes on every tick.
+// ticked or nothing lost; it changes on every tick.
 function lossProse(
   offer: BranchOffer,
   deleteCurrent: boolean,

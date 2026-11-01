@@ -416,7 +416,7 @@ mod tests {
                 let branches = strings(&args["branches"]);
                 let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
                 let lost = fixture_unpushed(&args["lost"]).expect("a count or a failure");
-                crate::delete_agent_prose::branch_loss_prose(&branches, &lost)
+                crate::delete_agent_prose::branch_loss_prose(&branches, &lost).unwrap_or_default()
             }
             "delete_other_branches_warning" => {
                 let others: Vec<(String, crate::branch_history::BranchOrigin)> = args["others"]

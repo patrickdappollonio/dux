@@ -77,31 +77,24 @@ export function otherBranchesLabelProse(branches: readonly string[]): Prose {
 
 /**
  * What deleting `branches` (every box ticked right now) loses: their commits
- * on no remote and no local branch that stays, or why git could not count.
- * Mirrors dux-core's `branch_loss_prose`, pinned by the shared prose fixture.
+ * on no remote and no local branch that stays, or why git could not count;
+ * `null` when git counted no such commit, since there is nothing to warn
+ * about. Mirrors dux-core's `branch_loss_prose`, pinned by the shared prose
+ * fixture.
  */
 export function branchLossProse(
   branches: readonly string[],
   lost: { count: number; has_remote_refs: boolean } | { failed: string },
-): Prose {
+): Prose | null {
   if ("failed" in lost) return unpushedCountFailureProse([...branches], lost.failed)
-  const [also, nowhere, tail] = lost.has_remote_refs
-    ? [
-        "on a remote or a branch that stays",
-        "on no remote and no branch that stays",
-        "",
-      ]
-    : [
-        "on a branch that stays",
-        "on no branch that stays",
-        ", and this repository has no remote",
-      ]
+  if (lost.count === 0) return null
+  const [nowhere, tail] = lost.has_remote_refs
+    ? ["on no remote and no branch that stays", ""]
+    : ["on no branch that stays", ", and this repository has no remote"]
   const said =
-    lost.count === 0
-      ? ` loses no commits: every one is also ${also}.`
-      : lost.count === 1
-        ? ` loses 1 commit that is ${nowhere}${tail}.`
-        : ` loses ${lost.count} commits that are ${nowhere}${tail}.`
+    lost.count === 1
+      ? ` loses 1 commit that is ${nowhere}${tail}.`
+      : ` loses ${lost.count} commits that are ${nowhere}${tail}.`
   return ["Deleting ", ...nameList(branches, " and "), said]
 }
 

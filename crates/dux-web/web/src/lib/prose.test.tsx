@@ -210,11 +210,13 @@ describe("the sentences both surfaces print", () => {
           args.ticked as boolean,
         )
       case "delete_branch_loss":
-        return branchLossProse(
-          args.branches as string[],
-          args.lost as
-            | { count: number; has_remote_refs: boolean }
-            | { failed: string },
+        return (
+          branchLossProse(
+            args.branches as string[],
+            args.lost as
+              | { count: number; has_remote_refs: boolean }
+              | { failed: string },
+          ) ?? []
         )
       case "delete_branches_checking":
         return branchesCheckingProse()

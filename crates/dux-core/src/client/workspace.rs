@@ -1640,7 +1640,7 @@ struct BranchAnswersPlan {
 
 /// What deleting the branches the two answers tick loses, as the line before
 /// the question, using the count for exactly that tick combination; `None`
-/// when they tick nothing.
+/// when they tick nothing or deleting them loses no commit.
 fn loss_note(
     offer: &BranchOfferReply,
     current: &crate::branch_history::BoxWire,
@@ -1662,7 +1662,7 @@ fn loss_note(
         (false, true) => count_answer(offer.others_unpushed, offer.others_unpushed_error.as_ref()),
         (false, false) => return None,
     };
-    Some(crate::delete_agent_prose::branch_loss_prose(&deleted, &lost).plain())
+    crate::delete_agent_prose::branch_loss_prose(&deleted, &lost).map(|prose| prose.plain())
 }
 
 fn plan_branch_answers(
@@ -1770,7 +1770,8 @@ fn plan_branch_answers(
 /// Any branch flag makes the command read the branches from the running dux
 /// first and answer BOTH boxes as the dialogs would, the box no flag named at
 /// its default, so the question names every branch that goes and every branch
-/// that stays, and the line before it says what deleting them loses. A
+/// that stays, and the line before it, there only when deleting them loses
+/// any commit, says how many. A
 /// standalone agent has no branch of its own, and a worktree that stays keeps
 /// every branch, so neither reads anything. With no flag
 /// at all, only the branch dux made for the agent goes, and only while dux can
@@ -2906,5 +2907,20 @@ mod agents_rm_tests {
             body["branches"]["current"]["branches"][0]["name"],
             "drifted"
         );
+    }
+    /// Ticked boxes that lose no commit leave nothing to say before the
+    /// question.
+    #[test]
+    fn the_notice_is_absent_when_the_ticked_boxes_lose_nothing() {
+        let planned = plan(
+            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+               "current_unpushed":{"count":0,"has_remote_refs":true},
+               "others":[{"name":"born","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":0,"has_remote_refs":true},
+               "both_unpushed":{"count":0,"has_remote_refs":true},"protected":[]}"#,
+            Some(true),
+            Some(true),
+        );
+        assert_eq!(planned.notice, None);
     }
 }

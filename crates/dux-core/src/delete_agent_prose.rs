@@ -77,32 +77,29 @@ pub enum BoxState {
 
 /// What deleting `branches` (every box ticked right now) loses: their
 /// commits on no remote and no local branch that stays, as git counted them
-/// from the commits the dialog pinned, or why git could not count.
-pub fn branch_loss_prose(branches: &[&str], lost: &UnpushedAnswer) -> Prose {
+/// from the commits the dialog pinned, or why git could not count. `None`
+/// when git counted no such commit, since there is nothing to warn about.
+pub fn branch_loss_prose(branches: &[&str], lost: &UnpushedAnswer) -> Option<Prose> {
     let answer = match lost {
         Ok(answer) => *answer,
-        Err(reason) => return unpushed_count_failure_prose(branches, reason),
+        Err(reason) => return Some(unpushed_count_failure_prose(branches, reason)),
     };
-    let mut prose = Prose::new().text("Deleting ");
-    push_list(&mut prose, branches, " and ");
-    let (also, nowhere, tail) = if answer.has_remote_refs {
-        (
-            "on a remote or a branch that stays",
-            "on no remote and no branch that stays",
-            "",
-        )
+    let lost = match answer.count {
+        0 => return None,
+        1 => "loses 1 commit that is".to_string(),
+        count => format!("loses {count} commits that are"),
+    };
+    let (nowhere, tail) = if answer.has_remote_refs {
+        ("on no remote and no branch that stays", "")
     } else {
         (
-            "on a branch that stays",
             "on no branch that stays",
             ", and this repository has no remote",
         )
     };
-    prose.text(match answer.count {
-        0 => format!(" loses no commits: every one is also {also}."),
-        1 => format!(" loses 1 commit that is {nowhere}{tail}."),
-        count => format!(" loses {count} commits that are {nowhere}{tail}."),
-    })
+    let mut prose = Prose::new().text("Deleting ");
+    push_list(&mut prose, branches, " and ");
+    Some(prose.text(format!(" {lost} {nowhere}{tail}.")))
 }
 
 fn push_sentence(prose: &mut Prose, sentence: Prose) {

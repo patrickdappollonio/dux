@@ -1368,7 +1368,7 @@
       ]
     },
     {
-      "what": "what deleting a fully kept branch loses",
+      "what": "deleting a branch that loses no commit says nothing",
       "sentence": "delete_branch_loss",
       "args": {
         "branches": [
@@ -1379,14 +1379,7 @@
           "has_remote_refs": true
         }
       },
-      "segments": [
-        "Deleting ",
-        {
-          "name": "feat",
-          "quoted": false
-        },
-        " loses no commits: every one is also on a remote or a branch that stays."
-      ]
+      "segments": []
     },
     {
       "what": "what deleting branches loses when git could not count",
