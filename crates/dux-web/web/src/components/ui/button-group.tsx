@@ -1,7 +1,13 @@
-// Vendored from shadcn/ui (button-group). The child selectors below are kept
-// byte-identical to upstream, since they are what squares the inner corners and
-// collapses the shared border. Two deviations, both forced by base-ui rather than
-// radix: the Separator import path, and ButtonGroupText using a plain div.
+// Vendored from shadcn/ui (button-group). The child selectors below square the
+// inner corners and collapse the shared border. Three deviations, all forced by
+// base-ui rather than radix: the Separator import path, ButtonGroupText using a
+// plain div, and the orientation selectors counting siblings rather than using
+// :first-child and :last-child. While a base-ui menu or popover is open, its
+// trigger and its portal render hidden spans in place (focus guards on both
+// sides of the trigger, and the portal's own guards and its aria-owns span), so
+// upstream's selectors would square a trigger's outer corners for as long as its
+// popup is open. "Not first" is therefore "follows a child that is not one of
+// those spans" and "not last" is "is followed by a child that is not one".
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
@@ -14,9 +20,9 @@ const buttonGroupVariants = cva(
     variants: {
       orientation: {
         horizontal:
-          "[&>*:not(:first-child)]:rounded-l-none [&>*:not(:first-child)]:border-l-0 [&>*:not(:last-child)]:rounded-r-none",
+          "[&>:not([data-base-ui-focus-guard]):not(span[aria-owns])~*]:rounded-l-none [&>:not([data-base-ui-focus-guard]):not(span[aria-owns])~*]:border-l-0 [&>*:has(~:not([data-base-ui-focus-guard]):not(span[aria-owns]))]:rounded-r-none",
         vertical:
-          "flex-col [&>*:not(:first-child)]:rounded-t-none [&>*:not(:first-child)]:border-t-0 [&>*:not(:last-child)]:rounded-b-none",
+          "flex-col [&>:not([data-base-ui-focus-guard]):not(span[aria-owns])~*]:rounded-t-none [&>:not([data-base-ui-focus-guard]):not(span[aria-owns])~*]:border-t-0 [&>*:has(~:not([data-base-ui-focus-guard]):not(span[aria-owns]))]:rounded-b-none",
       },
     },
     defaultVariants: {

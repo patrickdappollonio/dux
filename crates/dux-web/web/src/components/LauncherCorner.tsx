@@ -61,9 +61,11 @@ export function LauncherCorner({ className }: { className?: string }) {
             <Button
               size="sm"
               aria-label="More ways to start"
-              className="w-8 px-0 max-md:min-h-11 max-md:w-11 pointer-coarse:min-h-11 pointer-coarse:w-11"
+              // The chevron points at the menu: down while it is closed and up
+              // while it is open, read from the trigger's own open state.
+              className="w-8 px-0 max-md:min-h-11 max-md:w-11 pointer-coarse:min-h-11 pointer-coarse:w-11 [&[data-popup-open]>svg]:rotate-180"
             >
-              <ChevronDown />
+              <ChevronDown className="transition-transform motion-reduce:transition-none" />
             </Button>
           }
         />

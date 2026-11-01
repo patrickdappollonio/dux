@@ -52,6 +52,27 @@ const entry = (title: string) =>
     .getAllByRole("menuitem")
     .find((item) => item.querySelector("[data-entry-title]")?.textContent === title)
 
+// What a holder's own `[&...]:utility` arbitrary variants apply to an element,
+// as the browser would read them: each variant becomes its selector, rooted at
+// the holder, and applies wherever that selector matches.
+function appliedVariants(holder: Element, element: Element) {
+  const applied: string[] = []
+  for (const token of holder.className.split(/\s+/)) {
+    const rule = /^\[(&.+)\]:([\w-]+)$/.exec(token)
+    if (!rule) continue
+    const selector = rule[1].replace(/&/g, ":scope").replace(/_/g, " ")
+    if (Array.from(holder.querySelectorAll(selector)).includes(element)) {
+      applied.push(rule[2])
+    }
+  }
+  return applied
+}
+
+const squaredCorners = (element: Element) =>
+  appliedVariants(element.closest('[data-slot="button-group"]')!, element).filter(
+    (utility) => /^rounded-[lr]-none$/.test(utility),
+  )
+
 beforeEach(() => {
   calls.length = 0
   seed()
@@ -123,5 +144,39 @@ describe("LauncherCorner", () => {
     render(<LauncherCorner />)
     await openMenu()
     expect(entry("New agent from PR…")).toBeUndefined()
+  })
+  // The sidebar footer and the phone hub's bottom bar, whose menu is a sheet.
+  describe.each([
+    ["a computer", 1024],
+    ["a phone", 390],
+  ])("on %s", (_, width) => {
+    const desktopWidth = window.innerWidth
+    beforeEach(() => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
+    })
+    afterEach(() => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: desktopWidth })
+    })
+
+    it("keeps the menu half's outer corners round, with its menu closed and open", async () => {
+      render(<LauncherCorner />)
+      const more = screen.getByRole("button", { name: "More ways to start" })
+      const main = screen.getByRole("button", { name: "New agent…" })
+      expect(squaredCorners(more)).toEqual(["rounded-l-none"])
+      expect(squaredCorners(main)).toEqual(["rounded-r-none"])
+      await openMenu()
+      expect(squaredCorners(more)).toEqual(["rounded-l-none"])
+      expect(squaredCorners(main)).toEqual(["rounded-r-none"])
+    })
+
+    it("points its menu half's chevron down while closed and up while open", async () => {
+      render(<LauncherCorner />)
+      const more = screen.getByRole("button", { name: "More ways to start" })
+      const chevron = more.querySelector("svg")!
+      const rotated = () => appliedVariants(more, chevron).includes("rotate-180")
+      expect(rotated()).toBe(false)
+      await openMenu()
+      expect(rotated()).toBe(true)
+    })
   })
 })
