@@ -319,7 +319,7 @@ describe("the standalone editor shell", () => {
     expect(header.querySelector("[aria-label^='Syntax language']")).toBeNull()
   })
 
-  it("keeps the desktop header inline: mode toggle, preview-capable controls, Open local editor", async () => {
+  it("keeps the desktop header inline: mode toggle and preview-capable controls", async () => {
     await seedState({
       changes: {
         sessionId: SESSION,
@@ -337,10 +337,6 @@ describe("the standalone editor shell", () => {
     await screen.findByTestId("code-editor")
     // The File/Diff segmented control renders inline.
     expect(screen.getByRole("group", { name: "View mode" })).toBeTruthy()
-    // The GUI-editor dropdown is named "Open local editor" (it spawns an
-    // editor on the machine dux runs on, not in the browser).
-    expect(screen.getByText("Open local editor")).toBeTruthy()
-    expect(screen.queryByText(/^Open editor$/)).toBeNull()
     // The mobile fold's ⋯ trigger exists but is desktop-hidden by class.
     const fold = screen.getByRole("button", { name: /more editor actions/i })
     expect(fold.className).toContain("md:hidden")
@@ -375,7 +371,8 @@ describe("the standalone editor shell", () => {
       screen.getByRole("button", { name: /^save$/i }).className,
     ).not.toContain("max-md:hidden")
     // The ⋯ menu carries the folded controls: the mode switch (with the
-    // active mode readable), the preview toggle, and Open local editor.
+    // active mode readable), the preview toggle, and, because jsdom's host is
+    // localhost, Open local editor.
     fireEvent.click(
       screen.getByRole("button", { name: /more editor actions/i }),
     )

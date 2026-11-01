@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { ChevronDown, Code2, FileType } from "lucide-react"
+import { ChevronDown, Code2, FileType, Laptop, Loader2 } from "lucide-react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
@@ -113,6 +113,7 @@ export function EditorStatusBar({
   languageLabel,
   languageItems,
   encodingItems = null,
+  localEditor = null,
 }: {
   plan: StatusBarPlan
   editor: StatusBarEditor | null
@@ -123,6 +124,9 @@ export function EditorStatusBar({
   // The encoding menu's rows (reopen, save with). Shown while the plan names
   // an encoding, on every screen: this selector is their only home.
   encodingItems?: React.ReactNode
+  // The local editors to open the file in, and whether one is opening now.
+  // Null leaves the selector out: the editor is only offered where it can open.
+  localEditor?: { items: React.ReactNode; opening: boolean } | null
 }) {
   const status = useEditorCursorStatus(plan.editing ? editor : null)
   return (
@@ -201,10 +205,12 @@ export function EditorStatusBar({
                 <DropdownMenuTrigger
                   render={
                     // Under the 40px floor on the vertical axis for a fine
-                    // pointer only: its neighbours on this bar are plain
-                    // text. A finger at any width gets the floor (the bar
-                    // grows to match), and the label keeps it wider than
-                    // 40px on the other axis.
+                    // pointer only: above it is the editor surface, where a
+                    // stray click only moves the caret, and the selectors
+                    // beside it are kept apart by the bar's 12px gap. A
+                    // finger at any width gets the floor (the bar grows to
+                    // match), and the label keeps it wider than 40px on the
+                    // other axis.
                     <Button
                       variant="ghost"
                       size="xs"
@@ -231,9 +237,11 @@ export function EditorStatusBar({
                 <DropdownMenuTrigger
                   render={
                     // Ghost and under the 40px floor on the vertical axis for
-                    // a fine pointer only: its neighbours on this bar are
-                    // plain text, and a finger at desktop width gets the
-                    // floor (the bar grows to match).
+                    // a fine pointer only: above it is the editor surface,
+                    // where a stray click only moves the caret, and the
+                    // selectors beside it are kept apart by the bar's 12px
+                    // gap. A finger at desktop width gets the floor (the bar
+                    // grows to match).
                     <Button
                       variant="ghost"
                       size="xs"
@@ -249,6 +257,41 @@ export function EditorStatusBar({
               </SimpleTooltip>
               <DropdownMenuContent align="end" side="top">
                 {languageItems}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </span>
+        )}
+        {localEditor !== null && (
+          // Desktop only: a phone reaches the same menu through the header's
+          // fold.
+          <span className={cn("inline-flex", DESKTOP_ONLY)}>
+            <DropdownMenu>
+              <SimpleTooltip content="Open this file in an editor on the machine dux runs on">
+                <DropdownMenuTrigger
+                  render={
+                    // Ghost and under the 40px floor on the vertical axis for
+                    // a fine pointer only, for the language picker's reasons:
+                    // the editor surface above, the bar's 12px gap beside.
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="h-5.5 font-normal text-muted-foreground pointer-coarse:h-10"
+                      disabled={localEditor.opening}
+                      aria-busy={localEditor.opening}
+                    />
+                  }
+                >
+                  {localEditor.opening ? (
+                    <Loader2 className="motion-safe:animate-spin" />
+                  ) : (
+                    <Laptop />
+                  )}
+                  Open local editor
+                  <ChevronDown />
+                </DropdownMenuTrigger>
+              </SimpleTooltip>
+              <DropdownMenuContent align="end" side="top">
+                {localEditor.items}
               </DropdownMenuContent>
             </DropdownMenu>
           </span>

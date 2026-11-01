@@ -43,7 +43,7 @@ The standalone tab works on phones, best-effort:
 
 - The file explorer starts collapsed so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard.
 - The header keeps the **‹** Back button, the explorer toggle, the name of what the editor is rooted at and **Save**.
-- The File/Diff switch (on changed files), the preview toggle, the syntax language and **Open local editor** fold into one `⋯` menu at the end of the row.
+- The File/Diff switch (on changed files), the preview toggle, the syntax language and, when dux is opened at a local address, **Open local editor** fold into one `⋯` menu at the end of the row.
 - The status bar keeps the file's path, the unsaved-changes dot, the read-only badge where it applies, the cursor position, and an image's pixel dimensions.
 
 ## Editing next to a terminal
@@ -431,11 +431,12 @@ changes disappear (say, you revert them), until you flip back to File.
 
 ## Open in your local editor
 
-The **Open local editor ▾** dropdown launches **Cursor, VS Code, Zed, VSCodium, or Sublime
-Text** on the file.
+The **Open local editor ▾** dropdown at the right end of the status bar, beside the syntax
+language, launches **Cursor, VS Code, Zed, VSCodium, or Sublime Text** on the file. On a
+phone it is in the header's `⋯` menu instead.
 
 > [!IMPORTANT]
 > It spawns that editor **on the server** (the machine dux runs on), so it only makes sense
-> when you are sitting at that machine. dux enables it only for local-access URLs (loopback,
-> `0.0.0.0`, or a private LAN address) and disables it with a tooltip when you reached dux
-> over a remote URL.
+> when you are sitting at that machine. dux shows it only for local-access URLs (loopback,
+> `0.0.0.0`, or a private LAN address); when you reached dux over a remote URL it is not
+> there at all.

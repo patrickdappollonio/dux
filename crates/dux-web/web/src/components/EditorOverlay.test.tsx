@@ -94,6 +94,14 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
+// Whether the page counts as opened locally. jsdom's own host is localhost, so
+// this is on unless a case turns it off.
+let localAccess = true
+vi.mock("@/lib/localAccess", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/localAccess")>()
+  return { ...actual, isLocalAccessHost: () => localAccess }
+})
+
 // Resolves with the save route's real success body (the file's fresh stamp),
 // which the editor adopts as its new baseline. Tests that care override it.
 const writeMock = vi.fn(async (..._a: unknown[]) => ({
@@ -1490,20 +1498,45 @@ describe("the overlay's header names the root, and the status bar names the file
   })
 })
 
-describe("the header's two open controls are told apart by their icons", () => {
+describe("Open local editor sits in the status bar, on a local instance only", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     installBootStubs()
+    localAccess = true
   })
 
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    localAccess = true
   })
 
-  it("gives them different icons, and the arrow to the one that is a link", async () => {
+  it("puts it in the status bar, not the header, and lists the editors", async () => {
     await mountWithTab(PATH)
-    const local = screen.getByText("Open local editor").closest("button")!
+    const local = screen.getByRole("button", { name: /open local editor/i })
+    expect(local.closest("div.border-t")).toBeTruthy()
+    expect(local.closest("div.border-b")).toBeNull()
+    // Desktop only: a phone reaches it through the header's fold instead.
+    expect(local.closest(".max-md\\:hidden")).toBeTruthy()
+    fireEvent.click(local)
+    for (const editor of OPEN_IN_EDITORS) {
+      expect(await screen.findByRole("menuitem", { name: editor.label })).toBeTruthy()
+    }
+  })
+
+  it("is absent from the status bar, the header and the phone fold over a remote URL", async () => {
+    localAccess = false
+    await mountWithTab(PATH)
+    await screen.findByTestId("code-editor")
+    expect(screen.queryByRole("button", { name: /open local editor/i })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "More editor actions" }))
+    await screen.findByRole("menu")
+    expect(screen.queryByRole("menuitem", { name: /open local editor/i })).toBeNull()
+  })
+
+  it("gives it and Open in new tab different icons, and the arrow to the link", async () => {
+    await mountWithTab(PATH)
+    const local = screen.getByRole("button", { name: /open local editor/i })
     const newTab = screen.getByText("Open in new tab").closest("a")!
     // Exact class match, not a substring: lucide names are prefixes of each
     // other ("lucide-laptop" of "lucide-laptop-minimal").
@@ -1513,10 +1546,10 @@ describe("the header's two open controls are told apart by their icons", () => {
     expect(newTab.querySelector("svg.lucide-laptop")).toBeNull()
   })
 
-  it("offers the same local editors in the desktop and mobile menus", async () => {
+  it("offers the same local editors in the status bar and the phone fold", async () => {
     await mountWithTab(PATH)
 
-    fireEvent.click(screen.getByText("Open local editor").closest("button")!)
+    fireEvent.click(screen.getByRole("button", { name: /open local editor/i }))
     for (const editor of OPEN_IN_EDITORS) {
       expect(await screen.findByRole("menuitem", { name: editor.label })).toBeTruthy()
     }
@@ -1589,11 +1622,6 @@ describe("editor header controls share one outline look", () => {
 
     // Desktop only: the phone reaches these through the fold.
     expectOutline(screen.getByRole("button", { name: /preview/i }), false)
-    const local = screen.getByRole("button", { name: /open local editor/i })
-    expectOutline(local, false)
-    // Its tooltip wrapper is what hides it on a phone, once, not the button too.
-    expect(local.className).not.toContain("max-md:hidden")
-    expect(local.parentElement!.className).toContain("max-md:hidden")
   })
 
   // Save is the cluster's one filled primary action, because it commits the
@@ -1632,7 +1660,6 @@ describe("editor header controls share one outline look", () => {
       [screen.getByRole("button", { name: /^file$/i }), "File"],
       [screen.getByRole("button", { name: /^diff$/i }), "Diff"],
       [screen.getByRole("button", { name: /preview/i }), "Preview"],
-      [screen.getByRole("button", { name: /open local editor/i }), "Open local editor"],
       [screen.getByRole("link", { name: /open in new tab/i }), "Open in new tab"],
       [screen.getByRole("button", { name: /^close$/i }), "Close"],
     ]

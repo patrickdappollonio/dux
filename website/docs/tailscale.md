@@ -454,9 +454,9 @@ it, and browsers switch off a handful of APIs there:
 - **Everything that matters still works.** The terminal, the live WebSocket streams, the file
   editor, git, macros, the mobile compose bar.
 
-One more that is *not* a TLS problem: the editor's **Open local editor** button, which hands a path
-to the editor on the machine you are sitting at, is enabled only for `localhost` and other loopback
-names, `0.0.0.0`, `::1` and private-network IPv4 addresses. It is disabled everywhere else,
+One more that is *not* a TLS problem: the editor's **Open local editor** menu, which hands a path
+to the editor on the machine you are sitting at, appears only for `localhost` and other loopback
+names, `0.0.0.0`, `::1` and private-network IPv4 addresses. It is left out everywhere else,
 which includes tailnet addresses and names and any other hostname. That is a host check, not
 a certificate one.
 

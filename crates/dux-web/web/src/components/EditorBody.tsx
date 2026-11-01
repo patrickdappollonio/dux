@@ -8,7 +8,6 @@ import { changedStatusLookup } from "@/lib/changedFiles"
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
 import {
   Check,
-  ChevronDown,
   ChevronLeft,
   CircleAlert,
   Ellipsis,
@@ -1669,49 +1668,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
   }
 
-  function renderLocalEditorAction(): React.ReactNode {
-    if (activeTab === null) return null
-    return (
-      // On the wrapper rather than the button, so it still answers a hover
-      // while the button is disabled; a keyboard focus on the button inside
-      // opens it too, because focus reaches the wrapper's handler.
-      <SimpleTooltip
-        content={
-          localAccess
-            ? "Open local editor"
-            : "Only available when dux is opened locally, not over a remote URL."
-        }
-      >
-        <span className="inline-flex max-md:hidden">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  // The wrapper span, not the button, carries max-md:hidden.
-                  className={cn(HEADER_CONTROL, COLLAPSES_BELOW_XL)}
-                  disabled={!localAccess || openingEditor}
-                  aria-busy={openingEditor}
-                />
-              }
-            >
-              {openingEditor ? (
-                <Loader2 className="motion-safe:animate-spin" />
-              ) : (
-                <Laptop />
-              )}
-              <HeaderLabel>Open local editor</HeaderLabel>
-              <ChevronDown />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {localEditorMenuItems()}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </span>
-      </SimpleTooltip>
-    )
-  }
-
   function renderSaveAction(): React.ReactNode {
     if (activeTab?.mode !== "file" || isImageTab) return null
     // The cluster's one filled primary action, beside its outline peers: Save
@@ -1792,15 +1748,17 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               </DropdownMenuSubContent>
             </DropdownMenuSub>
           )}
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={!localAccess || openingEditor}>
-              <Laptop />
-              Open local editor
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              {localEditorMenuItems()}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
+          {localAccess && (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger disabled={openingEditor}>
+                <Laptop />
+                Open local editor
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {localEditorMenuItems()}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
     )
@@ -1983,7 +1941,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         </SimpleTooltip>
         {renderRootTitle()}
         {renderDesktopViewActions()}
-        {renderLocalEditorAction()}
         {renderSaveAction()}
         {renderMobileActions()}
         {renderStandaloneActions()}
@@ -2288,6 +2245,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           languageLabel={activeLanguageLabel}
           languageItems={languagePickerItems()}
           encodingItems={encodingMenuItems()}
+          // Spawns an editor on the server, so it is offered only where the
+          // page was opened at a local address.
+          localEditor={
+            localAccess && activeTab !== null
+              ? { items: localEditorMenuItems(), opening: openingEditor }
+              : null
+          }
         />
       </>
     )
