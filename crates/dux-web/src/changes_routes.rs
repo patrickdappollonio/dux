@@ -99,9 +99,7 @@ fn list_children(
         Vec<dux_core::model::ChangedFile>,
     )>,
 ) -> Result<Vec<dux_core::model::ChangedFile>, ChildrenError> {
-    use dux_core::git::{
-        ChangesSide, changed_dir_children, changed_files_for_display, rows_answering,
-    };
+    use dux_core::git::{ChangesSide, changed_dir_children, rows_answering};
     if dir.is_empty() || !dux_core::model::is_lexically_normal_path(dir) {
         return Err(ChildrenError::Refused(format!(
             "\"{dir}\" is not a plain path inside the worktree"
@@ -122,14 +120,14 @@ fn list_children(
         dir.to_string()
     };
     let refused = |why: &str| ChildrenError::Refused(format!("\"{shown}\" {why}"));
-    // The listing the pane shows (the service's cache), or a fresh one when
-    // nothing is cached. A folder row answers for itself from it; only a folder
-    // inside a folded one is asked of git, scoped to that folder.
+    // The listing the pane shows (the service's cache), or a fresh one, read in
+    // the worktree's lane, when nothing current is cached. A folder row answers
+    // for itself from it; only a folder inside a folded one is asked of git,
+    // scoped to that folder.
     let (staged, unstaged) = match listing {
         Some(listing) => listing,
-        None => {
-            changed_files_for_display(worktree).map_err(|e| ChildrenError::Git(format!("{e:#}")))?
-        }
+        None => dux_core::changes_lane::request_changed_files(worktree)
+            .map_err(|e| ChildrenError::Git(format!("{e:#}")))?,
     };
     let files = match side {
         ChangesSide::Staged => &staged,
@@ -199,7 +197,12 @@ async fn get_children(
     if listing.is_none() {
         state.changes.note_fresh_validation_read();
     }
-    let answer = tokio::task::spawn_blocking(move || list_children(&wt, &dir, side, listing)).await;
+    // A folder expansion: a git child stopped at its deadline says only that,
+    // since nothing fetches the folder again by itself.
+    let answer = tokio::task::spawn_blocking(move || {
+        dux_core::git::as_folder_read(|| list_children(&wt, &dir, side, listing))
+    })
+    .await;
     match answer {
         Ok(Ok(children)) => Json(ChildrenResponseBody {
             dir: query.dir,

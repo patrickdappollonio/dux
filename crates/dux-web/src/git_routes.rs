@@ -148,8 +148,8 @@ pub fn routes() -> Router<AppState> {
 /// not do through one of them catches up only on the next poll.
 ///
 /// Both halves are needed. The engine call refreshes the lists the engine itself
-/// serves; the invalidate drops the REST cache entry, so the next GET recomputes
-/// rather than re-serving the pre-edit snapshot.
+/// serves; the invalidate marks the REST cache entry stale, so the next GET
+/// recomputes rather than re-serving the pre-edit snapshot.
 pub(crate) fn refresh_changed_files_now(state: &AppState, session_id: String, worktree: &Path) {
     state
         .engine
@@ -1410,8 +1410,8 @@ mod tests {
 
     /// The refresh route has to do BOTH halves of what every mutating handler
     /// above does after it touches a file: ask the engine to recompute its own
-    /// lists, and drop the REST cache entry so the next GET recomputes instead of
-    /// re-serving the answer from before the user edited anything in a terminal.
+    /// lists, and mark the REST cache entry stale so the next GET recomputes instead
+    /// of re-serving the answer from before the user edited anything in a terminal.
     /// Doing only one of them looks like it worked and changes nothing.
     #[tokio::test]
     async fn refresh_changes_invalidates_the_cache_and_asks_the_engine_to_refresh() {
@@ -1430,7 +1430,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let generation_before = state.changes.invalidation_generation();
+        let generation_before = state.changes.invalidation_generation("s1");
         assert!(
             state.engine.refresh_requests().is_empty(),
             "nothing has asked the engine to refresh yet"
@@ -1448,7 +1448,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         assert!(
-            state.changes.invalidation_generation() > generation_before,
+            state.changes.invalidation_generation("s1") > generation_before,
             "the REST changed-files cache must be invalidated, or the next GET \
              serves the same stale answer"
         );
@@ -1714,6 +1714,64 @@ mod tests {
 
         let staged = stage.await.unwrap().unwrap();
         assert_eq!(staged.status(), StatusCode::OK);
+        let committed = commit.await.unwrap().unwrap();
+        assert_eq!(
+            committed.status(),
+            StatusCode::OK,
+            "{}",
+            body_text(committed).await
+        );
+    }
+
+    /// A commit asked for while the changes listing is reading waits for that
+    /// read, rather than meet the index lock its `git status` takes and fail.
+    /// This was the commit-after-a-stage flake: the stage's refresh read the
+    /// listing beside the commit.
+    /// The read's first `git status` runs an fsmonitor hook that takes the lock
+    /// the way that status does, and holds it until the test lets go.
+    #[tokio::test]
+    async fn a_commit_waits_for_a_changes_listing_that_is_reading() {
+        let (tmp, app, state) = router_with_session_and_state().await;
+        let worktree = tmp.path().join("wt");
+        std::fs::write(worktree.join("f.txt"), "line1\nline2\n").unwrap();
+        run_git(&worktree, &["add", "f.txt"]);
+        let git_dir = worktree.join(".git");
+        let hook = git_dir.join("fsmonitor-hold");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\n\
+             mkdir .git/held 2>/dev/null || exit 1\n\
+             touch .git/index.lock\n\
+             while [ ! -e .git/release ]; do sleep 0.02; done\n\
+             rm -f .git/index.lock\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        run_git(
+            &worktree,
+            &["config", "core.fsmonitor", hook.to_str().unwrap()],
+        );
+
+        state.changes.invalidate("s1".to_string());
+        while !git_dir.join("held").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let commit = tokio::spawn(app.clone().oneshot(json_req(
+            "POST",
+            "/api/v1/sessions/s1/git/commit",
+            r#"{"message":"while the list reads"}"#,
+        )));
+        // Longer than a change waits for an outside program's lock, so a commit
+        // outside the lane would have run git, met the lock and answered.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            !commit.is_finished(),
+            "the commit ran beside the listing's git status"
+        );
+
+        std::fs::write(git_dir.join("release"), "").unwrap();
         let committed = commit.await.unwrap().unwrap();
         assert_eq!(
             committed.status(),

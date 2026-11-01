@@ -615,7 +615,7 @@ mod tests {
         /// generation, and the worktrees the engine was asked to recompute.
         fn refreshes(&self) -> (u64, Vec<String>) {
             (
-                self.state.changes.invalidation_generation(),
+                self.state.changes.invalidation_generation("s1"),
                 self.state.engine.refresh_requests(),
             )
         }

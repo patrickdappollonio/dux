@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Result, anyhow};
 
@@ -282,7 +282,7 @@ fn untracked_records(worktree: &Path, dir: Option<&str>) -> Result<Vec<u8>> {
         // pathspecs flag above so one named like a glob matches only itself.
         command.arg("--").arg(format!("{dir}/"));
     }
-    let output = command.output()?;
+    let output = super::listing_child::output(&mut command, "git ls-files")?;
     if !output.status.success() {
         return Err(anyhow!(
             "git ls-files failed: {}",
@@ -397,36 +397,24 @@ fn dirs_missing_from_head(worktree: &Path, dirs: &[&str]) -> HashSet<String> {
     if asked.is_empty() {
         return HashSet::new();
     }
-    let Ok(mut child) = Command::new("git")
-        .args([
-            "-C",
-            worktree.to_string_lossy().as_ref(),
-            "cat-file",
-            "--batch-check",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return HashSet::new();
-    };
-    let Some(mut stdin) = child.stdin.take() else {
-        return HashSet::new();
-    };
     let mut payload = Vec::new();
     for dir in &asked {
         payload.extend_from_slice(b"HEAD:");
         payload.extend_from_slice(dir.as_bytes());
         payload.push(b'\n');
     }
-    // Written from its own thread for the same reason `check-attr` is: a large
+    // Fed from its own thread for the same reason `check-attr` is: a large
     // batch fills the output pipe while the input is still being fed.
-    let writer = std::thread::spawn(move || {
-        let _ = std::io::Write::write_all(&mut stdin, &payload);
-    });
-    let output = child.wait_with_output();
-    let _ = writer.join();
+    let output = super::listing_child::output_with_input(
+        Command::new("git").args([
+            "-C",
+            worktree.to_string_lossy().as_ref(),
+            "cat-file",
+            "--batch-check",
+        ]),
+        payload,
+        "git cat-file",
+    );
     let Ok(output) = output else {
         return HashSet::new();
     };
@@ -685,19 +673,20 @@ fn staged_index(
     if dirs.is_empty() {
         return index;
     }
-    let Ok(output) = Command::new("git")
-        .args([
-            "--literal-pathspecs",
-            "-C",
-            worktree.to_string_lossy().as_ref(),
-            "ls-files",
-            "--stage",
-            "-z",
-            "--",
-        ])
-        .args(dirs)
-        .output()
-    else {
+    let Ok(output) = super::listing_child::output(
+        Command::new("git")
+            .args([
+                "--literal-pathspecs",
+                "-C",
+                worktree.to_string_lossy().as_ref(),
+                "ls-files",
+                "--stage",
+                "-z",
+                "--",
+            ])
+            .args(dirs),
+        "git ls-files --stage",
+    ) else {
         logger::debug("staged index: git ls-files --stage could not run");
         return index;
     };
@@ -1431,9 +1420,14 @@ fn staged_children(worktree: &Path, dir: &str) -> Result<Vec<ChangedFile>> {
 /// # Errors
 ///
 /// Fails when git cannot be run or reports a failure.
+///
+/// It takes no index lock (`--no-optional-locks`): it answers one folder of
+/// the pane, outside the worktree's lane, and the refreshed file times git
+/// would write back are the full listing's to write.
 fn tracked_status_under(wt: &str, pathspec: &str) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args([
+            "--no-optional-locks",
             "--literal-pathspecs",
             "-C",
             wt,

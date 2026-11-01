@@ -20,12 +20,21 @@ use crate::worker::BranchWarningKind;
 
 mod clone;
 mod folding;
+pub(crate) mod listing_child;
 pub use clone::{CloneError, CloneProcesses, clone_repository};
 pub(crate) use clone::{clone_repository_with_env, remote_default_branch_from_remote};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
     rows_answering, untracked_directory_kind,
 };
+
+/// Run `read` as a folder expansion: a git child of it stopped at its deadline
+/// says only that it was stopped, because nothing lists the folder again by
+/// itself and no change was waiting on it. Every read inside it, a whole
+/// listing on a cold cache included, says the same.
+pub fn as_folder_read<T>(read: impl FnOnce() -> T) -> T {
+    listing_child::with_purpose(listing_child::Purpose::Neutral, read)
+}
 
 /// One entry of `git worktree list`: a working tree and what it has checked out.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1231,11 +1240,19 @@ fn pull_origin_branch(
     } else {
         None
     };
+    // The merge changes the index, so it takes its turn in the checkout's lane
+    // like every other change dux makes there; the fetch above does not, and
+    // never holds a turn across the network.
+    let _turn = crate::changes_lane::ticket(repo_path).wait();
+    let lock = IndexLockWait::before_change(repo_path);
     let output = tree_move(repo_path, TreeMove::Merge)
         .args(["--ff-only", "--no-edit", &incoming])
         .output()?;
     if !output.status.success() {
-        return Err(git_failure("git merge --ff-only", repo_path, &output));
+        return Err(lock.explain(
+            git_failure("git merge --ff-only", repo_path, &output),
+            Some(repo_path),
+        ));
     }
     Ok(())
 }
@@ -2209,13 +2226,19 @@ pub(crate) fn fast_forward_worktree(worktree: &Path, commit: &str) -> Result<()>
         ));
     }
     // `--` after the id: a file named like it would otherwise make the
-    // argument ambiguous, and git would refuse the move.
+    // argument ambiguous, and git would refuse the move. The worktree is one
+    // an agent create is still making, with no session in any lane yet, so
+    // this waits only for another program's index lock.
+    let lock = IndexLockWait::before_change(worktree);
     let out = worktree_git(worktree, &["reset", "--keep", "--quiet", commit, "--"])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to fast-forward {}", worktree.display()))?;
     if !out.status.success() {
-        return Err(git_failure("git reset --keep", worktree, &out));
+        return Err(lock.explain(
+            git_failure("git reset --keep", worktree, &out),
+            Some(worktree),
+        ));
     }
     let now = head_commit(worktree)?;
     if now != commit {
@@ -2241,12 +2264,17 @@ pub(crate) fn rewind_worktree(worktree: &Path, from: &str, to: &str) -> Result<(
             worktree.display()
         ));
     }
+    // Undoing a create that failed, so no session holds a lane here either.
+    let lock = IndexLockWait::before_change(worktree);
     let out = worktree_git(worktree, &["reset", "--hard", "--quiet", to, "--"])
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("failed to rewind {}", worktree.display()))?;
     if !out.status.success() {
-        return Err(git_failure("git reset --hard", worktree, &out));
+        return Err(lock.explain(
+            git_failure("git reset --hard", worktree, &out),
+            Some(worktree),
+        ));
     }
     Ok(())
 }
@@ -3602,8 +3630,10 @@ pub fn copy_uncommitted_changes(
 }
 
 fn uncommitted_status(source: &Path) -> Result<Vec<u8>> {
+    // Read only, so it never takes the source's index lock.
     let output = Command::new("git")
         .args([
+            "--no-optional-locks",
             "-C",
             source.to_string_lossy().as_ref(),
             // Pin rename/copy detection off so every record carries exactly
@@ -4441,8 +4471,10 @@ impl std::error::Error for LeftoverWorktreeFolder {}
 /// Uses `--porcelain=v1 -z`, the machine-stable form; only the presence of the
 /// records is read, never the paths.
 pub(crate) fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
+    // A scan that only reads: it never takes the index lock.
     let output = Command::new("git")
         .args([
+            "--no-optional-locks",
             "-C",
             worktree_path.to_string_lossy().as_ref(),
             "status",
@@ -4812,7 +4844,43 @@ fn rename_source(status: char, source: Option<&String>) -> Option<String> {
 pub fn changed_files_for_display(
     worktree_path: &Path,
 ) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
-    changed_files_with(worktree_path, Submodules::AsConfigured)
+    changed_files_with(
+        worktree_path,
+        Submodules::AsConfigured,
+        ListingLocks::Refresh,
+    )
+}
+
+/// [`changed_files_for_display`], taking the index lock only as `locks` says.
+/// The caller owns the lane: [`crate::changes_lane::poll_changed_files`] and
+/// [`crate::changes_lane::request_changed_files`] pick the mode from the turn
+/// they got.
+///
+/// # Errors
+///
+/// Fails when git cannot be run, its status or numstat cannot be read, or one
+/// of its git children does not finish within its deadline.
+pub fn changed_files_for_display_with(
+    worktree_path: &Path,
+    locks: ListingLocks,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+    changed_files_with(worktree_path, Submodules::AsConfigured, locks)
+}
+
+/// Which of a listing's git children may take the worktree's `index.lock`.
+/// `git status` and `git diff` take it to write refreshed file times back,
+/// which is what spares the next read from hashing a file whose content did
+/// not change, and a change git is asked for meanwhile is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListingLocks {
+    /// Every child as git runs it: the listing holds the lane's turn.
+    Refresh,
+    /// A poll holding the turn: `git status` takes no lock, which on a clean
+    /// tree leaves the index untouched, and the unstaged numstat still writes
+    /// back the file times of files only touched, so they are hashed once.
+    Poll,
+    /// Read while somebody else holds the turn: nothing takes the lock.
+    LockFree,
 }
 
 /// The changed files for a decision (a discard's classification, the commit
@@ -4826,7 +4894,7 @@ pub fn changed_files_for_display(
 pub fn changed_files_for_decisions(
     worktree_path: &Path,
 ) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
-    changed_files_with(worktree_path, Submodules::All)
+    changed_files_with(worktree_path, Submodules::All, ListingLocks::Refresh)
 }
 
 /// Which submodule changes a listing includes.
@@ -4957,16 +5025,45 @@ fn staged_stats_with_folder_sums(
     staged_stats
 }
 
+/// One listing, failed whole when any git child it ran was stopped at its
+/// deadline (see [`listing_child`]), with what a lock left behind means.
 fn changed_files_with(
     worktree_path: &Path,
     submodules: Submodules,
+    locks: ListingLocks,
 ) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
-    let wt = worktree_path.to_string_lossy();
+    // The display listing feeds the changes list; the decision listing is the
+    // one a change runs before it acts (see `Submodules`).
+    let read = || list_changed_files(worktree_path, submodules, locks);
+    let purpose = match submodules {
+        Submodules::AsConfigured => listing_child::Purpose::Display,
+        Submodules::All => listing_child::Purpose::Change,
+    };
+    let (listing, stopped) =
+        listing_child::stopped_within(|| listing_child::with_purpose(purpose, read));
+    let Some(stopped) = stopped else {
+        return listing;
+    };
+    let lock = IndexLockWait::unwaited(worktree_path);
+    Err(match lock.leftover_note() {
+        Some(note) => anyhow!("{stopped} {note}"),
+        None => anyhow!("{stopped}"),
+    })
+}
 
+/// The listing's `git status --porcelain=v1 -z`, its standard output.
+fn status_porcelain(
+    worktree_path: &Path,
+    submodules: Submodules,
+    locks: ListingLocks,
+) -> Result<Vec<u8>> {
     let mut command = Command::new("git");
+    if locks != ListingLocks::Refresh {
+        command.arg("--no-optional-locks");
+    }
     command.args([
         "-C",
-        wt.as_ref(),
+        worktree_path.to_string_lossy().as_ref(),
         "status",
         "--porcelain=v1",
         "-z",
@@ -4978,15 +5075,24 @@ fn changed_files_with(
     if submodules == Submodules::All {
         command.arg("--ignore-submodules=none");
     }
-    let output = command.output()?;
+    let output = listing_child::output(&mut command, "git status")?;
     if !output.status.success() {
         return Err(anyhow!(
             "git status failed: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    Ok(output.stdout)
+}
 
-    let (staged, mut unstaged, untracked_folders) = sort_status_entries(&output.stdout);
+fn list_changed_files(
+    worktree_path: &Path,
+    submodules: Submodules,
+    locks: ListingLocks,
+) -> Result<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+    let wt = worktree_path.to_string_lossy();
+    let status = status_porcelain(worktree_path, submodules, locks)?;
+    let (staged, mut unstaged, untracked_folders) = sort_status_entries(&status);
 
     // What each folded folder holds. A count git could not produce fails the
     // read rather than claiming an empty folder.
@@ -5012,7 +5118,7 @@ fn changed_files_with(
     // whatever came back. A failed `git diff` yields an empty map, which costs
     // tracked rows their line counts and nothing else; running the loop inside
     // the call's `Ok` would take the untracked files' in-process counts with it.
-    let tracked_stats = unstaged_numstat(wt.as_ref());
+    let tracked_stats = unstaged_numstat(wt.as_ref(), locks);
     // A folder staged whole carries its files' line sums, read within the
     // same budget the unstaged side reads under: numstat reads every blob it
     // is not told to skip, so only the folders whose files fit what is left
@@ -5066,14 +5172,67 @@ fn changed_files_with(
 /// A git call that could not be run, or that exited non-zero, answers with an
 /// empty map rather than an error: it is one of two independent sources feeding
 /// the unstaged rows, and the other one still has something to say.
-fn unstaged_numstat(worktree: &str) -> HashMap<String, DiffStat> {
-    Command::new("git")
-        .args(["-C", worktree, "diff", "--numstat", "-z"])
-        .output()
+///
+/// `git diff` takes the index lock to write refreshed file times back, so a
+/// [`ListingLocks::LockFree`] read asks the plumbing `git diff-files` instead,
+/// which never does. Plumbing reads none of the configuration that changes
+/// what `git diff` counts, so the two settings that do (`diff.algorithm`,
+/// which can move lines between hunks, and `diff.renames`, which pairs a file
+/// added with intent-to-add with the one it replaced) are read and handed to it
+/// as flags, and both forms count the same.
+fn unstaged_numstat(worktree: &str, locks: ListingLocks) -> HashMap<String, DiffStat> {
+    let mut command = Command::new("git");
+    command.args(["-C", worktree]);
+    if locks == ListingLocks::LockFree {
+        command.args(["diff-files", "--numstat", "-z"]);
+        command.args(porcelain_diff_flags(worktree));
+    } else {
+        command.args(["diff", "--numstat", "-z"]);
+    }
+    listing_child::output(&mut command, "git diff")
         .ok()
         .filter(|ns| ns.status.success())
         .map(|ns| parse_numstat(&ns.stdout))
         .unwrap_or_default()
+}
+
+/// The flags that make a plumbing diff in `worktree` count what `git diff`
+/// counts there: the configured `diff.algorithm`, and rename detection as
+/// `diff.renames` sets it (on unless it says otherwise, as `git diff` has it).
+fn porcelain_diff_flags(worktree: &str) -> Vec<String> {
+    let mut command = Command::new("git");
+    command.args([
+        "-C",
+        worktree,
+        "config",
+        "-z",
+        "--get-regexp",
+        r"^diff\.(algorithm|renames)$",
+    ]);
+    let configured = listing_child::output(&mut command, "git config")
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout)
+        .unwrap_or_default();
+    let mut algorithm = None;
+    let mut renames = "-M".to_string();
+    for record in configured.split(|byte| *byte == 0) {
+        let record = String::from_utf8_lossy(record);
+        let Some((key, value)) = record.split_once('\n') else {
+            continue;
+        };
+        match (key, value.trim().to_ascii_lowercase().as_str()) {
+            ("diff.algorithm", value) => algorithm = Some(format!("--diff-algorithm={value}")),
+            ("diff.renames", "false" | "no" | "off" | "0") => renames = "--no-renames".into(),
+            ("diff.renames", "copy" | "copies") => renames = "-C".into(),
+            ("diff.renames", _) => renames = "-M".into(),
+            _ => {}
+        }
+    }
+    algorithm
+        .into_iter()
+        .chain(std::iter::once(renames))
+        .collect()
 }
 
 /// Per-path line counts for the staged changes in `worktree`. Answers with an
@@ -5094,8 +5253,7 @@ fn staged_numstat(worktree: &str, skip: &[String]) -> HashMap<String, DiffStat> 
         command.args(["--", "."]);
         command.args(skip.iter().map(|dir| format!(":(exclude,literal){dir}")));
     }
-    command
-        .output()
+    listing_child::output(&mut command, "git diff --cached")
         .ok()
         .filter(|ns| ns.status.success())
         .map(|ns| parse_numstat(&ns.stdout))
@@ -5146,34 +5304,20 @@ fn paths_excluded_from_diffs(worktree: &str, paths: &[String]) -> HashSet<String
         return HashSet::new();
     }
 
-    let Ok(mut child) = Command::new("git")
-        .args(["-C", worktree, "check-attr", "-z", "--stdin", "diff"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
-        return HashSet::new();
-    };
-
-    let Some(mut stdin) = child.stdin.take() else {
-        return HashSet::new();
-    };
     let mut payload = Vec::new();
     for path in paths {
         payload.extend_from_slice(path.as_bytes());
         payload.push(0);
     }
 
-    // The writer runs on its own thread: check-attr answers three records per
-    // path, so a large batch can fill the output pipe while dux is still
+    // The input is fed from its own thread: check-attr answers three records
+    // per path, so a large batch can fill the output pipe while dux is still
     // feeding the input one, and a single-threaded write-then-read deadlocks.
-    let writer = std::thread::spawn(move || {
-        let _ = std::io::Write::write_all(&mut stdin, &payload);
-    });
-
-    let output = child.wait_with_output();
-    let _ = writer.join();
+    let output = listing_child::output_with_input(
+        Command::new("git").args(["-C", worktree, "check-attr", "-z", "--stdin", "diff"]),
+        payload,
+        "git check-attr",
+    );
 
     match output {
         Ok(out) if out.status.success() => parse_check_attr_z(&out.stdout),
@@ -5267,40 +5411,28 @@ fn file_prefix_on_disk(path: &Path) -> Option<Vec<u8>> {
 /// and the revision always starts with a colon, so a dash-leading path can
 /// never be read as an option.
 fn index_blob_prefix(worktree_path: &Path, rel_path: &str) -> Option<Vec<u8>> {
-    use std::io::Read as _;
-
-    let mut child = Command::new("git")
-        .args([
+    // Only the sniff is read: the pipe is dropped after it, and a blob larger
+    // than the sniff gets EPIPE and exits instead of blocking on a reader that
+    // stopped. A listing child, so it is held to the listing's deadline.
+    let output = listing_child::output_prefix(
+        Command::new("git").args([
             "-C",
             worktree_path.to_string_lossy().as_ref(),
             "cat-file",
             "-p",
             &format!(":{rel_path}"),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut prefix = Vec::new();
-    let read = child.stdout.as_mut().map_or(Ok(0), |stdout| {
-        stdout
-            .take(crate::numeric::usize_to_u64(BINARY_SNIFF_BYTES))
-            .read_to_end(&mut prefix)
-    });
-    // Drop the pipe before waiting: a blob larger than the sniff gets EPIPE and
-    // exits instead of blocking on a reader that stopped. The child is reaped
-    // before a failed read is answered.
-    drop(child.stdout.take());
-    let status = child.wait();
-    read.ok()?;
-    let status = status.ok()?;
+        ]),
+        crate::numeric::usize_to_u64(BINARY_SNIFF_BYTES),
+        "git cat-file",
+    )
+    .ok()?;
     // A blob that fit inside the sniff exits 0; a larger one is killed by
     // SIGPIPE, which is success as far as this read is concerned. Only an
     // absent path (a real non-zero exit with nothing read) answers None.
-    if !status.success() && prefix.is_empty() {
+    if !output.status.success() && output.stdout.is_empty() {
         return None;
     }
-    Some(prefix)
+    Some(output.stdout)
 }
 
 /// Put one numstat answer onto its row.
@@ -5520,8 +5652,11 @@ pub(crate) struct FileStatusCodes {
 /// or for some other reason (a real error the caller surfaces).
 pub(crate) fn file_status(worktree: &Path, rel_path: &str) -> Result<Option<FileStatusCodes>> {
     let wt = worktree.to_string_lossy();
+    // No index lock: one file's status, read outside the worktree's lane, must
+    // not refuse a commit somebody starts meanwhile.
     let output = Command::new("git")
         .args([
+            "--no-optional-locks",
             "-C",
             wt.as_ref(),
             "status",
@@ -5987,12 +6122,16 @@ fn stages_anything(worktree_path: &Path, path: &str, excludes: &[Vec<u8>]) -> Re
     let specs: Vec<Vec<u8>> = std::iter::once(format!(":(literal){path}").into_bytes())
         .chain(excludes.iter().cloned())
         .collect();
+    // A dry run still takes the index lock, so it waits for another
+    // program's like the stage it decides about.
+    let lock = IndexLockWait::before_change(worktree_path);
     let out = run_pathspecs_output(
         worktree_path,
         &["add", "--dry-run"],
         &specs,
         PathspecMagic::PerSpec,
         "git add --dry-run",
+        Some(&lock),
     )?;
     Ok(out.iter().any(|byte| !byte.is_ascii_whitespace()))
 }
@@ -6075,7 +6214,9 @@ enum PathspecMagic {
     PerSpec,
 }
 
-/// Run one git command over pathspecs fed on stdin, read as `magic` says.
+/// Run one git command that changes the index over pathspecs fed on stdin,
+/// read as `magic` says, once another program's index lock has had its wait
+/// (see [`IndexLockWait`]).
 fn run_pathspecs<P: AsRef<[u8]>>(
     worktree_path: &Path,
     subcommand: &[&str],
@@ -6083,16 +6224,28 @@ fn run_pathspecs<P: AsRef<[u8]>>(
     magic: PathspecMagic,
     what: &str,
 ) -> Result<()> {
-    run_pathspecs_output(worktree_path, subcommand, file_paths, magic, what).map(|_| ())
+    let lock = IndexLockWait::before_change(worktree_path);
+    run_pathspecs_output(
+        worktree_path,
+        subcommand,
+        file_paths,
+        magic,
+        what,
+        Some(&lock),
+    )
+    .map(|_| ())
 }
 
-/// [`run_pathspecs`], answering git's standard output.
+/// One git command over pathspecs fed on stdin, answering its standard
+/// output. `lock` is the wait a change to the index made, whose note a
+/// refusal carries.
 fn run_pathspecs_output<P: AsRef<[u8]>>(
     worktree_path: &Path,
     subcommand: &[&str],
     file_paths: &[P],
     magic: PathspecMagic,
     what: &str,
+    lock: Option<&IndexLockWait>,
 ) -> Result<Vec<u8>> {
     let wt = worktree_path.to_string_lossy();
     let mut args: Vec<&str> = Vec::new();
@@ -6127,10 +6280,11 @@ fn run_pathspecs_output<P: AsRef<[u8]>>(
         .join()
         .unwrap_or_else(|_| Err(io::Error::other("the writer thread panicked")));
     if !output.status.success() {
-        return Err(anyhow!(
-            "{what} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let error = anyhow!("{what} failed: {}", String::from_utf8_lossy(&output.stderr));
+        return Err(match lock {
+            Some(lock) => lock.explain(error, None),
+            None => error,
+        });
     }
     written.map_err(|err| anyhow!("{what} failed: could not write the file list to git: {err}"))?;
     Ok(output.stdout)
@@ -6149,6 +6303,7 @@ pub(crate) fn stage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
 pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
     refuse_unplain_path(file_path, "unstage")?;
     let wt = worktree_path.to_string_lossy();
+    let lock = IndexLockWait::before_change(worktree_path);
     let output = Command::new("git")
         .args([
             "--literal-pathspecs",
@@ -6161,9 +6316,12 @@ pub fn unstage_file(worktree_path: &Path, file_path: &str) -> Result<()> {
         ])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git reset failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        return Err(lock.explain(
+            anyhow!(
+                "git reset failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            None,
         ));
     }
     Ok(())
@@ -6405,15 +6563,19 @@ pub fn discard_confirmed<'c>(
         }
         _ => {}
     }
+    let lock = IndexLockWait::before_change(worktree_path);
     let output = tree_move(worktree_path, TreeMove::Checkout)
         // The path is a path, never a glob or magic pathspec.
         .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["--", file_path])
         .output()?;
     if !output.status.success() {
-        return Err(anyhow!(
-            "git checkout failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        return Err(lock.explain(
+            anyhow!(
+                "git checkout failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            None,
         ));
     }
     Ok(1)
@@ -6830,6 +6992,146 @@ pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
     out
 }
 
+/// How long a change to the index waits for another git program's
+/// `index.lock` to go before it runs anyway.
+const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often that wait looks again.
+const INDEX_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// A lock older than this is more likely left over from a crash than held by
+/// a git program that is still running.
+const LEFTOVER_LOCK_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Where git takes `worktree`'s index lock, resolved by git itself so a linked
+/// worktree's lives in its own admin folder. `None` when git cannot say.
+fn index_lock_path(worktree: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C"])
+        .arg(worktree)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index.lock",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = path_from_git_output(&output.stdout);
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// The wait a change to the index makes before it runs, and what its lock
+/// means if git refuses anyway.
+///
+/// dux's own reads and changes take their turns in the worktree's lane, so a
+/// lock found here belongs to another program: the agent's own git, a
+/// terminal, an editor. The change waits up to [`INDEX_LOCK_WAIT`] for it to
+/// go and then runs git exactly once, whatever it found. It never runs git a
+/// second time after a refusal: a hook, a signing program or an fsmonitor
+/// may already have run, and running them again is not dux's to decide.
+pub(crate) struct IndexLockWait {
+    lock: Option<PathBuf>,
+}
+
+impl IndexLockWait {
+    /// Wait for `worktree`'s index lock to go, up to [`INDEX_LOCK_WAIT`].
+    pub(crate) fn before_change(worktree: &Path) -> Self {
+        let lock = index_lock_path(worktree);
+        if let Some(path) = &lock
+            && path.exists()
+        {
+            let started = std::time::Instant::now();
+            while path.exists() && started.elapsed() < INDEX_LOCK_WAIT {
+                std::thread::sleep(INDEX_LOCK_POLL);
+            }
+            let outcome = if path.exists() {
+                "it was still there, so git runs anyway"
+            } else {
+                "it cleared"
+            };
+            logger::info(&format!(
+                "waited {}ms for {} before changing the index of {}: {outcome}",
+                started.elapsed().as_millis(),
+                path.display(),
+                worktree.display()
+            ));
+        }
+        Self { lock }
+    }
+
+    /// The lock's location, for a listing stopped at its deadline, which has
+    /// no wait of its own to make.
+    fn unwaited(worktree: &Path) -> Self {
+        Self {
+            lock: index_lock_path(worktree),
+        }
+    }
+
+    /// The sentence a change git refused adds when the lock is there right
+    /// after: another program is using the worktree, or, once the lock is over
+    /// a minute old, it may be left over from a crash.
+    fn refusal_note(&self) -> Option<String> {
+        let path = self.lock.as_ref()?;
+        let meta = fs::symlink_metadata(path).ok()?;
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > LEFTOVER_LOCK_AGE);
+        Some(if old {
+            leftover_lock_sentence(path)
+        } else {
+            "Another git program, such as the agent, a terminal or an editor, is using this \
+             worktree right now. Wait for it to finish, then try again."
+                .to_string()
+        })
+    }
+
+    /// The leftover-lock sentence, only for a lock over a minute old: after a
+    /// listing was stopped, a fresh lock may be the one its own git left, so
+    /// nothing is said about it.
+    fn leftover_note(&self) -> Option<String> {
+        let path = self.lock.as_ref()?;
+        let age = fs::symlink_metadata(path)
+            .ok()?
+            .modified()
+            .ok()?
+            .elapsed()
+            .ok()?;
+        (age > LEFTOVER_LOCK_AGE).then(|| leftover_lock_sentence(path))
+    }
+
+    /// `error` with the refusal note appended, when there is one. `redact`
+    /// is the worktree whose path git's own text had stripped, so the lock's
+    /// path reads the same way.
+    pub(crate) fn explain(&self, error: anyhow::Error, redact: Option<&Path>) -> anyhow::Error {
+        let Some(note) = self.refusal_note() else {
+            return error;
+        };
+        let note = match redact {
+            Some(worktree) => redact_worktree_path(&note, worktree),
+            None => note,
+        };
+        anyhow!("{error:#} {note}")
+    }
+}
+
+/// What to do about an index lock over a minute old, which may be left over
+/// from a crash. dux never deletes it: whether a git program still runs is the
+/// user's to know.
+fn leftover_lock_sentence(path: &Path) -> String {
+    format!(
+        "The lock file has been there for over a minute, so it may be left over from a git \
+         program that crashed. If nothing is using git in this worktree, delete {} and try again.",
+        path.display()
+    )
+}
+
 /// Build the error for a failed git subprocess, carrying BOTH streams.
 ///
 /// stderr alone is not enough, and the reason is worth writing down because the
@@ -6875,11 +7177,15 @@ fn git_failure(what: &str, worktree_path: &Path, output: &std::process::Output) 
 /// Fails when git cannot be run or the commit fails, with git's own reason.
 pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
     let wt = worktree_path.to_string_lossy();
+    let lock = IndexLockWait::before_change(worktree_path);
     let output = git_without_auto_maintenance()
         .args(["-C", wt.as_ref(), "commit", "-m", message])
         .output()?;
     if !output.status.success() {
-        return Err(git_failure("git commit", worktree_path, &output));
+        return Err(lock.explain(
+            git_failure("git commit", worktree_path, &output),
+            Some(worktree_path),
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -8608,7 +8914,8 @@ mod tests {
     fn the_display_views_honour_a_submodule_the_repository_says_to_ignore() {
         let repo = repo_with_an_ignored_submodule_change();
         assert!(
-            !unstaged_numstat(&repo.path().to_string_lossy()).contains_key("sub"),
+            !unstaged_numstat(&repo.path().to_string_lossy(), ListingLocks::Refresh)
+                .contains_key("sub"),
             "no line counts for the ignored submodule"
         );
         assert!(
@@ -9266,6 +9573,318 @@ mod tests {
         assert!(
             text.contains("trailing-whitespace....Failed"),
             "the hook's report must reach the user, got: {text}"
+        );
+    }
+
+    /// A repository with a staged file and a `pre-commit` hook that counts its
+    /// runs into `.git/hook-runs`.
+    fn repo_with_a_counting_hook() -> tempfile::TempDir {
+        let repo = init_test_repo();
+        let hook = repo.path().join(".git/hooks/pre-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, "#!/bin/sh\necho run >> .git/hook-runs\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(repo.path().join("f.txt"), "x\n").unwrap();
+        run_git(repo.path(), &["add", "f.txt"]);
+        repo
+    }
+
+    fn hook_runs(repo: &Path) -> usize {
+        fs::read_to_string(repo.join(".git/hook-runs")).map_or(0, |runs| runs.lines().count())
+    }
+
+    /// Another program's index lock that goes within the wait is waited out:
+    /// the commit runs once, after it, and succeeds.
+    #[test]
+    fn a_commit_waits_for_another_programs_index_lock_to_go() {
+        let repo = repo_with_a_counting_hook();
+        let lock = repo.path().join(".git/index.lock");
+        fs::write(&lock, "").unwrap();
+        let held = lock.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            fs::remove_file(held).unwrap();
+        });
+
+        commit(repo.path(), "after the lock").expect("the commit ran once the lock went");
+        release.join().unwrap();
+
+        assert_eq!(hook_runs(repo.path()), 1);
+    }
+
+    /// A lock still held past the wait: git runs once, refuses, and the
+    /// refusal says why in dux's words after git's own. Nothing runs twice.
+    #[test]
+    fn a_commit_refused_by_a_held_index_lock_says_why_and_runs_once() {
+        let repo = repo_with_a_counting_hook();
+        fs::write(repo.path().join(".git/index.lock"), "").unwrap();
+
+        let err = commit(repo.path(), "under the lock").expect_err("the lock is held");
+
+        let text = format!("{err:#}");
+        assert!(text.contains("index.lock"), "git's own text: {text}");
+        assert!(
+            text.ends_with(
+                "Another git program, such as the agent, a terminal or an editor, is using this \
+                 worktree right now. Wait for it to finish, then try again."
+            ),
+            "{text}"
+        );
+        assert!(hook_runs(repo.path()) <= 1);
+    }
+
+    /// The same wait and the same refusal for a stage, which stages nothing
+    /// while the lock is held and the file once it has gone.
+    #[test]
+    fn a_stage_waits_for_another_programs_index_lock_and_says_why_when_it_stays() {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("new.txt"), "x\n").unwrap();
+        let lock = repo.path().join(".git/index.lock");
+        fs::write(&lock, "").unwrap();
+
+        let err = stage_files(repo.path(), &["new.txt".to_string()]).expect_err("held");
+        assert!(
+            format!("{err:#}").contains("is using this worktree right now. Wait for it to finish"),
+            "{err:#}"
+        );
+        fs::remove_file(&lock).unwrap();
+        let (staged, _) = changed_files_for_display(repo.path()).unwrap();
+        assert!(staged.is_empty(), "nothing was staged under the lock");
+
+        fs::write(&lock, "").unwrap();
+        let held = lock.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            fs::remove_file(held).unwrap();
+        });
+        stage_files(repo.path(), &["new.txt".to_string()]).expect("staged once it went");
+        release.join().unwrap();
+        let (staged, _) = changed_files_for_display(repo.path()).unwrap();
+        assert_eq!(staged.len(), 1);
+    }
+
+    /// A lock older than a minute is more likely a crash's leftover: the
+    /// refusal names the lock and says it may be removed by hand.
+    #[test]
+    fn a_refusal_by_an_old_index_lock_says_it_may_be_left_over() {
+        let repo = repo_with_a_counting_hook();
+        let lock = repo.path().join(".git/index.lock");
+        let file = fs::File::create(&lock).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+
+        let err = commit(repo.path(), "under an old lock").expect_err("the lock is held");
+
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(
+                "The lock file has been there for over a minute, so it may be left over from a git \
+                 program that crashed. If nothing is using git in this worktree, delete \
+                 ./.git/index.lock and try again."
+            ),
+            "{text}"
+        );
+    }
+
+    /// A tracked file whose time moved and whose content did not: `git status`
+    /// would write refreshed times back to the index, which is what takes the
+    /// lock.
+    fn repo_with_a_touched_file() -> tempfile::TempDir {
+        let repo = init_test_repo();
+        fs::write(repo.path().join("touched.txt"), "same\n").unwrap();
+        commit_all(repo.path(), "touched");
+        let file = fs::File::options()
+            .write(true)
+            .open(repo.path().join("touched.txt"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        repo
+    }
+
+    /// The poll's `git status` leaves the index as it found it, where the
+    /// status a turn-holding refresh runs writes it back.
+    #[test]
+    fn the_polls_status_leaves_the_index_alone() {
+        let repo = repo_with_a_touched_file();
+        let index = repo.path().join(".git/index");
+        let before = fs::read(&index).unwrap();
+
+        status_porcelain(repo.path(), Submodules::AsConfigured, ListingLocks::Poll).unwrap();
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            before,
+            "the poll wrote the index"
+        );
+
+        status_porcelain(repo.path(), Submodules::AsConfigured, ListingLocks::Refresh).unwrap();
+        assert_ne!(
+            fs::read(&index).unwrap(),
+            before,
+            "a refresh writes the times back, which the poll must not"
+        );
+    }
+
+    /// The listing read without the lock counts exactly what the ordinary
+    /// listing counts, under configuration that changes what `git diff`
+    /// counts, and writes nothing to the index doing it.
+    #[test]
+    fn the_lock_free_listing_counts_what_the_ordinary_listing_counts() {
+        let repo = repo_with_a_touched_file();
+        let root = repo.path();
+        run_git(root, &["config", "diff.algorithm", "histogram"]);
+        run_git(root, &["config", "diff.renames", "copies"]);
+        // An edit myers and histogram count differently (2/2 against 3/3).
+        let before = "b\n{\na\n{\n}\nx\nx\nb\nx\n{\n{\n}\n";
+        let after = "x\nb\n{\n{\n}\nx\nx\nb\n{\n{\nx\n}\n";
+        fs::write(root.join("algo.txt"), before).unwrap();
+        fs::write(root.join("moved.txt"), "one\ntwo\nthree\n").unwrap();
+        fs::write(root.join("gone.txt"), "a\nb\nc\nd\n").unwrap();
+        commit_all(root, "base");
+        fs::write(root.join("algo.txt"), after).unwrap();
+        // An edited rename, staged.
+        run_git(root, &["mv", "moved.txt", "renamed.txt"]);
+        fs::write(root.join("renamed.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        // A file moved and added with intent-to-add, which rename detection pairs.
+        fs::rename(root.join("gone.txt"), root.join("came.txt")).unwrap();
+        run_git(root, &["add", "-N", "came.txt"]);
+        // A folder staged whole, and one left untracked.
+        fs::create_dir_all(root.join("staged/dir")).unwrap();
+        fs::write(root.join("staged/dir/a.txt"), "a\n").unwrap();
+        run_git(root, &["add", "staged"]);
+        fs::create_dir_all(root.join("loose")).unwrap();
+        fs::write(root.join("loose/b.txt"), "b\nb\n").unwrap();
+        let index = root.join(".git/index");
+        let index_before = fs::read(&index).unwrap();
+
+        let lock_free = changed_files_for_display_with(root, ListingLocks::LockFree).unwrap();
+        assert_eq!(
+            fs::read(&index).unwrap(),
+            index_before,
+            "the read wrote the index"
+        );
+        let ordinary = changed_files_for_display(root).unwrap();
+
+        let rows = |(staged, unstaged): &(Vec<ChangedFile>, Vec<ChangedFile>)| {
+            [staged, unstaged].map(|side| {
+                side.iter()
+                    .map(|f| (f.status.clone(), f.path.clone(), f.additions, f.deletions))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(rows(&lock_free), rows(&ordinary));
+        assert!(
+            rows(&ordinary)[1].contains(&("M".to_string(), "algo.txt".to_string(), 3, 3)),
+            "the configured algorithm counted: {:?}",
+            rows(&ordinary)
+        );
+    }
+
+    /// On a branch with no commit yet, too.
+    #[test]
+    fn the_lock_free_listing_reads_an_unborn_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        fs::write(dir.path().join("first.txt"), "1\n2\n").unwrap();
+        run_git(dir.path(), &["add", "first.txt"]);
+        fs::write(dir.path().join("first.txt"), "1\n2\n3\n").unwrap();
+
+        let lock_free = changed_files_for_display_with(dir.path(), ListingLocks::LockFree).unwrap();
+        let ordinary = changed_files_for_display(dir.path()).unwrap();
+
+        let counts = |files: &[ChangedFile]| {
+            files
+                .iter()
+                .map(|f| (f.path.clone(), f.additions, f.deletions))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts(&lock_free.0), counts(&ordinary.0));
+        assert_eq!(counts(&lock_free.1), counts(&ordinary.1));
+        assert_eq!(counts(&ordinary.1), vec![("first.txt".to_string(), 1, 0)]);
+    }
+
+    /// A repository whose `git status` never finishes: its fsmonitor hook
+    /// takes the index lock, as an outside program would, and sleeps.
+    fn repo_whose_status_hangs() -> tempfile::TempDir {
+        let repo = init_test_repo();
+        let hook = repo.path().join(".git/fsmonitor-hang");
+        fs::write(
+            &hook,
+            "#!/bin/sh\ntrap '' TERM\ntouch \"$PWD/.git/index.lock\"\nsleep 30\n",
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        run_git(
+            repo.path(),
+            &["config", "core.fsmonitor", hook.to_str().unwrap()],
+        );
+        repo
+    }
+
+    fn stopped_at_a_short_deadline<T: std::fmt::Debug>(read: impl FnOnce() -> Result<T>) -> String {
+        let started = std::time::Instant::now();
+        let err = listing_child::with_limits(
+            std::time::Duration::from_millis(200),
+            std::time::Duration::from_millis(200),
+            read,
+        )
+        .expect_err("the listing was stopped");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        format!("{err:#}")
+    }
+
+    /// A listing for the changes list whose `git status` never finishes is
+    /// stopped at its deadline and fails, saying the list was not updated. The
+    /// lock the hook left is under a minute old, which may be the stopped git's
+    /// own, so nothing is said about it.
+    #[test]
+    fn a_display_listing_past_its_deadline_says_the_list_was_not_updated() {
+        let repo = repo_whose_status_hangs();
+
+        let text = stopped_at_a_short_deadline(|| changed_files_for_display(repo.path()));
+
+        assert!(text.starts_with("git status ran for "), "{text}");
+        assert!(
+            text.ends_with(
+                " seconds without finishing, so dux stopped it and the list of changed files \
+                 wasn't updated. dux tries again on its next check."
+            ),
+            "{text}"
+        );
+    }
+
+    /// The listing a change runs before it acts says the change was not made.
+    #[test]
+    fn a_decision_listing_past_its_deadline_says_nothing_was_changed() {
+        let repo = repo_whose_status_hangs();
+
+        let text = stopped_at_a_short_deadline(|| changed_files_for_decisions(repo.path()));
+
+        assert!(text.starts_with("git status ran for "), "{text}");
+        assert!(
+            text.ends_with(
+                " seconds without finishing, so dux stopped it before making the change, and \
+                 nothing was changed. Try again."
+            ),
+            "{text}"
+        );
+    }
+
+    /// A folder expansion says only that it was stopped, even when it lists the
+    /// whole worktree on a cold cache: nothing fetches the folder again by
+    /// itself, and no change was waiting on it.
+    #[test]
+    fn a_folder_expansion_past_its_deadline_says_only_that_it_was_stopped() {
+        let repo = repo_whose_status_hangs();
+
+        let text = stopped_at_a_short_deadline(|| {
+            as_folder_read(|| changed_files_for_display(repo.path()))
+        });
+
+        assert!(text.starts_with("git status ran for "), "{text}");
+        assert!(
+            text.ends_with(" seconds without finishing, so dux stopped it."),
+            "{text}"
         );
     }
 
@@ -11028,6 +11647,7 @@ mod tests {
             &paths,
             PathspecMagic::AllLiteral,
             "git add",
+            None,
         )
         .expect_err("the worktree is gone");
         let message = error.to_string();

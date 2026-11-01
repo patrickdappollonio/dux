@@ -378,6 +378,8 @@ fn same_reload_owned_projects(a: &[Project], b: &[Project]) -> bool {
 pub const FOCUSED_TAB_FLUSH_BOUND: Duration = Duration::from_secs(2);
 
 /// The lane the focused-tab writes to `db_path` share, so they land in order.
+/// The path never exists, and no worktree records it, so it is its own key as
+/// given.
 fn focused_tab_lane(db_path: &Path) -> PathBuf {
     db_path.with_extension("focused-tab")
 }
@@ -4159,6 +4161,10 @@ impl Engine {
                 remedy: crate::poller_status::REMEDY_NEXT_LOOK_AT_AGENT.into(),
             },
             move |tx| {
+                // Every question about the agent's directory starts here, on a
+                // worker, so this is where its spelling joins the lane of the
+                // directory it resolves to.
+                crate::changes_lane::record_worktree(&folder);
                 let status = if managed {
                     crate::git::managed_worktree_status(&folder)
                 } else {
@@ -4260,7 +4266,7 @@ impl Engine {
                     (path, queue.start_read())
                 };
                 let outcome =
-                    crate::git::changed_files_for_display(&path).map_err(|e| e.to_string());
+                    crate::changes_lane::request_changed_files(&path).map_err(|e| e.to_string());
                 if tx
                     .send(WorkerEvent::ChangedFilesReady {
                         outcome,
@@ -4338,9 +4344,12 @@ impl Engine {
                 let path = watched_worktree_of(&watched);
                 let started = Instant::now();
                 let read = lock_changed_files_queue(&reads).start_read();
-                let swept = path
-                    .as_ref()
-                    .map(|worktree_path| crate::git::changed_files_for_display(worktree_path));
+                // A poll reads only when nothing else holds the worktree's lane;
+                // a busy lane is skipped like a failed read, sending nothing,
+                // and the next tick asks again.
+                let swept = path.as_ref().and_then(|worktree_path| {
+                    crate::changes_lane::poll_changed_files(worktree_path)
+                });
                 last_sweep = if swept.is_some() {
                     started.elapsed()
                 } else {

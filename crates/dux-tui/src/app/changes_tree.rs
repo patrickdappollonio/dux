@@ -517,8 +517,11 @@ impl App {
         let _ = thread::Builder::new()
             .name("dux-changes-folder".into())
             .spawn(move || {
-                let answer = git::changed_dir_children(&worktree, &worker_dir, side)
-                    .map_err(|err| format!("{err:#}"));
+                // A folder expansion: a git child stopped at its deadline says
+                // only that, since nothing fetches the folder again by itself.
+                let answer =
+                    git::as_folder_read(|| git::changed_dir_children(&worktree, &worker_dir, side))
+                        .map_err(|err| format!("{err:#}"));
                 let _ = tx.send(answer);
             });
         self.changes_tree

@@ -20,7 +20,7 @@
 //! that wakes to an absent cache re-elects an owner rather than reporting an error.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -82,7 +82,27 @@ enum Cached {
         /// `Ok::generation` so the waiter freshness check is uniform across variants).
         generation: u64,
         at: Instant,
+        /// The listing from before a change, kept when the read the change asked
+        /// for failed: served in place of the 409, as stale and never as
+        /// current, until a read succeeds. Its own `rev`, so a client that
+        /// already holds it applies nothing.
+        previous: Option<(u64, Lists)>,
     },
+}
+
+/// A sorted (staged, unstaged) pair of wire rows.
+type Lists = (Vec<ChangedFileView>, Vec<ChangedFileView>);
+
+/// How a compute takes its place in the worktree's lane (see
+/// [`dux_core::changes_lane`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    /// The poll tick: reads only when the lane is idle, and otherwise stores
+    /// nothing and counts as nothing.
+    Poll,
+    /// A read somebody waits on (a GET, the refresh after a change): it waits
+    /// a bounded time for its turn and then reads without the lock.
+    Request,
 }
 
 impl Cached {
@@ -121,11 +141,17 @@ pub(crate) struct ChangesService {
     inflight: Mutex<HashMap<String, watch::Receiver<bool>>>,
     /// First time each cache entry was seen with zero interest, for grace eviction.
     uninterested_since: Mutex<HashMap<String, Instant>>,
-    /// Monotonic invalidation generation, bumped by [`Self::invalidate`] after a git
-    /// mutation. A compute stamps its entry with the value it observed when it began
-    /// reading the filesystem, so a waiter that wakes to an older stamp re-elects as
-    /// owner and recomputes: the post-mutation state always wins.
-    invalidation_gen: AtomicU64,
+    /// Each session's monotonic invalidation generation, bumped by
+    /// [`Self::invalidate`] after a change to that session's files. A compute
+    /// stamps its entry with its session's value observed when it began reading
+    /// the filesystem, so an entry stamped older than its session's value is not
+    /// served as current, and a waiter that wakes to one re-elects as owner and
+    /// recomputes: the post-mutation state always wins. Per session, so a change
+    /// in one session leaves every other session's entry current.
+    invalidations: Mutex<HashMap<String, u64>>,
+    /// How long a [`Read::Request`] waits for its turn: always
+    /// [`dux_core::changes_lane::REQUEST_TURN_WAIT`] outside tests.
+    request_turn_wait: Mutex<Duration>,
     /// Total git computes run. Test instrumentation for the single-flight test.
     compute_count: AtomicUsize,
     /// Full listings read outside the cache to validate a folder-children
@@ -133,6 +159,11 @@ pub(crate) struct ChangesService {
     /// not multiply full statuses. Absent outside tests.
     #[cfg(test)]
     fresh_validation_reads: AtomicUsize,
+    /// Callers that joined a compute already in flight as waiters. Test
+    /// instrumentation: the point a test knows a waiter is parked. Absent
+    /// outside tests.
+    #[cfg(test)]
+    waiters_joined: AtomicUsize,
 }
 
 /// What kind of failure a cached error records, which decides whether it may
@@ -156,10 +187,13 @@ impl ChangesService {
             cache: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             uninterested_since: Mutex::new(HashMap::new()),
-            invalidation_gen: AtomicU64::new(0),
+            invalidations: Mutex::new(HashMap::new()),
+            request_turn_wait: Mutex::new(dux_core::changes_lane::REQUEST_TURN_WAIT),
             compute_count: AtomicUsize::new(0),
             #[cfg(test)]
             fresh_validation_reads: AtomicUsize::new(0),
+            #[cfg(test)]
+            waiters_joined: AtomicUsize::new(0),
         });
         Self::spawn_poller(Arc::downgrade(&svc));
         svc
@@ -235,9 +269,12 @@ impl ChangesService {
                         let svc = Arc::clone(&svc);
                         async move {
                             let id_for_err = id.clone();
-                            if tokio::time::timeout(PER_SESSION_TIMEOUT, svc.compute_cached(id))
-                                .await
-                                .is_err()
+                            if tokio::time::timeout(
+                                PER_SESSION_TIMEOUT,
+                                svc.compute_cached(id, Read::Poll),
+                            )
+                            .await
+                            .is_err()
                             {
                                 // A shutdown that began mid-compute leaves the engine
                                 // unable to answer, so this timeout is expected and
@@ -256,7 +293,7 @@ impl ChangesService {
                                      after {PER_SESSION_TIMEOUT:?}; recording an error"
                                 ));
                                 let rev = svc.engine.next_changes_rev(id_for_err.clone()).await;
-                                let generation = svc.invalidation_gen.load(Ordering::SeqCst);
+                                let generation = svc.invalidation_of(&id_for_err);
                                 // `Failure::Timeout`: this timeout races a freshly
                                 // elected owner whose good `Cached::Ok` carries a lower
                                 // rev, which the plain `rev >= existing` guard would let
@@ -313,7 +350,8 @@ impl ChangesService {
         if let Some(result) = self.read_fresh(session_id) {
             return result;
         }
-        self.compute_cached(session_id.to_string()).await;
+        self.compute_cached(session_id.to_string(), Read::Request)
+            .await;
         if let Some(result) = self.read_cached(session_id) {
             return result;
         }
@@ -330,7 +368,8 @@ impl ChangesService {
         }
         // Known session whose entry was evicted between the compute and the read:
         // recompute once and serve that.
-        self.compute_cached(session_id.to_string()).await;
+        self.compute_cached(session_id.to_string(), Read::Request)
+            .await;
         match self.read_cached(session_id) {
             Some(result) => result,
             // Still nothing: it vanished during the retry (or raced again), so treat
@@ -339,34 +378,38 @@ impl ChangesService {
         }
     }
 
-    /// Read the current cache entry (regardless of error TTL), projecting it to the
-    /// HTTP result. `None` means there is no entry at all.
+    /// Read the current cache entry (regardless of error TTL or freshness),
+    /// projecting it to the HTTP result. `None` means there is no entry at all.
     fn read_cached(&self, session_id: &str) -> Option<Result<ChangesResponse, GitError>> {
         let cache = lock(&self.cache);
+        cache.get(session_id).map(project)
+    }
+
+    /// Return a cached result if it is fresh: stamped at its session's current
+    /// invalidation generation or newer, and, for an `Err`, within
+    /// [`ERROR_TTL`]. `None` means a compute is needed.
+    fn read_fresh(&self, session_id: &str) -> Option<Result<ChangesResponse, GitError>> {
+        let current = self.invalidation_of(session_id);
+        let cache = lock(&self.cache);
         match cache.get(session_id) {
-            Some(Cached::Ok { rev, prev, .. }) => Some(Ok(ChangesResponse {
-                rev: *rev,
-                staged: prev.0.clone(),
-                unstaged: prev.1.clone(),
-            })),
-            Some(Cached::Err { .. }) => Some(Err(GitError::Git)),
-            None => None,
+            Some(entry @ Cached::Ok { generation, .. }) if *generation >= current => {
+                Some(project(entry))
+            }
+            Some(entry @ Cached::Err { generation, at, .. })
+                if *generation >= current && at.elapsed() < ERROR_TTL =>
+            {
+                Some(project(entry))
+            }
+            _ => None,
         }
     }
 
-    /// Return a cached result if it is fresh (an `Ok` entry, or an `Err` within
-    /// [`ERROR_TTL`]); `None` means a compute is needed.
-    fn read_fresh(&self, session_id: &str) -> Option<Result<ChangesResponse, GitError>> {
-        let cache = lock(&self.cache);
-        match cache.get(session_id) {
-            Some(Cached::Ok { rev, prev, .. }) => Some(Ok(ChangesResponse {
-                rev: *rev,
-                staged: prev.0.clone(),
-                unstaged: prev.1.clone(),
-            })),
-            Some(Cached::Err { at, .. }) if at.elapsed() < ERROR_TTL => Some(Err(GitError::Git)),
-            _ => None,
-        }
+    /// Session `session_id`'s current invalidation generation.
+    fn invalidation_of(&self, session_id: &str) -> u64 {
+        lock(&self.invalidations)
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The session's cached listing as model rows, or `None` when nothing
@@ -376,9 +419,12 @@ impl ChangesService {
         &self,
         session_id: &str,
     ) -> Option<(Vec<ChangedFile>, Vec<ChangedFile>)> {
+        let current = self.invalidation_of(session_id);
         let cache = lock(&self.cache);
         match cache.get(session_id) {
-            Some(Cached::Ok { prev, .. }) => Some((
+            Some(Cached::Ok {
+                prev, generation, ..
+            }) if *generation >= current => Some((
                 prev.0.iter().map(model_from_view).collect(),
                 prev.1.iter().map(model_from_view).collect(),
             )),
@@ -408,22 +454,25 @@ impl ChangesService {
         self.fresh_validation_reads.load(Ordering::SeqCst)
     }
 
-    /// Drop a session's cached lists and trigger a fresh compute and emit, so the
-    /// pane refreshes right after a git or file mutation rather than at the next
-    /// poll. With no `prev`, the next compute always detects a change.
+    /// Mark a session's cached lists stale and trigger a fresh compute and emit,
+    /// so the pane refreshes right after a git or file mutation rather than at
+    /// the next poll.
+    ///
+    /// The entry stays: a stale entry is never served as current (a GET runs or
+    /// joins the compute this starts), but it is what the compute compares its
+    /// rows with, so a change that left the rows as they were bumps no `rev`, and
+    /// it is what a GET serves, marked stale, if that compute fails.
     pub(crate) fn invalidate(self: &Arc<Self>, session_id: String) {
-        // Bumped before the entry is cleared: an in-flight compute that already read
-        // the pre-mutation filesystem still stores its stale snapshot, and requiring
-        // this newer stamp is what makes the recompute below re-elect as owner
-        // instead of waiting on it and serving pre-mutation files.
-        self.invalidation_gen.fetch_add(1, Ordering::SeqCst);
-        {
-            let mut cache = lock(&self.cache);
-            cache.remove(&session_id);
-        }
+        // Bumped first: an in-flight compute that already read the pre-mutation
+        // filesystem still stores its snapshot under the older stamp, and
+        // requiring this newer one is what makes the recompute below re-elect as
+        // owner instead of waiting on it and serving pre-mutation files.
+        *lock(&self.invalidations)
+            .entry(session_id.clone())
+            .or_insert(0) += 1;
         let svc = Arc::clone(self);
         tokio::spawn(async move {
-            svc.compute_cached(session_id).await;
+            svc.compute_cached(session_id, Read::Request).await;
         });
     }
 
@@ -438,12 +487,24 @@ impl ChangesService {
         }
     }
 
-    /// The current invalidation generation. Test-only: a route that must drop the
-    /// cache has no other observable proof it did, since the invalidate also
-    /// spawns a recompute that repopulates the entry.
+    /// Session `session_id`'s current invalidation generation. Test-only: a
+    /// route that must invalidate the cache has no other observable proof it
+    /// did, since the invalidate also spawns a recompute that refreshes the
+    /// entry.
     #[cfg(test)]
-    pub(crate) fn invalidation_generation(&self) -> u64 {
-        self.invalidation_gen.load(Ordering::SeqCst)
+    pub(crate) fn invalidation_generation(&self, session_id: &str) -> u64 {
+        self.invalidation_of(session_id)
+    }
+
+    /// Shorten how long a request read waits for its turn. Test-only.
+    #[cfg(test)]
+    pub(crate) fn set_request_turn_wait(&self, wait: Duration) {
+        *lock(&self.request_turn_wait) = wait;
+    }
+
+    /// How long a [`Read::Request`] waits for its turn.
+    fn request_turn_wait(&self) -> Duration {
+        *lock(&self.request_turn_wait)
     }
 
     /// Seed the cache with a known `rev` for `session_id`. Test-only: lets
@@ -465,12 +526,12 @@ impl ChangesService {
     /// Single-flight wrapper around [`Self::compute`]. Exactly one compute runs per
     /// session at a time; late callers wait for the owner and re-read the cache,
     /// re-electing a new owner if the previous owner was cancelled before storing.
-    async fn compute_cached(self: &Arc<Self>, session_id: String) {
+    async fn compute_cached(self: &Arc<Self>, session_id: String, read: Read) {
         // The minimum invalidation generation this call must see reflected in the
         // cache before accepting another compute's result. Captured once at entry:
         // a recompute spawned by `invalidate()` runs AFTER the bump, so it requires
         // the post-mutation generation and will not accept a stale owner's snapshot.
-        let required_gen = self.invalidation_gen.load(Ordering::SeqCst);
+        let required_gen = self.invalidation_of(&session_id);
         loop {
             enum Role {
                 Owner(watch::Sender<bool>),
@@ -479,6 +540,8 @@ impl ChangesService {
             let role = {
                 let mut inflight = lock(&self.inflight);
                 if let Some(rx) = inflight.get(&session_id) {
+                    #[cfg(test)]
+                    self.waiters_joined.fetch_add(1, Ordering::SeqCst);
                     Role::Waiter(rx.clone())
                 } else {
                     let (tx, rx) = watch::channel(false);
@@ -488,7 +551,7 @@ impl ChangesService {
             };
             match role {
                 Role::Owner(tx) => {
-                    self.run_owned_compute(&session_id, tx).await;
+                    self.run_owned_compute(&session_id, tx, read).await;
                     return;
                 }
                 Role::Waiter(mut rx) => {
@@ -508,9 +571,9 @@ impl ChangesService {
                     if fresh_enough {
                         return;
                     }
-                    // The owner was cancelled before storing, or stored a snapshot
-                    // older than our required generation, so the loop goes round
-                    // again and re-elects a new owner.
+                    // The owner was cancelled before storing, skipped a busy lane,
+                    // or stored a snapshot older than our required generation, so
+                    // the loop goes round again and re-elects a new owner.
                 }
             }
         }
@@ -519,7 +582,12 @@ impl ChangesService {
     /// Run the compute as the single-flight owner. A drop guard clears the inflight
     /// slot and wakes waiters on EVERY exit path (success, error, or future
     /// cancellation at an `.await`).
-    async fn run_owned_compute(self: &Arc<Self>, session_id: &str, tx: watch::Sender<bool>) {
+    async fn run_owned_compute(
+        self: &Arc<Self>,
+        session_id: &str,
+        tx: watch::Sender<bool>,
+        read: Read,
+    ) {
         struct InflightGuard<'a> {
             inflight: &'a Mutex<HashMap<String, watch::Receiver<bool>>>,
             id: String,
@@ -541,19 +609,19 @@ impl ChangesService {
             tx,
         };
 
-        self.compute(session_id).await;
+        self.compute(session_id, read).await;
     }
 
     /// The two-stage compute: resolve the worktree on the async thread, then run
     /// `git status` in `spawn_blocking`. Stores the result and, on a detected
     /// change (or recovery from an error), bumps `rev` and emits `session.changes`.
-    async fn compute(self: &Arc<Self>, session_id: &str) {
+    async fn compute(self: &Arc<Self>, session_id: &str, read: Read) {
         self.compute_count.fetch_add(1, Ordering::SeqCst);
 
         // Stamp this compute with the invalidation generation observed at its START
         // (before any filesystem read), so a result based on the pre-mutation tree
         // is recognizably older than a generation a waiting `invalidate()` requires.
-        let generation = self.invalidation_gen.load(Ordering::SeqCst);
+        let generation = self.invalidation_of(session_id);
 
         // Stage 1: resolve the worktree. An unknown session (no worktree) is NOT a
         // git error: storing one would recreate a phantom SQLite rev row every
@@ -579,20 +647,29 @@ impl ChangesService {
             None => return,
         };
 
-        // Stage 2: the git work, off the reactor.
+        // Stage 2: the git work, off the reactor, in the worktree's lane. A poll
+        // that finds the lane busy reads nothing and stores nothing: no failure,
+        // no warning streak, and the waiters it wakes re-elect an owner.
         let wt = worktree.clone();
-        let computed =
-            tokio::task::spawn_blocking(move || dux_core::git::changed_files_for_display(&wt))
-                .await;
+        let request_wait = self.request_turn_wait();
+        let computed = tokio::task::spawn_blocking(move || match read {
+            Read::Poll => dux_core::changes_lane::poll_changed_files(&wt),
+            Read::Request => Some(dux_core::changes_lane::request_changed_files_within(
+                &wt,
+                request_wait,
+            )),
+        })
+        .await;
 
         match computed {
-            Ok(Ok((staged_raw, unstaged_raw))) => {
+            Ok(None) => {}
+            Ok(Some(Ok((staged_raw, unstaged_raw)))) => {
                 let staged = sorted_views(&staged_raw);
                 let unstaged = sorted_views(&unstaged_raw);
                 self.store_ok_and_maybe_emit(session_id, generation, staged, unstaged)
                     .await;
             }
-            Ok(Err(e)) => {
+            Ok(Some(Err(e))) => {
                 let rev = self.engine.next_changes_rev(session_id.to_string()).await;
                 let message = format!("{e:#}");
                 dux_core::logger::error(&format!(
@@ -639,6 +716,18 @@ impl ChangesService {
         self.reset_error_streak(session_id);
 
         if !changed {
+            // The rows are as they were, so no `rev` and no emit, but the entry is
+            // now known current as of this compute's stamp: a waiter requiring it
+            // is satisfied without a rerun. Only ever raised, so a slower, older
+            // completion never makes the entry look newer than a later
+            // invalidation.
+            let mut cache = lock(&self.cache);
+            if let Some(Cached::Ok {
+                generation: stored, ..
+            }) = cache.get_mut(session_id)
+            {
+                *stored = (*stored).max(generation);
+            }
             return;
         }
 
@@ -710,6 +799,7 @@ impl ChangesService {
         failure: Failure,
     ) -> bool {
         let clobber_ok = failure == Failure::Real;
+        let current = self.invalidation_of(session_id);
         let stored = {
             let mut cache = lock(&self.cache);
             // Keep the higher rev (a stale error must not clobber a newer entry),
@@ -720,12 +810,34 @@ impl ChangesService {
                 None => true,
             };
             if should_store {
+                // A listing a change made stale, whose fresh read failed, is
+                // still what the pane is owed in place of a 409; it travels on
+                // the error, marked stale, and a success replaces both.
+                let previous = match cache.remove(session_id) {
+                    Some(Cached::Ok {
+                        rev: kept,
+                        generation: stamped,
+                        prev,
+                    }) if stamped < current => {
+                        // Said once, when the stale listing first stands in;
+                        // the failures after it carry it on quietly.
+                        dux_core::logger::warn(&format!(
+                            "changed-files read for session {session_id} failed after a \
+                             change; serving the listing from before the change, marked \
+                             stale, until a read succeeds"
+                        ));
+                        Some((kept, prev))
+                    }
+                    Some(Cached::Err { previous, .. }) => previous,
+                    _ => None,
+                };
                 cache.insert(
                     session_id.to_string(),
                     Cached::Err {
                         rev,
                         generation,
                         at: Instant::now(),
+                        previous,
                     },
                 );
             }
@@ -769,6 +881,23 @@ impl ChangesService {
     #[cfg(test)]
     pub(crate) fn compute_count(&self) -> usize {
         self.compute_count.load(Ordering::SeqCst)
+    }
+}
+
+/// A cache entry as the HTTP result: an error with a listing kept from before
+/// a change serves that listing, stale.
+fn project(entry: &Cached) -> Result<ChangesResponse, GitError> {
+    match entry {
+        Cached::Ok { rev, prev, .. }
+        | Cached::Err {
+            previous: Some((rev, prev)),
+            ..
+        } => Ok(ChangesResponse {
+            rev: *rev,
+            staged: prev.0.clone(),
+            unstaged: prev.1.clone(),
+        }),
+        Cached::Err { previous: None, .. } => Err(GitError::Git),
     }
 }
 
@@ -1383,7 +1512,7 @@ mod tests {
         // Add a line: same path, same `M` status, different additions stat. The
         // compare includes additions/deletions, so a recompute (keeping prev) emits.
         std::fs::write(root.join("f.txt"), "line1\nCHANGED\nEXTRA\n").unwrap();
-        svc.compute_cached("s1".to_string()).await;
+        svc.compute_cached("s1".to_string(), Read::Request).await;
 
         let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
             .await
@@ -1407,7 +1536,7 @@ mod tests {
         let first = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
         // Subscribe after priming so the priming emit is not mistaken for a recompute.
         let mut events = bus.subscribe();
-        svc.compute_cached("s1".to_string()).await;
+        svc.compute_cached("s1".to_string(), Read::Request).await;
         let again = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
         assert_eq!(again.rev, first.rev, "rev must not advance with no change");
         assert!(
@@ -1469,10 +1598,15 @@ mod tests {
         }
         // A git mutation bumped the invalidation generation: a compute entering now
         // requires an entry stamped at the new generation.
-        svc.invalidation_gen.fetch_add(1, Ordering::SeqCst);
+        *lock(&svc.invalidations)
+            .entry("s1".to_string())
+            .or_insert(0) += 1;
 
         let svc_w = Arc::clone(&svc);
-        let waiter = tokio::spawn(async move { svc_w.compute_cached("s1".to_string()).await });
+        let waiter =
+            tokio::spawn(
+                async move { svc_w.compute_cached("s1".to_string(), Read::Request).await },
+            );
         // Let the waiter reach `wait_for` on the inflight receiver.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -1519,7 +1653,10 @@ mod tests {
         }
         // No invalidation: the waiter requires generation 0.
         let svc_w = Arc::clone(&svc);
-        let waiter = tokio::spawn(async move { svc_w.compute_cached("s1".to_string()).await });
+        let waiter =
+            tokio::spawn(
+                async move { svc_w.compute_cached("s1".to_string(), Read::Request).await },
+            );
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The owner stores an entry at generation 0 (== required) and wakes the
@@ -1542,6 +1679,116 @@ mod tests {
             svc.compute_count(),
             0,
             "a fresh-enough entry must NOT trigger a recompute"
+        );
+    }
+
+    fn unstaged_paths(response: &ChangesResponse) -> Vec<String> {
+        response.unstaged.iter().map(|f| f.path.clone()).collect()
+    }
+
+    /// A poll that finds the worktree's lane busy reads nothing and stores
+    /// nothing: no entry, so no error, and nothing for the warning streak.
+    #[tokio::test]
+    async fn a_poll_with_a_busy_lane_stores_nothing() {
+        let (engine, bus, _tmp, root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        let running = dux_core::changes_lane::ticket(&root).wait();
+
+        svc.compute_cached("s1".to_string(), Read::Poll).await;
+
+        assert!(lock(&svc.cache).get("s1").is_none());
+        drop(running);
+        assert!(svc.get("s1").await.is_ok());
+    }
+
+    /// After a change, a GET behind a lane held past the request wait answers
+    /// with the tree as it is now, read without the lock, never the list from
+    /// before the change.
+    #[tokio::test]
+    async fn after_a_change_a_get_behind_a_held_lane_reads_the_tree_as_it_is() {
+        let (engine, bus, _tmp, root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        let before = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
+        assert_eq!(unstaged_paths(&before), ["f.txt"]);
+        svc.set_request_turn_wait(Duration::from_millis(100));
+        let running = dux_core::changes_lane::ticket(&root).wait();
+
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        svc.invalidate("s1".to_string());
+        let after = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
+
+        assert_eq!(unstaged_paths(&after), ["f.txt", "new.txt"]);
+        drop(running);
+    }
+
+    /// A refresh whose rows came back unchanged still answers the waiters that
+    /// needed a read after the change, without a second read.
+    #[tokio::test]
+    async fn an_unchanged_refresh_satisfies_its_waiters_without_a_rerun() {
+        let (engine, bus, _tmp, root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        let _ = svc.get("s1").await;
+        assert_eq!(svc.compute_count(), 1);
+        *lock(&svc.invalidations)
+            .entry("s1".to_string())
+            .or_insert(0) += 1;
+        let running = dux_core::changes_lane::ticket(&root).wait();
+
+        let owner = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move { svc.compute_cached("s1".to_string(), Read::Request).await }
+        });
+        while !lock(&svc.inflight).contains_key("s1") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let waiter = tokio::spawn({
+            let svc = Arc::clone(&svc);
+            async move { svc.compute_cached("s1".to_string(), Read::Request).await }
+        });
+        while svc.waiters_joined.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(running);
+        owner.await.unwrap();
+        waiter.await.unwrap();
+
+        assert_eq!(svc.compute_count(), 2, "the waiter read again");
+        assert!(svc.read_fresh("s1").is_some(), "the entry is current");
+    }
+
+    /// A change in one session leaves every other session's listing current.
+    #[tokio::test]
+    async fn a_change_in_one_session_leaves_anothers_listing_current() {
+        let (engine, bus, _tmp, _root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        svc.seed_rev_for_test("s1", 3);
+        svc.seed_rev_for_test("other", 4);
+
+        svc.invalidate("s1".to_string());
+
+        assert!(svc.read_fresh("other").is_some());
+        assert!(svc.cached_listing("other").is_some());
+        assert_eq!(svc.invalidation_generation("other"), 0);
+        assert_eq!(svc.invalidation_generation("s1"), 1);
+    }
+
+    /// When the read a change asked for fails, a GET serves the listing from
+    /// before the change, stale, in place of the error.
+    #[tokio::test]
+    async fn a_failed_read_after_a_change_serves_the_listing_from_before_it() {
+        let (engine, bus, _tmp, root) = boot();
+        let svc = ChangesService::new(engine, bus);
+        let before = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
+        std::fs::rename(root.join(".git"), root.join("git-away")).unwrap();
+
+        svc.invalidate("s1".to_string());
+        let after = svc.get("s1").await.unwrap_or_else(|_| panic!("ok"));
+
+        assert_eq!(after.rev, before.rev);
+        assert_eq!(unstaged_paths(&after), unstaged_paths(&before));
+        assert!(
+            svc.read_fresh("s1").is_some(),
+            "served within the error window"
         );
     }
 
