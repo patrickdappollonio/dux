@@ -7005,7 +7005,21 @@ const LEFTOVER_LOCK_AGE: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Where git takes `worktree`'s index lock, resolved by git itself so a linked
 /// worktree's lives in its own admin folder. `None` when git cannot say.
+///
+/// git answers with the resolved path, so a lock inside the worktree is
+/// re-rooted onto `worktree` as given: the sentences that name it then read
+/// `./` once the worktree's path is stripped, whether it was given through a
+/// symlink (`/var` on macOS) or not.
 fn index_lock_path(worktree: &Path) -> Option<PathBuf> {
+    let path = git_index_lock_path(worktree)?;
+    let inside = fs::canonicalize(worktree)
+        .ok()
+        .and_then(|canonical| path.strip_prefix(canonical).ok().map(Path::to_path_buf));
+    Some(inside.map_or(path, |inside| worktree.join(inside)))
+}
+
+/// The lock's path as `git rev-parse --git-path` resolves it.
+fn git_index_lock_path(worktree: &Path) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["-C"])
         .arg(worktree)
@@ -9682,6 +9696,27 @@ mod tests {
                  program that crashed. If nothing is using git in this worktree, delete \
                  ./.git/index.lock and try again."
             ),
+            "{text}"
+        );
+    }
+
+    /// git names the lock by its resolved path, so a worktree reached through
+    /// a symlink must still read as `./` in the note.
+    #[test]
+    fn a_leftover_lock_reads_as_inside_a_worktree_reached_through_a_symlink() {
+        let repo = repo_with_a_counting_hook();
+        let links = tempfile::tempdir().unwrap();
+        let linked = links.path().join("linked");
+        symlink(repo.path(), &linked).unwrap();
+        let file = fs::File::create(repo.path().join(".git/index.lock")).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+
+        let err = commit(&linked, "under an old lock").expect_err("the lock is held");
+
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("delete ./.git/index.lock and try again."),
             "{text}"
         );
     }
