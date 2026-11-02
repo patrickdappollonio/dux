@@ -1710,7 +1710,9 @@ mod tests {
 
     fn assert_names_neither_form(body: &str, worktree: &Path, resolved: &Path) {
         assert!(
-            body.contains("git status failed") && body.contains("./no-such-gitdir"),
+            // git names either the gitdir it could not find or the `.git` file
+            // pointing at it, depending on its version; both sit in the worktree.
+            body.contains("git status failed") && body.contains(" ./"),
             "the reason must survive the redaction: {body}"
         );
         assert!(
