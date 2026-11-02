@@ -489,10 +489,10 @@ async fn lane_turn(worktree: &Path) -> Result<dux_core::changes_lane::Turn, Rout
 /// `index.lock`, and pointing at `dux.log` instead strands a remote browser on a
 /// machine its reader may not reach.
 ///
-/// The server's worktree path is stripped by
-/// [`dux_core::git::redact_worktree_path`], a tidiness measure and not a security
-/// boundary, applied at the source for commit, push and pull too so all three read
-/// the same way on both surfaces. The unredacted chain still goes to `dux.log`.
+/// The server's worktree path, as given and as resolved, is stripped by
+/// [`dux_core::git::redact_resolved_worktree_path`], a tidiness measure and not a
+/// security boundary, applied at the source for commit, push and pull too so all
+/// three read the same way on both surfaces. The unredacted chain still goes to `dux.log`.
 ///
 /// The ordinary refusals do not come through here: `git::commit_preflight` catches
 /// the empty-message and nothing-staged cases and answers 400 in its own wording.
@@ -508,34 +508,44 @@ where
     T: Send + 'static,
 {
     let worktree = worktree.to_path_buf();
+    let wt = worktree.clone();
     // The hold and the lane turn ride INTO the blocking task: a client that
     // disconnects drops this future, and the git work it started must still
     // keep its worktree registered, and the next change waiting, until it has
-    // actually finished.
+    // actually finished. A failure's text is redacted of the worktree's
+    // resolved path as well, resolved there, off the reactor.
     match tokio::task::spawn_blocking(move || {
         let _hold = hold;
         let _turn = turn;
-        op()
+        op().map_err(|e| (e, std::fs::canonicalize(&wt).ok()))
     })
     .await
     {
         Ok(Ok(value)) => Ok(value),
         // A refusal is a sentence the user can act on (look again, act on a
         // row inside), not a git failure.
-        Ok(Err(e)) if e.downcast_ref::<dux_core::git::Refusal>().is_some() => Err((
+        Ok(Err((e, canonical))) if e.downcast_ref::<dux_core::git::Refusal>().is_some() => Err((
             StatusCode::BAD_REQUEST,
-            dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
+            dux_core::git::redact_resolved_worktree_path(
+                &e.to_string(),
+                &worktree,
+                canonical.as_deref(),
+            ),
         )
             .into_response()
             .into()),
         // Something lives where the operation would delete: a conflict with
         // what is there, said in the sentence that names it.
-        Ok(Err(e)) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
+        Ok(Err((e, _))) if e.downcast_ref::<dux_core::destructive::Refused>().is_some() => {
             Err((StatusCode::CONFLICT, e.to_string()).into_response().into())
         }
-        Ok(Err(e)) => {
+        Ok(Err((e, canonical))) => {
             dux_core::logger::warn(&format!("[web] could not {action}: {e:#}"));
-            let detail = dux_core::git::redact_worktree_path(&format!("{e:#}"), &worktree);
+            let detail = dux_core::git::redact_resolved_worktree_path(
+                &format!("{e:#}"),
+                &worktree,
+                canonical.as_deref(),
+            );
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Could not {action}. {detail}"),

@@ -6955,22 +6955,58 @@ pub fn commit_preflight(worktree_path: &Path, message: &str) -> CommitPreflight 
 /// path this rule exists to prevent. Inside a quoted run the quote is safe for
 /// the same reason it is safe to git, since the opening quote is what says a
 /// quoted path is being read at all.
+///
+/// The match must START a path too: it is preceded by the start of the text,
+/// whitespace, a quote, or punctuation that opens a path in prose (`(`, `[`,
+/// `<`, `=`, `:`). Found inside a longer path (`/var/x` in `/private/var/x/a`)
+/// it is a different path, and shortening it would read `/private./a`.
+///
+/// This strips only the path as given. git often prints the RESOLVED one, so a
+/// worktree reached through a symlink (`/var` on macOS) needs
+/// [`redact_resolved_worktree_path`] with its canonical form as well.
 pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
-    let wt = worktree_path.to_string_lossy();
-    let wt = wt.strip_suffix('/').unwrap_or(wt.as_ref());
-    if wt.is_empty() || wt == "/" {
-        return text.to_string();
-    }
+    redact_resolved_worktree_path(text, worktree_path, None)
+}
 
+/// [`redact_worktree_path`] that also strips `canonical`, the worktree's
+/// resolved path, so git's text reads `./` whether git printed the path it was
+/// given or the one it resolved. Resolving it is filesystem I/O, so the caller
+/// does that off the UI and engine threads (on the worker that ran git) and
+/// passes the answer, `None` when it could not be resolved.
+pub fn redact_resolved_worktree_path(
+    text: &str,
+    worktree_path: &Path,
+    canonical: Option<&Path>,
+) -> String {
+    let mut forms: Vec<String> = [Some(worktree_path), canonical]
+        .into_iter()
+        .flatten()
+        .map(|path| {
+            let path = path.to_string_lossy();
+            path.strip_suffix('/').unwrap_or(&path).to_string()
+        })
+        .filter(|form| !form.is_empty() && form != "/")
+        .collect();
+    // The longer form first, so neither is ever stripped out of the other.
+    forms.sort_by_key(|form| std::cmp::Reverse(form.len()));
+    forms.dedup();
+    forms
+        .iter()
+        .fold(text.to_string(), |text, form| strip_path(&text, form))
+}
+
+/// One pass of [`redact_worktree_path`] for one spelling of the worktree.
+fn strip_path(text: &str, wt: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find(wt) {
         let after = &rest[at + wt.len()..];
+        let before = rest[..at].chars().next_back();
         // The quote that OPENED this path, if any, closes it too.
-        let opening_quote = rest[..at]
-            .chars()
-            .next_back()
-            .filter(|c| *c == '\'' || *c == '"');
+        let opening_quote = before.filter(|c| *c == '\'' || *c == '"');
+        let starts_a_path = before.is_none_or(|c| {
+            c.is_whitespace() || matches!(c, '\'' | '"' | '(' | '[' | '<' | '=' | ':')
+        });
         let next = after.chars().next();
         // A boundary is a separator, the closing quote, or the end of the text.
         // Anything else means this is a DIFFERENT path that merely starts with
@@ -6980,7 +7016,7 @@ pub fn redact_worktree_path(text: &str, worktree_path: &Path) -> String {
             None | Some('/') => true,
             Some(c) => Some(c) == opening_quote,
         };
-        if at_boundary {
+        if starts_a_path && at_boundary {
             out.push_str(&rest[..at]);
             out.push('.');
         } else {
@@ -7128,7 +7164,11 @@ impl IndexLockWait {
             return error;
         };
         let note = match redact {
-            Some(worktree) => redact_worktree_path(&note, worktree),
+            Some(worktree) => redact_resolved_worktree_path(
+                &note,
+                worktree,
+                fs::canonicalize(worktree).ok().as_deref(),
+            ),
             None => note,
         };
         anyhow!("{error:#} {note}")
@@ -7180,7 +7220,11 @@ fn git_failure(what: &str, worktree_path: &Path, output: &std::process::Output) 
     }
     anyhow!(
         "{what} failed: {}",
-        redact_worktree_path(&detail, worktree_path)
+        redact_resolved_worktree_path(
+            &detail,
+            worktree_path,
+            fs::canonicalize(worktree_path).ok().as_deref()
+        )
     )
 }
 
@@ -9721,6 +9765,25 @@ mod tests {
         );
     }
 
+    /// git's own text names the lock by its resolved path too, so it must read
+    /// as `./` for a worktree reached through a symlink, with no trace of where
+    /// the symlink leads.
+    #[test]
+    fn gits_own_lock_text_reads_as_inside_a_worktree_reached_through_a_symlink() {
+        let repo = repo_with_a_counting_hook();
+        let links = tempfile::tempdir().unwrap();
+        let linked = links.path().join("linked");
+        symlink(repo.path(), &linked).unwrap();
+        fs::write(repo.path().join(".git/index.lock"), "").unwrap();
+
+        let err = commit(&linked, "under a held lock").expect_err("the lock is held");
+
+        let text = format!("{err:#}");
+        let resolved = fs::canonicalize(repo.path()).unwrap();
+        assert!(text.contains("'./.git/index.lock'"), "{text}");
+        assert!(!text.contains(&*resolved.to_string_lossy()), "{text}");
+    }
+
     /// A tracked file whose time moved and whose content did not: `git status`
     /// would write refreshed times back to the index, which is what takes the
     /// lock.
@@ -10011,6 +10074,15 @@ mod tests {
             redact_worktree_path("cannot change to /wt/agent's parent", wt),
             "cannot change to /wt/agent's parent"
         );
+    }
+
+    /// A match has to START a path as well as end one: the worktree's path
+    /// found inside a longer one is a different path, and shortening it from
+    /// the middle invents one that does not exist.
+    #[test]
+    fn redact_worktree_path_leaves_a_path_that_merely_ends_with_the_worktree_whole() {
+        let text = "error: '/private/var/x/a' is unmerged";
+        assert_eq!(redact_worktree_path(text, Path::new("/var/x")), text);
     }
 
     /// A trailing separator on the worktree path must not change the answer,
