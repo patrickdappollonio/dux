@@ -4265,8 +4265,22 @@ impl Engine {
                     };
                     (path, queue.start_read())
                 };
-                let outcome =
-                    crate::changes_lane::request_changed_files(&path).map_err(|e| e.to_string());
+                // The failure's text reaches the status line and the browsers,
+                // so it is redacted of the worktree's path in both the form it
+                // was given and the one git may resolve it to, resolved here on
+                // the worker. The unredacted chain still goes to dux.log.
+                let outcome = crate::changes_lane::request_changed_files(&path).map_err(|e| {
+                    crate::logger::error(&format!(
+                        "changed-files refresh failed for {}: {e:#}",
+                        path.display()
+                    ));
+                    let canonical = std::fs::canonicalize(&path).ok();
+                    crate::git::redact_resolved_worktree_path(
+                        &e.to_string(),
+                        &path,
+                        canonical.as_deref(),
+                    )
+                });
                 if tx
                     .send(WorkerEvent::ChangedFilesReady {
                         outcome,

@@ -649,15 +649,20 @@ impl ChangesService {
 
         // Stage 2: the git work, off the reactor, in the worktree's lane. A poll
         // that finds the lane busy reads nothing and stores nothing: no failure,
-        // no warning streak, and the waiters it wakes re-elect an owner.
+        // no warning streak, and the waiters it wakes re-elect an owner. A
+        // failure carries the worktree's resolved path, resolved here, so its
+        // text can be redacted of both forms git may print.
         let wt = worktree.clone();
         let request_wait = self.request_turn_wait();
-        let computed = tokio::task::spawn_blocking(move || match read {
-            Read::Poll => dux_core::changes_lane::poll_changed_files(&wt),
-            Read::Request => Some(dux_core::changes_lane::request_changed_files_within(
-                &wt,
-                request_wait,
-            )),
+        let computed = tokio::task::spawn_blocking(move || {
+            let listing = match read {
+                Read::Poll => dux_core::changes_lane::poll_changed_files(&wt),
+                Read::Request => Some(dux_core::changes_lane::request_changed_files_within(
+                    &wt,
+                    request_wait,
+                )),
+            };
+            listing.map(|listing| listing.map_err(|e| (e, std::fs::canonicalize(&wt).ok())))
         })
         .await;
 
@@ -669,12 +674,19 @@ impl ChangesService {
                 self.store_ok_and_maybe_emit(session_id, generation, staged, unstaged)
                     .await;
             }
-            Ok(Some(Err(e))) => {
+            Ok(Some(Err((e, canonical)))) => {
                 let rev = self.engine.next_changes_rev(session_id.to_string()).await;
                 let message = format!("{e:#}");
                 dux_core::logger::error(&format!(
                     "changed-files compute failed for session {session_id}: {message}"
                 ));
+                // The stored text becomes the warning both surfaces show; the
+                // unredacted chain went to dux.log just above.
+                let message = dux_core::git::redact_resolved_worktree_path(
+                    &message,
+                    &worktree,
+                    canonical.as_deref(),
+                );
                 // A genuine git failure must replace a now-stale success (`clobber_ok`).
                 let _ = self.store_err(session_id, rev, generation, message, Failure::Real);
             }
@@ -1449,6 +1461,44 @@ mod tests {
         assert_eq!(
             recovery.key.as_deref(),
             Some(dux_core::changes_status::warn_key("s1").as_str())
+        );
+    }
+
+    /// git resolves a relative gitdir from the directory it changed into, so a
+    /// worktree reached through a symlink fails with its RESOLVED path in the
+    /// text. The warning the failures raise names neither form of it.
+    #[tokio::test]
+    async fn the_failure_warning_names_neither_form_of_the_worktree_path() {
+        let outer = dux_core::test_scratch::ScratchDir::new();
+        let real = outer.path().join("real");
+        std::fs::create_dir_all(real.join("wt")).unwrap();
+        let link = outer.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let worktree = link.join("wt");
+        std::fs::write(worktree.join(".git"), "gitdir: no-such-gitdir\n").unwrap();
+        let resolved = std::fs::canonicalize(&worktree).unwrap();
+        assert_ne!(worktree, resolved);
+
+        let (engine, bus, _tmp) = boot_session_at(&worktree);
+        let svc = ChangesService::new(engine, bus);
+        let mut statuses = svc.engine.subscribe_status();
+        for _ in 0..dux_core::changes_status::ERROR_WARN_THRESHOLD {
+            svc.compute_cached("s1".to_string(), Read::Request).await;
+        }
+        let message = loop {
+            let status = statuses.recv().await.expect("a status");
+            if status.tone == "warning" {
+                break status.message;
+            }
+        };
+        assert!(
+            message.contains("git status failed"),
+            "the reason must survive the redaction: {message}"
+        );
+        assert!(
+            !message.contains(resolved.to_string_lossy().as_ref())
+                && !message.contains(worktree.to_string_lossy().as_ref()),
+            "the warning must not carry the server's worktree path: {message}"
         );
     }
 
