@@ -642,6 +642,41 @@ async fn unstage(
     .await
 }
 
+/// Whether `path` is untracked, which [`discard`] derives from live git
+/// status rather than trusting the client.
+///
+/// `discard_classify`'s refusals are written to be read ("unstage first",
+/// "nothing to discard"), so they go to the client as they always have; the
+/// path redaction is applied for the same reason `run_git` applies it, with the
+/// worktree's resolved path found on the blocking task.
+async fn classify_discard(worktree: &Path, path: String) -> Result<bool, RouteRejection> {
+    let wt = worktree.to_path_buf();
+    match tokio::task::spawn_blocking(move || {
+        dux_core::git::discard_classify(&wt, &path)
+            .map_err(|e| (e, std::fs::canonicalize(&wt).ok()))
+    })
+    .await
+    {
+        Ok(Ok(untracked)) => Ok(untracked),
+        Ok(Err((e, canonical))) => Err((
+            StatusCode::BAD_REQUEST,
+            dux_core::git::redact_resolved_worktree_path(
+                &e.to_string(),
+                worktree,
+                canonical.as_deref(),
+            ),
+        )
+            .into_response()
+            .into()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git task failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
+}
+
 async fn discard(
     State(state): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -666,30 +701,10 @@ async fn discard(
     // so the tracked-vs-untracked distinction is derived SERVER-SIDE from live
     // git status, never trusted from the client. This also rejects staged files
     // ("unstage first") and files with nothing to discard, with a message.
-    let wt = worktree.clone();
-    let p = op.path.clone();
-    let untracked =
-        match tokio::task::spawn_blocking(move || dux_core::git::discard_classify(&wt, &p)).await {
-            Ok(Ok(u)) => u,
-            // `discard_classify`'s refusals are written to be read ("unstage
-            // first", "nothing to discard"), so they go to the client as they
-            // always have; the path redaction is applied for the same reason
-            // `run_git` applies it.
-            Ok(Err(e)) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    dux_core::git::redact_worktree_path(&e.to_string(), &worktree),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("git task failed: {e}"),
-                )
-                    .into_response();
-            }
-        };
+    let untracked = match classify_discard(&worktree, op.path.clone()).await {
+        Ok(untracked) => untracked,
+        Err(refusal) => return refusal.into_response(),
+    };
     let wt = worktree.clone();
     let confirmed = op.confirmed();
     let path = op.path;
@@ -880,43 +895,49 @@ async fn partition_batch(
     let wt = worktree.to_path_buf();
     let requested = paths;
     let partition = tokio::task::spawn_blocking(move || {
-        dux_core::git::changed_files_for_decisions(&wt).and_then(|(staged, unstaged)| {
-            let (live, side) = match section {
-                Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
-                Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
-            };
-            // One git call confirms every path inside a folded folder, so an
-            // ignored or missing file there is refused rather than acted on.
-            let answered = dux_core::git::rows_answering(&wt, live, side, &requested)?;
-            let mut seen = std::collections::HashSet::new();
-            let mut done = Vec::new();
-            let mut refused = Vec::new();
-            for path in requested {
-                if !seen.insert(path.clone()) {
-                    continue;
+        dux_core::git::changed_files_for_decisions(&wt)
+            .and_then(|(staged, unstaged)| {
+                let (live, side) = match section {
+                    Section::Staged => (&staged, dux_core::git::ChangesSide::Staged),
+                    Section::Unstaged => (&unstaged, dux_core::git::ChangesSide::Unstaged),
+                };
+                // One git call confirms every path inside a folded folder, so an
+                // ignored or missing file there is refused rather than acted on.
+                let answered = dux_core::git::rows_answering(&wt, live, side, &requested)?;
+                let mut seen = std::collections::HashSet::new();
+                let mut done = Vec::new();
+                let mut refused = Vec::new();
+                for path in requested {
+                    if !seen.insert(path.clone()) {
+                        continue;
+                    }
+                    // A file inside a folded folder is in the section when the
+                    // folder is and git lists it there, which is how an expanded
+                    // row validates.
+                    if answered.contains(&path) {
+                        done.push(path);
+                    } else {
+                        refused.push(path);
+                    }
                 }
-                // A file inside a folded folder is in the section when the
-                // folder is and git lists it there, which is how an expanded
-                // row validates.
-                if answered.contains(&path) {
-                    done.push(path);
-                } else {
-                    refused.push(path);
-                }
-            }
-            Ok((done, refused))
-        })
+                Ok((done, refused))
+            })
+            .map_err(|e| (e, std::fs::canonicalize(&wt).ok()))
     })
     .await;
     match partition {
         Ok(Ok(split)) => Ok(split),
-        Ok(Err(e)) => {
+        Ok(Err((e, canonical))) => {
             dux_core::logger::warn(&format!("[web] could not read changed files: {e:#}"));
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
                     "Could not read this worktree's changed files. {}",
-                    dux_core::git::redact_worktree_path(&format!("{e:#}"), worktree)
+                    dux_core::git::redact_resolved_worktree_path(
+                        &format!("{e:#}"),
+                        worktree,
+                        canonical.as_deref(),
+                    )
                 ),
             )
                 .into_response()
@@ -929,6 +950,57 @@ async fn partition_batch(
             .into_response()
             .into()),
     }
+}
+
+/// Stages or unstages `batch` in one git call. A path git may not be asked to
+/// stage (a worktree of this repository, a folder holding nothing but
+/// repositories) is refused on its own with its sentence, and the rest of the
+/// batch goes ahead; when every path was refused, the first sentence is the
+/// 400.
+///
+/// The worktree's resolved path is found on the blocking task, and only when
+/// the whole batch was refused, since only then is a refusal's sentence sent on.
+async fn apply_batch(
+    section: Section,
+    worktree: &Path,
+    batch: Vec<String>,
+    hold: dux_core::worktree_ops::WorktreeOpGuard,
+    turn: dux_core::changes_lane::Turn,
+) -> Result<dux_core::git::StagePartition, RouteRejection> {
+    let wt = worktree.to_path_buf();
+    let (partition, canonical) = run_git(section.action(), worktree, hold, turn, move || {
+        let partition = match section {
+            Section::Staged => {
+                dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
+                    staged: batch,
+                    ..Default::default()
+                })
+            }
+            Section::Unstaged => dux_core::git::stage_partitioned(&wt, &batch),
+        }?;
+        let canonical = if partition.staged.is_empty() {
+            std::fs::canonicalize(&wt).ok()
+        } else {
+            None
+        };
+        Ok((partition, canonical))
+    })
+    .await?;
+    if partition.staged.is_empty() {
+        // Every path left was refused for a reason of its own: say the first.
+        let sentence = partition
+            .refused
+            .first()
+            .map(|(_, sentence)| sentence.clone())
+            .unwrap_or_default();
+        return Err((
+            StatusCode::BAD_REQUEST,
+            dux_core::git::redact_resolved_worktree_path(&sentence, worktree, canonical.as_deref()),
+        )
+            .into_response()
+            .into());
+    }
+    Ok(partition)
 }
 
 /// Stage or unstage a whole batch: one validating `git status` read, one git call,
@@ -992,44 +1064,10 @@ async fn files_op(
             .into_response();
     }
 
-    // A path git may not be asked to stage (a worktree of this repository, a
-    // folder holding nothing but repositories) is refused on its own with its
-    // sentence, and the rest of the batch goes ahead.
-    let wt = worktree.clone();
-    let batch = done.clone();
-    let partition = match run_git(
-        section.action(),
-        &worktree,
-        hold,
-        turn,
-        move || match section {
-            Section::Staged => {
-                dux_core::git::unstage_files(&wt, &batch).map(|()| dux_core::git::StagePartition {
-                    staged: batch,
-                    ..Default::default()
-                })
-            }
-            Section::Unstaged => dux_core::git::stage_partitioned(&wt, &batch),
-        },
-    )
-    .await
-    {
+    let partition = match apply_batch(section, &worktree, done.clone(), hold, turn).await {
         Ok(partition) => partition,
-        Err(r) => return r.into_response(),
+        Err(refusal) => return refusal.into_response(),
     };
-    if partition.staged.is_empty() {
-        // Every path left was refused for a reason of its own: say the first.
-        let sentence = partition
-            .refused
-            .first()
-            .map(|(_, sentence)| sentence.clone())
-            .unwrap_or_default();
-        return (
-            StatusCode::BAD_REQUEST,
-            dux_core::git::redact_worktree_path(&sentence, &worktree),
-        )
-            .into_response();
-    }
     let mut refused = refused;
     let mut reasons = std::collections::BTreeMap::new();
     for (path, sentence) in partition.refused {
@@ -1272,6 +1310,24 @@ mod tests {
     -> (dux_core::test_scratch::ScratchDir, Router, AppState) {
         let tmp = dux_core::test_scratch::ScratchDir::new();
         let root = tmp.path().to_path_buf();
+        let (app, state) = router_at(root).await;
+        (tmp, app, state)
+    }
+
+    /// [`router_with_session_and_state`] with every path reached through a
+    /// symlink, the way macOS reaches a temp directory through `/var`, so git
+    /// can print a worktree's resolved path where dux knows the given one.
+    async fn router_through_a_symlink() -> (dux_core::test_scratch::ScratchDir, Router, AppState) {
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (app, state) = router_at(link).await;
+        (tmp, app, state)
+    }
+
+    async fn router_at(root: PathBuf) -> (Router, AppState) {
         // The git repo lives in its own subdir so the dux runtime files at `root`
         // never show up as untracked changes.
         let wt = root.join("wt");
@@ -1368,7 +1424,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let state = slot.lock().unwrap().take().expect("probe captured state");
-        (tmp, app, state)
+        (app, state)
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {
@@ -1622,6 +1678,68 @@ mod tests {
             !body.contains(worktree.to_string_lossy().as_ref()),
             "the response must not carry the server's worktree path: {body}"
         );
+    }
+
+    /// Sends `body` to `route` for a session whose path runs through a
+    /// symlink and whose `.git` names a relative gitdir that does not exist.
+    /// git resolves a relative gitdir from the directory it changed into, so
+    /// its failure names the worktree's RESOLVED path, which the session does
+    /// not record. Answers the status, the body, and both forms of the path.
+    async fn through_a_symlink_with_a_broken_gitdir(
+        route: &str,
+        body: &str,
+    ) -> (StatusCode, String, PathBuf, PathBuf) {
+        let (tmp, app, _state) = router_through_a_symlink().await;
+        let worktree = tmp.path().join("link").join("wt");
+        let resolved = std::fs::canonicalize(&worktree).unwrap();
+        assert_ne!(worktree, resolved);
+        std::fs::remove_dir_all(worktree.join(".git")).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: no-such-gitdir\n").unwrap();
+
+        let resp = app.oneshot(json_req("POST", route, body)).await.unwrap();
+        let status = resp.status();
+        let body = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), 64 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        (status, body, worktree, resolved)
+    }
+
+    fn assert_names_neither_form(body: &str, worktree: &Path, resolved: &Path) {
+        assert!(
+            body.contains("git status failed") && body.contains("./no-such-gitdir"),
+            "the reason must survive the redaction: {body}"
+        );
+        assert!(
+            !body.contains(resolved.to_string_lossy().as_ref())
+                && !body.contains(worktree.to_string_lossy().as_ref()),
+            "the response must not carry the server's worktree path: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_strips_the_resolved_server_path_from_a_classify_refusal() {
+        let (status, body, worktree, resolved) = through_a_symlink_with_a_broken_gitdir(
+            "/api/v1/sessions/s1/git/discard",
+            r#"{"path":"f.txt"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_names_neither_form(&body, &worktree, &resolved);
+    }
+
+    #[tokio::test]
+    async fn stage_files_strips_the_resolved_server_path_from_a_failed_read() {
+        let (status, body, worktree, resolved) = through_a_symlink_with_a_broken_gitdir(
+            "/api/v1/sessions/s1/git/stage-files",
+            r#"{"paths":["f.txt"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_names_neither_form(&body, &worktree, &resolved);
     }
 
     /// A failing git helper must tell the browser WHY. The action alone plus a

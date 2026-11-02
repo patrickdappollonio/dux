@@ -198,9 +198,12 @@ async fn get_children(
         state.changes.note_fresh_validation_read();
     }
     // A folder expansion: a git child stopped at its deadline says only that,
-    // since nothing fetches the folder again by itself.
+    // since nothing fetches the folder again by itself. A failure carries the
+    // worktree's resolved path, found here off the reactor, so its text is
+    // stripped of the path in both forms.
     let answer = tokio::task::spawn_blocking(move || {
         dux_core::git::as_folder_read(|| list_children(&wt, &dir, side, listing))
+            .map_err(|e| (e, std::fs::canonicalize(&wt).ok()))
     })
     .await;
     match answer {
@@ -213,19 +216,23 @@ async fn get_children(
             children: crate::changes::sorted_views(&children),
         })
         .into_response(),
-        Ok(Err(ChildrenError::Refused(why))) => (
+        Ok(Err((ChildrenError::Refused(why), canonical))) => (
             StatusCode::BAD_REQUEST,
-            dux_core::git::redact_worktree_path(&why, &worktree),
+            dux_core::git::redact_resolved_worktree_path(&why, &worktree, canonical.as_deref()),
         )
             .into_response(),
-        Ok(Err(ChildrenError::Git(detail))) => {
+        Ok(Err((ChildrenError::Git(detail), canonical))) => {
             dux_core::logger::warn(&format!("[web] could not list a folder: {detail}"));
             (
                 StatusCode::CONFLICT,
                 [(header::RETRY_AFTER, RETRY_AFTER_SECS.to_string())],
                 format!(
                     "Could not list the folder. {}",
-                    dux_core::git::redact_worktree_path(&detail, &worktree)
+                    dux_core::git::redact_resolved_worktree_path(
+                        &detail,
+                        &worktree,
+                        canonical.as_deref(),
+                    )
                 ),
             )
                 .into_response()
