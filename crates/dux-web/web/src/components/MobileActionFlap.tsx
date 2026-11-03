@@ -143,8 +143,18 @@ function useFlapShape(ref: React.RefObject<HTMLDivElement | null>) {
     const el = ref.current
     if (!el) return
     const read = () => {
-      const width = el.offsetWidth
-      const height = el.offsetHeight
+      // The width the browser PAINTS: the box's edges snapped to device
+      // pixels, which is how the pill landing on this box paints its own. The
+      // cluster is fractional whenever it carries the changed-file count, and
+      // `offsetWidth` rounds in whole CSS pixels, so the silhouette's right side
+      // could sit half a pixel off the pill's border at the swap. The SVG's
+      // origin snaps with the box's left edge wherever the fillet and overhang
+      // span a whole number of device pixels, which every integer ratio gives.
+      const r = el.getBoundingClientRect()
+      const dpr = window.devicePixelRatio || 1
+      const snap = (v: number) => Math.round(v * dpr) / dpr
+      const width = snap(r.right) - snap(r.left)
+      const height = snap(r.bottom) - snap(r.top)
       setBox((prev) =>
         prev.width === width && prev.height === height
           ? prev

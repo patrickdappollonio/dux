@@ -89,6 +89,7 @@ installBootStubs()
 const { TheaterPill } = await import("./TheaterPill")
 const { appMenuModel } = await import("@/lib/appMenu")
 const {
+  PILL_GRIPLESS_CLASS,
   THEATER_PILL_GRIP_SLOT_PX,
   THEATER_PILL_GRIP_W_PX,
   THEATER_PILL_HINT_KEY,
@@ -178,10 +179,30 @@ function pillRect(el: HTMLElement): DOMRect {
   })
 }
 
+// How much of the grip slot the grip takes up, read the way the pill reads it:
+// from the grip's left edge to the next control's. Collapsed under the gripless
+// class and open otherwise, unless a test plays a frame of the slot opening.
+let gripOccupied: number | null = null
+const GRIP_LEFT = 10
+
+function slotOccupied(el: Element): number {
+  if (gripOccupied !== null) return gripOccupied
+  const box = el.closest('[data-testid="theater-pill"]')
+  return box?.classList.contains(PILL_GRIPLESS_CLASS)
+    ? 0
+    : THEATER_PILL_GRIP_SLOT_PX
+}
+
 function stubRects() {
   Element.prototype.getBoundingClientRect = function (this: Element) {
     const id = this instanceof HTMLElement ? this.dataset.testid : undefined
     if (id === "theater-pill") return pillRect(this as HTMLElement)
+    if (id === "theater-pill-grip") {
+      return rect({ left: GRIP_LEFT, top: 0, width: 0, height: 40 })
+    }
+    if (id === "pane-theater-toggle" && this.closest('[data-testid="theater-pill"]')) {
+      return rect({ left: GRIP_LEFT + slotOccupied(this), top: 0, width: 40, height: 40 })
+    }
     if (id === "flap-dock") return rect(flapBox)
     return rect(surfaceBox)
   }
@@ -196,6 +217,7 @@ beforeEach(() => {
   surfaceBox = { left: 0, top: 0, width: 800, height: 600 }
   pillBox = PILL_BOX
   flapBox = { left: 0, top: 0, width: 200, height: 48 }
+  gripOccupied = null
   stubRects()
   // THE PILL ONLY EXISTS IN THEATER, so the state it is rendered against says
   // so: its menu's way out is the shared item, which is present exactly while
@@ -1071,6 +1093,22 @@ describe("the phone flight, with real boxes to measure", () => {
     flapBox = { left: 300, top: 0, width: 200, height: 48 }
     render(flying("detaching"))
     expect(pill().style.left).toBe("566px")
+  })
+
+  it("keeps its resting corner while the grip slot opens on the travel's clock", () => {
+    // The gripless class comes off at the START of the slot's widening, so the
+    // box the next resize measures is still the collapsed one. Settling on it
+    // moved the pill a whole slot to the right under a transform computed for
+    // where it was, and the cluster lurched sideways one frame into the flight.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    expect(pill().className).not.toContain(PILL_GRIPLESS_CLASS)
+    for (const occupied of [0, 9, THEATER_PILL_GRIP_SLOT_PX]) {
+      gripOccupied = occupied
+      pillBox = { ...pillBox, width: 200 + occupied }
+      act(() => playPillResize())
+      expect(pill().style.left).toBe("566px")
+    }
   })
 
   it("pulls off wearing the flap's shape and lands as a capsule", () => {

@@ -678,10 +678,17 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 
 /* THE GRIP SLOT IS THE WIDTH THE CLUSTER GAINS IN FLIGHT. The docked flap has
    no grip and reserves no blank space for one, so the pill starts the detach
-   gripless (its box then equals the flap's exactly, which is what makes the
-   FLIP a pure translation) and the slot widens on the travel's own clock. The
-   negative margin swallows the row's 2px gap at zero width, so a collapsed grip
-   advances the row by exactly nothing. */
+   gripless (its box then equals the flap's, which is what makes the FLIP a pure
+   translation) and the slot widens on the travel's own clock.
+
+   At zero width the grip is still its two 1px borders, and the negative margin
+   swallows those along with the row's 2px gap, so a collapsed grip advances the
+   row by nothing. The border itself never changes: it is the solid half of the
+   keyboard focus ring, and a border width in flight is snapped to whole device
+   pixels, so it would sit at one device pixel per side and then hop. Width and
+   margin are lengths with no such snap and open on the one clock together. At a
+   fractional device pixel ratio the border and the margin round differently,
+   so the collapsed slot is exact only at whole-number ratios. */
 .dux-pill-grip {
   transition:
     width 320ms cubic-bezier(0.2, 0, 0, 1),
@@ -689,7 +696,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 }
 .dux-pill-gripless .dux-pill-grip {
   width: 0;
-  margin-right: -2px;
+  margin-right: -4px;
   padding: 0;
   overflow: hidden;
 }
@@ -714,19 +721,23 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    arcs the docked flap draws, so the shape the flight leaves and the shape it
    re-forms are one object. They shrink away right at pull-off; on the way back
    they appear only AFTER the capsule has arrived, so the return reads
-   travel-then-snap and never a tab shape flying through the air. */
+   travel-then-snap and never a tab shape flying through the air.
+
+   Offsets are measured from the pill's padding box, one border width inside
+   the box the flap's arcs hang from, so each carries the pill's 1px border:
+   without it the arcs land a pixel low and a pixel in at the swap. */
 .dux-pill-fillet {
   position: absolute;
-  top: 0;
+  top: -1px;
   display: none;
   pointer-events: none;
 }
 .dux-pill-fillet-l {
-  left: -12px;
+  left: -13px;
   transform-origin: 100% 0;
 }
 .dux-pill-fillet-r {
-  right: -12px;
+  right: -13px;
   transform-origin: 0 0;
 }
 .dux-flight-out .dux-pill-fillet,

@@ -40,7 +40,6 @@ import {
   clampPillPosition,
   markPillHintShown,
   nudgePillPosition,
-  PILL_GRIPLESS_CLASS,
   readPillHintPending,
   readPillPosition,
   resolvePillPosition,
@@ -527,13 +526,18 @@ function usePillHint(): void {
   }, [])
 }
 
-/// How much width the collapsed grip slot is about to give back, or zero for an
-/// open one. Read from the element, not threaded down, so the class and the
-/// measurement are the same commit's answer.
-function griplessSlotWidth(box: HTMLElement): number {
-  return box.classList.contains(PILL_GRIPLESS_CLASS)
-    ? THEATER_PILL_GRIP_SLOT_PX
-    : 0
+/// How much narrower the pill is right now than it will settle at: the grip
+/// slot's full width less what the grip takes up at this moment, read off the
+/// layout as the distance from the grip to the control after it. The class
+/// cannot answer this, because it comes off at the START of the slot's widening
+/// and every frame of that widening is a box that is still too narrow.
+function gripSlotShortfall(box: HTMLElement): number {
+  const grip = box.querySelector<HTMLElement>('[data-testid="theater-pill-grip"]')
+  const next = grip?.nextElementSibling
+  if (!grip || !next) return 0
+  const occupied =
+    next.getBoundingClientRect().left - grip.getBoundingClientRect().left
+  return THEATER_PILL_GRIP_SLOT_PX - occupied
 }
 
 interface PillDrag {
@@ -614,7 +618,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       // through: a corner derived from the detach's collapsed box puts the right
       // edge outside the surface the moment the slot opens.
       pill: {
-        width: p.width + griplessSlotWidth(box),
+        width: p.width + gripSlotShortfall(box),
         height: p.height,
       },
     }

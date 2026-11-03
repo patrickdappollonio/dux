@@ -107,15 +107,26 @@ function zLevel(className: string): number {
 
 /// jsdom lays nothing out, so the flap's own box reads zero and no silhouette
 /// is drawn. Give it a real one, the way a browser would.
-function stubBox(width: number, height: number) {
-  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
-    configurable: true,
-    get: () => width,
-  })
-  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
-    configurable: true,
-    get: () => height,
-  })
+const realRect = Element.prototype.getBoundingClientRect
+
+/// The flap's painted box. Every other element keeps jsdom's empty one.
+function stubBox(width: number, height: number, left = 0, top = 0) {
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    if ((this as HTMLElement).dataset?.testid !== "mobile-action-flap") {
+      return realRect.call(this)
+    }
+    return {
+      x: left,
+      y: top,
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+      width,
+      height,
+      toJSON: () => ({}),
+    } as DOMRect
+  }
 }
 
 beforeEach(() => {
@@ -128,10 +139,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
-  // @ts-expect-error restoring jsdom's own zero-size getters
-  delete HTMLElement.prototype.offsetWidth
-  // @ts-expect-error restoring jsdom's own zero-size getters
-  delete HTMLElement.prototype.offsetHeight
+  Element.prototype.getBoundingClientRect = realRect
 })
 
 describe("the docked action flap", () => {
@@ -200,6 +208,21 @@ describe("the docked action flap", () => {
     // band is.
     const stroke = container.querySelector("path[stroke]")
     expect(stroke?.getAttribute("d")).not.toContain("Z")
+  })
+
+  it("draws the width the browser paints, not a rounded one, at a fractional size", () => {
+    // The landing pill is parked on this box's fractional coordinates and its
+    // CSS box is painted between edges snapped to device pixels. A silhouette
+    // built from a whole-pixel width put its right side up to half a pixel off
+    // that at the swap. At 2x: left 185.3 snaps to 185.5 and the right edge,
+    // 378.1125, to 378, so 192.5 is painted.
+    vi.stubGlobal("devicePixelRatio", 2)
+    stubBox(192.8125, 50, 185.3, 43)
+    const { container } = render(
+      <MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />,
+    )
+    const svg = container.querySelector("svg[viewBox]") as SVGSVGElement | null
+    expect(svg?.getAttribute("viewBox")).toBe("0 0 222.5 53")
   })
 
   it("takes the band's own color, and the plain background with no band", () => {
