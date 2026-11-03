@@ -261,9 +261,18 @@ describe("the docked action flap", () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const flapZ = zLevel(screen.getByTestId("mobile-action-flap").className)
     const pane = readFileSync("src/components/TerminalPane.tsx", "utf8")
-    const covers = [...pane.matchAll(/absolute inset-0 z-(\d+)/g)].map((m) =>
-      Number(m[1]),
-    )
+    // The pane's floating-overlay layer is the one exemption: it is not a
+    // cover, and the pane withholds it whenever a cover owns the pane. Exempted
+    // by its own marker, so any other layer above the flap is still caught.
+    const overlayLayer = pane.match(
+      /data-testid="pane-overlay-layer"\s+className="([^"]*)"/,
+    )?.[1]
+    expect(overlayLayer, "the overlay layer's class list was not found").toBeDefined()
+    const covers = [...pane.matchAll(/className="([^"]*)"/g)]
+      .map((m) => m[1])
+      .filter((c) => c !== overlayLayer)
+      .flatMap((c) => [...c.matchAll(/absolute inset-0 z-(\d+)/g)])
+      .map((m) => Number(m[1]))
     expect(covers.length).toBeGreaterThan(0)
     for (const cover of covers) expect(flapZ).toBeGreaterThan(cover)
   })

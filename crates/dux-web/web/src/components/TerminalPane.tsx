@@ -966,9 +966,17 @@ function TerminalPaneSurface({
   takeOver,
   overlay,
 }: TerminalPaneSurfaceProps) {
+  // The pane's box is not itself the clip: the terminal, its covers and the
+  // drop overlay are clipped by an inner layer, while an overlay handed to this
+  // live pane gets a layer of its own over the same box. That layer admits
+  // exactly the one pixel row above the pane, which is the band's hairline the
+  // docked flap hangs over, so the phone's pill covers it at the handoff the
+  // way the flap does; every other edge stays clipped, so the pill's shadow
+  // never spills onto the input rows or a neighbouring panel. (A dormant tab
+  // has no pane, and its shell paints the overlay in the column instead.)
   return (
     <div
-      className="group relative min-h-0 w-full flex-1 overflow-hidden bg-background"
+      className="group relative min-h-0 w-full flex-1 bg-background"
       onDragEnter={(event) => {
         if (!upload.paneAcceptsFileDrag(event)) return
         event.preventDefault()
@@ -997,42 +1005,55 @@ function TerminalPaneSurface({
         )
       }}
     >
-      {dragActive ? <FileDropOverlay kind={kind} /> : null}
-      <div
-        ref={hostRef}
-        className={
-          viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"
-        }
-        onPointerDown={(event) => {
-          pointerTypeRef.current = event.pointerType
-        }}
-        onContextMenu={(event) => {
-          if (pointerTypeRef.current === "touch") {
-            event.preventDefault()
-            return
-          }
-          event.preventDefault()
-          input.onRightClickPaste()
-        }}
-      >
+      <div className="absolute inset-0 overflow-hidden">
+        {dragActive ? <FileDropOverlay kind={kind} /> : null}
         <div
-          ref={containerRef}
-          data-testid="terminal-container"
-          className="h-full w-full [-webkit-touch-callout:none]"
+          ref={hostRef}
+          className={
+            viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"
+          }
+          onPointerDown={(event) => {
+            pointerTypeRef.current = event.pointerType
+          }}
+          onContextMenu={(event) => {
+            if (pointerTypeRef.current === "touch") {
+              event.preventDefault()
+              return
+            }
+            event.preventDefault()
+            input.onRightClickPaste()
+          }}
+        >
+          <div
+            ref={containerRef}
+            data-testid="terminal-container"
+            className="h-full w-full [-webkit-touch-callout:none]"
+          />
+        </div>
+        {pickerInput}
+        <TerminalCover
+          cover={cover}
+          kind={kind}
+          providerName={providerName}
+          ptyRef={ptyRef}
+          takeoverIntent={takeoverIntent}
+          takeoverLabel={takeoverLabel}
+          ownerPresent={ownerPresent}
+          takeOver={takeOver}
         />
       </div>
-      {pickerInput}
-      <TerminalCover
-        cover={cover}
-        kind={kind}
-        providerName={providerName}
-        ptyRef={ptyRef}
-        takeoverIntent={takeoverIntent}
-        takeoverLabel={takeoverLabel}
-        ownerPresent={ownerPresent}
-        takeOver={takeOver}
-      />
-      {coverOwnsThePane(cover) ? null : overlay}
+      {/* Withheld whole under a full-pane cover, layer included, so nothing of
+        * the pill can paint over a cover or over the band it brings back.
+        * Pointer events pass through the layer to the terminal and land only
+        * on what it carries. */}
+      {coverOwnsThePane(cover) || overlay == null ? null : (
+        <div
+          data-testid="pane-overlay-layer"
+          className="pointer-events-none absolute inset-0 z-30 [clip-path:polygon(0_-1px,100%_-1px,100%_100%,0_100%)] *:pointer-events-auto"
+        >
+          {overlay}
+        </div>
+      )}
     </div>
   )
 }

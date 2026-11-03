@@ -3499,7 +3499,7 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
     pointerStub = stubCoarsePointer(false)
     const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const terminalPane = screen.getByTestId("terminal-container")
-      .parentElement!.parentElement!
+      .closest(".group")!
     const column = view.container.firstElementChild
 
     expect(terminalPane.parentElement).toBe(column)
@@ -3513,7 +3513,7 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
     pointerStub = stubCoarsePointer(true)
     const view = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const terminalPane = screen.getByTestId("terminal-container")
-      .parentElement!.parentElement!
+      .closest(".group")!
     const column = view.container.firstElementChild
 
     expect(terminalPane.parentElement).toBe(column)
@@ -5010,6 +5010,16 @@ describe("TerminalPane and theater mode", () => {
 
   const overlay = <div data-testid="pane-overlay" />
 
+  /// The box the overlay is positioned against: its layer covers the pane's own
+  /// box exactly, so the layer's parent is the area the overlay may roam.
+  const overlayBox = () => {
+    const layer = screen.getByTestId("pane-overlay").parentElement
+    expect(layer?.dataset.testid).toBe("pane-overlay-layer")
+    const box = layer?.parentElement
+    if (!box) throw new Error("the overlay has no positioning context")
+    return box
+  }
+
   it("paints an overlay over the terminal, never over the input rows", () => {
     // The bug this pins: anchored to the pane COLUMN, the floating pill landed
     // on the Send button, because the compose row and the terminal keys are
@@ -5020,8 +5030,7 @@ describe("TerminalPane and theater mode", () => {
       <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
     )
     const send = screen.getByRole("button", { name: "Send" })
-    const anchor = screen.getByTestId("pane-overlay").parentElement
-    if (!anchor) throw new Error("the overlay has no positioning context")
+    const anchor = overlayBox()
     expect(anchor.className).toContain("relative")
     expect(anchor.contains(screen.getByTestId("terminal-container"))).toBe(true)
     expect(anchor.contains(send)).toBe(false)
@@ -5031,9 +5040,65 @@ describe("TerminalPane and theater mode", () => {
     render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
     )
-    const anchor = screen.getByTestId("pane-overlay").parentElement
-    if (!anchor) throw new Error("the overlay has no positioning context")
-    expect(anchor.contains(screen.getByTestId("terminal-container"))).toBe(true)
+    expect(
+      overlayBox().contains(screen.getByTestId("terminal-container")),
+    ).toBe(true)
+  })
+
+  it("keeps the overlay out of the clip the terminal is painted in", () => {
+    // The phone's docked flap hangs one pixel above the pane, over the band's
+    // hairline, and the pill lands on the flap's exact pixels: clipped with the
+    // terminal, the pill could not cover that row and it blinked through at the
+    // handoff. The overlay's own layer is the only clip it is under.
+    goMobile()
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const clip = screen
+      .getByTestId("terminal-container")
+      .closest(".overflow-hidden")
+    if (!clip) throw new Error("the terminal is not clipped")
+    expect(clip.contains(screen.getByTestId("pane-overlay"))).toBe(false)
+    expect(overlayBox().className).not.toContain("overflow-hidden")
+  })
+
+  it("clips the overlay's layer on every edge but the one row above the pane", () => {
+    // jsdom paints nothing, so the clip is read from the class that sets it.
+    goMobile()
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const classes = screen.getByTestId("pane-overlay-layer").className.split(/\s+/)
+    const clip = classes.find((c) => c.startsWith("[clip-path:polygon("))
+    expect(clip, "the overlay layer has no clip-path polygon").toBeDefined()
+    const points = clip!
+      .slice("[clip-path:polygon(".length, -")]".length)
+      .split(",")
+      .map((p) => p.replace(/_/g, " "))
+    expect(
+      [points[0], points[1]],
+      "the top edge must sit 1px above the pane, or the band's hairline blinks through at the pill-to-flap handoff",
+    ).toEqual(["0 -1px", "100% -1px"])
+    expect(
+      [points[2], points[3], points.length],
+      "the right, bottom and left edges must be the pane's own, or the pill's shadow spills over the input rows and neighbouring panels",
+    ).toEqual(["100% 100%", "0 100%", 4])
+  })
+
+  it("passes presses through the overlay's layer and lets the overlay take them", () => {
+    goMobile()
+    render(
+      <TerminalPane kind="agent" id="s1" sessionId="s1" overlay={overlay} />,
+    )
+    const classes = screen.getByTestId("pane-overlay-layer").className.split(/\s+/)
+    expect(
+      classes,
+      "the layer covers the whole terminal, so without this every press on the terminal lands on the layer",
+    ).toContain("pointer-events-none")
+    expect(
+      classes,
+      "the overlay inherits the layer's pointer-events, so without this the pill stops taking presses",
+    ).toContain("*:pointer-events-auto")
   })
 
   it("says nothing about ownership on a watcher's FIRST honest handshake", () => {
@@ -5249,6 +5314,8 @@ describe("TerminalPane gates its floating overlay on the cover", () => {
     act(() => last().onConnected("conn-self", "conn-other"))
     expect(screen.getByText("Active on another device")).toBeTruthy()
     expect(screen.queryByTestId("pane-overlay")).toBeNull()
+    // The layer admits the row above the pane, so it must leave with the pill.
+    expect(screen.queryByTestId("pane-overlay-layer")).toBeNull()
     expect(mounted).not.toHaveBeenCalled()
   })
 
