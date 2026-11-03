@@ -14,6 +14,11 @@
 // and flap are one painted shape; the stroke starts and ends `FLAP_OVERHANG`
 // pixels out on the hairline before curving away, so however a DPR rounds the
 // CSS border, stroke and hairline hand over to each other.
+//
+// The fill also covers the hairline's whole row across the SVG's full width.
+// Stroke and hairline are the same translucent border colour, so the stroke laid
+// over a bare hairline (the overhangs, and the start of each fillet) stacks into
+// a brighter line; over the opaque fill it is exactly the hairline's own tone.
 
 /// The radius of the two concave fillets that flare the flap's top corners out
 /// into the band. 12px reads at DPR 1, where a subtler arc quantizes away.
@@ -39,7 +44,8 @@ export interface FlapShape {
   /// negative: the SVG starts up and to the left of the body it draws.
   left: number
   top: number
-  /// The closed body, painted in the band's color.
+  /// The closed body, painted in the band's color, plus the band's hairline
+  /// row it hangs from. Two subpaths with the same winding, so they union.
   fill: string
   /// The open outline: fillets, sides and bottom corners, and nothing across
   /// the top, because the flap has no top edge.
@@ -71,6 +77,7 @@ export function buildFlapShape(
   // half pixel so a 1px stroke lands on one device pixel at DPR 1.
   const y0 = FLAP_BLEED + 0.5
   const yb = FLAP_BLEED + h - 0.5
+  const hairlineBottom = FLAP_BLEED + 1
 
   const stroke =
     `M 0 ${y0} L ${o} ${y0}` +
@@ -89,7 +96,9 @@ export function buildFlapShape(
     viewBox: `0 0 ${width} ${height}`,
     left: -(f + o),
     top: -FLAP_BLEED,
-    fill: `M 0 0 L${stroke.slice(1)} L ${width} 0 Z`,
+    fill:
+      `M 0 0 L 0 ${hairlineBottom} L ${width} ${hairlineBottom} L ${width} 0 Z` +
+      ` M 0 0 L${stroke.slice(1)} L ${width} 0 Z`,
     stroke,
   }
 }

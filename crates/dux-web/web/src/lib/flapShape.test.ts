@@ -93,6 +93,26 @@ function readPath(d: string) {
   return { points, sweeps }
 }
 
+/// Whether a point lies inside any closed subpath of `d`, each read as the
+/// polygon through its endpoints. Arcs become chords, which is exact for the
+/// straight runs this is asked about.
+function filled(d: string, x: number, y: number): boolean {
+  return d
+    .split(/(?=M)/)
+    .map((sub) => readPath(sub).points)
+    .some((poly) => {
+      let inside = false
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i]
+        const b = poly[j]
+        if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
+          inside = !inside
+        }
+      }
+      return inside
+    })
+}
+
 describe("the silhouette, read back as geometry", () => {
   it("stays inside the box it declares, corner to corner", () => {
     const shape = buildFlapShape({ width: 180, height: 50 })
@@ -112,6 +132,24 @@ describe("the silhouette, read back as geometry", () => {
     // The outline reaches the hanging bottom edge, a hairline up from the box.
     expect(Math.max(...ys)).toBeGreaterThan((shape?.height ?? 0) / 2)
     expect(Math.max(...ys)).toBeLessThan(shape?.height ?? 0)
+  })
+
+  it("lays its own fill under every stroke pixel on the band's hairline", () => {
+    // The stroke and the band's hairline are both the translucent border
+    // colour, so wherever the stroke runs over a bare hairline the two stack
+    // into a brighter line. The hairline is the 1px row the flap's top sits on
+    // (`-top-px`), which in SVG units starts FLAP_BLEED down.
+    const shape = buildFlapShape({ width: 180, height: 50 })
+    const fill = shape?.fill ?? ""
+    const width = shape?.width ?? 0
+    const inHairline = FLAP_BLEED + 0.75
+    const belowHairline = FLAP_BLEED + 1.25
+    // The overhangs, where the stroke lies flat along the hairline.
+    expect(filled(fill, 1, inHairline)).toBe(true)
+    expect(filled(fill, width - 1, inHairline)).toBe(true)
+    // Never past it: below the hairline is the terminal.
+    expect(filled(fill, 1, belowHairline)).toBe(false)
+    expect(filled(fill, width - 1, belowHairline)).toBe(false)
   })
 
   it("curves the top corners the opposite way from the bottom ones", () => {
