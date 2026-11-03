@@ -198,9 +198,19 @@ async function takeOver(page) {
 }
 
 // Toasts stack over the bottom of the page and are never part of a scene.
+//
+// Hidden with a stylesheet rather than removed: the toaster's list is a node
+// React owns, and once it is gone from the page React's next attempt to drop
+// it (the last toast expiring) throws a removeChild error that takes the whole
+// app down mid-journey. A rule also covers a toast raised after this call,
+// which a one-off sweep cannot, and it lasts until the page navigates.
 async function clearToasts(page) {
   await page.evaluate(() => {
-    document.querySelectorAll("[data-sonner-toaster]").forEach((n) => n.remove())
+    if (document.getElementById("screens-hide-toasts")) return
+    const style = document.createElement("style")
+    style.id = "screens-hide-toasts"
+    style.textContent = "[data-sonner-toaster] { display: none !important; }"
+    document.head.appendChild(style)
   })
   await sleep(200)
 }
