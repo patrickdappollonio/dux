@@ -113,6 +113,17 @@ impl LazySlot {
     fn take(&self) -> Option<(u64, Config)> {
         self.lock().latest.take()
     }
+
+    /// Drop the slot's save when it is no newer than `seq`: one made during a
+    /// barrier that held is a stale snapshot, and any other waits as usual.
+    /// Judged and taken under one lock, so a save made the moment the barrier
+    /// ends cannot replace the stale one in between and be dropped in its place.
+    fn discard_through(&self, seq: u64) {
+        let mut state = self.lock();
+        if state.latest.as_ref().is_some_and(|(made, _)| *made <= seq) {
+            state.latest = None;
+        }
+    }
 }
 
 /// The writer's base after its most recent SUCCESSFUL write (the config it
@@ -720,16 +731,7 @@ fn handle_writer_input(
             let Some(discard_through) = run_paused_writer(rx, path, &mut state.base) else {
                 return WriterControl::Stop;
             };
-            // The slot holds the newest lazy save; one made during a barrier
-            // that held is a stale snapshot, and any other waits as usual.
-            if lazy
-                .lock()
-                .latest
-                .as_ref()
-                .is_some_and(|(seq, _)| *seq <= discard_through)
-            {
-                let _ = lazy.take();
-            }
+            lazy.discard_through(discard_through);
             state.take_lazy(lazy);
         }
         Ok(Some(WriteMsg::Resume { .. })) => {}

@@ -9590,32 +9590,53 @@ mod tests {
         );
     }
 
-    /// Hold `[::1]` on some port P and make the kernel's first IPv4 pick land
-    /// on P, so the IPv6 loopback clashes on a port dux picked. `None` when this
-    /// machine has no IPv6 or 127.0.0.1:P is not free to stage it.
-    fn a_pick_that_clashes_on_ipv6() -> Option<(std::net::TcpListener, u16)> {
-        let held = match std::net::TcpListener::bind("[::1]:0") {
+    /// A port P held on `[::1]`, and 127.0.0.1:P held too for a staged IPv4
+    /// pick to hand out, so the IPv6 loopback clashes on a port dux picked.
+    struct ClashOnIpv6 {
+        _ipv6: std::net::TcpListener,
+        ipv4: std::net::TcpListener,
+        port: u16,
+    }
+
+    impl ClashOnIpv6 {
+        /// The kernel's IPv4 pick landing on P. A duplicate of the listener
+        /// held from staging, never a fresh bind: P is free on IPv4 to every
+        /// other test in the process, and one that bound 127.0.0.1:0 in between
+        /// could be given it.
+        fn pick(&self) -> std::io::Result<std::net::TcpListener> {
+            self.ipv4.try_clone()
+        }
+    }
+
+    /// `None` when this machine has no IPv6 or 127.0.0.1:P is not free.
+    fn a_pick_that_clashes_on_ipv6() -> Option<ClashOnIpv6> {
+        let ipv6 = match std::net::TcpListener::bind("[::1]:0") {
             Ok(held) => held,
             Err(err) if dux_core::config::ipv6_unavailable(&err) => return None,
             Err(err) => panic!("hold [::1]: {err}"),
         };
-        let port = held.local_addr().expect("held addr").port();
-        std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).ok()?;
-        Some((held, port))
+        let port = ipv6.local_addr().expect("held addr").port();
+        let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).ok()?;
+        Some(ClashOnIpv6 {
+            _ipv6: ipv6,
+            ipv4,
+            port,
+        })
     }
 
     #[test]
     fn preflight_on_port_zero_picks_again_when_its_pick_is_taken_on_ipv6() {
-        let Some((_held, clash)) = a_pick_that_clashes_on_ipv6() else {
+        let Some(staged) = a_pick_that_clashes_on_ipv6() else {
             return;
         };
+        let clash = staged.port;
         let mut picks = 0;
         let (listeners, urls, _) =
             bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
                 if addr.port() == 0 {
                     picks += 1;
                     if picks == 1 {
-                        return std::net::TcpListener::bind((addr.ip(), clash));
+                        return staged.pick();
                     }
                 }
                 std::net::TcpListener::bind(addr)
@@ -9634,14 +9655,15 @@ mod tests {
 
     #[test]
     fn preflight_on_port_zero_stops_picking_after_a_bounded_number_of_clashes() {
-        let Some((_held, clash)) = a_pick_that_clashes_on_ipv6() else {
+        let Some(staged) = a_pick_that_clashes_on_ipv6() else {
             return;
         };
+        let clash = staged.port;
         let mut picks = 0;
         let err = bind_preflight_addrs_with(&dux_core::config::local_addrs(0, None), |addr| {
             if addr.port() == 0 {
                 picks += 1;
-                return std::net::TcpListener::bind((addr.ip(), clash));
+                return staged.pick();
             }
             std::net::TcpListener::bind(addr)
         })
