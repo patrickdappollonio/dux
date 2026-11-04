@@ -22,11 +22,13 @@ import { useTheaterPillFocus } from "@/hooks/use-theater"
 import { FLAP_FILLET_BOX, filletShape } from "@/lib/flapShape"
 import {
   FLIGHT_ATTACH_MS,
+  FLIGHT_CARRY_MS,
   FLIGHT_EASE,
   FLIGHT_SHAPE_MS,
   FLIGHT_TAB_RADIUS_PX,
   FLIGHT_TRAVEL_MS,
   FLAP_FILL_VAR,
+  carryCanJoin,
   flightEaseProgress,
   flightOffset,
   flightTranslation,
@@ -110,6 +112,7 @@ export function TheaterPill({
     flight,
     drag.position,
     drag.restMovedRef,
+    drag.carryRef,
   )
   const box = theaterPillBox({
     flight,
@@ -263,6 +266,8 @@ function useFlightChoreography(
   position: PillPosition | null,
   /// Where the pill's resting corner is told it moved on screen.
   restMovedRef: React.RefObject<((shift: ScreenShift) => void) | null>,
+  /// Where a drag takes a running carry over.
+  carryRef: React.RefObject<CarryControl | null>,
 ): boolean {
   // Keyed on the stage it was written for, so a new stage's default takes over
   // by itself rather than needing a reset pass that would cost a render.
@@ -284,6 +289,45 @@ function useFlightChoreography(
   // When the running travel started, for a re-clamp that has to know how far
   // along it is where the browser's own clock for it cannot be read.
   const travelStartRef = useRef(0)
+  // When the last carry lands, on `performance.now()`'s clock, or `null` when
+  // none is running. A late carry outlives the stage that wrote it.
+  const carryLandsRef = useRef<number | null>(null)
+  const carryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Hand the transition list back to the stylesheet once the carry it lists
+  // has landed, so the resting pill's own settle eases the next re-clamp. On
+  // the transition's own end where the browser exposes it: it started on the
+  // frame after it was written, so a timer on the clock it was written by ends
+  // it a frame early, and cutting it lands the last of the move in one frame.
+  const releaseWhenLanded = useCallback((box: HTMLElement) => {
+    const kept = box.style.transition
+    const lands = carryLandsRef.current
+    if (carryTimerRef.current !== null) clearTimeout(carryTimerRef.current)
+    carryTimerRef.current = null
+    const release = () => {
+      if (box.style.transition === kept) box.style.transition = ""
+      if (carryLandsRef.current === lands) carryLandsRef.current = null
+    }
+    const running = carryAnimation(box)
+    if (!running) {
+      const left = Math.max(0, (lands ?? 0) - performance.now())
+      carryTimerRef.current = setTimeout(() => {
+        carryTimerRef.current = null
+        release()
+      }, left)
+      return
+    }
+    const follow = (anim: Animation) => {
+      // A style change can replace a transition that has not started yet with
+      // one from the same value, so a cancel is followed to its successor
+      // rather than taken as the end.
+      anim.finished.then(release, () => {
+        const next = carryAnimation(box)
+        if (next && next !== anim) follow(next)
+        else release()
+      })
+    }
+    follow(running)
+  }, [])
   const setStageGripless = useCallback(
     (phase: FlightPhase, gripless: boolean) =>
       setOverride({ phase, gripless }),
@@ -315,6 +359,9 @@ function useFlightChoreography(
       // painted transform over by however far that state moved from the
       // coordinates it was painted on.
       travelStartRef.current = performance.now()
+      // A travel writes its transitions afresh, and a turn folds whatever
+      // carry is painted into its starting transform.
+      carryLandsRef.current = null
       const was = paintedAtRef.current
       const carry =
         start === "air" && was
@@ -338,6 +385,7 @@ function useFlightChoreography(
       const dock = peekFlapRect()
       if (!dock) return
       ranRef.current = flight
+      carryLandsRef.current = null
       runAttach(box, dock)
       startParts(box, partsRef.current, "attaching")
       return
@@ -346,9 +394,28 @@ function useFlightChoreography(
     // A resting stage: leaving the flight's inline writes behind would pin the
     // pill's shape at whatever the last frame happened to be.
     ranRef.current = flight
-    clearFlightStyles(box, position)
+    const lands = carryLandsRef.current
+    const carrying =
+      lands !== null &&
+      lands > performance.now() &&
+      box.style.transition.includes("translate ")
+    // A carry still running keeps the transition list exactly as it is
+    // written: dropping it from the list would cancel it, landing the rest of
+    // the move in one frame, and Chrome restarts its curve on any other
+    // rewrite of the list. The travel's own entries left listed have finished
+    // by now and only ease values that paint the same.
+    clearFlightStyles(box, position, carrying ? box.style.transition : null)
     settleParts(partsRef.current)
-  }, [boxRef, flight, position, setStageGripless])
+    if (carrying) releaseWhenLanded(box)
+    else carryLandsRef.current = null
+  }, [boxRef, flight, position, setStageGripless, releaseWhenLanded])
+
+  useEffect(
+    () => () => {
+      if (carryTimerRef.current !== null) clearTimeout(carryTimerRef.current)
+    },
+    [],
+  )
 
   // A departure flies to a corner it does not pin, and its travel is a
   // transform in the surface the corner is measured in, so anything that moves
@@ -358,14 +425,62 @@ function useFlightChoreography(
   useLayoutEffect(() => {
     restMovedRef.current = (shift) => {
       const box = boxRef.current
-      if (box && ranRef.current === "detaching") {
-        carryReclamp(box, shift, travelStartRef.current)
+      if (!box) return
+      // A carry still running past the departure's stage is a move in the air
+      // too, and a second move folds into it the same way.
+      const lands = carryLandsRef.current
+      const carrying =
+        ranRef.current === "floating" &&
+        lands !== null &&
+        lands > performance.now()
+      if (ranRef.current === "detaching" || carrying) {
+        const landed = carryReclamp(box, shift, travelStartRef.current)
+        if (landed === null) return
+        carryLandsRef.current = landed
+        // Past the departure, nothing else will hand the list back.
+        if (carrying) releaseWhenLanded(box)
       }
+    }
+    carryRef.current = {
+      settle: () => {
+        const box = boxRef.current
+        const lands = carryLandsRef.current
+        // Only a carry that has outlived the departure: during a travel the
+        // flight owns the transition list, and a press does not take it over.
+        if (
+          !box ||
+          lands === null ||
+          lands <= performance.now() ||
+          (ranRef.current !== "floating" && ranRef.current !== "expanding")
+        ) {
+          return null
+        }
+        const painted = translateOf(getComputedStyle(box).translate)
+        if (carryTimerRef.current !== null) clearTimeout(carryTimerRef.current)
+        carryTimerRef.current = null
+        carryLandsRef.current = null
+        box.style.transition = ""
+        box.style.translate = ""
+        return painted
+      },
+      resume: (held) => {
+        const box = boxRef.current
+        if (!box) return
+        const landed = carryReclamp(
+          box,
+          { x: -held.x, y: -held.y },
+          travelStartRef.current,
+        )
+        if (landed === null) return
+        carryLandsRef.current = landed
+        releaseWhenLanded(box)
+      },
     }
     return () => {
       restMovedRef.current = null
+      carryRef.current = null
     }
-  }, [boxRef, restMovedRef])
+  }, [boxRef, restMovedRef, carryRef, releaseWhenLanded])
 
   // After every commit, the routine above included: what the next frame paints
   // the transform from.
@@ -457,31 +572,40 @@ function translateOf(value: string | undefined): { x: number; y: number } {
 /// `translate`, which leaves the travel's own transition untouched, and that
 /// offset is run down on the travel's own curve from the point the travel has
 /// reached, so the two land together and the pill's path bends toward the new
-/// corner rather than wobbling between two motions on different clocks.
+/// corner rather than wobbling between two motions on different clocks. Too
+/// late in the travel for that (see `carryCanJoin`), the offset gets an ease of
+/// its own instead, which lands after the travel has, and a later move joins
+/// that ease's clock the same way while enough of it is left.
 ///
 /// Measured on screen, not in the surface: chrome collapsing above the pane
 /// moves the surface up exactly as far as it moves a bottom corner down it, and
 /// that corner never moved, while a corner placed away from the bottom moves
 /// with the surface, and that move is carried like any other.
+///
+/// Returns when the carry lands, on `performance.now()`'s clock, or `null`
+/// when there was nothing to carry.
 function carryReclamp(
   box: HTMLElement,
   shift: ScreenShift,
   startedAt: number,
-): void {
-  if (shift.x === 0 && shift.y === 0) return
-  const elapsed = travelElapsed(box) ?? performance.now() - startedAt
-  const remaining = FLIGHT_TRAVEL_MS - elapsed
-  if (remaining <= 0) return
+): number | null {
+  if (shift.x === 0 && shift.y === 0) return null
+  const now = performance.now()
   const painted = translateOf(getComputedStyle(box).translate)
   const offset = { x: painted.x - shift.x, y: painted.y - shift.y }
-  // What is left of the travel's distance at this point of its curve. Joining
-  // the curve here means starting from `offset / left`, of which only `offset`
-  // is ever painted. A carry already running is on that same curve, so folding
-  // it in keeps it on its own path. Only in the travel's last instant, where
-  // the factor grows without bound, does the offset ease out on its own.
-  const left = 1 - flightEaseProgress(elapsed / FLIGHT_TRAVEL_MS)
-  const lockstep = left >= 0.001
-  const scale = lockstep ? 1 / left : 1
+  // The curve the carry runs down on: the travel's, or failing that a late
+  // carry's own ease already running, or failing both a fresh ease. Joining a
+  // curve `elapsed` along means starting from `offset / left`, where `left` is
+  // what is left of its distance, of which only `offset` is ever painted, so a
+  // carry already running on that curve is folded in and keeps its path.
+  const travelAt = travelElapsed(box) ?? now - startedAt
+  const ownAt = ownCarryElapsed(box)
+  const [duration, elapsed] = carryCanJoin(FLIGHT_TRAVEL_MS - travelAt)
+    ? [FLIGHT_TRAVEL_MS, travelAt]
+    : ownAt !== null && carryCanJoin(FLIGHT_CARRY_MS - ownAt)
+      ? [FLIGHT_CARRY_MS, ownAt]
+      : [FLIGHT_CARRY_MS, 0]
+  const scale = 1 / (1 - flightEaseProgress(elapsed / duration))
   // The travel's own transitions stay listed exactly as they are, so the ones
   // still running carry on. A carry is always the last entry, which is what
   // makes the previous one safe to cut off by position: the easing functions
@@ -497,11 +621,40 @@ function carryReclamp(
   void box.offsetWidth
   box.style.transition = [
     ...listed,
-    lockstep
-      ? `translate ${FLIGHT_TRAVEL_MS}ms ${FLIGHT_EASE} ${-elapsed}ms`
-      : `translate ${remaining}ms ease-out`,
+    elapsed > 0
+      ? `translate ${duration}ms ${FLIGHT_EASE} ${-elapsed}ms`
+      : `translate ${duration}ms ${FLIGHT_EASE}`,
   ].join(", ")
   box.style.translate = ""
+  return now + duration - elapsed
+}
+
+/// How far a late carry's own ease is, or `null` when none is running or it
+/// cannot be read (no Web Animations). A carry joined to the travel runs on
+/// the travel's duration, so the duration tells the two apart.
+function ownCarryElapsed(box: HTMLElement): number | null {
+  const anim = carryAnimation(box)
+  const timing = anim?.effect?.getTiming()
+  if (!anim || anim.currentTime === null || timing?.duration !== FLIGHT_CARRY_MS) {
+    return null
+  }
+  return Number(anim.currentTime) - Number(timing.delay ?? 0)
+}
+
+/// The carry's running transition, or `null` where that cannot be read (no Web
+/// Animations) or nothing is running.
+function carryAnimation(box: HTMLElement): Animation | null {
+  if (typeof box.getAnimations !== "function") return null
+  for (const anim of box.getAnimations()) {
+    if (
+      "transitionProperty" in anim &&
+      anim.transitionProperty === "translate" &&
+      anim.playState !== "finished"
+    ) {
+      return anim
+    }
+  }
+  return null
 }
 
 /// How far the running travel transition is, on the clock the browser paints
@@ -522,15 +675,17 @@ function travelElapsed(box: HTMLElement): number | null {
 }
 
 /// Everything the flight writes inline, in one place, so a stage that ends can
-/// hand the element back exactly as it found it. `left` and `top` are React's
-/// while the pill rests (its next diff sees values that never changed), so they
-/// are cleared only when the pill has no position of its own.
+/// hand the element back exactly as it found it, apart from the transition
+/// list of a carry that has not landed yet (`keptTransition`). `left` and `top`
+/// are React's while the pill rests (its next diff sees values that never
+/// changed), so they are cleared only when the pill has no position of its own.
 function clearFlightStyles(
   box: HTMLElement,
   position: PillPosition | null,
+  keptTransition: string | null = null,
 ): void {
   const style = box.style
-  style.transition = ""
+  style.transition = keptTransition ?? ""
   style.transform = ""
   style.translate = ""
   style.transformOrigin = ""
@@ -829,6 +984,18 @@ interface ScreenShift {
   y: number
 }
 
+/// A running carry, as a drag takes it over. A carry left running under a
+/// drag would move the pill away from the finger for the rest of its ease.
+interface CarryControl {
+  /// End the carry at once and hand the transition list back to the
+  /// stylesheet, returning the offset it had painted for the caller to hold,
+  /// or `null` when no carry is running.
+  settle: () => ScreenShift | null
+  /// Ease a held offset down again from where it is painted, for a press that
+  /// turned out to be a tap and moves nothing.
+  resume: (held: ScreenShift) => void
+}
+
 interface PillDrag {
   /// Where the pill sits, or `null` before anything has been measured.
   position: PillPosition | null
@@ -836,6 +1003,8 @@ interface PillDrag {
   /// whether by a re-clamp, by the surface itself moving, or both, before the
   /// new coordinates are committed. The flight sets it.
   restMovedRef: React.RefObject<((shift: ScreenShift) => void) | null>
+  /// How a press takes over a carry still running. The flight sets it.
+  carryRef: React.RefObject<CarryControl | null>
   /// Whether a drag is live, which suppresses the settle animation.
   dragging: boolean
   /// True for the single commit that lands a drop, suppressing the settle: the
@@ -854,7 +1023,12 @@ interface DragGesture {
   pointerType: string
   startX: number
   startY: number
+  /// Where the pill is painted at the press, which the drag moves from.
   base: PillPosition
+  /// Where its coordinates are, which the drag's transform is written off.
+  origin: PillPosition
+  /// What a carry the press took over had painted, `origin` to `base`.
+  held: ScreenShift
   last: PillPosition
   lifted: boolean
   frame: number | null
@@ -894,6 +1068,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
   // re-clamped by exactly as much as its surface moved never moved at all.
   const restOnScreenRef = useRef<ScreenShift | null>(null)
   const restMovedRef = useRef<((shift: ScreenShift) => void) | null>(null)
+  const carryRef = useRef<CarryControl | null>(null)
   // The pill's width as the last frame with a settled grip slot measured it.
   const settledWidthRef = useRef<number | null>(null)
 
@@ -982,7 +1157,11 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       if (box) box.style.transform = ""
       setDragging(false)
       // A gesture that never lifted was a tap, and a tap on the grip does
-      // nothing at all: the buttons beside it keep their own meanings.
+      // nothing at all: the buttons beside it keep their own meanings. A
+      // carry it held goes on from where it is painted.
+      if (!g.lifted && (g.held.x !== 0 || g.held.y !== 0)) {
+        carryRef.current?.resume(g.held)
+      }
       if (!commit || !g.lifted) return
       // The drop is not a settle: one commit swaps the transform for real
       // coordinates and re-enables the animation, which would then ease the pill
@@ -1042,8 +1221,8 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       live.frame = null
       const box = boxRef.current
       if (!box) return
-      box.style.transform = `translate3d(${live.last.x - live.base.x}px, ${
-        live.last.y - live.base.y
+      box.style.transform = `translate3d(${live.last.x - live.origin.x}px, ${
+        live.last.y - live.origin.y
       }px, 0)`
     })
   }, [boxRef])
@@ -1054,8 +1233,17 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       ev.stopPropagation()
       // A pane that has never been measured has no coordinates to drag from.
       measure()
-      const base = posRef.current
-      if (!base) return
+      const origin = posRef.current
+      if (!origin) return
+      // A carry still running would keep moving the pill under the finger, so
+      // the press ends it and holds the pill where it is painted, and the drag
+      // moves from there.
+      const held = carryRef.current?.settle() ?? { x: 0, y: 0 }
+      const base = { x: origin.x + held.x, y: origin.y + held.y }
+      const box = boxRef.current
+      if (box && (held.x !== 0 || held.y !== 0)) {
+        box.style.transform = `translate3d(${held.x}px, ${held.y}px, 0)`
+      }
       try {
         ev.currentTarget.setPointerCapture(ev.pointerId)
       } catch {
@@ -1070,13 +1258,15 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
         startX: ev.clientX,
         startY: ev.clientY,
         base,
+        origin,
+        held,
         last: base,
         lifted: false,
         frame: null,
       }
       gestureRef.current = gesture
     },
-    [measure],
+    [boxRef, measure],
   )
 
   const onPointerMove = useCallback(
@@ -1165,19 +1355,39 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       const current = posRef.current
       if (!current) return
       const { surface, pill } = sizesRef.current
-      const next = nudgePillPosition(current, ev.key, surface, pill)
       // Every other key still belongs to the page: the grip is a button, and
       // Space and Enter on it are a tap, which does nothing by design.
-      if (!next) return
+      if (!nudgePillPosition(current, ev.key, surface, pill)) return
       ev.preventDefault()
+      // A move the user made ends a carry still running, as a drag does, and
+      // steps from where the pill is painted. The coordinates are pinned there
+      // first, unanimated, so the settle eases on from the painted spot.
+      const held = carryRef.current?.settle() ?? { x: 0, y: 0 }
+      const from = { x: current.x + held.x, y: current.y + held.y }
+      const next = nudgePillPosition(from, ev.key, surface, pill)
+      if (!next) return
+      const box = boxRef.current
+      if (box && (held.x !== 0 || held.y !== 0)) {
+        box.style.transition = "none"
+        box.style.left = `${from.x}px`
+        box.style.top = `${from.y}px`
+        void box.offsetWidth
+        box.style.transition = ""
+        // Written here rather than left to React: a step clamped back onto the
+        // coordinates React last rendered is no change to React, which would
+        // leave the pinned spot on the element for good.
+        box.style.left = `${next.x}px`
+        box.style.top = `${next.y}px`
+      }
       place(next, true)
     },
-    [place],
+    [boxRef, place],
   )
 
   return {
     position,
     restMovedRef,
+    carryRef,
     dragging,
     justDropped,
     onPointerDown,

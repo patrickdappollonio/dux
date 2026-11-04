@@ -53,6 +53,24 @@ export const FLIGHT_CHROME_SLACK_MS = 20
 /// first stretch so the rest of the travel is already a finished capsule.
 export const FLIGHT_SHAPE_MS = 200
 
+/// A re-clamp's carry when the travel is too far along to take it (see
+/// `carryCanJoin`): a whole ease of its own on the flight's curve, which may run
+/// on past the travel and the stage, so a keyboard-sized move late in the
+/// flight still reads as motion rather than as a jump.
+export const FLIGHT_CARRY_MS = 200
+
+/**
+ * Can a re-clamp's carry join a curve already running (the travel, or an
+ * earlier carry's own ease) with `remainingMs` of it left, running down with it
+ * so the two land together? Only while that much is left: the curve's tail
+ * gets steeper toward the end, and past this point it would run the carry down
+ * faster in one frame than a fresh carry's ease does in its steepest frame,
+ * until in the last frames it is a jump.
+ */
+export function carryCanJoin(remainingMs: number): boolean {
+  return remainingMs >= FLIGHT_CARRY_MS / 2
+}
+
 /// The control points of the one easing the whole gesture is on, the same
 /// curve the chrome collapse uses, so nothing in the choreography moves on a
 /// different clock.

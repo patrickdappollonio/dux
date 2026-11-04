@@ -93,11 +93,14 @@ const {
   THEATER_PILL_GRIP_SLOT_PX,
   THEATER_PILL_GRIP_W_PX,
   THEATER_PILL_HINT_KEY,
+  THEATER_PILL_NUDGE_PX,
   THEATER_PILL_POSITION_KEY,
   THEATER_PILL_ROW_GAP_PX,
 } = await import("@/lib/theaterPill")
 const {
   FLAP_FILL_VAR,
+  FLIGHT_CARRY_MS,
+  FLIGHT_EASE,
   FLIGHT_TRAVEL_MS,
   flightEaseProgress,
   registerFlapElement,
@@ -1347,7 +1350,7 @@ describe("the phone flight, with real boxes to measure", () => {
   /// can see where a flight STARTS and not only where it ends.
   function recordWrites(
     el: HTMLElement,
-    prop: "transform" | "borderRadius" | "translate",
+    prop: "transform" | "borderRadius" | "translate" | "top" | "left",
   ) {
     const writes: string[] = []
     let proto: object | null = Object.getPrototypeOf(el.style)
@@ -1770,6 +1773,187 @@ describe("the phone flight, with real boxes to measure", () => {
     // One carry entry, and the travel's own transitions still listed.
     expect(pill().style.transition.match(/translate /g)?.length).toBe(1)
     expect(pill().style.transition).toContain("transform 320ms")
+  })
+
+  it.each([
+    ["in the travel's last frames", FLIGHT_TRAVEL_MS - 20],
+    ["after the travel has landed", FLIGHT_TRAVEL_MS + 10],
+  ])("eases a re-clamp %s on a curve of its own", (_when, elapsed) => {
+    // So late that the travel's own tail would run a keyboard-sized move down
+    // in a frame or two, or has already run out: the carry gets a whole ease of
+    // its own instead, starting from where the pill is painted.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    render(flying("detaching"))
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+    const before = paintedCorner("")
+    const translates = recordWrites(pill(), "translate")
+
+    now.mockReturnValue(1000 + elapsed)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 160 }
+    playResize()
+    const after = paintedCorner("")
+    expect(after).toEqual({ x: before.x, y: before.y - 160 })
+    const carry = carryOnScreen(translates[0], pill().style.transition)
+    expect(after.x + carry.x).toBeCloseTo(before.x, 6)
+    expect(after.y + carry.y).toBeCloseTo(before.y, 6)
+    expect(carry.landsAt).toBe(FLIGHT_CARRY_MS)
+    expect(translates.at(-1)).toBe("")
+  })
+
+  it("folds a move into a late carry on that carry's own clock", () => {
+    // The surface keeps reporting sub-pixel moves while the grip slot opens.
+    // Each one restarting the carry's ease would hold the pill on the slow
+    // start of the curve for as long as they keep coming.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    render(flying("detaching"))
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+    now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS - 20)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 160 }
+    playResize()
+
+    // Fifty milliseconds into its own ease, with 100px of it still painted.
+    const box = pill()
+    box.getAnimations = () =>
+      [
+        {
+          transitionProperty: "translate",
+          currentTime: 50,
+          playState: "running",
+          effect: { getTiming: () => ({ duration: FLIGHT_CARRY_MS, delay: 0 }) },
+        },
+      ] as unknown as Animation[]
+    paintMidAir({ translate: "0px 100px" })
+    const translates = recordWrites(box, "translate")
+    now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS + 30)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 10 }
+    playResize()
+    const carry = carryOnScreen(translates[0], box.style.transition)
+    expect(carry.y).toBeCloseTo(110, 6)
+    expect(carry.landsAt).toBe(FLIGHT_CARRY_MS - 50)
+  })
+
+  it("lets a late carry finish after the pill has settled", () => {
+    // The settled stage wipes the flight's inline writes, and wiping a carry
+    // still running would land the rest of it in one frame.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    try {
+      flapBox = { left: 300, top: 0, width: 200, height: 48 }
+      const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+      const view = render(flying("detaching"))
+      pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+      now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS - 20)
+      surfaceBox = { ...surfaceBox, height: surfaceBox.height - 160 }
+      playResize()
+      const translates = recordWrites(pill(), "translate")
+      const written = pill().style.transition
+      expect(written).toContain(`translate ${FLIGHT_CARRY_MS}ms ${FLIGHT_EASE}`)
+
+      now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS + 20)
+      act(() => view.rerender(flying("floating")))
+      // Not even rewritten: a browser restarts a carry's curve on that.
+      expect(pill().style.transition).toBe(written)
+      expect(translates.filter((t) => t !== "")).toEqual([])
+
+      // Handed back to the stylesheet once it has landed, so the resting
+      // pill's own settle applies to the next re-clamp.
+      act(() => vi.advanceTimersByTime(FLIGHT_CARRY_MS))
+      expect(pill().style.transition).toBe("")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /// A settled pill with a late carry still running, 100px of it painted
+  /// above the corner it is easing down to.
+  function settledMidCarry(
+    now: { mockReturnValue: (v: number) => unknown },
+    painted = "0px -100px",
+  ) {
+    const view = render(flying("detaching"))
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+    now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS - 20)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height + 160 }
+    playResize()
+    now.mockReturnValue(1000 + FLIGHT_TRAVEL_MS + 30)
+    act(() => view.rerender(flying("floating")))
+    paintMidAir({ translate: painted })
+    return {
+      left: Number.parseFloat(pill().style.left),
+      top: Number.parseFloat(pill().style.top),
+    }
+  }
+
+  it("ends a late carry at the press and drags from where the pill is painted", () => {
+    // A carry still running under a drag would move the pill away from the
+    // finger for the rest of its ease.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const rest = settledMidCarry(now)
+
+    down(grip(), { pointerType: "mouse", clientX: 300, clientY: 300 })
+    // Handed back to the stylesheet, and held where it is painted.
+    expect(pill().style.transition).toBe("")
+    expect(pill().style.translate).toBe("")
+    expect(pill().style.transform).toBe("translate3d(0px, -100px, 0)")
+
+    move(300, 260)
+    up(300, 260)
+    expect(pill().style.transform).toBe("")
+    expect(pill().style.left).toBe(`${rest.left}px`)
+    expect(pill().style.top).toBe(`${rest.top - 100 - 40}px`)
+  })
+
+  it("eases on from where it is painted when a press on a carrying pill is a tap", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const rest = settledMidCarry(now)
+
+    down(grip(), { pointerType: "mouse", clientX: 300, clientY: 300 })
+    // The press cancelled the carry, so nothing is painted on that channel.
+    vi.mocked(window.getComputedStyle).mockRestore()
+    const translates = recordWrites(pill(), "translate")
+    up(300, 300)
+    expect(pill().style.transform).toBe("")
+    expect(pill().style.top).toBe(`${rest.top}px`)
+    // The painted offset, eased down from where the press held it.
+    expect(translateOf(translates[0])).toEqual({ x: 0, y: -100 })
+    expect(pill().style.transition).toContain(`translate ${FLIGHT_CARRY_MS}ms`)
+    expect(translates.at(-1)).toBe("")
+  })
+
+  it("nudges a carrying pill from where it is painted", () => {
+    // An arrow key is a move the user made, so it ends the carry the same way a
+    // drag does and steps from the pill they can see.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const rest = settledMidCarry(now)
+    const tops = recordWrites(pill(), "top")
+
+    fireEvent.keyDown(grip(), { key: "ArrowUp" })
+    expect(pill().style.transition).toBe("")
+    expect(pill().style.translate).toBe("")
+    // Pinned on the painted spot first, so the settle eases on from there.
+    expect(tops[0]).toBe(`${rest.top - 100}px`)
+    expect(pill().style.top).toBe(`${rest.top - 100 - THEATER_PILL_NUDGE_PX}px`)
+  })
+
+  it("ends a nudge of a carrying pill where its state says, even against an edge", () => {
+    // Flush right with the carry painted left of the corner: the step clamps
+    // straight back onto the coordinates React last rendered, so React writes
+    // nothing and the painted spot the press pinned would stay on the element.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":5000,"y":5000}')
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const rest = settledMidCarry(now, "-10px 0px")
+    const lefts = recordWrites(pill(), "left")
+
+    fireEvent.keyDown(grip(), { key: "ArrowRight" })
+    // Eased from the painted spot, and ending where the state is.
+    expect(lefts[0]).toBe(`${rest.left - 10}px`)
+    expect(pill().style.left).toBe(`${rest.left}px`)
+    expect(pill().style.top).toBe(`${rest.top}px`)
   })
 
   it("carries a surface that moves on screen with the corner unchanged in it", () => {
