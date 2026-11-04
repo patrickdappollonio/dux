@@ -137,4 +137,27 @@ describe("the collapsing chrome", () => {
       `duration-${THEATER_TRANSITION_MS}`,
     )
   })
+
+  it("eases every property its collapsed state moves, so nothing jumps in the first frame", () => {
+    // Tailwind's translate utilities set the `translate` property, not
+    // `transform`. A transition list that names only `transform` lets the
+    // slide snap 14px while the height has not started to fall, which paints
+    // the band's bottom hairline across the screen above the flap for a frame.
+    render(
+      <TheaterChrome hidden>
+        <button type="button">Show changes</button>
+      </TheaterChrome>,
+    )
+    const classes = screen.getByTestId("theater-chrome").className.split(/\s+/)
+    const listed = classes
+      .map((c) => /^motion-safe:transition-\[([^\]]+)\]$/.exec(c)?.[1])
+      .find(Boolean)
+      ?.split(",")
+    // Every utility the collapsed state adds, by the CSS property it sets.
+    const moved = classes.flatMap((c) =>
+      /^-?translate-/.test(c) ? ["translate"] : /^opacity-/.test(c) ? ["opacity"] : [],
+    )
+    expect(moved.length).toBeGreaterThan(0)
+    expect(listed).toEqual(expect.arrayContaining(["height", ...moved]))
+  })
 })

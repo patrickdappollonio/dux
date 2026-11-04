@@ -96,9 +96,12 @@ const {
   THEATER_PILL_POSITION_KEY,
   THEATER_PILL_ROW_GAP_PX,
 } = await import("@/lib/theaterPill")
-const { FLAP_FILL_VAR, registerFlapElement } = await import(
-  "@/lib/theaterFlight"
-)
+const {
+  FLAP_FILL_VAR,
+  FLIGHT_TRAVEL_MS,
+  flightEaseProgress,
+  registerFlapElement,
+} = await import("@/lib/theaterFlight")
 type FlightPhase = import("@/lib/theaterFlight").FlightPhase
 
 function tab(over: Partial<AgentTabView> & { id: string }): AgentTabView {
@@ -1342,7 +1345,10 @@ describe("the phone flight, with real boxes to measure", () => {
 
   /// Every value the flight writes to one inline property, in order, so a test
   /// can see where a flight STARTS and not only where it ends.
-  function recordWrites(el: HTMLElement, prop: "transform" | "borderRadius") {
+  function recordWrites(
+    el: HTMLElement,
+    prop: "transform" | "borderRadius" | "translate",
+  ) {
     const writes: string[] = []
     let proto: object | null = Object.getPrototypeOf(el.style)
     let desc: PropertyDescriptor | undefined
@@ -1368,7 +1374,9 @@ describe("the phone flight, with real boxes to measure", () => {
   /// What the browser reports for the pill while a transition is running:
   /// jsdom has no animation clock, so its computed style is the inline END
   /// value, never the frame on screen.
-  function paintMidAir(over: Partial<Record<"transform" | "borderRadius", string>>) {
+  function paintMidAir(
+    over: Partial<Record<"transform" | "borderRadius" | "translate", string>>,
+  ) {
     const real = window.getComputedStyle.bind(window)
     vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
       const style = real(el, pseudo)
@@ -1431,8 +1439,8 @@ describe("the phone flight, with real boxes to measure", () => {
     }
   }
 
-  /// The parts of the cluster that animate on their own clocks (the theater
-  /// glyphs, the grip, the fillets), as the flight drives them. jsdom has no
+  /// The parts of the cluster that animate on their own clocks (the grip and
+  /// the fillets), as the flight drives them. jsdom has no
   /// Web Animations, so each one is a small model of an Animation: a direction,
   /// a time, and the auto-rewind `play()` and `reverse()` do at either end.
   interface FakeAnimation {
@@ -1519,15 +1527,26 @@ describe("the phone flight, with real boxes to measure", () => {
     delete Element.prototype.animate
   })
 
-  it("turns the glyphs and the grip around from where they are when the return turns", () => {
-    // A part restarted from its first frame pops: a glyph halfway faded snaps
-    // back to full, a grip halfway gone reappears. Each one already running has
-    // to head back the way it came, from the frame on screen.
+  it("leaves the glyphs alone when the flight starts, since the press already swapped them", () => {
+    // The swap belongs to the press and played on the cluster under the
+    // finger; the travel starting is not a second reason to swap them.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("detaching"))
+    act(() => view.rerender(flying("floating")))
+    act(() => view.rerender(flying("returning")))
+    expect(made.map(partOf).filter((p) => p === "max" || p === "min")).toEqual([])
+  })
+
+  it("turns the grip around from where it is when the return turns", () => {
+    // A part restarted from its first frame pops: a grip halfway gone
+    // reappears. One already running has to head back the way it came, from
+    // the frame on screen.
     flapBox = { left: 300, top: 0, width: 200, height: 48 }
     const made = recordPartAnimations()
     const view = render(flying("returning"))
     const returning = made.filter((a) => partOf(a) !== "other")
-    expect(returning.map(partOf).sort()).toEqual(["grip", "max", "min"])
+    expect(returning.map(partOf).sort()).toEqual(["grip"])
     returning.forEach((a) => (a.time = 120))
 
     act(() => view.rerender(flying("detaching")))
@@ -1541,7 +1560,7 @@ describe("the phone flight, with real boxes to measure", () => {
   it("holds a part the return had not started yet on the frame it shows", () => {
     // Turned before its first frame (or inside its delay), a part has not moved,
     // and its first frame is already the end the departure heads for. Reversing
-    // it from there would rewind it to its LAST frame: the other glyph, in one
+    // it from there would rewind it to its LAST frame: a grip gone in one
     // frame.
     flapBox = { left: 300, top: 0, width: 200, height: 48 }
     const made = recordPartAnimations()
@@ -1554,14 +1573,14 @@ describe("the phone flight, with real boxes to measure", () => {
     )
   })
 
-  it("turns the glyphs and the grip around when the departure turns home, and lets the fillets go", () => {
+  it("turns the grip around when the departure turns home, and lets the fillets go", () => {
     // The fillets belong against the band and the return never wears them, so
     // they finish fading where they are rather than growing back mid-air.
     flapBox = { left: 300, top: 0, width: 200, height: 48 }
     const made = recordPartAnimations()
     const view = render(flying("detaching"))
     const leaving = made.filter((a) => partOf(a) !== "other")
-    expect(leaving.map(partOf).sort()).toEqual(["fillet", "fillet", "grip", "max", "min"])
+    expect(leaving.map(partOf).sort()).toEqual(["fillet", "fillet", "grip"])
     leaving.forEach((a) => (a.time = 90))
 
     act(() => view.rerender(flying("returning")))
@@ -1675,6 +1694,111 @@ describe("the phone flight, with real boxes to measure", () => {
     surfaceBox = { ...surfaceBox, height: surfaceBox.height + 40 }
     playResize()
     expect(Number.parseFloat(pill().style.top)).toBe(before + 40)
+  })
+
+  /// Where an inline `translate` puts the box, as written by the flight.
+  function translateOf(value: string | undefined): { x: number; y: number } {
+    const [x = 0, y = 0] = (value ?? "").split(/\s+/).map((v) => Number.parseFloat(v) || 0)
+    return { x, y }
+  }
+
+  /// What the browser paints for a carry the moment it is written, and when
+  /// it lands: the last `translate` entry of the transition list, started with
+  /// a negative delay part-way along the flight's curve. A model of how a CSS
+  /// transition runs, not of the code that wrote it.
+  function carryOnScreen(written: string, transition: string) {
+    const entry = transition.slice(transition.lastIndexOf("translate "))
+    const ms = [...entry.matchAll(/(-?[\d.]+)ms/g)].map((m) => Number(m[1]))
+    const [duration, delay = 0] = ms
+    expect(entry, "a carry on another curve does not land with the travel").toContain(
+      "cubic-bezier(0.2, 0, 0, 1)",
+    )
+    const left = 1 - flightEaseProgress(-delay / duration)
+    const from = translateOf(written)
+    return { x: from.x * left, y: from.y * left, landsAt: duration + delay }
+  }
+
+  it("stays where it is painted when the surface shrinks under a departure", () => {
+    // A soft keyboard or a rotation re-clamps the resting corner mid-travel.
+    // The travel is a transform off those coordinates, so the move has to be
+    // carried and run down with the travel, or the pill jumps by the whole
+    // re-clamp, or lands after it.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    render(flying("detaching"))
+    const midAir = "matrix(1, 0, 0, 1, -120, -260)"
+    paintMidAir({ transform: midAir })
+    const before = paintedCorner(midAir)
+    const translates = recordWrites(pill(), "translate")
+    // The slot has opened by now, which is the width the corner was set for.
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+
+    now.mockReturnValue(1100)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 77 }
+    playResize()
+    const after = paintedCorner(midAir)
+    expect(after).toEqual({ x: before.x, y: before.y - 77 })
+    const carry = carryOnScreen(translates[0], pill().style.transition)
+    expect(after.x + carry.x).toBeCloseTo(before.x, 6)
+    expect(after.y + carry.y).toBeCloseTo(before.y, 6)
+    expect(carry.landsAt).toBeCloseTo(FLIGHT_TRAVEL_MS - 100, 6)
+    expect(translates.at(-1)).toBe("")
+  })
+
+  it("folds a second move into a carry that is still running", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    render(flying("detaching"))
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+    now.mockReturnValue(1100)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 77 }
+    playResize()
+
+    // Later in the travel the first carry has run part of the way down, and
+    // that is what is on screen when the surface moves again.
+    now.mockReturnValue(1150)
+    paintMidAir({ translate: "0px 50px" })
+    const translates = recordWrites(pill(), "translate")
+    const top = Number.parseFloat(pill().style.top)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height - 30 }
+    playResize()
+    expect(Number.parseFloat(pill().style.top)).toBe(top - 30)
+    const carry = carryOnScreen(translates[0], pill().style.transition)
+    expect(carry.x).toBeCloseTo(0, 6)
+    expect(carry.y).toBeCloseTo(80, 6)
+    expect(carry.landsAt).toBeCloseTo(FLIGHT_TRAVEL_MS - 150, 6)
+    // One carry entry, and the travel's own transitions still listed.
+    expect(pill().style.transition.match(/translate /g)?.length).toBe(1)
+    expect(pill().style.transition).toContain("transform 320ms")
+  })
+
+  it("carries a surface that moves on screen with the corner unchanged in it", () => {
+    // A banner arriving above the pane moves the whole surface down and leaves
+    // a placed pill's coordinates alone; the travel is a transform in that
+    // surface, so the painted pill would drop by the banner's height at once.
+    localStorage.setItem(THEATER_PILL_POSITION_KEY, '{"x":120,"y":200}')
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    vi.spyOn(performance, "now").mockReturnValue(1000)
+    render(flying("detaching"))
+    const translates = recordWrites(pill(), "translate")
+    surfaceBox = { ...surfaceBox, top: surfaceBox.top + 40, height: surfaceBox.height - 40 }
+    playResize()
+    expect(pill().style.top).toBe("200px")
+    const carry = carryOnScreen(translates[0], pill().style.transition)
+    expect(carry.y).toBeCloseTo(-40, 6)
+  })
+
+  it("carries nothing when the surface moves its origin by as much as the re-clamp", () => {
+    // The chrome collapsing above the pane grows it upward: the corner moves
+    // down the surface exactly as far as the surface moves up the screen, so
+    // the painted pill never moved and there is nothing to carry.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    const translates = recordWrites(pill(), "translate")
+    pillBox = { ...pillBox, width: pillBox.width + THEATER_PILL_GRIP_SLOT_PX }
+    surfaceBox = { ...surfaceBox, top: surfaceBox.top - 40, height: surfaceBox.height + 40 }
+    playResize()
+    expect(translates).toEqual([])
   })
 
   it("turns home where it is painted after the surface changed under the departure", () => {

@@ -76,7 +76,11 @@ export function TheaterChrome({
         // a class built from a variable produces no CSS at all. It must match
         // `THEATER_TRANSITION_MS`, which is how long the gesture holds the
         // terminal's refit: a drift re-grids the terminal mid-transition.
-        "motion-safe:transition-[height,opacity,transform] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.2,0,0,1)]",
+        //
+        // `translate`, not `transform`: that is the property Tailwind's
+        // translate utilities set, and a slide left out of the list snaps in
+        // the first frame while the height has not started to fall.
+        "motion-safe:transition-[height,opacity,translate] motion-safe:duration-300 motion-safe:ease-[cubic-bezier(0.2,0,0,1)]",
         hidden && "-translate-y-3.5 opacity-0",
       )}
     >

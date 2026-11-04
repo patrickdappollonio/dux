@@ -53,9 +53,35 @@ export const FLIGHT_CHROME_SLACK_MS = 20
 /// first stretch so the rest of the travel is already a finished capsule.
 export const FLIGHT_SHAPE_MS = 200
 
-/// The one easing the whole gesture is on, the same curve the chrome collapse
-/// uses, so nothing in the choreography moves on a different clock.
-export const FLIGHT_EASE = "cubic-bezier(0.2, 0, 0, 1)"
+/// The control points of the one easing the whole gesture is on, the same
+/// curve the chrome collapse uses, so nothing in the choreography moves on a
+/// different clock.
+const FLIGHT_EASE_POINTS = [0.2, 0, 0, 1] as const
+
+export const FLIGHT_EASE = `cubic-bezier(${FLIGHT_EASE_POINTS.join(", ")})`
+
+/**
+ * How far along `FLIGHT_EASE` a transition is at `t`, its share of its own
+ * duration (0 to 1), as the browser computes it. Something that has to move in
+ * lockstep with a travel already under way joins it at this point of its
+ * curve.
+ */
+export function flightEaseProgress(t: number): number {
+  if (t <= 0) return 0
+  if (t >= 1) return 1
+  const [x1, y1, x2, y2] = FLIGHT_EASE_POINTS
+  const bezier = (s: number, a: number, b: number) =>
+    3 * (1 - s) * (1 - s) * s * a + 3 * (1 - s) * s * s * b + s * s * s
+  // x(s) is monotonic for a timing function, so bisection always converges.
+  let lo = 0
+  let hi = 1
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2
+    if (bezier(mid, x1, x2) < t) lo = mid
+    else hi = mid
+  }
+  return bezier((lo + hi) / 2, y1, y2)
+}
 
 /// The flap's bottom corner radius, which is the radius the capsule squares
 /// INTO on arrival and out of at pull-off.

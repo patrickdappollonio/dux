@@ -1,15 +1,18 @@
 import { Diff, Maximize2, Minimize2 } from "lucide-react"
 import type * as React from "react"
-import type { ReactNode } from "react"
+import { useLayoutEffect, useRef, type ReactNode } from "react"
 
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { armTheaterToggleFocus } from "@/hooks/use-theater"
 import { openChangedFiles, toggleTheater, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
+
+import { swapTheaterGlyphs } from "./theaterFlightParts"
 
 // The pane's one action cluster, wherever it is painted: the theater toggle,
 // Macros, the changed-file count where an agent has one, and the surface `⋯`.
@@ -60,9 +63,9 @@ export function PaneActionCluster({
 }
 
 // The toggle morphs rather than swaps: both icons are stacked in one grid cell
-// and `aria-pressed` picks the settled one, because the detach and re-dock
-// flights rotate one out while the other rotates in (see
-// `theaterFlightParts.ts`). A conditional pair of icons has nothing to animate
+// and `aria-pressed` picks the settled one, and the mode flipping rotates one
+// out while the other rotates in, right under the finger (see
+// `swapTheaterGlyphs`). A conditional pair of icons has nothing to animate
 // between, and the control reads as two buttons rather than one changing state.
 //
 // It is also the way out wherever the cluster is floating: the pill exists only
@@ -75,6 +78,7 @@ function TheaterMorphButton({
 }) {
   const { theater } = useDux()
   const label = theater ? "Leave theater mode" : "Theater mode"
+  const glyphsRef = useGlyphSwap(theater)
   return (
     <SimpleTooltip content={label}>
       <Button
@@ -92,13 +96,42 @@ function TheaterMorphButton({
           toggleTheater()
         }}
       >
-        <span aria-hidden className="dux-icswap grid place-items-center">
+        <span
+          ref={glyphsRef}
+          aria-hidden
+          className="dux-icswap grid place-items-center"
+        >
           <Maximize2 className="dux-ic-max" />
           <Minimize2 className="dux-ic-min" />
         </span>
       </Button>
     </SimpleTooltip>
   )
+}
+
+/// Swaps the glyphs when the mode flips under a mounted toggle, in the commit
+/// that flips `aria-pressed`, so the first frame of the new state is the
+/// swap's first frame. A toggle that mounts into a mode shows it settled.
+function useGlyphSwap(theater: boolean) {
+  const ref = useRef<HTMLSpanElement | null>(null)
+  const reducedMotion = usePrefersReducedMotion()
+  const shown = useRef(theater)
+  const swaps = useRef<Animation[]>([])
+  useLayoutEffect(() => {
+    const flipped = shown.current !== theater
+    shown.current = theater
+    // Asking for less motion stops a swap already playing, whatever the mode
+    // is doing: the glyph the stylesheet picks is the settled one.
+    if (reducedMotion) {
+      swaps.current.forEach((a) => a.cancel())
+      swaps.current = []
+      return
+    }
+    const root = ref.current
+    if (!flipped || !root) return
+    swaps.current = swapTheaterGlyphs(root, swaps.current, theater)
+  }, [theater, reducedMotion])
+  return ref
 }
 
 // The changed-file count, its own control rather than a badge on the `⋯`. The

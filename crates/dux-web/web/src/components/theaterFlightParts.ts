@@ -1,21 +1,21 @@
 // The parts of the phone's flying cluster that animate on clocks of their own:
-// the theater toggle's two glyphs, the grip, and the flap's fillets. The box
-// itself (its travel, corners and shadow) is the choreography's inline
-// transitions; these are short animations inside it.
+// the grip and the flap's fillets, plus the theater toggle's glyph swap, which
+// belongs to the press rather than to the flight. The box itself (its travel,
+// corners and shadow) is the choreography's inline transitions; these are short
+// animations inside it.
 //
-// They run through the Web Animations API, held per pill, rather than as
-// keyframes named by the phase class. A flight turned around in mid-air has to
-// take each part back from the frame on screen, and an animation object can be
-// reversed where it stands, while a keyframe animation swapped by a class
-// change restarts from its first frame: a glyph half faded snaps back to full,
-// a grip half gone reappears.
+// They run through the Web Animations API rather than as keyframes named by a
+// class. A flight turned around in mid-air has to take each part back from the
+// frame on screen, and an animation object can be reversed where it stands,
+// while a keyframe animation swapped by a class change restarts from its first
+// frame: a glyph half faded snaps back to full, a grip half gone reappears.
 
 import type { FlightPhase } from "@/lib/theaterFlight"
 
 /// The stages that animate parts. The resting ones settle them.
 export type PartStage = Extract<FlightPhase, "detaching" | "returning" | "attaching">
 
-type Part = "max" | "min" | "grip" | "fillets"
+type Part = "grip" | "fillets"
 
 /// The animations a pill is running, by part, so a turn can find them.
 export type FlightParts = Map<Part, Animation[]>
@@ -28,13 +28,12 @@ const GLYPH_IN: Keyframe[] = [
   { opacity: 0, transform: "rotate(-90deg) scale(0.6)" },
   { opacity: 1, transform: "none" },
 ]
-/// The glyph swap waits for the travel to be under way, so the toggle reads as
-/// changing state in flight rather than before it leaves.
+/// No fill: each glyph ends on the value its resting rule gives it (the hidden
+/// one's rotation is invisible at zero opacity), so a finished swap hands the
+/// glyphs back to the stylesheet without moving them.
 const GLYPH_TIMING: KeyframeAnimationOptions = {
   duration: 180,
-  delay: 70,
   easing: "ease",
-  fill: "both",
 }
 const FILLETS_OUT: Keyframe[] = [
   { opacity: 1, transform: "none" },
@@ -69,8 +68,6 @@ function stageParts(stage: PartStage): PartAnimation[] {
   switch (stage) {
     case "detaching":
       return [
-        { part: "max", selector: MAX, keyframes: GLYPH_OUT, timing: GLYPH_TIMING },
-        { part: "min", selector: MIN, keyframes: GLYPH_IN, timing: GLYPH_TIMING },
         // The grip arrives with the slot it sits in, late in the travel.
         {
           part: "grip",
@@ -82,8 +79,6 @@ function stageParts(stage: PartStage): PartAnimation[] {
       ]
     case "returning":
       return [
-        { part: "min", selector: MIN, keyframes: GLYPH_OUT, timing: GLYPH_TIMING },
-        { part: "max", selector: MAX, keyframes: GLYPH_IN, timing: GLYPH_TIMING },
         {
           part: "grip",
           selector: GRIP,
@@ -116,9 +111,9 @@ export function settleParts(parts: FlightParts): void {
 }
 
 /// A stage started from a resting end, or off the band: its parts run from
-/// their first frame. The snap only grows the fillets: the return's glyphs and
-/// grip stay held on their last frame, so nothing about them moves when it
-/// starts, and a snap turned back into a departure finds them to reverse.
+/// their first frame. The snap only grows the fillets: the return's grip stays
+/// held on its last frame, so nothing about it moves when the snap starts, and
+/// a snap turned back into a departure finds it to reverse.
 export function startParts(
   box: HTMLElement,
   parts: FlightParts,
@@ -175,4 +170,31 @@ export function turnParts(
     if (inAir && anim.part === "fillets") continue
     start(box, parts, anim)
   }
+}
+
+/// The theater toggle's glyph swap, on the toggle whose mode just flipped to
+/// `theater`. It is the press's, not the flight's: it plays at once on the
+/// cluster under the finger, which stays on screen through the chrome stage, so
+/// it has finished before a travel starts and the travel has nothing to swap.
+///
+/// A swap still playing when the mode flips back is turned around from the
+/// frame it shows rather than started over.
+export function swapTheaterGlyphs(
+  root: HTMLElement,
+  swaps: Animation[],
+  theater: boolean,
+): Animation[] {
+  const running = swaps.filter((a) => a.playState !== "finished" && a.playState !== "idle")
+  if (running.length > 0) {
+    running.forEach(turnAround)
+    return running
+  }
+  const max = root.querySelector(MAX)
+  const min = root.querySelector(MIN)
+  if (!max || !min || typeof max.animate !== "function") return []
+  const [leaving, arriving] = theater ? [max, min] : [min, max]
+  return [
+    leaving.animate(GLYPH_OUT, GLYPH_TIMING),
+    arriving.animate(GLYPH_IN, GLYPH_TIMING),
+  ]
 }

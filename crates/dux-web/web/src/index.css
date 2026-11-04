@@ -620,7 +620,7 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
    =========================================================================== */
 
 /* The theater toggle stacks both icons in one cell; `aria-pressed` picks the
-   settled one, and the flight rotates one out while the other rotates in. */
+   settled one, and the press rotates one out while the other rotates in. */
 .dux-icswap > * {
   grid-area: 1 / 1;
 }
@@ -636,11 +636,11 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 [aria-pressed="true"] .dux-icswap .dux-ic-max {
   opacity: 0;
 }
-/* The flight turns one glyph out while the other turns in. It is driven from
-   the choreography with the Web Animations API rather than keyframes on the
-   phase class, because a flight turned around mid-air has to run each part
-   back from the frame on screen, and a keyframe animation swapped by a class
-   restarts from its first frame instead (see `theaterFlightParts.ts`). */
+/* The press turns one glyph out while the other turns in. It is driven with
+   the Web Animations API rather than keyframes on a class, because a mode
+   flipped back mid-swap has to run the glyphs back from the frame on screen,
+   and a keyframe animation swapped by a class restarts from its first frame
+   instead (see `theaterFlightParts.ts`). */
 
 /* THE FLOATING PILL WEARS THE BAND'S COLOUR, opaque, docked and floating
    alike. The fill is whatever the flap published for the band it hangs from

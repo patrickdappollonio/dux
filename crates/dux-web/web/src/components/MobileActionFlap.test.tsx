@@ -26,6 +26,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
 })
 
+let reducedMotion = false
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -41,7 +43,7 @@ function installBootStubs() {
   vi.stubGlobal(
     "matchMedia",
     vi.fn((query: string) => ({
-      matches: false,
+      matches: query.includes("prefers-reduced-motion") ? reducedMotion : false,
       media: query,
       onchange: null,
       addEventListener: () => {},
@@ -130,6 +132,7 @@ function stubBox(width: number, height: number, left = 0, top = 0) {
 }
 
 beforeEach(() => {
+  reducedMotion = false
   installBootStubs()
   toggleTheaterMock.mockReset()
   openChangedFilesMock.mockReset()
@@ -335,5 +338,140 @@ describe("the docked action flap over a terminal", () => {
     // gets: the shape follows the cluster, which is the whole reason it is
     // generated rather than drawn once.
     expect(svg?.getAttribute("viewBox")).toBe("0 0 180 53")
+  })
+})
+
+describe("the theater toggle's glyph swap", () => {
+  /// jsdom has no Web Animations: each one is modelled as a direction, a time
+  /// and whether it is still playing, which is all a turn reads or writes.
+  interface Glyph {
+    el: Element
+    keyframes: Keyframe[]
+    delay: number
+    rate: number
+    time: number | null
+    state: AnimationPlayState
+  }
+  let made: Glyph[] = []
+  beforeEach(() => {
+    made = []
+    Object.defineProperty(Element.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value: function (this: Element, keyframes: Keyframe[], timing: KeyframeAnimationOptions) {
+        const a: Glyph = {
+          el: this,
+          keyframes,
+          delay: timing.delay ?? 0,
+          rate: 1,
+          time: null,
+          state: "running",
+        }
+        made.push(a)
+        const end = a.delay + Number(timing.duration ?? 0)
+        return {
+          get playState() {
+            return a.state
+          },
+          get playbackRate() {
+            return a.rate
+          },
+          set playbackRate(v: number) {
+            a.rate = v
+          },
+          get currentTime() {
+            return a.time
+          },
+          set currentTime(v: number | null) {
+            a.time = v
+          },
+          effect: { getComputedTiming: () => ({ endTime: end }) },
+          pause: () => {
+            a.state = "paused"
+            if (a.time === null) a.time = 0
+          },
+          play: () => void (a.state = "running"),
+          cancel: () => void (a.state = "idle"),
+        } as unknown as Animation
+      },
+    })
+  })
+  afterEach(() => {
+    // @ts-expect-error jsdom has no Web Animations of its own to restore
+    delete Element.prototype.animate
+  })
+
+  const glyph = (a: Glyph) =>
+    a.el.getAttribute("class")?.includes("dux-ic-max") ? "max" : "min"
+  const opacityTo = (a: Glyph) => Number(a.keyframes.at(-1)?.opacity)
+
+  function flap() {
+    return (
+      <MobileActionFlap
+        target={target}
+        subject={{ kind: "agent", session: session() }}
+        band="strip"
+      />
+    )
+  }
+
+  it("starts the swap under the finger, in the same commit the mode flips", () => {
+    // The flap stays on screen while the chrome collapses, so the swap the
+    // press asked for plays here, at once: not a flat swap now and a second
+    // one when the flight takes off.
+    const view = render(flap())
+    expect(made).toEqual([])
+    mockState = makeState({ theater: true })
+    view.rerender(flap())
+    expect(made.map((a) => [glyph(a), opacityTo(a), a.delay]).sort()).toEqual([
+      ["max", 0, 0],
+      ["min", 1, 0],
+    ])
+  })
+
+  it("turns a swap still in flight around from the frame it shows", () => {
+    const view = render(flap())
+    mockState = makeState({ theater: true })
+    view.rerender(flap())
+    const first = [...made]
+    expect(first.length).toBe(2)
+    first.forEach((a) => (a.time = 90))
+    mockState = makeState({ theater: false })
+    view.rerender(flap())
+    expect(made.length).toBe(first.length)
+    expect(first.map((a) => [a.rate, a.time, a.state])).toEqual(
+      first.map(() => [-1, 90, "running"]),
+    )
+  })
+
+  it("starts a fresh swap once the last one has finished", () => {
+    const view = render(flap())
+    mockState = makeState({ theater: true })
+    view.rerender(flap())
+    made.forEach((a) => (a.state = "finished"))
+    mockState = makeState({ theater: false })
+    view.rerender(flap())
+    expect(made.slice(2).map((a) => [glyph(a), opacityTo(a)]).sort()).toEqual([
+      ["max", 1],
+      ["min", 0],
+    ])
+  })
+
+  it("stops a swap already playing when the viewer asks for less motion", () => {
+    const view = render(flap())
+    mockState = makeState({ theater: true })
+    view.rerender(flap())
+    expect(made.length).toBe(2)
+    reducedMotion = true
+    view.rerender(flap())
+    expect(made.map((a) => a.state)).toEqual(["idle", "idle"])
+  })
+
+  it("swaps flat for a viewer who asked for less motion", () => {
+    reducedMotion = true
+    const view = render(flap())
+    mockState = makeState({ theater: true })
+    view.rerender(flap())
+    expect(made).toEqual([])
   })
 })
