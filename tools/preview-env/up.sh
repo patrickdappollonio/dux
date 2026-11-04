@@ -7,6 +7,7 @@
 #   DUX_SRC=/path ./up.sh   # preview a different worktree
 #   ./up.sh --restart       # rebuild binary + restart container (no image rebuild)
 #   DUX_PORT=9000 ./up.sh   # move both published ports (web 9000, TUI 9208)
+#   COMPOSE_PROJECT_NAME=b DUX_PORT=9000 ./up.sh   # a second stack beside the first
 #
 # Two loopback ports are published; see the DUX_TUI_PORT block below and the
 # README for how they move together. shot.sh reads DUX_PORT independently, so
@@ -52,6 +53,11 @@ fi
 DUX_TUI_PORT="${DUX_TUI_PORT:-$((DUX_PORT + 208))}"
 BASE_IMAGE="${BASE_IMAGE:-archlinux:latest}"
 
+# The container's name. Resolved below, once compose can be asked which project
+# this is; empty until then, which compose reads as its own default.
+DUX_PREVIEW_CONTAINER="${DUX_PREVIEW_CONTAINER:-}"
+project_name=""
+
 # The screenshot tool's two switches, resolved here so both docker paths below
 # carry them: the `sg` path builds its own environment and would otherwise drop
 # whatever the caller exported. Off unless reshoot.sh set them, or unless a
@@ -90,7 +96,7 @@ if docker info > /dev/null 2>&1; then
   run_docker() {
     (
       cd "$HERE"
-      export DUX_BIN DUX_PORT DUX_TUI_PORT BASE_IMAGE DUX_SCREENS DUX_NO_TAILSCALE
+      export DUX_BIN DUX_PORT DUX_TUI_PORT BASE_IMAGE DUX_SCREENS DUX_NO_TAILSCALE DUX_PREVIEW_CONTAINER
       docker compose "$@"
     )
   }
@@ -98,8 +104,14 @@ if docker info > /dev/null 2>&1; then
 else
   run_docker() {
     local quoted
+    local project=""
     quoted=$(printf '%q ' "$@")
-    sg docker -c "cd $(printf '%q' "$HERE") && export DUX_BIN=$(printf '%q' "$DUX_BIN") DUX_PORT=$(printf '%q' "$DUX_PORT") DUX_TUI_PORT=$(printf '%q' "$DUX_TUI_PORT") BASE_IMAGE=$(printf '%q' "$BASE_IMAGE") DUX_SCREENS=$(printf '%q' "$DUX_SCREENS") DUX_NO_TAILSCALE=$(printf '%q' "$DUX_NO_TAILSCALE") && docker compose $quoted"
+    # Exported only when set, so an unset project keeps compose's own default
+    # (this directory's name) rather than being pinned to an empty string.
+    if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+      project="export COMPOSE_PROJECT_NAME=$(printf '%q' "$COMPOSE_PROJECT_NAME") && "
+    fi
+    sg docker -c "cd $(printf '%q' "$HERE") && ${project}export DUX_PREVIEW_CONTAINER=$(printf '%q' "$DUX_PREVIEW_CONTAINER") DUX_BIN=$(printf '%q' "$DUX_BIN") DUX_PORT=$(printf '%q' "$DUX_PORT") DUX_TUI_PORT=$(printf '%q' "$DUX_TUI_PORT") BASE_IMAGE=$(printf '%q' "$BASE_IMAGE") DUX_SCREENS=$(printf '%q' "$DUX_SCREENS") DUX_NO_TAILSCALE=$(printf '%q' "$DUX_NO_TAILSCALE") && docker compose $quoted"
   }
   docker_raw() {
     local quoted
@@ -108,17 +120,39 @@ else
   }
 fi
 
-# What the container that is running right now was brought up with, or empty.
+# The container's name, the one thing compose does not scope to the project: a
+# daemon holds one container per name, so a second stack under a project of its
+# own would otherwise collide with the first on `dux-preview`. Derived from the
+# project compose itself resolves (an exported COMPOSE_PROJECT_NAME, a `.env`
+# file here, or this directory's name), so naming the project is all a second
+# stack needs; the default project keeps `dux-preview`, as it always was. Set
+# DUX_PREVIEW_CONTAINER to choose the name outright.
+if [ -z "$DUX_PREVIEW_CONTAINER" ]; then
+  project_name=$(run_docker config 2> /dev/null | sed -n 's/^name: //p' | head -1)
+  [ -n "$project_name" ] || { echo "error: docker compose could not resolve this stack's project" >&2; exit 1; }
+  if [ "$project_name" = "preview-env" ]; then
+    DUX_PREVIEW_CONTAINER=dux-preview
+  else
+    DUX_PREVIEW_CONTAINER="dux-preview-$project_name"
+  fi
+fi
+
+# What the container this project already has was brought up with, or empty.
 #
+# Found through compose rather than by name, because the name is only what THIS
+# shell would call it: a stack started under another name (an explicit
+# DUX_PREVIEW_CONTAINER) is still this project's container,
+# and missing it would quietly recreate a screenshot stack as a plain one.
 # `docker container inspect`, not `docker inspect`: the bare form falls back to
-# any other object with that name, and there is an IMAGE called dux-preview, so
-# it answered with the image's build-time environment rather than the running
-# container's. The `|| true` matters as much: with no container at all the
-# substitution's failure ends the script under `set -e`, silently, several
-# minutes of release build after anyone could have noticed.
+# any other object with that id or name, images included. The `|| true` matters
+# as much: with no container at all the substitution's failure ends the script
+# under `set -e`, silently, several minutes of release build after anyone could
+# have noticed.
 running_mode() {
-  local env
-  env=$(docker_raw container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' dux-preview 2> /dev/null || true)
+  local id env
+  id=$(run_docker ps -a -q dux 2> /dev/null | head -1 || true)
+  [ -n "$id" ] || return 0
+  env=$(docker_raw container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$id" 2> /dev/null || true)
   printf '%s\n' "$env" | sed -n "s/^$1=//p" | head -1
 }
 
@@ -161,7 +195,7 @@ wait_until_answering() {
     sleep 2
     seconds=$((seconds + 2))
   done
-  echo "error: dux never answered on port $DUX_PORT; try: docker compose logs dux" >&2
+  echo "error: dux never answered on port $DUX_PORT; try: ${COMPOSE_PROJECT_NAME:+COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME }docker compose logs dux" >&2
   exit 1
 }
 
@@ -180,5 +214,6 @@ fi
 wait_until_answering
 
 echo ">> dux preview at http://127.0.0.1:$DUX_PORT (TUI-journey port $DUX_TUI_PORT)"
-echo ">> logs:  docker compose logs -f dux   (from $HERE)"
+echo ">> container: $DUX_PREVIEW_CONTAINER${project_name:+ (compose project $project_name)}"
+echo ">> logs:  ${COMPOSE_PROJECT_NAME:+COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME }docker compose logs -f dux   (from $HERE)"
 echo ">> shot:  ./shot.sh / home.png"

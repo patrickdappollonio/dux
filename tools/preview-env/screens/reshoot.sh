@@ -40,9 +40,15 @@ if docker info > /dev/null 2>&1; then
 else
   command -v sg > /dev/null 2>&1 || fail "docker access denied and sg is unavailable"
   compose() {
-    local quoted
+    local quoted project=""
     quoted=$(printf '%q ' "$@")
-    sg docker -c "cd $(printf '%q' "$PREVIEW") && docker compose $quoted"
+    # The project is what tells this stack's container from another one's, so
+    # it is carried into the sub-shell explicitly, and only when set, so an
+    # unset project keeps compose's own default rather than an empty string.
+    if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+      project="export COMPOSE_PROJECT_NAME=$(printf '%q' "$COMPOSE_PROJECT_NAME") && "
+    fi
+    sg docker -c "cd $(printf '%q' "$PREVIEW") && ${project}docker compose $quoted"
   }
 fi
 

@@ -20,7 +20,12 @@ services:
       args:
         BASE_IMAGE: ${BASE_IMAGE:-archlinux:latest}
     image: dux-preview
-    container_name: dux-preview
+    # A container name is global to the Docker daemon, unlike the network and
+    # the volumes, which compose already scopes to the project. So a second
+    # stack (its own COMPOSE_PROJECT_NAME) needs a name of its own too; up.sh
+    # derives one from the project when this is unset. The image name stays
+    # shared on purpose: every stack runs the same image.
+    container_name: ${DUX_PREVIEW_CONTAINER:-dux-preview}
     ports:
       - "127.0.0.1:${DUX_PORT:-8790}:8790"
       # The concurrent-TUI journey's port. That journey runs the TUI in this

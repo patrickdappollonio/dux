@@ -103,7 +103,13 @@ if docker info >/dev/null 2>&1; then
 else
   command -v sg >/dev/null 2>&1 || fail "docker access denied and sg is unavailable" 1
   quoted=$(printf '%q ' "$DUX_BIN" "$OUTPUT_DIR" "$JOURNEY" "$COLS" "$ROWS" "$THEME" "$OUTPUT_STEM" "$REVISION" "$(basename "$JOURNEY")")
-  sg docker -c "cd '$HERE' && set -- $quoted && export DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" && docker compose --profile capture build tui-shot && docker compose --profile capture run --rm --no-deps -e DUX_TUI_COLS=\"\$4\" -e DUX_TUI_ROWS=\"\$5\" -e DUX_TUI_THEME=\"\$6\" -e DUX_TUI_OUTPUT_STEM=\"\$7\" -e DUX_PREVIEW_REVISION=\"\$8\" -e DUX_TUI_JOURNEY_NAME=\"\$9\" tui-shot"
+  # The project is carried into the sub-shell explicitly, and only when set,
+  # so an unset project keeps compose's own default rather than an empty string.
+  project=""
+  if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
+    project="export COMPOSE_PROJECT_NAME=$(printf '%q' "$COMPOSE_PROJECT_NAME") && "
+  fi
+  sg docker -c "cd '$HERE' && ${project}set -- $quoted && export DUX_BIN=\"\$1\" DUX_TUI_OUTPUT_DIR=\"\$2\" DUX_TUI_JOURNEY=\"\$3\" && docker compose --profile capture build tui-shot && docker compose --profile capture run --rm --no-deps -e DUX_TUI_COLS=\"\$4\" -e DUX_TUI_ROWS=\"\$5\" -e DUX_TUI_THEME=\"\$6\" -e DUX_TUI_OUTPUT_STEM=\"\$7\" -e DUX_PREVIEW_REVISION=\"\$8\" -e DUX_TUI_JOURNEY_NAME=\"\$9\" tui-shot"
 fi
 
 # DUX_TUI_JOURNEY reaches the rasterizer too: it is the side that knows the crop,

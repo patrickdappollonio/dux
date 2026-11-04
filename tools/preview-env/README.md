@@ -55,16 +55,41 @@ Then open `http://127.0.0.1:8790` (loopback only; `DUX_PORT` overrides).
 
 Two loopback ports are published: the web preview on `DUX_PORT` and the
 concurrent-TUI journey's background server on `DUX_TUI_PORT`, which defaults to
-`DUX_PORT + 208` (so 8790 pairs with 8998). Moving one moves both, which is what
-lets a second stack come up beside a running one:
+`DUX_PORT + 208` (so 8790 pairs with 8998). Moving one moves both:
 
 ```bash
 DUX_PORT=9000 ./up.sh         # web 9000, TUI-journey 9208
 ```
 
-`shot.sh` reads `DUX_PORT` independently, so export it (or pass it to every
-script in the session) when you move the web port, or the screenshots go to the
-other stack.
+### A second stack beside a running one
+
+Ports are only part of it. A second stack also needs a compose project of its
+own (`COMPOSE_PROJECT_NAME`), so its volumes and network are its own, and a
+container name of its own, because a container name is global to Docker.
+`up.sh` derives the name from the project (`dux-preview-<project>`), or takes
+`DUX_PREVIEW_CONTAINER` if you set it; the default project (`preview-env`) keeps
+the container `dux-preview`, as it always was. Name the second stack with
+EXPORTED environment variables, not compose's `-p` flag (the scripts take no
+such flag, so each one would fall back to the default stack) and not a `.env`
+file here (it would rename the default stack too, for everyone using this
+checkout). Export the project and the port for the whole session, so every
+script, compose command and teardown aims at the same stack:
+
+```bash
+export COMPOSE_PROJECT_NAME=preview-b DUX_PORT=9000
+./up.sh                       # container dux-preview-preview-b, web 9000, TUI 9208
+./shot.sh / home.png          # this stack, not the default one
+(cd screens && ./reshoot.sh no-password-banner)
+docker compose down -v        # this stack only: the project scopes it
+```
+
+Every script here reads `DUX_PORT` and `COMPOSE_PROJECT_NAME` from the
+environment, so a session that sets them for one script and not the next ends up
+screenshotting, seeding or tearing down the other stack. The `dux-preview` image
+is shared between stacks on purpose; do not remove it while another stack is up.
+A compose `up` you run by hand under a project of your own also needs
+`DUX_PREVIEW_CONTAINER` set, since the derivation lives in `up.sh`; `exec`,
+`logs` and `down` find the container by its project and need only that.
 
 ### Iterate on code
 

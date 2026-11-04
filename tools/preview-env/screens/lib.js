@@ -78,6 +78,15 @@ async function freshen(id, seconds, fixture = "working") {
 const composeDir = path.resolve(__dirname, "..")
 let directDocker = null
 
+// The compose project is what tells this stack's container from another one's
+// (a second stack runs under its own COMPOSE_PROJECT_NAME), so the `sg` path
+// carries it into its sub-shell explicitly, and only when set, so an unset
+// project keeps compose's own default rather than an empty string.
+function projectExport() {
+  const project = process.env.COMPOSE_PROJECT_NAME
+  return project ? `export COMPOSE_PROJECT_NAME=${JSON.stringify(project)} && ` : ""
+}
+
 function containerSh(script) {
   if (directDocker === null) {
     directDocker = spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0
@@ -90,7 +99,7 @@ function containerSh(script) {
         [
           "docker",
           "-c",
-          `cd ${JSON.stringify(composeDir)} && docker compose exec -T dux sh -euc ${JSON.stringify(script)}`,
+          `cd ${JSON.stringify(composeDir)} && ${projectExport()}docker compose exec -T dux sh -euc ${JSON.stringify(script)}`,
         ],
         { encoding: "utf8" },
       )
