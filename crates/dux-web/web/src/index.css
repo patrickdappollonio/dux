@@ -636,34 +636,11 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 [aria-pressed="true"] .dux-icswap .dux-ic-max {
   opacity: 0;
 }
-.dux-flight-out .dux-ic-max,
-.dux-flight-in .dux-ic-min {
-  animation: dux-ic-out 180ms ease 70ms both;
-}
-.dux-flight-out .dux-ic-min,
-.dux-flight-in .dux-ic-max {
-  animation: dux-ic-in 180ms ease 70ms both;
-}
-@keyframes dux-ic-out {
-  from {
-    opacity: 1;
-    transform: none;
-  }
-  to {
-    opacity: 0;
-    transform: rotate(90deg) scale(0.6);
-  }
-}
-@keyframes dux-ic-in {
-  from {
-    opacity: 0;
-    transform: rotate(-90deg) scale(0.6);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
+/* The flight turns one glyph out while the other turns in. It is driven from
+   the choreography with the Web Animations API rather than keyframes on the
+   phase class, because a flight turned around mid-air has to run each part
+   back from the frame on screen, and a keyframe animation swapped by a class
+   restarts from its first frame instead (see `theaterFlightParts.ts`). */
 
 /* THE FLOATING PILL WEARS THE BAND'S COLOUR, opaque, docked and floating
    alike. The fill is whatever the flap published for the band it hangs from
@@ -700,22 +677,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   padding: 0;
   overflow: hidden;
 }
-.dux-flight-out .dux-pill-grip {
-  animation: dux-grip-in 380ms 100ms both;
-}
-.dux-flight-in .dux-pill-grip {
-  animation: dux-grip-out 200ms ease both;
-}
-@keyframes dux-grip-in {
-  from {
-    opacity: 0;
-  }
-}
-@keyframes dux-grip-out {
-  to {
-    opacity: 0;
-  }
-}
+/* The grip fades in and out with the slot, driven from the choreography for
+   the same reason as the theater glyphs above. */
 
 /* The flap's concave fillets, reproduced on the travelling pill as the same
    arcs the docked flap draws, so the shape the flight leaves and the shape it
@@ -740,37 +703,16 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   right: -13px;
   transform-origin: 0 0;
 }
+/* In every flight stage they are in the box, and faded out (an inline
+   opacity) unless the choreography is animating them: shrinking off the band
+   at pull-off, growing back in the snap, and never growing in the air
+   (see `theaterFlightParts.ts`). Which stage it is does not decide whether
+   they show; the fade does. */
 .dux-flight-out .dux-pill-fillet,
+.dux-flight-in .dux-pill-fillet,
 .dux-flight-attach .dux-pill-fillet {
   display: block;
 }
-.dux-flight-out .dux-pill-fillet {
-  animation: dux-fillet-out 180ms ease both;
-}
-.dux-flight-attach .dux-pill-fillet {
-  animation: dux-fillet-in 180ms ease both;
-}
-@keyframes dux-fillet-out {
-  from {
-    opacity: 1;
-    transform: none;
-  }
-  to {
-    opacity: 0;
-    transform: scale(0.25);
-  }
-}
-@keyframes dux-fillet-in {
-  from {
-    opacity: 0;
-    transform: scale(0.25);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
 /* A viewer who asked for less motion never reaches a flight at all: the phase
    machine collapses every stage to an instant swap, so no phase class is ever
    applied. The grip's own transition is the one rule that is live outside a

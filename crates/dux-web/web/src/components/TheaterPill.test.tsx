@@ -1068,6 +1068,7 @@ describe("the phone flight, with real boxes to measure", () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     retireDock()
     // @ts-expect-error restoring jsdom's own zero-size getter
     delete HTMLElement.prototype.offsetHeight
@@ -1109,6 +1110,69 @@ describe("the phone flight, with real boxes to measure", () => {
       act(() => playPillResize())
       expect(pill().style.left).toBe("566px")
     }
+  })
+
+  it("does not drift its corner on a surface change while the grip slot is in transit", () => {
+    // A flight turned around in mid-air flies while the chrome is still moving,
+    // so the surface resizes under a pill whose grip slot is half open. The box
+    // and the grip's offset are snapped to the layout grid independently, so
+    // reading the settled width off that frame lands a fraction of a pixel off,
+    // and the pill comes to rest beside the corner every other flight uses.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    expect(pill().style.left).toBe("566px")
+    gripOccupied = 9.016
+    pillBox = { ...pillBox, width: 209 }
+    surfaceBox = { ...surfaceBox, height: 640 }
+    act(() => playResize())
+    expect(pill().style.left).toBe("566px")
+  })
+
+  it("follows the controls changing width while the grip slot is in transit", () => {
+    // The width an earlier frame gave is only a stand-in for noise. A cluster
+    // that really grew mid-flight (a count appearing) must move its corner.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("floating"))
+    // The open slot is inside this box: 800 - 200 - 14.
+    expect(pill().style.left).toBe("586px")
+    // The controls grow by 20 while the slot is 9 of its 20 open.
+    gripOccupied = 9
+    pillBox = { ...pillBox, width: 209 }
+    act(() => playPillResize())
+    // 800 - (209 + 11) - 14.
+    expect(pill().style.left).toBe("566px")
+  })
+
+  it("treats a collapsed slot as settled at a fractional device pixel ratio", () => {
+    // At 1.5x the collapsed grip's border and margin round differently, so the
+    // slot is a fraction of a pixel off zero. That is still a settled frame,
+    // and its width is the one to keep, not a guess carried from before.
+    vi.stubGlobal("devicePixelRatio", 1.5)
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    gripOccupied = 0.333
+    pillBox = { ...pillBox, width: 200.333 }
+    render(flying("detaching"))
+    expect(pill().style.left).toBe("566px")
+    pillBox = { ...pillBox, width: 230.333 }
+    act(() => playPillResize())
+    // 800 - (230 + 20) - 14.
+    expect(pill().style.left).toBe("536px")
+  })
+
+  it("lands a re-clamp in the same frame as the surface change that caused it", () => {
+    // A flight turned around mid-air travels while the chrome is still moving
+    // the surface, and the pill's resting point is re-derived from every one
+    // of those frames. A position that lands a frame late paints the pill a
+    // frame of chrome motion off its path and then catches up: a wobble. The
+    // browser paints straight after the resize notification, so the new
+    // coordinates have to be on the element when the callback returns.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    render(flying("detaching"))
+    expect(pill().style.top).toBe(CORNER.top)
+    surfaceBox = { ...surfaceBox, height: 640 }
+    // Deliberately not wrapped in act(): nothing flushes React after it.
+    playResize()
+    expect(pill().style.top).toBe("578px")
   })
 
   it("pulls off wearing the flap's shape and lands as a capsule", () => {
@@ -1274,6 +1338,379 @@ describe("the phone flight, with real boxes to measure", () => {
     expect(box.style.bottom).toBe("")
     // Its own resting corner for THIS box: 800 - 220 - 14.
     expect(box.style.left).toBe("566px")
+  })
+
+  /// Every value the flight writes to one inline property, in order, so a test
+  /// can see where a flight STARTS and not only where it ends.
+  function recordWrites(el: HTMLElement, prop: "transform" | "borderRadius") {
+    const writes: string[] = []
+    let proto: object | null = Object.getPrototypeOf(el.style)
+    let desc: PropertyDescriptor | undefined
+    while (proto && !desc) {
+      desc = Object.getOwnPropertyDescriptor(proto, prop)
+      proto = Object.getPrototypeOf(proto)
+    }
+    if (!desc?.set || !desc.get) throw new Error(`no accessor for ${prop}`)
+    const { get, set } = desc
+    Object.defineProperty(el.style, prop, {
+      configurable: true,
+      get() {
+        return get.call(this)
+      },
+      set(value: string) {
+        writes.push(value)
+        set.call(this, value)
+      },
+    })
+    return writes
+  }
+
+  /// What the browser reports for the pill while a transition is running:
+  /// jsdom has no animation clock, so its computed style is the inline END
+  /// value, never the frame on screen.
+  function paintMidAir(over: Partial<Record<"transform" | "borderRadius", string>>) {
+    const real = window.getComputedStyle.bind(window)
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = real(el, pseudo)
+      if (!(el instanceof HTMLElement) || el.dataset.testid !== "theater-pill") {
+        return style
+      }
+      return new Proxy(style, {
+        get(target, key) {
+          if (typeof key === "string" && key in over) {
+            return over[key as keyof typeof over]
+          }
+          const value = Reflect.get(target, key, target)
+          return typeof value === "function" ? value.bind(target) : value
+        },
+      })
+    })
+  }
+
+  it("turns around where it is painted when theater comes back mid-return", () => {
+    // Halfway home, the capsule is wherever its transform has got to. The new
+    // departure has to begin THERE: a flight that restarts from the dock, or
+    // from the rest it is heading back to, is a jump.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("returning"))
+    const midAir = "matrix(1, 0, 0, 1, -133, -269)"
+    paintMidAir({ transform: midAir, borderRadius: "24px" })
+    const transforms = recordWrites(pill(), "transform")
+    const radii = recordWrites(pill(), "borderRadius")
+
+    act(() => view.rerender(flying("detaching")))
+    expect(transforms[0]).toBe(midAir)
+    expect(transforms.at(-1)).toBe("")
+    // Already a capsule in the air: it never puts the flap's tab shape back on.
+    expect(radii).not.toContain(`0 0 ${10}px ${10}px`)
+  })
+
+  /// Where a transform list puts the box's corner, for the translations and
+  /// translation matrices the flight writes.
+  function translationOf(transform: string): { x: number; y: number } {
+    let x = 0
+    let y = 0
+    for (const m of transform.matchAll(/(translate|matrix)\(([^)]*)\)/g)) {
+      const n = m[2].split(",").map((v) => Number.parseFloat(v))
+      if (m[1] === "translate") {
+        x += n[0]
+        y += n[1] ?? 0
+      } else {
+        x += n[4]
+        y += n[5]
+      }
+    }
+    return { x, y }
+  }
+
+  function paintedCorner(transform: string) {
+    const t = translationOf(transform)
+    return {
+      x: Number.parseFloat(pill().style.left) + t.x,
+      y: Number.parseFloat(pill().style.top) + t.y,
+    }
+  }
+
+  /// The parts of the cluster that animate on their own clocks (the theater
+  /// glyphs, the grip, the fillets), as the flight drives them. jsdom has no
+  /// Web Animations, so each one is a small model of an Animation: a direction,
+  /// a time, and the auto-rewind `play()` and `reverse()` do at either end.
+  interface FakeAnimation {
+    el: Element
+    keyframes: Keyframe[]
+    /// Where its active phase ends, from the timing the code passed.
+    end: number
+    rate: number
+    time: number | null
+    paused: boolean
+    cancelled: boolean
+  }
+  function recordPartAnimations(): FakeAnimation[] {
+    const made: FakeAnimation[] = []
+    const rewind = (a: FakeAnimation) => {
+      if (a.rate < 0 && (a.time === null || a.time <= 0)) a.time = a.end
+      if (a.rate > 0 && (a.time === null || a.time >= a.end)) a.time = 0
+    }
+    const animate = vi.fn(function (
+      this: Element,
+      keyframes: Keyframe[],
+      timing: KeyframeAnimationOptions,
+    ) {
+      const a: FakeAnimation = {
+        el: this,
+        keyframes,
+        end: (timing.delay ?? 0) + Number(timing.duration ?? 0),
+        rate: 1,
+        time: null,
+        paused: false,
+        cancelled: false,
+      }
+      made.push(a)
+      return {
+        get playbackRate() {
+          return a.rate
+        },
+        set playbackRate(v: number) {
+          a.rate = v
+        },
+        get currentTime() {
+          return a.time
+        },
+        set currentTime(v: number | null) {
+          a.time = v
+        },
+        effect: { getComputedTiming: () => ({ endTime: a.end }) },
+        reverse: () => {
+          a.rate = -a.rate
+          a.paused = false
+          rewind(a)
+        },
+        play: () => {
+          a.paused = false
+          rewind(a)
+        },
+        pause: () => {
+          a.paused = true
+          if (a.time === null) a.time = 0
+        },
+        cancel: () => void (a.cancelled = true),
+      } as unknown as Animation
+    })
+    Object.defineProperty(Element.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value: animate,
+    })
+    return made
+  }
+  function partOf(a: FakeAnimation): string {
+    const cls = a.el.getAttribute("class") ?? ""
+    if (cls.includes("dux-ic-max")) return "max"
+    if (cls.includes("dux-ic-min")) return "min"
+    if (cls.includes("dux-pill-fillet")) return "fillet"
+    if ((a.el as HTMLElement).dataset?.testid === "theater-pill-grip") return "grip"
+    return "other"
+  }
+  /// Direction, the frame it is on, and whether it is still running.
+  const motion = (a: FakeAnimation) => [partOf(a), a.rate, a.time, a.paused, a.cancelled]
+
+  afterEach(() => {
+    // @ts-expect-error jsdom has no Web Animations of its own to restore
+    delete Element.prototype.animate
+  })
+
+  it("turns the glyphs and the grip around from where they are when the return turns", () => {
+    // A part restarted from its first frame pops: a glyph halfway faded snaps
+    // back to full, a grip halfway gone reappears. Each one already running has
+    // to head back the way it came, from the frame on screen.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("returning"))
+    const returning = made.filter((a) => partOf(a) !== "other")
+    expect(returning.map(partOf).sort()).toEqual(["grip", "max", "min"])
+    returning.forEach((a) => (a.time = 120))
+
+    act(() => view.rerender(flying("detaching")))
+    expect(returning.map(motion)).toEqual(
+      returning.map((a) => [partOf(a), -1, 120, false, false]),
+    )
+    // Nothing started over on top of them.
+    expect(made.slice(returning.length).filter((a) => partOf(a) !== "fillet")).toEqual([])
+  })
+
+  it("holds a part the return had not started yet on the frame it shows", () => {
+    // Turned before its first frame (or inside its delay), a part has not moved,
+    // and its first frame is already the end the departure heads for. Reversing
+    // it from there would rewind it to its LAST frame: the other glyph, in one
+    // frame.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("returning"))
+    const returning = made.filter((a) => partOf(a) !== "other")
+
+    act(() => view.rerender(flying("detaching")))
+    expect(returning.map((a) => [partOf(a), a.time, a.paused])).toEqual(
+      returning.map((a) => [partOf(a), 0, true]),
+    )
+  })
+
+  it("turns the glyphs and the grip around when the departure turns home, and lets the fillets go", () => {
+    // The fillets belong against the band and the return never wears them, so
+    // they finish fading where they are rather than growing back mid-air.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("detaching"))
+    const leaving = made.filter((a) => partOf(a) !== "other")
+    expect(leaving.map(partOf).sort()).toEqual(["fillet", "fillet", "grip", "max", "min"])
+    leaving.forEach((a) => (a.time = 90))
+
+    act(() => view.rerender(flying("returning")))
+    expect(leaving.map(motion)).toEqual(
+      leaving.map((a) => [partOf(a), partOf(a) === "fillet" ? 1 : -1, 90, false, false]),
+    )
+    expect(made.length).toBe(leaving.length)
+  })
+
+  it("takes the fillets back from where the snap left them", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("attaching"))
+    const snapping = made.filter((a) => partOf(a) === "fillet")
+    expect(snapping.length).toBe(2)
+    snapping.forEach((a) => (a.time = 60))
+
+    act(() => view.rerender(flying("detaching")))
+    expect(snapping.map(motion)).toEqual(
+      snapping.map(() => ["fillet", -1, 60, false, false]),
+    )
+  })
+
+  /// Is this fillet animation making the fillets GROW from here on?
+  function grows(a: FakeAnimation): boolean {
+    const from = Number(a.keyframes[0]?.opacity ?? 0)
+    const to = Number(a.keyframes.at(-1)?.opacity ?? 0)
+    return !a.cancelled && !a.paused && (to - from) * a.rate > 0
+  }
+
+  /// THE RULE IN THE AIR: no tab shape flying. Every fillet is either faded
+  /// out with nothing driving it, or shrinking.
+  function filletsInTheAir(made: FakeAnimation[]): string[] {
+    const wrong: string[] = []
+    for (const el of document.querySelectorAll<SVGElement>(".dux-pill-fillet")) {
+      const live = made.filter((a) => a.el === el && !a.cancelled)
+      if (live.some(grows)) wrong.push("growing")
+      if (live.length === 0 && el.style.opacity !== "0") {
+        wrong.push(`resting at opacity '${el.style.opacity}'`)
+      }
+    }
+    return wrong
+  }
+
+  it("flies no fillets home on a second turn that never touched the band", () => {
+    // Leave, re-enter mid-return, leave again: nothing ever pulled off the
+    // band on this pill, so there is no fade to finish and nothing to show.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("returning"))
+    act(() => view.rerender(flying("detaching")))
+    expect(filletsInTheAir(made)).toEqual([])
+    act(() => view.rerender(flying("returning")))
+    expect(filletsInTheAir(made)).toEqual([])
+  })
+
+  it("never regrows the pull-off's fillets in the air, however often it turns", () => {
+    // Off the band, then turned home, out, home and out again: the fade the
+    // pull-off started only ever runs one way, toward gone.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("detaching"))
+    made.forEach((a) => (a.time = 90))
+    for (const stage of ["returning", "detaching", "returning", "detaching"] as const) {
+      act(() => view.rerender(flying(stage)))
+      expect([stage, ...filletsInTheAir(made)]).toEqual([stage])
+    }
+  })
+
+  it("never grows fillets in the air after a turn out of the snap", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const made = recordPartAnimations()
+    const view = render(flying("attaching"))
+    made.forEach((a) => (a.time = 60))
+    for (const stage of ["detaching", "returning", "detaching"] as const) {
+      act(() => view.rerender(flying(stage)))
+      expect([stage, ...filletsInTheAir(made)]).toEqual([stage])
+    }
+  })
+
+  it("turns around where it is painted after the surface changed under the return", () => {
+    // The return is pinned on the coordinates it left from, but the pill's own
+    // state is re-clamped when the surface changes (a soft keyboard closing, a
+    // rotation, a strip row arriving). The departure that turns it around is
+    // placed from that new state, so the painted transform has to be carried
+    // over from the old coordinates or the pill jumps by the difference.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("returning"))
+    const midAir = "matrix(1, 0, 0, 1, -133, -269)"
+    const before = paintedCorner(midAir)
+    surfaceBox = { ...surfaceBox, height: 400 }
+    act(() => playResize())
+    paintMidAir({ transform: midAir, borderRadius: "24px" })
+    const transforms = recordWrites(pill(), "transform")
+
+    act(() => view.rerender(flying("detaching")))
+    expect(paintedCorner(transforms[0])).toEqual(before)
+    expect(transforms.at(-1)).toBe("")
+  })
+
+  it("keeps a turned departure on the current frame's coordinates while the surface resizes", () => {
+    // Turned around mid-return, the departure flies while the chrome is still
+    // changing the surface, so its resting point moves on every frame of it.
+    // The coordinates it is painted from have to be that frame's, with no
+    // React flush after the resize to rescue a late commit.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("returning"))
+    paintMidAir({ transform: "matrix(1, 0, 0, 1, -133, -269)", borderRadius: "24px" })
+    act(() => view.rerender(flying("detaching")))
+    const before = Number.parseFloat(pill().style.top)
+    surfaceBox = { ...surfaceBox, height: surfaceBox.height + 40 }
+    playResize()
+    expect(Number.parseFloat(pill().style.top)).toBe(before + 40)
+  })
+
+  it("turns home where it is painted after the surface changed under the departure", () => {
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    surfaceBox = { ...surfaceBox, height: 400 }
+    act(() => playResize())
+    const midAir = "matrix(1, 0, 0, 1, -120, -260)"
+    const before = paintedCorner(midAir)
+    paintMidAir({ transform: midAir, borderRadius: "17px" })
+    const transforms = recordWrites(pill(), "transform")
+
+    act(() => view.rerender(flying("returning")))
+    expect(paintedCorner(transforms[0])).toEqual(before)
+  })
+
+  it("turns around where it is painted when theater is left mid-departure", () => {
+    // The other way round: flying out, asked back. It heads for the dock from
+    // the frame it is on, and lands where any return lands.
+    flapBox = { left: 300, top: 0, width: 200, height: 48 }
+    const view = render(flying("detaching"))
+    const rest = { left: Number.parseFloat(pill().style.left), top: Number.parseFloat(pill().style.top) }
+    const midAir = "matrix(1, 0, 0, 1, -120, -260)"
+    paintMidAir({ transform: midAir, borderRadius: "17px" })
+    const transforms = recordWrites(pill(), "transform")
+
+    act(() => view.rerender(flying("returning")))
+    expect(transforms[0]).toBe(midAir)
+    expect(transforms.at(-1)).toBe(
+      `translate(${300 - rest.left}px, ${0 - rest.top}px)`,
+    )
+    // Pinned on the rest it was flying out to, which the transform is relative to.
+    expect(pill().style.left).toBe(`${rest.left}px`)
+    expect(pill().style.top).toBe(`${rest.top}px`)
+    // The shape it had reached, eased on to the capsule rather than snapped.
+    expect(pill().style.transition).toContain("border-radius")
   })
 
   it("falls back to the corner while a fresh pill has nothing to place it", () => {

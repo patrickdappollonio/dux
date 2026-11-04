@@ -61,8 +61,8 @@ export function PaneActionCluster({
 
 // The toggle morphs rather than swaps: both icons are stacked in one grid cell
 // and `aria-pressed` picks the settled one, because the detach and re-dock
-// flights rotate one out while the other rotates in (see the `dux-flight-*`
-// rules in index.css). A conditional pair of icons has nothing to animate
+// flights rotate one out while the other rotates in (see
+// `theaterFlightParts.ts`). A conditional pair of icons has nothing to animate
 // between, and the control reads as two buttons rather than one changing state.
 //
 // It is also the way out wherever the cluster is floating: the pill exists only

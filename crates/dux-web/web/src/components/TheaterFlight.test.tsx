@@ -318,6 +318,99 @@ describe("a mode flipped back mid-gesture", () => {
   })
 })
 
+describe("theater re-entered while the return is still in the air", () => {
+  // THE CLUSTER IS ONE OBJECT, so a gesture the other way picks it up wherever
+  // it is. Re-entering while the capsule is flying home, or squaring up against
+  // the band, must not put the flap back on the band for a chrome stage and
+  // then fly it out again: the pill would vanish mid-air and reappear as the
+  // docked flap, which is the teleport the whole choreography exists to avoid.
+  function leaveAfterSettling() {
+    mockState = makeState(false)
+    const view = render(<MobileShell />)
+    mockState = makeState(true)
+    act(() => view.rerender(<MobileShell />))
+    tick(CHROME_HOLD_MS)
+    tick(FLIGHT_TRAVEL_HOLD_MS)
+    mockState = makeState(false)
+    act(() => view.rerender(<MobileShell />))
+    tick(CHROME_HOLD_MS)
+    return view
+  }
+
+  for (const [when, into] of [
+    ["early in the travel home", 40],
+    ["halfway home", FLIGHT_TRAVEL_HOLD_MS / 2],
+    ["during the arrival snap", FLIGHT_TRAVEL_HOLD_MS + FLIGHT_ATTACH_HOLD_MS / 2],
+  ] as const) {
+    it(`keeps the pill on screen and the flap off the band, ${when}`, () => {
+      const view = leaveAfterSettling()
+      tick(into)
+      expect(pill()).not.toBeNull()
+
+      mockState = makeState(true)
+      act(() => view.rerender(<MobileShell />))
+      // It heads straight back out, with no chrome stage in between.
+      expect(shot()).toEqual({ flap: "hidden", pill: "leaving" })
+      // Every moment the cluster is not the pill in the air, by time since the
+      // re-entry.
+      const jumps: string[] = []
+      for (let t = 0; t <= CHROME_HOLD_MS + FLIGHT_TRAVEL_HOLD_MS; t += 20) {
+        const s = shot()
+        if (s.pill === "gone" || s.flap === "shown") {
+          jumps.push(`${t}ms: flap ${s.flap}, pill ${s.pill}`)
+        }
+        tick(20)
+      }
+      expect(jumps).toEqual([])
+      expect(shot()).toEqual({ flap: "gone", pill: "floating" })
+    })
+  }
+})
+
+describe("theater left while the departure is still in the air", () => {
+  // The same rule the other way: leaving while the capsule is still flying out
+  // turns it around at once, toward the dock, rather than letting it finish a
+  // departure the user has just taken back. It ends exactly as any return does:
+  // travel, then the snap, then the real flap in the pill's place.
+  for (const [when, into] of [
+    ["early in the departure", 40],
+    ["halfway out", FLIGHT_TRAVEL_HOLD_MS / 2],
+    ["just before it settles", FLIGHT_TRAVEL_HOLD_MS - 40],
+  ] as const) {
+    it(`turns straight back to the dock, ${when}`, () => {
+      mockState = makeState(false)
+      const view = render(<MobileShell />)
+      mockState = makeState(true)
+      act(() => view.rerender(<MobileShell />))
+      tick(CHROME_HOLD_MS)
+      tick(into)
+      expect(shot()).toEqual({ flap: "hidden", pill: "leaving" })
+
+      mockState = makeState(false)
+      act(() => view.rerender(<MobileShell />))
+      expect(shot()).toEqual({ flap: "hidden", pill: "returning" })
+
+      // Until the pill goes, the flap is not painted; the tick the pill goes,
+      // the flap is there.
+      const wrong: string[] = []
+      let t = 0
+      for (; t <= FLIGHT_TRAVEL_HOLD_MS + FLIGHT_ATTACH_HOLD_MS + 40; t += 20) {
+        const s = shot()
+        const docked = s.pill === "gone" && s.flap === "shown"
+        if (docked) break
+        if (s.pill === "gone" || s.flap === "shown") {
+          wrong.push(`${t}ms: flap ${s.flap}, pill ${s.pill}`)
+        }
+        tick(20)
+      }
+      expect(wrong).toEqual([])
+      expect(shot()).toEqual({ flap: "shown", pill: "gone" })
+      // A travel and a snap, never a chrome stage on top of them.
+      expect(t).toBeLessThanOrEqual(FLIGHT_TRAVEL_HOLD_MS + FLIGHT_ATTACH_HOLD_MS + 20)
+    })
+  }
+})
+
 describe("the cluster the pill carries on a phone", () => {
   it("is the flap's four controls, in the flap's order", () => {
     mockState = makeState(true)

@@ -77,7 +77,16 @@ export function flightForMode(theater: boolean, chromeMs: number): FlightPhase {
  * The same question from a machine already mid-flight. A mode flipped back
  * during its own chrome stage undoes that stage and rests, with no flight: the
  * cluster has not moved yet, so the opposite gesture would hide a flap that is
- * still on the band. Any later interruption is a real gesture the other way.
+ * still on the band.
+ *
+ * A mode flipped back while the cluster is IN THE AIR turns it around where it
+ * is, straight into the opposite travel. Going through a chrome stage instead
+ * would either put the flap back on the band for its length, so the pill
+ * vanishes mid-air and flies out again from the dock, or keep the pill flying
+ * away from the dock it was just asked back to. Snapping against the band
+ * counts as in the air: the pill is still what is painted there.
+ *
+ * Only a resting state starts a whole gesture, chrome stage first.
  */
 export function flightForModeFrom(
   previous: FlightPhase,
@@ -86,7 +95,29 @@ export function flightForModeFrom(
 ): FlightPhase {
   const abandoned = theater ? "expanding" : "collapsing"
   if (previous === abandoned) return theater ? "floating" : "docked"
+  if (chromeMs > 0) {
+    if (theater && (previous === "returning" || previous === "attaching")) {
+      return "detaching"
+    }
+    if (!theater && previous === "detaching") return "returning"
+  }
   return flightForMode(theater, chromeMs)
+}
+
+/**
+ * Did this stage begin by turning a flight around in mid-air, rather than by
+ * leaving a resting end? Such a travel starts from the frame on screen and
+ * from the shape the cluster has at that moment, and the pull-off's fillets,
+ * which only mean something against the band, stay off.
+ */
+export function flightTurnedInAir(
+  previous: FlightPhase | null,
+  phase: FlightPhase,
+): boolean {
+  return (
+    (previous === "returning" && phase === "detaching") ||
+    (previous === "detaching" && phase === "returning")
+  )
 }
 
 /**

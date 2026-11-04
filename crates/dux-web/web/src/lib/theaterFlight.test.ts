@@ -61,12 +61,18 @@ describe("the phone's theater flight, stage by stage", () => {
     expect(flightForModeFrom("expanding", true, CHROME_MS)).toBe("floating")
   })
 
-  it("treats every later interruption as a real gesture the other way", () => {
-    // By then the cluster is somewhere else, and it has to travel back.
-    expect(flightForModeFrom("detaching", false, CHROME_MS)).toBe("expanding")
+  it("turns a cluster that is in the air around where it is", () => {
+    // Mid-flight the cluster is the pill, somewhere between the two ends, so
+    // the gesture the other way is the flight the other way, starting now:
+    // neither chrome stage, which would put the flap back on the band first or
+    // leave the pill flying away from the dock it was just asked back to.
+    expect(flightForModeFrom("detaching", false, CHROME_MS)).toBe("returning")
+    expect(flightForModeFrom("returning", true, CHROME_MS)).toBe("detaching")
+    expect(flightForModeFrom("attaching", true, CHROME_MS)).toBe("detaching")
+  })
+
+  it("starts a whole gesture from either resting state", () => {
     expect(flightForModeFrom("floating", false, CHROME_MS)).toBe("expanding")
-    expect(flightForModeFrom("returning", true, CHROME_MS)).toBe("collapsing")
-    expect(flightForModeFrom("attaching", true, CHROME_MS)).toBe("collapsing")
     expect(flightForModeFrom("docked", true, CHROME_MS)).toBe("collapsing")
   })
 
