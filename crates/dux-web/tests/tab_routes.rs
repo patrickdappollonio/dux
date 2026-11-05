@@ -237,17 +237,24 @@ async fn boot_with_broken_provider_and_claude(
     (addr, tmp)
 }
 
+/// The creation is followed to its outcome so the tab's launch has reported and
+/// nothing still holds the tab when the caller acts on it.
 async fn create_extra_tab(client: &reqwest::Client, addr: SocketAddr, session: &str) -> String {
     let resp = client
-        .post(format!("http://{addr}/api/v1/sessions/{session}/tabs"))
+        .post(format!(
+            "http://{addr}/api/v1/sessions/{session}/tabs?operation=1"
+        ))
         .send()
         .await
         .expect("send the request");
-    assert_eq!(resp.status(), 201, "create tab should 201");
-    let body: serde_json::Value = resp.json().await.expect("the response body is JSON");
-    body["tab_id"]
+    let record = followed_outcome(client, addr, resp).await;
+    assert_eq!(
+        record["state"], "succeeded",
+        "the tab should come up: {record}"
+    );
+    record["created"][0]
         .as_str()
-        .expect("the response names the tab")
+        .unwrap_or_else(|| panic!("the record names the tab: {record}"))
         .to_string()
 }
 
@@ -485,9 +492,6 @@ async fn delete_slot_tab_promotes_the_next_tab() {
 
     let slot = slot_tab_id(&client, addr, "s1").await;
     let sibling = create_extra_tab(&client, addr, "s1").await;
-    // Wait out the sibling's async launch so the assertion below is about a
-    // process the promotion left alone, not one that never started.
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &sibling)).await;
 
     let resp = client
         .delete(format!("http://{addr}/api/v1/sessions/s1/tabs/{slot}"))
@@ -641,11 +645,11 @@ async fn stopping_or_closing_an_extra_tab_with_a_live_sibling_does_not_detach() 
         "reconnect should launch the session-slot tab: {}",
         launch_resp.status()
     );
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, "s1")).await;
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &slot)).await;
 
     // Stopping the extra tab, followed as an operation, ends inside the call:
     // its process is gone, its row stays, and the agent keeps running.
-    wait_for_session(&client, addr, "s1", |s| tab_has_live_process(s, &tab)).await;
     let resp = client
         .post(format!(
             "http://{addr}/api/v1/sessions/s1/tabs/{tab}/stop?operation=1"
@@ -660,7 +664,6 @@ async fn stopping_or_closing_an_extra_tab_with_a_live_sibling_does_not_detach() 
         record["message"],
         "Stopped the Claude 2 tab. Its other tabs are still running."
     );
-    let slot = slot_tab_id(&client, addr, "s1").await;
     let session = wait_for_session(&client, addr, "s1", |_| true).await;
     assert!(!tab_has_live_process(&session, &tab), "{session}");
     assert!(tab_has_live_process(&session, &slot), "{session}");
