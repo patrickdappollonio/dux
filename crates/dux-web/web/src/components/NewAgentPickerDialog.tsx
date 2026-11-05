@@ -57,7 +57,7 @@ const INTENT_COPY = {
   new: {
     title: "New agent",
     description:
-      "Pick a project to create an agent. Every project action lives in each project's menu.",
+      "An agent is an AI coding session with its own branch and working copy. Run several at once on one project without them touching each other's files.",
   },
   from_pr: {
     title: "New agent from PR",
