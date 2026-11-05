@@ -228,7 +228,8 @@ impl Engine {
             return Err("add_existing needs a pull request.".into());
         }
         // For a pull request the address is built here from the policy and the
-        // protocols as they are now, whatever the request carries.
+        // protocols as they are now, whatever the request carries. A typed
+        // short `host/owner/repo` is expanded with the same protocols.
         let offer = match &request.pull_request {
             Some(target) => Some(self.clone_offer_for(target)?),
             None => None,
@@ -238,7 +239,16 @@ impl Engine {
                 url: offer.address.clone(),
                 ..request.clone()
             },
-            None => request.clone(),
+            None => match crate::clone_project::expand_short_address(
+                &request.url,
+                &self.github_git_protocols(),
+            ) {
+                Some(url) => CloneRequest {
+                    url,
+                    ..request.clone()
+                },
+                None => request.clone(),
+            },
         };
         let projects: Vec<&str> = self.projects.iter().map(|p| p.path.as_str()).collect();
         let prepared =
@@ -259,7 +269,7 @@ impl Engine {
             && !self.mark_in_flight(InFlightKey::CloneRepository(repository.clone()))
         {
             self.clear_in_flight(&key);
-            return Err(self.clone_repository_busy(repository));
+            return Err(self.clone_repository_busy(repository, offer.as_ref()));
         }
         if let Err(refused) = self.hold_path_for_in_flight(
             &key,
@@ -331,27 +341,31 @@ impl Engine {
     }
 
     /// The refusal when a clone or add of the same repository is already
-    /// running, saying which of the two it is.
-    fn clone_repository_busy(&self, repository: &str) -> StatusText {
+    /// running, saying which of the two it is and what the refused request
+    /// can do once it ends: with an `offer` it was for a pull request, whose
+    /// asker uses New agent from PR again; without one it was a plain clone.
+    fn clone_repository_busy(
+        &self,
+        repository: &str,
+        offer: Option<&crate::pr_reference::PullRequestCloneOffer>,
+    ) -> StatusText {
         let holder = self
             .clones
             .pending
             .values()
             .find(|held| held.repository_key.as_deref() == Some(repository))
             .map(|held| held.mode);
-        if let Some(CloneMode::AddExisting) = holder {
-            crate::status_text![
-                "dux is already adding a checkout of ",
-                n(repository),
-                " for a new agent. Wait for it to finish, then use New agent from PR again."
-            ]
+        let doing = if let Some(CloneMode::AddExisting) = holder {
+            "dux is already adding a checkout of "
         } else {
-            crate::status_text![
-                "dux is already cloning ",
-                n(repository),
-                " for a new agent. Wait for it to finish, then use New agent from PR again."
-            ]
-        }
+            "dux is already cloning "
+        };
+        let next = if offer.is_some() {
+            " for a new agent. Wait for it to finish, then use New agent from PR again."
+        } else {
+            " for a new agent. Wait for it to finish, then try the clone again."
+        };
+        crate::status_text![doing, n(repository), next]
     }
 
     /// The offer a pull request clone is built from, from the engine's state
@@ -699,6 +713,34 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// A short `host/owner/repo` reaches the clone as the address `gh` would
+    /// use for that host.
+    #[test]
+    fn a_short_address_is_cloned_from_the_address_gh_uses() {
+        let (mut engine, tmp) = test_engine();
+        engine.set_github_git_protocols(
+            [("github.com".to_string(), crate::gh::GitProtocol::Ssh)].into(),
+        );
+        let destination = std::fs::canonicalize(tmp.path()).unwrap().join("dest");
+        let request = CloneRequest {
+            url: "github.com/acme/widget".to_string(),
+            path: destination.to_string_lossy().into_owned(),
+            agent_name: Some("first".to_string()),
+            random_name: false,
+            pull_request: None,
+            add_existing: false,
+            review_copy: UpfrontReviewCopy::default(),
+        };
+        crate::engine::fail_next_worker_spawn();
+        let busy = engine
+            .begin_clone_project(&request, CloneAskedBy::OtherSurface)
+            .expect("the clone is dispatched");
+        assert!(
+            busy.message.contains("git@github.com:acme/widget.git"),
+            "{busy:?}"
+        );
     }
 
     /// A clone whose worker thread cannot start ends its busy with the reason

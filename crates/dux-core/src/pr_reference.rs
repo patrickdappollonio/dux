@@ -163,20 +163,30 @@ pub fn pull_request_clone_offer(
     if !policy.allows(&host) {
         return None;
     }
-    // `git@host:port:owner/repo.git` is not an address, so a host with a port
-    // is cloned over https whatever its protocol setting says.
-    let address = match protocols.get(&host) {
-        Some(GitProtocol::Ssh) if !host.contains(':') => {
-            format!("git@{host}:{owner_repo}.git")
-        }
-        _ => format!("https://{host}/{owner_repo}.git"),
-    };
+    let address = clone_address(&host, &owner_repo, protocols);
     Some(PullRequestCloneOffer {
         address,
         host,
         owner_repo,
         number,
     })
+}
+
+/// The address `gh repo clone` would clone `owner_repo` on `host` from:
+/// `git@host:owner/repo.git` when `gh`'s git protocol for the host is ssh,
+/// `https://host/owner/repo.git` otherwise. `host` is lowercase and
+/// `owner_repo` carries no `.git`.
+pub fn clone_address(
+    host: &str,
+    owner_repo: &str,
+    protocols: &BTreeMap<String, GitProtocol>,
+) -> String {
+    // `git@host:port:owner/repo.git` is not an address, so a host with a port
+    // is cloned over https whatever its protocol setting says.
+    match protocols.get(host) {
+        Some(GitProtocol::Ssh) if !host.contains(':') => format!("git@{host}:{owner_repo}.git"),
+        _ => format!("https://{host}/{owner_repo}.git"),
+    }
 }
 
 /// The clone offer with the pull request's own facts, as `gh` just reported

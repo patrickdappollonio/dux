@@ -12665,9 +12665,11 @@ mod tests {
             .apply_wire(plain(&two))
             .expect_err("a plain clone of the same repository is refused")
             .to_string();
-        assert!(
-            refused.contains("already cloning") && refused.contains("github.com/acme/widget"),
-            "{refused}"
+        assert_eq!(
+            refused,
+            "dux is already cloning github.com/acme/widget for a new agent. Wait for it to \
+             finish, then try the clone again.",
+            "a plain clone is not told to use New agent from PR"
         );
         drive_clone_chain(&mut engine);
         let (mut engine, _engine_dir) = test_engine();

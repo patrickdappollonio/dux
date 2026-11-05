@@ -65,7 +65,7 @@ behalf. Picking a plain folder in **Add project…** offers the same step.
 ### Starting from a remote instead
 
 **Clone a repository…**, next to **Add project…** in the same menus, takes a git address
-rather than a folder. It asks for three things:
+(or a short `github.com/owner/repo`) rather than a folder. It asks for three things:
 
 - the address;
 - the destination folder (filled in from the address until you edit it);

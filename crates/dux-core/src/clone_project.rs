@@ -227,6 +227,46 @@ pub(crate) fn prepare_clone(
     })
 }
 
+/// The full address a short `host/owner/repo` stands for, or `None` for any
+/// other text, which is cloned exactly as typed. Short means no scheme, no `@`
+/// and no `:`, and exactly three non-empty segments whose first is a host name
+/// with a dot in it, like `github.com` (so `localhost/o/r` stays a path); the
+/// repository may end in `.git` and the whole in one `/`. A relative path of
+/// that shape is expanded too, and `./` in front of it keeps it a path. The
+/// address is the one `gh repo clone` would use for that host, ssh or https
+/// by `protocols`, so a host with no recorded protocol is cloned over https.
+pub(crate) fn expand_short_address(
+    text: &str,
+    protocols: &std::collections::BTreeMap<String, crate::gh::GitProtocol>,
+) -> Option<String> {
+    let text = text.trim();
+    if text.contains("://") || text.contains('@') || text.contains(':') {
+        return None;
+    }
+    let text = text.strip_suffix('/').unwrap_or(text);
+    let mut segments = text.split('/');
+    let (Some(host), Some(owner), Some(repo), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    // Every label of the host must be non-empty, so `./rel/path` and
+    // `../rel/path` stay local paths.
+    let is_host = host.contains('.') && host.split('.').all(|label| !label.is_empty());
+    if !is_host || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(crate::pr_reference::clone_address(
+        &host.to_ascii_lowercase(),
+        &format!("{owner}/{repo}"),
+        protocols,
+    ))
+}
+
 /// Refuse a destination that is already a project. Both sides are
 /// canonicalized, so a project saved under another spelling of the folder
 /// (through a symbolic link, say) still matches.
@@ -1395,6 +1435,56 @@ mod tests {
         what: String,
         address: String,
         name: Option<String>,
+    }
+
+    #[test]
+    fn a_short_address_expands_to_the_one_gh_uses_for_its_host() {
+        use crate::gh::GitProtocol::{Https, Ssh};
+        let protocols = |entries: &[(&str, crate::gh::GitProtocol)]| {
+            entries
+                .iter()
+                .map(|(host, protocol)| (host.to_string(), *protocol))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let ssh = protocols(&[("github.com", Ssh)]);
+        let https = protocols(&[("github.com", Https)]);
+        let none = protocols(&[]);
+        for (text, map, expected) in [
+            ("github.com/o/r", &ssh, "git@github.com:o/r.git"),
+            ("github.com/o/r.git", &ssh, "git@github.com:o/r.git"),
+            ("  GitHub.com/o/r/ ", &ssh, "git@github.com:o/r.git"),
+            ("github.com/o/r", &https, "https://github.com/o/r.git"),
+            ("github.com/o/r", &none, "https://github.com/o/r.git"),
+            ("gitlab.example/o/r", &ssh, "https://gitlab.example/o/r.git"),
+            ("v1.2/a/b", &none, "https://v1.2/a/b.git"),
+        ] {
+            assert_eq!(
+                expand_short_address(text, map).as_deref(),
+                Some(expected),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "https://github.com/o/r",
+            "git@github.com:o/r",
+            "ssh://git@github.com/o/r.git",
+            "file:///srv/o/r",
+            "github.com:8443/o/r",
+            "/abs/path",
+            "/srv/o/r",
+            "./rel/path",
+            "./github.com/o/r",
+            "../rel/path",
+            "localhost/o/r",
+            "~/x/y",
+            "owner/repo",
+            "a/b/c",
+            "github.com/o/r/extra",
+            "github.com//r",
+            "github.com/o/.git",
+        ] {
+            assert_eq!(expand_short_address(text, &ssh), None, "{text:?}");
+        }
     }
 
     #[test]

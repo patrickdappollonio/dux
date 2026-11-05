@@ -134,7 +134,7 @@ The launcher's **▾** menu holds both flavors under **Projects** ("Add project�
 
 ### Cloning a repository
 
-Not on the server yet? **Clone a repository** sits right beside them, under **Projects** in the launcher's **▾** menu and in the app menu's **Add project** submenu. Paste the remote's address and dux clones it, adds it as a project and starts its first agent, all in one go.
+Not on the server yet? **Clone a repository** sits right beside them, under **Projects** in the launcher's **▾** menu and in the app menu's **Add project** submenu. Paste the remote's address (a short `github.com/owner/repo` works too) and dux clones it, adds it as a project and starts its first agent, all in one go.
 
 - The destination folder fills itself in from the address (your start directory plus the repository's name) until you type over it.
 - The agent gets the name you give it or a random one, exactly like **New agent**.

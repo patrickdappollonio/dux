@@ -275,7 +275,13 @@ launcher's **▾** opens, and in the app menu's **Add project** submenu. In the 
 Both open the same short form:
 
 - **The address.** Anything `git clone` takes: `https://…`, `ssh://…`,
-  `git@host:owner/repo.git`, a `file://` address, or a plain path.
+  `git@host:owner/repo.git`, a `file://` address, or a plain path. A short
+  `host/owner/repo` works too, on any host whose name has a dot in it, like
+  `github.com/owner/repo`. dux turns it into `git@github.com:owner/repo.git` when its
+  GitHub integration sees that your `gh` uses SSH for that host, and into
+  `https://github.com/owner/repo.git` otherwise, which is also what you get while the
+  GitHub integration is off. To clone a local folder whose path happens to look like that
+  (say `github.com/owner/repo` under your current folder), start it with `./`.
 - **The destination folder.** It fills itself in as your project browser's start
   directory plus the repository's name, and keeps following the address until you edit
   it. A leading `~` works; otherwise give a full path.

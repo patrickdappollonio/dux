@@ -85,7 +85,7 @@ export function CloneProjectDialog() {
           <DialogDescription>
             {pr
               ? renderProse(offerBody(pr, form.path.trim()))
-              : "Paste the address of a git remote. dux clones its default branch, adds it as a project and starts an agent there. It never asks for a password: the credentials and ssh keys you already use in a shell are the ones it uses."}
+              : "Paste the address of a git remote, or just github.com/owner/repo. dux clones its default branch, adds it as a project and starts an agent there. It never asks for a password: the credentials and ssh keys you already use in a shell are the ones it uses."}
           </DialogDescription>
           {pr && (
             <p className="text-sm text-muted-foreground">
@@ -102,7 +102,7 @@ export function CloneProjectDialog() {
             value={form.url}
             onChange={(event) => setCloneProjectUrl(event.target.value)}
             onKeyDown={handleEnter}
-            placeholder="https://github.com/owner/repo.git"
+            placeholder="github.com/owner/repo or a git URL"
             autoFocus={!pr}
             readOnly={pr !== null}
             autoCapitalize="off"
