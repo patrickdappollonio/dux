@@ -1080,10 +1080,10 @@ mod tests {
         open_modal(&mut app);
         let shown = screen(&draw(&mut app, 140, 40));
         let open = shown.find("Open, newest first").expect(&shown);
-        let first = shown.find("o/r#418").expect(&shown);
+        let first = shown.find(" #418 ").expect(&shown);
         let attached = shown.find("acme/infra#77").expect(&shown);
         let done = shown.find("Merged and closed").expect(&shown);
-        let merged = shown.find("o/r#415").expect(&shown);
+        let merged = shown.find(" #415 ").expect(&shown);
         assert!(
             open < first && first < attached && attached < done && done < merged,
             "{shown}"
@@ -1110,7 +1110,7 @@ mod tests {
         let shown = screen(&draw(&mut app, 140, 40));
         let row = shown
             .lines()
-            .find(|line| line.contains("o/r#418"))
+            .find(|line| line.contains(" #418 "))
             .expect(&shown);
         assert!(
             row.contains("login-session-cook\u{2026} Store every tab"),
@@ -1133,7 +1133,7 @@ mod tests {
         };
         assert!(row(&app).hidden);
         assert!(
-            app.status.message().starts_with("Hid o/r#418"),
+            app.status.message().starts_with("Hid #418"),
             "{}",
             app.status.message()
         );
@@ -1233,7 +1233,7 @@ mod tests {
         // found or attached, is listed apart rather than left out.
         let shown = screen(&draw(&mut app, 160, 40));
         let apart = shown.find("On no branch listed here").expect(&shown);
-        for pr in ["o/r#418", "acme/infra#77", "o/r#415"] {
+        for pr in [" #418 ", "acme/infra#77", " #415 "] {
             assert!(shown.find(pr).is_some_and(|at| at > apart), "{pr}: {shown}");
         }
     }
