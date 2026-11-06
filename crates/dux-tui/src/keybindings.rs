@@ -694,15 +694,15 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // A chord, so the minimized typeable pane leaves it to dux, while
-        // fullscreen (Interactive scope) hands it to the agent, where Ctrl-n is
-        // readline's next-history. One of the `LATE_DEFAULTS`.
+        // A dux chord only while the agent pane is not taking typing: typed
+        // at a live agent, windowed or fullscreen, it reaches the child, where
+        // Ctrl-n is readline's next-history. One of the `LATE_DEFAULTS`.
         action: Action::NextPullRequest,
         default_keys: &[key!(ctrl - n)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Step the band to the agent's next pull request",
+            description: "Step the band to the agent's next pull request (not while typing to the agent)",
         }),
         hint_contexts: &[],
     },

@@ -648,7 +648,9 @@ impl Action {
             Action::OpenCurrentPullRequest => {
                 "Open the pull request the band shows in the default browser."
             }
-            Action::NextPullRequest => "Step the band to the agent's next pull request.",
+            Action::NextPullRequest => {
+                "Step the band to the agent's next pull request. While you type to the agent the key reaches the agent instead."
+            }
             Action::PullRequests => {
                 "Show, order, attach and hide the selected agent's pull requests."
             }

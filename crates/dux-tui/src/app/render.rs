@@ -6199,7 +6199,7 @@ impl App {
                 .and_then(|s| self.band_pr(&s.id))
                 .is_some_and(|band| band.count > 1);
             let next = self.bindings.label_for(Action::NextPullRequest);
-            if several && !next.is_empty() {
+            if several && !next.is_empty() && !self.center_takes_typing() {
                 hints.insert(at, (next, "next PR"));
             }
         }
@@ -15482,9 +15482,16 @@ impl App {
         } else {
             display_width(arrow) + display_width(title_trimmed).min(BAND_TITLE_FLOOR)
         };
+        // While the pane takes typing the step key goes to the child, so the
+        // band offers no key there.
+        let next_key = if self.center_takes_typing() {
+            String::new()
+        } else {
+            self.bindings.label_for(Action::NextPullRequest)
+        };
         let right = band_right_end(
             place,
-            &self.bindings.label_for(Action::NextPullRequest),
+            &next_key,
             inner_w.saturating_sub(prefix_w + title_need),
         );
         let right_w = display_width(&right);

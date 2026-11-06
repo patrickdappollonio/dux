@@ -1744,6 +1744,9 @@ impl App {
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
                 self.open_current_pr_in_browser();
             }
+            Action::NextPullRequest if self.center_takes_typing() => {
+                self.forward_typing_key_to_center(&key);
+            }
             Action::NextPullRequest => self.step_pull_request(),
             Action::ReconnectAgent => {
                 self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
@@ -1832,6 +1835,14 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// True while keys typed at the center pane go to its child: a live,
+    /// typeable surface at the live edge with no take-over card over it.
+    pub(crate) fn center_takes_typing(&self) -> bool {
+        self.center_typeable()
+            && !self.scroll_mode_active()
+            && !self.focused_pty_is_covered_by_card()
     }
 
     fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
@@ -34486,6 +34497,56 @@ cyan = "#00ffff"
         tap_center(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
 
         wait_for_grid_row(&mut app, "ok");
+    }
+
+    /// The next-pull-request key is a dux chord only while the agent pane is
+    /// not taking typing. Typed at a live agent it reaches the child the way
+    /// an unbound chord does, the band stays where it was, and neither the
+    /// band nor the footer offers the key; in scroll mode the same key steps
+    /// the band and both offer it again.
+    #[test]
+    fn the_next_pull_request_key_reaches_a_typing_agent_and_steps_only_outside_typing() {
+        let mut app = app_with_minimized_typeable_caret_child("");
+        app.engine.agent_prs.insert(
+            "session-1".to_string(),
+            vec![
+                found_pr("o/r", 418, PrState::Open, "First"),
+                found_pr("o/r", 419, PrState::Open, "Second"),
+            ],
+        );
+        let shown = |app: &App| app.current_pr_info().map(|pr| pr.number);
+        let offers_step = |app: &App| {
+            app.footer_hints_for(crate::keybindings::HintContext::Center)
+                .iter()
+                .any(|(_, label)| *label == "next PR")
+        };
+        let band = |app: &mut App| {
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+            terminal.draw(|frame| app.render(frame)).expect("draw");
+            let buf = terminal.backend().buffer().clone();
+            buf.content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+        let before = shown(&app);
+
+        tap_center(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        wait_for_grid_row(&mut app, "READY^N");
+        assert_eq!(shown(&app), before, "typing at the agent steps nothing");
+        assert!(!offers_step(&app), "the footer must not offer the step key");
+        let typing_band = band(&mut app);
+        assert!(
+            typing_band.contains("1/2") && !typing_band.contains("Ctrl-n next"),
+            "{typing_band}"
+        );
+
+        let surface = app.selected_terminal_surface_id().expect("surface");
+        app.scroll_mode.insert(surface);
+        assert!(offers_step(&app), "scroll mode offers the step key again");
+        assert!(band(&mut app).contains("1/2  Ctrl-n next"));
+        tap_center(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_ne!(shown(&app), before, "outside typing the key steps the band");
     }
 
     /// Ctrl-c is the ONE chord the agent gets while typing minimized
