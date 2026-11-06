@@ -65,6 +65,7 @@ pub(crate) mod numeric;
 pub mod operations;
 pub mod palette;
 pub mod poller_status;
+pub mod pr_list;
 pub mod pr_reference;
 pub mod process_sessions;
 pub mod project_browser;

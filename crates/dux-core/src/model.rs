@@ -109,17 +109,6 @@ impl PrState {
         }
     }
 
-    /// The state GitHub reports (`OPEN`, `MERGED`, `CLOSED`) plus whether an
-    /// open one is a draft, as one state. A draft flag on a merged or closed
-    /// pull request means nothing and is ignored.
-    #[must_use]
-    pub fn with_draft(self, is_draft: bool) -> Self {
-        match self {
-            Self::Open if is_draft => Self::Draft,
-            other => other,
-        }
-    }
-
     /// The state text the database and GitHub use, which has no draft: a
     /// draft is stored as `OPEN` with a separate flag, so an older dux reading
     /// the row decodes it as open instead of dropping it.
@@ -295,7 +284,11 @@ impl AgentPr {
         self.host.clone_from(&info.host);
         self.owner_repo.clone_from(&info.owner_repo);
         self.number = info.number;
-        self.state = info.state.clone().with_draft(info.is_draft);
+        // A draft flag on a merged or closed pull request means nothing.
+        self.state = match info.state {
+            PrState::Open if info.is_draft => PrState::Draft,
+            ref other => other.clone(),
+        };
         self.title.clone_from(&info.title);
         self.url.clone_from(&info.url);
         if info.head_branch.is_some() {
