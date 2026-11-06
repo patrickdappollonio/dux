@@ -5077,7 +5077,10 @@ impl Engine {
     }
 
     /// Make an agent's pull requests `rows` in memory, moving its revision
-    /// when they differ. An empty list removes the entry.
+    /// when they differ. An empty list keeps the agent's entry, because an
+    /// entry is what says memory holds the agent: a change that took away
+    /// its last pull request and could not be saved must not be read back
+    /// from the session database by the next change.
     pub(crate) fn set_agent_prs(&mut self, session_id: &str, rows: Vec<crate::model::AgentPr>) {
         let current = self
             .agent_prs
@@ -5086,11 +5089,7 @@ impl Engine {
         if current == rows.as_slice() {
             return;
         }
-        if rows.is_empty() {
-            self.agent_prs.remove(session_id);
-        } else {
-            self.agent_prs.insert(session_id.to_string(), rows);
-        }
+        self.agent_prs.insert(session_id.to_string(), rows);
         *self.pr_revision.entry(session_id.to_string()).or_default() += 1;
     }
 
@@ -5107,8 +5106,10 @@ impl Engine {
     /// Forget every agent's pull requests in memory, as switching the GitHub
     /// integration off does. The rows stay in the session database.
     pub fn clear_agent_prs(&mut self) {
-        for id in self.agent_prs.keys().cloned().collect::<Vec<_>>() {
-            self.set_agent_prs(&id, Vec::new());
+        for (id, rows) in self.agent_prs.drain() {
+            if !rows.is_empty() {
+                *self.pr_revision.entry(id).or_default() += 1;
+            }
         }
     }
 
@@ -12539,12 +12540,27 @@ mod tests {
     }
 
     /// A change whose save fails holds in memory and says so, and the next
-    /// change starts from what memory holds, so it does not undo the first.
+    /// change starts from what memory holds, so it does not undo the first,
+    /// even when the first took away the agent's last pull request.
     #[test]
     fn a_change_whose_save_fails_holds_for_the_next_change() {
         let (mut engine, _tmp) = engine_with_prs(&[found_pr(1, 1, "a"), found_pr(2, 2, "b")]);
+        let other = sample_session("s2", "p1", "other");
+        engine.session_store.upsert_session(&other).unwrap();
+        engine.sessions.push(other);
+        engine
+            .session_store
+            .replace_agent_prs(
+                "s2",
+                &[attached_only_pr(77, "acme/infra", "x")],
+                &crate::model::PrPrefs::default(),
+            )
+            .unwrap();
+        engine.seed_pull_requests_from_store();
         engine.session_store.run_sql_for_tests(
             "create trigger refuse_pr_writes before insert on session_pull_requests \
+             begin select raise(fail, 'disk full'); end; \
+             create trigger refuse_pr_deletes before delete on session_pull_requests \
              begin select raise(fail, 'disk full'); end;",
         );
         let key = |n| crate::model::PrKey::new("github.com", "o/r", n);
@@ -12564,6 +12580,24 @@ mod tests {
             .map(|row| (row.number, row.hidden))
             .collect();
         assert_eq!(hidden, vec![(1, true), (2, true)]);
+
+        let detached = engine
+            .detach_pull_request(
+                "s2",
+                &crate::model::PrKey::new("github.com", "acme/infra", 77),
+            )
+            .unwrap();
+        assert_eq!(detached.tone, crate::statusline::StatusTone::Error);
+        let sorted = engine
+            .set_pull_request_sort("s2", crate::pr_list::PrSortMode::Manual)
+            .unwrap();
+        assert_eq!(sorted.tone, crate::statusline::StatusTone::Error);
+        assert_eq!(engine.shown_pr("s2"), None);
+        assert!(
+            engine.agent_prs.get("s2").is_none_or(Vec::is_empty),
+            "the detached pull request came back: {:?}",
+            engine.agent_prs.get("s2")
+        );
     }
 
     /// With the preferences unreadable no sync result is applied for an agent
