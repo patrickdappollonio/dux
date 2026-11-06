@@ -589,8 +589,8 @@ poll; the earlier ones take turns:
   project's default branch is never one of them. `0` asks about the current branch alone,
   and anything above `50` is held to `50`.
 - **`pr_settled_recheck_seconds`** is how long an earlier branch whose pull requests are
-  all merged, and a closed pull request of an agent whose process exited, wait before they
-  are asked about again. The default is 12 hours; the value is held to between 30 seconds
+  all merged, and a closed pull request or an earlier branch of an agent whose process
+  exited, wait before they are asked about again. The default is 12 hours; the value is held to between 30 seconds
   and 604800 seconds (7 days).
 
 A pull request dux has found stays on the agent until you hide or detach it: a branch

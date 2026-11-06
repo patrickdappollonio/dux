@@ -540,8 +540,8 @@ pub(crate) const DEFAULT_PR_HISTORY_BRANCHES_PER_CYCLE: u16 = 8;
 pub(crate) const MAX_PR_HISTORY_BRANCHES_PER_CYCLE: u16 = 50;
 
 /// Default seconds before an earlier branch whose pull requests are all merged,
-/// or a closed pull request of an agent whose process exited, is asked about
-/// again (twelve hours).
+/// or a closed pull request or an earlier branch of an agent whose process
+/// exited, is asked about again (twelve hours).
 pub(crate) const DEFAULT_PR_SETTLED_RECHECK_SECONDS: u32 = 43_200;
 
 /// Ceiling on that recheck (seven days), the same as the inactive poll's.
@@ -1833,8 +1833,8 @@ pub struct UiConfig {
     /// Clamped to [`MAX_PR_HISTORY_BRANCHES_PER_CYCLE`].
     pub pr_history_branches_per_cycle: u16,
     /// Seconds before an earlier branch whose pull requests are all merged, or
-    /// a closed pull request of an agent whose process exited, is asked about
-    /// again. Clamped to between the poll's floor and
+    /// a closed pull request or an earlier branch of an agent whose process
+    /// exited, is asked about again. Clamped to between the poll's floor and
     /// [`MAX_PR_SETTLED_RECHECK_SECONDS`].
     pub pr_settled_recheck_seconds: u32,
     /// Seconds between re-checks of the `gh` CLI while dux cannot use it.

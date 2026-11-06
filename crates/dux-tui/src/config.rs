@@ -705,7 +705,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "pr_settled_recheck_seconds",
             comment: Some(CommentSource::Static(
-                "# Seconds before dux asks GitHub again about an earlier branch whose pull\n# requests are all merged, and about a closed pull request of an agent\n# whose process exited. Such a pull request rarely moves, but a branch name\n# can be reused for a new pull request and a closed one can be reopened,\n# so neither is left alone for good. The default is 12 hours. The value is\n# clamped to between 30 seconds and 604800 seconds (7 days), and dux logs a\n# warning when it clamps one.",
+                "# Seconds before dux asks GitHub again about an earlier branch whose pull\n# requests are all merged, and about a closed pull request or an earlier\n# branch of an agent whose process exited. Such a pull request rarely moves, but a branch name\n# can be reused for a new pull request and a closed one can be reopened,\n# so neither is left alone for good. The default is 12 hours. The value is\n# clamped to between 30 seconds and 604800 seconds (7 days), and dux logs a\n# warning when it clamps one.",
             )),
             value_fn: |c| FieldValue::U32(c.ui.pr_settled_recheck_seconds),
         },
