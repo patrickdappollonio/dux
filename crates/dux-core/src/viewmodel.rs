@@ -683,6 +683,10 @@ pub struct SessionView {
     /// The pull requests the user hid, in automatic order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub prs_hidden: Vec<PrView>,
+    /// The open or draft pull request that would keep the branch's old name
+    /// if the agent's branch were renamed, as the rename dialog warns about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rename_warning_pr: Option<u64>,
     /// How the pull requests are ordered: "automatic" | "manual".
     pub pr_sort: &'static str,
     /// Moves whenever the agent's pull requests, their preferences or its
@@ -1621,6 +1625,7 @@ impl Engine {
             pr: prs.first().cloned(),
             prs,
             prs_hidden,
+            rename_warning_pr: self.rename_open_pull_request(&s.id),
             pr_sort: self.pr_sort_mode(&s.id).stored_text(),
             pr_revision: self.pr_revision.get(&s.id).copied().unwrap_or_default(),
             slot_tab_id: s.slot_tab_id().to_string(),
@@ -2268,6 +2273,8 @@ mod tests {
         assert_eq!(shown, vec![(43, "draft", true), (42, "merged", true)]);
         assert_eq!(view.pr.as_ref().map(|pr| pr.number), Some(43));
         assert_eq!(view.prs[1].head_branch.as_deref(), Some("feature"));
+        // Renaming the branch leaves the open draft on its old name.
+        assert_eq!(view.rename_warning_pr, Some(43));
         let hidden = &view.prs_hidden[0];
         assert_eq!(
             (
