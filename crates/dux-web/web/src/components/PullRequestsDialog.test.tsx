@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { PrView, SessionView } from "@/lib/types"
@@ -245,9 +245,16 @@ describe("PullRequestsDialog rows", () => {
     seed(session())
     const { rerender } = render(<PullRequestsDialog />)
     expect(screen.queryByText("Key provider state by tab id")).toBeNull()
-    fireEvent.click(screen.getByRole("button", { name: /Hidden/ }))
-    expect(screen.getByText("Key provider state by tab id")).toBeTruthy()
+    const toggle = screen.getByRole("button", { name: /Hidden/ })
+    expect(within(toggle).getByText("1").className).toMatch(/(^| )text-muted-foreground( |$)/)
+    fireEvent.click(toggle)
+    const title = screen.getByText("Key provider state by tab id")
+    expect(title.className).toMatch(/(^| )text-muted-foreground( |$)/)
     expect(screen.getByText("closed")).toBeTruthy()
+    // Show again drops below the title rather than squeezing it.
+    const showAgain = screen.getByRole("button", { name: "Show again" })
+    expect(showAgain.parentElement?.className).toMatch(/(^| )flex-wrap( |$)/)
+    expect(title.closest("li")?.className).toMatch(/(^| )items-center( |$)/)
 
     seed(session({ prs_hidden: [{ ...hidden, state: "merged" }], pr_revision: 2 }))
     rerender(<PullRequestsDialog />)
@@ -258,6 +265,22 @@ describe("PullRequestsDialog rows", () => {
       owner_repo: "acme/api",
       number: 402,
     })
+  })
+
+  it("keeps a row's details on one line with the branch giving way first, beside a small muted Attached tag", () => {
+    seed(session())
+    render(<PullRequestsDialog />)
+    const branch = screen.getByText("tab-slot-pointer")
+    expect(branch.className).toMatch(/(^| )truncate( |$)/)
+    const details = branch.closest("[data-slot='pr-details']") as HTMLElement
+    expect(details.className).toMatch(/(^| )whitespace-nowrap( |$)/)
+    expect(details.className).not.toMatch(/flex-wrap/)
+    const tag = screen.getAllByText("Attached")[0]
+    expect(tag.className).toMatch(/(^| )text-muted-foreground( |$)/)
+    expect(tag.className).toMatch(/(^| )text-\[11px\]( |$)/)
+    expect(screen.getByLabelText("Drag #418").closest("li")?.className).toMatch(
+      /(^| )items-center( |$)/,
+    )
   })
 
   it("says how the order is kept, and Sort switches it", async () => {

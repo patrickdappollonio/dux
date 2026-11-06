@@ -408,29 +408,49 @@ function PullRequestsView({
   )
 }
 
+// A small, muted label beside a name (Attached, Current, a count): it says
+// something about the row without competing with the title for attention.
+const QUIET_TAG =
+  "inline-flex h-4 shrink-0 items-center rounded-sm bg-muted px-1.5 text-[11px] leading-none font-normal text-muted-foreground tabular-nums"
+
 function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
   const tone = prIconClass(pr.state)
   const origin = prOrigin(pr)
   const activity = prActivity(pr)
   return (
     <>
-      <GitPullRequest className={cn("mt-0.5 size-4 shrink-0", tone)} />
-      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", muted && "opacity-70")}>
+      <GitPullRequest className={cn("size-4 shrink-0", tone, muted && "opacity-60")} />
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-2">
-          <span className={cn("shrink-0 font-semibold", tone)}>{prName(pr)}</span>
-          <span className="truncate">{pr.title}</span>
+          <span className={cn("shrink-0 font-semibold", tone, muted && "opacity-60")}>
+            {prName(pr)}
+          </span>
+          <span className={cn("min-w-0 truncate", muted && "text-muted-foreground")}>
+            {pr.title}
+          </span>
           {(pr.attached ?? pr.overridden) ? (
-            <Badge variant="secondary" className="shrink-0">
+            // On a phone the details already say "attached by you" when that
+            // is all it is, and the title needs the width more.
+            <span className={cn(QUIET_TAG, origin?.kind === "attached" && "max-md:hidden")}>
               Attached
-            </Badge>
+            </span>
           ) : null}
         </span>
-        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-          <span className={tone}>{prStateLabel(pr.state)}</span>
+        {/* One line, whatever the width: the branch name is what gives way,
+          * and each separator travels with the detail after it so none is
+          * ever left at a line's end. */}
+        <span
+          data-slot="pr-details"
+          className={cn(
+            "flex min-w-0 items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground",
+            muted && "opacity-80",
+          )}
+        >
+          <span className={cn("shrink-0", tone)}>{prStateLabel(pr.state)}</span>
           {origin?.kind === "branch" ? (
-            <Detail>
-              <GitBranch className="size-3" />
-              {origin.name}
+            <Detail shrink>
+              <GitBranch className="size-3 shrink-0" />
+              <span className="truncate">{origin.name}</span>
             </Detail>
           ) : origin?.kind === "attached" ? (
             <Detail>attached by you</Detail>
@@ -442,12 +462,12 @@ function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
   )
 }
 
-function Detail({ children }: { children: ReactNode }) {
+function Detail({ children, shrink = false }: { children: ReactNode; shrink?: boolean }) {
   return (
-    <>
+    <span className={cn("inline-flex items-center gap-1.5", shrink ? "min-w-0" : "shrink-0")}>
       <span aria-hidden>•</span>
-      <span className="inline-flex min-w-0 items-center gap-1">{children}</span>
-    </>
+      <span className={cn("inline-flex items-center gap-1", shrink && "min-w-0")}>{children}</span>
+    </span>
   )
 }
 
@@ -489,7 +509,7 @@ function SortablePrRow({
       ref={setNodeRef}
       style={style}
       className={cn(
-        "group/pr-row flex items-start gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50",
+        "group/pr-row flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50",
         isDragging && "z-10 bg-muted shadow-lg",
       )}
     >
@@ -606,30 +626,34 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
       >
         <ChevronRight className="size-4 transition-transform group-data-[panel-open]/hidden:rotate-90 motion-reduce:transition-none" />
         Hidden
-        <Badge variant="secondary" className="tabular-nums">
-          {hidden.length}
-        </Badge>
+        <span className={QUIET_TAG}>{hidden.length}</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ul className="flex flex-col gap-1">
           {hidden.map((pr) => {
             const key = prKeyOf(pr)
             return (
-              <li key={pr.url} className="flex items-start gap-2 rounded-lg px-1 py-1.5">
+              <li key={pr.url} className="flex items-center gap-2 rounded-lg px-1 py-1.5">
                 {/* Stands in for the grip, so hidden rows line up with the
                   * shown ones above. */}
                 <span aria-hidden className={cn("shrink-0", ROW_CONTROL)} />
-                <PrRowText pr={pr} muted />
-                {key ? (
-                  <Button
-                    variant="outline"
-                    className="h-8 shrink-0 pointer-coarse:h-10"
-                    onClick={() => showPullRequest(sessionId, key)}
-                  >
-                    <Eye />
-                    Show again
-                  </Button>
-                ) : null}
+                {/* Show again goes under the text once the two no longer fit
+                  * side by side, rather than squeezing the title. */}
+                <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+                  <div className="flex min-w-48 flex-1 basis-48 items-center gap-2">
+                    <PrRowText pr={pr} muted />
+                  </div>
+                  {key ? (
+                    <Button
+                      variant="outline"
+                      className="h-8 shrink-0 pointer-coarse:h-10"
+                      onClick={() => showPullRequest(sessionId, key)}
+                    >
+                      <Eye />
+                      Show again
+                    </Button>
+                  ) : null}
+                </div>
               </li>
             )
           })}
