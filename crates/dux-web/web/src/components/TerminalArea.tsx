@@ -10,6 +10,7 @@ import { TheaterChrome } from "@/components/TheaterChrome"
 import { TheaterPill } from "@/components/TheaterPill"
 import { Welcome } from "@/components/Welcome"
 import { shouldShowTabStrip } from "@/lib/agentTabs"
+import { prKeyOf, samePrKey, sessionPrs } from "@/lib/pr"
 import { openPullRequests, useDux } from "@/lib/store"
 import type { Bootstrap } from "@/lib/bootstrapApi"
 import type { AgentTabView, PrKeyView, PrView, SessionView } from "@/lib/types"
@@ -47,6 +48,23 @@ function PrLane({
 // this tab's own: it writes nothing, is not shared with any other surface, and
 // a reload starts every agent on its first pull request again.
 type PrCursors = Readonly<Record<string, PrKeyView>>
+
+// The cursors whose pull request the agent still shows, the same object when
+// every one of them does. A cursor kept past its pull request leaving would
+// jump the banner back to it if it were ever shown again.
+function keepListedCursors(cursors: PrCursors, sessions: readonly SessionView[]): PrCursors {
+  const kept = Object.entries(cursors).filter(([sessionId, key]) => {
+    const session = sessions.find((s) => s.id === sessionId)
+    return (
+      session !== undefined &&
+      sessionPrs(session).some((pr) => {
+        const own = prKeyOf(pr)
+        return own !== null && samePrKey(own, key)
+      })
+    )
+  })
+  return kept.length === Object.keys(cursors).length ? cursors : Object.fromEntries(kept)
+}
 
 function AgentTabLane({
   target,
@@ -177,6 +195,10 @@ export function TerminalArea() {
   const [prCursors, setPrCursors] = useState<PrCursors>({})
   const stepPr = (sessionId: string, key: PrKeyView) =>
     setPrCursors((current) => ({ ...current, [sessionId]: key }))
+  // Adjusted during render rather than in an effect, so no frame draws a
+  // cursor whose pull request has already gone.
+  const listedCursors = spine ? keepListedCursors(prCursors, spine.sessions) : prCursors
+  if (listedCursors !== prCursors) setPrCursors(listedCursors)
 
   // The URL names an agent this workspace does not have (a stale bookmark, or
   // Back landing on a deleted agent). Say so rather than showing the idle
