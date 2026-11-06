@@ -188,8 +188,9 @@ describe("the PTY retry gate", () => {
   // fire-and-forget, so a page loaded during a blip used to keep a null baseline
   // for its whole life, and a null baseline never reports a change: the
   // run-identity hard reload was silently switched off for that tab. It re-asks
-  // now.
-  it("re-asks for the boot baseline when the first read fails", async () => {
+  // now, backing off, and gives up after a few minutes rather than asking for
+  // the rest of the tab's life; an events reconnect starts the asking again.
+  it("re-asks for the boot baseline on a backoff that a reconnect restarts and disposal cancels", async () => {
     // Rebuild the store with the endpoint already unreachable, so the read boot
     // itself performs is the one that comes back unknown.
     vi.resetModules()
@@ -200,8 +201,47 @@ describe("the PTY retry gate", () => {
       store = await import("./store")
       await vi.advanceTimersByTimeAsync(1)
       expect(buildProbeCount).toBe(1)
-      await vi.advanceTimersByTimeAsync(6000)
-      expect(buildProbeCount).toBeGreaterThan(1)
+      // Each re-ask lands at its backoff step and not a millisecond before.
+      let asked = 1
+      for (const gap of [5000, 10000, 20000, 40000, 60000, 60000]) {
+        await vi.advanceTimersByTimeAsync(gap - 2)
+        expect(buildProbeCount).toBe(asked)
+        await vi.advanceTimersByTimeAsync(2)
+        asked += 1
+        expect(buildProbeCount).toBe(asked)
+      }
+      // The sixth re-ask was the last one.
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(buildProbeCount).toBe(7)
+
+      // The boot's own open, a drop, and a reconnect against an endpoint that
+      // answers again: the reconnect's run check asks at once, and since its
+      // answer cannot fill the baseline, the baseline is asked for at the first
+      // step, after which the sequence is over.
+      buildAnswers = "ok"
+      store.eventsSocket.onOpen()
+      store.eventsSocket.onConn("closed")
+      store.eventsSocket.onOpen()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(buildProbeCount).toBe(8)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(buildProbeCount).toBe(9)
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(buildProbeCount).toBe(9)
+
+      // A later reconnect that answers unknown backs off from the first step.
+      buildAnswers = "unreachable"
+      store.eventsSocket.onConn("closed")
+      store.eventsSocket.onOpen()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(buildProbeCount).toBe(10)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(buildProbeCount).toBe(11)
+
+      // Disposing the app socket leaves no re-ask scheduled.
+      store.eventsSocket.dispose()
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(buildProbeCount).toBe(11)
     } finally {
       vi.useRealTimers()
     }

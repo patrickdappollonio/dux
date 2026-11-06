@@ -1506,22 +1506,54 @@ let skipNextEventsOnOpenLoad = false
 // and a null baseline never forces a reload: unknown is not "changed".
 let serverIdentityBaseline: ServerIdentity | null = null
 
-// How long before an identity read that answered UNKNOWN is asked again. A blip
+// The gaps before each re-ask of an identity read that answered UNKNOWN. A blip
 // on the one endpoint that decides whether this tab is running against the
-// server that served it is not a reason to stop asking, and re-asking is one
-// small GET.
-const IDENTITY_REPROBE_MS = 5000
+// server that served it is not a reason to stop asking at once, but a server
+// that never answers it is not worth a request every few seconds for the life
+// of the tab either: after the last gap (about three minutes in all) the asking
+// stops until the events socket reconnects, which is the moment dux can have
+// been restarted underneath the page and so the moment the question matters.
+const IDENTITY_REPROBE_BACKOFF_MS = [5000, 10000, 20000, 40000, 60000, 60000]
 let identityReprobeTimer: ReturnType<typeof setTimeout> | null = null
+let identityReprobesUsed = 0
+// Set when the app socket is disposed: the page is torn down and nothing may
+// be left scheduled behind it.
+let identityReprobesStopped = false
 
-// Ask again, once, after the gap. Idempotent: several unknown answers in flight
-// at once still schedule a single re-ask.
-function scheduleIdentityReprobe(again: () => void): void {
-  if (!hasBrowser) return
+function cancelIdentityReprobe(): void {
+  if (identityReprobeTimer === null) return
+  clearTimeout(identityReprobeTimer)
+  identityReprobeTimer = null
+}
+
+// A known answer ends the sequence, and a reconnect starts it over.
+function resetIdentityReprobes(): void {
+  cancelIdentityReprobe()
+  identityReprobesUsed = 0
+}
+
+// Ask again, once, after the next gap. Idempotent: several unknown answers in
+// flight at once still schedule a single re-ask. The re-ask asks whichever
+// question is still open: without a baseline, a run check could never see a
+// change, so it is the baseline that is asked for.
+function scheduleIdentityReprobe(): void {
+  if (!hasBrowser || identityReprobesStopped) return
   if (identityReprobeTimer !== null) return
+  const gap = IDENTITY_REPROBE_BACKOFF_MS[identityReprobesUsed]
+  if (gap === undefined) return
+  identityReprobesUsed += 1
   identityReprobeTimer = setTimeout(() => {
     identityReprobeTimer = null
-    again()
-  }, IDENTITY_REPROBE_MS)
+    if (serverIdentityBaseline === null) void loadServerIdentityBaseline()
+    else void reloadIfServerChanged()
+  }, gap)
+}
+
+// The identity re-asks are scheduled for the app socket's sake, so they end
+// with it.
+eventsSocket.onDispose = () => {
+  identityReprobesStopped = true
+  cancelIdentityReprobe()
 }
 
 // Learn the run-identity baseline the hard reload compares against. A tab that
@@ -1548,11 +1580,8 @@ async function loadServerIdentityBaseline(): Promise<void> {
   }
   serverIdentityBaseline = answer
   noteServerValidated()
-  if (serverIdentityBaseline === null) {
-    scheduleIdentityReprobe(() => {
-      void loadServerIdentityBaseline()
-    })
-  }
+  if (serverIdentityBaseline === null) scheduleIdentityReprobe()
+  else resetIdentityReprobes()
 }
 
 // Is this the server that served this tab? A reconnect is the only moment dux
@@ -1618,11 +1647,8 @@ async function reloadIfServerChanged(owner: number | null = null): Promise<void>
   // re-ask, one transient failure on a reconnect after a restart left the tab
   // running old code against a new run indefinitely, which is the exact thing
   // this check exists to prevent.
-  if (current === null) {
-    scheduleIdentityReprobe(() => {
-      void reloadIfServerChanged()
-    })
-  }
+  if (current === null) scheduleIdentityReprobe()
+  else if (serverIdentityBaseline !== null) resetIdentityReprobes()
 }
 
 // After a (re)connect the socket has re-sent the whole interest set; re-fetch so
@@ -1646,6 +1672,11 @@ eventsSocket.onOpen = () => {
     // The identity probe comes first: dux may have been restarted during the
     // outage, and refetching state into old code is the wrong recovery.
     armReconnectDeepLink()
+    // The probe below is this reconnect's own ask, so the backoff of any earlier
+    // unknown answer starts over behind it. Its answer cannot fill a missing
+    // baseline, so that ask is queued at the first step whatever it says.
+    resetIdentityReprobes()
+    if (serverIdentityBaseline === null) scheduleIdentityReprobe()
     const recover = () => {
       loadBootstrap()
       loadWorkspace()
