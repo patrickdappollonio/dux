@@ -82,6 +82,9 @@ services:
       - ${DUX_BIN:-../../target/release/dux}:/usr/local/bin/dux:ro
       - ${DUX_TUI_OUTPUT_DIR:-./shots}:/output
       - ${DUX_TUI_JOURNEY:-./tui-journey.example.js}:/journey.js:ro
+      # The stand-in gh, put on dux's PATH only for a journey that asks for
+      # GitHub (journey.github in tui-driver.js).
+      - ./screens/fixtures:/fixtures:ro
     tmpfs:
       - /capture
     # Lets a journey's stand-in Tailscale address be added to this container's

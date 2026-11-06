@@ -52,9 +52,9 @@ done
 
 # --- Screenshot fixtures (opt-in) ------------------------------------------
 # The committed screenshot tool needs two stand-ins an ordinary preview must not
-# have: a `gh` answering only dux's auth probe and its bounded `pr view`, so the
-# pull-request chip, banner and from-PR dialog can be shot without a GitHub
-# login, and a transcript provider standing in for `claude`, so the standalone
+# have: a `gh` answering only dux's auth probe, its bounded `pr view` and the
+# pull-request sync's GraphQL questions from a canned table, so the pull-request
+# chip, banner, list and dialogs can be shot without a GitHub login, and a transcript provider standing in for `claude`, so the standalone
 # agent shows a scripted session rather than a streaming fixture. Both are
 # mounted read-only and installed only when this is asked for, and the marker
 # file is how the host tells a screens container from a plain one.

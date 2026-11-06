@@ -1,10 +1,12 @@
-// The pull-request banner, the wide anchor that opens the PR from the pane.
+// The pull-request banner: the wide link to the pull request it shows, and the
+// counter, arrows and list button at its end that step through the others.
 const {
   agents,
   clearToasts,
   expectBanner,
   expectNoCover,
   expectPanePainted,
+  expectVisibleText,
   goto,
   takeOver,
 } = require("../lib.js")
@@ -24,14 +26,15 @@ module.exports = {
     await expectBanner(page, "Fix the login redirect loop", {
       what: "the pull-request banner",
     })
-    // The sidebar row's chip carries the same href at chip width, so the banner
-    // is picked out as the widest of the pull-request anchors.
+    await expectVisibleText(page, "1 of 3", {
+      selector: '[data-testid="pr-banner"] span',
+      what: "the banner's counter",
+    })
+    // The whole strip, its trailing controls included, not just the link.
     const r = await page.evaluate(() => {
-      const wide = [...document.querySelectorAll('a[href*="/pull/"]')]
-        .map((a) => a.getBoundingClientRect())
-        .filter((b) => b.width > 300)
-        .sort((a, b) => b.width - a.width)[0]
-      return wide ? { x: wide.x, y: wide.y, width: wide.width, height: wide.height } : null
+      const strip = document.querySelector('[data-testid="pr-banner"]')
+      const b = strip && strip.getBoundingClientRect()
+      return b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null
     })
     if (!r) throw new Error("no pull-request banner on this pane")
     return {

@@ -41,6 +41,12 @@ const shellHome = "/home/you"
 // An optional stand-in for the Tailscale CLI, so a journey can show dux on a
 // tailnet in a container that has none. See standInTailscale below.
 const tailscale = journey.tailscale || null
+// Whether the journey shows GitHub: the integration stays on and the screenshot
+// fixtures' stand-in gh answers from its canned table. Off, the integration is
+// off and no gh is on the PATH, so nothing a journey shows depends on one. The
+// journey points a repository's origin at GitHub itself, once its agents exist:
+// dux pulls a project before creating an agent, and nothing answers that URL.
+const github = journey.github === true
 // Not under /capture: that is a tmpfs, which Docker mounts noexec, so a script
 // written there cannot run. The container's own layer is disposable too.
 const standInBin = "/opt/dux-stand-in/bin"
@@ -106,7 +112,7 @@ function seedState() {
     .replace(/^provider = .*$/m, 'provider = "fake"')
     .replace(/^disable_automated_welcome_screen = false$/m, "disable_automated_welcome_screen = true")
     .replace(/^disable_release_notes = false$/m, "disable_release_notes = true")
-    .replace(/^github_integration = true$/m, "github_integration = false")
+    .replace(/^github_integration = true$/m, `github_integration = ${github}`)
     .replace(/^theme = .*$/m, `theme = "${theme}"`)
   config += `
 [providers.fake]
@@ -114,6 +120,14 @@ command = "/usr/local/bin/fake-agent"
 args = []
 `
   fs.writeFileSync(configPath, patchConfig(config))
+}
+
+/// Put the screenshot fixtures' stand-in gh on the PATH dux is started with.
+function standInGitHub() {
+  if (!github) return
+  fs.mkdirSync(standInBin, { recursive: true })
+  fs.copyFileSync("/fixtures/gh", path.join(standInBin, "gh"))
+  fs.chmodSync(path.join(standInBin, "gh"), 0o755)
 }
 
 /// The fixture the fake provider reads is an environment variable, and the
@@ -392,7 +406,8 @@ async function selectAgent(name, maxRows = 24) {
 async function main() {
   seedState()
   standInTailscale()
-  const searchPath = tailscale ? `${standInBin}:${process.env.PATH}` : process.env.PATH
+  standInGitHub()
+  const searchPath = tailscale || github ? `${standInBin}:${process.env.PATH}` : process.env.PATH
   if (launch === "shell") {
     // The seeded state, reached through the home's default config directory.
     fs.mkdirSync(path.join(shellHome, ".config"), { recursive: true })

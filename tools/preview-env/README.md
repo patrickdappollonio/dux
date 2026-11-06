@@ -236,7 +236,10 @@ that answers `ip`, `status --json --peers=false` and `serve status --json` with
 those values, and adds `ip` to the container's loopback so the Tailscale listener
 really binds (the capture service is granted `NET_ADMIN` for exactly this, inside
 its own disposable network namespace). Use an obviously fake machine and tailnet,
-never a real one. Throwaway scripts are ignored
+never a real one. `github = true` keeps GitHub integration on and puts the
+screenshot fixtures' stand-in `gh` on dux's PATH, so a journey can show pull
+requests; the journey points a repository's `origin` at a GitHub URL itself,
+once its agents exist. Throwaway scripts are ignored
 by Git, matching the web screenshot workflow; the journeys behind the docs
 screenshots are not throwaways and live under `screens/scenes`.
 
@@ -272,7 +275,7 @@ pieces an ordinary preview must not have, and they are installed only under
 
 | Fixture | Why |
 | --- | --- |
-| `screens/fixtures/gh` | A stand-in `gh` answering only dux's auth probe and its bounded `pr view`, so the pull-request chip, banner and from-PR dialog are shootable without a GitHub login. |
+| `screens/fixtures/gh` | A stand-in `gh` answering only dux's auth probe, its bounded `pr view` per number and the pull-request sync's GraphQL questions, all from one canned table, so the pull-request chip, banner, list and dialogs are shootable without a GitHub login. Anything else fails loudly. |
 | `screens/fixtures/notes-agent` | A transcript provider installed as `claude`, so the folder agent's pane shows a scripted session rather than a streaming fixture. |
 | An `opencode` alias | dux refuses a tab for a CLI that is not on PATH, and the tab strip shows one tab per provider, so `opencode` points at the fake provider for the length of the run. |
 

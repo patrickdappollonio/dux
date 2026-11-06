@@ -1,5 +1,5 @@
 // One idempotent seed for the whole screenshot scene: the project, the six
-// agents and their tabs, the two terminals, the macros, the pull request, and
+// agents and their tabs, the two terminals, the macros, the pull requests, and
 // the changed files each pane shows. Run it against a fresh container or an
 // already-seeded one; it converges to the same workspace either way.
 //
@@ -204,14 +204,55 @@ async function seedTerminals(projectId) {
   console.log("terminals:", (after.terminals || []).map((t) => t.id).join(", "))
 }
 
-async function seedPullRequest() {
+// fix-login-redirect carries three pull requests: the open one on its own
+// branch, a merged one on a branch its worktree was on before, both found by
+// the sync from the stand-in gh's table, and a draft from another repository
+// attached by hand. The earlier branch only has to reach the worktree's HEAD
+// reflog; dux's branch sync reads it from there.
+const EARLIER_BRANCH = "login-session-cookie"
+const ATTACHED_PULL_REQUEST = "acme/infra#77"
+const PULL_REQUESTS_SHOWN = ["acme/demo-api#123", "acme/infra#77", "acme/demo-api#118"]
+
+function seedEarlierBranch() {
+  containerSh(
+    `cd /data/dux/worktrees/demo-api/fix-login-redirect
+     git checkout -q ${EARLIER_BRANCH} 2>/dev/null || git checkout -q -b ${EARLIER_BRANCH}
+     git checkout -q fix-login-redirect`,
+  )
+}
+
+async function seedPullRequests() {
+  seedEarlierBranch()
   const by = await agents()
   const session = by["fix-login-redirect"]
-  if (session.pr && session.pr.number) return
-  await api("POST", `/api/v1/sessions/${session.id}/pull-requests`, { pr: "acme/demo-api#123" })
-  await sleep(4000)
-  const now = (await get("/api/v1/sessions")).find((s) => s.id === session.id)
-  console.log("pull request:", JSON.stringify(now.pr))
+  const named = (s) => [...(s.prs || []), ...(s.prs_hidden || [])].map((pr) => `${pr.owner_repo}#${pr.number}`)
+  if (!named(session).includes(ATTACHED_PULL_REQUEST)) {
+    await api("POST", `/api/v1/sessions/${session.id}/pull-requests`, { pr: ATTACHED_PULL_REQUEST })
+  }
+  // Converges on the automatic order with nothing hidden, whatever an earlier
+  // run or a scene left behind.
+  for (const pr of session.prs_hidden || []) {
+    const key = { host: pr.host, owner_repo: pr.owner_repo, number: pr.number }
+    await api("POST", `/api/v1/sessions/${session.id}/pull-requests/show`, key)
+  }
+  if (session.pr_sort !== "automatic") {
+    await api("PUT", `/api/v1/sessions/${session.id}/pull-requests/sort`, { mode: "automatic" })
+  }
+  // The sync finds the other two on its own poll, every three minutes by
+  // default, so this waits out two of them rather than guessing.
+  const deadline = Date.now() + 420000
+  for (;;) {
+    const now = (await get("/api/v1/sessions")).find((s) => s.id === session.id)
+    const shown = (now.prs || []).map((pr) => `${pr.owner_repo}#${pr.number}`)
+    if (PULL_REQUESTS_SHOWN.every((name) => shown.includes(name))) {
+      console.log("pull requests:", shown.join(", "))
+      return
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`fix-login-redirect has ${shown.join(", ") || "no pull requests"}, not ${PULL_REQUESTS_SHOWN.join(", ")}`)
+    }
+    await sleep(3000)
+  }
 }
 
 // Changed files, written into two worktrees: the login fix's four-file set that
@@ -262,7 +303,7 @@ async function main() {
   await seedTabs()
   await seedTerminals(demoApi.id)
   await api("PUT", "/api/v1/macros", { entries: MACROS })
-  await seedPullRequest()
+  await seedPullRequests()
   seedChangedFiles()
   console.log("staging the sidebar")
   await stage("all-working")

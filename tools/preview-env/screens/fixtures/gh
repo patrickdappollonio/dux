@@ -1,22 +1,154 @@
-#!/bin/sh
-# Stand-in `gh` for the screenshot container, so the pull-request chip, the
-# banner and the from-PR dialog can be shot without a GitHub login. It answers
-# only the calls dux makes, and fails loudly on anything else rather than
-# pretending: a screenshot of a lie is worse than a screenshot that did not
-# happen. Installed by entrypoint.sh only when DUX_SCREENS=1.
-case "$1 $2" in
-  "auth status")
-    printf '{"hosts":{"github.com":[{"state":"success","active":true,"host":"github.com"}]}}\n'
-    exit 0
-    ;;
-  "pr view")
-    printf '{"number":123,"title":"Fix the login redirect loop","state":"OPEN","headRefName":"fix-login-redirect","headRefOid":"0123456789abcdef0123456789abcdef01234567"}\n'
-    exit 0
-    ;;
-  "repo view")
-    printf '{"defaultBranchRef":{"name":"main"}}\n'
-    exit 0
-    ;;
-esac
-echo "stand-in gh: unhandled $*" >&2
-exit 1
+#!/usr/bin/env node
+// Stand-in `gh` for the screenshot container, so the pull-request banner, its
+// list, the Pull requests dialog and the from-PR dialog can be shot without a
+// GitHub login. It answers only the calls dux makes, from the table below, and
+// fails loudly on anything else rather than pretending: a screenshot of a lie
+// is worse than a screenshot that did not happen. Installed by entrypoint.sh
+// only when DUX_SCREENS=1.
+//
+// Every time is relative to the moment of the call, so "updated 2 hours ago"
+// in a screenshot reads the same whenever it is reshot.
+const HOUR = 3600e3
+const now = Date.now()
+const iso = (ms) => new Date(ms).toISOString()
+
+// Per repository, per number. `head` is the branch GitHub names as the pull
+// request's head; discovery answers a branch with the pull requests whose head
+// it is.
+const PULL_REQUESTS = {
+  "acme/demo-api": {
+    123: {
+      title: "Fix the login redirect loop",
+      state: "OPEN",
+      head: "fix-login-redirect",
+      updated: now - 2 * HOUR,
+    },
+    118: {
+      title: "Keep the session cookie across the login redirect",
+      state: "MERGED",
+      head: "login-session-cookie",
+      updated: now - 50 * HOUR,
+      merged: now - 50 * HOUR,
+    },
+  },
+  "acme/infra": {
+    77: {
+      title: "Allow the preview host in the ingress",
+      state: "OPEN",
+      draft: true,
+      head: "preview-host",
+      updated: now - 26 * HOUR,
+    },
+  },
+}
+
+const HEAD_OID = "0123456789abcdef0123456789abcdef01234567"
+
+function answer(body) {
+  process.stdout.write(`${JSON.stringify(body)}\n`)
+  process.exit(0)
+}
+
+function refuse(why) {
+  process.stderr.write(`stand-in gh: ${why}\n`)
+  process.exit(1)
+}
+
+// A pull request as the sync's GraphQL query asks for it. `createdAt` is a
+// moment ago so a branch dux has only just seen still counts it as its own.
+function node(repo, number) {
+  const pr = PULL_REQUESTS[repo] && PULL_REQUESTS[repo][number]
+  if (!pr) return null
+  const ended = pr.merged || pr.closed
+  return {
+    number: Number(number),
+    state: pr.state,
+    isDraft: Boolean(pr.draft),
+    title: pr.title,
+    url: `https://github.com/${repo}/pull/${number}`,
+    createdAt: iso(now - 1000),
+    updatedAt: iso(pr.updated),
+    closedAt: ended ? iso(ended) : null,
+    mergedAt: pr.merged ? iso(pr.merged) : null,
+    headRefName: pr.head,
+    headRefOid: HEAD_OID,
+    repository: { nameWithOwner: repo },
+    headRepository: { nameWithOwner: repo },
+  }
+}
+
+function onBranch(repo, branch) {
+  return Object.keys(PULL_REQUESTS[repo] || {})
+    .map((number) => node(repo, number))
+    .filter((pr) => pr.headRefName === branch)
+}
+
+// The sync's query: one alias per repository, one per question inside it.
+//   rN: repository(owner: "o", name: "r") {
+//     qN_ref: ref(qualifiedName: "refs/heads/<branch>") { ... }
+//     qN_head: pullRequests(headRefName: "<branch>", ...) { ... }
+//     qN_num: pullRequest(number: N) { ... }
+// A line of any other shape is a question this stand-in was not written for.
+function graphql(query) {
+  const data = { rateLimit: { cost: 1, remaining: 4999, resetAt: iso(now + HOUR) } }
+  let scope = null
+  let repo = null
+  for (const line of query.split("\n")) {
+    const text = line.trim()
+    if (text === "" || text === "{" || text === "}" || text.startsWith("rateLimit")) continue
+    let m = text.match(/^(r\d+): repository\(owner: "([^"]*)", name: "([^"]*)"\) \{$/)
+    if (m) {
+      scope = data[m[1]] = {}
+      repo = `${m[2]}/${m[3]}`
+      continue
+    }
+    if (!scope) refuse(`unexpected GraphQL line ${text}`)
+    m = text.match(/^(q\d+_ref): ref\(qualifiedName: "refs\/heads\/([^"]*)"\)/)
+    if (m) {
+      scope[m[1]] = { associatedPullRequests: { nodes: onBranch(repo, m[2]) } }
+      continue
+    }
+    m = text.match(/^(q\d+_head): pullRequests\(headRefName: "([^"]*)"/)
+    if (m) {
+      scope[m[1]] = { nodes: onBranch(repo, m[2]) }
+      continue
+    }
+    m = text.match(/^(q\d+_num): pullRequest\(number: (\d+)\)/)
+    if (m) {
+      scope[m[1]] = node(repo, m[2])
+      continue
+    }
+    refuse(`unexpected GraphQL line ${text}`)
+  }
+  answer({ data })
+}
+
+const args = process.argv.slice(2)
+const command = `${args[0]} ${args[1]}`
+
+if (command === "auth status") {
+  answer({ hosts: { "github.com": [{ state: "success", active: true, host: "github.com" }] } })
+}
+if (command === "repo view") {
+  answer({ defaultBranchRef: { name: "main" } })
+}
+if (command === "pr view") {
+  const at = args.indexOf("--repo")
+  if (at < 0) refuse(`pr view without --repo: ${args.join(" ")}`)
+  const repo = args[at + 1].replace(/^github\.com\//, "")
+  const pr = node(repo, args[2])
+  if (!pr) refuse(`no pull request ${repo}#${args[2]} in the fixture`)
+  answer({
+    number: pr.number,
+    title: pr.title,
+    state: pr.state,
+    headRefName: pr.headRefName,
+    headRefOid: pr.headRefOid,
+  })
+}
+if (command === "api graphql") {
+  const field = args.find((arg) => arg.startsWith("query="))
+  if (!field) refuse(`api graphql without a query: ${args.join(" ")}`)
+  graphql(field.slice("query=".length))
+}
+refuse(`unhandled ${args.join(" ")}`)
