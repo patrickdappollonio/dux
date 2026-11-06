@@ -9338,7 +9338,8 @@ mod tests {
 
     /// A pull request the user attached from another repository is refreshed
     /// by its number like any other, and a refresh never claims the sync found
-    /// it: a later detach leaves nothing of it behind.
+    /// it: a later detach leaves nothing of it behind, and a refresh asked
+    /// before the detach that answers after it does not bring it back.
     #[test]
     fn a_refreshed_attachment_is_never_marked_found_and_a_detach_leaves_nothing() {
         let (mut engine, _tmp) = test_engine();
@@ -9350,34 +9351,39 @@ mod tests {
             .upsert_session(&session)
             .expect("seed session");
         engine.sessions.push(session);
+        engine.process_worker_event(pr_status_ready(vec![(
+            "s1".to_string(),
+            Some(PrInfo {
+                number: 50,
+                state: PrState::Open,
+                title: "Found".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                url: "https://github.com/o/r/pull/50".to_string(),
+                ..Default::default()
+            }),
+        )]));
         engine
-            .apply_pr_attach(
-                "s1",
-                "github.com",
-                "forker/Hello-World",
-                12,
-                "Pinned",
-                "CLOSED",
-                "",
-            )
-            .expect("attach the fork pull request");
+            .apply_pr_attach("s1", "github.com", "acme/infra", 77, "Pinned", "CLOSED", "")
+            .expect("attach the other repository's pull request");
 
         let reopened = PrInfo {
-            number: 12,
+            number: 77,
             state: PrState::Open,
             title: "Pinned".to_string(),
             host: "github.com".to_string(),
-            owner_repo: "forker/Hello-World".to_string(),
-            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+            owner_repo: "acme/infra".to_string(),
+            url: "https://github.com/acme/infra/pull/77".to_string(),
             ..Default::default()
         };
-        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
-            crate::worker::PrStatusResult {
+        let refresh = |info: &PrInfo| {
+            WorkerEvent::PrStatusReady(vec![crate::worker::PrStatusResult {
                 session_id: "s1".to_string(),
-                answers: vec![crate::worker::PrSyncAnswer::Refreshed(reopened)],
+                answers: vec![crate::worker::PrSyncAnswer::Refreshed(info.clone())],
                 asked: Vec::new(),
-            },
-        ]));
+            }])
+        };
+        let reaction = engine.process_worker_event(refresh(&reopened));
 
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         let row = engine.attached_pr("s1").expect("still attached");
@@ -9391,15 +9397,24 @@ mod tests {
         engine
             .detach_pull_request(
                 "s1",
-                &crate::model::PrKey::new("github.com", "forker/Hello-World", 12),
+                &crate::model::PrKey::new("github.com", "acme/infra", 77),
             )
             .expect("detach");
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
         assert!(
-            entries[0].known.iter().all(|row| row.number != 12),
+            entries[0].known.iter().all(|row| row.number != 77),
             "the detached pull request is gone from the next cycle, got {:?}",
             entries[0].known,
+        );
+
+        engine.process_worker_event(refresh(&reopened));
+        let numbers =
+            |rows: &[crate::model::AgentPr]| rows.iter().map(|row| row.number).collect::<Vec<_>>();
+        assert_eq!(numbers(&engine.agent_prs["s1"]), vec![50]);
+        assert_eq!(
+            numbers(&engine.session_store.load_agent_prs_of("s1").unwrap()),
+            vec![50]
         );
     }
 
