@@ -253,6 +253,8 @@ enum PromptMouseTarget {
     ChangeDefaultProviderItem(usize),
     ChangeProjectDefaultProviderItem(usize),
     SetTailscaleModeItem(usize),
+    /// A row of the Pull requests modal, by its place in the drawn list.
+    PullRequestItem(usize),
     RuntimeKillInput,
     RuntimeKillItem(usize),
     RuntimeKillCancel,
@@ -500,6 +502,7 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::ChangeDefaultProviderItem(_)
             | PromptMouseTarget::ChangeProjectDefaultProviderItem(_)
             | PromptMouseTarget::SetTailscaleModeItem(_)
+            | PromptMouseTarget::PullRequestItem(_)
             | PromptMouseTarget::RuntimeKillInput
             | PromptMouseTarget::RuntimeKillItem(_)
             | PromptMouseTarget::Checkbox(_)
@@ -1741,6 +1744,10 @@ impl App {
             Action::OpenCurrentPullRequest if self.current_pr_info().is_some() => {
                 self.open_current_pr_in_browser();
             }
+            Action::NextPullRequest if self.center_takes_typing() => {
+                self.forward_typing_key_to_center(&key);
+            }
+            Action::NextPullRequest => self.step_pull_request(),
             Action::ReconnectAgent => {
                 self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
             }
@@ -1828,6 +1835,14 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// True while keys typed at the center pane go to its child: a live,
+    /// typeable surface at the live edge with no take-over card over it.
+    pub(crate) fn center_takes_typing(&self) -> bool {
+        self.center_typeable()
+            && !self.scroll_mode_active()
+            && !self.focused_pty_is_covered_by_card()
     }
 
     fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
@@ -2150,6 +2165,7 @@ impl App {
             | PromptState::ChangeDefaultProvider(_)
             | PromptState::ChangeProjectDefaultProvider(_)
             | PromptState::SetTailscaleMode(_)
+            | PromptState::PullRequests(_)
             | PromptState::ProjectActions(_)
             | PromptState::ProjectInfo(_)
             | PromptState::ConfirmChangeBaseBranch(_) => {}
@@ -5710,7 +5726,12 @@ impl App {
             self.bindings.lookup(&key, BindingScope::Dialog)
         };
         match modal_key_step(action, key, crate::app::modal::TextFieldFocus::Field) {
-            ModalKeyStep::Close => self.prompt = PromptState::None,
+            // Back to the Pull requests modal it was opened from, as it was.
+            ModalKeyStep::Close => {
+                if let PromptState::AttachPullRequestInput { back, .. } = &self.prompt {
+                    self.prompt = PromptState::PullRequests(back.clone());
+                }
+            }
             ModalKeyStep::Confirm => self.confirm_attach_pull_request_input(),
             ModalKeyStep::MoveFocus(_) | ModalKeyStep::ActivateFocus => {}
             ModalKeyStep::FallThroughToField => {
@@ -6308,6 +6329,9 @@ impl App {
             return Ok(Some(self.handle_provider_picker_key(key, which)?));
         }
         if let Some(exit) = self.handle_set_tailscale_mode_prompt_key(key) {
+            return Ok(Some(exit));
+        }
+        if let Some(exit) = self.handle_pull_requests_prompt_key(key) {
             return Ok(Some(exit));
         }
         if let Some(exit) = self.handle_change_theme_prompt_key(key) {
@@ -7456,6 +7480,12 @@ impl App {
                 offset,
             } => Self::overlay_row_at(list, offset, items, column, row)
                 .map(PromptMouseTarget::SetTailscaleModeItem),
+            OverlayMouseLayout::PullRequests {
+                list,
+                items,
+                offset,
+            } => Self::overlay_row_at(list, offset, items, column, row)
+                .map(PromptMouseTarget::PullRequestItem),
             OverlayMouseLayout::KillRunning {
                 input,
                 list,
@@ -10546,6 +10576,19 @@ impl App {
         }
     }
 
+    /// A click selects a pull request (or branch) row; a second click on the
+    /// same row opens it, as the confirm key does. Headings take no click.
+    fn click_pull_request_item(&mut self, index: usize) {
+        let Some(selectable) = self.pull_request_modal_selectable_at(index) else {
+            return;
+        };
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        self.set_pull_requests_cursor(selectable);
+        if double_click {
+            self.open_selected_pull_request();
+        }
+    }
+
     fn click_theme_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         let mut moved = false;
@@ -10697,6 +10740,9 @@ impl App {
             }
             PromptMouseTarget::SetTailscaleModeItem(index) => {
                 self.click_tailscale_mode_item(index);
+            }
+            PromptMouseTarget::PullRequestItem(index) => {
+                self.click_pull_request_item(index);
             }
             PromptMouseTarget::ChangeThemeItem(index) => {
                 self.click_theme_item(index);
@@ -24839,7 +24885,7 @@ not_a_real_action = ["x"]
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].palette_name, Some("open-current-pr"));
         assert_eq!(
-            app.current_pr_url(),
+            app.current_pr_info().map(|pr| pr.url.as_str()),
             Some("https://github.com/owner/repo/pull/42")
         );
     }
@@ -24939,81 +24985,30 @@ not_a_real_action = ["x"]
             .insert(stored.session_id.clone(), vec![row]);
     }
 
+    /// One command manages an agent's pull requests. It needs the integration
+    /// on (off, nothing shows them) and an agent with a branch, and NOT `gh`:
+    /// hiding and detaching touch no network, and a pull request must never
+    /// outlive the ability to remove it.
     #[test]
-    fn command_palette_gates_the_pull_request_commands_on_gh_and_the_association() {
+    fn command_palette_offers_pull_requests_for_an_agent_with_a_branch_while_the_integration_is_on()
+    {
         let mut app = test_app(default_bindings());
-
-        // gh unavailable: attach (which needs gh to resolve) is not offered.
         assert!(
-            app.filtered_palette_commands("attach-pull-request")
-                .is_empty()
+            app.filtered_palette_commands("pull-requests").is_empty(),
+            "the integration is off"
         );
-        // Detach is NOT gh-gated: it touches no network, and an association
-        // must never outlive the ability to remove it. With no PR at all it
-        // stays hidden; with a pin it appears even while gh is unavailable.
-        assert!(
-            app.filtered_palette_commands("detach-pull-request")
-                .is_empty()
-        );
-        attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
-        assert!(
-            !app.filtered_palette_commands("detach-pull-request")
-                .is_empty(),
-            "a pin must be removable without gh"
-        );
-        app.engine.clear_agent_prs();
-
-        // A pull request dux found has nothing to detach (it is hidden
-        // instead), so the command is not offered for one.
-        app.engine.agent_prs.insert(
-            "session-1".to_string(),
-            vec![crate::model::AgentPr::found(
-                &dux_core::model::PrInfo {
-                    number: 7,
-                    state: dux_core::model::PrState::Open,
-                    title: "Autodetected".to_string(),
-                    host: "github.com".to_string(),
-                    owner_repo: "o/r".to_string(),
-                    url: "https://github.com/o/r/pull/7".to_string(),
-                    ..Default::default()
-                },
-                chrono::Utc::now(),
-            )],
-        );
-        assert!(
-            app.filtered_palette_commands("detach-pull-request")
-                .is_empty(),
-            "a found pull request is not detachable"
-        );
-        app.engine.clear_agent_prs();
-
-        // gh available, selected session has no PR at all: attach only.
         app.engine.github_integration_enabled = true;
-        app.engine.gh_status = dux_core::model::GhStatus::Available;
-        assert_eq!(
-            app.selected_session().map(|s| s.id.clone()),
-            Some("session-1".to_string()),
-            "the fixture session must be selected for the detach gate to apply"
-        );
         assert!(
-            !app.filtered_palette_commands("attach-pull-request")
-                .is_empty()
+            !app.filtered_palette_commands("pull-requests").is_empty(),
+            "offered without gh"
         );
+        app.engine.sessions[0].workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: "/tmp/notes".to_string(),
+            });
         assert!(
-            app.filtered_palette_commands("detach-pull-request")
-                .is_empty(),
-            "detach must not be offered while the selected agent has no PR"
-        );
-
-        // Pin the selected session: detach appears alongside attach.
-        attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
-        assert!(
-            !app.filtered_palette_commands("attach-pull-request")
-                .is_empty()
-        );
-        assert!(
-            !app.filtered_palette_commands("detach-pull-request")
-                .is_empty()
+            app.filtered_palette_commands("pull-requests").is_empty(),
+            "a standalone agent has no branch for pull requests"
         );
     }
 
@@ -25027,23 +25022,19 @@ not_a_real_action = ["x"]
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
         attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
-        for name in ["attach-pull-request", "detach-pull-request"] {
-            assert!(
-                !app.filtered_palette_commands(name).is_empty(),
-                "{name} is offered before the attach starts"
-            );
-        }
+        assert!(
+            !app.filtered_palette_commands("pull-requests").is_empty(),
+            "pull-requests is offered before the attach starts"
+        );
 
         app.engine
             .mark_in_flight(dux_core::engine::InFlightKey::PrAttach(
                 "session-1".to_string(),
             ));
-        for name in ["attach-pull-request", "detach-pull-request"] {
-            assert!(
-                app.filtered_palette_commands(name).is_empty(),
-                "{name} must be hidden while an attach is resolving for this agent"
-            );
-        }
+        assert!(
+            app.filtered_palette_commands("pull-requests").is_empty(),
+            "pull-requests must be hidden while an attach is resolving for this agent"
+        );
 
         // Another agent's attach is not this agent's business.
         app.engine
@@ -25059,12 +25050,10 @@ not_a_real_action = ["x"]
             .mark_in_flight(dux_core::engine::InFlightKey::PrCheck(
                 "session-1".to_string(),
             ));
-        for name in ["attach-pull-request", "detach-pull-request"] {
-            assert!(
-                !app.filtered_palette_commands(name).is_empty(),
-                "{name} comes back once this agent's attach is done"
-            );
-        }
+        assert!(
+            !app.filtered_palette_commands("pull-requests").is_empty(),
+            "pull-requests comes back once this agent's attach is done"
+        );
     }
 
     #[test]
@@ -25073,8 +25062,10 @@ not_a_real_action = ["x"]
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
 
-        app.execute_command("attach-pull-request")
-            .expect("open the attach modal");
+        app.execute_command("pull-requests")
+            .expect("open the pull requests modal");
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .unwrap();
         assert!(
             matches!(app.prompt, PromptState::AttachPullRequestInput { .. }),
             "got {:?}",
@@ -25140,7 +25131,9 @@ not_a_real_action = ["x"]
             .seed_pr_for_tests(&stored, dux_core::storage::SeededPr::Attached);
         attach_in_memory(&mut app, &stored);
 
-        app.execute_command("detach-pull-request").expect("detach");
+        app.execute_command("pull-requests").expect("open");
+        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))
+            .expect("detach the selected one");
         assert!(
             app.engine
                 .agent_prs
@@ -34504,6 +34497,56 @@ cyan = "#00ffff"
         tap_center(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
 
         wait_for_grid_row(&mut app, "ok");
+    }
+
+    /// The next-pull-request key is a dux chord only while the agent pane is
+    /// not taking typing. Typed at a live agent it reaches the child the way
+    /// an unbound chord does, the band stays where it was, and neither the
+    /// band nor the footer offers the key; in scroll mode the same key steps
+    /// the band and both offer it again.
+    #[test]
+    fn the_next_pull_request_key_reaches_a_typing_agent_and_steps_only_outside_typing() {
+        let mut app = app_with_minimized_typeable_caret_child("");
+        app.engine.agent_prs.insert(
+            "session-1".to_string(),
+            vec![
+                found_pr("o/r", 418, PrState::Open, "First"),
+                found_pr("o/r", 419, PrState::Open, "Second"),
+            ],
+        );
+        let shown = |app: &App| app.current_pr_info().map(|pr| pr.number);
+        let offers_step = |app: &App| {
+            app.footer_hints_for(crate::keybindings::HintContext::Center)
+                .iter()
+                .any(|(_, label)| *label == "next PR")
+        };
+        let band = |app: &mut App| {
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+            terminal.draw(|frame| app.render(frame)).expect("draw");
+            let buf = terminal.backend().buffer().clone();
+            buf.content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+        let before = shown(&app);
+
+        tap_center(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        wait_for_grid_row(&mut app, "READY^N");
+        assert_eq!(shown(&app), before, "typing at the agent steps nothing");
+        assert!(!offers_step(&app), "the footer must not offer the step key");
+        let typing_band = band(&mut app);
+        assert!(
+            typing_band.contains("1/2") && !typing_band.contains("Ctrl-n next"),
+            "{typing_band}"
+        );
+
+        let surface = app.selected_terminal_surface_id().expect("surface");
+        app.scroll_mode.insert(surface);
+        assert!(offers_step(&app), "scroll mode offers the step key again");
+        assert!(band(&mut app).contains("1/2  Ctrl-n next"));
+        tap_center(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_ne!(shown(&app), before, "outside typing the key steps the band");
     }
 
     /// Ctrl-c is the ONE chord the agent gets while typing minimized

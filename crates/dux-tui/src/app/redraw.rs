@@ -55,6 +55,10 @@ pub(crate) struct RedrawGate {
     /// The card over the shown pane. Ownership moves on the socket thread while
     /// nothing on this surface happens, so there is no mutation point to mark.
     takeover_card: Option<PtyTakeoverCard>,
+    /// Every agent's pull-request revision summed. A revision only ever
+    /// counts up, so the sum moves whenever any of them does, including when
+    /// a browser changes one while this process serves.
+    pr_revisions: u64,
     rows: HashMap<String, u8>,
     /// Frames actually drawn. Tests assert cadence against it.
     pub(crate) renders: u64,
@@ -245,7 +249,13 @@ impl App {
         // Compared rather than marked: a browser claims or releases a pty on the
         // socket thread, so no path on this surface runs at all.
         let takeover_card = self.focused_pty_takeover_card();
+        let pr_revisions = self
+            .engine
+            .pr_revision
+            .values()
+            .fold(0u64, |sum, revision| sum.wrapping_add(*revision));
         let needed = self.redraw.dirty
+            || pr_revisions != self.redraw.pr_revisions
             || self.redraw.last_frame.is_none()
             || phase != self.redraw.phase
             || status_line != self.redraw.status_line
@@ -259,6 +269,7 @@ impl App {
             self.redraw.phase = phase;
             self.redraw.status_line = status_line;
             self.redraw.takeover_card = takeover_card;
+            self.redraw.pr_revisions = pr_revisions;
             self.redraw.last_frame = Some(now);
         }
         needed
@@ -352,6 +363,25 @@ mod tests {
 
         tick(&mut app, &mut terminal, start + Duration::from_millis(99));
         assert_eq!(app.redraw.renders, 2, "and the tick after it does not");
+    }
+
+    /// An agent's pull requests can change with no path on this surface
+    /// running at all (a browser hides one while this process serves), so the
+    /// gate watches their revision rather than waiting for a mark.
+    #[test]
+    fn a_pull_request_change_draws_the_next_frame() {
+        let (mut app, mut terminal, start) = app_at_rest();
+        *app.engine
+            .pr_revision
+            .entry("session-1".to_string())
+            .or_default() += 1;
+        tick(&mut app, &mut terminal, start + Duration::from_millis(33));
+        assert_eq!(
+            app.redraw.renders, 2,
+            "the pull requests moved, so it draws"
+        );
+        tick(&mut app, &mut terminal, start + Duration::from_millis(66));
+        assert_eq!(app.redraw.renders, 2, "and only once");
     }
 
     #[test]

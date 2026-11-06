@@ -111,6 +111,7 @@ pub(super) fn outside_click_policy(prompt: &PromptState) -> OutsideClickPolicy {
         | PromptState::ChangeDefaultProvider(_)
         | PromptState::ChangeProjectDefaultProvider(_)
         | PromptState::SetTailscaleMode(_)
+        | PromptState::PullRequests(_)
         | PromptState::ChangeTheme(_)
         | PromptState::AddProjectFailed { .. }
         | PromptState::ConfigReloadFailed { .. }
@@ -254,6 +255,7 @@ impl App {
             | PromptState::ChangeAgentProvider(_)
             | PromptState::ChangeDefaultProvider(_)
             | PromptState::SetTailscaleMode(_)
+            | PromptState::PullRequests(_)
             | PromptState::Command { .. }
             | PromptState::ConfirmNonDefaultBranch { .. }
             // The macro LIST closes the overlay, exactly as its close binding
@@ -639,7 +641,7 @@ mod tests {
                 "AttachPullRequestInput",
                 PromptState::AttachPullRequestInput {
                     session_id: "session-1".to_string(),
-                    current_pr: None,
+                    back: crate::app::test_support::pull_requests_prompt("session-1"),
                     input: TextInput::with_text("half-typed-name".to_string()),
                 },
             ),

@@ -350,22 +350,15 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::OpenCurrentPullRequest,
         name: "open-current-pr",
-        description: "Open the selected agent's current pull request in the default browser",
+        description: "Open the pull request the band shows in the default browser",
         // Per-session: web links to the PR directly from the session's PR badge.
     },
     PaletteCommand {
-        action: Action::AttachPullRequest,
-        name: "attach-pull-request",
-        description: "Attach a GitHub pull request to the selected agent",
-        // Per-session: the web exposes "Attach pull request…" in the agent's
-        // own ⋯ menu (already shipped), so no app-menu entry is warranted.
-    },
-    PaletteCommand {
-        action: Action::DetachPullRequest,
-        name: "detach-pull-request",
-        description: "Detach the selected agent's shown pull request, when you attached it",
-        // Per-session: the web's agent ⋯ menu carries "Detach pull request",
-        // so no app-menu entry is warranted.
+        action: Action::PullRequests,
+        name: "pull-requests",
+        description: "Show, order, attach and hide the selected agent's pull requests",
+        // Per-session: the web's counterpart is "Pull requests…" in the agent's
+        // own ⋯ menu, so no app-menu entry is warranted.
     },
     // ── Global ────────────────────────────────────────────────────
     PaletteCommand {

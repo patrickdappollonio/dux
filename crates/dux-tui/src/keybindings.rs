@@ -17,6 +17,9 @@ pub(crate) enum BindingScope {
     RuntimeKill,
     StartupCommandLogs,
     MacroList,
+    /// The Pull requests modal. Its handler asks this scope first and then
+    /// `Palette`, the shared picker vocabulary (move, confirm, close).
+    PullRequestList,
     /// The "New agent in project" chooser. A scope of its own rather than a
     /// share of `Palette`, which every picker resolves through: an action put
     /// there would arm its key inside all of them.
@@ -45,6 +48,7 @@ impl BindingScope {
         Self::RuntimeKill,
         Self::StartupCommandLogs,
         Self::MacroList,
+        Self::PullRequestList,
         Self::ProjectChooser,
         Self::Dialog,
         Self::CommitInput,
@@ -66,6 +70,7 @@ impl BindingScope {
             Self::RuntimeKill => "Kill running modal",
             Self::StartupCommandLogs => "Startup command logs modal",
             Self::MacroList => "Text macros list",
+            Self::PullRequestList => "Pull requests modal",
             Self::ProjectChooser => "Project chooser",
             Self::Dialog => "Dialog",
             Self::CommitInput => "Commit input",
@@ -142,6 +147,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Browser,
             BindingScope::RuntimeKill,
             BindingScope::StartupCommandLogs,
+            BindingScope::PullRequestList,
             BindingScope::Help,
         ],
         help: Some(HelpEntry {
@@ -165,6 +171,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
             BindingScope::Browser,
             BindingScope::RuntimeKill,
             BindingScope::StartupCommandLogs,
+            BindingScope::PullRequestList,
             BindingScope::Help,
         ],
         help: None, // covered by MoveDown's combined label
@@ -682,21 +689,26 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Open current pull request in the default browser",
+            description: "Open the pull request the band shows in the default browser",
         }),
         hint_contexts: &[],
     },
     BindingDef {
-        // Palette-only: attach (pin) a GitHub PR to the selected agent.
-        action: Action::AttachPullRequest,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
+        // A dux chord only while the agent pane is not taking typing: typed
+        // at a live agent, windowed or fullscreen, it reaches the child, where
+        // Ctrl-n is readline's next-history. One of the `LATE_DEFAULTS`.
+        action: Action::NextPullRequest,
+        default_keys: &[key!(ctrl - n)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Step the band to the agent's next pull request (not while typing to the agent)",
+        }),
         hint_contexts: &[],
     },
     BindingDef {
-        // Palette-only: detach the pull request the agent shows.
-        action: Action::DetachPullRequest,
+        // Palette-only: opens the Pull requests modal.
+        action: Action::PullRequests,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -1377,6 +1389,86 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
+        action: Action::PullRequestsAttach,
+        default_keys: &[key!(a)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: attach a pull request",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestHideOrDetach,
+        default_keys: &[key!(h)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: hide, detach, or show again (the row decides)",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestsToggleHidden,
+        default_keys: &[key!(s)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: show or hide the hidden ones",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestsToggleView,
+        default_keys: &[key!(b)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: switch to the branches and back",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestsToggleSort,
+        default_keys: &[key!(o)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: switch between automatic order and yours",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestMoveUp,
+        default_keys: &[key!(shift - k)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: move the selected one up",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestMoveDown,
+        default_keys: &[key!(shift - j)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: move the selected one down",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
+        action: Action::PullRequestMoveTop,
+        default_keys: &[key!(shift - t)],
+        scopes: &[BindingScope::PullRequestList],
+        help: Some(HelpEntry {
+            section: "Overlays",
+            description: "Pull requests: move the selected one to the top",
+        }),
+        hint_contexts: &[],
+    },
+    BindingDef {
         action: Action::ClearTextField,
         default_keys: &[key!(ctrl - d)],
         scopes: &[BindingScope::Dialog, BindingScope::CommitInput],
@@ -1806,16 +1898,13 @@ impl RuntimeBindings {
     /// Parses key strings from the config, falling back to defaults for
     /// missing or unparseable entries.
     pub(crate) fn from_keys_config(keys: &crate::config::KeysConfig) -> Self {
-        Self::new(|action| match configured_keys(keys, action) {
-            Some(key_strs) => key_strs
+        let resolved = resolve_keys(keys);
+        Self::new(|action| {
+            resolved
                 .iter()
-                .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
-                .collect(),
-            None => BINDING_DEFS
-                .iter()
-                .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default(),
+                .find(|(resolved_action, ..)| *resolved_action == action)
+                .map(|(_, keys, _)| keys.clone())
+                .unwrap_or_default()
         })
     }
 
@@ -2337,8 +2426,87 @@ fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
     na.codes == nb.codes && na.modifiers == nb.modifiers
 }
 
+/// Defaults that shipped after configs already existed. A `[keys]` written
+/// before one of these could not have avoided it, so where its default key
+/// meets a key the file binds to another action on purpose, the default steps
+/// aside and the action starts unbound, with a warning saying how to bind it
+/// ([`late_default_warnings`]), rather than refusing a config that loaded the
+/// day before. Every other default keeps the old rule: a collision refuses.
+///
+/// The Pull requests modal's own keys are late too, and so is what a binding
+/// of the shared `move_up`/`move_down` there now meets: those two answer in
+/// the modal as well, so a file giving one of them a modal key (`shift-j`)
+/// keeps it and the modal's default steps aside.
+const LATE_DEFAULTS: &[Action] = &[
+    Action::NextPullRequest,
+    Action::PullRequestsAttach,
+    Action::PullRequestHideOrDetach,
+    Action::PullRequestsToggleHidden,
+    Action::PullRequestsToggleView,
+    Action::PullRequestsToggleSort,
+    Action::PullRequestMoveUp,
+    Action::PullRequestMoveDown,
+    Action::PullRequestMoveTop,
+];
+
+fn parse_configured(key_strs: &[String]) -> Vec<KeyCombination> {
+    key_strs
+        .iter()
+        .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
+        .collect()
+}
+
+/// The action whose explicit `[keys]` binding a late default steps aside
+/// for, when one does: the file leaves `def` out and binds one of its default
+/// keys to another action that a keystroke could reach beside it.
+fn late_default_holder(keys: &crate::config::KeysConfig, def: &BindingDef) -> Option<Action> {
+    if !LATE_DEFAULTS.contains(&def.action) || configured_keys(keys, def.action).is_some() {
+        return None;
+    }
+    BINDING_DEFS.iter().find_map(|other| {
+        if other.action == def.action {
+            return None;
+        }
+        let bound = parse_configured(configured_keys(keys, other.action)?);
+        let collides = def
+            .default_keys
+            .iter()
+            .any(|ours| bound.iter().any(|theirs| keys_conflict(ours, theirs)));
+        let meets = def.scopes.iter().any(|ours| {
+            other.scopes.iter().any(|theirs| {
+                conflict_scope((def.action, *ours), (other.action, *theirs)).is_some()
+            })
+        });
+        (collides && meets).then_some(other.action)
+    })
+}
+
+/// One warning per late default that stepped aside, naming the action, the
+/// binding it gave way to, and how to bind it.
+pub(crate) fn late_default_warnings(keys: &crate::config::KeysConfig) -> Vec<String> {
+    BINDING_DEFS
+        .iter()
+        .filter_map(|def| {
+            let holder = late_default_holder(keys, def)?;
+            let key = def
+                .default_keys
+                .first()
+                .map(|key| display_format().to_string(*key))
+                .unwrap_or_default();
+            Some(format!(
+                "[keys] {action} starts unbound: its default key, {key}, is already bound to \
+                 {holder} in your config. Add a {action} row under [keys] with a key of your own \
+                 to use it.",
+                action = def.action.config_name(),
+                holder = holder.config_name(),
+            ))
+        })
+        .collect()
+}
+
 /// Build the resolved key list for each action (config overrides, falling
-/// back to defaults), applying `normalize_key_string` to config values.
+/// back to defaults), applying `normalize_key_string` to config values. A
+/// late default that meets an explicit binding resolves to no key at all.
 fn resolve_keys(
     keys: &crate::config::KeysConfig,
 ) -> Vec<(Action, Vec<KeyCombination>, &'static [BindingScope])> {
@@ -2346,10 +2514,8 @@ fn resolve_keys(
         .iter()
         .map(|def| {
             let resolved = match configured_keys(keys, def.action) {
-                Some(key_strs) => key_strs
-                    .iter()
-                    .filter_map(|s| crokey::parse(&normalize_key_string(s)).ok())
-                    .collect(),
+                Some(key_strs) => parse_configured(key_strs),
+                None if late_default_holder(keys, def).is_some() => Vec::new(),
                 None => def.default_keys.to_vec(),
             };
             (def.action, resolved, def.scopes)
@@ -2366,7 +2532,8 @@ fn resolve_keys(
 /// the scope the user can see, not whichever was declared first.
 ///
 /// The project chooser is such a ladder: its handler asks `ProjectChooser` and
-/// then `Palette` (`app::input`). So is a dialog whose body scrolls (a Confirm
+/// then `Palette` (`app::input`), and so is the Pull requests modal, which asks
+/// `PullRequestList` and then `Palette`. So is a dialog whose body scrolls (a Confirm
 /// dialog too tall for the screen, an error dialog's message): its own
 /// `Dialog` keys win and the `Help` scope's scroll keys are the fallback, so a
 /// key bound in both reports under `Dialog`. So is the main key handler, which
@@ -2399,6 +2566,12 @@ fn conflict_scope(
         (BindingScope::Dialog, BindingScope::Help) | (BindingScope::Help, BindingScope::Dialog) => {
             Some((BindingScope::Dialog, ConflictKind::Collision, false))
         }
+        (BindingScope::PullRequestList, BindingScope::Palette)
+        | (BindingScope::Palette, BindingScope::PullRequestList) => Some((
+            BindingScope::PullRequestList,
+            ConflictKind::Collision,
+            false,
+        )),
         _ => None,
     }
 }
@@ -2419,6 +2592,7 @@ fn global_shadows(action: Action, scope: BindingScope) -> bool {
         | BindingScope::RuntimeKill
         | BindingScope::StartupCommandLogs
         | BindingScope::MacroList
+        | BindingScope::PullRequestList
         | BindingScope::ProjectChooser
         | BindingScope::Dialog
         | BindingScope::CommitInput
@@ -3100,6 +3274,108 @@ mod tests {
         );
     }
 
+    /// The step key is the agent pane's alone: fullscreen sends its byte to
+    /// the agent, where Ctrl-n is readline's next-history.
+    #[test]
+    fn next_pull_request_is_the_agent_panes_ctrl_n_and_fullscreen_leaves_it_to_the_agent() {
+        let bindings = default_bindings();
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(
+            bindings.lookup(&ctrl_n, BindingScope::Center),
+            Some(Action::NextPullRequest)
+        );
+        assert_eq!(bindings.lookup(&ctrl_n, BindingScope::Interactive), None);
+        assert_eq!(
+            bindings.interactive_byte_patterns().match_sequence(&[0x0e]),
+            None,
+            "fullscreen must not intercept the Ctrl-n byte"
+        );
+    }
+
+    /// A config written before a newer default existed and already giving its
+    /// key to another action that meets it loads: the config passes the start
+    /// check, the new default starts unbound and says how to bind it, and the
+    /// user's own binding keeps its key.
+    #[test]
+    fn a_newer_default_steps_aside_for_an_explicit_binding_on_its_key() {
+        let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let plain_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        for (holder, bound, key, scope, holder_action, late, late_name) in [
+            (
+                "next_tab",
+                &["ctrl-n"][..],
+                ctrl_n,
+                BindingScope::Center,
+                Action::NextTab,
+                Action::NextPullRequest,
+                "next_pull_request",
+            ),
+            (
+                "move_down",
+                &["j", "down", "shift-j"][..],
+                shift_j,
+                BindingScope::PullRequestList,
+                Action::MoveDown,
+                Action::PullRequestMoveDown,
+                "pull_request_move_down",
+            ),
+            (
+                "search_toggle",
+                &["a"][..],
+                plain_a,
+                BindingScope::Palette,
+                Action::SearchToggle,
+                Action::PullRequestsAttach,
+                "pull_requests_attach",
+            ),
+        ] {
+            let mut keys = crate::config::KeysConfig::default();
+            keys.bindings.insert(
+                holder.to_string(),
+                bound.iter().map(ToString::to_string).collect(),
+            );
+
+            assert_eq!(crate::config::validate_keys(&keys), Ok(()), "{holder}");
+            let bindings = RuntimeBindings::from_keys_config(&keys);
+            assert_eq!(
+                bindings.lookup(&key, scope),
+                Some(holder_action),
+                "{holder}"
+            );
+            assert_eq!(bindings.label_for(late), "", "{holder}");
+            let warnings = late_default_warnings(&keys);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains(late_name) && warnings[0].contains(holder),
+                "{warnings:?}"
+            );
+        }
+
+        // The user binding the step key there too is a collision they made.
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("next_tab".to_string(), vec!["ctrl-n".to_string()]);
+        keys.bindings
+            .insert("next_pull_request".to_string(), vec!["ctrl-n".to_string()]);
+        assert!(!detect_conflicts(&keys).is_empty());
+        assert_eq!(late_default_warnings(&keys), Vec::<String>::new());
+    }
+
+    /// A binding of Ctrl-n where the agent pane never looks is no collision,
+    /// so the default keeps its key.
+    #[test]
+    fn a_newer_default_keeps_its_key_beside_a_binding_in_another_pane() {
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("move_down".to_string(), vec!["ctrl-n".to_string()]);
+        assert_eq!(
+            RuntimeBindings::from_keys_config(&keys).label_for(Action::NextPullRequest),
+            "Ctrl-n"
+        );
+        assert_eq!(late_default_warnings(&keys), Vec::<String>::new());
+    }
+
     #[test]
     fn help_sections_produces_valid_sections() {
         let bindings = default_bindings();
@@ -3280,8 +3556,7 @@ mod tests {
                 "open-worktree",
                 "open-worktree-with",
                 "show-terminal",
-                "open-current-pr",
-                "detach-pull-request",
+                "pull-requests",
                 "recreate-working-copy",
                 "new-terminal-for-agent",
                 "agent-info",
@@ -3635,10 +3910,6 @@ mod tests {
     /// command is a real user-facing change: update this list in the same
     /// commit, on purpose.
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "a hand-maintained table of every palette command; the check over it is two lines"
-    )]
     fn tui_palette_listing_is_the_expected_command_set() {
         let bindings = default_bindings();
         let mut listed: Vec<&str> = bindings
@@ -3651,7 +3922,6 @@ mod tests {
         let expected = [
             "add-project",
             "agent-info",
-            "attach-pull-request",
             "change-agent-provider",
             "change-default-provider",
             "change-project-base-branch",
@@ -3669,7 +3939,6 @@ mod tests {
             "delete-project",
             "delete-terminal",
             "detach-agent",
-            "detach-pull-request",
             "edit-macros",
             "filter-agents",
             "force-reconnect-agent",
@@ -3700,6 +3969,7 @@ mod tests {
             "open-worktree",
             "open-worktree-with",
             "pull-project",
+            "pull-requests",
             "read-startup-command-logs",
             "recheck-github",
             "reconnect-agent",

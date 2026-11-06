@@ -233,9 +233,13 @@ const DUX_DARK_TOML: &str = include_str!("../../../assets/themes/dux_dark.toml")
 const GITHUB_PR_OPEN_BG: OpalineColor = OpalineColor::new(35, 134, 54);
 const GITHUB_PR_MERGED_BG: OpalineColor = OpalineColor::new(130, 80, 223);
 const GITHUB_PR_CLOSED_BG: OpalineColor = OpalineColor::new(110, 54, 48);
+// GitHub's draft gray: the tint for surfaces, and the lighter one for text on
+// a dark background.
+const GITHUB_PR_DRAFT_BG: OpalineColor = OpalineColor::new(110, 119, 129);
 const GITHUB_PR_OPEN_LABEL: OpalineColor = OpalineColor::new(0, 255, 0);
 const GITHUB_PR_MERGED_LABEL: OpalineColor = OpalineColor::new(170, 100, 220);
 const GITHUB_PR_CLOSED_LABEL: OpalineColor = OpalineColor::new(140, 80, 80);
+const GITHUB_PR_DRAFT_LABEL: OpalineColor = OpalineColor::new(139, 148, 158);
 
 /// Every field is a `Color`, so the whole palette is trivially copyable. That
 /// is what lets a background worker be handed the theme it must render with
@@ -387,10 +391,12 @@ pub(crate) struct Theme {
     pub pr_open_bg: Color,
     pub pr_merged_bg: Color,
     pub pr_closed_bg: Color,
+    pub pr_draft_bg: Color,
     pub pr_banner_fg: Color,
     pub pr_merged_label: Color,
     pub pr_closed_label: Color,
     pub pr_open_label: Color,
+    pub pr_draft_label: Color,
     pub help_banner_fg: Color,
     pub help_banner_bg: Color,
     pub help_body_fg: Color,
@@ -617,10 +623,12 @@ fn register_dux_defaults(theme: &mut OpalineTheme) {
     theme.register_default_token("dux.pr_open_bg", GITHUB_PR_OPEN_BG);
     theme.register_default_token("dux.pr_merged_bg", GITHUB_PR_MERGED_BG);
     theme.register_default_token("dux.pr_closed_bg", GITHUB_PR_CLOSED_BG);
+    theme.register_default_token("dux.pr_draft_bg", GITHUB_PR_DRAFT_BG);
     theme.register_default_token("dux.pr_banner_fg", OpalineColor::WHITE);
     theme.register_default_token("dux.pr_open_label", GITHUB_PR_OPEN_LABEL);
     theme.register_default_token("dux.pr_merged_label", GITHUB_PR_MERGED_LABEL);
     theme.register_default_token("dux.pr_closed_label", GITHUB_PR_CLOSED_LABEL);
+    theme.register_default_token("dux.pr_draft_label", GITHUB_PR_DRAFT_LABEL);
 }
 
 /// Convert an [`OpalineColor`] (always RGB) into a [`ratatui::style::Color`],
@@ -785,10 +793,12 @@ impl Theme {
             pr_open_bg: pick("dux.pr_open_bg"),
             pr_merged_bg: pick("dux.pr_merged_bg"),
             pr_closed_bg: pick("dux.pr_closed_bg"),
+            pr_draft_bg: pick("dux.pr_draft_bg"),
             pr_banner_fg: pick("dux.pr_banner_fg"),
             pr_merged_label: pick("dux.pr_merged_label"),
             pr_closed_label: pick("dux.pr_closed_label"),
             pr_open_label: pick("dux.pr_open_label"),
+            pr_draft_label: pick("dux.pr_draft_label"),
             help_banner_fg: pick("dux.help_banner_fg"),
             help_banner_bg: pick("dux.help_banner_bg"),
             help_body_fg: pick("dux.help_body_fg"),
@@ -1286,10 +1296,12 @@ mod tests {
             pr_open_bg: Color::Rgb(35, 134, 54),
             pr_merged_bg: Color::Rgb(130, 80, 223),
             pr_closed_bg: Color::Rgb(110, 54, 48),
+            pr_draft_bg: Color::Rgb(110, 119, 129),
             pr_merged_label: Color::Rgb(170, 100, 220),
             pr_banner_fg: Color::White,
             pr_closed_label: Color::Rgb(140, 80, 80),
             pr_open_label: Color::Green,
+            pr_draft_label: Color::Rgb(139, 148, 158),
             help_banner_fg: Color::Rgb(20, 20, 20),
             help_banner_bg: Color::Cyan,
             help_body_fg: Color::Rgb(180, 180, 180),
@@ -1300,6 +1312,10 @@ mod tests {
     /// field for field. If a token in `assets/themes/dux-dark.toml` is
     /// retyped wrong, this test will pinpoint which one drifted.
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one assertion per palette field, so a drifted token is named by its line"
+    )]
     fn dux_dark_matches_original_palette() {
         let actual = load_from_str(DUX_DARK_TOML).expect("bundled dux-dark must parse");
         let expected = default_dark_archived();
@@ -1396,10 +1412,12 @@ mod tests {
         assert_field!(pr_open_bg);
         assert_field!(pr_merged_bg);
         assert_field!(pr_closed_bg);
+        assert_field!(pr_draft_bg);
         assert_field!(pr_banner_fg);
         assert_field!(pr_merged_label);
         assert_field!(pr_closed_label);
         assert_field!(pr_open_label);
+        assert_field!(pr_draft_label);
         assert_field!(help_banner_fg);
         assert_field!(help_banner_bg);
         assert_field!(help_body_fg);
@@ -1486,6 +1504,8 @@ info = "info"
         assert_eq!(theme.pr_open_label, Color::Green);
         assert_eq!(theme.pr_merged_label, Color::Rgb(170, 100, 220));
         assert_eq!(theme.pr_closed_label, Color::Rgb(140, 80, 80));
+        assert_eq!(theme.pr_draft_bg, Color::Rgb(110, 119, 129));
+        assert_eq!(theme.pr_draft_label, Color::Rgb(139, 148, 158));
 
         assert_ne!(theme.pr_open_bg, Color::Rgb(1, 1, 1));
         assert_ne!(theme.pr_merged_bg, Color::Rgb(171, 205, 239));
@@ -1508,6 +1528,8 @@ variant = "dark"
 "dux.pr_open_label" = "#131415"
 "dux.pr_merged_label" = "#161718"
 "dux.pr_closed_label" = "#192021"
+"dux.pr_draft_bg" = "#222324"
+"dux.pr_draft_label" = "#252627"
 "##,
         )
         .expect("theme must parse");
@@ -1519,6 +1541,8 @@ variant = "dark"
         assert_eq!(theme.pr_open_label, Color::Rgb(19, 20, 21));
         assert_eq!(theme.pr_merged_label, Color::Rgb(22, 23, 24));
         assert_eq!(theme.pr_closed_label, Color::Rgb(25, 32, 33));
+        assert_eq!(theme.pr_draft_bg, Color::Rgb(34, 35, 36));
+        assert_eq!(theme.pr_draft_label, Color::Rgb(37, 38, 39));
     }
 
     /// The bundled dux-dark theme's attention color must stay consistent with

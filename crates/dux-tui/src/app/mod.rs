@@ -838,6 +838,11 @@ pub(crate) struct App {
     /// resize, a lost focus or a surface change drops it exactly where it drops
     /// a withheld link press.
     pub(crate) pending_pr_banner_press: Option<Rect>,
+    /// Which of each agent's pull requests the band shows, by key, once the
+    /// user stepped with the next-pull-request key. Display-only: it writes
+    /// nothing, the row badge and every other surface keep showing the first
+    /// in the agent's order, and a key that left the list falls back to it.
+    pub(crate) pr_cursors: HashMap<String, crate::model::PrKey>,
     /// When and where the last link was opened, so the second click of a
     /// double click (the select-a-word gesture over a URL) does not open the
     /// same address a second time. The terminal UI's twin of the web's
@@ -3169,6 +3174,27 @@ pub(crate) enum BrowsePurpose {
     StandaloneAgent,
 }
 
+/// Which half of the Pull requests modal is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PullRequestsView {
+    /// The agent's pull requests, in its order.
+    PullRequests,
+    /// Every branch the agent's worktree has been on, with its pull requests.
+    Branches,
+}
+
+/// The Pull requests modal's own state. The rows are read from engine memory
+/// on every frame, so a sync answer or a change made elsewhere shows at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PullRequestsPrompt {
+    pub(crate) session_id: String,
+    pub(crate) view: PullRequestsView,
+    /// The selected row among the ones the view can select.
+    pub(crate) cursor: usize,
+    /// Whether the hidden pull requests are listed.
+    pub(crate) show_hidden: bool,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum PromptState {
     None,
@@ -3557,13 +3583,15 @@ pub(crate) enum PromptState {
     /// focus concept: there is nowhere for focus to move.
     AttachPullRequestInput {
         session_id: String,
-        /// A prebuilt display line naming the PR currently shown for the
-        /// session (e.g. `#42 (open) Fix the frobnicator`, plus
-        /// ` (manually attached)` when it is a pin), so the body can say what
-        /// attaching would replace. `None` when no PR is known yet.
-        current_pr: Option<String>,
+        /// The Pull requests modal it was opened from, which the close key
+        /// returns to as it was.
+        back: PullRequestsPrompt,
         input: TextInput,
     },
+    /// Show, order, attach and hide an agent's pull requests. A Picker: rows
+    /// with a selection cursor, Enter opens the selected one, and every other
+    /// key comes from the `PullRequestList` bindings.
+    PullRequests(PullRequestsPrompt),
     /// Name the standalone agent about to run in the folder the user just
     /// picked in the browser.
     ///
@@ -4591,6 +4619,13 @@ pub(crate) enum OverlayMouseLayout {
         items: usize,
         offset: usize,
     },
+    /// The Pull requests modal: a Picker, so it publishes its rows (headings
+    /// included, which a click passes over) and nothing else.
+    PullRequests {
+        list: Rect,
+        items: usize,
+        offset: usize,
+    },
     /// The macro editor, not the nested delete-confirm, which publishes
     /// `ConfirmDeleteMacro` over the top of this.
     ///
@@ -4835,6 +4870,18 @@ pub(crate) fn tab_reaches_agent_trap_warning(
         })
 }
 
+/// The startup and reload warning about the bindings themselves: the
+/// typeable-pane trap above, and every newer default that starts unbound
+/// because the user's `[keys]` already gives its key to another action. One
+/// line, so neither pushes the other off the status line.
+pub(crate) fn key_bindings_warning(bindings: &RuntimeBindings, config: &Config) -> Option<String> {
+    let mut parts: Vec<String> = tab_reaches_agent_trap_warning(bindings, config)
+        .into_iter()
+        .collect();
+    parts.extend(crate::keybindings::late_default_warnings(&config.keys));
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 /// Build the flat left-pane list: a single globally-ordered agent list with no
 /// project grouping. Active agents come first; detached/exited ("inactive") agents
 /// collapse under an `InactiveToggle` tail (default collapsed). Orphan
@@ -4894,6 +4941,7 @@ mod input;
 pub(crate) mod modal;
 mod overlay_dismiss;
 mod pr_clone;
+mod pull_requests;
 pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequestClone};
 #[cfg(test)]
 pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
@@ -5041,7 +5089,7 @@ impl App {
             Duration::from_secs(u64::from(config.ui.status_clear_seconds)),
             live_status_keys.clone(),
             initial_status,
-            tab_reaches_agent_trap_warning(&bindings, &config),
+            key_bindings_warning(&bindings, &config),
             theme_warning,
             socket_warning,
         );
@@ -5315,6 +5363,7 @@ impl App {
             terminal_selection: None,
             pending_link_click: None,
             pending_pr_banner_press: None,
+            pr_cursors: HashMap::new(),
             last_link_open: None,
             url_opener: default_url_opener(),
             startup_log_selection: None,
@@ -5422,7 +5471,7 @@ impl App {
             Duration::from_secs(u64::from(engine.config.ui.status_clear_seconds)),
             engine.live_status_keys.clone(),
             "Web server stopped. Your agents kept running, so you can reconnect to any session to pick up where it left off.",
-            tab_reaches_agent_trap_warning(&bindings, &engine.config),
+            key_bindings_warning(&bindings, &engine.config),
             theme_warning,
             None,
         );
@@ -6295,16 +6344,19 @@ impl App {
             // the selected agent: the engine refuses a second attach, and an
             // offered command that can only refuse is a worse answer than an
             // absent one.
-            Action::AttachPullRequest => {
-                self.github_pr_agent_command_available() && !self.pr_attach_pending_on_selection()
-            }
-            // Detach acts on the pull request the band shows, and only one the
-            // user attached has anything to detach. Deliberately NOT gated on
-            // gh availability: detaching touches no network, and an
-            // association must never outlive the ability to remove it.
-            Action::DetachPullRequest => {
-                !self.pr_attach_pending_on_selection()
-                    && self.current_pr_info().is_some_and(|pr| pr.attached)
+            // Offered for an agent with a branch while the integration is on
+            // (off, memory holds no pull requests and nothing shows them).
+            // Not gated on `gh`: hiding, detaching and ordering touch no
+            // network, and a pull request must never outlive the ability to
+            // remove it; the modal's attach key says what it needs. Hidden
+            // while an attach resolves for the agent, because the engine
+            // refuses every change to its pull requests until it lands.
+            Action::PullRequests => {
+                self.engine.github_integration_enabled
+                    && !self.pr_attach_pending_on_selection()
+                    && self
+                        .selected_session()
+                        .is_some_and(|s| s.workspace.as_managed().is_some())
             }
             // Offered only in the one state it exists for, and hidden rather
             // than disabled: a command that exists only while something is
@@ -6607,12 +6659,8 @@ impl App {
                 self.open_current_pr_in_browser();
                 Ok(())
             }
-            "attach-pull-request" => {
-                self.open_attach_pull_request_prompt();
-                Ok(())
-            }
-            "detach-pull-request" => {
-                self.detach_pull_request();
+            "pull-requests" => {
+                self.open_pull_requests_modal();
                 Ok(())
             }
             "toggle-project" => {
@@ -7019,7 +7067,7 @@ impl App {
         // anything, so the load is the only place that can say the pane has no
         // keyboard way out. Said before the theme warning, which is the more
         // urgent of the two when both land in the same reload.
-        if let Some(message) = tab_reaches_agent_trap_warning(&self.bindings, &self.engine.config) {
+        if let Some(message) = key_bindings_warning(&self.bindings, &self.engine.config) {
             self.set_warning(message);
         }
     }

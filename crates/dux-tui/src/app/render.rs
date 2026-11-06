@@ -961,7 +961,7 @@ const LEFT_PANE_GUTTER: u16 = 1;
 /// gap, so a long name yields `long-na…   PR#12`: the badge stays pinned to the
 /// right and the name loses characters instead. Falls back to a single
 /// ellipsized run when there is not even room for the right group plus the gap.
-fn right_align_line(
+pub(super) fn right_align_line(
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
     total_w: u16,
@@ -2766,20 +2766,19 @@ impl App {
     }
 
     /// The pull request badge an agent row pins to its right edge, when the
-    /// agent has a pull request.
+    /// agent has a pull request: `#415` for one, the glyph and the count for
+    /// several, colored by the first in the agent's order either way.
     fn agent_row_pr_badge(&self, session: &AgentSession) -> Option<Span<'static>> {
+        let count = self.ordered_prs(&session.id).visible.len();
         self.engine.shown_pr(&session.id).map(|pr| {
-            let pr_color = match pr.state {
-                crate::model::PrState::Merged => self.theme.pr_merged_label,
-                crate::model::PrState::Closed => self.theme.pr_closed_label,
-                // Draft has no color of its own here yet, so it wears open's.
-                crate::model::PrState::Open | crate::model::PrState::Draft => {
-                    self.theme.pr_open_label
-                }
+            let text = if count > 1 {
+                format!("{}{count}", self.glyphs().pull_request)
+            } else {
+                format!("{}#{}", self.glyphs().pull_request, pr.number)
             };
             Span::styled(
-                format!("{}#{}", self.glyphs().pull_request, pr.number),
-                Style::default().fg(pr_color),
+                text,
+                Style::default().fg(self.pr_state_label_color(&pr.state)),
             )
         })
     }
@@ -3571,8 +3570,8 @@ impl App {
         let covered = !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
         let pr_info = if !is_input && !covered {
             self.selected_session()
-                .and_then(|s| self.engine.shown_pr(&s.id))
-                .cloned()
+                .and_then(|s| self.band_pr(&s.id))
+                .map(|band| (band.pr.clone(), band.index, band.count))
         } else {
             None
         };
@@ -3592,8 +3591,8 @@ impl App {
             (pr_area, pane_area)
         };
 
-        if let Some(ref pr) = pr_info {
-            self.render_pr_banner(frame, pr_area, pr);
+        if let Some((ref pr, index, count)) = pr_info {
+            self.render_pr_banner(frame, pr_area, pr, BandPlace { index, count });
         }
 
         // The wrapped-row cache belongs to a diff that is on screen. Released
@@ -6191,8 +6190,17 @@ impl App {
         }
         if matches!(ctx, HintContext::Center) && self.current_pr_info().is_some() {
             let key = self.bindings.label_for(Action::OpenCurrentPullRequest);
+            let at = usize::from(!key.is_empty());
             if !key.is_empty() {
                 hints.insert(0, (key, "PR"));
+            }
+            let several = self
+                .selected_session()
+                .and_then(|s| self.band_pr(&s.id))
+                .is_some_and(|band| band.count > 1);
+            let next = self.bindings.label_for(Action::NextPullRequest);
+            if several && !next.is_empty() && !self.center_takes_typing() {
+                hints.insert(at, (next, "next PR"));
             }
         }
         hints
@@ -11391,18 +11399,15 @@ impl App {
     }
 
     fn render_attach_pull_request_input_prompt(&mut self, frame: &mut Frame<'_>) {
-        let PromptState::AttachPullRequestInput {
-            current_pr, input, ..
-        } = &self.prompt
-        else {
+        let PromptState::AttachPullRequestInput { session_id, .. } = &self.prompt else {
+            return;
+        };
+        let (lead, agent) = self.attach_pull_request_lead(session_id);
+        let PromptState::AttachPullRequestInput { input, .. } = &self.prompt else {
             return;
         };
         self.render_dim_overlay(frame);
-        // Two body rows always (the accepted-forms hint plus spacing),
-        // plus one more when there is a current PR to name.
-        let has_current = current_pr.is_some();
-        let height = if has_current { 9 } else { 8 };
-        let area = centered_rect_exact(64, height, frame.area());
+        let area = centered_rect_exact(64, 9, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Attach Pull Request");
@@ -11412,29 +11417,28 @@ impl App {
         let [label_area, input_area, hint_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(if has_current { 3 } else { 2 }),
+                Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(1),
             ])
             .areas(inner);
 
-        let mut labels = Vec::new();
-        if let Some(current) = current_pr {
-            let hint = Style::default().fg(self.theme.hint_desc_fg);
-            labels.push(Line::from(vec![
-                Span::styled(" Currently showing ", hint),
-                name_chip(current, &self.theme),
-                Span::styled("; attaching replaces it.", hint),
-            ]));
-        }
-        labels.push(Line::from(Span::styled(
-            " Enter a PR URL, owner/repo#123, #123, or 123:",
-            Style::default().fg(self.theme.input_label_fg),
-        )));
-        labels.push(Line::from(Span::styled(
-            " Attaching pins the PR and pauses autodetection.",
-            Style::default().fg(self.theme.hint_desc_fg),
-        )));
+        let hint = Style::default().fg(self.theme.hint_desc_fg);
+        let labels = vec![
+            Line::from(vec![
+                Span::styled(format!(" {lead}"), hint),
+                name_chip(&agent, &self.theme),
+                Span::styled(".", hint),
+            ]),
+            Line::from(Span::styled(
+                " Enter a PR URL, owner/repo#123, #123, or 123:",
+                Style::default().fg(self.theme.input_label_fg),
+            )),
+            Line::from(Span::styled(
+                " Adds it to this agent's pull requests.",
+                hint,
+            )),
+        ];
         Paragraph::new(labels).render(label_area, frame.buffer_mut());
 
         // The field is the modal's only control, so it is always
@@ -13310,6 +13314,7 @@ impl App {
             PromptState::NameNewAgent { .. } => self.render_name_new_agent_prompt(frame),
             PromptState::CloneProject { .. } => self.render_clone_project_prompt(frame),
             PromptState::PullRequestInput { .. } => self.render_pull_request_input_prompt(frame),
+            PromptState::PullRequests(_) => self.render_pull_requests_prompt(frame),
             PromptState::AttachPullRequestInput { .. } => {
                 self.render_attach_pull_request_input_prompt(frame);
             }
@@ -15395,19 +15400,27 @@ fn path_completion_display_label(completion: &str) -> String {
 impl App {
     /// Render the GitHub PR pill as a single-line pill using Unicode
     /// half-block characters for the caps and a solid background:
-    /// `▐ owner/repo#1234 │ PR title ellipsized… ▌`
+    /// `▐ owner/repo#1234 → PR title ellipsized…      1/3  Ctrl-n next ▌`
     ///
     /// The caps are half-block characters in the state color, which gives the
-    /// pill shape without requiring Powerline or Nerd Fonts. The `│` divider uses
-    /// terminal default colors so it blends with the user's background.
+    /// pill shape without requiring Powerline or Nerd Fonts.
+    ///
+    /// With two or more pull requests the right end carries where this one
+    /// sits in the agent's order and the key that steps it. When the band is
+    /// narrow the key hint goes first, then the counter, and only then does
+    /// the title give up more than [`BAND_TITLE_FLOOR`] cells.
     ///
     /// The band is a click target: it publishes its painted rect so a left press
-    /// opens the pull request, the way the web banner is one link across the
-    /// whole strip. The rect is published only where the band is actually
+    /// opens the pull request it shows, the way the web banner is one link
+    /// across the strip. The rect is published only where the band is actually
     /// painted, so every early return below leaves it unset.
-    fn render_pr_banner(&mut self, frame: &mut Frame<'_>, area: Rect, pr: &crate::model::AgentPr) {
-        use crate::model::PrState;
-
+    pub(super) fn render_pr_banner(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        pr: &crate::model::AgentPr,
+        place: BandPlace,
+    ) {
         if area.height < 1 || area.width < 6 {
             return;
         }
@@ -15421,12 +15434,7 @@ impl App {
             .buffer_mut()
             .set_style(area, Style::default().bg(self.theme.app_bg));
 
-        let bg = match pr.state {
-            // Draft has no color of its own here yet, so it wears open's.
-            PrState::Open | PrState::Draft => self.theme.pr_open_bg,
-            PrState::Merged => self.theme.pr_merged_bg,
-            PrState::Closed => self.theme.pr_closed_bg,
-        };
+        let bg = self.pr_state_band_color(&pr.state);
         let fg = self.theme.pr_banner_fg;
         // Half-block caps: fg is the pill color, bg is the freshly-painted
         // app surface so the pill arc sits on a theme-driven backdrop
@@ -15444,9 +15452,6 @@ impl App {
         let left_cap = "\u{2590}"; // ▐ is the right half block
         let right_cap = "\u{258c}"; // ▌ is the left half block
 
-        // Build the pill content as a single string.
-        // With title:    " ⎇ owner/repo#1234 ▸ PR title here… "
-        // Without title: " ⎇ owner/repo#1234 "
         let prefix = format!(
             " {} {}#{}",
             self.glyphs().pull_request,
@@ -15454,11 +15459,10 @@ impl App {
             pr.number
         );
         let title_trimmed = pr.title.trim();
-        let has_title = !title_trimmed.is_empty();
+        let arrow = " \u{2192} ";
 
         // Available content width inside the pill (between the two caps).
-        let avail = usize::from(area.width);
-        let inner_w = avail.saturating_sub(2); // 2 = left cap + right cap
+        let inner_w = usize::from(area.width).saturating_sub(2);
         if inner_w < 4 {
             return;
         }
@@ -15473,40 +15477,56 @@ impl App {
         self.mouse_layout.pr_banner = Some(Rect::new(area.x, area.y, area.width, 1));
 
         let prefix_w = display_width(&prefix);
+        let title_need = if title_trimmed.is_empty() {
+            0
+        } else {
+            display_width(arrow) + display_width(title_trimmed).min(BAND_TITLE_FLOOR)
+        };
+        // While the pane takes typing the step key goes to the child, so the
+        // band offers no key there.
+        let next_key = if self.center_takes_typing() {
+            String::new()
+        } else {
+            self.bindings.label_for(Action::NextPullRequest)
+        };
+        let right = band_right_end(
+            place,
+            &next_key,
+            inner_w.saturating_sub(prefix_w + title_need),
+        );
+        let right_w = display_width(&right);
+
         let buf = frame.buffer_mut();
         let y = area.y;
         // The pill's content runs from just after the left cap to just before
         // the right one; every write is measured in columns and clipped there,
         // so a wide glyph takes the two cells it occupies.
         let content_end = area.x + 1 + u16::try_from(inner_w).unwrap_or(u16::MAX);
+        let text_end = content_end.saturating_sub(u16::try_from(right_w).unwrap_or(u16::MAX));
         let put = |buf: &mut ratatui::buffer::Buffer, x: u16, text: &str, style: Style| -> u16 {
-            let room = usize::from(content_end.saturating_sub(x));
+            let room = usize::from(text_end.saturating_sub(x));
             buf.set_stringn(x, y, text, room, style).0
         };
 
         // Left cap.
         set_cell(buf, area.x, y, left_cap, cap_style);
         let mut x = area.x + 1;
+        let left_w = inner_w - right_w;
 
-        if !has_title || inner_w <= prefix_w + 4 {
+        if title_trimmed.is_empty() || left_w <= prefix_w + 4 {
             // No title or not enough room: render just the prefix, padded.
-            // " ⎇ owner/repo#1234 "
             x = put(
                 buf,
                 x,
-                &ellipsize_end(&format!("{prefix} "), inner_w),
+                &ellipsize_end(&format!("{prefix} "), left_w),
                 text_style,
             );
         } else {
-            // Render prefix + arrow + title.
-            // " ⎇ owner/repo#1234 ▸ PR title here "
-            let arrow = " \u{2192} "; // " ▸ "
             x = put(buf, x, &prefix, text_style);
             x = put(buf, x, arrow, fill_style);
-
             // Remaining space for the title, less its trailing space.
             let used = prefix_w + display_width(arrow);
-            let title_budget = inner_w.saturating_sub(used + 1);
+            let title_budget = left_w.saturating_sub(used + 1);
             x = put(
                 buf,
                 x,
@@ -15515,14 +15535,48 @@ impl App {
             );
         }
 
-        // Fill remaining space to the right cap.
-        while x < content_end {
+        // Fill to where the right end starts, then the right end itself.
+        while x < text_end {
             set_cell(buf, x, y, " ", fill_style);
             x += 1;
         }
+        buf.set_stringn(text_end, y, &right, right_w, text_style);
 
         // Right cap.
         set_cell(buf, content_end, y, right_cap, cap_style);
+    }
+}
+
+/// Where the band's pull request sits in the agent's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BandPlace {
+    /// Zero-based.
+    pub(super) index: usize,
+    pub(super) count: usize,
+}
+
+/// The cells of title the band keeps before it gives up its counter: a title
+/// cut shorter than this no longer says which pull request it is.
+const BAND_TITLE_FLOOR: usize = 16;
+
+/// The band's right end within `room` cells: "  1/3  Ctrl-n next " when it
+/// fits, the counter alone when only that does, and a single space of padding
+/// otherwise or with only one pull request.
+fn band_right_end(place: BandPlace, next_key: &str, room: usize) -> String {
+    if place.count < 2 {
+        return " ".to_string();
+    }
+    let counter = format!("  {}/{} ", place.index + 1, place.count);
+    if !next_key.is_empty() {
+        let full = format!("  {}/{}  {next_key} next ", place.index + 1, place.count);
+        if display_width(&full) <= room {
+            return full;
+        }
+    }
+    if display_width(&counter) <= room {
+        counter
+    } else {
+        " ".to_string()
     }
 }
 
@@ -27122,7 +27176,7 @@ mod tests {
         input.cursor = cursor;
         PromptState::AttachPullRequestInput {
             session_id: "session-1".to_string(),
-            current_pr: Some("#42 (open) Fix the frobnicator (manually attached)".to_string()),
+            back: crate::app::test_support::pull_requests_prompt("session-1"),
             input,
         }
     }
@@ -27138,12 +27192,23 @@ mod tests {
 
     #[test]
     fn attach_pull_request_modal_publishes_a_clickable_input_rect() {
-        // Both shapes publish: with a current-PR line in the body and without.
-        for current_pr in [Some("#42 (open) Fix the frobnicator".to_string()), None] {
+        // Both leads publish: with pull requests to join and with none.
+        for count in [1, 0] {
             let mut app = test_app(default_bindings());
+            if count == 1 {
+                app.engine.agent_prs.insert(
+                    "session-1".to_string(),
+                    vec![crate::app::test_support::found_pr(
+                        "o/r",
+                        42,
+                        crate::model::PrState::Open,
+                        "Fix the frobnicator",
+                    )],
+                );
+            }
             app.prompt = PromptState::AttachPullRequestInput {
                 session_id: "session-1".to_string(),
-                current_pr,
+                back: crate::app::test_support::pull_requests_prompt("session-1"),
                 input: TextInput::new(),
             };
             let buf = draw(&mut app);
@@ -28711,7 +28776,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = Rect::new(0, 0, width, 1);
-                    app.render_pr_banner(frame, area, &pr);
+                    app.render_pr_banner(frame, area, &pr, BandPlace { index: 0, count: 1 });
                 })
                 .expect("render frame");
             // Width 6 has room for the caps and four inner cells, which is the

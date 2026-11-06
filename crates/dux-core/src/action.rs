@@ -112,12 +112,30 @@ pub enum Action {
     /// Open the macro command bar to send text macros. Works over the windowed agent pane and in
     /// fullscreen.
     OpenMacroBar,
-    /// Open the selected agent's current pull request in the default browser.
+    /// Open the pull request the band shows in the default browser.
     OpenCurrentPullRequest,
-    /// Attach a GitHub pull request to the selected agent, beside the ones dux finds.
-    AttachPullRequest,
-    /// Detach the pull request the selected agent shows, when you attached it.
-    DetachPullRequest,
+    /// Step the band to the agent's next pull request.
+    NextPullRequest,
+    /// Palette-only: show, order, attach and hide the selected agent's pull
+    /// requests in one modal.
+    PullRequests,
+    /// Pull requests modal: attach a pull request to the agent.
+    PullRequestsAttach,
+    /// Pull requests modal: hide the selected pull request dux found, detach one
+    /// you attached, or show a hidden one again. The row decides which.
+    PullRequestHideOrDetach,
+    /// Pull requests modal: show or hide the hidden pull requests.
+    PullRequestsToggleHidden,
+    /// Pull requests modal: switch between the pull requests and the branches.
+    PullRequestsToggleView,
+    /// Pull requests modal: switch between automatic order and your own.
+    PullRequestsToggleSort,
+    /// Pull requests modal: move the selected pull request up.
+    PullRequestMoveUp,
+    /// Pull requests modal: move the selected pull request down.
+    PullRequestMoveDown,
+    /// Pull requests modal: move the selected pull request to the top.
+    PullRequestMoveTop,
     /// Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent
     /// while dux chords stay active; fullscreen, keys go to the agent verbatim.
     ToggleFullscreen,
@@ -416,8 +434,16 @@ impl Action {
             Action::SelectTab9 => "select_tab_9",
             Action::OpenMacroBar => "open_macro_bar",
             Action::OpenCurrentPullRequest => "open_current_pull_request",
-            Action::AttachPullRequest => "attach_pull_request",
-            Action::DetachPullRequest => "detach_pull_request",
+            Action::NextPullRequest => "next_pull_request",
+            Action::PullRequests => "pull_requests",
+            Action::PullRequestsAttach => "pull_requests_attach",
+            Action::PullRequestHideOrDetach => "pull_request_hide_or_detach",
+            Action::PullRequestsToggleHidden => "pull_requests_toggle_hidden",
+            Action::PullRequestsToggleView => "pull_requests_toggle_view",
+            Action::PullRequestsToggleSort => "pull_requests_toggle_sort",
+            Action::PullRequestMoveUp => "pull_request_move_up",
+            Action::PullRequestMoveDown => "pull_request_move_down",
+            Action::PullRequestMoveTop => "pull_request_move_top",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -620,14 +646,28 @@ impl Action {
                 "Open the macro command bar to send text macros. Works over the windowed agent pane and in fullscreen."
             }
             Action::OpenCurrentPullRequest => {
-                "Open the selected agent's current pull request in the default browser."
+                "Open the pull request the band shows in the default browser."
             }
-            Action::AttachPullRequest => {
-                "Attach a GitHub pull request to the selected agent, beside the ones dux finds."
+            Action::NextPullRequest => {
+                "Step the band to the agent's next pull request. While you type to the agent the key reaches the agent instead."
             }
-            Action::DetachPullRequest => {
-                "Detach the pull request the selected agent shows, when you attached it."
+            Action::PullRequests => {
+                "Show, order, attach and hide the selected agent's pull requests."
             }
+            Action::PullRequestsAttach => "Pull requests: attach a pull request to the agent.",
+            Action::PullRequestHideOrDetach => {
+                "Pull requests: hide the selected one dux found, detach one you attached, or show a hidden one again."
+            }
+            Action::PullRequestsToggleHidden => "Pull requests: show or hide the hidden ones.",
+            Action::PullRequestsToggleView => {
+                "Pull requests: switch between the pull requests and the branches."
+            }
+            Action::PullRequestsToggleSort => {
+                "Pull requests: switch between automatic order and your own."
+            }
+            Action::PullRequestMoveUp => "Pull requests: move the selected one up.",
+            Action::PullRequestMoveDown => "Pull requests: move the selected one down.",
+            Action::PullRequestMoveTop => "Pull requests: move the selected one to the top.",
             Action::ToggleFullscreen => {
                 "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go to the agent verbatim."
             }
@@ -866,8 +906,7 @@ impl Action {
             | Action::ToggleRandomizedPetNameDefault
             | Action::TogglePrBannerPosition
             | Action::ForceReconnectAgent
-            | Action::AttachPullRequest
-            | Action::DetachPullRequest
+            | Action::PullRequests
             | Action::RefreshChanges
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider
@@ -895,6 +934,7 @@ impl Action {
             | Action::MoveTerminalBottom => None,
             Action::OpenMacroBar
             | Action::OpenCurrentPullRequest
+            | Action::NextPullRequest
             | Action::ToggleFullscreen
             | Action::ScrollPageUp
             | Action::ScrollPageDown
@@ -951,6 +991,14 @@ impl Action {
             | Action::ToggleMarked
             | Action::NewMacro
             | Action::DeleteMacro
+            | Action::PullRequestsAttach
+            | Action::PullRequestHideOrDetach
+            | Action::PullRequestsToggleHidden
+            | Action::PullRequestsToggleView
+            | Action::PullRequestsToggleSort
+            | Action::PullRequestMoveUp
+            | Action::PullRequestMoveDown
+            | Action::PullRequestMoveTop
             | Action::ClearTextField => Some("Overlays"),
         }
     }
