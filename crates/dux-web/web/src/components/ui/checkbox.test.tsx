@@ -29,3 +29,15 @@ describe("the shared checkbox in its indeterminate state", () => {
     expect(container.querySelector(".lucide-check")).toBeTruthy()
   })
 })
+
+// base-ui draws the box as a span, which `:disabled` never matches, so the
+// disabled look has to key off the attribute base-ui stamps.
+describe("the shared checkbox when disabled", () => {
+  it("carries the attribute its disabled look keys off", () => {
+    render(<Checkbox disabled aria-label="Off" />)
+    const root = screen.getByRole("checkbox")
+    expect(root.tagName).toBe("SPAN")
+    expect(root.hasAttribute("data-disabled")).toBe(true)
+    expect(root.className).toContain("data-disabled:opacity-50")
+  })
+})

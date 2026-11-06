@@ -389,7 +389,9 @@ mod tests {
         "delete_current_branch_warning",
         "delete_other_branches_warning",
         "delete_branches_checking",
+        "delete_branches_checked",
         "delete_branches_check_failed",
+        "delete_current_branch_check_failed",
         "unpushed_count_failure",
         "delete_protected_branches",
         "delete_branch_loss",
@@ -444,8 +446,30 @@ mod tests {
                 )
             }
             "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
+            "delete_branches_checked" => {
+                let lost = |key: &str| fixture_unpushed(&args[key]).expect(key);
+                let others = strings(&args["others"]);
+                let others: Vec<&str> = others.iter().map(String::as_str).collect();
+                crate::delete_agent_prose::branches_checked_prose(
+                    args["current"].as_str(),
+                    &lost("current_lost"),
+                    &others,
+                    &lost("others_lost"),
+                    &lost("both_lost"),
+                )
+                .map_or_else(
+                    |failed| failed,
+                    |said| said.expect("a fixture case says something"),
+                )
+            }
             "delete_branches_check_failed" => {
                 crate::delete_agent_prose::branches_check_failed_prose(&s("reason"))
+            }
+            "delete_current_branch_check_failed" => {
+                crate::delete_agent_prose::current_branch_check_failed_prose(
+                    &s("branch"),
+                    &s("reason"),
+                )
             }
             "unpushed_count_failure" => {
                 let branches = strings(&args["branches"]);

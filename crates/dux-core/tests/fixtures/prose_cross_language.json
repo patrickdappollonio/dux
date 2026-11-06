@@ -1268,7 +1268,396 @@
       "sentence": "delete_branches_checking",
       "args": {},
       "segments": [
-        "Checking the branches…"
+        "Looking for unpushed work on the branches…"
+      ]
+    },
+    {
+      "what": "the branch check's answer for one branch with nothing unpushed",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "feat",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "No unpushed work on ",
+        {
+          "name": "feat",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the branch check's answer for two branches with nothing unpushed",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "No unpushed work on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " or ",
+        {
+          "name": "born",
+          "quoted": false
+        }
+      ]
+    },
+    {
+      "what": "the branch check's answer for three branches with nothing unpushed",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born",
+          "spike"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "No unpushed work on any of the 3 branches"
+      ]
+    },
+    {
+      "what": "the branch check's answer for one unpushed commit",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "wip",
+        "current_lost": {
+          "count": 1,
+          "has_remote_refs": true
+        },
+        "others": [],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "1 commit on ",
+        {
+          "name": "wip",
+          "quoted": false
+        },
+        " isn't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer for several unpushed commits on one branch",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "wip",
+        "current_lost": {
+          "count": 4,
+          "has_remote_refs": true
+        },
+        "others": [],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "4 commits on ",
+        {
+          "name": "wip",
+          "quoted": false
+        },
+        " aren't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer naming only the branch that holds the unpushed commits",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 2,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 2,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "2 commits on ",
+        {
+          "name": "born",
+          "quoted": false
+        },
+        " aren't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer naming both branches when both hold unpushed commits",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 3,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 2,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 5,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "5 commits on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "born",
+          "quoted": false
+        },
+        " aren't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer counting the branches when more than two may hold unpushed commits",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born",
+          "spike",
+          "fix"
+        ],
+        "others_lost": {
+          "count": 5,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 5,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "5 commits on 3 branches aren't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer for commits only the two branches share",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 1,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "1 commit on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "born",
+          "quoted": false
+        },
+        " isn't pushed anywhere"
+      ]
+    },
+    {
+      "what": "the branch check's answer with nothing to lose in a repository with no remote",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "feat",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": false
+        },
+        "others": [],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "Everything on ",
+        {
+          "name": "feat",
+          "quoted": false
+        },
+        " is also on another branch, and this repository has no remote"
+      ]
+    },
+    {
+      "what": "the branch check's answer for unpushed commits in a repository with no remote",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "wip",
+        "current_lost": {
+          "count": 1,
+          "has_remote_refs": false
+        },
+        "others": [],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "1 commit on ",
+        {
+          "name": "wip",
+          "quoted": false
+        },
+        " is on no other branch, and this repository has no remote"
+      ]
+    },
+    {
+      "what": "the branch check's answer when git could not count the commits",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "failed": "git rev-list failed"
+        }
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " and ",
+        {
+          "name": "born",
+          "quoted": false
+        },
+        " (git rev-list failed); check them before deleting them."
+      ]
+    },
+    {
+      "what": "the branch check's answer when git could not count one box of two",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "failed": "git rev-list failed"
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " (git rev-list failed); check it before deleting it."
       ]
     },
     {
@@ -1279,6 +1668,22 @@
       },
       "segments": [
         "dux could not check the branches (git could not be run), so they will be kept."
+      ]
+    },
+    {
+      "what": "the branch boxes when git could not read the branch the worktree is on",
+      "sentence": "delete_current_branch_check_failed",
+      "args": {
+        "branch": "refactor-cache",
+        "reason": "git could not read the branch"
+      },
+      "segments": [
+        "dux could not check ",
+        {
+          "name": "refactor-cache",
+          "quoted": false
+        },
+        " (git could not read the branch), so it will be kept."
       ]
     },
     {

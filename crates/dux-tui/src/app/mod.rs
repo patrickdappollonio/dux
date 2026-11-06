@@ -2891,7 +2891,11 @@ impl DeleteAgentTarget {
                 unchecked: None,
                 offered: branches.iter().map(|branch| branch.name.clone()).collect(),
             };
+        // A box whose loss git could not count cannot be answered, so it is
+        // a failed check and keeps its branches whatever the default says.
+        let [current_uncounted, others_uncounted] = offer.count_failures();
         let current = match &offer.current {
+            Some(_) if current_uncounted.is_some() => unchecked(Unchecked::Failed),
             Some(current) => pinned(
                 delete_branch.unwrap_or_else(|| offer.current_default()),
                 &[current],
@@ -2906,6 +2910,8 @@ impl DeleteAgentTarget {
         };
         let others = if offer.others.is_empty() {
             unchecked(Unchecked::NotOffered)
+        } else if others_uncounted.is_some() {
+            unchecked(Unchecked::Failed)
         } else {
             let others: Vec<&dux_core::branch_history::OfferedBranch> =
                 offer.others.iter().collect();
@@ -2942,32 +2948,38 @@ impl DeleteBranchOffer {
         }
     }
 
-    /// Whether there is a first box: git answered and read the branch the
-    /// worktree is on (the project's own branch is offered in no box).
-    pub(crate) fn offers_current(&self) -> bool {
-        self.ready().is_some_and(|offer| offer.current.is_some())
+    /// Whether the first box can be answered: it is offered and git counted
+    /// what it would lose. One git could not count is drawn dimmed and
+    /// unticked, is no focus stop, and keeps its branch.
+    pub(crate) fn current_answerable(&self) -> bool {
+        self.ready()
+            .is_some_and(|offer| offer.current.is_some() && offer.count_failures()[0].is_none())
     }
 
-    /// Whether the first box shows ticked: the answer, else its default.
+    /// Whether the second box can be answered, as for the first.
+    pub(crate) fn others_answerable(&self) -> bool {
+        self.ready()
+            .is_some_and(|offer| !offer.others.is_empty() && offer.count_failures()[1].is_none())
+    }
+
+    /// Whether the first box shows ticked: the answer, else its default, and
+    /// never while it cannot be answered.
     pub(crate) fn current_ticked(&self, answer: Option<bool>) -> bool {
-        answer.unwrap_or_else(|| {
-            self.ready()
-                .is_some_and(dux_core::branch_history::BranchOffer::current_default)
-        })
+        self.current_answerable()
+            && answer.unwrap_or_else(|| {
+                self.ready()
+                    .is_some_and(dux_core::branch_history::BranchOffer::current_default)
+            })
     }
 
-    /// Whether the second box shows ticked: the answer, else its default.
+    /// Whether the second box shows ticked: the answer, else its default, and
+    /// never while it cannot be answered.
     pub(crate) fn others_ticked(&self, answer: Option<bool>) -> bool {
-        answer.unwrap_or_else(|| {
-            self.ready()
-                .is_some_and(dux_core::branch_history::BranchOffer::others_default)
-        })
-    }
-
-    /// Whether there is a second box at all: git answered and the agent was
-    /// on another branch that is still there.
-    pub(crate) fn offers_others(&self) -> bool {
-        self.ready().is_some_and(|offer| !offer.others.is_empty())
+        self.others_answerable()
+            && answer.unwrap_or_else(|| {
+                self.ready()
+                    .is_some_and(dux_core::branch_history::BranchOffer::others_default)
+            })
     }
 }
 

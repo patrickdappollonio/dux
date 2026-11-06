@@ -193,20 +193,141 @@ export function otherBranchesWarningProse(
   return sentences(parts)
 }
 
-/**
- * How long the delete dialog waits on a branch check before it says it is
- * still checking, so an answer that lands inside it never flashes the line.
- */
-export const BRANCHES_CHECKING_GRACE_MS = 400
-
 /** What the branch boxes say while the dialog is still asking git about them. */
 export function branchesCheckingProse(): Prose {
-  return ["Checking the branches…"]
+  return ["Looking for unpushed work on the branches…"]
+}
+
+/** What git answered about the commits a box would delete, or why it could not count. */
+export type UnpushedAnswer =
+  | { count: number; has_remote_refs: boolean }
+  | { failed: string }
+
+/**
+ * What git answered about the branches the boxes offer (`current`, the first
+ * box's, when there is one, and `others`), said before anything is ticked:
+ * whether deleting them would lose work that exists nowhere else. The count is
+ * the one a tick of every offered box would lose, so it agrees with the loss
+ * warning; `failed` is the sentence for a count git could not make, naming
+ * the branches of every box `boxCountFailures` says it could not count.
+ *
+ * The commits are said to be on the branches whose own box's count is not
+ * zero, or on every offered branch when only their union holds them. More
+ * than two such branches are counted rather than named, and the second box
+ * counts as a whole, since git counts it as one. `ok: null` is no box offering
+ * a branch, which has nothing to say. Mirrors dux-core's
+ * `branches_checked_prose`, pinned by the shared prose fixture.
+ */
+export function branchesCheckedProse(
+  current: string | null,
+  currentLost: UnpushedAnswer,
+  others: readonly string[],
+  othersLost: UnpushedAnswer,
+  bothLost: UnpushedAnswer,
+): { ok: Prose | null } | { failed: Prose } {
+  const offered = [...(current === null ? [] : [current]), ...others]
+  if (offered.length === 0) return { ok: null }
+  const [currentFailed, othersFailed] = boxCountFailures(
+    current === null ? null : currentLost,
+    others.length > 0 ? othersLost : null,
+    bothLost,
+  )
+  const reason = currentFailed ?? othersFailed
+  if (reason !== null)
+    return {
+      failed: unpushedCountFailureProse(
+        [
+          ...(current !== null && currentFailed !== null ? [current] : []),
+          ...(othersFailed !== null ? others : []),
+        ],
+        reason,
+      ),
+    }
+  const lost =
+    current !== null ? (others.length > 0 ? bothLost : currentLost) : othersLost
+  if ("failed" in lost)
+    return { failed: unpushedCountFailureProse(offered, lost.failed) }
+  const noRemote = !lost.has_remote_refs
+  if (lost.count === 0) {
+    const where: Prose =
+      offered.length <= 2
+        ? nameList(offered, noRemote ? " and " : " or ")
+        : [
+            noRemote
+              ? `the ${offered.length} branches`
+              : `any of the ${offered.length} branches`,
+          ]
+    return {
+      ok: noRemote
+        ? [
+            "Everything on ",
+            ...where,
+            " is also on another branch, and this repository has no remote",
+          ]
+        : ["No unpushed work on ", ...where],
+    }
+  }
+  const holds = (answer: UnpushedAnswer) => !("failed" in answer) && answer.count > 0
+  const named = [
+    ...(current !== null && holds(currentLost) ? [current] : []),
+    ...(holds(othersLost) ? others : []),
+  ]
+  const holding = named.length > 0 ? named : offered
+  const one = lost.count === 1
+  const where: Prose =
+    holding.length > 2 ? [`${holding.length} branches`] : nameList(holding, " and ")
+  const tail = noRemote
+    ? one
+      ? " is on no other branch, and this repository has no remote"
+      : " are on no other branch, and this repository has no remote"
+    : one
+      ? " isn't pushed anywhere"
+      : " aren't pushed anywhere"
+  return {
+    ok: joinProse(
+      [[one ? "1 commit on " : `${lost.count} commits on `], where, [tail]],
+      "",
+    ),
+  }
+}
+
+/**
+ * Why git could not count what each box (`[first, second]`) would lose, or
+ * `null` for a box it counted or that is not offered (its answer `null`). A box is counted by its
+ * own count and, while the other box is offered too, by the count of both
+ * together, since ticking both needs that one. A box with a reason cannot be
+ * answered: it is disabled and unticked, and keeps its branches. Mirrors
+ * dux-core's `box_count_failures`.
+ */
+export function boxCountFailures(
+  currentLost: UnpushedAnswer | null,
+  othersLost: UnpushedAnswer | null,
+  bothLost: UnpushedAnswer,
+): [string | null, string | null] {
+  const failed = (answer: UnpushedAnswer) =>
+    "failed" in answer ? answer.failed : null
+  const both =
+    currentLost !== null && othersLost !== null ? failed(bothLost) : null
+  return [
+    currentLost === null ? null : (failed(currentLost) ?? both),
+    othersLost === null ? null : (failed(othersLost) ?? both),
+  ]
 }
 
 /** What the branch boxes say when git could not be asked about them. */
 export function branchesCheckFailedProse(reason: string): Prose {
   return [`dux could not check the branches (${reason}), so they will be kept.`]
+}
+
+/**
+ * What the branch boxes say when git answered about every branch but the one
+ * the worktree is on, which is the only one kept on that account.
+ */
+export function currentBranchCheckFailedProse(
+  branch: string,
+  reason: string,
+): Prose {
+  return ["dux could not check ", chip(branch), ` (${reason}), so it will be kept.`]
 }
 
 /**

@@ -197,7 +197,128 @@ pub fn other_branches_warning_prose(others: &[(&str, BranchOrigin)], state: BoxS
 
 /// What the branch boxes say while the dialog is still asking git about them.
 pub fn branches_checking_prose() -> Prose {
-    Prose::new().text("Checking the branches\u{2026}")
+    Prose::new().text("Looking for unpushed work on the branches\u{2026}")
+}
+
+/// Why git could not count what each box (`[first, second]`) would lose, or
+/// `None` for a box it counted or that is not offered (its answer `None`). A box is counted by its
+/// own count and, while the other box is offered too, by the count of both
+/// together, since ticking both needs that one. A box with a reason cannot be
+/// answered: both dialogs draw it disabled and unticked and send it as a failed
+/// check, so its branches are kept. Mirrored by the browser's
+/// `boxCountFailures`.
+pub fn box_count_failures<'a>(
+    current_lost: Option<&'a UnpushedAnswer>,
+    others_lost: Option<&'a UnpushedAnswer>,
+    both_lost: &'a UnpushedAnswer,
+) -> [Option<&'a str>; 2] {
+    let failed = |answer: &'a UnpushedAnswer| answer.as_ref().err().map(String::as_str);
+    let both = failed(both_lost).filter(|_| current_lost.is_some() && others_lost.is_some());
+    [
+        current_lost.and_then(|lost| failed(lost).or(both)),
+        others_lost.and_then(|lost| failed(lost).or(both)),
+    ]
+}
+
+/// What git answered about the branches the boxes offer (`current`, the
+/// first box's, when there is one, and `others`), said before anything is
+/// ticked: whether deleting them would lose work that exists nowhere else.
+/// The count is the one a tick of every offered box would lose, so it agrees
+/// with the loss warning.
+///
+/// The commits are said to be on the branches whose own box's count is not
+/// zero, or on every offered branch when only their union holds them. More
+/// than two such branches are counted rather than named, and the second box
+/// counts as a whole, since git counts it as one.
+///
+/// `None` when no box offers a branch (the agent is on the project's own), so
+/// there is nothing to say and the surface shows no answer at all.
+///
+/// # Errors
+///
+/// The sentence saying git could not count the commits, naming the branches
+/// of every box [`box_count_failures`] says it could not count.
+pub fn branches_checked_prose(
+    current: Option<&str>,
+    current_lost: &UnpushedAnswer,
+    others: &[&str],
+    others_lost: &UnpushedAnswer,
+    both_lost: &UnpushedAnswer,
+) -> Result<Option<Prose>, Prose> {
+    let offered: Vec<&str> = current.into_iter().chain(others.iter().copied()).collect();
+    if offered.is_empty() {
+        return Ok(None);
+    }
+    let [current_failed, others_failed] = box_count_failures(
+        current.map(|_| current_lost),
+        (!others.is_empty()).then_some(others_lost),
+        both_lost,
+    );
+    if let Some(reason) = current_failed.or(others_failed) {
+        let uncounted: Vec<&str> = current
+            .filter(|_| current_failed.is_some())
+            .into_iter()
+            .chain(others.iter().copied().filter(|_| others_failed.is_some()))
+            .collect();
+        return Err(unpushed_count_failure_prose(&uncounted, reason));
+    }
+    let lost = match (current, others.is_empty()) {
+        (Some(_), false) => both_lost,
+        (Some(_), true) => current_lost,
+        (None, _) => others_lost,
+    };
+    let answer = match lost {
+        Ok(answer) => *answer,
+        Err(reason) => return Err(unpushed_count_failure_prose(&offered, reason)),
+    };
+    let no_remote = !answer.has_remote_refs;
+    if answer.count == 0 {
+        let mut prose = Prose::new().text(if no_remote {
+            "Everything on "
+        } else {
+            "No unpushed work on "
+        });
+        match (offered.len(), no_remote) {
+            (1 | 2, _) => push_list(
+                &mut prose,
+                &offered,
+                if no_remote { " and " } else { " or " },
+            ),
+            (many, true) => prose.push_text(format!("the {many} branches")),
+            (many, false) => prose.push_text(format!("any of the {many} branches")),
+        }
+        if no_remote {
+            prose.push_text(" is also on another branch, and this repository has no remote");
+        }
+        return Ok(Some(prose));
+    }
+    let holds = |lost: &UnpushedAnswer| matches!(lost, Ok(lost) if lost.count > 0);
+    let mut holding: Vec<&str> = current
+        .filter(|_| holds(current_lost))
+        .into_iter()
+        .chain(others.iter().copied().filter(|_| holds(others_lost)))
+        .collect();
+    if holding.is_empty() {
+        holding = offered;
+    }
+    let one = answer.count == 1;
+    let mut prose = Prose::new().text(if one {
+        "1 commit on ".to_string()
+    } else {
+        format!("{} commits on ", answer.count)
+    });
+    if holding.len() > 2 {
+        prose.push_text(format!("{} branches", holding.len()));
+    } else {
+        push_list(&mut prose, &holding, " and ");
+    }
+    prose.push_text(match (no_remote, one) {
+        (false, true) => " isn't pushed anywhere",
+        (false, false) => " aren't pushed anywhere",
+        (true, true) => " is on no other branch, and this repository has no remote",
+        (true, false) => " are on no other branch, and this repository has no remote",
+    });
+    Ok(Some(prose))
 }
 
 /// What the branch boxes say when git could not be asked about them.
@@ -205,6 +326,15 @@ pub fn branches_check_failed_prose(reason: &str) -> Prose {
     Prose::new().text(format!(
         "dux could not check the branches ({reason}), so they will be kept."
     ))
+}
+
+/// What the branch boxes say when git answered about every branch but the one
+/// the worktree is on, which is the only one kept on that account.
+pub fn current_branch_check_failed_prose(branch: &str, reason: &str) -> Prose {
+    Prose::new()
+        .text("dux could not check ")
+        .name(branch)
+        .text(format!(" ({reason}), so it will be kept."))
 }
 
 /// The line naming branches the agent was on that are the project's own,
@@ -217,4 +347,21 @@ pub fn protected_branches_prose(branches: &[&str]) -> Prose {
     } else {
         " are the project's own branches, so dux keeps them."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_offered_branch_leaves_nothing_to_say() {
+        let none = Ok(crate::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        });
+        assert!(matches!(
+            branches_checked_prose(None, &none, &[], &none, &none),
+            Ok(None)
+        ));
+    }
 }

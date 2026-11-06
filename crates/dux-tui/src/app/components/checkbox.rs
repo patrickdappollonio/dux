@@ -35,6 +35,8 @@ impl From<bool> for CheckMark {
 pub(crate) enum CheckboxState {
     Normal,
     Focused,
+    /// Cannot be answered: drawn dimmed, and never a focus stop.
+    Disabled,
 }
 
 impl CheckboxState {
@@ -200,6 +202,7 @@ impl<'a> Checkbox<'a> {
         match self.state {
             CheckboxState::Normal => base_marker_style,
             CheckboxState::Focused => base_marker_style.add_modifier(Modifier::BOLD),
+            CheckboxState::Disabled => base_marker_style.add_modifier(Modifier::DIM),
         }
     }
 
@@ -207,6 +210,7 @@ impl<'a> Checkbox<'a> {
         match self.state {
             CheckboxState::Normal => base_label_style,
             CheckboxState::Focused => base_label_style.add_modifier(Modifier::BOLD),
+            CheckboxState::Disabled => base_label_style.add_modifier(Modifier::DIM),
         }
     }
 }

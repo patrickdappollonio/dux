@@ -411,9 +411,17 @@ it only passed through between two of dux's checks, so the dialog can offer all 
 - **"Also delete the other branches this agent was on: …"** names every other branch the
   worktree has been on that still exists. It appears only when there is at least one.
 
-Until dux has read the branches from git, which takes a moment, the dialog says "Checking the
-branches…" (the browser shows the first box disabled; the terminal UI shows no branch box
-yet). Press **Delete** before that, or after git could not be asked, and every branch is kept.
+dux starts reading the branches from git as soon as the dialog opens, so the answer is
+usually in by the time you tick the worktree box. Until it is, the dialog says "Looking for
+unpushed work on the branches…" (the browser shows the first box disabled; the terminal UI
+shows no branch box yet). Once git answers, the dialog says whether deleting the branches it
+offers would lose work that exists nowhere else, such as "No unpushed work on …" or "2 commits
+on … aren't pushed anywhere", naming up to two branches and counting them past that. The
+browser shows that answer for a few seconds before it goes away; the terminal UI keeps it
+above the boxes. Press **Delete** before git has answered, or after git could not be asked,
+and every branch is kept. When git could not be asked, or could not count the commits, the
+dialog says why; cancel and open it again to retry. A box whose commits git could not count
+is disabled and unticked, so its branches are kept.
 
 Where each box starts depends on whether dux can prove the branch is its own:
 

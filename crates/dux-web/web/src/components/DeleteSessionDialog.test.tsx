@@ -4,7 +4,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import type { DuxState } from "@/lib/store"
 import { installBrowserHistory } from "@/test/browserHistory"
-import { BRANCHES_CHECKING_GRACE_MS } from "@/lib/deleteAgent"
 
 // Override `useDux` (seeded spine + target) and spy the store actions the
 // dialog fires, while every other store export stays intact.
@@ -215,17 +214,27 @@ describe("DeleteSessionDialog", () => {
     }
   })
 
-  it("keeps the boxes disabled when the check fails, and says why", async () => {
-    branchUnpushed.mockRejectedValue(new Error("git could not be run"))
-    seed("s1", [session1])
-    render(<DeleteSessionDialog />)
-    tickWorktree()
-    expect(
-      await screen.findByText(
+  // The agent's own branch is dux's, so a good answer would tick its box; a
+  // failed one leaves it unticked, and the pill keeps saying why.
+  it("keeps the boxes disabled and unticked when the check fails, and the pill says why", async () => {
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockRejectedValue(new Error("git could not be run"))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      await act(async () => {})
+      tickWorktree()
+      act(() => vi.advanceTimersByTime(5000))
+      const pill = screen.getByRole("status")
+      expect(pill.textContent).toBe(
         "dux could not check the branches (git could not be run), so they will be kept.",
-      ),
-    ).toBeTruthy()
-    expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+      )
+      expect(chipsIn(pill)).toEqual([])
+      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+      expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    } finally {
+      vi.useRealTimers()
+    }
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     const unchecked = { delete: false, branches: [], unchecked: "failed" }
     expect(deleteSession).toHaveBeenCalledWith(
@@ -246,12 +255,12 @@ describe("DeleteSessionDialog", () => {
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
     tickWorktree()
-    expect(
-      await screen.findByText(
-        "dux could not check the branches (git could not read the branch), so they will be kept.",
-      ),
-    ).toBeTruthy()
     await waitFor(() => expect(othersBox()?.getAttribute("aria-checked")).toBe("true"))
+    const pill = screen.getByRole("status")
+    expect(pill.textContent).toBe(
+      "dux could not check dux/s1 (git could not read the branch), so it will be kept.",
+    )
+    expect(chipsIn(pill)).toEqual(["dux/s1"])
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     expect(deleteSession).toHaveBeenCalledWith(
       "s1",
@@ -268,6 +277,123 @@ describe("DeleteSessionDialog", () => {
     )
   })
 
+  // A ready answer that could not read the current branch is a failed check:
+  // the pill never says the branches were checked, and the reason is said once.
+  it("keeps the warning pill when git could not read the current branch", async () => {
+    vi.useFakeTimers()
+    try {
+      let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+      branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      await act(async () => answer(offer(null)))
+      const reason =
+        "dux could not check dux/s1 (git could not read the branch), so it will be kept."
+      expect(screen.getByRole("status").textContent).toBe(reason)
+      act(() => vi.advanceTimersByTime(5000))
+      expect(screen.getByRole("status").textContent).toBe(reason)
+      expect(screen.queryByText(/unpushed work/)).toBeNull()
+      expect(screen.getAllByText(/could not check/)).toHaveLength(1)
+      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+      expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The pill already separates the boxes from the buttons, so the dialog's
+  // misclick spacing is taken out while it is up and grows back as it leaves:
+  // the pill sits one ordinary gap above the footer.
+  it("drops the spacing above the footer while the pill is up", async () => {
+    vi.useFakeTimers()
+    try {
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      const spacing = screen.getByTestId("delete-footer-spacing")
+      expect(spacing.className).toContain("h-0")
+      await act(async () => {})
+      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
+      expect(spacing.className).toContain("h-0")
+      act(() => vi.advanceTimersByTime(5000))
+      expect(spacing.className).toContain("h-6")
+      expect(spacing.className).not.toContain("h-0")
+      expect(document.querySelector('[data-slot="dialog-content"] > .h-2')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Every box's row is the touch floor on a phone, so a tap beside a box
+  // still lands on it.
+  it("gives the worktree and branch rows the touch floor", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [
+        { name: "spike", origin: "dux", oid: OID_B },
+      ]),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    for (const id of ["delete-worktree", "delete-branch", "delete-other-branches"]) {
+      const row = document.getElementById(id)!.parentElement!
+      expect(row.className).toContain("max-md:min-h-10")
+    }
+  })
+
+  // A box with nothing it can answer is drawn disabled, and so is its label.
+  it("draws the first box and its label disabled while it cannot be answered", () => {
+    branchUnpushed.mockReturnValue(new Promise(() => {}))
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    const box = currentBox()
+    expect(box.hasAttribute("data-disabled")).toBe(true)
+    expect(box.className).toContain("data-disabled:opacity-50")
+    const label = document.querySelector('label[for="delete-branch"]') as HTMLElement
+    expect(label.className).toContain("peer-data-disabled:opacity-50")
+  })
+
+  // The pill's own height follows what it measures, so a one-line pill turning
+  // into a two-line one can be transitioned rather than jumping.
+  it("sizes the pill's wrapper to the pill's measured height as it changes", () => {
+    const observers: { cb: ResizeObserverCallback; el: Element }[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private cb: ResizeObserverCallback) {}
+        observe(el: Element) {
+          observers.push({ cb: this.cb, el })
+        }
+        disconnect() {}
+      },
+    )
+    const resize = (blockSize: number) =>
+      act(() => {
+        for (const { cb, el } of observers) {
+          const entry = { target: el, borderBoxSize: [{ blockSize, inlineSize: 100 }] }
+          cb([entry] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
+        }
+      })
+    branchUnpushed.mockReturnValue(new Promise(() => {}))
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    const pill = screen.getByRole("status")
+    const content = pill.parentElement!
+    const wrapper = content.parentElement!
+    ;(pill.lastElementChild as HTMLElement).style.lineHeight = "16px"
+    expect(observers.map((o) => o.el)).toContain(content)
+    resize(16)
+    expect(wrapper.style.height).toBe("16px")
+    expect(pill.className).toContain("rounded-full")
+    resize(42)
+    expect(wrapper.style.height).toBe("42px")
+    expect(pill.className).toContain("rounded-lg")
+    expect(pill.className).not.toContain("rounded-full")
+  })
+
   // The project's own branch is named and offered in no box: never a failed
   // check, and the delete says the box was not offered.
   it("names the project's own branch and offers no box for it", async () => {
@@ -277,6 +403,8 @@ describe("DeleteSessionDialog", () => {
     tickWorktree()
     expect(await screen.findByText(/is the project's own branch, so dux keeps it\./)).toBeTruthy()
     expect(screen.queryByText(/could not check the branches/)).toBeNull()
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.queryByText(/No branches to check/)).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     const notOffered = { delete: false, branches: [], unchecked: "not_offered" }
     expect(deleteSession).toHaveBeenCalledWith(
@@ -466,71 +594,259 @@ describe("DeleteSessionDialog", () => {
     )
   })
 
-  // A quick answer replaces the pending state before anyone could read it, so
-  // a "Checking" line drawn at the tick only flashed in and out and moved the
-  // dialog twice. The box is drawn at the tick and answers in place.
-  it("never flashes the checking line when the offer answers quickly", async () => {
+  // The pill is drawn from the first frame so its arrival moves nothing; the
+  // same pill then says the answer landed, and leaves once that has been read.
+  it("shows the checking pill from the first frame, then the checked pill until it leaves", async () => {
     vi.useFakeTimers()
     try {
+      let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+      branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
       seed("s1", [session1])
       render(<DeleteSessionDialog />)
-      tickWorktree()
-      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
-      expect(screen.queryByText("Checking the branches…")).toBeNull()
-      await act(async () => {})
-      expect(currentBox().getAttribute("aria-checked")).toBe("true")
-      expect(screen.queryByText("Checking the branches…")).toBeNull()
+      expect(screen.getByRole("status").textContent).toBe(
+        "Looking for unpushed work on the branches…",
+      )
+      await act(async () => answer(offer({ name: "dux/s1", origin: "dux" })))
+      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
+      act(() => vi.advanceTimersByTime(2999))
+      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
+      act(() => vi.advanceTimersByTime(1))
+      expect(screen.queryByRole("status")).toBeNull()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it("says it is checking the branches once the check outlasts the grace", () => {
-    vi.useFakeTimers()
-    try {
-      branchUnpushed.mockReturnValue(new Promise(() => {}))
-      seed("s1", [session1])
-      render(<DeleteSessionDialog />)
-      tickWorktree()
-      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS - 1))
-      expect(screen.queryByText("Checking the branches…")).toBeNull()
-      act(() => vi.advanceTimersByTime(2))
-      expect(screen.getByText("Checking the branches…")).toBeTruthy()
-      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  // Every check earns its line afresh: unticking mid-check and ticking again
-  // starts a new grace rather than showing the old check's line at once.
-  it("starts the grace over when the worktree box is ticked again mid-check", () => {
-    vi.useFakeTimers()
-    try {
-      branchUnpushed.mockReturnValue(new Promise(() => {}))
-      seed("s1", [session1])
-      render(<DeleteSessionDialog />)
-      tickWorktree()
-      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
-      expect(screen.getByText("Checking the branches…")).toBeTruthy()
-      tickWorktree()
-      tickWorktree()
-      expect(screen.queryByText("Checking the branches…")).toBeNull()
-      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
-      expect(screen.getByText("Checking the branches…")).toBeTruthy()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it("asks git nothing until the branch box is on screen", () => {
-    // One git call, bought only where its answer is rendered: with the worktree
-    // kept there is no branch offer at all.
+  // With nothing offered the pending pill, drawn before the dialog could know,
+  // goes at once: no green answer and no hold.
+  it("removes the pending pill at once when no branch is offered", async () => {
+    let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+    branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
-    expect(branchUnpushed).not.toHaveBeenCalled()
+    expect(screen.getByRole("status").textContent).toBe(
+      "Looking for unpushed work on the branches…",
+    )
+    await act(async () => answer(offer(null, [], { protected: ["dux/s1"] })))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.queryByText(/No branches to check/)).toBeNull()
+  })
+
+  // The answer says, before anything is ticked, whether deleting the branches
+  // would lose work that exists nowhere else, and it stays green either way:
+  // an unticked box loses nothing.
+  it.each([
+    {
+      what: "one unpushed commit",
+      answer: offer({ name: "dux/s1", origin: "dux" }, [], {
+        current_unpushed: { count: 1, has_remote_refs: true },
+      }),
+      says: "1 commit on dux/s1 isn't pushed anywhere",
+      chips: ["dux/s1"],
+    },
+    {
+      what: "several unpushed commits",
+      answer: offer({ name: "dux/s1", origin: "dux" }, [], {
+        current_unpushed: { count: 3, has_remote_refs: true },
+      }),
+      says: "3 commits on dux/s1 aren't pushed anywhere",
+      chips: ["dux/s1"],
+    },
+    {
+      what: "two branches with nothing unpushed",
+      answer: offer({ name: "dux/s1", origin: "dux" }, [
+        { name: "spike", origin: "dux", oid: OID_B },
+      ]),
+      says: "No unpushed work on dux/s1 or spike",
+      chips: ["dux/s1", "spike"],
+    },
+    {
+      what: "two branches where only the other one holds unpushed commits",
+      answer: offer(
+        { name: "dux/s1", origin: "dux" },
+        [{ name: "spike", origin: "dux", oid: OID_B }],
+        {
+          others_unpushed: { count: 2, has_remote_refs: true },
+          both_unpushed: { count: 2, has_remote_refs: true },
+        },
+      ),
+      says: "2 commits on spike aren't pushed anywhere",
+      chips: ["spike"],
+    },
+    {
+      what: "three branches with nothing unpushed",
+      answer: offer({ name: "dux/s1", origin: "dux" }, [
+        { name: "spike", origin: "dux", oid: OID_B },
+        { name: "fix", origin: "dux", oid: OID_C },
+      ]),
+      says: "No unpushed work on any of the 3 branches",
+      chips: [],
+    },
+    {
+      what: "a repository with no remote",
+      answer: offer({ name: "dux/s1", origin: "dux" }, [], {
+        current_unpushed: { count: 1, has_remote_refs: false },
+      }),
+      says: "1 commit on dux/s1 is on no other branch, and this repository has no remote",
+      chips: ["dux/s1"],
+    },
+  ])("states the answer for $what in a green pill", async ({ answer, says, chips }) => {
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockResolvedValue(answer)
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      await act(async () => {})
+      const pill = screen.getByRole("status")
+      expect(pill.textContent).toBe(says)
+      expect(chipsIn(pill)).toEqual(chips)
+      expect(pill.className).toContain("bg-dux-success/10")
+      act(() => vi.advanceTimersByTime(3000))
+      expect(screen.queryByRole("status")).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A count git could not make is said in the warning pill, which stays.
+  it("keeps the warning pill when git could not count the unpushed commits", async () => {
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockResolvedValue(
+        offer({ name: "dux/s1", origin: "dux" }, [], {
+          current_unpushed: null,
+          current_unpushed_error: "git rev-list failed",
+        }),
+      )
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      await act(async () => {})
+      act(() => vi.advanceTimersByTime(5000))
+      const pill = screen.getByRole("status")
+      expect(pill.textContent).toBe(
+        "dux could not count the unpushed commits on dux/s1 (git rev-list failed); check it before deleting it.",
+      )
+      expect(pill.className).toContain("bg-dux-warning/10")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A box whose loss git could not count cannot be answered: it is disabled
+  // and unticked even for a branch dux made, the delete keeps that branch as
+  // a failed check, and the reason is said once, in the pill.
+  it("disables and unticks a box whose unpushed count failed, and keeps its branch", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [], {
+        current_unpushed: null,
+        current_unpushed_error: "git rev-list failed",
+        both_unpushed: null,
+        both_unpushed_error: "git rev-list failed",
+      }),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
     tickWorktree()
-    expect(branchUnpushed).toHaveBeenCalledWith("s1")
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(/could not count/),
+    )
+    expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+    expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+    fireEvent.click(currentBox())
+    expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith(
+      "s1",
+      true,
+      {
+        current: { delete: false, branches: [], unchecked: "failed" },
+        others: { delete: false, branches: [], unchecked: "not_offered" },
+      },
+      null,
+    )
+  })
+
+  // Only the box whose own count failed is disabled; the other still answers,
+  // and the pill names only the branch it could not count.
+  it("disables only the box whose count failed", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer(
+        { name: "dux/s1", origin: "dux" },
+        [{ name: "spike", origin: "dux", oid: OID_B }],
+        {
+          others_unpushed: null,
+          others_unpushed_error: "git rev-list failed",
+        },
+      ),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    expect(screen.getByRole("status").textContent).toBe(
+      "dux could not count the unpushed commits on spike (git rev-list failed); check it before deleting it.",
+    )
+    expect(othersBox()!.getAttribute("aria-disabled")).toBe("true")
+    expect(othersBox()!.getAttribute("aria-checked")).toBe("false")
+    expect(currentBox().getAttribute("aria-disabled")).not.toBe("true")
+    expect(currentBox().getAttribute("aria-checked")).toBe("true")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith(
+      "s1",
+      true,
+      {
+        current: {
+          delete: true,
+          branches: [{ name: "dux/s1", oid: OID_A }],
+          offered: ["dux/s1"],
+        },
+        others: { delete: false, branches: [], unchecked: "failed" },
+      },
+      null,
+    )
+  })
+
+  // The count for both boxes together is the one a tick of both needs, so a
+  // failure there disables both.
+  it("disables both boxes when only their joint count failed", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer(
+        { name: "dux/s1", origin: "dux" },
+        [{ name: "spike", origin: "dux", oid: OID_B }],
+        { both_unpushed: null, both_unpushed_error: "git rev-list failed" },
+      ),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+    expect(othersBox()!.getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+  })
+
+  it("asks git about the branches when the dialog opens, once for the whole open", async () => {
+    vi.useFakeTimers()
+    try {
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      expect(branchUnpushed).toHaveBeenCalledWith("s1")
+      await act(async () => {})
+      act(() => vi.advanceTimersByTime(3000))
+      // A later answer would show: the ticks below must keep the first one.
+      branchUnpushed.mockResolvedValue(offer({ name: "dux/s1", origin: "before" }))
+      tickWorktree()
+      tickWorktree()
+      tickWorktree()
+      await act(async () => {})
+      expect(currentBox().getAttribute("aria-checked")).toBe("true")
+      expect(screen.queryByText(/This branch existed before the agent\./)).toBeNull()
+      expect(screen.queryByRole("status")).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // Reopening is a new question: the answers and the offer start over.
@@ -550,14 +866,15 @@ describe("DeleteSessionDialog", () => {
       branchUnpushed.mockReturnValue(new Promise(() => {}))
       seed("s2", [session1, session2])
       rerender(<DeleteSessionDialog />)
+      expect(screen.getByRole("status").textContent).toBe(
+        "Looking for unpushed work on the branches…",
+      )
       tickWorktree()
       expect(
         screen
           .getByRole("checkbox", { name: "Also delete the branch dux/s2" })
           .getAttribute("aria-disabled"),
       ).toBe("true")
-      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
-      expect(screen.getByText("Checking the branches…")).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
@@ -652,7 +969,7 @@ describe("DeleteSessionDialog", () => {
   // rendered, so it cannot be ticked. The copy says the folder is untouched,
   // because "removes the agent from dux" alone reads as though something on
   // disk went with it.
-  it("offers no worktree checkbox for a standalone agent, and says the folder is untouched", () => {
+  it("offers no worktree checkbox and asks git nothing for a standalone agent, and says the folder is untouched", () => {
     seed("sa1", [
       {
         id: "sa1",
@@ -668,6 +985,8 @@ describe("DeleteSessionDialog", () => {
     ])
     render(<DeleteSessionDialog />)
     expect(screen.queryByRole("checkbox")).toBeNull()
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(branchUnpushed).not.toHaveBeenCalled()
     expect(screen.getByText(/left untouched/i)).toBeTruthy()
     expect(screen.getByText(/~\/notes/)).toBeTruthy()
   })
@@ -790,10 +1109,8 @@ describe("DeleteSessionDialog names", () => {
       "Also delete the other branches this agent was on: a and b",
     )
     expect(chipsIn(others)).toEqual(["a", "b"])
-    // The count sentence is about the boxes ticked right now.
-    fireEvent.click(currentBox())
-    expect(chipsIn(paragraph(/dux could not count the unpushed commits on develop/)))
-      .toEqual(["develop"])
+    // A count git could not make is said in the pill alone.
+    expect(chipsIn(screen.getByRole("status"))).toEqual(["develop"])
     expect(chipsIn(paragraph(/existed before the agent\. dux cannot tell when/)))
       .toEqual(["a", "b"])
   })
