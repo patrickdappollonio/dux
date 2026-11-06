@@ -4805,13 +4805,13 @@ impl App {
         Ok(())
     }
 
+    /// The pull request the band shows for the selected agent: the one the
+    /// next-pull-request key stepped to, or the first in the agent's order.
+    /// What the open key and a click on the band open.
     pub(crate) fn current_pr_info(&self) -> Option<&crate::model::AgentPr> {
         self.selected_session()
-            .and_then(|session| self.engine.shown_pr(&session.id))
-    }
-
-    pub(crate) fn current_pr_url(&self) -> Option<&str> {
-        self.current_pr_info().map(|pr| pr.url.as_str())
+            .and_then(|session| self.band_pr(&session.id))
+            .map(|band| band.pr)
     }
 
     /// Infallible on purpose: every outcome it can have, including "there is
@@ -4823,76 +4823,18 @@ impl App {
             self.set_error("No pull request is known for the selected agent yet.");
             return;
         };
+        self.open_pr_in_browser(&pr);
+    }
 
-        let url = self.current_pr_url().unwrap_or(pr.url.as_str()).to_string();
+    /// Open one pull request in the default browser and say which.
+    pub(crate) fn open_pr_in_browser(&mut self, pr: &crate::model::AgentPr) {
         self.open_url_in_browser(
-            url,
+            pr.url.clone(),
             format!(
                 "Opened PR {}#{} in your default browser.",
                 pr.owner_repo, pr.number
             ),
         );
-    }
-
-    /// `attach-pull-request`: open the reference field for the selected agent.
-    /// The session fixes the project, so unlike the create-from-PR modal there
-    /// is no project to choose and the field is the only control.
-    pub(crate) fn open_attach_pull_request_prompt(&mut self) {
-        if !self.github_pr_agent_command_available() {
-            self.set_error(
-                "Attaching a pull request requires GitHub integration and an authenticated gh CLI.",
-            );
-            return;
-        }
-        let Some(session) = self.selected_session().cloned() else {
-            self.set_error("No agent session selected. Select an agent to attach a pull request.");
-            return;
-        };
-        // The body names the PR currently shown so overriding it is explicit.
-        let current_pr = self.engine.shown_pr(&session.id).map(|pr| {
-            let overridden = self.engine.attached_pr(&session.id).is_some();
-            format!(
-                "#{} ({}) {}{}",
-                pr.number,
-                super::pr_state_word(&pr.state),
-                pr.title,
-                if overridden {
-                    " (manually attached)"
-                } else {
-                    ""
-                }
-            )
-        });
-        self.input_target = InputTarget::None;
-        self.fullscreen_overlay = FullscreenOverlay::None;
-        self.prompt = PromptState::AttachPullRequestInput {
-            session_id: session.id,
-            current_pr,
-            input: TextInput::new(),
-        };
-    }
-
-    /// `detach-pull-request`: detach the pull request the band shows, when
-    /// the user attached it. Synchronous and reversible (attach it again), so
-    /// no modal and no confirmation.
-    pub(crate) fn detach_pull_request(&mut self) {
-        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
-            self.set_error(
-                "No agent session selected. Select an agent to detach its pull request.",
-            );
-            return;
-        };
-        let Some(key) = self.current_pr_info().map(crate::model::AgentPr::key) else {
-            self.set_error("The selected agent shows no pull request to detach.");
-            return;
-        };
-        match self.engine.detach_pull_request(&session_id, &key) {
-            Ok(update) if update.tone == StatusTone::Error => {
-                self.set_error(update.message);
-            }
-            Ok(update) => self.set_info(update.message),
-            Err(err) => self.set_error(format!("{err:#}")),
-        }
     }
 
     pub(crate) fn open_kill_running(&mut self) {
@@ -5733,6 +5675,7 @@ mod tests {
             terminal_selection: None,
             pending_link_click: None,
             pending_pr_banner_press: None,
+            pr_cursors: std::collections::HashMap::new(),
             last_link_open: None,
             url_opener: default_url_opener(),
             startup_log_selection: None,

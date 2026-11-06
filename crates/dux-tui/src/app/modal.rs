@@ -230,7 +230,11 @@ pub(crate) fn modal_spec(prompt: &PromptState) -> Option<ModalSpec> {
         | PromptState::ChangeProjectDefaultProvider(_)
         // Three modes, the saved one marked, and picking one applies it. Rows and
         // nothing else, so no buttons and no focus concept.
-        | PromptState::SetTailscaleMode(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
+        | PromptState::SetTailscaleMode(_)
+        // An agent's pull requests (or its branches) with a selection cursor;
+        // Enter opens the selected one and every other key is a binding of the
+        // modal's own scope. No buttons.
+        | PromptState::PullRequests(_) => ModalSpec { family: Picker, multiline_field: false, confirm_button: false },
 
         // The one picker that keeps its buttons: they are distinct actions (kill
         // the hovered runtime, kill the marked ones, kill everything the filter
@@ -326,6 +330,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         | PromptState::ChangeDefaultProvider(_)
         | PromptState::ChangeProjectDefaultProvider(_)
         | PromptState::SetTailscaleMode(_)
+        | PromptState::PullRequests(_)
         | PromptState::ProjectActions(_)
         | PromptState::ProjectInfo(_) => Vec::new(),
 
@@ -420,6 +425,7 @@ pub(crate) fn layout_publishes_confirm_button(layout: &OverlayMouseLayout) -> bo
         | OverlayMouseLayout::ProjectInfo { .. }
         | OverlayMouseLayout::ChangeTheme { .. }
         | OverlayMouseLayout::EditMacroList { .. }
+        | OverlayMouseLayout::PullRequests { .. }
         | OverlayMouseLayout::ResourceMonitor { .. }
         | OverlayMouseLayout::StartupCommandLogs { .. }
         | OverlayMouseLayout::RenameSession { .. }
@@ -1318,9 +1324,15 @@ pub(super) mod tests {
                 "AttachPullRequestInput",
                 PromptState::AttachPullRequestInput {
                     session_id: "s1".to_string(),
-                    current_pr: Some("#42 (open) Fix the frobnicator".to_string()),
+                    back: crate::app::test_support::pull_requests_prompt("s1"),
                     input: TextInput::new(),
                 },
+            ),
+            (
+                "PullRequests",
+                PromptState::PullRequests(crate::app::test_support::pull_requests_prompt(
+                    "session-1",
+                )),
             ),
             (
                 "NameStandaloneAgent",

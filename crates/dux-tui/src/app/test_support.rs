@@ -396,6 +396,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         terminal_selection: None,
         pending_link_click: None,
         pending_pr_banner_press: None,
+        pr_cursors: std::collections::HashMap::new(),
         last_link_open: None,
         url_opener: crate::app::default_url_opener(),
         startup_log_selection: None,
@@ -781,6 +782,38 @@ fn test_app_opens_worktrees_only_in_the_stand_in_editor() {
 /// The repository every test app is built on never signs a commit, even for a
 /// developer whose global config signs everything: the app's own git commands
 /// inherit that global config, so the answer has to live in the repository.
+/// The Pull requests modal as it opens for `session_id`.
+pub(crate) fn pull_requests_prompt(session_id: &str) -> crate::app::PullRequestsPrompt {
+    crate::app::PullRequestsPrompt {
+        session_id: session_id.to_string(),
+        view: crate::app::PullRequestsView::PullRequests,
+        cursor: 0,
+        show_hidden: false,
+    }
+}
+
+/// A pull request dux found, as the sync would record it: `owner/repo#number`
+/// on github.com, titled `title`.
+pub(crate) fn found_pr(
+    owner_repo: &str,
+    number: u64,
+    state: dux_core::model::PrState,
+    title: &str,
+) -> crate::model::AgentPr {
+    crate::model::AgentPr::found(
+        &dux_core::model::PrInfo {
+            number,
+            state,
+            title: title.to_string(),
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+            url: format!("https://github.com/{owner_repo}/pull/{number}"),
+            ..Default::default()
+        },
+        Utc::now(),
+    )
+}
+
 #[test]
 fn the_shared_fixture_repository_never_signs_under_a_signing_global_config() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -185,6 +185,10 @@ const RETIRED_KEY_ACTIONS: &[&str] = &[
     // An agent's pull requests are hidden one at a time now; there is no
     // whole-agent detection switch to resume.
     "resume_pull_request_autodetection",
+    // Attaching and detaching moved into the one Pull requests modal, whose
+    // keys are bindable on their own.
+    "attach_pull_request",
+    "detach_pull_request",
 ];
 
 /// Remove `[keys]` entries for retired actions so an old config that still binds
@@ -2754,7 +2758,9 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// Every binding in `keys` that loads but never runs on its key: a pane
 /// action whose key a global action also holds, which the main key handler
 /// answers first, and an interactive-mode key the terminal sends no bytes of
-/// its own for. Each is named by its actions and never by the key. These
+/// its own for. Each is named by its actions and never by the user's key.
+/// Also every newer default that starts unbound because the file already
+/// binds its key elsewhere, which names that default key, dux's own. These
 /// warn rather than refuse, because a file holding one used to load.
 pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
     let shadowed = keybindings::detect_conflicts(keys)
@@ -2779,7 +2785,10 @@ pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
                 scope = keybindings::BindingScope::Interactive.display_name(),
             )
         });
-    shadowed.chain(unmatchable).collect()
+    shadowed
+        .chain(unmatchable)
+        .chain(keybindings::late_default_warnings(keys))
+        .collect()
 }
 
 /// Every problem with the bindings in `keys`, none of them repeating a
@@ -4333,11 +4342,13 @@ oneshot_output = "stdout"
     }
 
     #[test]
-    fn prune_retired_key_actions_drops_the_per_mode_sort_actions() {
+    fn prune_retired_key_actions_drops_the_actions_that_were_replaced() {
         for action in [
             "sort_agents_by_updated",
             "sort_agents_by_created",
             "sort_agents_by_name",
+            "attach_pull_request",
+            "detach_pull_request",
         ] {
             // A binding for the retired action would abort startup at validate_keys...
             let mut keys = KeysConfig::default();

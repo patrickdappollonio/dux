@@ -88,6 +88,10 @@ fn highlighted_rows(app: &App, buf: &Buffer) -> Vec<u16> {
 }
 
 /// The list rect, item count and offset the picker published for clicks.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per picker layout, each only naming the three fields it publishes"
+)]
 fn published_list(layout: OverlayMouseLayout) -> (Rect, usize, usize) {
     match layout {
         OverlayMouseLayout::Command {
@@ -165,6 +169,11 @@ fn published_list(layout: OverlayMouseLayout) -> (Rect, usize, usize) {
             offset,
         }
         | OverlayMouseLayout::EditMacroList {
+            list,
+            items,
+            offset,
+        }
+        | OverlayMouseLayout::PullRequests {
             list,
             items,
             offset,
@@ -265,7 +274,7 @@ fn last(names: &[String]) -> Option<String> {
     clippy::too_many_lines,
     reason = "one arm per picker, each building that picker's fixture"
 )]
-fn fixture(app: &App, name: &str) -> PickerFixture {
+fn fixture(app: &mut App, name: &str) -> PickerFixture {
     let project = app.engine.projects[0].clone();
     match name {
         "Command" => {
@@ -567,6 +576,40 @@ fn fixture(app: &App, name: &str) -> PickerFixture {
                 row_height: 1,
             }
         }
+        "PullRequests" => {
+            // The rows are the agent's pull requests in engine memory: forty
+            // open ones on the selected agent, numbered so the automatic order
+            // (newest first, then the higher number) ends on #1. The empty
+            // list is a second agent with none.
+            let id = app.engine.sessions[0].id.clone();
+            app.engine.agent_prs.insert(
+                id.clone(),
+                (1..=u64::try_from(TALL).expect("fits"))
+                    .map(|n| {
+                        crate::app::test_support::found_pr(
+                            "o/r",
+                            n,
+                            crate::model::PrState::Open,
+                            &format!("title-{n:02}"),
+                        )
+                    })
+                    .collect(),
+            );
+            let mut empty = app.engine.sessions[0].clone();
+            empty.id = "session-empty".to_string();
+            app.engine.sessions.push(empty);
+            PickerFixture {
+                tall: PromptState::PullRequests(crate::app::test_support::pull_requests_prompt(
+                    &id,
+                )),
+                last_label: Some("title-01".to_string()),
+                empty: PromptState::PullRequests(crate::app::test_support::pull_requests_prompt(
+                    "session-empty",
+                )),
+                empty_text: "No pull requests yet",
+                row_height: 1,
+            }
+        }
         "SetTailscaleMode" => {
             use dux_core::config::TailscaleMode;
             let set = |count: usize| {
@@ -789,11 +832,11 @@ fn for_each_picker(check: impl Fn(&'static str)) {
 
 #[test]
 fn every_picker_has_a_tall_fixture() {
-    let app = test_app(default_bindings());
+    let mut app = test_app(default_bindings());
     let pickers = pickers(&app);
     assert!(pickers.len() >= 15, "the registry lists {pickers:?}");
     for name in pickers {
-        let _ = fixture(&app, name);
+        let _ = fixture(&mut app, name);
     }
 }
 
@@ -822,7 +865,7 @@ fn the_cursor_moved_past_the_bottom_stays_visible_and_highlighted() {
         // A fresh app per picker: a click on one must not pair with a click on
         // another into a double click.
         let mut app = test_app(default_bindings());
-        let fixture = fixture(&app, name);
+        let fixture = fixture(&mut app, name);
         app.prompt = fixture.tall;
         let buf = render(&mut app);
         let (list, items, _) = published_list(app.overlay_layout.active);
@@ -865,7 +908,7 @@ fn a_tall_picker_shows_the_welcome_screens_scroll_indicator() {
         // Key badges and the indicator share a color in most themes; pull them
         // apart so the indicator has to be the welcome screen's own.
         app.theme.hint_key_fg = ratatui::style::Color::Rgb(0x12, 0x34, 0x56);
-        let fixture = fixture(&app, name);
+        let fixture = fixture(&mut app, name);
         app.prompt = fixture.tall;
         let buf = render(&mut app);
         let (list, _, _) = published_list(app.overlay_layout.active);
@@ -891,7 +934,7 @@ fn a_click_on_a_visible_row_selects_that_row() {
         // A fresh app per picker: a click on one must not pair with a click on
         // another into a double click.
         let mut app = test_app(default_bindings());
-        let fixture = fixture(&app, name);
+        let fixture = fixture(&mut app, name);
         app.prompt = fixture.tall;
         render(&mut app);
         let (_, items, _) = published_list(app.overlay_layout.active);
@@ -926,7 +969,7 @@ fn the_empty_state_renders_without_a_highlight() {
         // A fresh app per picker: a click on one must not pair with a click on
         // another into a double click.
         let mut app = test_app(default_bindings());
-        let fixture = fixture(&app, name);
+        let fixture = fixture(&mut app, name);
         app.prompt = fixture.empty;
         let buf = render(&mut app);
         let shown = screen(&buf);
@@ -949,7 +992,7 @@ fn the_empty_state_renders_without_a_highlight() {
 #[test]
 fn a_click_on_a_scrolled_kill_running_list_selects_the_clicked_row() {
     let mut app = test_app(default_bindings());
-    let fixture = fixture(&app, "KillRunning");
+    let fixture = fixture(&mut app, "KillRunning");
     app.prompt = fixture.tall;
     render(&mut app);
     for _ in 0..TALL {

@@ -1085,18 +1085,56 @@ fn the_pull_request_dialog_chips_the_project() {
     assert_chipped(&app, &buf, "proj-pr");
 }
 
+/// Assert `name` is a chip on the row of the screen that carries `marker`.
+/// The agent's name also labels the header and its sidebar row behind the
+/// overlay, so only the occurrence in the dialog is asked about.
+fn assert_chipped_on_row_with(app: &App, buf: &Buffer, name: &str, marker: &str) {
+    let shown = screen(buf);
+    let row = occurrences(buf, marker).first().map_or_else(
+        || panic!("{marker:?} is not on screen:\n{shown}"),
+        |(_, y)| *y,
+    );
+    let hits: Vec<_> = occurrences(buf, name)
+        .into_iter()
+        .filter(|(_, y)| *y == row)
+        .collect();
+    assert!(
+        !hits.is_empty(),
+        "{name:?} is not beside {marker:?}:\n{shown}"
+    );
+    for (x, y) in hits {
+        assert_eq!(
+            (buf[(x, y)].fg, buf[(x, y)].bg),
+            (app.theme.overlay_bg, app.theme.text_fg),
+            "{shown}"
+        );
+    }
+}
+
 #[test]
-fn the_attach_pull_request_dialog_chips_the_pull_request_it_replaces() {
+fn the_attach_pull_request_dialog_chips_the_agent_it_joins() {
     let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].display_label();
     let buf = open(
         &mut app,
         PromptState::AttachPullRequestInput {
-            session_id: "s1".to_string(),
-            current_pr: Some("#42 (open) Fix the frobnicator".to_string()),
+            session_id: "session-1".to_string(),
+            back: crate::app::test_support::pull_requests_prompt("session-1"),
             input: TextInput::new(),
         },
     );
-    assert_chipped(&app, &buf, "#42 (open) Fix the frobnicator");
+    assert_chipped_on_row_with(&app, &buf, &agent, "pull request on");
+}
+
+#[test]
+fn the_pull_requests_modal_chips_the_agent() {
+    let mut app = test_app(default_bindings());
+    let agent = app.engine.sessions[0].display_label();
+    let buf = open(
+        &mut app,
+        PromptState::PullRequests(crate::app::test_support::pull_requests_prompt("session-1")),
+    );
+    assert_chipped_on_row_with(&app, &buf, &agent, "Agent:");
 }
 
 #[test]
