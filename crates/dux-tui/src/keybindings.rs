@@ -2432,7 +2432,22 @@ fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
 /// aside and the action starts unbound, with a warning saying how to bind it
 /// ([`late_default_warnings`]), rather than refusing a config that loaded the
 /// day before. Every other default keeps the old rule: a collision refuses.
-const LATE_DEFAULTS: &[Action] = &[Action::NextPullRequest];
+///
+/// The Pull requests modal's own keys are late too, and so is what a binding
+/// of the shared `move_up`/`move_down` there now meets: those two answer in
+/// the modal as well, so a file giving one of them a modal key (`shift-j`)
+/// keeps it and the modal's default steps aside.
+const LATE_DEFAULTS: &[Action] = &[
+    Action::NextPullRequest,
+    Action::PullRequestsAttach,
+    Action::PullRequestHideOrDetach,
+    Action::PullRequestsToggleHidden,
+    Action::PullRequestsToggleView,
+    Action::PullRequestsToggleSort,
+    Action::PullRequestMoveUp,
+    Action::PullRequestMoveDown,
+    Action::PullRequestMoveTop,
+];
 
 fn parse_configured(key_strs: &[String]) -> Vec<KeyCombination> {
     key_strs
@@ -3277,35 +3292,70 @@ mod tests {
         );
     }
 
-    /// A config written before the step key existed and already giving Ctrl-n
-    /// to an agent-pane action loads: the new default starts unbound and says
-    /// how to bind it, and the user's own binding keeps its key.
+    /// A config written before a newer default existed and already giving its
+    /// key to another action that meets it loads: the config passes the start
+    /// check, the new default starts unbound and says how to bind it, and the
+    /// user's own binding keeps its key.
     #[test]
     fn a_newer_default_steps_aside_for_an_explicit_binding_on_its_key() {
+        let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
+        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let plain_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        for (holder, bound, key, scope, holder_action, late, late_name) in [
+            (
+                "next_tab",
+                &["ctrl-n"][..],
+                ctrl_n,
+                BindingScope::Center,
+                Action::NextTab,
+                Action::NextPullRequest,
+                "next_pull_request",
+            ),
+            (
+                "move_down",
+                &["j", "down", "shift-j"][..],
+                shift_j,
+                BindingScope::PullRequestList,
+                Action::MoveDown,
+                Action::PullRequestMoveDown,
+                "pull_request_move_down",
+            ),
+            (
+                "search_toggle",
+                &["a"][..],
+                plain_a,
+                BindingScope::Palette,
+                Action::SearchToggle,
+                Action::PullRequestsAttach,
+                "pull_requests_attach",
+            ),
+        ] {
+            let mut keys = crate::config::KeysConfig::default();
+            keys.bindings.insert(
+                holder.to_string(),
+                bound.iter().map(ToString::to_string).collect(),
+            );
+
+            assert_eq!(crate::config::validate_keys(&keys), Ok(()), "{holder}");
+            let bindings = RuntimeBindings::from_keys_config(&keys);
+            assert_eq!(
+                bindings.lookup(&key, scope),
+                Some(holder_action),
+                "{holder}"
+            );
+            assert_eq!(bindings.label_for(late), "", "{holder}");
+            let warnings = late_default_warnings(&keys);
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(
+                warnings[0].contains(late_name) && warnings[0].contains(holder),
+                "{warnings:?}"
+            );
+        }
+
+        // The user binding the step key there too is a collision they made.
         let mut keys = crate::config::KeysConfig::default();
         keys.bindings
             .insert("next_tab".to_string(), vec!["ctrl-n".to_string()]);
-
-        assert!(
-            detect_conflicts(&keys).is_empty(),
-            "nothing to refuse: {:?}",
-            detect_conflicts(&keys)
-        );
-        let bindings = RuntimeBindings::from_keys_config(&keys);
-        let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
-        assert_eq!(
-            bindings.lookup(&ctrl_n, BindingScope::Center),
-            Some(Action::NextTab)
-        );
-        assert_eq!(bindings.label_for(Action::NextPullRequest), "");
-        let warnings = late_default_warnings(&keys);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains("next_pull_request") && warnings[0].contains("next_tab"),
-            "{warnings:?}"
-        );
-
-        // The user binding the step key there too is a collision they made.
         keys.bindings
             .insert("next_pull_request".to_string(), vec!["ctrl-n".to_string()]);
         assert!(!detect_conflicts(&keys).is_empty());
