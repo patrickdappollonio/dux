@@ -361,6 +361,7 @@ dux agents [OPTIONS] <COMMAND>
 - [`dux agents stop`](#dux-agents-stop): Stop everything an agent runs.
 - [`dux agents start`](#dux-agents-start): Start an agent.
 - [`dux agents tabs`](#dux-agents-tabs): An agent's provider tabs.
+- [`dux agents prs`](#dux-agents-prs): An agent's pull requests: the ones dux found on the branches its worktree has been on, and the ones you attached from any repository.
 
 ### `dux agents ls`
 
@@ -591,6 +592,174 @@ dux agents tabs stop [OPTIONS] <AGENT> <TAB>
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 | `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+
+### `dux agents prs`
+
+An agent's pull requests: the ones dux found on the branches its worktree has been on, and the ones you attached from any repository.
+
+```text
+dux agents prs [OPTIONS] <COMMAND>
+```
+
+- [`dux agents prs ls`](#dux-agents-prs-ls): List an agent's pull requests in its order, the one its banner shows first, then the hidden ones. Each row's id is the pull request's link, which every other `prs` command accepts.
+- [`dux agents prs attach`](#dux-agents-prs-attach): Attach a pull request to an agent, beside the ones it has. It can come from any repository, and stays until you detach it.
+- [`dux agents prs detach`](#dux-agents-prs-detach): Detach a pull request you attached. One dux also found on the agent's branches stays in the list, as found.
+- [`dux agents prs hide`](#dux-agents-prs-hide): Hide a pull request dux found, until you unhide it. It keeps its place in your own order.
+- [`dux agents prs unhide`](#dux-agents-prs-unhide): Show a hidden pull request again, in the place it had.
+- [`dux agents prs sort`](#dux-agents-prs-sort): Choose how an agent's pull requests are ordered. Your own order is kept while the order is automatic, so choosing `manual` again brings it back.
+- [`dux agents prs move`](#dux-agents-prs-move): Move one of an agent's shown pull requests in its order. A move made while the order is automatic switches to your own order, starting from the order it was in, and replaces any order you had saved.
+- [`dux agents prs branches`](#dux-agents-prs-branches): List every branch an agent's worktree has been on, newest first, with the names it had before a rename and its pull requests, then the attached pull requests that are on none of them.
+
+### `dux agents prs ls`
+
+Also: `list`
+
+List an agent's pull requests in its order, the one its banner shows first, then the hidden ones. Each row's id is the pull request's link, which every other `prs` command accepts.
+
+```text
+dux agents prs ls [OPTIONS] <AGENT>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
+
+### `dux agents prs attach`
+
+Attach a pull request to an agent, beside the ones it has. It can come from any repository, and stays until you detach it.
+
+```text
+dux agents prs attach [OPTIONS] <AGENT> <REF>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<REF>` | Required. The pull request: its link, `owner/repo#123`, or `#123` (or just `123`) in the agent's own repository. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs detach`
+
+Detach a pull request you attached. One dux also found on the agent's branches stays in the list, as found.
+
+```text
+dux agents prs detach [OPTIONS] <AGENT> <REF>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs hide`
+
+Hide a pull request dux found, until you unhide it. It keeps its place in your own order.
+
+```text
+dux agents prs hide [OPTIONS] <AGENT> <REF>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs unhide`
+
+Show a hidden pull request again, in the place it had.
+
+```text
+dux agents prs unhide [OPTIONS] <AGENT> <REF>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs sort`
+
+Choose how an agent's pull requests are ordered. Your own order is kept while the order is automatic, so choosing `manual` again brings it back.
+
+```text
+dux agents prs sort [OPTIONS] <AGENT> <MODE>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<MODE>` | Required. `auto` (or `automatic`): open, draft, merged, closed, newest first. `manual`: your own order, with pull requests found later after the ones you placed. One of `auto`, `manual`. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs move`
+
+Move one of an agent's shown pull requests in its order. A move made while the order is automatic switches to your own order, starting from the order it was in, and replaces any order you had saved.
+
+```text
+dux agents prs move [OPTIONS] <AGENT> <REF> <TO>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+| `<TO>` | Required. Where to: `top`, `up`, `down`, or a position counted from 1. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+
+### `dux agents prs branches`
+
+List every branch an agent's worktree has been on, newest first, with the names it had before a rename and its pull requests, then the attached pull requests that are on none of them.
+
+```text
+dux agents prs branches [OPTIONS] <AGENT>
+```
+
+| Argument | Description |
+|---|---|
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+
+| Flag | Value | Description |
+|---|---|---|
+| `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ## `dux terminals`
 

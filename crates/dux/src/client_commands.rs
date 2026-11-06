@@ -14,7 +14,7 @@ use std::io::Write;
 
 use crate::commands::{
     AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
-    KeysSub, ListFlags, MacrosSub, OperationsSub, ProjectsSub, ProvidersSub, RemoteSource,
+    KeysSub, ListFlags, MacrosSub, OperationsSub, ProjectsSub, ProvidersSub, PrsSub, RemoteSource,
     RemoteSub, ServerSub, TabsSub, TerminalsSub, ThemesSub, WorktreesSub,
 };
 
@@ -813,6 +813,61 @@ pub(crate) fn agents(
             })
         }
         AgentsSub::Tabs { command } => tabs(command, selection, err),
+        AgentsSub::Prs { command } => prs(command, selection, err),
+    }
+}
+
+fn prs(command: PrsSub, selection: &Selection, err: &mut impl Write) -> Result<String, CliError> {
+    match command {
+        PrsSub::Ls { agent, list } => read_on_dux(selection, |client| {
+            workspace::prs_ls(client, &agent, shape(&list))
+        }),
+        PrsSub::Branches { agent, list } => read_on_dux(selection, |client| {
+            workspace::prs_branches(client, &agent, shape(&list))
+        }),
+        PrsSub::Attach {
+            agent,
+            reference,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_attach(client, &agent, &reference)
+        }),
+        PrsSub::Detach {
+            agent,
+            reference,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_detach(client, &agent, &reference)
+        }),
+        PrsSub::Hide {
+            agent,
+            reference,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_hide(client, &agent, &reference)
+        }),
+        PrsSub::Unhide {
+            agent,
+            reference,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_unhide(client, &agent, &reference)
+        }),
+        PrsSub::Sort {
+            agent,
+            mode,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_sort(client, &agent, mode.into())
+        }),
+        PrsSub::Move {
+            agent,
+            reference,
+            to,
+            change,
+        } => change_on_dux(selection, err, &change, |client, _| {
+            workspace::prs_move(client, &agent, &reference, to)
+        }),
     }
 }
 

@@ -637,6 +637,148 @@ pub(crate) enum AgentsSub {
         #[command(subcommand)]
         command: TabsSub,
     },
+    /// An agent's pull requests: the ones dux found on the branches its
+    /// worktree has been on, and the ones you attached from any repository.
+    Prs {
+        #[command(subcommand)]
+        command: PrsSub,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PrsSub {
+    /// List an agent's pull requests in its order, the one its banner shows
+    /// first, then the hidden ones. Each row's id is the pull request's link,
+    /// which every other `prs` command accepts.
+    #[command(visible_alias = "list")]
+    Ls {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        #[command(flatten)]
+        list: ListFlags,
+    },
+    /// Attach a pull request to an agent, beside the ones it has. It can come
+    /// from any repository, and stays until you detach it.
+    Attach {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// The pull request: its link, `owner/repo#123`, or `#123` (or just
+        /// `123`) in the agent's own repository.
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Detach a pull request you attached. One dux also found on the agent's
+    /// branches stays in the list, as found.
+    Detach {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// One of the agent's pull requests: its link, `owner/repo#123`, or
+        /// `#123` (or just `123`); a number two of them share is refused with
+        /// both links.
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Hide a pull request dux found, until you unhide it. It keeps its place
+    /// in your own order.
+    Hide {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// One of the agent's pull requests: its link, `owner/repo#123`, or
+        /// `#123` (or just `123`); a number two of them share is refused with
+        /// both links.
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Show a hidden pull request again, in the place it had.
+    Unhide {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// One of the agent's pull requests: its link, `owner/repo#123`, or
+        /// `#123` (or just `123`); a number two of them share is refused with
+        /// both links.
+        #[arg(value_name = "REF")]
+        reference: String,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Choose how an agent's pull requests are ordered. Your own order is kept
+    /// while the order is automatic, so choosing `manual` again brings it back.
+    Sort {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// `auto` (or `automatic`): open, draft, merged, closed, newest first.
+        /// `manual`: your own order, with pull requests found later after the
+        /// ones you placed.
+        #[arg(value_enum)]
+        mode: PrSortArg,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// Move one of an agent's shown pull requests in its order. A move made
+    /// while the order is automatic switches to your own order, starting from
+    /// the order it was in, and replaces any order you had saved.
+    Move {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        /// One of the agent's pull requests: its link, `owner/repo#123`, or
+        /// `#123` (or just `123`); a number two of them share is refused with
+        /// both links.
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// Where to: `top`, `up`, `down`, or a position counted from 1.
+        #[arg(value_name = "TO", value_parser = parse_move_target)]
+        to: dux_core::wire::PullRequestMove,
+        #[command(flatten)]
+        change: ChangeFlags,
+    },
+    /// List every branch an agent's worktree has been on, newest first, with
+    /// the names it had before a rename and its pull requests, then the
+    /// attached pull requests that are on none of them.
+    Branches {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+        #[command(flatten)]
+        list: ListFlags,
+    },
+}
+
+/// The orders `dux agents prs sort` chooses between.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum PrSortArg {
+    /// Open, draft, merged, closed, newest first.
+    #[value(alias = "automatic")]
+    Auto,
+    /// Your own order.
+    Manual,
+}
+
+impl From<PrSortArg> for dux_core::wire::PullRequestSort {
+    fn from(arg: PrSortArg) -> Self {
+        match arg {
+            PrSortArg::Auto => Self::Automatic,
+            PrSortArg::Manual => Self::Manual,
+        }
+    }
+}
+
+/// `top`, `up`, `down`, or a position counted from 1.
+fn parse_move_target(text: &str) -> Result<dux_core::wire::PullRequestMove, String> {
+    use dux_core::wire::{PullRequestMove, PullRequestMoveNamed};
+    match text {
+        "top" => Ok(PullRequestMove::Named(PullRequestMoveNamed::Top)),
+        "up" => Ok(PullRequestMove::Named(PullRequestMoveNamed::Up)),
+        "down" => Ok(PullRequestMove::Named(PullRequestMoveNamed::Down)),
+        _ => match text.parse::<usize>() {
+            Ok(position) if position >= 1 => Ok(PullRequestMove::Position(position)),
+            _ => Err("use top, up, down, or a position counted from 1".to_string()),
+        },
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -1083,6 +1225,7 @@ codes:
         assert!(parse(&["agents", "list"]).is_ok());
         assert!(parse(&["agents", "remove", "a"]).is_ok());
         assert!(parse(&["agents", "tabs", "list", "a"]).is_ok());
+        assert!(parse(&["agents", "prs", "list", "a"]).is_ok());
     }
 
     #[test]
@@ -1101,6 +1244,8 @@ codes:
             &["server", "logs", "--remote", "a"][..],
             &["server", "connections", "ls", "--remote", "a"][..],
             &["agents", "tabs", "ls", "x", "--local"][..],
+            &["agents", "prs", "--remote", "a", "ls", "x"][..],
+            &["agents", "prs", "branches", "x", "--local"][..],
         ] {
             assert!(parse(args).is_ok(), "{args:?}");
         }
@@ -1216,6 +1361,10 @@ codes:
         ],
         &["terminals", "add", "--agent", "a"],
         &["terminals", "add"],
+        &["agents", "prs", "sort", "a", "automatic"],
+        &["agents", "prs", "sort", "a", "auto", "--yes"],
+        &["agents", "prs", "move", "a", "418", "2"],
+        &["agents", "prs", "move", "a", "#418", "top", "--no-wait"],
     ];
 
     /// Change lines whose flags conflict, which the command tree refuses.
@@ -1261,6 +1410,9 @@ codes:
         ],
         &["agents", "rm", "a", "--delete-other-branches"],
         &["terminals", "add", "--agent", "a", "--project", "p"],
+        &["agents", "prs", "move", "a", "418", "0"],
+        &["agents", "prs", "move", "a", "418", "sideways"],
+        &["agents", "prs", "sort", "a", "sideways"],
     ];
 
     #[test]

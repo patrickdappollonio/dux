@@ -95,6 +95,21 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "a branch the delete dialog offers, as a server answers with it",
     ),
     (
+        "dux_core::wire::PullRequestSort",
+        Vetted::Type("crates/dux-core/src/wire.rs", "PullRequestSort"),
+        "the order a pull-request sort asks for, and the order it means",
+    ),
+    (
+        "dux_core::wire::PullRequestMove",
+        Vetted::Type("crates/dux-core/src/wire.rs", "PullRequestMove"),
+        "where a pull-request move goes, and the place it means",
+    ),
+    (
+        "dux_core::wire::PullRequestMoveNamed",
+        Vetted::Data,
+        "the named places a pull-request move goes; it has no code of its own",
+    ),
+    (
         "dux_core::git::UnpushedCommits",
         Vetted::Data,
         "a count of commits a server answers with; it has no code of its own",

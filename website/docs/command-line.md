@@ -58,6 +58,12 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | [`dux agents tabs ls <agent>`](/docs/cli-reference#dux-agents-tabs-ls) | The agent's provider tabs and whether each is running. |
 | [`dux agents tabs add <agent>`](/docs/cli-reference#dux-agents-tabs-add) | Adds a tab, running the project's provider unless `--provider` names another. |
 | [`dux agents tabs rm`](/docs/cli-reference#dux-agents-tabs-rm), `start`, `stop` `<agent> <tab>` | Closes, starts or stops one tab. Stopping keeps the tab, closing removes it. |
+| [`dux agents prs ls <agent>`](/docs/cli-reference#dux-agents-prs-ls) | The agent's pull requests in its order, the one its banner shows first, then the hidden ones, each with its link. See [Pull requests](#pull-requests). |
+| [`dux agents prs attach <agent> <ref>`](/docs/cli-reference#dux-agents-prs-attach) | Attaches a pull request from any repository, beside the ones the agent has. |
+| [`dux agents prs detach`](/docs/cli-reference#dux-agents-prs-detach), [`hide`](/docs/cli-reference#dux-agents-prs-hide), [`unhide`](/docs/cli-reference#dux-agents-prs-unhide) `<agent> <ref>` | Detaches one you attached, hides one dux found, or shows a hidden one again in the place it had. |
+| [`dux agents prs sort <agent> auto\|manual`](/docs/cli-reference#dux-agents-prs-sort) | Orders the pull requests automatically (open, draft, merged, closed, newest first) or in your own order. |
+| [`dux agents prs move <agent> <ref> <to>`](/docs/cli-reference#dux-agents-prs-move) | Moves one to the `top`, `up`, `down`, or to a position counted from 1. |
+| [`dux agents prs branches <agent>`](/docs/cli-reference#dux-agents-prs-branches) | Every branch the agent's worktree has been on, newest first, with its former names and its pull requests, then the attached ones on none of them. |
 | [`dux terminals ls`](/docs/cli-reference#dux-terminals-ls) | Every terminal and who owns it. |
 | [`dux terminals add`](/docs/cli-reference#dux-terminals-add) | Opens a terminal: in an agent's worktree with `--agent`, at a project's root with `--project`, or a standalone one in your home folder with neither. |
 | [`dux terminals rm <terminal>`](/docs/cli-reference#dux-terminals-rm) | Closes a terminal. |
@@ -80,6 +86,24 @@ agent=$(dux agents add --project web --name fix-login --yes | tail -n 1)
 
 Paths you give are made absolute for the dux on this machine. A remote dux is another
 machine, so it refuses a relative path; give the whole thing.
+
+### Pull requests
+
+`dux agents prs` names one of an agent's pull requests by its link, as `owner/repo#123`
+(the repository in any case), or as `#123` or just `123`. A number two of its pull
+requests share, say `#77` in two repositories, is refused with both links, so you can
+name one as `owner/repo#77` or by its link. The links are what `dux agents prs ls -q`
+prints, so its output feeds the other commands. `attach` takes the same forms, and a bare
+number there means the agent's own repository.
+
+- `detach` is for pull requests you attached and `hide` for the ones dux found; asking for
+  the other one is refused before anything is asked, naming the command that does it.
+- `move` takes `top`, `up`, `down` or a position counted from 1. A move while the order is
+  automatic switches to your own order, starting from the order you were looking at, and
+  replaces any order you had saved; `sort <agent> manual` without a move brings a saved
+  order back.
+- There is no command that opens a pull request: the command line may be talking to a dux
+  on another machine, so it prints the links instead.
 
 ### Creating an agent
 
@@ -127,6 +151,14 @@ Every `ls` prints an aligned table with a header row. Two flags change that:
 `PROVIDER`, `STATE`, `TABS` (running of total) and `BROWSERS`. An agent's state is
 `active`, `detached` or `exited`, or `removing` while its deletion is still running.
 `show` prints one field per line.
+
+An agent's pull requests have no column in that table. `dux agents show` prints the one
+its banner shows as `pull_request` (`#418 open https://…`), every one it shows, in order,
+as `pull_requests` (`#418 open store-tab-rows https://…`, or
+`acme/infra#77 open attached https://…` for one attached from another repository), and the
+hidden ones as `pull_requests_hidden`. In `dux agents ls --format json`, each agent's
+`pull_requests` is how many it shows and `pull_request` is the shown one, so a script can
+pick agents without a `show` for each.
 
 > [!NOTE]
 > `BROWSERS` counts the browsers that would stop a change to the agent: every one with it

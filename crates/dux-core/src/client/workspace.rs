@@ -1,4 +1,4 @@
-//! `dux projects`, `agents`, `agents tabs`, `projects worktrees` and
+//! `dux projects`, `agents`, `agents tabs`, `agents prs`, `projects worktrees` and
 //! `terminals`: the resources kept in `sessions.sqlite3` and the running
 //! engine, so every one of them goes through a running dux.
 //!
@@ -69,6 +69,113 @@ struct Pr {
     number: u64,
     state: String,
     url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    owner_repo: String,
+    #[serde(default)]
+    own_repo: bool,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    found: bool,
+    #[serde(default)]
+    attached: bool,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+}
+
+impl Pr {
+    /// How the lists name it: `#418` in the agent's own repository,
+    /// `acme/infra#77` in any other.
+    fn label(&self) -> String {
+        if self.own_repo {
+            format!("#{}", self.number)
+        } else {
+            format!("{}#{}", self.owner_repo, self.number)
+        }
+    }
+
+    /// The branch of the agent's own repository it merges from, once GitHub
+    /// has said; another repository's branch is none of the agent's.
+    fn branch(&self) -> Option<&str> {
+        self.head_branch.as_deref().filter(|_| self.own_repo)
+    }
+
+    /// Whether dux found it, the user attached it, or both.
+    fn source(&self) -> &'static str {
+        match (self.found, self.attached) {
+            (true, true) => "found+attached",
+            (false, true) => "attached",
+            _ => "found",
+        }
+    }
+
+    /// The one line `dux agents show` and `ls --format json` name the shown
+    /// pull request with.
+    fn shown_line(&self) -> String {
+        format!("#{} {} {}", self.number, self.state, self.url)
+    }
+
+    /// One entry of `dux agents show`'s lists: its name, state, where it
+    /// comes from (its branch, else `attached`) and its link.
+    fn list_line(&self) -> String {
+        let from = self
+            .branch()
+            .or_else(|| self.attached.then_some("attached"));
+        match from {
+            Some(from) => format!("{} {} {from} {}", self.label(), self.state, self.url),
+            None => format!("{} {} {}", self.label(), self.state, self.url),
+        }
+    }
+
+    /// Whether it is the pull request `key` names; host and repository
+    /// compare without regard to case, as GitHub's do.
+    fn is(&self, key: &PrKeyAnswer) -> bool {
+        self.number == key.number
+            && self.host.eq_ignore_ascii_case(&key.host)
+            && self.owner_repo.eq_ignore_ascii_case(&key.owner_repo)
+    }
+
+    /// What a change names it by.
+    fn key(&self) -> Value {
+        json!({ "host": self.host, "owner_repo": self.owner_repo, "number": self.number })
+    }
+}
+
+/// A pull request as the branch list names it.
+#[derive(Clone, Debug, Deserialize)]
+struct PrKeyAnswer {
+    host: String,
+    owner_repo: String,
+    number: u64,
+}
+
+/// One branch an agent's worktree has been on.
+#[derive(Clone, Debug, Deserialize)]
+struct BranchAnswer {
+    name: String,
+    #[serde(default)]
+    former_names: Vec<String>,
+    #[serde(default)]
+    current: bool,
+    #[serde(default)]
+    first_seen_at: Option<String>,
+    #[serde(default)]
+    prs: Vec<PrKeyAnswer>,
+}
+
+/// `GET …/pull-requests/branches`.
+#[derive(Clone, Debug, Deserialize)]
+struct BranchesAnswer {
+    #[serde(default)]
+    branches: Vec<BranchAnswer>,
+    #[serde(default)]
+    attached_on_no_branch: Vec<PrKeyAnswer>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -110,6 +217,12 @@ struct Agent {
     status: String,
     #[serde(default)]
     pr: Option<Pr>,
+    #[serde(default)]
+    prs: Vec<Pr>,
+    #[serde(default)]
+    prs_hidden: Vec<Pr>,
+    #[serde(default)]
+    pr_sort: String,
     #[serde(default)]
     tabs: Vec<Tab>,
     #[serde(default)]
@@ -441,6 +554,8 @@ pub fn agents_ls(
                     "tabs": agent.tabs.len(),
                     "running_tabs": running,
                     "remote_viewers": viewers,
+                    "pull_requests": agent.prs.len(),
+                    "pull_request": agent.pr.as_ref().map(Pr::shown_line),
                 }),
             }
         })
@@ -493,7 +608,9 @@ pub fn agents_show(client: &Client, query: &str) -> Result<String, CliError> {
         "tabs": tabs,
         "terminals": terminals,
         "remote_viewers": agent.remote_viewers,
-        "pull_request": agent.pr.as_ref().map(|pr| format!("#{} {} {}", pr.number, pr.state, pr.url)),
+        "pull_request": agent.pr.as_ref().map(Pr::shown_line),
+        "pull_requests": agent.prs.iter().map(Pr::list_line).collect::<Vec<_>>(),
+        "pull_requests_hidden": agent.prs_hidden.iter().map(Pr::list_line).collect::<Vec<_>>(),
     });
     let fields = shown.as_object_mut().expect("an object");
     match &agent.workspace {
@@ -558,6 +675,211 @@ pub fn tabs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, Cli
     Ok(output::render(
         &Listing {
             headers: vec!["ID", "LABEL", "PROVIDER", "STATE"],
+            rows,
+        },
+        shape,
+    ))
+}
+
+/// The pull request of `agent` that `query` names: its URL, `owner/repo#n`
+/// (the repository without regard to case, on any host), or `#n` / `n` (the
+/// number in any repository). Hidden ones count.
+fn find_pr<'a>(agent: &'a Agent, query: &str) -> Result<&'a Pr, CliError> {
+    let every: Vec<&Pr> = agent.prs.iter().chain(&agent.prs_hidden).collect();
+    if let Some(pr) = every.iter().find(|pr| pr.url == query) {
+        return Ok(pr);
+    }
+    let (repository, number) = match query.rsplit_once('#') {
+        Some((repository, number)) if !repository.is_empty() => (Some(repository), number),
+        _ => (None, query.strip_prefix('#').unwrap_or(query)),
+    };
+    let shown = match repository {
+        Some(_) => query.to_string(),
+        None => format!("#{number}"),
+    };
+    let matches: Vec<&Pr> = match number.parse::<u64>() {
+        Ok(number) => every
+            .into_iter()
+            .filter(|pr| {
+                pr.number == number
+                    && repository.is_none_or(|repo| pr.owner_repo.eq_ignore_ascii_case(repo))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let agent_name = agent.name();
+    match matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(CliError::new(
+            Exit::Failed,
+            format!(
+                "agent {agent_name} has no pull request {shown}; dux agents prs ls {agent_name} \
+                 lists them"
+            ),
+        )),
+        many => {
+            let urls: Vec<&str> = many.iter().map(|pr| pr.url.as_str()).collect();
+            let how = match repository {
+                Some(_) => "name one by its URL".to_string(),
+                None => format!("name one as owner/repo{shown} or by its URL"),
+            };
+            Err(CliError::new(
+                Exit::Usage,
+                format!(
+                    "{} pull requests on agent {agent_name} are {shown}: {}; {how}",
+                    many.len(),
+                    urls.join(", ")
+                ),
+            ))
+        }
+    }
+}
+
+/// `dux agents prs ls <a>`: the shown ones in the agent's order, the one its
+/// banner shows first, then the hidden ones.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+pub fn prs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
+    let agent = find_agent(client, query)?;
+    let positions = (1..).map(Some).take(agent.prs.len());
+    let rows = agent
+        .prs
+        .iter()
+        .zip(positions)
+        .chain(agent.prs_hidden.iter().map(|pr| (pr, None)))
+        .map(|(pr, position): (&Pr, Option<usize>)| Row {
+            id: pr.url.clone(),
+            cells: vec![
+                position.map_or_else(|| "hidden".to_string(), |n| n.to_string()),
+                pr.label(),
+                pr.state.clone(),
+                pr.branch().unwrap_or_default().to_string(),
+                pr.source().to_string(),
+                pr.url.clone(),
+                pr.title.clone(),
+            ],
+            json: json!({
+                "position": position,
+                "shown": position == Some(1),
+                "hidden": position.is_none(),
+                "host": pr.host,
+                "owner_repo": pr.owner_repo,
+                "number": pr.number,
+                "state": pr.state,
+                "head_branch": pr.head_branch,
+                "found": pr.found,
+                "attached": pr.attached,
+                "url": pr.url,
+                "title": pr.title,
+                "created_at": pr.created_at,
+                "updated_at": pr.updated_at,
+            }),
+        })
+        .collect();
+    let mut out = output::render(
+        &Listing {
+            headers: vec!["POS", "PR", "STATE", "BRANCH", "SOURCE", "URL", "TITLE"],
+            rows,
+        },
+        shape,
+    );
+    if shape == Shape::Table && agent.pr_sort == "manual" {
+        let _ = writeln!(
+            out,
+            "In your own order (dux agents prs sort {} auto goes back).",
+            agent.name()
+        );
+    }
+    Ok(out)
+}
+
+/// `dux agents prs branches <a>`: every branch the agent's worktree has been
+/// on, newest first, with its pull requests, then the attached pull requests
+/// that are on none of them.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+pub fn prs_branches(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
+    let agent = find_agent(client, query)?;
+    let answer: BranchesAnswer = client.get_json(&format!(
+        "/api/v1/sessions/{}/pull-requests/branches",
+        segment(&agent.id)
+    ))?;
+    let named = |keys: &[PrKeyAnswer]| -> (String, Vec<Value>) {
+        let mut words = Vec::new();
+        let mut objects = Vec::new();
+        for key in keys {
+            let shown = agent.prs.iter().find(|pr| pr.is(key));
+            let hidden = agent.prs_hidden.iter().find(|pr| pr.is(key));
+            let Some(pr) = shown.or(hidden) else {
+                words.push(format!("{}#{}", key.owner_repo, key.number));
+                continue;
+            };
+            let suffix = if hidden.is_some() { " (hidden)" } else { "" };
+            words.push(format!("{} {}{suffix}", pr.label(), pr.state));
+            objects.push(json!({
+                "host": pr.host,
+                "owner_repo": pr.owner_repo,
+                "number": pr.number,
+                "state": pr.state,
+                "hidden": hidden.is_some(),
+                "url": pr.url,
+            }));
+        }
+        (words.join(", "), objects)
+    };
+    let mut rows: Vec<Row> = answer
+        .branches
+        .iter()
+        .map(|branch| {
+            let (words, objects) = named(&branch.prs);
+            Row {
+                id: branch.name.clone(),
+                cells: vec![
+                    branch.name.clone(),
+                    if branch.current { "yes" } else { "" }.to_string(),
+                    branch.first_seen_at.clone().unwrap_or_default(),
+                    branch.former_names.join(", "),
+                    words,
+                ],
+                json: json!({
+                    "branch": branch.name,
+                    "current": branch.current,
+                    "first_seen_at": branch.first_seen_at,
+                    "former_names": branch.former_names,
+                    "pull_requests": objects,
+                }),
+            }
+        })
+        .collect();
+    // The attachments on no branch have no branch to be the id of, so a list
+    // of ids leaves them out.
+    if !answer.attached_on_no_branch.is_empty() && shape != Shape::Ids {
+        let (words, objects) = named(&answer.attached_on_no_branch);
+        rows.push(Row {
+            id: String::new(),
+            cells: vec![
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                words,
+            ],
+            json: json!({
+                "branch": null,
+                "current": false,
+                "first_seen_at": null,
+                "former_names": [],
+                "pull_requests": objects,
+            }),
+        });
+    }
+    Ok(output::render(
+        &Listing {
+            headers: vec!["BRANCH", "CURRENT", "FIRST SEEN", "FORMER NAMES", "PRS"],
             rows,
         },
         shape,
@@ -1969,6 +2291,166 @@ pub fn tabs_stop(
     .forced(if_attached))
 }
 
+/// `dux agents prs attach <a> <ref>`. The reference goes as typed: the dux
+/// resolves a bare number against the agent's own repository.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+pub fn prs_attach(client: &Client, query: &str, reference: &str) -> Result<Planned, CliError> {
+    let agent = find_agent(client, query)?;
+    Ok(Planned::new(
+        format!("Attach pull request {reference} to agent {}", agent.name()),
+        Method::Post,
+        format!("/api/v1/sessions/{}/pull-requests", segment(&agent.id)),
+        Some(json!({ "pr": reference })),
+    ))
+}
+
+/// The agent a pull-request verb acts on and the pull request it names.
+fn pr_address(client: &Client, query: &str, reference: &str) -> Result<(Agent, Pr), CliError> {
+    let agent = find_agent(client, query)?;
+    let pr = find_pr(&agent, reference)?.clone();
+    Ok((agent, pr))
+}
+
+/// A change to one of `agent`'s pull requests, at `route` under its
+/// pull-request address.
+fn pr_change(agent: &Agent, pr: &Pr, question: String, route: &str) -> Planned {
+    Planned::new(
+        question,
+        Method::Post,
+        format!(
+            "/api/v1/sessions/{}/pull-requests/{route}",
+            segment(&agent.id)
+        ),
+        Some(pr.key()),
+    )
+}
+
+/// `dux agents prs detach <a> <ref>`. One dux only found has nothing to
+/// detach, so it is refused before anything is asked, naming the verb that
+/// does what the user wants.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, the agent or the pull
+/// request is not named by exactly one, or the pull request was not attached.
+pub fn prs_detach(client: &Client, query: &str, reference: &str) -> Result<Planned, CliError> {
+    let (agent, pr) = pr_address(client, query, reference)?;
+    let name = agent.name();
+    if !pr.attached {
+        let label = pr.label();
+        return Err(CliError::new(
+            Exit::Usage,
+            format!(
+                "{label} on {name} was found by dux, not attached; hide it instead (dux agents \
+                 prs hide {name} {label})"
+            ),
+        ));
+    }
+    let question = format!(
+        "Detach pull request #{} ({}) from agent {name}",
+        pr.number, pr.owner_repo
+    );
+    Ok(pr_change(&agent, &pr, question, "detach"))
+}
+
+/// `dux agents prs hide <a> <ref>`. One only attached is refused before
+/// anything is asked: hiding is for what dux found.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, the agent or the pull
+/// request is not named by exactly one, or the pull request was only attached.
+pub fn prs_hide(client: &Client, query: &str, reference: &str) -> Result<Planned, CliError> {
+    let (agent, pr) = pr_address(client, query, reference)?;
+    let name = agent.name();
+    let label = pr.label();
+    if !pr.found {
+        return Err(CliError::new(
+            Exit::Usage,
+            format!(
+                "{label} on {name} was attached, not found by dux; detach it instead (dux agents \
+                 prs detach {name} {label})"
+            ),
+        ));
+    }
+    let question = format!("Hide pull request {label} on agent {name}");
+    Ok(pr_change(&agent, &pr, question, "hide"))
+}
+
+/// `dux agents prs unhide <a> <ref>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the agent or the pull
+/// request is not named by exactly one.
+pub fn prs_unhide(client: &Client, query: &str, reference: &str) -> Result<Planned, CliError> {
+    let (agent, pr) = pr_address(client, query, reference)?;
+    let question = format!(
+        "Show pull request {} again on agent {}",
+        pr.label(),
+        agent.name()
+    );
+    Ok(pr_change(&agent, &pr, question, "show"))
+}
+
+/// `dux agents prs sort <a> <mode>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+pub fn prs_sort(
+    client: &Client,
+    query: &str,
+    mode: crate::wire::PullRequestSort,
+) -> Result<Planned, CliError> {
+    let agent = find_agent(client, query)?;
+    let order = match mode {
+        crate::wire::PullRequestSort::Automatic => "automatic order",
+        crate::wire::PullRequestSort::Manual => "your own order",
+    };
+    Ok(Planned::new(
+        format!("Put agent {}'s pull requests in {order}", agent.name()),
+        Method::Put,
+        format!("/api/v1/sessions/{}/pull-requests/sort", segment(&agent.id)),
+        Some(json!({ "mode": mode })),
+    ))
+}
+
+/// `dux agents prs move <a> <ref> <to>`.
+///
+/// # Errors
+///
+/// Fails when the dux cannot be reached or refuses, or the agent or the pull
+/// request is not named by exactly one.
+pub fn prs_move(
+    client: &Client,
+    query: &str,
+    reference: &str,
+    to: crate::wire::PullRequestMove,
+) -> Result<Planned, CliError> {
+    use crate::wire::{PullRequestMove, PullRequestMoveNamed};
+    let (agent, pr) = pr_address(client, query, reference)?;
+    let place = match to {
+        PullRequestMove::Named(PullRequestMoveNamed::Top) => "to the top".to_string(),
+        PullRequestMove::Named(PullRequestMoveNamed::Up) => "up".to_string(),
+        PullRequestMove::Named(PullRequestMoveNamed::Down) => "down".to_string(),
+        PullRequestMove::Position(n) => format!("to position {n}"),
+    };
+    Ok(Planned::new(
+        format!(
+            "Move pull request {} {place} on agent {}",
+            pr.label(),
+            agent.name()
+        ),
+        Method::Post,
+        format!("/api/v1/sessions/{}/pull-requests/move", segment(&agent.id)),
+        Some(json!({ "pr": pr.key(), "to": to })),
+    ))
+}
+
 /// Who a new terminal belongs to.
 #[derive(Debug)]
 pub enum TerminalFor {
@@ -2928,5 +3410,405 @@ mod agents_rm_tests {
             Some(true),
         );
         assert_eq!(planned.notice, None);
+    }
+}
+
+#[cfg(test)]
+mod pull_request_tests {
+    use super::*;
+    use crate::client::connect::{Target, connect};
+    use crate::client::test_server::{FakeDux, Reply, Seen, private_dir};
+    use crate::wire::{PullRequestMove, PullRequestMoveNamed, PullRequestSort};
+
+    const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
+
+    /// A pull request of the shape the sessions read answers with.
+    fn pr(number: u64, owner_repo: &str, state: &str, head: Option<&str>, source: &str) -> Value {
+        json!({
+            "number": number,
+            "state": state,
+            "title": format!("PR {number}"),
+            "url": format!("https://github.com/{owner_repo}/pull/{number}"),
+            "host": "github.com",
+            "owner_repo": owner_repo,
+            "own_repo": owner_repo == "octo/hello",
+            "head_branch": head,
+            "found": source != "attached",
+            "attached": source != "found",
+        })
+    }
+
+    fn agents() -> String {
+        let shown = [
+            pr(418, "octo/hello", "open", Some("store-tab-rows"), "found"),
+            pr(77, "acme/infra", "open", Some("infra-fix"), "attached"),
+            pr(77, "acme/api", "draft", None, "attached"),
+            pr(415, "octo/hello", "merged", Some("older"), "found+attached"),
+        ];
+        json!([{
+            "id": "a1",
+            "title": "store-tab-rows",
+            "provider": "claude",
+            "status": "active",
+            "workspace": {
+                "kind": "managed",
+                "project_id": "p1",
+                "branch_name": "store-tab-rows",
+                "worktree_path": "/wt/s",
+            },
+            "pr_sort": "manual",
+            "pr": shown[0],
+            "prs": shown,
+            "prs_hidden": [pr(402, "octo/hello", "closed", Some("spike"), "found")],
+        }])
+        .to_string()
+    }
+
+    const BRANCHES: &str = r#"{"branches":[
+          {"name":"store-tab-rows","former_names":["tab-rows","rows"],"current":true,"first_seen_at":"2026-10-02T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":418}]},
+          {"name":"older","former_names":[],"current":false,"first_seen_at":"2026-09-01T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":415},{"host":"GitHub.com","owner_repo":"Octo/Hello","number":402}]}
+        ],
+        "attached_on_no_branch":[{"host":"github.com","owner_repo":"acme/infra","number":77},{"host":"github.com","owner_repo":"acme/api","number":77}]}"#;
+
+    /// Agent `store-tab-rows` in octo/hello, in manual order: #418 found on
+    /// its own branch, acme/infra#77 attached, acme/api#77 attached, #415
+    /// found on a branch it was on before and attached too; #402 hidden.
+    ///
+    /// A stand-in dux holding [`agents`], answering what `answer` says for
+    /// every other request.
+    struct Dux {
+        fake: FakeDux,
+        client: Client,
+        _lock: crate::lockfile::SingleInstanceLock,
+        _dir: tempfile::TempDir,
+    }
+
+    fn dux(answer: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> Dux {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let sessions = agents();
+        let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/projects" => {
+                Reply::json(200, r#"[{"id":"p1","name":"hello","path":"/src/hello"}]"#)
+            }
+            "/api/v1/sessions" => Reply::json(200, &sessions),
+            "/api/v1/sessions/a1/pull-requests/branches" => Reply::json(200, BRANCHES),
+            _ => answer(seen),
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        Dux {
+            fake,
+            client,
+            _lock: lock,
+            _dir: dir,
+        }
+    }
+
+    fn reads() -> Dux {
+        dux(|_| Reply::json(404, "{}"))
+    }
+
+    #[test]
+    fn show_names_the_shown_pull_request_and_lists_the_shown_and_hidden_ones() {
+        let dux = reads();
+        let shown = agents_show(&dux.client, "store-tab-rows").unwrap();
+        let field = |name: &str| -> Value {
+            let line = shown
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+                .unwrap_or_else(|| panic!("no {name} in {shown}"));
+            serde_json::from_str(line).unwrap_or_else(|_| Value::String(line.to_string()))
+        };
+        assert_eq!(
+            field("pull_request"),
+            "#418 open https://github.com/octo/hello/pull/418"
+        );
+        assert_eq!(
+            field("pull_requests"),
+            json!([
+                "#418 open store-tab-rows https://github.com/octo/hello/pull/418",
+                "acme/infra#77 open attached https://github.com/acme/infra/pull/77",
+                "acme/api#77 draft attached https://github.com/acme/api/pull/77",
+                "#415 merged older https://github.com/octo/hello/pull/415",
+            ])
+        );
+        assert_eq!(
+            field("pull_requests_hidden"),
+            json!(["#402 closed spike https://github.com/octo/hello/pull/402"])
+        );
+    }
+
+    #[test]
+    fn ls_json_counts_the_shown_pull_requests_and_names_the_first() {
+        let dux = reads();
+        let listed = agents_ls(&dux.client, None, AgentColumns::All, Shape::Json).unwrap();
+        let agents: Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(agents[0]["pull_requests"], 4);
+        assert_eq!(
+            agents[0]["pull_request"],
+            "#418 open https://github.com/octo/hello/pull/418"
+        );
+    }
+
+    #[test]
+    fn a_reference_names_one_pull_request_or_is_refused() {
+        let dux = reads();
+        let agent = find_agent(&dux.client, "a1").unwrap();
+        let url_of = |query: &str| find_pr(&agent, query).map(|pr| pr.url.clone());
+
+        assert_eq!(
+            url_of("https://github.com/acme/api/pull/77").unwrap(),
+            "https://github.com/acme/api/pull/77"
+        );
+        assert_eq!(
+            url_of("ACME/Infra#77").unwrap(),
+            "https://github.com/acme/infra/pull/77"
+        );
+        assert_eq!(
+            url_of("#402").unwrap(),
+            "https://github.com/octo/hello/pull/402"
+        );
+        assert_eq!(
+            url_of("418").unwrap(),
+            "https://github.com/octo/hello/pull/418"
+        );
+
+        let two = url_of("#77").unwrap_err();
+        assert_eq!(two.exit, Exit::Usage);
+        assert_eq!(
+            two.message,
+            "2 pull requests on agent store-tab-rows are #77: https://github.com/acme/infra/pull/77, \
+             https://github.com/acme/api/pull/77; name one as owner/repo#77 or by its URL"
+        );
+
+        let none = url_of("9").unwrap_err();
+        assert_eq!(none.exit, Exit::Failed);
+        assert_eq!(
+            none.message,
+            "agent store-tab-rows has no pull request #9; dux agents prs ls store-tab-rows lists \
+             them"
+        );
+    }
+
+    #[test]
+    fn ls_lists_the_order_then_the_hidden_ones_and_says_when_it_is_your_own() {
+        let dux = reads();
+        let table = prs_ls(&dux.client, "store-tab-rows", Shape::Table).unwrap();
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(
+            lines[0].starts_with("POS") && lines[0].ends_with("TITLE"),
+            "{table}"
+        );
+        let cells: Vec<Vec<&str>> = lines[1..6]
+            .iter()
+            .map(|line| {
+                line.split("   ")
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            cells[0][..5],
+            ["1", "#418", "open", "store-tab-rows", "found"]
+        );
+        assert_eq!(cells[1][..4], ["2", "acme/infra#77", "open", "attached"]);
+        assert_eq!(
+            cells[3][..5],
+            ["4", "#415", "merged", "older", "found+attached"]
+        );
+        assert_eq!(
+            cells[4][..5],
+            ["hidden", "#402", "closed", "spike", "found"]
+        );
+        assert_eq!(
+            lines[6],
+            "In your own order (dux agents prs sort store-tab-rows auto goes back)."
+        );
+
+        let json: Value =
+            serde_json::from_str(&prs_ls(&dux.client, "a1", Shape::Json).unwrap()).unwrap();
+        assert_eq!(json[0]["position"], 1);
+        assert_eq!(json[0]["shown"], true);
+        assert_eq!(json[1]["shown"], false);
+        assert_eq!(json[4]["position"], Value::Null);
+        assert_eq!(json[4]["hidden"], true);
+        assert_eq!(json[2]["state"], "draft");
+
+        assert_eq!(
+            prs_ls(&dux.client, "a1", Shape::Ids).unwrap(),
+            "https://github.com/octo/hello/pull/418\nhttps://github.com/acme/infra/pull/77\n\
+             https://github.com/acme/api/pull/77\nhttps://github.com/octo/hello/pull/415\n\
+             https://github.com/octo/hello/pull/402\n"
+        );
+    }
+
+    #[test]
+    fn branches_lists_each_branch_with_its_former_names_then_the_attachments_on_none() {
+        let dux = reads();
+        let table = prs_branches(&dux.client, "a1", Shape::Table).unwrap();
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 4, "{table}");
+        assert!(lines[1].starts_with("store-tab-rows   yes"), "{table}");
+        assert!(lines[1].contains("tab-rows, rows"), "{table}");
+        assert!(
+            lines[2].ends_with("#415 merged, #402 closed (hidden)"),
+            "{table}"
+        );
+        assert!(lines[3].starts_with(' '), "{table}");
+        assert!(
+            lines[3].ends_with("acme/infra#77 open, acme/api#77 draft"),
+            "{table}"
+        );
+        assert_eq!(
+            prs_branches(&dux.client, "a1", Shape::Ids).unwrap(),
+            "store-tab-rows\nolder\n"
+        );
+    }
+
+    #[test]
+    fn each_change_plans_its_request_and_its_question() {
+        let dux = reads();
+        let key = |owner_repo: &str, number: u64| json!({ "host": "github.com", "owner_repo": owner_repo, "number": number });
+        let cases: Vec<(Planned, &str, Method, &str, Value)> = vec![
+            (
+                prs_attach(&dux.client, "a1", "acme/infra#77").unwrap(),
+                "Attach pull request acme/infra#77 to agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests",
+                json!({ "pr": "acme/infra#77" }),
+            ),
+            (
+                prs_detach(&dux.client, "a1", "acme/infra#77").unwrap(),
+                "Detach pull request #77 (acme/infra) from agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests/detach",
+                key("acme/infra", 77),
+            ),
+            (
+                prs_hide(&dux.client, "a1", "#418").unwrap(),
+                "Hide pull request #418 on agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests/hide",
+                key("octo/hello", 418),
+            ),
+            (
+                prs_unhide(&dux.client, "a1", "402").unwrap(),
+                "Show pull request #402 again on agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests/show",
+                key("octo/hello", 402),
+            ),
+            (
+                prs_sort(&dux.client, "a1", PullRequestSort::Automatic).unwrap(),
+                "Put agent store-tab-rows's pull requests in automatic order",
+                Method::Put,
+                "/api/v1/sessions/a1/pull-requests/sort",
+                json!({ "mode": "automatic" }),
+            ),
+            (
+                prs_sort(&dux.client, "a1", PullRequestSort::Manual).unwrap(),
+                "Put agent store-tab-rows's pull requests in your own order",
+                Method::Put,
+                "/api/v1/sessions/a1/pull-requests/sort",
+                json!({ "mode": "manual" }),
+            ),
+            (
+                prs_move(
+                    &dux.client,
+                    "a1",
+                    "#415",
+                    PullRequestMove::Named(PullRequestMoveNamed::Top),
+                )
+                .unwrap(),
+                "Move pull request #415 to the top on agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests/move",
+                json!({ "pr": key("octo/hello", 415), "to": "top" }),
+            ),
+            (
+                prs_move(&dux.client, "a1", "#415", PullRequestMove::Position(2)).unwrap(),
+                "Move pull request #415 to position 2 on agent store-tab-rows",
+                Method::Post,
+                "/api/v1/sessions/a1/pull-requests/move",
+                json!({ "pr": key("octo/hello", 415), "to": 2 }),
+            ),
+        ];
+        for (planned, question, method, path, body) in cases {
+            assert_eq!(planned.question, question);
+            assert_eq!((planned.method, planned.path.as_str()), (method, path));
+            assert_eq!(planned.body, Some(body), "{question}");
+        }
+    }
+
+    #[test]
+    fn detach_and_hide_refuse_the_verb_that_cannot_apply_and_name_the_one_that_does() {
+        let dux = reads();
+        let detach = prs_detach(&dux.client, "a1", "#418").unwrap_err();
+        assert_eq!(detach.exit, Exit::Usage);
+        assert_eq!(
+            detach.message,
+            "#418 on store-tab-rows was found by dux, not attached; hide it instead (dux agents \
+             prs hide store-tab-rows #418)"
+        );
+        let hide = prs_hide(&dux.client, "a1", "acme/api#77").unwrap_err();
+        assert_eq!(hide.exit, Exit::Usage);
+        assert_eq!(
+            hide.message,
+            "acme/api#77 on store-tab-rows was attached, not found by dux; detach it instead (dux \
+             agents prs detach store-tab-rows acme/api#77)"
+        );
+        let ambiguous = prs_hide(&dux.client, "a1", "77").unwrap_err();
+        assert_eq!(ambiguous.exit, Exit::Usage);
+        assert!(dux.fake.seen().iter().all(|seen| seen.method == "GET"));
+    }
+
+    #[test]
+    fn an_attach_and_a_move_report_the_final_their_operation_ended_with() {
+        const ATTACHED: &str = "Attached acme/infra#77 to store-tab-rows. It has 5 pull \
+                                requests now; the banner shows #418 because open ones come first.";
+        const MOVED: &str = "Moved #415 to position 2 on store-tab-rows and switched to your own \
+                             order; choose Automatic under Sort to go back.";
+        let dux = dux(|seen| match (seen.method.as_str(), seen.path.as_str()) {
+            ("POST", "/api/v1/sessions/a1/pull-requests?operation=1") => Reply::json(
+                202,
+                r#"{"id":"op-1","kind":"pr.attach","state":"running","message":"","created":[],"removed":[],"parts":[]}"#,
+            ),
+            ("GET", path) if path.starts_with("/api/v1/operations/op-1") => Reply::json(
+                200,
+                &format!(
+                    r#"{{"id":"op-1","kind":"pr.attach","state":"succeeded","message":"{ATTACHED}","created":[],"removed":[],"parts":[]}}"#
+                ),
+            ),
+            ("POST", "/api/v1/sessions/a1/pull-requests/move?operation=1") => Reply::json(
+                202,
+                &format!(
+                    r#"{{"id":"op-2","kind":"pr.move","state":"succeeded","message":"{MOVED}","created":[],"removed":[],"parts":[]}}"#
+                ),
+            ),
+            _ => Reply::json(404, "{}"),
+        });
+        let attach = prs_attach(&dux.client, "a1", "acme/infra#77").unwrap();
+        assert_eq!(
+            perform(&dux.client, &attach, Some(Duration::from_secs(5))).unwrap(),
+            format!("{ATTACHED}\n")
+        );
+        let moved = prs_move(&dux.client, "a1", "#415", PullRequestMove::Position(2)).unwrap();
+        assert_eq!(
+            perform(&dux.client, &moved, Some(Duration::from_secs(5))).unwrap(),
+            format!("{MOVED}\n")
+        );
     }
 }
