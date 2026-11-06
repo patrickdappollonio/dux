@@ -216,12 +216,10 @@ describe("RenameSessionDialog", () => {
     ])
   })
 
-  it("warns that the open pull request and the pushed branch keep the old name", async () => {
+  it("warns that the pull request the server names and the pushed branch keep the old name", async () => {
     branchPushed.mockResolvedValue({ pushed: true })
-    seed("s1", {
-      ...managedSession,
-      pr: { number: 42, state: "open", title: "Login", url: "u", overridden: false },
-    })
+    const pr = { number: 42, state: "draft", title: "Login", url: "u", overridden: false }
+    seed("s1", { ...managedSession, pr, prs: [pr], rename_warning_pr: 42 })
     renderDialog()
     await waitFor(() =>
       expect(note().textContent).toBe(
@@ -233,10 +231,10 @@ describe("RenameSessionDialog", () => {
 
   it("warns about a pushed branch with no pull request", async () => {
     branchPushed.mockResolvedValue({ pushed: true })
-    seed("s1", {
-      ...managedSession,
-      pr: { number: 7, state: "merged", title: "Old", url: "u", overridden: false },
-    })
+    // An open one the server does not name (its repository unknown) is no
+    // warning.
+    const pr = { number: 7, state: "open", title: "Old", url: "u", overridden: false }
+    seed("s1", { ...managedSession, pr, prs: [pr] })
     renderDialog()
     await waitFor(() =>
       expect(note().textContent).toBe(

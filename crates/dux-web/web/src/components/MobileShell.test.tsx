@@ -1440,8 +1440,11 @@ describe("MobileShell agent header identity", () => {
   it("does not grow the header: same h-11, tight leading, and the name truncates", () => {
     mockState = agentHeaderState()
     render(<MobileShell />)
-    const header = screen.getByLabelText("Back").closest("header")
+    const back = screen.getByLabelText("Back")
+    const header = back.closest("header")
     expect(header?.className).toContain("h-11")
+    // Back keeps the 40px touch floor inside the 44px header.
+    expect(back.className).toMatch(/(?:^|\s)h-10(?:\s|$)/)
     const name = screen.getByText("main")
     const laneTwo = screen.getByText("Repo").closest("div")
     // 14px + 11px at leading-tight is about 31px, inside the 44px header, and
@@ -1650,6 +1653,28 @@ describe("MobileShell agent header PR chip", () => {
     mockState = prState(openPr)
     render(<MobileShell />)
     expect(chip().getAttribute("aria-label")).toBe("Pull request #123, open")
+  })
+
+  it("with several pull requests reads +n and opens the list as a sheet instead of a link", async () => {
+    mockState = prState(openPr)
+    const sessions = (
+      mockState.spine as unknown as { sessions: Record<string, unknown>[] }
+    ).sessions
+    sessions[0].prs = [
+      openPr,
+      { ...openPr, number: 77, url: "https://github.com/o/r/pull/77" },
+      { ...openPr, number: 415, state: "merged", url: "https://github.com/o/r/pull/415" },
+    ]
+    render(<MobileShell />)
+    const button = chip()
+    expect(button.textContent).toBe("#123 +2")
+    expect(button.getAttribute("href")).toBeNull()
+    expect(button.className).toContain("text-dux-pr-open")
+    expect(button.className).toMatch(/(?:^|\s)min-w-10(?:\s|$)/)
+    await act(async () => {
+      fireEvent.click(button)
+    })
+    expect(screen.getByText("3 pull requests on this agent")).toBeTruthy()
   })
 
   // WIDTH BUDGET. jsdom has no layout engine, so this is arithmetic over the

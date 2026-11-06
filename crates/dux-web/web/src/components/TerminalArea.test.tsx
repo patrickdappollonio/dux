@@ -373,6 +373,44 @@ describe("TerminalArea slot tab identity", () => {
   })
 })
 
+describe("TerminalArea pull request banner", () => {
+  const pr = (number: number) => ({
+    number,
+    state: "open",
+    title: `Pull request ${number}`,
+    url: `https://github.com/acme/api/pull/${number}`,
+    overridden: false,
+    host: "github.com",
+    owner_repo: "acme/api",
+    own_repo: true,
+  })
+
+  it("forgets the stepped-to pull request once it leaves the list", () => {
+    const withPrs = (numbers: number[]) => {
+      const spine = dormantSpine()
+      spine!.sessions[0].prs = numbers.map(pr) as never
+      spine!.sessions[0].pr = pr(numbers[0]) as never
+      return makeState({
+        spine,
+        selectedSessionId: "s1",
+        selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      })
+    }
+    mockState = withPrs([418, 77, 415])
+    const { rerender } = render(<TerminalArea />)
+    fireEvent.click(screen.getByRole("button", { name: "Next pull request" }))
+    expect(screen.getByText("2 of 3")).toBeTruthy()
+
+    mockState = withPrs([418, 415])
+    rerender(<TerminalArea />)
+    expect(screen.getByText("1 of 2")).toBeTruthy()
+
+    mockState = withPrs([418, 77, 415])
+    rerender(<TerminalArea />)
+    expect(screen.getByText("1 of 3")).toBeTruthy()
+  })
+})
+
 describe("TerminalArea project terminals", () => {
   it("mounts the pane with the PROJECT owner and never the dormant agent card", async () => {
     // With a required string `sessionId` on the terminal target, this area
@@ -476,8 +514,8 @@ describe("terminalAreaModel", () => {
   })
 
   it("has no pull request when the selected session names none", () => {
-    expect(model().pr).toBeNull()
-    expect(model({ selectedSessionId: null }).pr).toBeNull()
+    expect(model().prs).toEqual([])
+    expect(model({ selectedSessionId: null }).prs).toEqual([])
   })
 
   it("cards a dormant extra tab and leaves the live slot tab alone", () => {

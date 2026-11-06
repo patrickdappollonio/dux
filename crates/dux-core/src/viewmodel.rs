@@ -683,6 +683,10 @@ pub struct SessionView {
     /// The pull requests the user hid, in automatic order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub prs_hidden: Vec<PrView>,
+    /// The open or draft pull request that would keep the branch's old name
+    /// if the agent's branch were renamed, as the rename dialog warns about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rename_warning_pr: Option<u64>,
     /// How the pull requests are ordered: "automatic" | "manual".
     pub pr_sort: &'static str,
     /// Moves whenever the agent's pull requests, their preferences or its
@@ -1369,7 +1373,8 @@ impl PrView {
             overridden: pr.attached,
             number: pr.number,
             state: pr.state.word().to_string(),
-            title: pr.title.clone(),
+            // Stored rows may predate the stripping at the gh boundary.
+            title: crate::bidi::strip_bidi_controls(&pr.title),
             url: pr.url.clone(),
             host: pr.host.clone(),
             owner_repo: pr.owner_repo.clone(),
@@ -1620,6 +1625,7 @@ impl Engine {
             pr: prs.first().cloned(),
             prs,
             prs_hidden,
+            rename_warning_pr: self.rename_open_pull_request(&s.id),
             pr_sort: self.pr_sort_mode(&s.id).stored_text(),
             pr_revision: self.pr_revision.get(&s.id).copied().unwrap_or_default(),
             slot_tab_id: s.slot_tab_id().to_string(),
@@ -2253,6 +2259,8 @@ mod tests {
         other.found = false;
         other.attached = true;
         other.hidden = true;
+        // A row stored before titles were cleaned where they enter.
+        other.title = "Infra \u{202E}fix\u{202C}".to_string();
         rows.push(draft);
         rows.push(other);
         let vm = engine.spine();
@@ -2265,6 +2273,8 @@ mod tests {
         assert_eq!(shown, vec![(43, "draft", true), (42, "merged", true)]);
         assert_eq!(view.pr.as_ref().map(|pr| pr.number), Some(43));
         assert_eq!(view.prs[1].head_branch.as_deref(), Some("feature"));
+        // Renaming the branch leaves the open draft on its old name.
+        assert_eq!(view.rename_warning_pr, Some(43));
         let hidden = &view.prs_hidden[0];
         assert_eq!(
             (
@@ -2275,6 +2285,7 @@ mod tests {
             ),
             (7, false, true, true)
         );
+        assert_eq!(hidden.title, "Infra fix");
         assert_eq!(view.pr_sort, "automatic");
         let before = view.pr_revision;
 

@@ -19,7 +19,6 @@ import {
   SquareChevronRight,
   SquareTerminal,
   Trash2,
-  Unlink,
   Unplug,
   Variable,
 } from "lucide-react"
@@ -49,11 +48,10 @@ import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
   addTab,
   createTerminal,
-  detachPullRequest,
   openAgentEnv,
   openAgentInfo,
   openAgentStartupCommand,
-  openAttachPullRequest,
+  openPullRequests,
   openChangeProvider,
   openDelete,
   openEditor,
@@ -69,7 +67,7 @@ import {
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
-import type { PrKeyView, SessionView } from "@/lib/types"
+import type { SessionView } from "@/lib/types"
 
 // Every per-agent action, in one place so no surface can drift from another.
 //
@@ -90,19 +88,10 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // project, read once so the submenu's presence and contents cannot disagree.
   const projectId = workspaceProjectId(session.workspace)
   const projectName = spine?.projects.find((p) => p.id === projectId)?.name
-  const ghAvailable = bootstrap?.gh_available ?? false
   // Whether the branch-identity features exist for this agent at all: fork,
   // pull requests, startup commands. They are about a branch dux manages, and
   // a standalone agent has none whatever its folder contains.
   const branchGit = supportsBranchGit(session.workspace)
-  // Detach acts on the pull request the agent shows, and only one the user
-  // attached has anything to detach. gh-free, so an attachment never outlives
-  // the ability to remove it.
-  const shownPr = session.pr
-  const detachable =
-    shownPr && (shownPr.attached ?? shownPr.overridden) && shownPr.host && shownPr.owner_repo
-      ? { host: shownPr.host, owner_repo: shownPr.owner_repo, number: shownPr.number }
-      : null
   // While another connection input-owns one of this agent's PTYs, the mutating
   // entries disable: deleting, renaming or relaunching an agent someone else is
   // driving surprises them. `sessionActiveElsewhere` answers from a mounted
@@ -194,8 +183,6 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       <AgentIdentityAndSetupItems
         sessionId={session.id}
         branchGit={branchGit}
-        ghAvailable={ghAvailable}
-        detachable={detachable}
         activeElsewhere={activeElsewhere}
       />
       <DropdownMenuSeparator />
@@ -325,15 +312,10 @@ function AgentProjectSubmenu({
 function AgentIdentityAndSetupItems({
   sessionId,
   branchGit,
-  ghAvailable,
-  detachable,
   activeElsewhere,
 }: {
   sessionId: string
   branchGit: boolean
-  ghAvailable: boolean
-  /** The attached pull request the agent shows, the one Detach acts on. */
-  detachable: PrKeyView | null
   activeElsewhere: boolean
 }) {
   return (
@@ -351,22 +333,14 @@ function AgentIdentityAndSetupItems({
         <Cpu />
         Change agent provider…
       </DropdownMenuItem>
-      {branchGit && ghAvailable ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => openAttachPullRequest(sessionId)}
-        >
+      {/* Offered with or without gh: the dialog says when attaching needs a
+        * signed-in gh, and hiding or detaching talks to nothing, so a pull
+        * request never outlives the way to remove it. Left enabled while
+        * another device drives the agent: the list ends nobody's terminal. */}
+      {branchGit ? (
+        <DropdownMenuItem onClick={() => openPullRequests(sessionId)}>
           <GitPullRequest />
-          Attach pull request…
-        </DropdownMenuItem>
-      ) : null}
-      {branchGit && detachable ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => detachPullRequest(sessionId, detachable)}
-        >
-          <Unlink />
-          Detach pull request
+          Pull requests…
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuItem onClick={() => openAgentInfo(sessionId)}>

@@ -13,6 +13,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatDisplayDate } from "@/lib/projectInfo"
+import { prName, sessionPrs } from "@/lib/pr"
 import { closeAgentInfo, useDux } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import {
@@ -86,6 +87,7 @@ export function AgentInfoDialog() {
     // omit it) and truly differs.
     const { drifted } = branchDriftOf(session.workspace)
     const tabCount = session.tabs.length
+    const prs = sessionPrs(session)
     body = (
       <dl className="flex flex-col gap-3">
         <InfoRow label="Name">
@@ -166,18 +168,22 @@ export function AgentInfoDialog() {
         <InfoRow label="Tabs">
           {formatRegularCount(tabCount, "tab")}
         </InfoRow>
-        {session.pr ? (
-          // Mirrors the TUI Agent Info's "Pull request:" line, including the
-          // "manually attached" cue: this row is where a pin says it is one.
-          <InfoRow label="Pull request">
-            <InlineCode>#{session.pr.number}</InlineCode> ({session.pr.state}){" "}
-            {session.pr.title}
-            {session.pr.overridden ? (
-              <span className="text-muted-foreground">
-                {" "}
-                (manually attached)
-              </span>
-            ) : null}
+        {prs.length > 0 ? (
+          // Mirrors the TUI Agent Info's pull-request lines, including the
+          // "manually attached" cue: this row is where an attachment says it
+          // is one.
+          <InfoRow label={prs.length === 1 ? "Pull request" : "Pull requests"}>
+            {prs.map((pr) => (
+              <div key={pr.url}>
+                <InlineCode>{prName(pr)}</InlineCode> ({pr.state}) {pr.title}
+                {(pr.attached ?? pr.overridden) ? (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    (manually attached)
+                  </span>
+                ) : null}
+              </div>
+            ))}
           </InfoRow>
         ) : null}
       </dl>

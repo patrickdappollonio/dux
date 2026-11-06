@@ -1,4 +1,5 @@
 import { dormantTabNeedsCard, slotTabIdOf } from "@/lib/agentTabs"
+import { sessionPrs } from "@/lib/pr"
 import type { DuxState } from "@/lib/store"
 import { ownerSessionId as terminalOwnerSessionId } from "@/lib/terminalOwner"
 import type { Bootstrap } from "@/lib/bootstrapApi"
@@ -11,7 +12,8 @@ export type SelectedTarget = NonNullable<DuxState["selectedTarget"]>
 // lookups are lossy on purpose: a project terminal has no owning session, and
 // every session-scoped field here is agent-only or tolerates `undefined`.
 export type TerminalAreaModel = {
-  pr: PrView | null
+  /** The selected agent's shown pull requests, in its order. */
+  prs: PrView[]
   bannerAtBottom: boolean
   targetId: string
   paneKey: string
@@ -80,12 +82,13 @@ export function terminalAreaModel(ctx: {
     ? tabs.find((t) => t.id === target.tabId)
     : undefined
   const slotTabId = slotTabIdOf(ownerSessionId ?? "", session, ctx.pendingSlotTab)
+  const prSession = spine?.sessions.find((s) => s.id === ctx.selectedSessionId)
   return {
     // The PR belongs to the owning session, so it shows whether the agent or one
     // of its companion terminals is focused, as in the TUI. Placement honours
     // the same config: "bottom" puts the lane below the terminal, anything else
     // above.
-    pr: spine?.sessions.find((s) => s.id === ctx.selectedSessionId)?.pr ?? null,
+    prs: prSession ? sessionPrs(prSession) : [],
     bannerAtBottom: ctx.bootstrap?.pr_banner_position === "bottom",
     targetId,
     paneKey: isAgent ? `${targetId}:${ctx.terminalEpoch}` : targetId,

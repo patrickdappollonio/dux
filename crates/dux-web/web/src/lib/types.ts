@@ -84,6 +84,25 @@ export interface PrKeyView {
   number: number
 }
 
+/** One branch the agent's worktree has been on, with its pull requests. */
+export interface PrBranchView {
+  name: string
+  /** The names a rename moved it away from, oldest first. */
+  former_names: string[]
+  current: boolean
+  /** When dux first saw the agent on it; absent for one not recorded yet. */
+  first_seen_at?: string | null
+  /** Its pull requests, shown ones first in the agent's order, then hidden ones. */
+  prs: PrKeyView[]
+}
+
+/** The branches read behind the Pull requests dialog's Branches view. */
+export interface PrBranchesView {
+  /** Newest first. */
+  branches: PrBranchView[]
+  attached_on_no_branch: PrKeyView[]
+}
+
 /** How a tab's last run ended, recorded at the moment it ended. An unrecognised
  * `ending` must fall back to the generic sentence rather than being printed. */
 export interface TabRunVerdict {
@@ -195,6 +214,9 @@ export interface SessionView {
   prs?: PrView[]
   /** The pull requests the user hid. Absent when none. */
   prs_hidden?: PrView[]
+  /** The open or draft pull request that would keep the branch's old name if
+   * the branch were renamed. Absent when none. */
+  rename_warning_pr?: number
   /** How the pull requests are ordered. */
   pr_sort?: "automatic" | "manual"
   /** Moves whenever the agent's pull requests, their order or its branch list

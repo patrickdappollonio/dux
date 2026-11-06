@@ -679,6 +679,9 @@ export interface DuxState {
   // (like renameDraft) so the input stays fully store-controlled.
   attachPullRequestTarget: string | null
   attachPullRequestDraft: string
+  // The agent whose Pull requests dialog is open, or null. Keyed to the
+  // agent, so the dialog closes itself when the agent leaves the spine.
+  pullRequestsTarget: string | null
   // New-agent dialog state lives in the store so the input is fully
   // store-controlled: the server's generated-name reply fills it through a
   // callback, never a set-state-in-effect. `createAgentGeneratedName` is the
@@ -1184,6 +1187,7 @@ let state: DuxState = {
   changeProviderTarget: null,
   attachPullRequestTarget: null,
   attachPullRequestDraft: "",
+  pullRequestsTarget: null,
   createAgentDraft: "",
   createAgentRandomize: false,
   createAgentCopyChanges: true,
@@ -5668,14 +5672,23 @@ export async function submitRename(): Promise<void> {
   }
 }
 
-// Open the attach-pull-request dialog for a session with an empty draft. The
-// dialog body names the currently shown PR (if any) so overriding is explicit.
+// Open the attach-pull-request dialog for a session with an empty draft. It
+// takes the Pull requests dialog's place rather than stacking over it, and
+// gives it back when it closes, however it closes.
 export function openAttachPullRequest(sessionId: string): void {
-  setState({ attachPullRequestTarget: sessionId, attachPullRequestDraft: "" })
+  setState({
+    attachPullRequestTarget: sessionId,
+    attachPullRequestDraft: "",
+    pullRequestsTarget: null,
+  })
 }
 
 export function closeAttachPullRequest(): void {
-  setState({ attachPullRequestTarget: null, attachPullRequestDraft: "" })
+  setState({
+    attachPullRequestTarget: null,
+    attachPullRequestDraft: "",
+    pullRequestsTarget: state.attachPullRequestTarget,
+  })
 }
 
 export function setAttachPullRequestDraft(raw: string): void {
@@ -5698,6 +5711,66 @@ export function submitAttachPullRequest(): void {
       e instanceof Error ? e.message : "Could not attach the pull request.",
     )
   })
+}
+
+export function openPullRequests(sessionId: string): void {
+  setState({ pullRequestsTarget: sessionId })
+}
+
+export function closePullRequests(): void {
+  setState({ pullRequestsTarget: null })
+}
+
+function toastPullRequestRefusal(fallback: string): (e: unknown) => void {
+  return (e) => notifyError(e instanceof Error ? e.message : fallback)
+}
+
+// Hide a pull request dux found. Reversible from the dialog's Hidden section,
+// so no confirm; the server's info status says where it went.
+export function hidePullRequest(sessionId: string, pr: PrKeyView): void {
+  sessionsApi
+    .hidePullRequest(sessionId, pr)
+    .catch(toastPullRequestRefusal("Could not hide the pull request."))
+}
+
+export function showPullRequest(sessionId: string, pr: PrKeyView): void {
+  sessionsApi
+    .showPullRequest(sessionId, pr)
+    .catch(toastPullRequestRefusal("Could not show the pull request again."))
+}
+
+export function setPullRequestSort(
+  sessionId: string,
+  mode: "automatic" | "manual",
+): void {
+  sessionsApi
+    .setPullRequestSort(sessionId, mode)
+    .catch(toastPullRequestRefusal("Could not change how the pull requests are sorted."))
+}
+
+export function movePullRequest(
+  sessionId: string,
+  pr: PrKeyView,
+  to: "top" | "up" | "down",
+): void {
+  sessionsApi
+    .movePullRequest(sessionId, pr, to)
+    .catch(toastPullRequestRefusal("Could not move the pull request."))
+}
+
+// Resolves whether the server took the order, so a drag shown ahead of the
+// server can snap back when it did not.
+export function reorderPullRequests(
+  sessionId: string,
+  order: PrKeyView[],
+): Promise<boolean> {
+  return sessionsApi.reorderPullRequests(sessionId, order).then(
+    () => true,
+    (e: unknown) => {
+      toastPullRequestRefusal("Could not reorder the pull requests.")(e)
+      return false
+    },
+  )
 }
 
 // Detach one pull request the user attached to a session. No confirm: nothing

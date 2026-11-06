@@ -7,6 +7,7 @@ import type { AgentWorkspaceWire } from "@/lib/agentWorkspace"
 import { stripBidiControls } from "@/lib/bidi"
 import type {
   AgentTabView,
+  PrView,
   ProjectView,
   SessionView,
   SidebarModel,
@@ -167,6 +168,10 @@ function normalizeSessionWorkspace(
   }
 }
 
+function cleanPrTitle(pr: PrView): PrView {
+  return { ...pr, title: stripBidiControls(pr.title) }
+}
+
 // Turn a wire document into the shape every consumer downstream assumes.
 //
 // The one ingestion boundary, shared by both delivery paths (the boot fetch and
@@ -196,8 +201,10 @@ export function normalizeWorkspace(raw: RawWorkspace): Spine {
       return {
         ...s,
         // Someone else's text, cleaned once here for every screen that draws it
-        // (see `./bidi`).
-        ...(s.pr ? { pr: { ...s.pr, title: stripBidiControls(s.pr.title) } } : {}),
+        // (see `./bidi`), in every list it rides in.
+        ...(s.pr ? { pr: cleanPrTitle(s.pr) } : {}),
+        ...(s.prs ? { prs: s.prs.map(cleanPrTitle) } : {}),
+        ...(s.prs_hidden ? { prs_hidden: s.prs_hidden.map(cleanPrTitle) } : {}),
         workspace: normalizeSessionWorkspace(rawSession),
         tabs: (s.tabs ?? []).map(normalizeTab),
         // An older server that predates attention omits the field; treat missing

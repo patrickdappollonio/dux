@@ -1,4 +1,4 @@
-import { Suspense, type ReactNode } from "react"
+import { Suspense, useState, type ReactNode } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
@@ -10,23 +10,60 @@ import { TheaterChrome } from "@/components/TheaterChrome"
 import { TheaterPill } from "@/components/TheaterPill"
 import { Welcome } from "@/components/Welcome"
 import { shouldShowTabStrip } from "@/lib/agentTabs"
-import { useDux } from "@/lib/store"
+import { prKeyOf, samePrKey, sessionPrs } from "@/lib/pr"
+import { openPullRequests, useDux } from "@/lib/store"
 import type { Bootstrap } from "@/lib/bootstrapApi"
-import type { AgentTabView, PrView, SessionView } from "@/lib/types"
+import type { AgentTabView, PrKeyView, PrView, SessionView } from "@/lib/types"
 
 import { terminalAreaModel, type SelectedTarget } from "./terminalAreaModel"
 
 function PrLane({
-  pr,
+  sessionId,
+  prs,
+  cursors,
+  onCursor,
   atBottom,
   position,
 }: {
-  pr: PrView | null
+  sessionId: string | null
+  prs: PrView[]
+  cursors: PrCursors
+  onCursor: (sessionId: string, key: PrKeyView) => void
   atBottom: boolean
   position: "top" | "bottom"
 }) {
-  if (!pr || atBottom !== (position === "bottom")) return null
-  return <PrBanner pr={pr} position={position} />
+  if (!sessionId || prs.length === 0 || atBottom !== (position === "bottom")) return null
+  return (
+    <PrBanner
+      prs={prs}
+      cursor={cursors[sessionId] ?? null}
+      onCursor={(key) => onCursor(sessionId, key)}
+      onManage={() => openPullRequests(sessionId)}
+      position={position}
+    />
+  )
+}
+
+// Which pull request the banner was stepped to, per agent. Display-only and
+// this tab's own: it writes nothing, is not shared with any other surface, and
+// a reload starts every agent on its first pull request again.
+type PrCursors = Readonly<Record<string, PrKeyView>>
+
+// The cursors whose pull request the agent still shows, the same object when
+// every one of them does. A cursor kept past its pull request leaving would
+// jump the banner back to it if it were ever shown again.
+function keepListedCursors(cursors: PrCursors, sessions: readonly SessionView[]): PrCursors {
+  const kept = Object.entries(cursors).filter(([sessionId, key]) => {
+    const session = sessions.find((s) => s.id === sessionId)
+    return (
+      session !== undefined &&
+      sessionPrs(session).some((pr) => {
+        const own = prKeyOf(pr)
+        return own !== null && samePrKey(own, key)
+      })
+    )
+  })
+  return kept.length === Object.keys(cursors).length ? cursors : Object.fromEntries(kept)
 }
 
 function AgentTabLane({
@@ -155,6 +192,13 @@ export function TerminalArea() {
     endedInViewTab,
     routeNotFound,
   } = useDux()
+  const [prCursors, setPrCursors] = useState<PrCursors>({})
+  const stepPr = (sessionId: string, key: PrKeyView) =>
+    setPrCursors((current) => ({ ...current, [sessionId]: key }))
+  // Adjusted during render rather than in an effect, so no frame draws a
+  // cursor whose pull request has already gone.
+  const listedCursors = spine ? keepListedCursors(prCursors, spine.sessions) : prCursors
+  if (listedCursors !== prCursors) setPrCursors(listedCursors)
 
   // The URL names an agent this workspace does not have (a stale bookmark, or
   // Back landing on a deleted agent). Say so rather than showing the idle
@@ -171,7 +215,7 @@ export function TerminalArea() {
   }
 
   const {
-    pr,
+    prs,
     bannerAtBottom,
     targetId,
     paneKey,
@@ -206,7 +250,14 @@ export function TerminalArea() {
         * pull-request band is a status glance and a click target at once. It is
         * one tap away again through the pill's exit. */}
       <TheaterChrome hidden={theater}>
-        <PrLane pr={pr} atBottom={bannerAtBottom} position="top" />
+        <PrLane
+          sessionId={selectedSessionId}
+          prs={prs}
+          cursors={prCursors}
+          onCursor={stepPr}
+          atBottom={bannerAtBottom}
+          position="top"
+        />
         <AgentTabLane
           target={selectedTarget}
           session={session}
@@ -230,7 +281,14 @@ export function TerminalArea() {
         />
       </div>
       <TheaterChrome hidden={theater}>
-        <PrLane pr={pr} atBottom={bannerAtBottom} position="bottom" />
+        <PrLane
+          sessionId={selectedSessionId}
+          prs={prs}
+          cursors={prCursors}
+          onCursor={stepPr}
+          atBottom={bannerAtBottom}
+          position="bottom"
+        />
       </TheaterChrome>
     </div>
   )

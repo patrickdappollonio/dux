@@ -35,7 +35,7 @@ import {
 // because an empty name goes back to it. Every agent's name follows the same
 // rules, a standalone agent's included. An agent with a branch also gets an unticked "Also rename the git branch"
 // box, with a line saying what stays on the old name when the branch has an
-// open pull request or a pushed copy.
+// open or draft pull request or a pushed copy.
 export function RenameSessionDialog() {
   const { renameTarget, renameDraft, renameBranch, renamePending, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === renameTarget)
@@ -52,7 +52,9 @@ export function RenameSessionDialog() {
       })
     : ""
   const branchNamed = branch !== null
-  const openPr = session?.pr?.state === "open" ? session.pr.number : null
+  // The open or draft pull request that keeps the old name, as the engine
+  // answers it for every surface.
+  const openPr = branch !== null ? (session?.rename_warning_pr ?? null) : null
 
   // Whether the branch has a pushed copy, tagged with the agent it was asked
   // about so an answer that lands after the dialog moved on is ignored.

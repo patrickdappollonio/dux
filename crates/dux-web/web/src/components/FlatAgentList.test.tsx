@@ -738,6 +738,35 @@ describe("FlatAgentList PR chip", () => {
     fireEvent.click(screen.getByLabelText("Pull request #42, open"))
     expect(handlers.onSelectSession).not.toHaveBeenCalled()
   })
+
+  it("shows the number with one pull request and the count with several, colored by the shown one", () => {
+    const open = vi.fn()
+    vi.stubGlobal("open", open)
+    mockState = makeState("name")
+    const shown = {
+      number: 418,
+      url: "https://github.com/o/r/pull/418",
+      title: "Store every tab",
+      state: "draft",
+    } as NonNullable<SessionView["pr"]>
+    mockState.spine!.sessions[0].pr = shown
+    mockState.spine!.sessions[0].prs = [shown]
+    const { unmount } = render(<FlatAgentList handlers={handlers} />)
+    expect(screen.getByLabelText("Pull request #418, draft").textContent).toBe("#418")
+    unmount()
+
+    mockState.spine!.sessions[0].prs = [
+      shown,
+      { ...shown, number: 77, state: "open", url: "https://github.com/o/r/pull/77" },
+      { ...shown, number: 415, state: "merged", url: "https://github.com/o/r/pull/415" },
+    ]
+    render(<FlatAgentList handlers={handlers} />)
+    const badge = screen.getByLabelText("Pull request #418, draft, and 2 more")
+    expect(badge.textContent).toBe("3")
+    expect(badge.className).toContain("text-dux-pr-draft")
+    fireEvent.click(badge)
+    expect(open).toHaveBeenCalledWith("https://github.com/o/r/pull/418", "_blank", "noopener")
+  })
 })
 
 // (b) the agent menu's editor entries: the in-app item is renamed to
