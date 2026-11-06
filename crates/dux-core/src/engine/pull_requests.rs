@@ -23,21 +23,61 @@ use crate::viewmodel::{PrBranchView, PrBranchesView, PrKeyView};
 /// route can answer it as a missing resource.
 pub const UNKNOWN_PULL_REQUEST_MARKER: &str = "has no pull request";
 
-/// Whether `row` lives in the agent's own repository, `own` being that
-/// repository when a worker has read it. Unknown, a found row is the agent's
-/// own, because discovery only ever keeps pull requests from that repository;
-/// an attached-only row is not, since it may come from anywhere.
-pub(crate) fn in_own_repository(own: Option<&GitHubRemote>, row: &AgentPr) -> bool {
-    match own {
-        Some(own) => own.holds(&row.host, &row.owner_repo),
-        None => row.found,
+/// What is known of an agent's own repository, decided once over all of its
+/// rows so every sentence, list and projection about the agent agrees.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OwnRepository<'a> {
+    /// A worker read it.
+    Read(&'a GitHubRemote),
+    /// Not read yet, and every found row is in one repository: discovery only
+    /// keeps pull requests from the agent's own, so a found row is its own.
+    FoundAgree,
+    /// Not read yet, and found rows span repositories: rows found before the
+    /// worktree's origin changed outlive the change, so no found row says
+    /// which repository is the agent's now.
+    Unknown,
+}
+
+impl<'a> OwnRepository<'a> {
+    /// The answer for an agent whose rows are `rows`, `own` being its
+    /// repository when a worker has read it.
+    pub(crate) fn of<'r>(
+        own: Option<&'a GitHubRemote>,
+        rows: impl IntoIterator<Item = &'r AgentPr>,
+    ) -> Self {
+        if let Some(own) = own {
+            return Self::Read(own);
+        }
+        let mut found = rows.into_iter().filter(|row| row.found);
+        let agree = found.next().is_none_or(|first| {
+            found.all(|row| {
+                row.host.eq_ignore_ascii_case(&first.host)
+                    && row.owner_repo.eq_ignore_ascii_case(&first.owner_repo)
+            })
+        });
+        if agree {
+            Self::FoundAgree
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// Whether `row` lives in the agent's own repository. An attached-only
+    /// row is not, until the repository is read, since it may come from
+    /// anywhere.
+    pub(crate) fn holds(self, row: &AgentPr) -> bool {
+        match self {
+            Self::Read(own) => own.holds(&row.host, &row.owner_repo),
+            Self::FoundAgree => row.found,
+            Self::Unknown => false,
+        }
     }
 }
 
 /// How a sentence names a pull request: `#418` in the agent's own
 /// repository, `acme/infra#77` from any other.
-pub(crate) fn pr_label(own: Option<&GitHubRemote>, row: &AgentPr) -> String {
-    if in_own_repository(own, row) {
+pub(crate) fn pr_label(own: OwnRepository<'_>, row: &AgentPr) -> String {
+    if own.holds(row) {
         format!("#{}", row.number)
     } else {
         format!("{}#{}", row.owner_repo, row.number)
@@ -96,7 +136,10 @@ impl PrChange {
     }
 
     fn label(&self, index: usize) -> String {
-        pr_label(self.own.as_ref(), &self.rows[index])
+        pr_label(
+            OwnRepository::of(self.own.as_ref(), &self.rows),
+            &self.rows[index],
+        )
     }
 
     fn visible_len(&self) -> usize {
@@ -144,6 +187,7 @@ pub(crate) fn attach_message(
     earlier: Option<AttachedBefore>,
     mode: PrSortMode,
 ) -> StatusText {
+    let own = OwnRepository::of(own, rows);
     let label = rows
         .iter()
         .find(|row| row.is(key))
@@ -201,7 +245,14 @@ impl Engine {
     /// the agent's own repository, `acme/infra#77` from any other, exactly as
     /// the status messages about it do.
     pub fn pull_request_label(&self, session_id: &str, row: &AgentPr) -> String {
-        pr_label(self.pr_own_repos.get(session_id), row)
+        let rows = self
+            .agent_prs
+            .get(session_id)
+            .map_or(std::slice::from_ref(row), Vec::as_slice);
+        pr_label(
+            OwnRepository::of(self.pr_own_repos.get(session_id), rows),
+            row,
+        )
     }
 
     /// The agent a pull-request change is for, its rows and its preferences,
@@ -702,9 +753,9 @@ impl Engine {
                 }
             })
         });
-        let own = self.pr_own_repos.get(session_id);
+        let own = OwnRepository::of(self.pr_own_repos.get(session_id), every.iter().copied());
         let on = |entry: &crate::branch_history::BranchHistoryEntry, row: &AgentPr| {
-            in_own_repository(own, row)
+            own.holds(row)
                 && row.head_branch.as_deref().is_some_and(|head| {
                     head == entry.name || entry.former_names.iter().any(|n| n == head)
                 })
@@ -764,11 +815,11 @@ impl Engine {
                 .map(|prefs| prefs.sort_mode)
                 .unwrap_or_default(),
         );
-        let own = self.pr_own_repos.get(session_id);
+        let own = OwnRepository::of(self.pr_own_repos.get(session_id), rows);
         let open = |row: &AgentPr| matches!(row.state, PrState::Open | PrState::Draft);
         let on_branch = ordered.visible.iter().chain(&ordered.hidden).find(|row| {
             open(row)
-                && in_own_repository(own, row)
+                && own.holds(row)
                 && row
                     .head_branch
                     .as_deref()
@@ -779,7 +830,11 @@ impl Engine {
                 ordered.visible.first().filter(|row| {
                     open(row)
                         && row.head_branch.is_none()
-                        && (own.is_none() || in_own_repository(own, row))
+                        && match own {
+                            OwnRepository::Read(_) => own.holds(row),
+                            OwnRepository::FoundAgree => true,
+                            OwnRepository::Unknown => false,
+                        }
                 })
             })
             .map(|row| row.number)

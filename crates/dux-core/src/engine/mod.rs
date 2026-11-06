@@ -12919,21 +12919,32 @@ mod tests {
 
     /// Before any answer has named the agent's own repository, a found pull
     /// request sits under its branch and is named by number alone, and the
-    /// rename warning sees it; an attached-only one stays apart under its
-    /// repository's name.
+    /// rename warning sees it, as long as every found one is in the same
+    /// repository whatever its case; an attached-only one stays apart under
+    /// its repository's name. Found ones from two repositories (the origin
+    /// changed) leave none of them the agent's own until the repository is
+    /// read.
     #[test]
-    fn a_found_pull_request_is_the_agents_own_before_its_repository_is_known() {
+    fn a_found_pull_request_is_the_agents_own_before_its_repository_is_known_while_found_ones_agree()
+     {
         let on_feat = found_pr(12, 3, "feat");
+        let mut shouted = found_pr(13, 2, "feat");
+        shouted.owner_repo = "O/R".to_string();
         let attached_on_feat = attached_only_pr(77, "acme/infra", "feat");
-        let (mut engine, _tmp) = engine_with_prs(&[on_feat.clone(), attached_on_feat.clone()]);
+        let (mut engine, _tmp) =
+            engine_with_prs(&[on_feat.clone(), shouted.clone(), attached_on_feat.clone()]);
         engine.pr_own_repos.remove("s1");
         let view = engine.pull_request_branches("s1").unwrap();
         assert_eq!(
             view.branches
                 .iter()
-                .map(|b| (b.name.as_str(), b.prs.iter().map(|k| k.number).collect()))
+                .map(|b| {
+                    let mut prs: Vec<u64> = b.prs.iter().map(|k| k.number).collect();
+                    prs.sort_unstable();
+                    (b.name.as_str(), prs)
+                })
                 .collect::<Vec<(&str, Vec<u64>)>>(),
-            vec![("feat", vec![12])]
+            vec![("feat", vec![12, 13])]
         );
         assert_eq!(
             view.on_no_listed_branch
@@ -12948,6 +12959,27 @@ mod tests {
             "acme/infra#77"
         );
         assert_eq!(engine.rename_open_pull_request("s1"), Some(12));
+
+        let mut former = found_pr(5, 4, "feat");
+        former.owner_repo = "old/origin".to_string();
+        let (mut engine, _tmp) = engine_with_prs(&[on_feat.clone(), former.clone()]);
+        engine.pr_own_repos.remove("s1");
+        let view = engine.pull_request_branches("s1").unwrap();
+        assert!(view.branches.iter().all(|b| b.prs.is_empty()));
+        let mut apart: Vec<(String, u64)> = view
+            .on_no_listed_branch
+            .iter()
+            .map(|k| (k.owner_repo.clone(), k.number))
+            .collect();
+        apart.sort_unstable();
+        assert_eq!(
+            apart,
+            vec![("o/r".to_string(), 12), ("old/origin".to_string(), 5)]
+        );
+        assert_eq!(engine.pull_request_label("s1", &on_feat), "o/r#12");
+        assert_eq!(engine.pull_request_label("s1", &former), "old/origin#5");
+        assert_eq!(engine.rename_open_pull_request("s1"), None);
+        assert!(engine.spine().sessions[0].prs.iter().all(|pr| !pr.own_repo));
     }
 
     /// The sort mode and every move rewrite the order the agent shows, and

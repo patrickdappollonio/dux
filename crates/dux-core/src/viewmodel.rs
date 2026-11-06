@@ -1365,9 +1365,12 @@ impl ProjectView {
 }
 
 impl PrView {
-    /// Project one of an agent's pull requests, `own` being the agent's own
-    /// repository when it is known.
-    fn from_pr(own: Option<&crate::git::GitHubRemote>, pr: &crate::model::AgentPr) -> Self {
+    /// Project one of an agent's pull requests, `own` being what is known of
+    /// the agent's own repository.
+    fn from_pr(
+        own: crate::engine::pull_requests::OwnRepository<'_>,
+        pr: &crate::model::AgentPr,
+    ) -> Self {
         let time = |at: Option<chrono::DateTime<chrono::Utc>>| at.map(|at| at.to_rfc3339());
         Self {
             overridden: pr.attached,
@@ -1378,7 +1381,7 @@ impl PrView {
             url: pr.url.clone(),
             host: pr.host.clone(),
             owner_repo: pr.owner_repo.clone(),
-            own_repo: crate::engine::pull_requests::in_own_repository(own, pr),
+            own_repo: own.holds(pr),
             head_branch: pr.head_branch.clone(),
             found: pr.found,
             attached: pr.attached,
@@ -1598,7 +1601,8 @@ impl Engine {
                 restart_offer: inputs.restart_offer,
             });
         let rows = self.agent_prs.get(&s.id).map_or(&[][..], Vec::as_slice);
-        let own = self.pr_own_repos.get(&s.id);
+        let own =
+            crate::engine::pull_requests::OwnRepository::of(self.pr_own_repos.get(&s.id), rows);
         let ordered = crate::pr_list::order(rows, self.pr_sort_mode(&s.id));
         let prs: Vec<PrView> = ordered
             .visible
