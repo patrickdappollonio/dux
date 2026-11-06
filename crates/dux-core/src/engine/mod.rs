@@ -12744,10 +12744,12 @@ mod tests {
         assert_eq!(engine.pr_revision.get("s1").copied(), revision);
     }
 
-    /// The branch list puts each pull request on the branch GitHub names as
-    /// its head, under the branch's name now or one it had before a rename;
-    /// attached ones on no branch are listed apart. The rename warning reads
-    /// the same names.
+    /// The branch list puts each pull request of the agent's own repository
+    /// on the branch GitHub names as its head, under the branch's name now or
+    /// one it had before a rename; attached ones on no branch, and those from
+    /// another repository whose head happens to share a name, are listed
+    /// apart. The rename warning reads the same names, and falls back to the
+    /// open pull request shown while no head branch is known.
     #[test]
     fn the_branch_list_groups_pull_requests_by_former_names() {
         use chrono::TimeZone;
@@ -12756,12 +12758,11 @@ mod tests {
         merged.state = crate::model::PrState::Merged;
         let mut unknown_head = found_pr(8, 2, "x");
         unknown_head.head_branch = None;
-        let (mut engine, _tmp) = engine_with_prs(&[
-            on_old_name,
-            merged,
-            unknown_head,
-            attached_only_pr(77, "acme/infra", "main"),
-        ]);
+        let mut elsewhere_on_feat = attached_only_pr(77, "acme/infra", "feat");
+        elsewhere_on_feat.gh_created_at =
+            Some(chrono::Utc.with_ymd_and_hms(2026, 1, 9, 0, 0, 0).unwrap());
+        let (mut engine, _tmp) =
+            engine_with_prs(&[on_old_name, merged, unknown_head.clone(), elsewhere_on_feat]);
         let day = |d| Some(chrono::Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap());
         engine.branch_histories.insert(
             "s1".to_string(),
@@ -12811,6 +12812,9 @@ mod tests {
             vec![("acme/infra", 77)]
         );
         assert_eq!(engine.rename_open_pull_request("s1"), Some(12));
+
+        let (engine, _tmp) = engine_with_prs(&[unknown_head]);
+        assert_eq!(engine.rename_open_pull_request("s1"), Some(8));
     }
 
     /// The sort mode and every move rewrite the order the agent shows, and

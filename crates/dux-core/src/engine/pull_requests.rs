@@ -610,8 +610,10 @@ impl Engine {
 
     /// Every branch the agent's worktree has been on, newest first, each with
     /// its pull requests, and the attached pull requests that are on none of
-    /// them. A pull request is on a branch when GitHub's head branch is the
-    /// branch's name or one of the names it had before a rename.
+    /// them. A pull request is on a branch when it lives in the agent's own
+    /// repository and GitHub's head branch is the branch's name or one of the
+    /// names it had before a rename; a head of the same name in another
+    /// repository is another branch.
     ///
     /// # Errors
     ///
@@ -657,10 +659,12 @@ impl Engine {
             (Some(_), None) => std::cmp::Ordering::Greater,
             (Some(x), Some(y)) => y.cmp(&x),
         });
+        let own = self.pr_own_repos.get(session_id);
         let on = |entry: &crate::branch_history::BranchHistoryEntry, row: &AgentPr| {
-            row.head_branch.as_deref().is_some_and(|head| {
-                head == entry.name || entry.former_names.iter().any(|n| n == head)
-            })
+            in_own_repository(own, row)
+                && row.head_branch.as_deref().is_some_and(|head| {
+                    head == entry.name || entry.former_names.iter().any(|n| n == head)
+                })
         };
         let branches = history
             .iter()
@@ -688,8 +692,12 @@ impl Engine {
     }
 
     /// The open or draft pull request on the branch the agent is on, under
-    /// its name now or any it had before a rename, for the rename dialog's
-    /// warning. From what the sync already knows; nothing is asked of GitHub.
+    /// its name now or any it had before a rename, in the agent's own
+    /// repository, for the rename dialog's warning. While no pull request
+    /// says which branch it is on yet (one carried over from before
+    /// pull requests were kept per row, until its first refresh), the open or
+    /// draft one shown stands in, unless it is known to live elsewhere. From
+    /// what the sync already knows; nothing is asked of GitHub.
     pub fn rename_open_pull_request(&self, session_id: &str) -> Option<u64> {
         let current = self
             .sessions
@@ -713,15 +721,23 @@ impl Engine {
                 .map(|prefs| prefs.sort_mode)
                 .unwrap_or_default(),
         );
-        ordered
-            .visible
-            .into_iter()
-            .chain(ordered.hidden)
-            .filter(|row| matches!(row.state, PrState::Open | PrState::Draft))
-            .find(|row| {
-                row.head_branch
+        let own = self.pr_own_repos.get(session_id);
+        let open = |row: &AgentPr| matches!(row.state, PrState::Open | PrState::Draft);
+        let on_branch = ordered.visible.iter().chain(&ordered.hidden).find(|row| {
+            open(row)
+                && in_own_repository(own, row)
+                && row
+                    .head_branch
                     .as_deref()
                     .is_some_and(|head| head == current || former.iter().any(|n| n == head))
+        });
+        on_branch
+            .or_else(|| {
+                ordered.visible.first().filter(|row| {
+                    open(row)
+                        && row.head_branch.is_none()
+                        && (own.is_none() || in_own_repository(own, row))
+                })
             })
             .map(|row| row.number)
     }

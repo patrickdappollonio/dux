@@ -8878,7 +8878,10 @@ mod tests {
                     )),
                 ],
                 asked: Vec::new(),
-                own_repo: None,
+                own_repo: Some(crate::git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                }),
             },
         ]));
         let mut rows: Vec<(u64, Option<String>)> = engine.agent_prs["s2"]
