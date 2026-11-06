@@ -23,6 +23,7 @@ import {
 } from "@/lib/agentWorkspace"
 import {
   branchesCheckFailedProse,
+  BRANCHES_CHECKING_GRACE_MS,
   branchesCheckingProse,
   currentBranchLabelProse,
   branchLossProse,
@@ -175,6 +176,7 @@ export function DeleteSessionDialog() {
   const [currentAnswer, setCurrentAnswer] = useState<boolean | null>(null)
   const [othersAnswer, setOthersAnswer] = useState<boolean | null>(null)
   const [offer, setOffer] = useState<OfferState>(PENDING)
+  const [checkingShown, setCheckingShown] = useState(false)
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
   const { name, managed, folder } = deleteSessionView(session)
@@ -232,6 +234,22 @@ export function DeleteSessionDialog() {
       live = false
     }
   }, [askOffer, deleteTarget])
+
+  // The pending box is drawn at the tick, but its "Checking" line waits out the
+  // grace: most checks answer inside it, and a line drawn for those flashed in
+  // and out and moved the dialog twice. Every check starts its own grace.
+  const checking = askOffer && offer.state === "pending"
+  useEffect(() => {
+    if (!checking) return
+    const timer = setTimeout(
+      () => setCheckingShown(true),
+      BRANCHES_CHECKING_GRACE_MS,
+    )
+    return () => {
+      clearTimeout(timer)
+      setCheckingShown(false)
+    }
+  }, [checking])
 
   async function handleConfirm() {
     if (!deleteTarget) return
@@ -347,7 +365,8 @@ export function DeleteSessionDialog() {
                 />
               </>
             )}
-            {offer.state !== "ready" && (
+            {(offer.state === "failed" ||
+              (offer.state === "pending" && checkingShown)) && (
               <p className="text-sm text-muted-foreground">
                 {renderProse(
                   offer.state === "pending"
@@ -369,6 +388,7 @@ export function DeleteSessionDialog() {
           </>
         )}
         <AttachedSection blockers={blockers} />
+        {/* Misclick-safe spacing between the checkboxes and the buttons. */}
         <div className="h-2" />
         <DialogFooter>
           <Button

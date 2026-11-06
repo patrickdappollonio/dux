@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 
 import type { DuxState } from "@/lib/store"
 import { installBrowserHistory } from "@/test/browserHistory"
+import { BRANCHES_CHECKING_GRACE_MS } from "@/lib/deleteAgent"
 
 // Override `useDux` (seeded spine + target) and spy the store actions the
 // dialog fires, while every other store export stays intact.
@@ -151,7 +152,6 @@ function othersBox(): HTMLElement | null {
   return screen.queryByRole("checkbox", { name: /Also delete the other branch/ })
 }
 
-
 describe("DeleteSessionDialog", () => {
   // The browser's Back abandons the dialog exactly as Cancel does: it closes,
   // and the agent is not deleted.
@@ -184,30 +184,35 @@ describe("DeleteSessionDialog", () => {
   })
 
   // Until the offer lands nothing is pinned, so nothing can be deleted on a
-  // guess: the box is there, named after the spine's branch, but disabled, and
-  // a Delete pressed now keeps every branch, saying why on the wire.
+  // guess: the box is there from the tick, named after the spine's branch, but
+  // disabled, and a Delete pressed now keeps every branch, saying why on the
+  // wire.
   it("disables the boxes while the offer is pending, and sends no pins", () => {
-    branchUnpushed.mockReturnValue(new Promise(() => {}))
-    seed("s1", [session1])
-    render(<DeleteSessionDialog />)
-    tickWorktree()
-    const box = screen.getByRole("checkbox", {
-      name: "Also delete the branch dux/s1",
-    })
-    expect(box.getAttribute("aria-disabled")).toBe("true")
-    expect(box.getAttribute("aria-checked")).toBe("false")
-    expect(othersBox()).toBeNull()
-    expect(screen.getByText("Checking the branches…")).toBeTruthy()
-    const confirm = screen.getByRole("button", { name: "Delete" })
-    expect((confirm as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(confirm)
-    const unchecked = { delete: false, branches: [], unchecked: "pending" }
-    expect(deleteSession).toHaveBeenCalledWith(
-      "s1",
-      true,
-      { current: unchecked, others: unchecked },
-      null,
-    )
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockReturnValue(new Promise(() => {}))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      const box = screen.getByRole("checkbox", {
+        name: "Also delete the branch dux/s1",
+      })
+      expect(box.getAttribute("aria-disabled")).toBe("true")
+      expect(box.getAttribute("aria-checked")).toBe("false")
+      expect(othersBox()).toBeNull()
+      const confirm = screen.getByRole("button", { name: "Delete" })
+      expect((confirm as HTMLButtonElement).disabled).toBe(false)
+      fireEvent.click(confirm)
+      const unchecked = { delete: false, branches: [], unchecked: "pending" }
+      expect(deleteSession).toHaveBeenCalledWith(
+        "s1",
+        true,
+        { current: unchecked, others: unchecked },
+        null,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("keeps the boxes disabled when the check fails, and says why", async () => {
@@ -461,6 +466,63 @@ describe("DeleteSessionDialog", () => {
     )
   })
 
+  // A quick answer replaces the pending state before anyone could read it, so
+  // a "Checking" line drawn at the tick only flashed in and out and moved the
+  // dialog twice. The box is drawn at the tick and answers in place.
+  it("never flashes the checking line when the offer answers quickly", async () => {
+    vi.useFakeTimers()
+    try {
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+      expect(screen.queryByText("Checking the branches…")).toBeNull()
+      await act(async () => {})
+      expect(currentBox().getAttribute("aria-checked")).toBe("true")
+      expect(screen.queryByText("Checking the branches…")).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("says it is checking the branches once the check outlasts the grace", () => {
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockReturnValue(new Promise(() => {}))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS - 1))
+      expect(screen.queryByText("Checking the branches…")).toBeNull()
+      act(() => vi.advanceTimersByTime(2))
+      expect(screen.getByText("Checking the branches…")).toBeTruthy()
+      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Every check earns its line afresh: unticking mid-check and ticking again
+  // starts a new grace rather than showing the old check's line at once.
+  it("starts the grace over when the worktree box is ticked again mid-check", () => {
+    vi.useFakeTimers()
+    try {
+      branchUnpushed.mockReturnValue(new Promise(() => {}))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
+      expect(screen.getByText("Checking the branches…")).toBeTruthy()
+      tickWorktree()
+      tickWorktree()
+      expect(screen.queryByText("Checking the branches…")).toBeNull()
+      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
+      expect(screen.getByText("Checking the branches…")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("asks git nothing until the branch box is on screen", () => {
     // One git call, bought only where its answer is rendered: with the worktree
     // kept there is no branch offer at all.
@@ -473,25 +535,34 @@ describe("DeleteSessionDialog", () => {
 
   // Reopening is a new question: the answers and the offer start over.
   it("forgets the answers and the offer on reopen", async () => {
-    seed("s1", [session1, session2])
-    const { rerender } = render(<DeleteSessionDialog />)
-    tickWorktree()
-    await waitFor(() => expect(currentBox().getAttribute("aria-checked")).toBe("true"))
-    fireEvent.click(currentBox())
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
-    seed(null, [session1, session2])
-    rerender(<DeleteSessionDialog />)
+    vi.useFakeTimers()
+    try {
+      seed("s1", [session1, session2])
+      const { rerender } = render(<DeleteSessionDialog />)
+      tickWorktree()
+      await act(async () => {})
+      expect(currentBox().getAttribute("aria-checked")).toBe("true")
+      fireEvent.click(currentBox())
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+      seed(null, [session1, session2])
+      rerender(<DeleteSessionDialog />)
 
-    branchUnpushed.mockReturnValue(new Promise(() => {}))
-    seed("s2", [session1, session2])
-    rerender(<DeleteSessionDialog />)
-    tickWorktree()
-    expect(
-      screen.getByRole("checkbox", { name: "Also delete the branch dux/s2" })
-        .getAttribute("aria-disabled"),
-    ).toBe("true")
-    expect(screen.getByText("Checking the branches…")).toBeTruthy()
+      branchUnpushed.mockReturnValue(new Promise(() => {}))
+      seed("s2", [session1, session2])
+      rerender(<DeleteSessionDialog />)
+      tickWorktree()
+      expect(
+        screen
+          .getByRole("checkbox", { name: "Also delete the branch dux/s2" })
+          .getAttribute("aria-disabled"),
+      ).toBe("true")
+      act(() => vi.advanceTimersByTime(BRANCHES_CHECKING_GRACE_MS + 1))
+      expect(screen.getByText("Checking the branches…")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
+
   // With the worktree kept there is no branch offer on screen at all, so the
   // request must carry no branch answer either: an answer nobody was asked for
   // is the server deciding on a click that never happened.
