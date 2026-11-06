@@ -223,9 +223,11 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].body).toEqual({ provider: "codex" })
   })
 
-  it("submitAttachPullRequest POSTs the typed reference and closes the dialog", async () => {
+  it("submitAttachPullRequest POSTs the typed reference and goes back to the Pull requests dialog", async () => {
     const mod = await loadStore()
+    mod.openPullRequests("s1")
     mod.openAttachPullRequest("s1")
+    expect(mod.getSnapshot().pullRequestsTarget).toBeNull()
     mod.setAttachPullRequestDraft("  #123  ")
     mod.submitAttachPullRequest()
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
@@ -236,6 +238,16 @@ describe("store write actions route to REST", () => {
     // Deferred action: the dialog closes on submit, the outcome rides the
     // status toast stream.
     expect(mod.getSnapshot().attachPullRequestTarget).toBeNull()
+    expect(mod.getSnapshot().pullRequestsTarget).toBe("s1")
+  })
+
+  it("closeAttachPullRequest goes back to the Pull requests dialog it was opened from", async () => {
+    const mod = await loadStore()
+    mod.openPullRequests("s1")
+    mod.openAttachPullRequest("s1")
+    mod.closeAttachPullRequest()
+    expect(mod.getSnapshot().attachPullRequestTarget).toBeNull()
+    expect(mod.getSnapshot().pullRequestsTarget).toBe("s1")
   })
 
   it("submitAttachPullRequest refuses an empty draft without a request", async () => {

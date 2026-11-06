@@ -5673,7 +5673,8 @@ export async function submitRename(): Promise<void> {
 }
 
 // Open the attach-pull-request dialog for a session with an empty draft. It
-// takes the Pull requests dialog's place rather than stacking over it.
+// takes the Pull requests dialog's place rather than stacking over it, and
+// gives it back when it closes, however it closes.
 export function openAttachPullRequest(sessionId: string): void {
   setState({
     attachPullRequestTarget: sessionId,
@@ -5683,7 +5684,11 @@ export function openAttachPullRequest(sessionId: string): void {
 }
 
 export function closeAttachPullRequest(): void {
-  setState({ attachPullRequestTarget: null, attachPullRequestDraft: "" })
+  setState({
+    attachPullRequestTarget: null,
+    attachPullRequestDraft: "",
+    pullRequestsTarget: state.attachPullRequestTarget,
+  })
 }
 
 export function setAttachPullRequestDraft(raw: string): void {
