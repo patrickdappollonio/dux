@@ -2002,16 +2002,17 @@ pub(crate) fn agent_info_lines(
     ));
     // These lines are the ONLY terminal UI cue in Agent Info that a pull
     // request was attached, so every one renders and an attachment says so.
-    let label = if prs.len() == 1 {
-        "Pull request: "
-    } else {
-        "Pull requests:"
-    };
-    for (index, (name, pr)) in prs.iter().enumerate() {
-        let lead = if index == 0 {
-            label.to_string()
+    // Several pull requests get a heading line of their own, so each one
+    // starts in the same column as every other label's value.
+    let value_column = "Pull request: ".len();
+    if prs.len() > 1 {
+        lines.push(("Pull requests:".to_string(), AgentInfoTone::Neutral));
+    }
+    for (name, pr) in prs {
+        let lead = if prs.len() == 1 {
+            "Pull request: ".to_string()
         } else {
-            " ".repeat(label.len())
+            " ".repeat(value_column)
         };
         let mut line = format!("{lead}{name} ({}) {}", pr_state_word(&pr.state), pr.title);
         if pr.attached {
@@ -9576,8 +9577,9 @@ mod tests {
         assert_eq!(
             both,
             vec![
+                ("Pull requests:".to_string(), AgentInfoTone::Neutral),
                 (
-                    "Pull requests:#42 (open) Fix the frobnicator".to_string(),
+                    "              #42 (open) Fix the frobnicator".to_string(),
                     AgentInfoTone::Neutral
                 ),
                 (
