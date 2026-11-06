@@ -1440,8 +1440,11 @@ describe("MobileShell agent header identity", () => {
   it("does not grow the header: same h-11, tight leading, and the name truncates", () => {
     mockState = agentHeaderState()
     render(<MobileShell />)
-    const header = screen.getByLabelText("Back").closest("header")
+    const back = screen.getByLabelText("Back")
+    const header = back.closest("header")
     expect(header?.className).toContain("h-11")
+    // Back keeps the 40px touch floor inside the 44px header.
+    expect(back.className).toMatch(/(?:^|\s)h-10(?:\s|$)/)
     const name = screen.getByText("main")
     const laneTwo = screen.getByText("Repo").closest("div")
     // 14px + 11px at leading-tight is about 31px, inside the 44px header, and

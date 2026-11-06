@@ -355,7 +355,7 @@ function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProp
       <Button
         variant="ghost"
         size="lg"
-        className="min-w-11 shrink-0"
+        className="h-10 min-w-11 shrink-0"
         aria-label="Back"
         onClick={() => navigateUp()}
       >
