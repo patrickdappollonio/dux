@@ -369,13 +369,25 @@ describe("PullRequestsDialog footer", () => {
 
 describe("PullRequestsDialog branches view", () => {
   it("lists every branch with its pull requests and the attachments on none", async () => {
+    const answer = await pullRequestBranches("s1")
+    // The server lists newest first; the current branch still goes on top.
+    pullRequestBranches.mockResolvedValue({
+      ...answer,
+      branches: [answer.branches[1], answer.branches[0], answer.branches[2]],
+    })
     seed(session())
     render(<PullRequestsDialog />)
     await act(async () => {
       fireEvent.click(screen.getByRole("tab", { name: /Branches/ }))
     })
     expect(await screen.findByText("spike-tab-ids")).toBeTruthy()
-    expect(screen.getByText("Current")).toBeTruthy()
+    expect(
+      [...document.querySelectorAll("[data-slot='branch-name']")].map((el) => el.textContent),
+    ).toEqual(["store-tab-rows", "tab-state-by-id", "spike-tab-ids"])
+    expect(screen.getByText("Current").className).toMatch(/(^| )text-muted-foreground( |$)/)
+    expect(screen.getByText("spike-tab-ids").closest("li")?.className).toMatch(
+      /(^| )items-center( |$)/,
+    )
     expect(screen.getByText("No pull request")).toBeTruthy()
     expect(screen.getByText("hidden")).toBeTruthy()
     expect(screen.getByText("tab-state")).toBeTruthy()

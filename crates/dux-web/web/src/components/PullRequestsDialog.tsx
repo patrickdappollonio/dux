@@ -32,7 +32,6 @@ import {
   Unlink,
 } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Collapsible,
@@ -729,7 +728,13 @@ function BranchesView({
       </p>
     )
   }
-  const { branches: rows, attached_on_no_branch: loose } = branches.data
+  const { attached_on_no_branch: loose } = branches.data
+  // The branch checked out now on top, then the rest in the server's order,
+  // newest first.
+  const rows = [
+    ...branches.data.branches.filter((b) => b.current),
+    ...branches.data.branches.filter((b) => !b.current),
+  ]
   return (
     <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
       {branches.error ? (
@@ -739,16 +744,14 @@ function BranchesView({
         {rows.map((branch) => {
           const seen = branch.first_seen_at ? formatFirstSeen(branch.first_seen_at) : null
           return (
-            <li key={branch.name} className="flex items-start gap-3 rounded-lg px-1 py-1.5">
-              <GitBranch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+            <li key={branch.name} className="flex items-center gap-3 rounded-lg px-1 py-1.5">
+              <GitBranch className="size-4 shrink-0 text-muted-foreground" />
               <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="flex min-w-0 items-center gap-2">
-                  <span className="truncate font-medium">{branch.name}</span>
-                  {branch.current ? (
-                    <Badge variant="secondary" className="shrink-0">
-                      Current
-                    </Badge>
-                  ) : null}
+                  <span data-slot="branch-name" className="truncate font-medium">
+                    {branch.name}
+                  </span>
+                  {branch.current ? <span className={QUIET_TAG}>Current</span> : null}
                 </span>
                 <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
                   {seen ? <span>first seen {seen}</span> : null}
@@ -780,7 +783,7 @@ function BranchesView({
                           target="_blank"
                           rel="noopener noreferrer"
                           className={cn(
-                            "inline-flex items-center justify-center gap-1 rounded px-1 font-medium hover:underline pointer-coarse:h-10 pointer-coarse:min-w-10",
+                            "inline-flex items-center justify-end gap-1 rounded pl-1 font-medium hover:underline pointer-coarse:h-10 pointer-coarse:min-w-10",
                             pr ? prIconClass(pr.state) : "text-muted-foreground",
                           )}
                         >
