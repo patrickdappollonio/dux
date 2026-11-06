@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+// Loaded once at collection, where no test timeout applies and, with no window
+// stubbed yet, the store boots nothing. Its first load is by far the slowest
+// step in the file; left to the first test, a busy machine pushes that test
+// past its timeout. Every test still imports its own fresh instance after
+// `vi.resetModules`.
+import "./store"
+
 // The per-PTY input-ownership ledger and the server-published spine field it
 // combines with. Two sources answer "is another connection driving this
 // agent": a MOUNTED TerminalPane's live verdict ("mine"/"elsewhere", the fast
@@ -42,7 +49,12 @@ beforeEach(() => {
   vi.resetModules()
 })
 
-afterEach(() => {
+// `vi.resetModules` gives the next test a fresh store but does not stop this
+// one: its app socket would keep reconnecting on real timers, and every socket
+// and request it makes would land on the next test's fakes.
+afterEach(async () => {
+  const store = await import("./store")
+  store.eventsSocket.dispose()
   vi.unstubAllGlobals()
 })
 

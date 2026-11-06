@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+// Loaded once at collection, where no test timeout applies and, with no window
+// stubbed yet, the store boots nothing. Its first load is by far the slowest
+// step in the file; left to the first test, a busy machine pushes that test
+// past its timeout. Every test still imports its own fresh instance after
+// `vi.resetModules`.
+import "./store"
+
 // Mock sonner before importing the store so the raiser the store calls
 // (`lib/notify.ts`) picks up our spies (mirrors storeStatusToasts.test.ts). A
 // REST 4xx/5xx rides no `/ws` CommandResult, so the store's own `.catch` must
@@ -142,7 +149,12 @@ beforeEach(() => {
   vi.resetModules()
 })
 
-afterEach(() => {
+// `vi.resetModules` gives the next test a fresh store but does not stop this
+// one: its app socket would keep reconnecting on real timers, and every socket
+// and request it makes would land on the next test's fakes.
+afterEach(async () => {
+  const store = await import("./store")
+  store.eventsSocket.dispose()
   vi.unstubAllGlobals()
 })
 

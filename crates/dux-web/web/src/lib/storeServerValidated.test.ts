@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
+// Loaded once at collection, where no test timeout applies and, with no window
+// stubbed yet, the store boots nothing. Its first load is by far the slowest
+// step in the file; left to the first test, a busy machine pushes that test
+// past its timeout. Every test still imports its own fresh instance after
+// `vi.resetModules`.
+import "./store"
+
 // JSDOM DELIBERATELY, AND WITHOUT IT THE FILE TESTS THE WRONG BRANCH. The store
 // runs `boot()` only where there is a `window`, so in the default node
 // environment this file exercised the path no browser ever takes: no boot, no
@@ -115,7 +122,12 @@ beforeEach(async () => {
   serverValidated = (await import("./serverValidated")).serverValidated
 })
 
-afterEach(() => {
+// `vi.resetModules` gives the next test a fresh store but does not stop this
+// one: its app socket would keep reconnecting on real timers, and every socket
+// and request it makes would land on the next test's fakes.
+afterEach(async () => {
+  const store = await import("./store")
+  store.eventsSocket.dispose()
   vi.unstubAllGlobals()
 })
 
