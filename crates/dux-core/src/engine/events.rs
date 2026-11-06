@@ -4574,6 +4574,15 @@ impl Engine {
             let (info, found) = match answer {
                 crate::worker::PrSyncAnswer::Found(info) => (info, true),
                 crate::worker::PrSyncAnswer::Refreshed(info) => (info, false),
+                crate::worker::PrSyncAnswer::Unanswered(key) => {
+                    if let Some(index) = rows.iter().position(|row| row.is(&key)) {
+                        rows[index].last_refreshed_at = Some(now);
+                        if !touched.contains(&index) {
+                            touched.push(index);
+                        }
+                    }
+                    continue;
+                }
             };
             let key =
                 crate::model::PrKey::new(info.host.clone(), info.owner_repo.clone(), info.number);
@@ -9387,6 +9396,31 @@ mod tests {
         assert!(
             planned.is_some_and(|at| at > an_hour_ago),
             "the plan carries the new stamp, got {planned:?}"
+        );
+
+        // A refresh GitHub answered null for (the pull request or its
+        // repository gone) keeps what the row knew and stamps that it asked,
+        // so the row waits for its cadence instead of being asked every cycle.
+        let before = engine.agent_prs["s1"][0].clone();
+        engine.agent_prs.get_mut("s1").unwrap()[0].last_refreshed_at = Some(an_hour_ago);
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".to_string(),
+                answers: vec![crate::worker::PrSyncAnswer::Unanswered(
+                    crate::model::PrKey::new("github.com", "o/r", 1),
+                )],
+                ..Default::default()
+            },
+        ]));
+        assert!(matches!(reaction, EventReaction::Nothing));
+        let row = &engine.agent_prs["s1"][0];
+        assert!(row.last_refreshed_at.is_some_and(|at| at > an_hour_ago));
+        assert_eq!((&row.state, &row.title), (&before.state, &before.title));
+        let stored = engine.session_store.load_agent_prs_of("s1").unwrap();
+        assert!(
+            stored[0]
+                .last_refreshed_at
+                .is_some_and(|at| at > an_hour_ago)
         );
     }
 

@@ -1292,6 +1292,10 @@ pub enum PrSyncAnswer {
     Found(crate::model::PrInfo),
     /// A refresh by number answered for a pull request the agent already has.
     Refreshed(crate::model::PrInfo),
+    /// A refresh by number that GitHub answered null for: the pull request,
+    /// or its repository, is gone or out of reach. What the agent knew of it
+    /// stands; only that it was asked is new.
+    Unanswered(crate::model::PrKey),
 }
 
 /// What one sync brought back for one agent. Every answer is about a named

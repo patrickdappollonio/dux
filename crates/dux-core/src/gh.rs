@@ -532,6 +532,15 @@ fn assemble_results(
             (Ask::Refresh { .. }, QuestionAnswer::Refresh(Some(info))) => {
                 result.answers.push(PrSyncAnswer::Refreshed(info));
             }
+            (Ask::Refresh { number }, QuestionAnswer::Refresh(None)) => {
+                result
+                    .answers
+                    .push(PrSyncAnswer::Unanswered(crate::model::PrKey::new(
+                        question.host.clone(),
+                        question.owner_repo(),
+                        *number,
+                    )));
+            }
             _ => {}
         }
     }
@@ -1628,6 +1637,11 @@ fn parse_chunk_response(
             .get(repo_alias(pos_repo[pos]).as_str())
             .filter(|v| !v.is_null())
         else {
+            // A repository GitHub answered null for is gone or out of reach:
+            // a refresh there is asked and answered with nothing.
+            if matches!(question.ask, Ask::Refresh { .. }) {
+                out.push((i, QuestionAnswer::Refresh(None)));
+            }
             continue;
         };
         let owner_repo = question.owner_repo();
@@ -4820,6 +4834,7 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             .map(|answer| match answer {
                 PrSyncAnswer::Found(pr) => format!("found #{}", pr.number),
                 PrSyncAnswer::Refreshed(pr) => format!("refreshed #{}", pr.number),
+                PrSyncAnswer::Unanswered(key) => format!("unanswered #{}", key.number),
             })
             .collect();
         assert_eq!(got, vec!["found #30", "refreshed #5"]);
@@ -5179,9 +5194,16 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             entries,
             &|_, _| false,
         );
-        assert!(
-            answered.is_empty(),
-            "a repository that answered null answers nothing"
+        let results = assemble_results(entries, &questions, answered, at(NOON));
+        let [PrSyncAnswer::Unanswered(key)] = results[0].answers.as_slice() else {
+            panic!(
+                "a repository that answered null says only that it was asked, got {:?}",
+                results[0].answers
+            );
+        };
+        assert_eq!(
+            key,
+            &crate::model::PrKey::new("git.example.com", "acme/widget", 7)
         );
     }
 
@@ -5280,6 +5302,7 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             .iter()
             .map(|answer| match answer {
                 PrSyncAnswer::Found(pr) | PrSyncAnswer::Refreshed(pr) => pr.number,
+                PrSyncAnswer::Unanswered(key) => key.number,
             })
             .collect()
     }
