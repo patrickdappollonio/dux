@@ -647,6 +647,12 @@ pub struct Engine {
     /// branches in turn and tells a gone ref to be looked up by head name.
     /// Runtime only: after a restart the turns simply start over.
     pub pr_branch_asks: HashMap<String, HashMap<String, crate::worker::BranchAskRecord>>,
+    /// Each agent's own repository, by session id: the one its worktree's
+    /// remote names, as the pull-request sync or an attach lookup last read
+    /// it. A pull request there is named `#418`, one anywhere else
+    /// `acme/infra#77`. Runtime only: until a worker has read it, no pull
+    /// request counts as the agent's own.
+    pub pr_own_repos: HashMap<String, crate::git::GitHubRemote>,
     /// Agents whose branch moved while their pull-request check could not run
     /// (one for the old branch was still in flight, or inside its debounce).
     /// Each is owed exactly one check for the branch it is on, dispatched when
@@ -5977,8 +5983,14 @@ impl Engine {
             row.attached = true;
             rows.push(row);
         }
-        let message =
-            pull_requests::attach_message(&agent_name, &rows, &key, earlier, prefs.sort_mode);
+        let message = pull_requests::attach_message(
+            &agent_name,
+            self.pr_own_repos.get(session_id),
+            &rows,
+            &key,
+            earlier,
+            prefs.sort_mode,
+        );
         self.commit_pr_change(session_id, &agent_name, rows, prefs)
             .map_err(|failure| anyhow::anyhow!(failure.to_string()))?;
         Ok(message)
@@ -12428,8 +12440,8 @@ mod tests {
         row
     }
 
-    /// An engine with the integration on and agent `s1` (branch `feat`)
-    /// holding `rows`, stored and loaded as a start would.
+    /// An engine with the integration on and agent `s1` (branch `feat`, in
+    /// repository `o/r`) holding `rows`, stored and loaded as a start would.
     fn engine_with_prs(
         rows: &[crate::model::AgentPr],
     ) -> (Engine, crate::test_scratch::ScratchDir) {
@@ -12443,6 +12455,13 @@ mod tests {
             .replace_agent_prs("s1", rows, &crate::model::PrPrefs::default())
             .unwrap();
         engine.seed_pull_requests_from_store();
+        engine.record_own_pr_repository(
+            "s1",
+            crate::git::GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+            },
+        );
         (engine, tmp)
     }
 
@@ -12594,6 +12613,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 answers: vec![crate::worker::PrSyncAnswer::Found(pr.clone())],
                 asked: Vec::new(),
+                own_repo: None,
             }])
         };
         engine.process_worker_event(sync());

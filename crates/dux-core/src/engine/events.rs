@@ -4643,10 +4643,14 @@ impl Engine {
             session_id,
             answers,
             asked,
+            own_repo,
         } in results
         {
             finished.push(session_id.clone());
             if self.pr_status_result_is_current(&session_id, checked_at) {
+                if let Some(own_repo) = own_repo {
+                    changed |= self.record_own_pr_repository(&session_id, own_repo);
+                }
                 asked_any |= !asked.is_empty();
                 changed |= self.apply_pr_sync_answers(&session_id, answers, asked, now);
             }
@@ -5084,6 +5088,9 @@ impl Engine {
                 } else {
                     match result {
                         Ok(pr) => {
+                            if let Some(remote) = pr.project_remote.clone() {
+                                self.record_own_pr_repository(&session_id, remote);
+                            }
                             match self.apply_pr_attach(
                                 &session_id,
                                 &pr.host,
@@ -7862,6 +7869,7 @@ mod tests {
                         .map(crate::worker::PrSyncAnswer::Found)
                         .collect(),
                     asked: Vec::new(),
+                    own_repo: None,
                 })
                 .collect(),
         )
@@ -8557,6 +8565,7 @@ mod tests {
                 custom_name: None,
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "deleted".into(),
@@ -8747,6 +8756,7 @@ mod tests {
                     ..Default::default()
                 })],
                 asked: Vec::new(),
+                own_repo: None,
             },
         ]));
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
@@ -8868,6 +8878,7 @@ mod tests {
                     )),
                 ],
                 asked: Vec::new(),
+                own_repo: None,
             },
         ]));
         let mut rows: Vec<(u64, Option<String>)> = engine.agent_prs["s2"]
@@ -9034,6 +9045,7 @@ mod tests {
                 session_id: "live".to_string(),
                 answers: Vec::new(),
                 asked: vec![("spike".to_string(), record.clone())],
+                own_repo: None,
             },
         ]));
         let plan = engine.pr_sync_sessions.lock().unwrap().clone();
@@ -9330,6 +9342,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 answers: vec![crate::worker::PrSyncAnswer::Refreshed(pr)],
                 asked: Vec::new(),
+                own_repo: None,
             },
         ]));
         assert!(matches!(reaction, EventReaction::Nothing));
@@ -9381,6 +9394,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 answers: vec![crate::worker::PrSyncAnswer::Refreshed(info.clone())],
                 asked: Vec::new(),
+                own_repo: None,
             }])
         };
         let reaction = engine.process_worker_event(refresh(&reopened));
@@ -9491,6 +9505,7 @@ mod tests {
                         )),
                     ],
                     asked: Vec::new(),
+                    own_repo: None,
                 },
             ]));
         };

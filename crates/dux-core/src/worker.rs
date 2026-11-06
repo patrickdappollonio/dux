@@ -84,6 +84,9 @@ pub struct ResolvedPullRequest {
     /// The id the asking client gave this create, echoed on the question a
     /// refusal puts so the client can tell it is the answer to that create.
     pub ask_id: Option<String>,
+    /// The repository the project's remote names, when the lookup read one:
+    /// for an attach, the agent's own repository.
+    pub project_remote: Option<crate::git::GitHubRemote>,
 }
 
 /// Whether the user agreed that an agent from a pull request may be made on a
@@ -1300,6 +1303,9 @@ pub struct PrStatusResult {
     pub(crate) answers: Vec<PrSyncAnswer>,
     /// The branches this sync asked about and what it learned of each.
     pub(crate) asked: Vec<(String, BranchAskRecord)>,
+    /// The repository the agent's worktree remote names, when the sync read
+    /// one: the agent's own repository.
+    pub(crate) own_repo: Option<crate::git::GitHubRemote>,
 }
 
 /// Snapshot of one agent shared with the pull-request sync worker.

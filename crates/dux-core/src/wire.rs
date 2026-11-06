@@ -10178,6 +10178,7 @@ mod tests {
                 custom_name: None,
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             purpose: crate::worker::PrLookupPurpose::Attach {
                 session_id: "s1".to_string(),
@@ -10269,6 +10270,10 @@ mod tests {
             custom_name: None,
             review_copy: crate::worker::ReviewCopyConsent::default(),
             ask_id: None,
+            project_remote: Some(crate::git::GitHubRemote {
+                host: "GitHub.com".to_string(),
+                owner_repo: "Forker/hello-world".to_string(),
+            }),
         };
         let reaction =
             engine.process_worker_event(crate::worker::WorkerEvent::PullRequestResolved {
@@ -10282,7 +10287,12 @@ mod tests {
         let final_status = statuses.last().expect("keyed final");
         assert_eq!(final_status.tone, "info");
         assert_eq!(final_status.key.as_deref(), Some(op_id.as_str()));
-        assert!(final_status.message.contains("#12"), "{final_status:?}");
+        assert!(
+            final_status.message.starts_with("Attached #12 to "),
+            "the agent with nothing found learns its own repository from the lookup: \
+             {final_status:?}"
+        );
+        assert!(engine.spine().sessions[0].prs[0].own_repo);
         assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
         assert_eq!(engine.attached_pr("s1").map(|p| p.number), Some(12));
         assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
@@ -16004,6 +16014,7 @@ mod tests {
                 custom_name: Some("my-agent".to_string()),
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             // An id with no registered lookup op, so the followup returns no
             // clear key and resolves nothing: the create busy flows through the
@@ -16122,6 +16133,7 @@ mod tests {
                 custom_name: Some(own_branch.to_string()),
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: Some("req-7".to_string()),
+                project_remote: None,
             }),
             status_op_id: None,
         };
@@ -16194,6 +16206,7 @@ mod tests {
                 custom_name: None,
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             status_op_id: None,
         };
@@ -16233,6 +16246,7 @@ mod tests {
                 custom_name: None,
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             status_op_id: Some("op-lookup".to_string()),
         };
@@ -16296,6 +16310,7 @@ mod tests {
                 custom_name: None,
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             status_op_id: None,
         };

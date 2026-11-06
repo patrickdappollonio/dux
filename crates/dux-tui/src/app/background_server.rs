@@ -1559,6 +1559,7 @@ pub(crate) mod tests {
             custom_name: None,
             review_copy: ReviewCopyConsent::default(),
             ask_id: None,
+            project_remote: None,
         }
     }
 

@@ -229,6 +229,7 @@ pub(crate) fn check_pr_for_entry(
         session_id: entry.session_id.clone(),
         answers: Vec::new(),
         asked: Vec::new(),
+        own_repo: None,
     });
     (result, signals)
 }
@@ -385,13 +386,30 @@ fn run_entries(
     trigger: SyncTrigger,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PrSyncReport {
+    // The remote each worktree names is the agent's own repository, which
+    // the answers carry back whether or not anything was asked there.
+    let remotes: std::cell::RefCell<BTreeMap<std::path::PathBuf, git::GitHubRemote>> =
+        std::cell::RefCell::default();
     let questions = plan_entries(
         entries,
-        &|path| live_remote_resolver(path, policy),
+        &|path| {
+            let resolution = live_remote_resolver(path, policy);
+            if let git::RemoteResolution::Allowed(remote) = &resolution {
+                remotes.borrow_mut().insert(
+                    path.to_path_buf(),
+                    git::GitHubRemote {
+                        host: normalized_github_host(&remote.host),
+                        owner_repo: remote.owner_repo.clone(),
+                    },
+                );
+            }
+            resolution
+        },
         policy,
         trigger,
         now,
     );
+    let remotes = remotes.into_inner();
 
     // Group by host; for each host either skip it (already backed off: nothing
     // asked, no signal) or chunk its questions by alias budget and emit one
@@ -454,7 +472,11 @@ fn run_entries(
         points,
     ));
 
-    (assemble_results(entries, &questions, answers, now), signals)
+    let mut results = assemble_results(entries, &questions, answers, now);
+    for (result, entry) in results.iter_mut().zip(entries) {
+        result.own_repo = remotes.get(Path::new(&entry.worktree_path)).cloned();
+    }
+    (results, signals)
 }
 
 /// Gather a cycle's answers back into one [`PrStatusResult`] per entry.
@@ -470,6 +492,7 @@ fn assemble_results(
             session_id: entry.session_id.clone(),
             answers: Vec::new(),
             asked: Vec::new(),
+            own_repo: None,
         })
         .collect();
     let mut asked: Vec<BTreeMap<String, BranchAskRecord>> = vec![BTreeMap::new(); entries.len()];
@@ -2280,10 +2303,18 @@ pub(crate) fn run_attach_pull_request_lookup_job(
             }
         };
 
+    let project_remote = match resolution {
+        git::RemoteResolution::Allowed(remote) => Some(git::GitHubRemote {
+            host: normalized_github_host(&remote.host),
+            owner_repo: remote.owner_repo,
+        }),
+        git::RemoteResolution::Denied | git::RemoteResolution::Unresolved => None,
+    };
     let result = look_up_pull_request(OsStr::new("gh"), &lookup)
         .map_err(StatusText::from)
-        .map(|metadata| {
-            resolved_pull_request(
+        .map(|metadata| crate::worker::ResolvedPullRequest {
+            project_remote,
+            ..resolved_pull_request(
                 metadata,
                 project,
                 &lookup,
@@ -2362,6 +2393,7 @@ fn resolved_pull_request(
         custom_name,
         review_copy,
         ask_id,
+        project_remote: None,
     }
 }
 

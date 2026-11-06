@@ -12,6 +12,7 @@ use super::{
     Engine, InFlightKey, STANDALONE_ADD_AS_PROJECT_REMEDY, StatusUpdate,
     pr_attach_in_flight_message,
 };
+use crate::git::GitHubRemote;
 use crate::model::{AgentPr, PrKey, PrPrefs, PrState};
 use crate::pr_list::{self, Arrange, ArrangeOutcome, MoveTo, PrSortMode};
 use crate::status_text::StatusText;
@@ -22,26 +23,16 @@ use crate::viewmodel::{PrBranchView, PrBranchesView, PrKeyView};
 /// route can answer it as a missing resource.
 pub const UNKNOWN_PULL_REQUEST_MARKER: &str = "has no pull request";
 
-/// The repository an agent's own pull requests live in: the one the sync
-/// found any of them in, because discovery only keeps pull requests from the
-/// agent's own repository. `None` while nothing was found.
-pub(crate) fn own_repository(rows: &[AgentPr]) -> Option<(&str, &str)> {
-    rows.iter()
-        .find(|row| row.found)
-        .map(|row| (row.host.as_str(), row.owner_repo.as_str()))
-}
-
-/// Whether `row` lives in the agent's own repository.
-pub(crate) fn in_own_repository(rows: &[AgentPr], row: &AgentPr) -> bool {
-    own_repository(rows).is_some_and(|(host, owner_repo)| {
-        row.host.eq_ignore_ascii_case(host) && row.owner_repo.eq_ignore_ascii_case(owner_repo)
-    })
+/// Whether `row` lives in the agent's own repository, `own` being that
+/// repository when a worker has read it. Unknown, nothing is the agent's own.
+pub(crate) fn in_own_repository(own: Option<&GitHubRemote>, row: &AgentPr) -> bool {
+    own.is_some_and(|own| own.holds(&row.host, &row.owner_repo))
 }
 
 /// How a sentence names a pull request: `#418` in the agent's own
 /// repository, `acme/infra#77` from any other.
-pub(crate) fn pr_label(rows: &[AgentPr], row: &AgentPr) -> String {
-    if in_own_repository(rows, row) {
+pub(crate) fn pr_label(own: Option<&GitHubRemote>, row: &AgentPr) -> String {
+    if in_own_repository(own, row) {
         format!("#{}", row.number)
     } else {
         format!("{}#{}", row.owner_repo, row.number)
@@ -66,6 +57,7 @@ struct PrChange {
     agent: String,
     rows: Vec<AgentPr>,
     prefs: PrPrefs,
+    own: Option<GitHubRemote>,
 }
 
 impl PrChange {
@@ -81,7 +73,7 @@ impl PrChange {
     }
 
     fn label(&self, index: usize) -> String {
-        pr_label(&self.rows, &self.rows[index])
+        pr_label(self.own.as_ref(), &self.rows[index])
     }
 
     fn visible_len(&self) -> usize {
@@ -123,6 +115,7 @@ const SWITCHED_REPLACING: &str = " and switched to your own order, starting from
 /// whether it was attached.
 pub(crate) fn attach_message(
     agent: &str,
+    own: Option<&GitHubRemote>,
     rows: &[AgentPr],
     key: &PrKey,
     earlier: Option<AttachedBefore>,
@@ -131,7 +124,7 @@ pub(crate) fn attach_message(
     let label = rows
         .iter()
         .find(|row| row.is(key))
-        .map_or_else(|| key_label(key), |row| pr_label(rows, row));
+        .map_or_else(|| key_label(key), |row| pr_label(own, row));
     match earlier {
         Some(AttachedBefore::Attached) => {
             crate::status_text![
@@ -150,7 +143,7 @@ pub(crate) fn attach_message(
         None => {
             let ordered = pr_list::order(rows, mode);
             let count = ordered.visible.len();
-            let shown = ordered.visible.first().map(|row| pr_label(rows, row));
+            let shown = ordered.visible.first().map(|row| pr_label(own, row));
             let tail = match (mode, shown) {
                 _ if count < 2 => crate::status_text!["; the banner shows it."],
                 (PrSortMode::Automatic, Some(shown)) => crate::status_text![
@@ -198,7 +191,28 @@ impl Engine {
             anyhow::bail!(pr_attach_in_flight_message(&agent));
         }
         let (rows, prefs) = self.pr_change_base(session_id)?;
-        Ok(PrChange { agent, rows, prefs })
+        let own = self.pr_own_repos.get(session_id).cloned();
+        Ok(PrChange {
+            agent,
+            rows,
+            prefs,
+            own,
+        })
+    }
+
+    /// Remember the repository a worker read as `session_id`'s own, moving
+    /// the agent's revision when it changed. Reports whether it did.
+    pub(crate) fn record_own_pr_repository(
+        &mut self,
+        session_id: &str,
+        remote: GitHubRemote,
+    ) -> bool {
+        if self.pr_own_repos.get(session_id) == Some(&remote) {
+            return false;
+        }
+        self.pr_own_repos.insert(session_id.to_string(), remote);
+        *self.pr_revision.entry(session_id.to_string()).or_default() += 1;
+        true
     }
 
     /// The rows and preferences a change to an agent's pull requests starts

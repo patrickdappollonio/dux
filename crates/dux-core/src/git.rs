@@ -7997,10 +7997,24 @@ pub(crate) mod test_support {
     }
 }
 
+/// The GitHub repository a remote names.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GitHubRemote {
+pub struct GitHubRemote {
+    /// The GitHub host, such as `github.com`.
     pub host: String,
+    /// The repository as `owner/repo`.
     pub owner_repo: String,
+}
+
+impl GitHubRemote {
+    /// Whether a pull request on `host` in `owner_repo` lives in this
+    /// repository. Hosts and repository names are compared without case,
+    /// as GitHub does.
+    pub(crate) fn holds(&self, host: &str, owner_repo: &str) -> bool {
+        crate::gh::normalized_github_host(&self.host)
+            .eq_ignore_ascii_case(&crate::gh::normalized_github_host(host))
+            && self.owner_repo.eq_ignore_ascii_case(owner_repo)
+    }
 }
 
 /// What reading a worktree's `origin` concluded. THREE outcomes, not two,

@@ -286,6 +286,7 @@ mod tests {
                 custom_name: Some("my-agent".to_string()),
                 review_copy: crate::worker::ReviewCopyConsent::default(),
                 ask_id: None,
+                project_remote: None,
             }),
             status_op_id,
         }

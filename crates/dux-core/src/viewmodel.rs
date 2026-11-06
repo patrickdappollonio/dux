@@ -1361,8 +1361,9 @@ impl ProjectView {
 }
 
 impl PrView {
-    /// Project one of an agent's pull requests, `rows` being all of them.
-    fn from_pr(rows: &[crate::model::AgentPr], pr: &crate::model::AgentPr) -> Self {
+    /// Project one of an agent's pull requests, `own` being the agent's own
+    /// repository when it is known.
+    fn from_pr(own: Option<&crate::git::GitHubRemote>, pr: &crate::model::AgentPr) -> Self {
         let time = |at: Option<chrono::DateTime<chrono::Utc>>| at.map(|at| at.to_rfc3339());
         Self {
             overridden: pr.attached,
@@ -1372,7 +1373,7 @@ impl PrView {
             url: pr.url.clone(),
             host: pr.host.clone(),
             owner_repo: pr.owner_repo.clone(),
-            own_repo: crate::engine::pull_requests::in_own_repository(rows, pr),
+            own_repo: crate::engine::pull_requests::in_own_repository(own, pr),
             head_branch: pr.head_branch.clone(),
             found: pr.found,
             attached: pr.attached,
@@ -1592,16 +1593,17 @@ impl Engine {
                 restart_offer: inputs.restart_offer,
             });
         let rows = self.agent_prs.get(&s.id).map_or(&[][..], Vec::as_slice);
+        let own = self.pr_own_repos.get(&s.id);
         let ordered = crate::pr_list::order(rows, self.pr_sort_mode(&s.id));
         let prs: Vec<PrView> = ordered
             .visible
             .iter()
-            .map(|pr| PrView::from_pr(rows, pr))
+            .map(|pr| PrView::from_pr(own, pr))
             .collect();
         let prs_hidden: Vec<PrView> = ordered
             .hidden
             .iter()
-            .map(|pr| PrView::from_pr(rows, pr))
+            .map(|pr| PrView::from_pr(own, pr))
             .collect();
         SessionView {
             id: s.id.clone(),
@@ -2196,6 +2198,19 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
+        // The agent's own repository is the one its worktree's remote names,
+        // as the sync reports it.
+        engine.process_worker_event(crate::worker::WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".to_string(),
+                answers: Vec::new(),
+                asked: Vec::new(),
+                own_repo: Some(crate::git::GitHubRemote {
+                    host: "github.com".to_string(),
+                    owner_repo: "Owner/Repo".to_string(),
+                }),
+            },
+        ]));
         engine.agent_prs.insert(
             "s1".to_string(),
             vec![crate::model::AgentPr::found(
@@ -2267,6 +2282,7 @@ mod tests {
             crate::worker::PrStatusResult {
                 session_id: "s1".to_string(),
                 asked: Vec::new(),
+                own_repo: None,
                 answers: vec![crate::worker::PrSyncAnswer::Refreshed(
                     crate::model::PrInfo {
                         number: 7,
