@@ -357,6 +357,11 @@ describe("PullRequestsDialog branches view", () => {
     expect(
       screen.getByText(/was attached by you, so it belongs to no branch here\./),
     ).toBeTruthy()
+    for (const name of ["#418", "#402"]) {
+      const chip = screen.getByRole("link", { name })
+      expect(chip.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
+      expect(chip.className).toMatch(/(^| )pointer-coarse:min-w-10( |$)/)
+    }
   })
 
   it("asks again whenever the agent's pull requests change while it is open", async () => {

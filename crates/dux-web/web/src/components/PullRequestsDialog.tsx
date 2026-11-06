@@ -739,6 +739,8 @@ function BranchesView({
                   ) : null}
                 </span>
               </span>
+              {/* The chips are 40px square at least under a finger, with
+                  gap-2 between neighbours on either axis. */}
               <span className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-sm">
                 {branch.prs.length === 0 ? (
                   <span className="text-muted-foreground">No pull request</span>
@@ -752,7 +754,7 @@ function BranchesView({
                           target="_blank"
                           rel="noopener noreferrer"
                           className={cn(
-                            "inline-flex items-center gap-1 rounded px-1 font-medium hover:underline",
+                            "inline-flex items-center justify-center gap-1 rounded px-1 font-medium hover:underline pointer-coarse:h-10 pointer-coarse:min-w-10",
                             pr ? prIconClass(pr.state) : "text-muted-foreground",
                           )}
                         >
