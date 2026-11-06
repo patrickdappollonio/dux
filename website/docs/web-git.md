@@ -271,8 +271,9 @@ The dialog's **Branches** view lists every branch the agent's worktree has had c
 out, the current one first and the rest newest first, each with when dux first saw it, the
 names it had before a rename, and the pull requests found on it. Every other pull request
 the agent has is listed below the branches, so none is missing from the view: one you
-attached, and one dux found on a branch the list leaves out, such as the default branch
-after the worktree moved off it. The terminal UI puts them under **On no branch listed
+attached, one dux found on a branch the list leaves out, such as the default branch
+after the worktree moved off it, and one found in another repository before the worktree's
+remote changed, even on a branch of the same name. The terminal UI puts them under **On no branch listed
 here**.
 
 ![The Branches view: fix-login-redirect marked Current with pull request 123, an earlier branch with its merged pull request, and the attached acme/infra#77 under its own heading.](/screens/pull-requests-branches.png)

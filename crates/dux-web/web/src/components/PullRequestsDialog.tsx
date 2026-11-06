@@ -763,6 +763,9 @@ function BranchesView({
   }
   // The server's order: the branch checked out now first, then newest first.
   const { branches: rows, on_no_listed_branch: loose } = branches.data
+  // A pull request apart whose head is a listed branch is apart because it
+  // lives in another repository, not because the branch is missing.
+  const listed = new Set(rows.flatMap((branch) => [branch.name, ...branch.former_names]))
   return (
     <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
       {branches.error ? (
@@ -838,6 +841,11 @@ function BranchesView({
             <InlineCode>{pr ? prName(pr) : `${key.owner_repo}#${key.number}`}</InlineCode>{" "}
             {pr?.attached ? (
               "was attached by you, so it belongs to no branch here."
+            ) : pr?.head_branch && listed.has(pr.head_branch) ? (
+              <>
+                was found on <InlineCode>{pr.head_branch}</InlineCode> in another repository, so it
+                belongs to no branch here.
+              </>
             ) : pr?.head_branch ? (
               <>
                 was found on <InlineCode>{pr.head_branch}</InlineCode>, a branch not listed here.

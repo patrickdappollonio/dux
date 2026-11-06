@@ -393,6 +393,14 @@ describe("PullRequestsDialog branches view", () => {
     const onMain = pr({ number: 390, title: "Bump the toolchain", head_branch: "main" })
     const headUnknown = pr({ number: 380, title: "Carried over", head_branch: undefined })
     const hiddenOnRelease = pr({ number: 370, title: "Cut the release", head_branch: "release" })
+    // Found before the worktree's remote moved, on a branch listed here.
+    const otherRepoOnListed = pr({
+      number: 360,
+      title: "Rename the tab state",
+      owner_repo: "acme/old-api",
+      own_repo: false,
+      head_branch: "store-tab-rows",
+    })
     // The order is the server's to decide, so the dialog keeps it as sent.
     pullRequestBranches.mockResolvedValue({
       ...answer,
@@ -402,11 +410,12 @@ describe("PullRequestsDialog branches view", () => {
         { host: "github.com", owner_repo: "acme/api", number: 390 },
         { host: "github.com", owner_repo: "acme/api", number: 380 },
         { host: "github.com", owner_repo: "acme/api", number: 370 },
+        { host: "github.com", owner_repo: "acme/old-api", number: 360 },
       ],
     })
     seed(
       session({
-        prs: [found, attached, both, onMain, headUnknown],
+        prs: [found, attached, both, onMain, headUnknown, otherRepoOnListed],
         prs_hidden: [hidden, hiddenOnRelease],
       }),
     )
@@ -439,6 +448,9 @@ describe("PullRequestsDialog branches view", () => {
     expect(apart).toContain("#390 was found on main, a branch not listed here.")
     expect(apart).toContain("#380 was found on a branch dux has not learned yet.")
     expect(apart).toContain("#370 was found on release, a branch not listed here. Hidden.")
+    expect(apart).toContain(
+      "acme/old-api#360 was found on store-tab-rows in another repository, so it belongs to no branch here.",
+    )
     for (const name of ["#418", "#402"]) {
       const chip = screen.getByRole("link", { name })
       expect(chip.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
