@@ -2005,7 +2005,7 @@ pub(crate) fn agent_info_lines(
     let label = if prs.len() == 1 {
         "Pull request: "
     } else {
-        "Pull requests: "
+        "Pull requests:"
     };
     for (index, (name, pr)) in prs.iter().enumerate() {
         let lead = if index == 0 {
@@ -9577,11 +9577,11 @@ mod tests {
             both,
             vec![
                 (
-                    "Pull requests: #42 (open) Fix the frobnicator".to_string(),
+                    "Pull requests:#42 (open) Fix the frobnicator".to_string(),
                     AgentInfoTone::Neutral
                 ),
                 (
-                    "               acme/infra#77 (draft) Allow the preview host (manually attached)"
+                    "              acme/infra#77 (draft) Allow the preview host (manually attached)"
                         .to_string(),
                     AgentInfoTone::Neutral
                 ),
