@@ -1908,13 +1908,13 @@ pub(crate) fn agent_search_location(
 /// Build the body lines of the Agent Info modal from a session: name, provider,
 /// the current/original/forked-from branches, a drift note when the current
 /// branch differs from the branch the agent was created on, then the worktree,
-/// creation time, status, and the tracked pull request when one is known
-/// (naming a manual pin). Each line carries its semantic tone so the renderer
+/// creation time, status, and one line per pull request in `prs` (each with
+/// the label it goes by), naming the attached ones. Each line carries its semantic tone so the renderer
 /// never has to substring-match prose. Pure and unit-tested.
 pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
-    pr: Option<(&crate::model::AgentPr, bool)>,
+    prs: &[(String, &crate::model::AgentPr)],
     working_copy: WorkingCopy,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session.display_label();
@@ -2000,16 +2000,21 @@ pub(crate) fn agent_info_lines(
         format!("Status:       {}", session.status.as_str()),
         AgentInfoTone::Neutral,
     ));
-    // The PR line is the ONLY TUI cue that a manual pin exists, so when a PR
-    // is known it always renders, and a pin always says so.
-    if let Some((pr, overridden)) = pr {
-        let mut line = format!(
-            "Pull request: #{} ({}) {}",
-            pr.number,
-            pr_state_word(&pr.state),
-            pr.title
-        );
-        if overridden {
+    // These lines are the ONLY terminal UI cue in Agent Info that a pull
+    // request was attached, so every one renders and an attachment says so.
+    let label = if prs.len() == 1 {
+        "Pull request: "
+    } else {
+        "Pull requests: "
+    };
+    for (index, (name, pr)) in prs.iter().enumerate() {
+        let lead = if index == 0 {
+            label.to_string()
+        } else {
+            " ".repeat(label.len())
+        };
+        let mut line = format!("{lead}{name} ({}) {}", pr_state_word(&pr.state), pr.title);
+        if pr.attached {
             line.push_str(" (manually attached)");
         }
         lines.push((line, AgentInfoTone::Neutral));
@@ -7962,10 +7967,12 @@ impl App {
                 .map(|p| p.default_provider.clone());
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
-            let pr = self
-                .engine
-                .shown_pr(&session.id)
-                .map(|pr| (pr, pr.attached));
+            let prs: Vec<(String, &crate::model::AgentPr)> = self
+                .ordered_prs(&session.id)
+                .visible
+                .into_iter()
+                .map(|pr| (self.engine.pull_request_label(&session.id, pr), pr))
+                .collect();
             let directory_missing = if self.engine.folder_repo_status(&session.id)
                 == dux_core::git::FolderRepoStatus::Missing
             {
@@ -7973,7 +7980,7 @@ impl App {
             } else {
                 WorkingCopy::Present
             };
-            let lines = agent_info_lines(&session, project_default, pr, directory_missing);
+            let lines = agent_info_lines(&session, project_default, &prs, directory_missing);
             self.prompt = PromptState::AgentInfo(AgentInfoPrompt {
                 session_label: label,
                 lines,
@@ -9346,7 +9353,7 @@ mod tests {
     #[test]
     fn agent_info_lines_for_a_standalone_agent_name_the_folder_and_no_branches() {
         let s = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
+        let lines = agent_info_lines(&s, None, &[], WorkingCopy::Present);
         let text = lines
             .iter()
             .map(|(l, _)| l.as_str())
@@ -9380,7 +9387,7 @@ mod tests {
     #[test]
     fn agent_info_lines_flag_a_directory_that_is_gone() {
         let managed = test_session("s1", "p1", 0);
-        let lines = agent_info_lines(&managed, None, None, WorkingCopy::Missing);
+        let lines = agent_info_lines(&managed, None, &[], WorkingCopy::Missing);
         let flagged = lines
             .iter()
             .find(|(_, tone)| *tone == AgentInfoTone::Warning)
@@ -9392,7 +9399,7 @@ mod tests {
         assert!(flagged.0.contains("Recreate it"), "{}", flagged.0);
 
         assert!(
-            !agent_info_lines(&managed, None, None, WorkingCopy::Present)
+            !agent_info_lines(&managed, None, &[], WorkingCopy::Present)
                 .iter()
                 .any(|(text, _)| text == dux_core::working_copy::MISSING_WORKING_COPY_INFO_LINE),
             "and nothing is flagged while the copy is there"
@@ -9401,7 +9408,7 @@ mod tests {
         // dux never puts a standalone agent's folder back, so its line names a
         // different remedy.
         let standalone = test_standalone_session("sa1", "/home/someone/notes");
-        let lines = agent_info_lines(&standalone, None, None, WorkingCopy::Missing);
+        let lines = agent_info_lines(&standalone, None, &[], WorkingCopy::Missing);
         assert!(
             lines
                 .iter()
@@ -9427,7 +9434,7 @@ mod tests {
             .expect("managed test session")
             .source_branch = "main".into();
 
-        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
+        let lines = agent_info_lines(&s, None, &[], WorkingCopy::Present);
         assert!(lines.iter().any(|(l, _)| l.contains("agent-tabs"))); // current branch
         assert!(lines.iter().any(|(l, _)| l.contains("server-mode"))); // original
         assert!(lines.iter().any(|(l, _)| l.contains("main"))); // forked from
@@ -9458,7 +9465,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = "main".into();
-        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
+        let lines = agent_info_lines(&s, None, &[], WorkingCopy::Present);
         // Both checks below are shaped so they would pass on an EMPTY list, so
         // pin that there is something to check first. Without this the test
         // passes while reporting nothing at all.
@@ -9490,7 +9497,7 @@ mod tests {
             .as_managed_mut()
             .expect("managed test session")
             .initial_branch = String::new();
-        let lines = agent_info_lines(&s, None, None, WorkingCopy::Present);
+        let lines = agent_info_lines(&s, None, &[], WorkingCopy::Present);
         assert!(
             !lines
                 .iter()
@@ -9500,45 +9507,86 @@ mod tests {
     }
 
     #[test]
-    fn agent_info_lines_show_the_pull_request_and_name_a_manual_pin() {
+    fn agent_info_lines_list_every_pull_request_and_name_the_attached_ones() {
         let s = test_session("s1", "p1", 0);
-        let pr = crate::model::PrInfo {
-            number: 42,
-            state: crate::model::PrState::Open,
-            title: "Fix the frobnicator".to_string(),
-            host: "github.com".to_string(),
-            owner_repo: "o/r".to_string(),
-            url: "https://github.com/o/r/pull/42".to_string(),
-            ..Default::default()
-        };
-        let pr = crate::model::AgentPr::found(&pr, chrono::Utc::now());
-
-        // No PR known: no line at all.
-        let none = agent_info_lines(&s, None, None, WorkingCopy::Present);
-        assert!(!none.iter().any(|(l, _)| l.starts_with("Pull request:")));
-
-        // Autodetected PR: number, lowercase state, title, no pin marker.
-        let auto = agent_info_lines(&s, None, Some((&pr, false)), WorkingCopy::Present);
-        let line = auto
-            .iter()
-            .find(|(l, _)| l.starts_with("Pull request:"))
-            .expect("pr line");
-        assert!(
-            line.0.contains("#42 (open) Fix the frobnicator"),
-            "{}",
-            line.0
+        let found = crate::model::AgentPr::found(
+            &crate::model::PrInfo {
+                number: 42,
+                state: crate::model::PrState::Open,
+                title: "Fix the frobnicator".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+                url: "https://github.com/o/r/pull/42".to_string(),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
         );
-        assert!(!line.0.contains("manually attached"));
-        assert_eq!(line.1, AgentInfoTone::Neutral);
+        let mut attached = crate::model::AgentPr::found(
+            &crate::model::PrInfo {
+                number: 77,
+                state: crate::model::PrState::Draft,
+                title: "Allow the preview host".to_string(),
+                host: "github.com".to_string(),
+                owner_repo: "acme/infra".to_string(),
+                url: "https://github.com/acme/infra/pull/77".to_string(),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        );
+        attached.found = false;
+        attached.attached = true;
+        let pr_lines = |lines: Vec<(String, AgentInfoTone)>| -> Vec<(String, AgentInfoTone)> {
+            lines
+                .into_iter()
+                .skip_while(|(l, _)| !l.starts_with("Pull request"))
+                .collect()
+        };
 
-        // Pinned PR: the same line carries the manual marker. This line is the
-        // ONLY TUI cue that a pin exists, so the marker is load-bearing.
-        let pinned = agent_info_lines(&s, None, Some((&pr, true)), WorkingCopy::Present);
-        let line = pinned
-            .iter()
-            .find(|(l, _)| l.starts_with("Pull request:"))
-            .expect("pr line");
-        assert!(line.0.ends_with("(manually attached)"), "{}", line.0);
+        // No pull request: no line at all.
+        let none = agent_info_lines(&s, None, &[], WorkingCopy::Present);
+        assert_eq!(pr_lines(none), Vec::new());
+
+        // One found: number, lowercase state, title, no attachment marker.
+        let one = pr_lines(agent_info_lines(
+            &s,
+            None,
+            &[("#42".to_string(), &found)],
+            WorkingCopy::Present,
+        ));
+        assert_eq!(
+            one,
+            vec![(
+                "Pull request: #42 (open) Fix the frobnicator".to_string(),
+                AgentInfoTone::Neutral
+            )]
+        );
+
+        // Several: one line each in the order given, under one plural label,
+        // and an attached one says so. This is the only place the terminal UI
+        // says a pull request was attached, so the marker is load-bearing.
+        let both = pr_lines(agent_info_lines(
+            &s,
+            None,
+            &[
+                ("#42".to_string(), &found),
+                ("acme/infra#77".to_string(), &attached),
+            ],
+            WorkingCopy::Present,
+        ));
+        assert_eq!(
+            both,
+            vec![
+                (
+                    "Pull requests: #42 (open) Fix the frobnicator".to_string(),
+                    AgentInfoTone::Neutral
+                ),
+                (
+                    "               acme/infra#77 (draft) Allow the preview host (manually attached)"
+                        .to_string(),
+                    AgentInfoTone::Neutral
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -9548,7 +9596,7 @@ mod tests {
         let same = agent_info_lines(
             &s,
             Some(ProviderKind::from_str("codex")),
-            None,
+            &[],
             WorkingCopy::Present,
         );
         let provider_same = same
@@ -9561,7 +9609,7 @@ mod tests {
         let diff = agent_info_lines(
             &s,
             Some(ProviderKind::from_str("claude")),
-            None,
+            &[],
             WorkingCopy::Present,
         );
         let provider_diff = diff

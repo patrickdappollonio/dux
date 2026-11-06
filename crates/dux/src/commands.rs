@@ -744,8 +744,8 @@ pub(crate) enum PrsSub {
     },
     /// List every branch an agent's worktree has been on, the one checked out
     /// now first and the rest newest first, with the names each had before a
-    /// rename and its pull requests, then the attached pull requests that are
-    /// on none of them.
+    /// rename and its pull requests, then the pull requests that are on none of
+    /// them: the ones you attached, and any dux found on a branch not listed.
     Branches {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,

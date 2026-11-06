@@ -633,11 +633,14 @@ impl Engine {
     }
 
     /// Every branch the agent's worktree has been on, the one checked out now
-    /// first and the rest newest first, each with its pull requests, and the attached pull requests that are on none of
-    /// them. A pull request is on a branch when it lives in the agent's own
-    /// repository and GitHub's head branch is the branch's name or one of the
-    /// names it had before a rename; a head of the same name in another
-    /// repository is another branch.
+    /// first and the rest newest first, each with its pull requests, and every
+    /// other pull request the agent has, shown or hidden, so none is missing
+    /// from the view: attached ones, and found ones whose head is a branch the
+    /// list leaves out (the leading branch, found while the worktree was on
+    /// it) or not known yet. A pull request is on a branch when it lives in
+    /// the agent's own repository and GitHub's head branch is the branch's
+    /// name or one of the names it had before a rename; a head of the same
+    /// name in another repository is another branch.
     ///
     /// # Errors
     ///
@@ -715,14 +718,14 @@ impl Engine {
                     .collect(),
             })
             .collect();
-        let attached_on_no_branch = every
+        let on_no_listed_branch = every
             .iter()
-            .filter(|row| row.attached && !history.iter().any(|entry| on(entry, row)))
+            .filter(|row| !history.iter().any(|entry| on(entry, row)))
             .map(|row| PrKeyView::from(&row.key()))
             .collect();
         Ok(PrBranchesView {
             branches,
-            attached_on_no_branch,
+            on_no_listed_branch,
         })
     }
 

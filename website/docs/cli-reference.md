@@ -608,7 +608,7 @@ dux agents prs [OPTIONS] <COMMAND>
 - [`dux agents prs unhide`](#dux-agents-prs-unhide): Show a hidden pull request again, in the place it had.
 - [`dux agents prs sort`](#dux-agents-prs-sort): Choose how an agent's pull requests are ordered. Your own order is kept while the order is automatic, so choosing `manual` again brings it back.
 - [`dux agents prs move`](#dux-agents-prs-move): Move one of an agent's shown pull requests in its order. A move made while the order is automatic switches to your own order, starting from the order it was in, and replaces any order you had saved.
-- [`dux agents prs branches`](#dux-agents-prs-branches): List every branch an agent's worktree has been on, the one checked out now first and the rest newest first, with the names each had before a rename and its pull requests, then the attached pull requests that are on none of them.
+- [`dux agents prs branches`](#dux-agents-prs-branches): List every branch an agent's worktree has been on, the one checked out now first and the rest newest first, with the names each had before a rename and its pull requests, then the pull requests that are on none of them: the ones you attached, and any dux found on a branch not listed.
 
 ### `dux agents prs ls`
 
@@ -746,7 +746,7 @@ dux agents prs move [OPTIONS] <AGENT> <REF> <TO>
 
 ### `dux agents prs branches`
 
-List every branch an agent's worktree has been on, the one checked out now first and the rest newest first, with the names each had before a rename and its pull requests, then the attached pull requests that are on none of them.
+List every branch an agent's worktree has been on, the one checked out now first and the rest newest first, with the names each had before a rename and its pull requests, then the pull requests that are on none of them: the ones you attached, and any dux found on a branch not listed.
 
 ```text
 dux agents prs branches [OPTIONS] <AGENT>

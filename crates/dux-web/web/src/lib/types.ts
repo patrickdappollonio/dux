@@ -100,7 +100,9 @@ export interface PrBranchView {
 export interface PrBranchesView {
   /** Newest first. */
   branches: PrBranchView[]
-  attached_on_no_branch: PrKeyView[]
+  /** Every other pull request, shown or hidden: attached ones, and found ones
+   * whose head is a branch the list leaves out or is not known yet. */
+  on_no_listed_branch: PrKeyView[]
 }
 
 /** How a tab's last run ended, recorded at the moment it ended. An unrecognised

@@ -12815,9 +12815,10 @@ mod tests {
     /// The branch list leads with the branch checked out now and lists the
     /// rest newest first. It puts each pull request of the agent's own
     /// repository on the branch GitHub names as its head, under the branch's name now or
-    /// one it had before a rename; attached ones on no branch, and those from
-    /// another repository whose head happens to share a name, are listed
-    /// apart. The rename warning reads the same names, and falls back to the
+    /// one it had before a rename; the rest are listed apart: attached ones,
+    /// those from another repository whose head happens to share a name, one
+    /// found on the leading branch while the worktree was on it, and one whose
+    /// head is not known yet. The rename warning reads the same names, and falls back to the
     /// open pull request shown while no head branch is known.
     #[test]
     fn the_branch_list_groups_pull_requests_by_former_names() {
@@ -12827,11 +12828,17 @@ mod tests {
         merged.state = crate::model::PrState::Merged;
         let mut unknown_head = found_pr(8, 2, "x");
         unknown_head.head_branch = None;
+        let found_on_main = found_pr(9, 4, "main");
         let mut elsewhere_on_feat = attached_only_pr(77, "acme/infra", "feat");
         elsewhere_on_feat.gh_created_at =
             Some(chrono::Utc.with_ymd_and_hms(2026, 1, 9, 0, 0, 0).unwrap());
-        let (mut engine, _tmp) =
-            engine_with_prs(&[on_old_name, merged, unknown_head.clone(), elsewhere_on_feat]);
+        let (mut engine, _tmp) = engine_with_prs(&[
+            on_old_name,
+            merged,
+            unknown_head.clone(),
+            found_on_main,
+            elsewhere_on_feat,
+        ]);
         let day = |d| Some(chrono::Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap());
         engine.projects.push(crate::model::Project {
             leading_branch: Some("main".to_string()),
@@ -12898,11 +12905,11 @@ mod tests {
         );
         assert_eq!(view.branches[0].former_names, vec!["old-feat".to_string()]);
         assert_eq!(
-            view.attached_on_no_branch
+            view.on_no_listed_branch
                 .iter()
                 .map(|k| (k.owner_repo.as_str(), k.number))
                 .collect::<Vec<_>>(),
-            vec![("acme/infra", 77)]
+            vec![("acme/infra", 77), ("o/r", 9), ("o/r", 8)]
         );
         assert_eq!(engine.rename_open_pull_request("s1"), Some(12));
 

@@ -1128,8 +1128,8 @@ pub struct PrBranchView {
 pub struct PrBranchesView {
     /// Every branch, newest first.
     pub branches: Vec<PrBranchView>,
-    /// The attached pull requests that are on none of them.
-    pub attached_on_no_branch: Vec<PrKeyView>,
+    /// The pull requests, shown or hidden, that are on none of them.
+    pub on_no_listed_branch: Vec<PrKeyView>,
 }
 
 /// A single changed file projected for web clients (used by the per-session

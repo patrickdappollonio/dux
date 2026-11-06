@@ -210,12 +210,12 @@ impl App {
                     "Branches this worktree has been on, current first",
                 ));
                 rows.extend((0..branches.branches.len()).map(ModalRow::Branch));
-                if !branches.attached_on_no_branch.is_empty() {
+                if !branches.on_no_listed_branch.is_empty() {
                     rows.push(ModalRow::Blank);
-                    rows.push(ModalRow::Heading("Attached, on no branch"));
+                    rows.push(ModalRow::Heading("On no branch listed here"));
                     rows.extend(
                         branches
-                            .attached_on_no_branch
+                            .on_no_listed_branch
                             .iter()
                             .map(|key| ModalRow::Pr(key_of(key))),
                     );
@@ -1229,5 +1229,12 @@ mod tests {
             panic!("open");
         };
         assert_eq!(prompt.view, PullRequestsView::Branches);
+        // None of the three names a head branch yet, so every one of them,
+        // found or attached, is listed apart rather than left out.
+        let shown = screen(&draw(&mut app, 160, 40));
+        let apart = shown.find("On no branch listed here").expect(&shown);
+        for pr in ["o/r#418", "acme/infra#77", "o/r#415"] {
+            assert!(shown.find(pr).is_some_and(|at| at > apart), "{pr}: {shown}");
+        }
     }
 }

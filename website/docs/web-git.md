@@ -230,7 +230,8 @@ or a bare number resolved against the project's remote.
 Attaching **adds** to the agent's list; it never replaces a pull request it already has,
 and autodetection keeps running beside it. A pull request from another repository works
 too, and the list names it with its repository (`acme/infra#77`) so it is never confused
-with one of the agent's own. The Agent Info dialog lists the pull requests the agent shows, not the ones you hid.
+with one of the agent's own. Agent Info lists the pull requests the agent shows, not the ones you hid, in the browser
+and the terminal UI alike, and marks the ones you attached as manually attached.
 
 ### Hiding and detaching
 
@@ -268,18 +269,23 @@ as you left it. A hidden pull request keeps its slot and returns to it when show
 
 The dialog's **Branches** view lists every branch the agent's worktree has had checked
 out, the current one first and the rest newest first, each with when dux first saw it, the
-names it had before a rename, and the pull requests found on it. Attached pull requests that
-belong to none of them get a heading of their own.
+names it had before a rename, and the pull requests found on it. Every other pull request
+the agent has is listed below the branches, so none is missing from the view: one you
+attached, and one dux found on a branch the list leaves out, such as the default branch
+after the worktree moved off it. The terminal UI puts them under **On no branch listed
+here**.
 
 ![The Branches view: fix-login-redirect marked Current with pull request 123, an earlier branch with its merged pull request, and the attached acme/infra#77 under its own heading.](/screens/pull-requests-branches.png)
 
-- **What is tracked:** every branch in that list. The current branch is asked about on
-  every poll and the earlier ones take turns; see
+- **What is tracked:** every branch in that list. The branch checked out now is asked
+  about on every poll and the earlier ones take turns; see
   [How PR status stays fresh](/docs/creating-agents#how-pr-status-stays-fresh).
 - **When history starts:** when dux first saw the worktree on a branch. A branch it was on
   before dux was watching is not in the list.
-- **The project's default branch** (usually `main`) is never tracked, because its pull
-  requests are everybody's, not the agent's.
+- **The project's default branch** (usually `main`) is listed and tracked only while the
+  worktree is on it. Once the worktree moves off it, it leaves the list and dux stops
+  looking for pull requests on it, because its pull requests are everybody's, not the
+  agent's; one dux already found there stays in the agent's list.
 
 > [!NOTE]
 > The first start of this version moves every agent's pull request into the new list. If

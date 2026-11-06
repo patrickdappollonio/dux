@@ -747,16 +747,13 @@ function BranchesView({
   hidden: PrView[]
   branches: BranchesState
 }) {
-  const find = (key: PrKeyView) =>
-    prs.find((pr) => {
+  const lookup = (list: PrView[], key: PrKeyView) =>
+    list.find((pr) => {
       const own = prKeyOf(pr)
       return own !== null && samePrKey(own, key)
     })
-  const isHidden = (key: PrKeyView) =>
-    hidden.some((pr) => {
-      const own = prKeyOf(pr)
-      return own !== null && samePrKey(own, key)
-    })
+  const find = (key: PrKeyView) => lookup(prs, key)
+  const isHidden = (key: PrKeyView) => lookup(hidden, key) !== undefined
   if (!branches.data) {
     return (
       <p className="py-6 text-center text-sm text-muted-foreground">
@@ -765,7 +762,7 @@ function BranchesView({
     )
   }
   // The server's order: the branch checked out now first, then newest first.
-  const { branches: rows, attached_on_no_branch: loose } = branches.data
+  const { branches: rows, on_no_listed_branch: loose } = branches.data
   return (
     <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
       {branches.error ? (
@@ -834,11 +831,21 @@ function BranchesView({
         })}
       </ul>
       {loose.map((key) => {
-        const pr = find(key)
+        const shut = isHidden(key)
+        const pr = find(key) ?? lookup(hidden, key)
         return (
           <p key={keyId(key)} className="mt-1 text-sm text-muted-foreground">
             <InlineCode>{pr ? prName(pr) : `${key.owner_repo}#${key.number}`}</InlineCode>{" "}
-            was attached by you, so it belongs to no branch here.
+            {pr?.attached ? (
+              "was attached by you, so it belongs to no branch here."
+            ) : pr?.head_branch ? (
+              <>
+                was found on <InlineCode>{pr.head_branch}</InlineCode>, a branch not listed here.
+              </>
+            ) : (
+              "was found on a branch dux has not learned yet."
+            )}
+            {shut ? " Hidden." : null}
           </p>
         )
       })}

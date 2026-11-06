@@ -179,7 +179,7 @@ struct BranchesAnswer {
     #[serde(default)]
     branches: Vec<BranchAnswer>,
     #[serde(default)]
-    attached_on_no_branch: Vec<PrKeyAnswer>,
+    on_no_listed_branch: Vec<PrKeyAnswer>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -808,8 +808,7 @@ pub fn prs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliE
 
 /// `dux agents prs branches <a>`: every branch the agent's worktree has been
 /// on, the one checked out now first and the rest newest first, with its pull
-/// requests, then the attached pull requests
-/// that are on none of them.
+/// requests, then the pull requests that are on none of them.
 ///
 /// # Errors
 ///
@@ -876,10 +875,10 @@ pub fn prs_branches(client: &Client, query: &str, shape: Shape) -> Result<String
             }
         })
         .collect();
-    // The attachments on no branch have no branch to be the id of, so a list
-    // of ids leaves them out.
-    if !answer.attached_on_no_branch.is_empty() && shape != Shape::Ids {
-        let (words, objects) = named(&answer.attached_on_no_branch);
+    // The pull requests on no listed branch have no branch to be the id of,
+    // so a list of ids leaves them out.
+    if !answer.on_no_listed_branch.is_empty() && shape != Shape::Ids {
+        let (words, objects) = named(&answer.on_no_listed_branch);
         rows.push(Row {
             id: String::new(),
             cells: vec![
@@ -3734,7 +3733,7 @@ mod pull_request_tests {
           {"name":"store-tab-rows","former_names":["tab-rows","rows"],"current":true,"first_seen_at":"2026-10-02T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":418}]},
           {"name":"older","former_names":[],"current":false,"first_seen_at":"2026-09-01T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":415},{"host":"GitHub.com","owner_repo":"Octo/Hello","number":402},{"host":"github.com","owner_repo":"octo/hello","number":399}]}
         ],
-        "attached_on_no_branch":[{"host":"github.com","owner_repo":"acme/infra","number":77},{"host":"github.com","owner_repo":"acme/api","number":77}]}"#;
+        "on_no_listed_branch":[{"host":"github.com","owner_repo":"acme/infra","number":77},{"host":"github.com","owner_repo":"acme/api","number":77}]}"#;
 
     /// Agent `store-tab-rows` in octo/hello, in manual order: #418 found on
     /// its own branch, acme/infra#77 attached, acme/api#77 attached, #415
@@ -3964,7 +3963,7 @@ mod pull_request_tests {
     }
 
     #[test]
-    fn branches_lists_each_branch_with_its_former_names_then_the_attachments_on_none() {
+    fn branches_lists_each_branch_with_its_former_names_then_the_pull_requests_on_none() {
         let dux = reads();
         let table = prs_branches(&dux.client, "a1", Shape::Table).unwrap();
         let lines: Vec<&str> = table.lines().collect();

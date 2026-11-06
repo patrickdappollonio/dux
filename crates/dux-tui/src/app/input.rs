@@ -15746,10 +15746,24 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
+        let shown =
+            |number, title| crate::app::test_support::found_pr("o/r", number, PrState::Open, title);
+        let mut hidden = shown(9, "Hidden away");
+        hidden.hidden = true;
+        app.engine.agent_prs.insert(
+            "session-1".to_string(),
+            vec![shown(12, "First shown"), shown(11, "Second shown"), hidden],
+        );
 
         app.open_agent_info();
 
-        assert!(matches!(app.prompt, PromptState::AgentInfo(_)));
+        let PromptState::AgentInfo(info) = &app.prompt else {
+            panic!("{:?}", app.prompt);
+        };
+        let text: Vec<&str> = info.lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert!(text.iter().any(|l| l.ends_with("First shown")), "{text:?}");
+        assert!(text.iter().any(|l| l.ends_with("Second shown")), "{text:?}");
+        assert!(!text.iter().any(|l| l.contains("Hidden away")), "{text:?}");
         // Opening the read-only modal drops any interactive/fullscreen surface.
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);

@@ -168,7 +168,7 @@ beforeEach(() => {
         prs: [],
       },
     ],
-    attached_on_no_branch: [{ host: "github.com", owner_repo: "acme/infra", number: 77 }],
+    on_no_listed_branch: [{ host: "github.com", owner_repo: "acme/infra", number: 77 }],
   })
   vi.mocked(store.hidePullRequest).mockClear()
   vi.mocked(store.detachPullRequest).mockClear()
@@ -388,14 +388,28 @@ describe("PullRequestsDialog footer", () => {
 })
 
 describe("PullRequestsDialog branches view", () => {
-  it("lists every branch with its pull requests and the attachments on none", async () => {
+  it("lists every branch with its pull requests and the ones on none", async () => {
     const answer = await pullRequestBranches("s1")
+    const onMain = pr({ number: 390, title: "Bump the toolchain", head_branch: "main" })
+    const headUnknown = pr({ number: 380, title: "Carried over", head_branch: undefined })
+    const hiddenOnRelease = pr({ number: 370, title: "Cut the release", head_branch: "release" })
     // The order is the server's to decide, so the dialog keeps it as sent.
     pullRequestBranches.mockResolvedValue({
       ...answer,
       branches: [answer.branches[1], answer.branches[0], answer.branches[2]],
+      on_no_listed_branch: [
+        ...answer.on_no_listed_branch,
+        { host: "github.com", owner_repo: "acme/api", number: 390 },
+        { host: "github.com", owner_repo: "acme/api", number: 380 },
+        { host: "github.com", owner_repo: "acme/api", number: 370 },
+      ],
     })
-    seed(session())
+    seed(
+      session({
+        prs: [found, attached, both, onMain, headUnknown],
+        prs_hidden: [hidden, hiddenOnRelease],
+      }),
+    )
     render(<PullRequestsDialog />)
     await act(async () => {
       fireEvent.click(screen.getByRole("tab", { name: /Branches/ }))
@@ -421,6 +435,10 @@ describe("PullRequestsDialog branches view", () => {
     expect(
       screen.getByText(/was attached by you, so it belongs to no branch here\./),
     ).toBeTruthy()
+    const apart = [...document.querySelectorAll("p")].map((el) => el.textContent)
+    expect(apart).toContain("#390 was found on main, a branch not listed here.")
+    expect(apart).toContain("#380 was found on a branch dux has not learned yet.")
+    expect(apart).toContain("#370 was found on release, a branch not listed here. Hidden.")
     for (const name of ["#418", "#402"]) {
       const chip = screen.getByRole("link", { name })
       expect(chip.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
