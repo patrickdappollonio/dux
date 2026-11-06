@@ -12915,6 +12915,35 @@ mod tests {
 
         let (engine, _tmp) = engine_with_prs(&[unknown_head]);
         assert_eq!(engine.rename_open_pull_request("s1"), Some(8));
+
+        // Before any answer has named the agent's own repository, a found
+        // pull request sits under its branch and is named by number alone;
+        // an attached-only one stays apart under its repository's name.
+        let on_feat = found_pr(12, 3, "feat");
+        let attached_on_feat = attached_only_pr(77, "acme/infra", "feat");
+        let (mut engine, _tmp) = engine_with_prs(&[on_feat.clone(), attached_on_feat.clone()]);
+        engine.pr_own_repos.remove("s1");
+        let view = engine.pull_request_branches("s1").unwrap();
+        assert_eq!(
+            view.branches
+                .iter()
+                .map(|b| (b.name.as_str(), b.prs.iter().map(|k| k.number).collect()))
+                .collect::<Vec<(&str, Vec<u64>)>>(),
+            vec![("feat", vec![12])]
+        );
+        assert_eq!(
+            view.on_no_listed_branch
+                .iter()
+                .map(|k| k.number)
+                .collect::<Vec<_>>(),
+            vec![77]
+        );
+        assert_eq!(engine.pull_request_label("s1", &on_feat), "#12");
+        assert_eq!(
+            engine.pull_request_label("s1", &attached_on_feat),
+            "acme/infra#77"
+        );
+        assert_eq!(engine.rename_open_pull_request("s1"), Some(12));
     }
 
     /// The sort mode and every move rewrite the order the agent shows, and

@@ -2310,6 +2310,18 @@ mod tests {
         let vm = engine.spine();
         assert_eq!(vm.sessions[0].prs_hidden[0].state, "merged");
         assert_ne!(vm.sessions[0].pr_revision, before);
+
+        // Before any answer has named the agent's own repository, a found
+        // pull request is still its own, and an attached-only one is not.
+        engine.pr_own_repos.remove("s1");
+        let vm = engine.spine();
+        let shown: Vec<(u64, bool)> = vm.sessions[0]
+            .prs
+            .iter()
+            .map(|pr| (pr.number, pr.own_repo))
+            .collect();
+        assert_eq!(shown, vec![(43, true), (42, true)]);
+        assert!(!vm.sessions[0].prs_hidden[0].own_repo);
     }
 
     #[test]

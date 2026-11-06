@@ -24,9 +24,14 @@ use crate::viewmodel::{PrBranchView, PrBranchesView, PrKeyView};
 pub const UNKNOWN_PULL_REQUEST_MARKER: &str = "has no pull request";
 
 /// Whether `row` lives in the agent's own repository, `own` being that
-/// repository when a worker has read it. Unknown, nothing is the agent's own.
+/// repository when a worker has read it. Unknown, a found row is the agent's
+/// own, because discovery only ever keeps pull requests from that repository;
+/// an attached-only row is not, since it may come from anywhere.
 pub(crate) fn in_own_repository(own: Option<&GitHubRemote>, row: &AgentPr) -> bool {
-    own.is_some_and(|own| own.holds(&row.host, &row.owner_repo))
+    match own {
+        Some(own) => own.holds(&row.host, &row.owner_repo),
+        None => row.found,
+    }
 }
 
 /// How a sentence names a pull request: `#418` in the agent's own
