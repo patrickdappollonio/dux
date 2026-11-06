@@ -110,6 +110,54 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the named places a pull-request move goes; it has no code of its own",
     ),
     (
+        "dux_core::pr_reference::parse_typed_reference",
+        Vetted::Function(
+            "crates/dux-core/src/pr_reference.rs",
+            "parse_typed_reference",
+        ),
+        "reads typed text as the repository and pull request it names; it parses a string \
+         and nothing else, and the module it calls into names no database",
+    ),
+    (
+        "dux_core::pr_reference::TypedReference",
+        Vetted::Type("crates/dux-core/src/pr_reference.rs", "TypedReference"),
+        "the host, repository and number typed text names",
+    ),
+    (
+        "dux_core::engine::standalone_agent_refusal",
+        Vetted::Function(
+            "crates/dux-core/src/engine/mod.rs",
+            "standalone_agent_refusal",
+        ),
+        "formats the sentence a standalone agent is refused a branch feature with",
+    ),
+    (
+        "dux_core::engine::STANDALONE_ADD_AS_PROJECT_REMEDY",
+        Vetted::Data,
+        "the remedy sentence a standalone agent's refusals end with",
+    ),
+    (
+        "dux_core::engine::pull_requests::PR_FEATURE",
+        Vetted::Data,
+        "the words a standalone agent's pull-request refusal names the feature with",
+    ),
+    (
+        "dux_core::engine::pull_requests::hidden_move_refusal",
+        Vetted::Function(
+            "crates/dux-core/src/engine/pull_requests.rs",
+            "hidden_move_refusal",
+        ),
+        "formats the refusal for moving a hidden pull request",
+    ),
+    (
+        "dux_core::engine::pull_requests::position_out_of_range_refusal",
+        Vetted::Function(
+            "crates/dux-core/src/engine/pull_requests.rs",
+            "position_out_of_range_refusal",
+        ),
+        "formats the refusal for a move to a position the agent does not show",
+    ),
+    (
         "dux_core::git::UnpushedCommits",
         Vetted::Data,
         "a count of commits a server answers with; it has no code of its own",

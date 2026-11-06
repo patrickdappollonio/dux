@@ -640,7 +640,7 @@ dux agents prs attach [OPTIONS] <AGENT> <REF>
 | Argument | Description |
 |---|---|
 | `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
-| `<REF>` | Required. The pull request: its link, `owner/repo#123`, or `#123` (or just `123`) in the agent's own repository. |
+| `<REF>` | Required. The pull request: its link, `owner/repo#123`, or just `123` (or `'#123'`, quoted, since a shell reads a word starting with `#` as a comment) in the agent's own repository. |
 
 | Flag | Value | Description |
 |---|---|---|
@@ -659,7 +659,7 @@ dux agents prs detach [OPTIONS] <AGENT> <REF>
 | Argument | Description |
 |---|---|
 | `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
-| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or just `123` (or `'#123'`, quoted, since a shell reads a word starting with `#` as a comment); a number two of them share is refused with both links. |
 
 | Flag | Value | Description |
 |---|---|---|
@@ -678,7 +678,7 @@ dux agents prs hide [OPTIONS] <AGENT> <REF>
 | Argument | Description |
 |---|---|
 | `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
-| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or just `123` (or `'#123'`, quoted, since a shell reads a word starting with `#` as a comment); a number two of them share is refused with both links. |
 
 | Flag | Value | Description |
 |---|---|---|
@@ -697,7 +697,7 @@ dux agents prs unhide [OPTIONS] <AGENT> <REF>
 | Argument | Description |
 |---|---|
 | `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
-| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or just `123` (or `'#123'`, quoted, since a shell reads a word starting with `#` as a comment); a number two of them share is refused with both links. |
 
 | Flag | Value | Description |
 |---|---|---|
@@ -735,7 +735,7 @@ dux agents prs move [OPTIONS] <AGENT> <REF> <TO>
 | Argument | Description |
 |---|---|
 | `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
-| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or `#123` (or just `123`); a number two of them share is refused with both links. |
+| `<REF>` | Required. One of the agent's pull requests: its link, `owner/repo#123`, or just `123` (or `'#123'`, quoted, since a shell reads a word starting with `#` as a comment); a number two of them share is refused with both links. |
 | `<TO>` | Required. Where to: `top`, `up`, `down`, or a position counted from 1. |
 
 | Flag | Value | Description |

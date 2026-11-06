@@ -662,8 +662,9 @@ pub(crate) enum PrsSub {
     Attach {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
-        /// The pull request: its link, `owner/repo#123`, or `#123` (or just
-        /// `123`) in the agent's own repository.
+        /// The pull request: its link, `owner/repo#123`, or just `123` (or
+        /// `'#123'`, quoted, since a shell reads a word starting with `#` as a
+        /// comment) in the agent's own repository.
         #[arg(value_name = "REF")]
         reference: String,
         #[command(flatten)]
@@ -675,7 +676,8 @@ pub(crate) enum PrsSub {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// One of the agent's pull requests: its link, `owner/repo#123`, or
-        /// `#123` (or just `123`); a number two of them share is refused with
+        /// just `123` (or `'#123'`, quoted, since a shell reads a word starting
+        /// with `#` as a comment); a number two of them share is refused with
         /// both links.
         #[arg(value_name = "REF")]
         reference: String,
@@ -688,7 +690,8 @@ pub(crate) enum PrsSub {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// One of the agent's pull requests: its link, `owner/repo#123`, or
-        /// `#123` (or just `123`); a number two of them share is refused with
+        /// just `123` (or `'#123'`, quoted, since a shell reads a word starting
+        /// with `#` as a comment); a number two of them share is refused with
         /// both links.
         #[arg(value_name = "REF")]
         reference: String,
@@ -700,7 +703,8 @@ pub(crate) enum PrsSub {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// One of the agent's pull requests: its link, `owner/repo#123`, or
-        /// `#123` (or just `123`); a number two of them share is refused with
+        /// just `123` (or `'#123'`, quoted, since a shell reads a word starting
+        /// with `#` as a comment); a number two of them share is refused with
         /// both links.
         #[arg(value_name = "REF")]
         reference: String,
@@ -727,7 +731,8 @@ pub(crate) enum PrsSub {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// One of the agent's pull requests: its link, `owner/repo#123`, or
-        /// `#123` (or just `123`); a number two of them share is refused with
+        /// just `123` (or `'#123'`, quoted, since a shell reads a word starting
+        /// with `#` as a comment); a number two of them share is refused with
         /// both links.
         #[arg(value_name = "REF")]
         reference: String,

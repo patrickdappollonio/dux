@@ -48,6 +48,24 @@ pub(crate) fn pull_request_count(n: usize) -> String {
     }
 }
 
+/// What a standalone agent is refused for every pull-request change and read,
+/// in the words [`super::standalone_agent_refusal`] slots it into.
+pub(crate) const PR_FEATURE: &str = "attach, detach or track a pull request for";
+
+/// The refusal for moving `label`, one of `agent`'s hidden pull requests.
+pub(crate) fn hidden_move_refusal(label: &str, agent: &str) -> String {
+    format!("{label} is hidden on \"{agent}\"; show it again before moving it.")
+}
+
+/// The refusal for a move to a position `agent`'s `visible` pull requests do
+/// not have.
+pub(crate) fn position_out_of_range_refusal(agent: &str, visible: usize) -> String {
+    format!(
+        "\"{agent}\" shows {}; a position is 1 to {visible}.",
+        pull_request_count(visible)
+    )
+}
+
 fn key_label(key: &PrKey) -> String {
     format!("{}#{}", key.owner_repo, key.number)
 }
@@ -182,11 +200,8 @@ impl Engine {
             anyhow::bail!("unknown session: {session_id}");
         };
         let agent = session.display_label();
-        let _ = self.branch_git_workspace(
-            session_id,
-            "attach, detach or track a pull request for",
-            STANDALONE_ADD_AS_PROJECT_REMEDY,
-        )?;
+        let _ =
+            self.branch_git_workspace(session_id, PR_FEATURE, STANDALONE_ADD_AS_PROJECT_REMEDY)?;
         if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
             anyhow::bail!(pr_attach_in_flight_message(&agent));
         }
@@ -523,13 +538,10 @@ impl Engine {
                 q(agent),
                 "."
             ])),
-            ArrangeOutcome::Stale => {
-                anyhow::bail!("{label} is hidden on \"{agent}\"; show it again before moving it.")
+            ArrangeOutcome::Stale => anyhow::bail!(hidden_move_refusal(&label, &agent)),
+            ArrangeOutcome::OutOfRange { .. } => {
+                anyhow::bail!(position_out_of_range_refusal(&agent, visible))
             }
-            ArrangeOutcome::OutOfRange { .. } => anyhow::bail!(
-                "\"{agent}\" shows {}; a position is 1 to {visible}.",
-                pull_request_count(visible)
-            ),
         }
     }
 
@@ -624,11 +636,8 @@ impl Engine {
     ///
     /// Refuses an unknown agent and a standalone one.
     pub fn pull_request_branches(&self, session_id: &str) -> anyhow::Result<PrBranchesView> {
-        let managed = self.branch_git_workspace(
-            session_id,
-            "attach, detach or track a pull request for",
-            STANDALONE_ADD_AS_PROJECT_REMEDY,
-        )?;
+        let managed =
+            self.branch_git_workspace(session_id, PR_FEATURE, STANDALONE_ADD_AS_PROJECT_REMEDY)?;
         let current = managed.branch_name.as_str();
         let rows = self
             .agent_prs

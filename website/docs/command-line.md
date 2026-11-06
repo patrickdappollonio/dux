@@ -89,19 +89,25 @@ machine, so it refuses a relative path; give the whole thing.
 
 ### Pull requests
 
-`dux agents prs` names one of an agent's pull requests by its link, as `owner/repo#123`
-(the repository in any case), or as `#123` or just `123`. A number two of its pull
-requests share, say `#77` in two repositories, is refused with both links, so you can
-name one as `owner/repo#77` or by its link. The links are what `dux agents prs ls -q`
-prints, so its output feeds the other commands. `attach` takes the same forms, and a bare
-number there means the agent's own repository.
+`dux agents prs` names one of an agent's pull requests by its link (copied straight from
+the browser is fine, `/files` or a comment's `#issuecomment-…` included), as
+`owner/repo#123` (the repository in any case), or as just `123`. `#123` works too, but
+quote it (`'#123'`): your shell reads a word starting with `#` as a comment and drops the
+rest of the line. A number two of its pull requests share, say `77` in two repositories,
+is refused with both links, so you can name one as `owner/repo#77` or by its link. The
+links are what `dux agents prs ls -q` prints, so its output feeds the other commands.
+`attach` takes the same forms, and a bare number there means the agent's own repository.
 
 - `detach` is for pull requests you attached and `hide` for the ones dux found; asking for
   the other one is refused before anything is asked, naming the command that does it.
-- `move` takes `top`, `up`, `down` or a position counted from 1. A move while the order is
-  automatic switches to your own order, starting from the order you were looking at, and
-  replaces any order you had saved; `sort <agent> manual` without a move brings a saved
-  order back.
+- `move` takes `top`, `up`, `down` or a position counted from 1, and moves only a pull
+  request the agent shows: a hidden one, or a position past the ones it shows, is refused
+  before anything is asked.
+- A move while the order is automatic switches to your own order, starting from the order
+  you were looking at, and replaces any order you had saved; `sort <agent> manual` without
+  a move brings a saved order back.
+- A standalone agent has no branch of its own and so no pull requests: every
+  `dux agents prs` command refuses it before anything is asked.
 - There is no command that opens a pull request: the command line may be talking to a dux
   on another machine, so it prints the links instead.
 

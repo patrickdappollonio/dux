@@ -6050,7 +6050,7 @@ impl Engine {
         // to finish" about a feature it does not have.
         let _ = self.branch_git_workspace(
             session_id,
-            "attach, detach or track a pull request for",
+            pull_requests::PR_FEATURE,
             STANDALONE_ADD_AS_PROJECT_REMEDY,
         )?;
         // One attach at a time per agent: a second one would resolve against

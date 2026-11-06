@@ -22,6 +22,7 @@ use super::transport::Method;
 use super::wait::{self, OperationRecord, RecordState, segment};
 use super::{CliError, Exit};
 use crate::operations::CREATE_IN_FLIGHT_REFUSAL;
+use crate::pr_reference::TypedReference;
 use crate::prose::Prose;
 use crate::status_text::ReviewCopyOutlook;
 
@@ -681,31 +682,37 @@ pub fn tabs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, Cli
     ))
 }
 
-/// The pull request of `agent` that `query` names: its URL, `owner/repo#n`
-/// (the repository without regard to case, on any host), or `#n` / `n` (the
-/// number in any repository). Hidden ones count.
+/// The pull request of `agent` that `query` names, read the way an attach
+/// reads it: its URL (a link copied from any of its pages, host and
+/// repository without regard to case), `owner/repo#n` (on any host), or `#n`
+/// / `n` (the number in any repository). Hidden ones count.
 fn find_pr<'a>(agent: &'a Agent, query: &str) -> Result<&'a Pr, CliError> {
-    let every: Vec<&Pr> = agent.prs.iter().chain(&agent.prs_hidden).collect();
-    if let Some(pr) = every.iter().find(|pr| pr.url == query) {
-        return Ok(pr);
-    }
-    let (repository, number) = match query.rsplit_once('#') {
-        Some((repository, number)) if !repository.is_empty() => (Some(repository), number),
-        _ => (None, query.strip_prefix('#').unwrap_or(query)),
+    let every = agent.prs.iter().chain(&agent.prs_hidden);
+    let named = crate::pr_reference::parse_typed_reference(query).ok();
+    let repository = named.as_ref().and_then(|named| named.owner_repo.as_deref());
+    let shown = match (&named, repository) {
+        (
+            Some(TypedReference {
+                number: Some(number),
+                ..
+            }),
+            None,
+        ) => format!("#{number}"),
+        _ => query.trim().to_string(),
     };
-    let shown = match repository {
-        Some(_) => query.to_string(),
-        None => format!("#{number}"),
-    };
-    let matches: Vec<&Pr> = match number.parse::<u64>() {
-        Ok(number) => every
-            .into_iter()
+    let matches: Vec<&Pr> = match &named {
+        Some(
+            reference @ TypedReference {
+                number: Some(number),
+                ..
+            },
+        ) => every
             .filter(|pr| {
-                pr.number == number
-                    && repository.is_none_or(|repo| pr.owner_repo.eq_ignore_ascii_case(repo))
+                pr.number == *number
+                    && (repository.is_none() || reference.matches(&pr.host, &pr.owner_repo))
             })
             .collect(),
-        Err(_) => Vec::new(),
+        _ => Vec::new(),
     };
     let agent_name = agent.name();
     match matches.as_slice() {
@@ -740,9 +747,10 @@ fn find_pr<'a>(agent: &'a Agent, query: &str) -> Result<&'a Pr, CliError> {
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent or a
+/// standalone one.
 pub fn prs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
-    let agent = find_agent(client, query)?;
+    let agent = pr_agent(client, query)?;
     let positions = (1..).map(Some).take(agent.prs.len());
     let rows = agent
         .prs
@@ -801,9 +809,10 @@ pub fn prs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliE
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent or a
+/// standalone one.
 pub fn prs_branches(client: &Client, query: &str, shape: Shape) -> Result<String, CliError> {
-    let agent = find_agent(client, query)?;
+    let agent = pr_agent(client, query)?;
     let answer: BranchesAnswer = client.get_json(&format!(
         "/api/v1/sessions/{}/pull-requests/branches",
         segment(&agent.id)
@@ -816,6 +825,14 @@ pub fn prs_branches(client: &Client, query: &str, shape: Shape) -> Result<String
             let hidden = agent.prs_hidden.iter().find(|pr| pr.is(key));
             let Some(pr) = shown.or(hidden) else {
                 words.push(format!("{}#{}", key.owner_repo, key.number));
+                objects.push(json!({
+                    "host": key.host,
+                    "owner_repo": key.owner_repo,
+                    "number": key.number,
+                    "state": null,
+                    "hidden": null,
+                    "url": null,
+                }));
                 continue;
             };
             let suffix = if hidden.is_some() { " (hidden)" } else { "" };
@@ -2296,9 +2313,10 @@ pub fn tabs_stop(
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent or a
+/// standalone one.
 pub fn prs_attach(client: &Client, query: &str, reference: &str) -> Result<Planned, CliError> {
-    let agent = find_agent(client, query)?;
+    let agent = pr_agent(client, query)?;
     Ok(Planned::new(
         format!("Attach pull request {reference} to agent {}", agent.name()),
         Method::Post,
@@ -2307,9 +2325,27 @@ pub fn prs_attach(client: &Client, query: &str, reference: &str) -> Result<Plann
     ))
 }
 
+/// The agent `query` names, refused before anything is asked when it is a
+/// standalone one, which has no pull requests, in the sentence the dux
+/// itself refuses with.
+fn pr_agent(client: &Client, query: &str) -> Result<Agent, CliError> {
+    let agent = find_agent(client, query)?;
+    match agent.workspace {
+        Workspace::Managed { .. } => Ok(agent),
+        Workspace::Folder { .. } => Err(CliError::new(
+            Exit::Usage,
+            crate::engine::standalone_agent_refusal(
+                &agent.name(),
+                crate::engine::pull_requests::PR_FEATURE,
+                crate::engine::STANDALONE_ADD_AS_PROJECT_REMEDY,
+            ),
+        )),
+    }
+}
+
 /// The agent a pull-request verb acts on and the pull request it names.
 fn pr_address(client: &Client, query: &str, reference: &str) -> Result<(Agent, Pr), CliError> {
-    let agent = find_agent(client, query)?;
+    let agent = pr_agent(client, query)?;
     let pr = find_pr(&agent, reference)?.clone();
     Ok((agent, pr))
 }
@@ -2345,7 +2381,8 @@ pub fn prs_detach(client: &Client, query: &str, reference: &str) -> Result<Plann
             Exit::Usage,
             format!(
                 "{label} on {name} was found by dux, not attached; hide it instead (dux agents \
-                 prs hide {name} {label})"
+                 prs hide {name} {})",
+                pr.url
             ),
         ));
     }
@@ -2372,7 +2409,8 @@ pub fn prs_hide(client: &Client, query: &str, reference: &str) -> Result<Planned
             Exit::Usage,
             format!(
                 "{label} on {name} was attached, not found by dux; detach it instead (dux agents \
-                 prs detach {name} {label})"
+                 prs detach {name} {})",
+                pr.url
             ),
         ));
     }
@@ -2400,13 +2438,14 @@ pub fn prs_unhide(client: &Client, query: &str, reference: &str) -> Result<Plann
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
+/// Fails when the dux cannot be reached or refuses, or `query` names no single agent or a
+/// standalone one.
 pub fn prs_sort(
     client: &Client,
     query: &str,
     mode: crate::wire::PullRequestSort,
 ) -> Result<Planned, CliError> {
-    let agent = find_agent(client, query)?;
+    let agent = pr_agent(client, query)?;
     let order = match mode {
         crate::wire::PullRequestSort::Automatic => "automatic order",
         crate::wire::PullRequestSort::Manual => "your own order",
@@ -2423,8 +2462,9 @@ pub fn prs_sort(
 ///
 /// # Errors
 ///
-/// Fails when the dux cannot be reached or refuses, or the agent or the pull
-/// request is not named by exactly one.
+/// Fails when the dux cannot be reached or refuses, the agent or the pull
+/// request is not named by exactly one, the agent is a standalone one, or the
+/// pull request is hidden or `to` is a position past the ones it shows.
 pub fn prs_move(
     client: &Client,
     query: &str,
@@ -2433,6 +2473,21 @@ pub fn prs_move(
 ) -> Result<Planned, CliError> {
     use crate::wire::{PullRequestMove, PullRequestMoveNamed};
     let (agent, pr) = pr_address(client, query, reference)?;
+    let name = agent.name();
+    if !agent.prs.iter().any(|shown| shown.url == pr.url) {
+        return Err(CliError::new(
+            Exit::Usage,
+            crate::engine::pull_requests::hidden_move_refusal(&pr.label(), &name),
+        ));
+    }
+    if let PullRequestMove::Position(n) = to
+        && (n == 0 || n > agent.prs.len())
+    {
+        return Err(CliError::new(
+            Exit::Usage,
+            crate::engine::pull_requests::position_out_of_range_refusal(&name, agent.prs.len()),
+        ));
+    }
     let place = match to {
         PullRequestMove::Named(PullRequestMoveNamed::Top) => "to the top".to_string(),
         PullRequestMove::Named(PullRequestMoveNamed::Up) => "up".to_string(),
@@ -2440,11 +2495,7 @@ pub fn prs_move(
         PullRequestMove::Position(n) => format!("to position {n}"),
     };
     Ok(Planned::new(
-        format!(
-            "Move pull request {} {place} on agent {}",
-            pr.label(),
-            agent.name()
-        ),
+        format!("Move pull request {} {place} on agent {name}", pr.label()),
         Method::Post,
         format!("/api/v1/sessions/{}/pull-requests/move", segment(&agent.id)),
         Some(json!({ "pr": pr.key(), "to": to })),
@@ -3460,13 +3511,23 @@ mod pull_request_tests {
             "pr": shown[0],
             "prs": shown,
             "prs_hidden": [pr(402, "octo/hello", "closed", Some("spike"), "found")],
+        }, {
+            "id": "a2",
+            "title": "notes",
+            "provider": "claude",
+            "status": "active",
+            "workspace": {
+                "kind": "folder",
+                "folder_path": "/home/me/notes",
+                "folder_label": "~/notes",
+            },
         }])
         .to_string()
     }
 
     const BRANCHES: &str = r#"{"branches":[
           {"name":"store-tab-rows","former_names":["tab-rows","rows"],"current":true,"first_seen_at":"2026-10-02T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":418}]},
-          {"name":"older","former_names":[],"current":false,"first_seen_at":"2026-09-01T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":415},{"host":"GitHub.com","owner_repo":"Octo/Hello","number":402}]}
+          {"name":"older","former_names":[],"current":false,"first_seen_at":"2026-09-01T00:00:00Z","prs":[{"host":"github.com","owner_repo":"octo/hello","number":415},{"host":"GitHub.com","owner_repo":"Octo/Hello","number":402},{"host":"github.com","owner_repo":"octo/hello","number":399}]}
         ],
         "attached_on_no_branch":[{"host":"github.com","owner_repo":"acme/infra","number":77},{"host":"github.com","owner_repo":"acme/api","number":77}]}"#;
 
@@ -3584,6 +3645,26 @@ mod pull_request_tests {
             url_of("418").unwrap(),
             "https://github.com/octo/hello/pull/418"
         );
+        for copied in [
+            "https://github.com/acme/api/pull/77/files",
+            "https://github.com/acme/api/pull/77/",
+            "https://github.com/acme/api/pull/77#issuecomment-1",
+            "https://GitHub.com/ACME/Api/pull/77",
+        ] {
+            assert_eq!(
+                url_of(copied).unwrap(),
+                "https://github.com/acme/api/pull/77",
+                "{copied}"
+            );
+        }
+        let elsewhere = url_of("https://ghe.example/acme/api/pull/77#issuecomment-1").unwrap_err();
+        assert_eq!(elsewhere.exit, Exit::Failed);
+        assert_eq!(
+            elsewhere.message,
+            "agent store-tab-rows has no pull request \
+             https://ghe.example/acme/api/pull/77#issuecomment-1; dux agents prs ls \
+             store-tab-rows lists them"
+        );
 
         let two = url_of("#77").unwrap_err();
         assert_eq!(two.exit, Exit::Usage);
@@ -3664,7 +3745,7 @@ mod pull_request_tests {
         assert!(lines[1].starts_with("store-tab-rows   yes"), "{table}");
         assert!(lines[1].contains("tab-rows, rows"), "{table}");
         assert!(
-            lines[2].ends_with("#415 merged, #402 closed (hidden)"),
+            lines[2].ends_with("#415 merged, #402 closed (hidden), octo/hello#399"),
             "{table}"
         );
         assert!(lines[3].starts_with(' '), "{table}");
@@ -3675,6 +3756,19 @@ mod pull_request_tests {
         assert_eq!(
             prs_branches(&dux.client, "a1", Shape::Ids).unwrap(),
             "store-tab-rows\nolder\n"
+        );
+        let json: Value =
+            serde_json::from_str(&prs_branches(&dux.client, "a1", Shape::Json).unwrap()).unwrap();
+        assert_eq!(
+            json[1]["pull_requests"][2],
+            json!({
+                "host": "github.com",
+                "owner_repo": "octo/hello",
+                "number": 399,
+                "state": null,
+                "hidden": null,
+                "url": null,
+            })
         );
     }
 
@@ -3754,24 +3848,71 @@ mod pull_request_tests {
     }
 
     #[test]
-    fn detach_and_hide_refuse_the_verb_that_cannot_apply_and_name_the_one_that_does() {
+    fn a_change_that_cannot_apply_is_refused_before_anything_is_asked() {
         let dux = reads();
         let detach = prs_detach(&dux.client, "a1", "#418").unwrap_err();
         assert_eq!(detach.exit, Exit::Usage);
         assert_eq!(
             detach.message,
             "#418 on store-tab-rows was found by dux, not attached; hide it instead (dux agents \
-             prs hide store-tab-rows #418)"
+             prs hide store-tab-rows https://github.com/octo/hello/pull/418)"
         );
         let hide = prs_hide(&dux.client, "a1", "acme/api#77").unwrap_err();
         assert_eq!(hide.exit, Exit::Usage);
         assert_eq!(
             hide.message,
             "acme/api#77 on store-tab-rows was attached, not found by dux; detach it instead (dux \
-             agents prs detach store-tab-rows acme/api#77)"
+             agents prs detach store-tab-rows https://github.com/acme/api/pull/77)"
         );
         let ambiguous = prs_hide(&dux.client, "a1", "77").unwrap_err();
         assert_eq!(ambiguous.exit, Exit::Usage);
+
+        let hidden = prs_move(
+            &dux.client,
+            "a1",
+            "#402",
+            PullRequestMove::Named(PullRequestMoveNamed::Top),
+        )
+        .unwrap_err();
+        assert_eq!(hidden.exit, Exit::Usage);
+        assert_eq!(
+            hidden.message,
+            "#402 is hidden on \"store-tab-rows\"; show it again before moving it."
+        );
+        for position in [0, 5] {
+            let beyond = prs_move(
+                &dux.client,
+                "a1",
+                "#418",
+                PullRequestMove::Position(position),
+            )
+            .unwrap_err();
+            assert_eq!(beyond.exit, Exit::Usage);
+            assert_eq!(
+                beyond.message,
+                "\"store-tab-rows\" shows 4 pull requests; a position is 1 to 4."
+            );
+        }
+
+        let standalone = "Agent \"notes\" is a standalone agent: it runs in a folder you chose \
+                          and has no branch of its own, so there is nothing to attach, detach or \
+                          track a pull request for. Add its folder as a project if you want dux \
+                          to manage branches and worktrees for it.";
+        let refusals = [
+            prs_ls(&dux.client, "a2", Shape::Table).map(|_| ()),
+            prs_branches(&dux.client, "a2", Shape::Json).map(|_| ()),
+            prs_attach(&dux.client, "a2", "#1").map(|_| ()),
+            prs_detach(&dux.client, "a2", "#1").map(|_| ()),
+            prs_hide(&dux.client, "a2", "#1").map(|_| ()),
+            prs_unhide(&dux.client, "a2", "#1").map(|_| ()),
+            prs_sort(&dux.client, "a2", PullRequestSort::Manual).map(|_| ()),
+            prs_move(&dux.client, "a2", "#1", PullRequestMove::Position(1)).map(|_| ()),
+        ];
+        for refusal in refusals {
+            let refusal = refusal.unwrap_err();
+            assert_eq!(refusal.exit, Exit::Usage);
+            assert_eq!(refusal.message, standalone);
+        }
         assert!(dux.fake.seen().iter().all(|seen| seen.method == "GET"));
     }
 
