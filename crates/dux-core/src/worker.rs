@@ -10,7 +10,6 @@ use crate::engine::StatusUpdate;
 use crate::ids::TabId;
 use crate::model::{AgentSession, ChangedFile, Project, ProjectBranchStatus, ProviderKind};
 use crate::pty::PtyClient;
-use crate::storage::StoredPr;
 
 /// One worktree of a project, as the adopt picker lists it.
 #[derive(Clone, Debug)]
@@ -1246,70 +1245,88 @@ pub struct BranchSyncUpdate {
     pub(crate) birth_identity: Option<(String, crate::branch_history::BranchIdentity)>,
 }
 
-/// The identity of a manually attached ("pinned") pull request, carried on a
-/// [`PrSyncEntry`] so the sync planner queries the PINNED repo (which may be a
-/// fork, or any repo other than the session's remote) instead of deriving a
-/// target from the worktree's remote. Identity only; the cached state/title
-/// ride in `known_pr`, which both construction sites set to the override row
-/// for a pinned session.
+/// What one cycle of the pull-request sync learned about one of an agent's
+/// branches: when it asked, whether GitHub no longer has the branch, and which
+/// pull requests the branch's discovery returned.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PinnedPr {
-    pub(crate) host: String,
-    pub(crate) owner_repo: String,
-    pub(crate) number: u64,
+pub struct BranchAskRecord {
+    /// When the cycle asked.
+    pub(crate) at: chrono::DateTime<chrono::Utc>,
+    /// Every name the branch was asked under came back with no ref.
+    pub(crate) ref_gone: bool,
+    /// The pull requests the branch's discovery returned.
+    pub(crate) returned: Vec<crate::model::PrKey>,
 }
 
-/// One agent's pull-request answer, with the branch generation it was asked
-/// under (see `Engine::pr_branch_generations`), so an answer that lands after
-/// the agent drifted onto another branch is dropped instead of being saved
-/// against the new one, while one that lands after an explicit rename stands.
+/// One of an agent's branches, as the pull-request sync asks about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrSyncBranch {
+    /// The branch's name now.
+    pub(crate) name: String,
+    /// The names a rename moved it away from, which GitHub may still know it by.
+    pub(crate) former_names: Vec<String>,
+    /// No pull request of this branch is older than this, give or take the
+    /// clock slack: when dux minted the current branch, or when an earlier
+    /// branch was created. `None` when nothing says.
+    pub(crate) identity_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The commit the branch pointed at when dux last saw the agent on it.
+    pub(crate) tip: Option<String>,
+    /// What the last cycle that asked about it learned, `None` before any.
+    pub(crate) last_ask: Option<BranchAskRecord>,
+}
+
+impl PrSyncBranch {
+    /// Every name the branch may carry on GitHub: its own, then its former ones.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.former_names.iter().map(String::as_str))
+    }
+}
+
+/// One answer the pull-request sync brings back for an agent.
+#[derive(Clone, Debug)]
+pub enum PrSyncAnswer {
+    /// Discovery found it on one of the agent's branches.
+    Found(crate::model::PrInfo),
+    /// A refresh by number answered for a pull request the agent already has.
+    Refreshed(crate::model::PrInfo),
+}
+
+/// What one sync brought back for one agent. Every answer is about a named
+/// branch or a numbered pull request, so it stays true whatever the agent has
+/// done since it was asked.
 #[derive(Clone, Debug)]
 pub struct PrStatusResult {
     pub(crate) session_id: String,
-    pub(crate) branch_generation: u64,
-    pub(crate) pr: Option<crate::model::PrInfo>,
+    pub(crate) answers: Vec<PrSyncAnswer>,
+    /// The branches this sync asked about and what it learned of each.
+    pub(crate) asked: Vec<(String, BranchAskRecord)>,
 }
 
-/// Snapshot of session data shared with the PR-sync background worker.
+/// Snapshot of one agent shared with the pull-request sync worker.
 #[derive(Clone, Debug)]
 pub struct PrSyncEntry {
     pub(crate) session_id: String,
-    pub(crate) branch_name: String,
     pub(crate) worktree_path: String,
-    /// If we already know a PR for this session, the worker can use `gh pr view`
-    /// (works even after branch deletion) and skip a merged PR entirely. A CLOSED
-    /// one is still refreshed, because it can be reopened.
-    /// For a pinned session this is the OVERRIDE row, never the `session_prs`
-    /// latest (which can be a different, autodetected PR).
-    pub(crate) known_pr: Option<StoredPr>,
-    /// Whether the agent process has exited. Used to skip PR discovery calls for
-    /// sessions that are both exited and merged (nobody is pushing to that branch
-    /// anymore, and a merge is final), and to keep an exited session whose PR is
-    /// CLOSED out of the blind poll while a one-shot trigger still refreshes it.
+    /// The branch the worktree is on now.
+    pub(crate) current: PrSyncBranch,
+    /// Every other branch the worktree has been on, except the project's
+    /// leading branch.
+    pub(crate) history: Vec<PrSyncBranch>,
+    /// Every pull request the agent has, found or attached, hidden included.
+    pub(crate) known: Vec<crate::model::AgentPr>,
+    /// Whether the agent process has exited. An exited agent's closed pull
+    /// requests, and its current branch when everything on it is merged or
+    /// closed, are left to the deliberate triggers and the settled recheck.
     pub(crate) agent_exited: bool,
-    /// A manually attached PR. When set, the planner short-circuits the
-    /// remote-derived target: the query goes to the pinned `(host, owner_repo)`,
-    /// the host policy gates the PINNED host, and the only alias emitted is the
-    /// by-number one for the pinned PR (no head-ref discovery).
-    pub pinned: Option<PinnedPr>,
     /// Whether the agent sits in the list's INACTIVE tail (detached or exited),
     /// as decided by the one `flat_list::is_inactive` predicate the sidebar
     /// uses. The blind poll puts these entries on `ui.pr_poll_inactive_interval_seconds`
     /// instead of the active clock; every other trigger ignores the flag.
-    ///
-    /// Distinct from `agent_exited`, which is about a live PTY rather than the
-    /// session's own status, and which the alias planner reads for a different
-    /// question (whether a terminal pull request is worth a call at all).
     pub inactive: bool,
-    /// When dux minted the branch, for an agent still on a branch dux created
-    /// for it; `None` for a branch that existed before the agent, or one the
-    /// agent has since moved off. No pull request from a minted branch can be
-    /// older than this, which is what tells it apart from an earlier branch
-    /// that used the same name when a pull request is found by head name.
-    pub(crate) branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// The agent's branch generation when this entry was planned, carried
-    /// into the result (see [`PrStatusResult`]).
-    pub(crate) branch_generation: u64,
+    /// `[ui] pr_history_branches_per_cycle`, already clamped.
+    pub(crate) history_per_cycle: usize,
+    /// `[ui] pr_settled_recheck_seconds`, already clamped.
+    pub(crate) settled_recheck: chrono::TimeDelta,
 }
 
 /// A project change to save to the session database.

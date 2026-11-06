@@ -16,8 +16,8 @@ use crate::model::{PrInfo, PrState, Project};
 use crate::status_text::StatusText;
 use crate::storage::StoredPr;
 use crate::worker::{
-    PrLookupPurpose, PrStatusResult, PrSyncEntry, PullRequestLookup, ResolvedPullRequest,
-    WorkerEvent,
+    BranchAskRecord, PrLookupPurpose, PrStatusResult, PrSyncAnswer, PrSyncBranch, PrSyncEntry,
+    PullRequestLookup, ResolvedPullRequest, WorkerEvent,
 };
 
 /// Live GraphQL rate-limit snapshot parsed from a batched query's top-level
@@ -49,35 +49,34 @@ pub(crate) struct HostSignal {
     pub rate_limited: bool,
 }
 
-/// One batched-sync outcome: the per-session PR results plus a per-host signal
-/// for every host actually queried this cycle.
-type PrSyncOutcome = (Vec<(String, Option<PrInfo>)>, Vec<HostSignal>);
-
-/// [`PrSyncOutcome`] with each result naming the branch generation it was asked under.
+/// One sync's answers, one per agent it covered, plus a per-host signal for
+/// every host actually queried.
 pub(crate) type PrSyncReport = (Vec<PrStatusResult>, Vec<HostSignal>);
 
-/// One chunk's outcome: per-session results, the chunk's `rateLimit` snapshot,
-/// whether the whole call hard-failed, and whether that failure looked like
-/// rate-limiting. Aggregated per host by `run_entries`.
+/// One chunk's outcome: the answers it brought back (by question index), the
+/// chunk's `rateLimit` snapshot, whether the whole call hard-failed, and
+/// whether that failure looked like rate-limiting. Aggregated per host by
+/// `run_entries`.
 type ChunkOutcome = (
-    Vec<(String, Option<PrInfo>)>,
+    Vec<(usize, QuestionAnswer)>,
     Option<RateLimitInfo>,
     bool,
     bool,
 );
 
 /// Snapshot of the active per-host backoff windows (`host -> until`) passed into
-/// a sync so backed-off hosts are skipped (their sessions keep last-known PRs)
-/// without another `gh` call.
+/// a sync so backed-off hosts are skipped (their questions go unasked and every
+/// pull request keeps what it last knew) without another `gh` call.
 pub(crate) type BackoffSnapshot = std::collections::HashMap<String, Instant>;
 
 /// GraphQL `rateLimit.remaining` floor below which the loop pauses polling
 /// until the quota resets.
 pub(crate) const RATE_LIMIT_BACKOFF_FLOOR: i64 = 100;
 
-/// Max GraphQL aliases per `gh api graphql` invocation. Each session emits 1–2
-/// aliases; capping the batch keeps every query ~1 GraphQL point AND stays well
-/// under Linux's ~128 KiB per-argv-entry limit for the inlined `-f query=` arg.
+/// Max GraphQL aliases per `gh api graphql` invocation. A question emits one or
+/// two aliases; capping the batch keeps every query ~1 GraphQL point AND stays
+/// well under Linux's ~128 KiB per-argv-entry limit for the inlined `-f query=`
+/// arg.
 const MAX_ALIASES_PER_QUERY: usize = 100;
 
 /// How many of a branch's pull requests the discovery alias asks for. The
@@ -85,11 +84,9 @@ const MAX_ALIASES_PER_QUERY: usize = 100;
 /// the newest end, so this is "the most recently created N pull requests on this
 /// branch name". A branch reused a couple of times needs a handful.
 ///
-/// What the window cannot see: if the newest twenty are all merged or closed
-/// while an OLDER one is open, discovery reports a terminal pull request and the
-/// open one stays invisible. That takes a branch name used more than twenty
-/// times with a long-lived open pull request underneath it; paging the whole
-/// history of every branch on every cycle is not worth covering it.
+/// What the window cannot see is an older pull request behind twenty newer ones
+/// on the same name. One the agent already has is still refreshed by its
+/// number, so the window only bounds what discovery can add.
 ///
 /// The cost, measured rather than assumed: the query still bills one GraphQL
 /// point, exactly as `first: 1` did, so the quota is unaffected. What grows is
@@ -98,17 +95,21 @@ const MAX_ALIASES_PER_QUERY: usize = 100;
 const DISCOVERY_WINDOW: usize = 20;
 
 /// How many of the most recently created pull requests with a given head name
-/// the head-name lookup asks for. It runs only for an agent with no known pull
-/// request, and every candidate still has to pass the checks in
-/// [`select_head_name_match`], so a handful covers a name reused a few times.
+/// the head-name lookup asks for. It runs only for a branch whose ref may be
+/// gone, and every candidate still has to pass the checks in
+/// [`select_head_name_matches`], so a handful covers a name reused a few times.
 const HEAD_NAME_WINDOW: usize = 5;
 
-/// How much earlier than the branch's minting a head-name match may claim to
-/// have been opened and still be accepted. GitHub stamps `createdAt` with its
-/// own clock and dux stamps the agent with this machine's, so an exact
+/// How much earlier than a branch's birth a pull request may claim to have been
+/// opened and still be counted as the branch's. GitHub stamps `createdAt` with
+/// its own clock and dux stamps the branch with this machine's, so an exact
 /// comparison would refuse the agent's own pull request on a machine whose
 /// clock runs a little fast.
 const HEAD_NAME_CLOCK_SLACK: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+
+/// What every pull-request node in a sync query asks for.
+const PR_NODE_FIELDS: &str = "number state isDraft title url createdAt updatedAt closedAt \
+mergedAt headRefName headRefOid repository { nameWithOwner }";
 
 /// Hard wall-clock cap on a single `gh` invocation. A hung `gh` (stalled TCP,
 /// DNS hang, credential-helper prompt) must not park a worker thread: we bail
@@ -121,12 +122,11 @@ pub(crate) const GH_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// open can never freeze the caller.
 const GH_READER_DRAIN: Duration = Duration::from_secs(2);
 
-/// Batched PR sync over the shared session snapshot. Issues one or more
-/// `gh api graphql` requests per GitHub host (sessions chunked to at most
-/// `MAX_ALIASES_PER_QUERY` aliases each), aliasing every session's lookup into a
-/// single query per chunk, and returns one [`PrStatusResult`] per session,
-/// naming the branch generation it was asked under, plus a per-host signal for the backoff. Hosts already backed off in
-/// `backoff` are skipped (their sessions keep last-known PRs) with no `gh` call.
+/// Batched PR sync over the shared session snapshot. Every agent's questions
+/// are packed into one or more `gh api graphql` requests per GitHub host (at
+/// most `MAX_ALIASES_PER_QUERY` aliases each), and one [`PrStatusResult`] comes
+/// back per agent, plus a per-host signal for the backoff. Hosts already backed
+/// off in `backoff` are skipped with no `gh` call.
 pub(crate) fn run_pr_sync(
     sessions: &Arc<Mutex<Vec<PrSyncEntry>>>,
     backoff: &BackoffSnapshot,
@@ -165,22 +165,7 @@ pub(crate) fn run_pr_sync_scoped(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let entries = entries_for_scope(snapshot, scope);
-    let (results, signals) = run_entries(&entries, backoff, policy, trigger);
-    let results = results
-        .into_iter()
-        .filter_map(|(session_id, pr)| {
-            let branch_generation = entries
-                .iter()
-                .find(|entry| entry.session_id == session_id)?
-                .branch_generation;
-            Some(PrStatusResult {
-                session_id,
-                branch_generation,
-                pr,
-            })
-        })
-        .collect();
-    (results, signals)
+    run_entries(&entries, backoff, policy, trigger, chrono::Utc::now())
 }
 
 /// The entries a cycle of the given [`SyncScope`] asks GitHub about. Pure, so
@@ -202,7 +187,7 @@ pub(crate) fn inactive_sweep_due(since_last: Duration, interval_secs: u64) -> bo
     interval_secs != 0 && since_last >= Duration::from_secs(interval_secs)
 }
 
-/// What caused this sync, which decides how much a dormant session is worth
+/// What caused this sync, which decides how much a dormant agent is worth
 /// spending a call on.
 ///
 /// It is a CALL-SITE parameter rather than a field on `PrSyncEntry` on purpose:
@@ -214,277 +199,236 @@ pub(crate) enum SyncTrigger {
     BlindPoll,
     /// An agent was brought to the foreground. Frequent and cheap to provoke:
     /// tabbing down a sidebar fires one per agent passed through, so it buys
-    /// nothing for a dormant agent whose pull request is already terminal.
+    /// nothing for a dormant agent whose pull requests are already finished.
     Focus,
     /// A deliberate event: boot, an agent being created, its branch being
     /// renamed or drifting, an agent exit, or the user asking (a resume or an
     /// attach). Rare, and each one is a reason to believe something moved, so it
-    /// is the only trigger that spends a call on a terminal row.
+    /// is the only trigger that spends a call on a dormant agent's closed pull
+    /// requests and finished branch.
     OneShot,
 }
 
-/// Single-session PR check (foreground / create / exit triggers). Shares
-/// the batched machinery with a one-element batch; returns the PR plus the
-/// per-host signal so the one-shot caller can arm/clear the shared backoff too.
+/// Single-agent PR check (foreground / create / exit triggers). Shares the
+/// batched machinery with a one-element batch, and returns the per-host signal
+/// so the one-shot caller can arm/clear the shared backoff too.
 pub(crate) fn check_pr_for_entry(
     entry: &PrSyncEntry,
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
-) -> (Option<PrInfo>, Vec<HostSignal>) {
-    let (results, signals) = run_entries(std::slice::from_ref(entry), backoff, policy, trigger);
-    let pr = results.into_iter().next().and_then(|(_, pr)| pr);
-    (pr, signals)
+) -> (PrStatusResult, Vec<HostSignal>) {
+    let (mut results, signals) = run_entries(
+        std::slice::from_ref(entry),
+        backoff,
+        policy,
+        trigger,
+        chrono::Utc::now(),
+    );
+    let result = results.pop().unwrap_or_else(|| PrStatusResult {
+        session_id: entry.session_id.clone(),
+        answers: Vec::new(),
+        asked: Vec::new(),
+    });
+    (result, signals)
 }
 
-/// A session that needs at least one GraphQL alias this cycle.
-struct Planned {
-    session_id: String,
+/// One thing a sync asks GitHub about one agent.
+struct Question {
+    /// Which of the cycle's entries it is for.
+    entry: usize,
     host: String,
     owner: String,
     repo: String,
-    branch: String,
-    known: Option<StoredPr>,
-    /// The agent's working copy, where a head-name match's commit is looked up.
+    ask: Ask,
+}
+
+/// What a [`Question`] asks.
+enum Ask {
+    /// The pull requests whose head is `name`, one of the names `branch` has
+    /// carried.
+    Discovery {
+        branch: String,
+        name: String,
+        /// See [`PrSyncBranch::identity_at`].
+        identity_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// Also look the pull requests up by head name, which still answers
+        /// once a merge has deleted the branch. Used only when the ref is gone.
+        head: Option<HeadEvidence>,
+    },
+    /// One pull request the agent already has, by its number.
+    Refresh { number: u64 },
+}
+
+/// What a head-name match is checked against: a name is not an identity, so a
+/// pull request found by one is taken only when its head commit is provably
+/// this branch's.
+struct HeadEvidence {
     worktree_path: String,
-    /// When dux minted the branch, for a branch it minted and the agent is
-    /// still on; `None` otherwise. A head-name match opened before then
-    /// belongs to an earlier branch of the same name.
-    branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// A manually attached PR: the plan targets the PIN's repo and number, and
-    /// the merge rule reports the pin (or its stored reconstruction), never a
-    /// discovery result.
-    pinned: bool,
+    /// The local branch whose history the head commit may be in.
+    local_branch: String,
+    /// The commit the branch last pointed at, for one the agent has left.
+    tip: Option<String>,
 }
 
-/// Single source of truth for "this stored PR is terminal (MERGED/CLOSED)".
-/// This is the PLANNING shape: a terminal row gets discovery only and no
-/// by-number alias, so a reopen is still noticed through the discovery node at
-/// no extra API cost. Whether a terminal row may skip the network entirely is a
-/// narrower question, answered by [`exited_entry_needs_no_network`].
-fn stored_pr_is_terminal(known: Option<&StoredPr>) -> bool {
-    known.is_some_and(|k| k.state == "MERGED" || k.state == "CLOSED")
-}
-
-/// A MERGED stored PR: the one state dux treats as final, in the sense that the
-/// pull request itself can no longer change. That makes another call pointless
-/// only where the call could not learn anything else, which is the PINNED case;
-/// an unpinned session's call is a discovery call, and the BRANCH can still
-/// grow a successor. See [`pinned_exited_entry_needs_no_network`].
-fn stored_pr_is_merged(known: Option<&StoredPr>) -> bool {
-    known.is_some_and(|k| k.state == "MERGED")
-}
-
-/// Whether an EXITED agent's entry can be answered from SQLite with no `gh`
-/// call at all.
-///
-/// A terminal row (MERGED or CLOSED) on an exited agent is free on the blind
-/// poll and on focus, and costs one discovery call on a deliberate trigger.
-///
-/// It is not free forever, because a terminal row does not mean the branch is
-/// finished: a closed pull request can be reopened, and a branch name reused
-/// after a merge carries a brand new pull request, which only discovery notices.
-///
-/// It is not paid on every focus either, because focusing an agent is a
-/// navigation keystroke and a sidebar of finished agents would spawn one `gh`
-/// process per agent tabbed past. Boot, an agent being created, a branch rename
-/// or drift, an agent exit and an explicit ask are rare and each means something plausibly moved, so those pay.
-///
-/// A terminal row on a running agent refreshes under every trigger.
-fn exited_entry_needs_no_network(known: Option<&StoredPr>, trigger: SyncTrigger) -> bool {
-    stored_pr_is_terminal(known) && trigger != SyncTrigger::OneShot
-}
-
-/// The same question for a PINNED session, which emits no discovery alias at
-/// all: its only call is a by-number refresh of the pull request the user named.
-/// So the reused-branch case above cannot arise here and a MERGED pin stays free
-/// under every trigger, while a CLOSED one, which can be reopened, follows the
-/// same trigger rule as an unpinned terminal row.
-fn pinned_exited_entry_needs_no_network(known: &StoredPr, trigger: SyncTrigger) -> bool {
-    stored_pr_is_merged(Some(known))
-        || (stored_pr_is_terminal(Some(known)) && trigger != SyncTrigger::OneShot)
-}
-
-impl Planned {
-    /// Build a planned lookup, deriving the `terminal/emit_num` eligibility from
-    /// the known PR so the single rule lives in one place (production and tests
-    /// both go through here and can't drift).
-    fn new(
-        session_id: String,
-        host: String,
-        owner: String,
-        repo: String,
-        branch: String,
-        known: Option<StoredPr>,
-    ) -> Self {
-        Planned {
-            session_id,
-            host,
-            owner,
-            repo,
-            branch,
-            known,
-            worktree_path: String::new(),
-            branch_minted_at: None,
-            pinned: false,
+impl Question {
+    /// How many aliases the question costs in a query.
+    fn aliases(&self) -> usize {
+        match &self.ask {
+            Ask::Discovery { head, .. } => 1 + usize::from(head.is_some()),
+            Ask::Refresh { .. } => 1,
         }
     }
 
-    /// Name the working copy a head-name match is checked against, and when
-    /// dux minted the branch (see [`Planned::branch_minted_at`]).
-    fn with_working_copy(
-        mut self,
-        worktree_path: String,
-        branch_minted_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Self {
-        self.worktree_path = worktree_path;
-        self.branch_minted_at = branch_minted_at;
-        self
-    }
-
-    /// Build the plan for a PINNED session: exactly one alias, the by-number
-    /// refresh of the pin, against the pin's own repo. No head-ref discovery.
-    /// `known` is the override row (which carries the pin's cached state), so
-    /// the num alias number and every fallback reconstruct the PIN.
-    fn new_pinned(
-        session_id: String,
-        host: String,
-        owner: String,
-        repo: String,
-        branch: String,
-        known: StoredPr,
-    ) -> Self {
-        Planned {
-            session_id,
-            host,
-            owner,
-            repo,
-            branch,
-            known: Some(known),
-            worktree_path: String::new(),
-            branch_minted_at: None,
-            pinned: true,
-        }
-    }
-
-    /// Whether the known pull request is merged or closed.
-    fn is_terminal(&self) -> bool {
-        stored_pr_is_terminal(self.known.as_ref())
-    }
-
-    /// Whether the by-number alias is emitted: always for a pin, and for an
-    /// open known pull request (robust when the branch was deleted on merge).
-    /// Terminal and undiscovered sessions get the head-ref discovery alias and
-    /// the head-name alias instead.
-    ///
-    /// For a remote-derived plan it fires ONLY when the stored row names the
-    /// repo being queried: PR numbers are per-repo, so a row from another
-    /// repository (a detached fork pin, a remote that changed under the
-    /// session) asked at this target would fetch an unrelated pull request.
-    /// Such a row falls back to discovery only; a discovery miss keeps the
-    /// stored badge via the merge rule's fallback.
-    fn emit_num(&self) -> bool {
-        if self.pinned {
-            return true;
-        }
-        let known_matches_target = self.known.as_ref().is_some_and(|k| {
-            k.owner_repo
-                .eq_ignore_ascii_case(&format!("{}/{}", self.owner, self.repo))
-                && normalize_github_host(&k.host).eq_ignore_ascii_case(&self.host)
-        });
-        known_matches_target && !self.is_terminal()
-    }
-
-    /// Whether the head-ref discovery alias is emitted at all. True for every
-    /// remote-derived plan; false for a PINNED session, whose only alias is the
-    /// by-number refresh of the pin (discovery would answer for a PR the user
-    /// deliberately overrode).
-    fn emit_ref(&self) -> bool {
-        !self.pinned
-    }
-
-    /// Whether the head-name alias is emitted: a remote-derived session with
-    /// no known pull request, or only a merged or closed one, whose (next)
-    /// pull request may have been merged and its branch deleted before dux
-    /// ever saw it, leaving the ref lookup nothing to answer with. See
-    /// [`select_head_name_match`].
-    fn emit_head(&self) -> bool {
-        !self.pinned && (self.known.is_none() || self.is_terminal())
+    fn owner_repo(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
     }
 }
 
-/// Core of the batched sync. Classifies each entry, resolves the ones that need
-/// no network call (terminal + exited → reconstruct from SQLite), and batches
-/// the rest into `gh api graphql` requests grouped by host.
+/// What came back for one question that GitHub answered.
+enum QuestionAnswer {
+    Discovery {
+        /// The pull requests to record for the agent.
+        found: Vec<PrInfo>,
+        /// Every pull request of this repository the window returned.
+        returned: Vec<crate::model::PrKey>,
+        /// The ref came back null: GitHub has no branch by that name.
+        ref_gone: bool,
+    },
+    /// `None` when GitHub answered null for the number.
+    Refresh(Option<PrInfo>),
+}
+
+/// The pull requests in `known` whose head is one of `branch`'s names.
+fn rows_on<'a>(
+    known: &'a [crate::model::AgentPr],
+    branch: &'a PrSyncBranch,
+) -> impl Iterator<Item = &'a crate::model::AgentPr> {
+    known.iter().filter(|row| {
+        row.head_branch
+            .as_deref()
+            .is_some_and(|head| branch.names().any(|name| name == head))
+    })
+}
+
+/// A merged or closed pull request.
+fn is_terminal(state: &PrState) -> bool {
+    matches!(state, PrState::Merged | PrState::Closed)
+}
+
+/// Whether every pull request on `branch` is merged, with at least one there.
+fn merged_only(known: &[crate::model::AgentPr], branch: &PrSyncBranch) -> bool {
+    let mut rows = rows_on(known, branch).peekable();
+    rows.peek().is_some() && rows.all(|row| row.state == PrState::Merged)
+}
+
+/// The earlier branches this cycle asks about: the least recently asked first
+/// (one never asked before all of them), at most the configured number, and a
+/// branch whose pull requests are all merged only once the settled recheck has
+/// passed since it was last asked. Every branch that is eligible is therefore
+/// asked within `ceil(eligible / per_cycle)` cycles.
+fn due_history_branches(
+    entry: &PrSyncEntry,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<&PrSyncBranch> {
+    let mut due: Vec<&PrSyncBranch> = entry
+        .history
+        .iter()
+        .filter(|branch| {
+            !merged_only(&entry.known, branch)
+                || branch
+                    .last_ask
+                    .as_ref()
+                    .is_none_or(|ask| now - ask.at >= entry.settled_recheck)
+        })
+        .collect();
+    due.sort_by_key(|branch| branch.last_ask.as_ref().map(|ask| ask.at));
+    due.truncate(entry.history_per_cycle);
+    due
+}
+
+/// Whether a pull request the agent already has is refreshed by number this
+/// cycle, by its state:
 ///
-/// Per-session strategy:
-///
-/// | Known PR state | Agent running? | Aliases                                   |
-/// |----------------|----------------|-------------------------------------------|
-/// | None           | any            | head-ref discovery **+** head-name lookup |
-/// | OPEN           | any            | head-ref discovery **+** by-number refresh|
-/// | MERGED/CLOSED  | yes            | head-ref discovery **+** head-name lookup (catch a follow-up PR) |
-/// | MERGED/CLOSED  | no             | zero calls, except discovery on a deliberate trigger |
-///
-/// A PINNED session is the exception: it emits only the by-number refresh, so a
-/// merged pin on an exited agent costs zero calls under every trigger.
+/// | state | agent running | agent exited |
+/// |---|---|---|
+/// | never refreshed | yes | yes |
+/// | open or draft | yes | yes |
+/// | closed | yes | on a deliberate trigger, or once the settled recheck passed |
+/// | merged | no, a merge is final | no |
+fn refresh_due(
+    row: &crate::model::AgentPr,
+    entry: &PrSyncEntry,
+    trigger: SyncTrigger,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(refreshed_at) = row.last_refreshed_at else {
+        return true;
+    };
+    match row.state {
+        PrState::Open | PrState::Draft => true,
+        PrState::Merged => false,
+        PrState::Closed => {
+            !entry.agent_exited
+                || trigger == SyncTrigger::OneShot
+                || now - refreshed_at >= entry.settled_recheck
+        }
+    }
+}
+
+/// Core of the batched sync: plan every entry's questions, ask them host by
+/// host, and gather the answers back per agent.
 fn run_entries(
     entries: &[PrSyncEntry],
     backoff: &BackoffSnapshot,
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
-) -> PrSyncOutcome {
-    let (mut results, planned) = plan_entries(
+    now: chrono::DateTime<chrono::Utc>,
+) -> PrSyncReport {
+    let questions = plan_entries(
         entries,
         &|path| live_remote_resolver(path, policy),
         policy,
         trigger,
+        now,
     );
 
-    // Group by host; for each host either skip it (already backed off: keep
-    // last-known PRs, no gh call, no signal) or chunk its sessions by alias
-    // budget and emit one per-host signal driving the backoff.
-    let now = Instant::now();
+    // Group by host; for each host either skip it (already backed off: nothing
+    // asked, no signal) or chunk its questions by alias budget and emit one
+    // per-host signal driving the backoff.
+    let instant = Instant::now();
+    let mut answers: Vec<(usize, QuestionAnswer)> = Vec::new();
     let mut signals: Vec<HostSignal> = Vec::new();
     // What GitHub billed for the whole cycle, summed over every chunk actually
     // run. The per-host signal keeps only the TIGHTEST snapshot (the backoff
     // cares about what is left, not what was spent), so the total is
     // accumulated here instead.
     let mut points = 0i64;
-    let mut by_host: std::collections::BTreeMap<String, Vec<usize>> = BTreeMap::default();
-    for (i, p) in planned.iter().enumerate() {
-        by_host.entry(p.host.clone()).or_default().push(i);
+    let mut by_host: BTreeMap<String, Vec<usize>> = BTreeMap::default();
+    for (i, question) in questions.iter().enumerate() {
+        by_host.entry(question.host.clone()).or_default().push(i);
     }
     for (host, idxs) in by_host {
-        // Host is under an active backoff window: preserve last-known PRs and skip
-        // the network call entirely (the window will expire on its own).
-        if backoff.get(&host).is_some_and(|until| now < *until) {
-            for i in idxs {
-                let p = &planned[i];
-                results.push((
-                    p.session_id.clone(),
-                    p.known.as_ref().and_then(reconstruct_from_stored),
-                ));
-            }
+        if backoff.get(&host).is_some_and(|until| instant < *until) {
             continue;
         }
-
         let mut rate: Option<RateLimitInfo> = None;
         let mut hard_failed = false;
         let mut rate_limited = false;
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
+        let mut run = |chunk: &[usize]| {
+            let (found, rl, failed, limited) = run_chunk(&host, &questions, chunk, entries);
+            answers.extend(found);
+            points += chunk_cost(rl.as_ref());
+            rate = tighter_rate_limit(rate.take(), rl);
+            hard_failed |= failed;
+            rate_limited |= limited;
+        };
         for i in idxs {
-            let cost = usize::from(planned[i].emit_ref())
-                + usize::from(planned[i].emit_num())
-                + usize::from(planned[i].emit_head());
+            let cost = questions[i].aliases();
             if !chunk.is_empty() && alias_count + cost > MAX_ALIASES_PER_QUERY {
-                let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
-                results.extend(r);
-                points += chunk_cost(rl.as_ref());
-                rate = tighter_rate_limit(rate, rl);
-                hard_failed |= failed;
-                rate_limited |= limited;
+                run(&chunk);
                 chunk.clear();
                 alias_count = 0;
             }
@@ -492,12 +436,7 @@ fn run_entries(
             alias_count += cost;
         }
         if !chunk.is_empty() {
-            let (r, rl, failed, limited) = run_chunk(&host, &planned, &chunk);
-            results.extend(r);
-            points += chunk_cost(rl.as_ref());
-            rate = tighter_rate_limit(rate, rl);
-            hard_failed |= failed;
-            rate_limited |= limited;
+            run(&chunk);
         }
         signals.push(HostSignal {
             host,
@@ -507,9 +446,76 @@ fn run_entries(
         });
     }
 
-    log_sync_cycle(entries, planned.len(), points, &results, trigger);
+    logger::debug(&format_sync_cycle_summary(
+        trigger,
+        entries.len(),
+        questions.len(),
+        answers.len(),
+        points,
+    ));
 
-    (results, signals)
+    (assemble_results(entries, &questions, answers, now), signals)
+}
+
+/// Gather a cycle's answers back into one [`PrStatusResult`] per entry.
+fn assemble_results(
+    entries: &[PrSyncEntry],
+    questions: &[Question],
+    answers: Vec<(usize, QuestionAnswer)>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<PrStatusResult> {
+    let mut results: Vec<PrStatusResult> = entries
+        .iter()
+        .map(|entry| PrStatusResult {
+            session_id: entry.session_id.clone(),
+            answers: Vec::new(),
+            asked: Vec::new(),
+        })
+        .collect();
+    let mut asked: Vec<BTreeMap<String, BranchAskRecord>> = vec![BTreeMap::new(); entries.len()];
+    for (index, answer) in answers {
+        let question = &questions[index];
+        let result = &mut results[question.entry];
+        match (&question.ask, answer) {
+            (
+                Ask::Discovery { branch, .. },
+                QuestionAnswer::Discovery {
+                    found,
+                    returned,
+                    ref_gone,
+                },
+            ) => {
+                let record = asked[question.entry]
+                    .entry(branch.clone())
+                    .or_insert_with(|| BranchAskRecord {
+                        at: now,
+                        ref_gone: true,
+                        returned: Vec::new(),
+                    });
+                record.ref_gone &= ref_gone;
+                for key in returned {
+                    if !record.returned.contains(&key) {
+                        record.returned.push(key);
+                    }
+                }
+                result
+                    .answers
+                    .extend(found.into_iter().map(PrSyncAnswer::Found));
+            }
+            (Ask::Refresh { .. }, QuestionAnswer::Refresh(Some(info))) => {
+                result.answers.push(PrSyncAnswer::Refreshed(info));
+            }
+            _ => {}
+        }
+    }
+    for (result, asked) in results.iter_mut().zip(asked) {
+        result.asked = asked.into_iter().collect();
+    }
+    results
+}
+
+fn answer_key(info: &PrInfo) -> crate::model::PrKey {
+    crate::model::PrKey::new(info.host.clone(), info.owner_repo.clone(), info.number)
 }
 
 /// The remote resolver production uses: the real one, reading the worktree's
@@ -523,9 +529,6 @@ fn live_remote_resolver(worktree_path: &Path, policy: &GithubHostPolicy) -> git:
 /// its own: it resolves each entry's repository and decides what would be
 /// asked, and it makes no network call and spawns no `gh` process.
 ///
-/// Returns the results that are already settled (an unresolvable entry, or one
-/// reconstructed from SQLite) alongside the lookups still to be run.
-///
 /// The remote resolver is a parameter so the planning can be exercised without
 /// git; in production it is always [`live_remote_resolver`]. That keeps a
 /// planning test from being decided by the developer's own git configuration:
@@ -537,150 +540,153 @@ fn plan_entries(
     resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
     policy: &GithubHostPolicy,
     trigger: SyncTrigger,
-) -> (Vec<(String, Option<PrInfo>)>, Vec<Planned>) {
-    let mut results: Vec<(String, Option<PrInfo>)> = Vec::new();
-    let mut planned: Vec<Planned> = Vec::new();
-
-    for entry in entries {
-        // A pinned session short-circuits the remote-derived target: the query
-        // goes to the pin's (host, owner_repo), the policy gates the pinned host,
-        // and no worktree remote is resolved, since a pin routinely lives on a
-        // fork the remote does not name. Every fallback below answers from the
-        // pin's row rather than raw `known_pr`, or a stale row naming a different
-        // PR would surface as a pinned session's answer.
-        if let Some(pin) = &entry.pinned {
-            // The override row is the pin's known state. A `known_pr` naming a
-            // DIFFERENT number is not the pin (a stale row from before the
-            // attach); synthesize an OPEN placeholder from the pin's identity
-            // instead so no fallback can report the wrong pull request.
-            let known = entry
-                .known_pr
-                .clone()
-                .filter(|k| k.pr_number == pin.number)
-                .unwrap_or_else(|| StoredPr {
-                    session_id: entry.session_id.clone(),
-                    pr_number: pin.number,
-                    host: pin.host.clone(),
-                    owner_repo: pin.owner_repo.clone(),
-                    state: "OPEN".to_string(),
-                    title: String::new(),
-                    url: pull_request_url(&pin.host, &pin.owner_repo, pin.number),
-                });
-            let host = normalize_github_host(&pin.host).to_ascii_lowercase();
-            // The gate runs on the PINNED host (the host the query would go
-            // to), exactly like the remote-derived gate below.
-            if !policy.allows(&host) {
-                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
-                continue;
-            }
-            // Terminal pin + exited agent: zero network, under the pinned rule
-            // (no discovery alias exists, so a merged pin stays free).
-            if entry.agent_exited && pinned_exited_entry_needs_no_network(&known, trigger) {
-                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
-                continue;
-            }
-            let Some((owner, repo)) = pin.owner_repo.split_once('/') else {
-                results.push((entry.session_id.clone(), reconstruct_from_stored(&known)));
-                continue;
-            };
-            planned.push(Planned::new_pinned(
-                entry.session_id.clone(),
-                host,
-                owner.to_string(),
-                repo.to_string(),
-                entry.branch_name.clone(),
-                known,
-            ));
-            continue;
-        }
-
-        // Resolve (host, owner_repo): live remote first, else the known PR's repo
-        // (works even after the branch/remote is gone).
-        //
-        // Only an unresolved address may fall back to a remembered host: nothing
-        // is known about where this agent pushes, so the last pull request is the
-        // best information there is. A denied address must not fall back, because
-        // dux knows where this agent pushes and knows it may not ask, and the
-        // gate below cannot catch it once the live address is gone.
-        let (host, owner_repo) = match resolve_remote(Path::new(&entry.worktree_path)) {
-            git::RemoteResolution::Allowed(remote) => (remote.host, remote.owner_repo),
-            git::RemoteResolution::Denied => {
-                let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-                results.push((entry.session_id.clone(), pr));
-                continue;
-            }
-            git::RemoteResolution::Unresolved => {
-                if let Some(known) = &entry.known_pr {
-                    (known.host.clone(), known.owner_repo.clone())
-                } else {
-                    results.push((entry.session_id.clone(), None));
-                    continue;
-                }
-            }
-        };
-
-        // Hostnames are case-insensitive and this value becomes a `gh`
-        // `--hostname` argument. The parser lowercases a live remote, but this
-        // host can also come straight out of SQLite, where a legacy or
-        // externally written row may have kept its capitals, so the lowercasing
-        // belongs here, at the boundary, whatever the source.
-        let host = normalize_github_host(&host).to_ascii_lowercase();
-
-        // The eligibility test belongs HERE, after the choice between the live
-        // address and the stored one, and not inside the parsers alone. A host
-        // remembered from a previous pull request never passes through either
-        // parser: it is read back from SQLite and handed to `gh`. So a host that
-        // was eligible once, or that was written before dux asked `gh` which
-        // hosts it can serve, would otherwise reach `gh` unchecked. An entry
-        // dux may not ask about makes NO call at all and keeps whatever it last
-        // knew, rather than being reported as having no pull request.
-        if !policy.allows(&host) {
-            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-            results.push((entry.session_id.clone(), pr));
-            continue;
-        }
-
-        // Terminal PR (merged or closed) + exited agent: reconstruct from SQLite
-        // with zero network calls, unless this is a deliberate trigger. Both
-        // states follow the same rule now; see `exited_entry_needs_no_network`
-        // for which triggers pay for a discovery call and why.
-        if entry.agent_exited && exited_entry_needs_no_network(entry.known_pr.as_ref(), trigger) {
-            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-            results.push((entry.session_id.clone(), pr));
-            continue;
-        }
-
-        let Some((owner, repo)) = owner_repo.split_once('/') else {
-            // Malformed owner/repo: nothing we can query; fall back to stored.
-            let pr = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-            results.push((entry.session_id.clone(), pr));
-            continue;
-        };
-
-        planned.push(
-            Planned::new(
-                entry.session_id.clone(),
-                host,
-                owner.to_string(),
-                repo.to_string(),
-                entry.branch_name.clone(),
-                entry.known_pr.clone(),
-            )
-            .with_working_copy(entry.worktree_path.clone(), entry.branch_minted_at),
-        );
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Question> {
+    let mut questions = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let remote = resolve_remote(Path::new(&entry.worktree_path));
+        plan_entry(index, entry, remote, policy, trigger, now, &mut questions);
     }
-
-    (results, planned)
+    logger::debug(&format!(
+        "[gh-integration] PR sync plans {} for {}",
+        crate::text::count_of(questions.len(), "question"),
+        crate::text::count_of(entries.len(), "agent"),
+    ));
+    questions
 }
 
-/// Keep the snapshot with the fewer remaining points (the more urgent backoff
-/// signal) across chunked calls.
+/// One entry's questions: discovery of its branches in the repository its
+/// remote names, and a refresh by number of each pull request it has that is
+/// due, each in its own repository and on its own host.
+fn plan_entry(
+    index: usize,
+    entry: &PrSyncEntry,
+    remote: git::RemoteResolution,
+    policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
+    now: chrono::DateTime<chrono::Utc>,
+    questions: &mut Vec<Question>,
+) {
+    // Discovery needs the repository the agent pushes to. A remote dux cannot
+    // read, or one on a host dux may not ask about, gets no discovery; the
+    // pull requests it already has are still refreshed where they live.
+    let target = match remote {
+        git::RemoteResolution::Allowed(remote) => {
+            // Hostnames are case-insensitive and this value becomes a `gh`
+            // `--hostname` argument, so it is lowercased at the boundary.
+            let host = normalize_github_host(&remote.host).to_ascii_lowercase();
+            remote
+                .owner_repo
+                .split_once('/')
+                .filter(|_| policy.allows(&host))
+                .map(|(owner, repo)| (host, owner.to_string(), repo.to_string()))
+        }
+        git::RemoteResolution::Denied | git::RemoteResolution::Unresolved => None,
+    };
+    let mut discovered: Vec<&PrSyncBranch> = Vec::new();
+    if let Some((host, owner, repo)) = &target {
+        let mut ask = |branch: &PrSyncBranch,
+                       identity_at: Option<chrono::DateTime<chrono::Utc>>,
+                       head: &dyn Fn() -> Option<HeadEvidence>| {
+            for name in branch.names() {
+                questions.push(Question {
+                    entry: index,
+                    host: host.clone(),
+                    owner: owner.clone(),
+                    repo: repo.clone(),
+                    ask: Ask::Discovery {
+                        branch: branch.name.clone(),
+                        name: name.to_string(),
+                        identity_at,
+                        head: head(),
+                    },
+                });
+            }
+        };
+        let current = &entry.current;
+        let mut on_current = rows_on(&entry.known, current).peekable();
+        let has_rows = on_current.peek().is_some();
+        let all_terminal = on_current.all(|row| is_terminal(&row.state));
+        // A dormant agent whose branch has nothing open left is asked about on
+        // the deliberate triggers only: tabbing past a sidebar of finished
+        // agents must not spawn a `gh` per agent.
+        let settled =
+            entry.agent_exited && trigger != SyncTrigger::OneShot && has_rows && all_terminal;
+        if !settled {
+            // The head-name lookup covers a pull request that was merged and
+            // its branch deleted before dux saw it, which matters only while
+            // nothing open is known on the branch.
+            ask(current, current.identity_at, &|| {
+                all_terminal.then(|| HeadEvidence {
+                    worktree_path: entry.worktree_path.clone(),
+                    local_branch: current.name.clone(),
+                    tip: None,
+                })
+            });
+            discovered.push(current);
+        }
+        for branch in due_history_branches(entry, now) {
+            let gone = branch.last_ask.as_ref().is_some_and(|ask| ask.ref_gone);
+            ask(branch, branch.identity_at, &|| {
+                gone.then(|| HeadEvidence {
+                    worktree_path: entry.worktree_path.clone(),
+                    local_branch: branch.name.clone(),
+                    tip: branch.tip.clone(),
+                })
+            });
+            discovered.push(branch);
+        }
+    }
+
+    for row in &entry.known {
+        if !refresh_due(row, entry, trigger, now) {
+            continue;
+        }
+        // Discovery of the row's own branch carries every field a refresh
+        // would, so a row that branch's last discovery returned is left to it.
+        let carried_by_discovery = target.as_ref().is_some_and(|(host, owner, repo)| {
+            row.host.eq_ignore_ascii_case(host)
+                && row
+                    .owner_repo
+                    .eq_ignore_ascii_case(&format!("{owner}/{repo}"))
+                && discovered.iter().any(|branch| {
+                    row.head_branch
+                        .as_deref()
+                        .is_some_and(|head| branch.names().any(|name| name == head))
+                        && branch
+                            .last_ask
+                            .as_ref()
+                            .is_some_and(|ask| !ask.ref_gone && ask.returned.contains(&row.key()))
+                })
+        });
+        if carried_by_discovery {
+            continue;
+        }
+        let host = normalize_github_host(&row.host).to_ascii_lowercase();
+        if !policy.allows(&host) {
+            continue;
+        }
+        let Some((owner, repo)) = row.owner_repo.split_once('/') else {
+            continue;
+        };
+        questions.push(Question {
+            entry: index,
+            host,
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            ask: Ask::Refresh { number: row.number },
+        });
+    }
+}
+
 /// What one chunk's query billed, or zero when the call failed or the answer
 /// carried no `rateLimit` (an unbilled call is not a billed one).
 fn chunk_cost(rate: Option<&RateLimitInfo>) -> i64 {
     rate.and_then(|r| r.cost).unwrap_or(0)
 }
 
+/// Keep the snapshot with the fewer remaining points (the more urgent backoff
+/// signal) across chunked calls.
 fn tighter_rate_limit(a: Option<RateLimitInfo>, b: Option<RateLimitInfo>) -> Option<RateLimitInfo> {
     match (a, b) {
         (Some(a), Some(b)) => Some(if b.remaining < a.remaining { b } else { a }),
@@ -698,18 +704,18 @@ fn graphql_string(s: &str) -> String {
 
 // The GraphQL alias names. `build_chunk_query` writes them and
 // `parse_chunk_response` reads them back, so both sides MUST derive them from
-// these helpers: a divergence would silently return "no PR" for every session.
+// these helpers: a divergence would silently drop every answer.
 fn repo_alias(k: usize) -> String {
     format!("r{k}")
 }
 fn ref_alias(pos: usize) -> String {
-    format!("s{pos}_ref")
+    format!("q{pos}_ref")
 }
 fn num_alias(pos: usize) -> String {
-    format!("s{pos}_num")
+    format!("q{pos}_num")
 }
 fn head_alias(pos: usize) -> String {
-    format!("s{pos}_head")
+    format!("q{pos}_head")
 }
 
 /// Which hosts dux may name when it calls `gh`.
@@ -1363,15 +1369,20 @@ fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> Gh
     }
 }
 
-/// Build and run one batched GraphQL query for a chunk of same-host sessions,
-/// returning `(session_id, Option<PrInfo>)` for each, the rate-limit snapshot,
-/// and whether the whole call hard-failed (spawn error / timeout / unparseable
-/// stdout, as opposed to a per-alias error, which is handled inline).
-fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
-    let (query, pos_repo) = build_chunk_query(planned, chunk);
+/// Build and run one batched GraphQL query for a chunk of same-host questions,
+/// returning the answers it got, the rate-limit snapshot, and whether the
+/// whole call hard-failed (spawn error / timeout / unparseable stdout, as
+/// opposed to a per-alias error, which is handled inline).
+fn run_chunk(
+    host: &str,
+    questions: &[Question],
+    chunk: &[usize],
+    entries: &[PrSyncEntry],
+) -> ChunkOutcome {
+    let (query, pos_repo) = build_chunk_query(questions, chunk);
 
-    // On a spawn failure / timeout we still finalize with no data (each session
-    // falls back to its stored result) rather than dropping the whole cycle.
+    // On a spawn failure / timeout the chunk answers nothing, and every pull
+    // request keeps what it last knew.
     let qarg = format!("query={query}");
     let (data_json, stderr): (Option<serde_json::Value>, String) = match run_gh_with_timeout(
         &["api", "graphql", "--hostname", host, "-f", &qarg],
@@ -1403,7 +1414,7 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
     };
     // Collapse both an absent `data` key and an explicit `data: null` (a real
     // GraphQL execution-failure shape) to "no data", so both drive the
-    // hard-failure path and the preserve-last-known-PR fallback below.
+    // hard-failure path.
     let data = data_json
         .as_ref()
         .and_then(|j| j.get("data"))
@@ -1444,7 +1455,7 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         // So: verbatim, and a reason rather than a redaction.
         logger::debug(&format!(
             "[gh-integration] gh api graphql failed for host {host} ({}, rate_limited={rate_limited}): {stderr}{}",
-            crate::text::count_of(chunk.len(), "session"),
+            crate::text::count_of(chunk.len(), "question"),
             if errors.is_empty() {
                 String::new()
             } else {
@@ -1453,11 +1464,12 @@ fn run_chunk(host: &str, planned: &[Planned], chunk: &[usize]) -> ChunkOutcome {
         ));
     }
     let (out, rate) = parse_chunk_response(
-        planned,
+        questions,
         chunk,
         &pos_repo,
         data,
-        &head_commit_in_local_history,
+        entries,
+        &head_commit_is_the_branchs,
     );
     (out, rate, hard_failed, rate_limited)
 }
@@ -1472,28 +1484,35 @@ fn looks_rate_limited(text: &str) -> bool {
         || t.contains("abuse detection")
 }
 
-/// Build the batched GraphQL query for a chunk plus the per-position repo-alias
-/// index (`pos_repo[pos] == k` means session `s{pos}` lives under `r{k}`), so the
-/// response can be reparsed. Pure, with no I/O, so it is unit-testable.
-fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize>) {
-    // Group the chunk's sessions by repo → one aliased `repository(...)` block
-    // each. `pos` is the session's index within the chunk (its `s{pos}` alias).
-    let mut groups: std::collections::BTreeMap<(String, String), Vec<usize>> = BTreeMap::default();
+/// Build the batched GraphQL query for a chunk of questions plus the
+/// per-position repo-alias index (`pos_repo[pos] == k` means question `q{pos}`
+/// lives under `r{k}`), so the response can be reparsed. Pure, with no I/O, so
+/// it is unit-testable.
+fn build_chunk_query(questions: &[Question], chunk: &[usize]) -> (String, Vec<usize>) {
+    // Group the chunk's questions by repository → one aliased
+    // `repository(...)` block each. GitHub reads owner and name without regard
+    // to case, so two spellings of one repository share a block.
+    let mut groups: BTreeMap<(String, String), (String, String, Vec<usize>)> = BTreeMap::default();
     for (pos, &i) in chunk.iter().enumerate() {
+        let question = &questions[i];
         groups
-            .entry((planned[i].owner.clone(), planned[i].repo.clone()))
-            .or_default()
+            .entry((
+                question.owner.to_ascii_lowercase(),
+                question.repo.to_ascii_lowercase(),
+            ))
+            .or_insert_with(|| (question.owner.clone(), question.repo.clone(), Vec::new()))
+            .2
             .push(pos);
     }
     let mut pos_repo: Vec<usize> = vec![0; chunk.len()];
-    for (k, (_, positions)) in groups.iter().enumerate() {
+    for (k, (_, _, positions)) in groups.values().enumerate() {
         for &pos in positions {
             pos_repo[pos] = k;
         }
     }
 
     let mut q = String::from("{\n  rateLimit { cost remaining resetAt }\n");
-    for (k, ((owner, repo), positions)) in groups.iter().enumerate() {
+    for (k, (owner, repo, positions)) in groups.values().enumerate() {
         let _ = writeln!(
             q,
             "  {}: repository(owner: {}, name: {}) {{",
@@ -1502,54 +1521,53 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
             graphql_string(repo),
         );
         for &pos in positions {
-            let p = &planned[chunk[pos]];
-            if p.emit_ref() {
-                // Discovery asks for a WINDOW of the branch's pull requests and
-                // picks among them in Rust (`select_discovered_pr`), rather than
-                // for one node in a chosen order.
-                //
-                // Measured against two real repositories: GitHub IGNORES
-                // `orderBy` on `associatedPullRequests`. The connection answers
-                // oldest-first by creation date whatever is passed, so `first: 1`
-                // with any orderBy returned the OLDEST pull request on the
-                // branch, and a branch name reused after a merge reported the
-                // old pull request forever. `last` walks from the newest end,
-                // which is where the interesting nodes are.
-                //
-                // Each node names its own repository, because this connection is
-                // not confined to the repository the alias was asked under: a
-                // fork's pull request whose head is this ref appears here too
-                // (measured on golang/go). Those are somebody else's pull
-                // requests and `parse_chunk_response` drops them.
-                let qname = graphql_string(&format!("refs/heads/{}", p.branch));
-                let _ = writeln!(
-                    q,
-                    "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ number state title url repository {{ nameWithOwner }} }} }} }}",
-                    ref_alias(pos),
-                );
-            }
-            if p.emit_head() {
-                // The same question asked by head NAME, which still answers
-                // after a merge deleted the branch and the ref lookup above
-                // came back null. A name is not an identity, so each node
-                // carries what `select_head_name_match` needs to refuse an
-                // older pull request that merely used the same name.
-                let _ = writeln!(
-                    q,
-                    "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ number state title url createdAt headRefOid headRepository {{ nameWithOwner }} }} }}",
-                    head_alias(pos),
-                    graphql_string(&p.branch),
-                );
-            }
-            if p.emit_num()
-                && let Some(known) = &p.known
-            {
-                let _ = writeln!(
-                    q,
-                    "    {}: pullRequest(number: {}) {{ number state title url }}",
-                    num_alias(pos),
-                    known.pr_number,
-                );
+            match &questions[chunk[pos]].ask {
+                Ask::Discovery { name, head, .. } => {
+                    // Discovery asks for a WINDOW of the branch's pull
+                    // requests and picks among them in Rust, rather than for
+                    // one node in a chosen order.
+                    //
+                    // Measured against two real repositories: GitHub IGNORES
+                    // `orderBy` on `associatedPullRequests`. The connection
+                    // answers oldest-first by creation date whatever is
+                    // passed, so `first: 1` with any orderBy returned the
+                    // OLDEST pull request on the branch. `last` walks from the
+                    // newest end, which is where the interesting nodes are.
+                    //
+                    // Each node names its own repository, because this
+                    // connection is not confined to the repository the alias
+                    // was asked under: a fork's pull request whose head is
+                    // this ref appears here too (measured on golang/go). Those
+                    // are somebody else's pull requests and
+                    // `parse_chunk_response` drops them.
+                    let qname = graphql_string(&format!("refs/heads/{name}"));
+                    let _ = writeln!(
+                        q,
+                        "    {}: ref(qualifiedName: {qname}) {{ associatedPullRequests(last: {DISCOVERY_WINDOW}) {{ nodes {{ {PR_NODE_FIELDS} }} }} }}",
+                        ref_alias(pos),
+                    );
+                    if head.is_some() {
+                        // The same question asked by head NAME, which still
+                        // answers after a merge deleted the branch and the ref
+                        // lookup above came back null. A name is not an
+                        // identity, so each node carries what
+                        // `select_head_name_matches` needs to refuse an older
+                        // pull request that merely used the same name.
+                        let _ = writeln!(
+                            q,
+                            "    {}: pullRequests(headRefName: {}, states: [OPEN, MERGED, CLOSED], last: {HEAD_NAME_WINDOW}) {{ nodes {{ {PR_NODE_FIELDS} headRepository {{ nameWithOwner }} }} }}",
+                            head_alias(pos),
+                            graphql_string(name),
+                        );
+                    }
+                }
+                Ask::Refresh { number } => {
+                    let _ = writeln!(
+                        q,
+                        "    {}: pullRequest(number: {number}) {{ {PR_NODE_FIELDS} }}",
+                        num_alias(pos),
+                    );
+                }
             }
         }
         q.push_str("  }\n");
@@ -1558,118 +1576,135 @@ fn build_chunk_query(planned: &[Planned], chunk: &[usize]) -> (String, Vec<usize
     (q, pos_repo)
 }
 
-/// Map a GraphQL `data` object (or `None` when the call failed) back to each
-/// chunk session's `(session_id, Option<PrInfo>)`, applying the per-session merge
-/// rule. A `null` repo/node (deleted repo or branch) resolves independently to
-/// that session's fallback, so one bad alias never poisons the batch. Pure, so
-/// it is unit-testable with a synthetic response.
+/// Map a GraphQL `data` object (or `None` when the call failed) back to the
+/// answer each of the chunk's questions got. A question whose repository or
+/// alias is missing from the answer gets none, so one bad alias never poisons
+/// the batch, and a failed call answers nothing at all. Pure apart from the
+/// head-commit check passed in, so it is unit-testable with a synthetic
+/// response.
 fn parse_chunk_response(
-    planned: &[Planned],
+    questions: &[Question],
     chunk: &[usize],
     pos_repo: &[usize],
     data: Option<&serde_json::Value>,
-    in_local_history: &dyn Fn(&Planned, &str) -> bool,
-) -> (Vec<(String, Option<PrInfo>)>, Option<RateLimitInfo>) {
-    let rate = data.and_then(parse_rate_limit);
+    entries: &[PrSyncEntry],
+    head_commit_is_the_branchs: &dyn Fn(&HeadEvidence, &str) -> bool,
+) -> (Vec<(usize, QuestionAnswer)>, Option<RateLimitInfo>) {
+    let Some(data) = data else {
+        return (Vec::new(), None);
+    };
+    let rate = parse_rate_limit(data);
     let mut out = Vec::with_capacity(chunk.len());
     for (pos, &i) in chunk.iter().enumerate() {
-        let p = &planned[i];
-        // Whole-call failure (`data` absent, not a per-alias null): preserve each
-        // session's last-known PR instead of reporting `None`, which the sidebar
-        // would render as "PR gone" and wipe a still-open badge. Mirrors the
-        // terminal-state fallback; the next successful cycle re-confirms it.
-        if data.is_none() {
-            out.push((
-                p.session_id.clone(),
-                p.known.as_ref().and_then(reconstruct_from_stored),
-            ));
+        let question = &questions[i];
+        let Some(repo_obj) = data
+            .get(repo_alias(pos_repo[pos]).as_str())
+            .filter(|v| !v.is_null())
+        else {
             continue;
-        }
-        let owner_repo = format!("{}/{}", p.owner, p.repo);
-        let repo_obj = data
-            .and_then(|d| d.get(repo_alias(pos_repo[pos]).as_str()))
-            .filter(|v| !v.is_null());
-        // Every node in the discovery window is parsed, the ones belonging to
-        // another repository are dropped, and which of the rest this session's
-        // badge should follow is decided by `select_discovered_pr`. A node dux
-        // cannot parse (an unrecognised state, a missing number) drops on its
-        // own and leaves its siblings alone.
-        let ref_pr = repo_obj
-            .and_then(|r| r.get(ref_alias(pos).as_str()))
-            .and_then(|rf| rf.get("associatedPullRequests"))
-            .and_then(|a| a.get("nodes"))
-            .and_then(|n| n.as_array())
-            .and_then(|arr| {
-                select_discovered_pr(
-                    arr.iter()
-                        .filter(|node| node_belongs_to(node, &owner_repo))
-                        .filter_map(|node| parse_pr_json_value(node, &p.host, &owner_repo))
-                        .collect(),
-                )
-            });
-        // A branch a merge deleted has no ref left to ask about, so its pull
-        // request is looked for by head name. Only for a null ref: while the
-        // branch exists, the ref lookup is the answer.
-        let ref_pr = ref_pr.or_else(|| {
-            let ref_value = repo_obj.and_then(|r| r.get(ref_alias(pos).as_str()));
-            if !p.emit_head() || !ref_value.is_some_and(serde_json::Value::is_null) {
-                return None;
-            }
-            let nodes = repo_obj
-                .and_then(|r| r.get(head_alias(pos).as_str()))
-                .and_then(|h| h.get("nodes"))
-                .and_then(|n| n.as_array())?;
-            select_head_name_match(p, &owner_repo, nodes, in_local_history)
-        });
-        let num_pr = if p.emit_num() {
-            repo_obj
-                .and_then(|r| r.get(num_alias(pos).as_str()))
-                .filter(|v| !v.is_null())
-                .and_then(|node| parse_pr_json_value(node, &p.host, &owner_repo))
-        } else {
-            None
         };
-        out.push((p.session_id.clone(), merge_pr_result(p, ref_pr, num_pr)));
+        let owner_repo = question.owner_repo();
+        let answer = match &question.ask {
+            Ask::Discovery {
+                name,
+                identity_at,
+                head,
+                ..
+            } => {
+                let Some(ref_value) = repo_obj.get(ref_alias(pos).as_str()) else {
+                    continue;
+                };
+                if ref_value.is_null() {
+                    // A branch a merge deleted has no ref left to ask about,
+                    // so its pull requests are looked for by head name.
+                    let found = head.as_ref().map_or_else(Vec::new, |evidence| {
+                        repo_obj
+                            .get(head_alias(pos).as_str())
+                            .and_then(|h| h.get("nodes"))
+                            .and_then(|n| n.as_array())
+                            .map_or_else(Vec::new, |nodes| {
+                                select_head_name_matches(
+                                    question,
+                                    name,
+                                    *identity_at,
+                                    evidence,
+                                    nodes,
+                                    head_commit_is_the_branchs,
+                                )
+                            })
+                    });
+                    QuestionAnswer::Discovery {
+                        returned: found.iter().map(answer_key).collect(),
+                        found,
+                        ref_gone: true,
+                    }
+                } else {
+                    // A node dux cannot parse (an unrecognised state, a
+                    // missing number) drops on its own and leaves its siblings
+                    // alone.
+                    let nodes: Vec<PrInfo> = ref_value
+                        .get("associatedPullRequests")
+                        .and_then(|a| a.get("nodes"))
+                        .and_then(|n| n.as_array())
+                        .map_or_else(Vec::new, |arr| {
+                            arr.iter()
+                                .filter(|node| node_belongs_to(node, &owner_repo))
+                                .filter_map(|node| {
+                                    parse_pr_json_value(node, &question.host, &owner_repo)
+                                })
+                                .collect()
+                        });
+                    let known = &entries[question.entry].known;
+                    QuestionAnswer::Discovery {
+                        returned: nodes.iter().map(answer_key).collect(),
+                        found: keep_discovered(nodes, *identity_at, known),
+                        ref_gone: false,
+                    }
+                }
+            }
+            Ask::Refresh { .. } => {
+                let Some(node) = repo_obj.get(num_alias(pos).as_str()) else {
+                    continue;
+                };
+                QuestionAnswer::Refresh(
+                    Some(node)
+                        .filter(|v| !v.is_null())
+                        .and_then(|node| parse_pr_json_value(node, &question.host, &owner_repo)),
+                )
+            }
+        };
+        out.push((i, answer));
     }
     (out, rate)
 }
 
-/// Log one sync cycle at debug: what it considered, what it spent, and how much
-/// of the answer differs from what it was told. A successful cycle used to say
-/// nothing at all, so a wrong badge left no trace of where it came from.
-///
-/// The per-session INFO line is deliberately not raised here. This function sees
-/// what the workers found, which is not the same as what the user's badge ends
-/// up saying: a result can still be dropped for a deleted, detached or pinned
-/// session. It is raised where the result is applied instead.
-fn log_sync_cycle(
-    entries: &[PrSyncEntry],
-    asked: usize,
-    points: i64,
-    results: &[(String, Option<PrInfo>)],
-    trigger: SyncTrigger,
-) {
-    let answered = results.iter().filter(|(_, pr)| pr.is_some()).count();
-    let changed = results
-        .iter()
-        .filter(|(session_id, pr)| {
-            entries
-                .iter()
-                .find(|e| &e.session_id == session_id)
-                .is_some_and(|entry| {
-                    let stored = entry.known_pr.as_ref().and_then(reconstruct_from_stored);
-                    pr_badge_changed(stored.as_ref(), pr.as_ref())
-                })
+/// Which of a branch's discovery window to record for the agent. Every one it
+/// already has is refreshed. A new one is the branch's when it was opened after
+/// the branch was born (give or take [`HEAD_NAME_CLOCK_SLACK`]); when nothing
+/// says when the branch was born, only the one [`select_discovered_pr`] picks
+/// is taken, so a branch name reused many times never floods the list.
+fn keep_discovered(
+    nodes: Vec<PrInfo>,
+    identity_at: Option<chrono::DateTime<chrono::Utc>>,
+    known: &[crate::model::AgentPr],
+) -> Vec<PrInfo> {
+    let is_known = |info: &PrInfo| known.iter().any(|row| row.is(&answer_key(info)));
+    let picked = match identity_at {
+        Some(_) => None,
+        None => select_discovered_pr(nodes.clone()).map(|pr| pr.number),
+    };
+    nodes
+        .into_iter()
+        .filter(|info| {
+            is_known(info)
+                || match identity_at {
+                    Some(born) => info
+                        .gh_created_at
+                        .is_some_and(|created| created >= born - HEAD_NAME_CLOCK_SLACK),
+                    None => picked == Some(info.number),
+                }
         })
-        .count();
-    logger::debug(&format_sync_cycle_summary(
-        trigger,
-        entries.len(),
-        asked,
-        answered,
-        changed,
-        points,
-    ));
+        .collect()
 }
 
 /// Whether a fresh answer differs from what the badge already said. Number and
@@ -1686,17 +1721,14 @@ fn pr_state_word(state: &PrState) -> &'static str {
     state.word()
 }
 
-/// The per-cycle debug summary. `sessions` is everything the cycle considered,
-/// `asked` the subset that needed a GitHub call at all (the rest were answered
-/// from SQLite or skipped by a host backoff), `answered` how many ended the
-/// cycle with a pull request, `changed` how many differ from the badge SQLite
-/// could reconstruct, and `points` what GitHub billed for the whole cycle.
+/// The per-cycle debug summary: how many agents the cycle covered, how many
+/// questions it asked, how many of them GitHub answered, and what GitHub
+/// billed for the whole cycle.
 fn format_sync_cycle_summary(
     trigger: SyncTrigger,
-    sessions: usize,
-    asked: usize,
+    agents: usize,
+    questions: usize,
     answered: usize,
-    changed: usize,
     points: i64,
 ) -> String {
     let word = match trigger {
@@ -1705,8 +1737,8 @@ fn format_sync_cycle_summary(
         SyncTrigger::OneShot => "one-shot",
     };
     format!(
-        "PR sync ({word}): {sessions} sessions, {asked} asked, {answered} answered, \
-{changed} changed, {points} GraphQL points"
+        "PR sync ({word}): {agents} agents, {questions} questions, {answered} answered, \
+{points} GraphQL points"
     )
 }
 
@@ -1765,134 +1797,70 @@ fn select_discovered_pr(nodes: Vec<PrInfo>) -> Option<PrInfo> {
         .max_by_key(|pr| (pr.state == PrState::Open, pr.number))
 }
 
-/// Pick the pull request a head-name lookup found for a branch whose ref is
-/// gone, or none.
+/// The pull requests a head-name lookup found for a branch whose ref is gone.
 ///
 /// A head name is not an identity: branch names are reused, so an older pull
 /// request from an earlier branch of the same name answers the lookup just as
 /// well. A node is accepted only when every one of these holds:
 ///   - its head repository is the queried repository, not a fork (a node whose
 ///     head repository is gone cannot be shown to be this one);
-///   - for a branch dux minted, it was opened after the branch was born, give
-///     or take [`HEAD_NAME_CLOCK_SLACK`];
-///   - its head commit is in the agent's own branch (`in_local_history`, which
-///     refuses a commit this clone does not have).
-///
-/// Among the nodes that pass, the most recently created one wins, and the
-/// higher number between two created in the same second.
-fn select_head_name_match(
-    p: &Planned,
-    owner_repo: &str,
+///   - it was opened after the branch was born, give or take
+///     [`HEAD_NAME_CLOCK_SLACK`], when dux knows when that was;
+///   - its head commit is provably the branch's (`head_commit_is_the_branchs`,
+///     which refuses a commit this clone does not have).
+fn select_head_name_matches(
+    question: &Question,
+    name: &str,
+    identity_at: Option<chrono::DateTime<chrono::Utc>>,
+    evidence: &HeadEvidence,
     nodes: &[serde_json::Value],
-    in_local_history: &dyn Fn(&Planned, &str) -> bool,
-) -> Option<PrInfo> {
-    let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, &str, PrInfo)> = nodes
+    head_commit_is_the_branchs: &dyn Fn(&HeadEvidence, &str) -> bool,
+) -> Vec<PrInfo> {
+    let owner_repo = question.owner_repo();
+    nodes
         .iter()
         .filter_map(|node| {
             let head_repo = node
                 .get("headRepository")
                 .and_then(|r| r.get("nameWithOwner"))
                 .and_then(|v| v.as_str())?;
-            if !head_repo.eq_ignore_ascii_case(owner_repo) {
+            if !head_repo.eq_ignore_ascii_case(&owner_repo) {
                 return None;
             }
-            let created_at = node
-                .get("createdAt")
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())?
-                .with_timezone(&chrono::Utc);
-            if p.branch_minted_at
-                .is_some_and(|minted| created_at < minted - HEAD_NAME_CLOCK_SLACK)
-            {
+            let mut pr = parse_pr_json_value(node, &question.host, &owner_repo)?;
+            let created_at = pr.gh_created_at?;
+            if identity_at.is_some_and(|born| created_at < born - HEAD_NAME_CLOCK_SLACK) {
                 return None;
             }
             let head_oid = node.get("headRefOid").and_then(|v| v.as_str())?;
-            let pr = parse_pr_json_value(node, &p.host, owner_repo)?;
-            Some((created_at, head_oid, pr))
-        })
-        .collect();
-    // Newest first; within one second, the higher number is the later one.
-    candidates.sort_by_key(|candidate| std::cmp::Reverse((candidate.0, candidate.2.number)));
-    let (_, _, pr) = candidates
-        .into_iter()
-        .find(|(_, head_oid, _)| in_local_history(p, head_oid))?;
-    logger::debug(&format!(
-        "[gh-integration] branch {} is gone on {owner_repo}; adopted PR #{} found by head name, \
-         whose head commit is in the agent's branch",
-        p.branch, pr.number,
-    ));
-    Some(pr)
-}
-
-/// The production check for [`select_head_name_match`]: whether `head_oid` is
-/// in the history of the agent's branch, read from its working copy. Runs git,
-/// which is fine here because the whole sync runs on a background worker.
-fn head_commit_in_local_history(p: &Planned, head_oid: &str) -> bool {
-    git::commit_is_in_branch_history(Path::new(&p.worktree_path), head_oid, &p.branch)
-}
-
-/// Reconcile the head-ref discovery result and the by-number refresh into the
-/// single PR to report, matching the pre-batch behavior:
-///   - terminal + running: a strictly-newer follow-up PR wins, then a same-numbered
-///     discovery result that says a CLOSED PR is no longer closed, else the stored PR
-///   - open known: the newest PR by number wins (a newer PR opened on the same
-///     branch), else the by-number refresh (robust when the branch was deleted)
-///   - undiscovered: whatever the head-ref discovery found
-fn merge_pr_result(p: &Planned, ref_pr: Option<PrInfo>, num_pr: Option<PrInfo>) -> Option<PrInfo> {
-    // A PINNED plan reports the pin and nothing else: the by-number refresh
-    // when it answered (a CLOSED pin can reopen, an OPEN one can merge), else
-    // the stored reconstruction. No discovery result exists to consider
-    // (`emit_ref` is false), and a per-alias failure keeps the badge.
-    if p.pinned {
-        return num_pr.or_else(|| p.known.as_ref().and_then(reconstruct_from_stored));
-    }
-    let Some(known) = &p.known else {
-        return ref_pr;
-    };
-    if p.is_terminal() {
-        if let Some(r) = &ref_pr
-            && r.number > known.pr_number
-        {
-            return ref_pr;
-        }
-        // A CLOSED pull request can be reopened, and discovery already told us:
-        // the same number came back in a state that is no longer closed. Accept
-        // it, at zero extra API cost, so the badge follows the reopen.
-        //
-        // This is deliberately not extended to MERGED. A merge cannot practically
-        // un-happen, and a stale read replica answering OPEN for a merged pull
-        // request must never flip a merged badge back.
-        //
-        // The comparison is by number alone, in deliberate parity with the
-        // strictly-higher-number rule above: discovery answers for the one
-        // target repo the planner chose for this session, and the by-number
-        // alias is separately guarded by known_matches_target.
-        if known.state == "CLOSED"
-            && let Some(r) = &ref_pr
-            && r.number == known.pr_number
-            && r.state != PrState::Closed
-        {
-            return ref_pr;
-        }
-        return reconstruct_from_stored(known);
-    }
-    match (num_pr, ref_pr) {
-        (Some(rf), Some(nw)) => {
-            if nw.number > rf.number {
-                Some(nw)
-            } else {
-                Some(rf)
+            if !head_commit_is_the_branchs(evidence, head_oid) {
+                return None;
             }
-        }
-        (Some(rf), None) => Some(rf),
-        (None, Some(nw)) => Some(nw),
-        // Both lookups came back empty for a KNOWN-open PR: this is a per-alias
-        // fetch failure (a null repo alias / transient GraphQL error), NOT a real
-        // close (GitHub returns the node with state CLOSED/MERGED, never null, for
-        // a real terminal PR). Preserve the last-known PR instead of wiping the
-        // badge, mirroring the whole-call-failure and terminal fallbacks.
-        (None, None) => reconstruct_from_stored(known),
-    }
+            if pr.head_branch.is_none() {
+                pr.head_branch = Some(name.to_string());
+            }
+            logger::debug(&format!(
+                "[gh-integration] branch {name} is gone on {owner_repo}; adopted PR #{} found \
+                 by head name, whose head commit is the branch's",
+                pr.number,
+            ));
+            Some(pr)
+        })
+        .collect()
+}
+
+/// The production check for [`select_head_name_matches`]: whether `head_oid`
+/// is the branch's recorded tip, is in the history of its local branch, or is
+/// an ancestor of its recorded tip. Runs git, which is fine here because the
+/// whole sync runs on a background worker.
+fn head_commit_is_the_branchs(evidence: &HeadEvidence, head_oid: &str) -> bool {
+    let worktree = Path::new(&evidence.worktree_path);
+    evidence.tip.as_deref() == Some(head_oid)
+        || git::commit_is_in_branch_history(worktree, head_oid, &evidence.local_branch)
+        || evidence
+            .tip
+            .as_deref()
+            .is_some_and(|tip| git::commit_is_ancestor_of(worktree, head_oid, tip))
 }
 
 /// Extract the `rateLimit` snapshot from a GraphQL `data` object.
@@ -1948,10 +1916,17 @@ fn parse_pr_json_object(json: &str, host: &str, owner_repo: &str) -> Option<PrIn
     parse_pr_json_value(&obj, host, owner_repo)
 }
 
-/// Extract `PrInfo` from a `serde_json::Value`.
+/// Extract `PrInfo` from a `serde_json::Value`. The repository the node names
+/// gives the display case; `owner_repo` is the fallback when it names none.
 fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) -> Option<PrInfo> {
     let number = obj.get("number")?.as_u64()?;
     let state_str = obj.get("state")?.as_str()?;
+    let owner_repo = obj
+        .get("repository")
+        .and_then(|r| r.get("nameWithOwner"))
+        .and_then(|v| v.as_str())
+        .filter(|name| name.eq_ignore_ascii_case(owner_repo))
+        .unwrap_or(owner_repo);
     // Someone else's text: see `crate::bidi` for why its display-order
     // controls never get past this point.
     let title =
@@ -1970,15 +1945,33 @@ fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) ->
         "CLOSED" => PrState::Closed,
         _ => return None,
     };
+    let time = |key: &str| {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|at| at.with_timezone(&chrono::Utc))
+    };
 
     Some(PrInfo {
         number,
         state,
+        is_draft: obj
+            .get("isDraft")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         title,
         host: normalize_github_host(host).to_string(),
         owner_repo: owner_repo.to_string(),
         url,
-        ..PrInfo::default()
+        head_branch: obj
+            .get("headRefName")
+            .and_then(|v| v.as_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+        gh_created_at: time("createdAt"),
+        gh_updated_at: time("updatedAt"),
+        gh_closed_at: time("closedAt"),
+        gh_merged_at: time("mergedAt"),
     })
 }
 
@@ -3537,94 +3530,6 @@ mod tests {
         GithubHostPolicy::LegacyNameRule
     }
 
-    fn stored(number: u64, state: &str) -> StoredPr {
-        StoredPr {
-            session_id: "s".to_string(),
-            pr_number: number,
-            host: "github.com".to_string(),
-            owner_repo: "octocat/Hello-World".to_string(),
-            state: state.to_string(),
-            title: "Stored".to_string(),
-            url: format!("https://github.com/octocat/Hello-World/pull/{number}"),
-        }
-    }
-
-    fn planned(
-        session_id: &str,
-        owner: &str,
-        repo: &str,
-        branch: &str,
-        known: Option<StoredPr>,
-    ) -> Planned {
-        // Go through the real constructor so the is_terminal/emit_num rule is
-        // never duplicated between production and tests.
-        Planned::new(
-            session_id.to_string(),
-            "github.com".to_string(),
-            owner.to_string(),
-            repo.to_string(),
-            branch.to_string(),
-            known,
-        )
-    }
-
-    /// Which aliases each kind of plan emits: (terminal, by-number, head-ref,
-    /// head-name).
-    #[test]
-    fn each_kind_of_plan_emits_its_own_aliases() {
-        let flags = |p: &Planned| (p.is_terminal(), p.emit_num(), p.emit_ref(), p.emit_head());
-        let plan = |known| planned("s", "octocat", "Hello-World", "feat/x", known);
-        assert_eq!(flags(&plan(None)), (false, false, true, true));
-        assert_eq!(
-            flags(&plan(Some(stored(7, "OPEN")))),
-            (false, true, true, false)
-        );
-        assert_eq!(
-            flags(&plan(Some(stored(7, "MERGED")))),
-            (true, false, true, true)
-        );
-        assert_eq!(
-            flags(&plan(Some(stored(7, "CLOSED")))),
-            (true, false, true, true)
-        );
-        let foreign = planned(
-            "s",
-            "someone",
-            "Elsewhere",
-            "feat/x",
-            Some(stored(7, "OPEN")),
-        );
-        assert_eq!(flags(&foreign), (false, false, true, false));
-        let pin = |state| {
-            Planned::new_pinned(
-                "s".to_string(),
-                "github.com".to_string(),
-                "octocat".to_string(),
-                "Hello-World".to_string(),
-                "feat/x".to_string(),
-                stored(7, state),
-            )
-        };
-        assert_eq!(flags(&pin("OPEN")), (false, true, false, false));
-        assert_eq!(flags(&pin("MERGED")), (true, true, false, false));
-        assert!(pin("OPEN").pinned && !plan(None).pinned);
-    }
-
-    /// The head-name check for tests whose response carries no head-name
-    /// nodes: it is never reached, and refuses if it ever is.
-    fn never_in_local_history(_: &Planned, _: &str) -> bool {
-        false
-    }
-
-    /// A ref-discovery node wrapped as the GraphQL shape `s{pos}_ref` resolves to.
-    fn ref_node(number: u64, state: &str) -> serde_json::Value {
-        serde_json::json!({
-            "associatedPullRequests": {
-                "nodes": [ pr_node(number, state) ]
-            }
-        })
-    }
-
     fn pr_node(number: u64, state: &str) -> serde_json::Value {
         pr_node_from(number, state, "octocat/Hello-World")
     }
@@ -3640,93 +3545,6 @@ mod tests {
             "url": format!("https://github.com/{name_with_owner}/pull/{number}"),
             "repository": { "nameWithOwner": name_with_owner },
         })
-    }
-
-    #[test]
-    fn build_chunk_query_discovers_undiscovered_session() {
-        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
-        let (q, pos_repo) = build_chunk_query(&ps, &[0]);
-        assert_eq!(pos_repo, vec![0]);
-        assert!(q.contains("rateLimit { cost remaining resetAt }"));
-        assert!(q.contains("r0: repository(owner: \"octocat\", name: \"Hello-World\")"));
-        // Branch with a slash must be JSON-escaped into a valid GraphQL string.
-        assert!(q.contains("s0_ref: ref(qualifiedName: \"refs/heads/feat/x\")"));
-        // A window taken from the NEWEST end, and no orderBy: GitHub ignores
-        // orderBy on this connection (measured), so asking for one ordered node
-        // returned the oldest pull request on the branch.
-        assert!(q.contains("associatedPullRequests(last: 20)"));
-        // Every node names its own repository, so a fork's pull request on this
-        // very ref can be told apart from one of this repository's own.
-        assert!(q.contains("nodes { number state title url repository { nameWithOwner } }"));
-        assert!(!q.contains("orderBy"));
-        assert!(!q.contains("CREATED_AT"));
-        // No known PR → no by-number alias.
-        assert!(!q.contains("s0_num"));
-        // ...but a lookup by head name, which still answers once a merge has
-        // deleted the branch, with what it takes to tell this branch's pull
-        // request from an older one that happened to use the same name.
-        assert!(q.contains(
-            "s0_head: pullRequests(headRefName: \"feat/x\", states: [OPEN, MERGED, CLOSED], last: 5) \
-{ nodes { number state title url createdAt headRefOid headRepository { nameWithOwner } } }"
-        ));
-    }
-
-    #[test]
-    fn build_chunk_query_open_known_emits_both_aliases() {
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "OPEN")),
-        )];
-        let (q, _) = build_chunk_query(&ps, &[0]);
-        assert!(q.contains("s0_ref: ref(qualifiedName:"));
-        assert!(q.contains("s0_num: pullRequest(number: 42)"));
-        // A known pull request is followed by number, so nothing is looked up
-        // by head name.
-        assert!(!q.contains("s0_head"));
-    }
-
-    #[test]
-    fn build_chunk_query_groups_by_repo() {
-        let ps = vec![
-            planned("s0", "octocat", "repo-a", "feat/a", None),
-            planned("s1", "octocat", "repo-b", "feat/b", None),
-        ];
-        let (q, pos_repo) = build_chunk_query(&ps, &[0, 1]);
-        // Two distinct repos → two aliased repository blocks.
-        assert!(q.contains("repository(owner: \"octocat\", name: \"repo-a\")"));
-        assert!(q.contains("repository(owner: \"octocat\", name: \"repo-b\")"));
-        assert_eq!(pos_repo.len(), 2);
-        assert_ne!(pos_repo[0], pos_repo[1]);
-    }
-
-    #[test]
-    fn build_and_parse_two_sessions_on_same_repo() {
-        // The core batching case: two agents on the SAME repo share one
-        // repository(...) block, each with its own aliased sub-fields, and
-        // parse_chunk_response must demultiplex both back to the right session.
-        let ps = vec![
-            planned("s0", "octocat", "Hello-World", "feat/a", None),
-            planned("s1", "octocat", "Hello-World", "feat/b", None),
-        ];
-        let chunk = [0usize, 1usize];
-        let (q, pos_repo) = build_chunk_query(&ps, &chunk);
-        // One shared repo block; both sessions' ref aliases live under it.
-        assert_eq!(q.matches("repository(owner:").count(), 1);
-        assert_eq!(pos_repo, vec![0, 0]);
-        assert!(q.contains("s0_ref: ref(qualifiedName: \"refs/heads/feat/a\")"));
-        assert!(q.contains("s1_ref: ref(qualifiedName: \"refs/heads/feat/b\")"));
-
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_node(10, "OPEN"), "s1_ref": ref_node(20, "OPEN") },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
-        assert_eq!(by_id[&"s0".to_string()].as_ref().unwrap().number, 10);
-        assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 20);
     }
 
     #[test]
@@ -3783,431 +3601,6 @@ mod tests {
         assert!(tighter_rate_limit(None, None).is_none());
     }
 
-    #[test]
-    fn parse_chunk_response_preserves_known_pr_on_whole_call_failure() {
-        // data=None means the whole gh call failed; an OPEN known PR must NOT be
-        // wiped to None (which the UI reads as "PR gone"): keep last-known state.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "OPEN")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let (results, rate) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, None, &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("kept last-known PR");
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Open);
-        assert!(rate.is_none());
-    }
-
-    #[test]
-    fn parse_chunk_response_discovers_pr_and_rate_limit() {
-        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "rateLimit": { "remaining": 42, "resetAt": "2030-01-01T00:00:00Z" },
-            "r0": { "s0_ref": ref_node(7, "OPEN") },
-        });
-        let (results, rate) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        assert_eq!(results.len(), 1);
-        let pr = results[0].1.as_ref().expect("discovered pr");
-        assert_eq!(pr.number, 7);
-        assert_eq!(pr.state, PrState::Open);
-        assert_eq!(rate.expect("rate").remaining, 42);
-    }
-
-    #[test]
-    fn parse_chunk_response_open_prefers_newer_ref_pr() {
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "OPEN")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        // A newer PR (#43) exists on the branch; the by-number refresh still shows #42.
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_node(43, "OPEN"), "s0_num": pr_node(42, "OPEN") },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        assert_eq!(results[0].1.as_ref().unwrap().number, 43);
-    }
-
-    #[test]
-    fn parse_chunk_response_open_survives_branch_deletion_on_merge() {
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "OPEN")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        // Branch deleted on squash-merge → ref is null, but by-number still resolves
-        // the now-MERGED PR (the case the pre-batch `gh pr view` handled).
-        let data = serde_json::json!({
-            "r0": { "s0_ref": serde_json::Value::Null, "s0_num": pr_node(42, "MERGED") },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let pr = results[0].1.as_ref().unwrap();
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Merged);
-    }
-
-    /// A repository whose `feat/x` holds two commits, plus a commit on another
-    /// line that `feat/x` does not contain. Returns the folder, `feat/x`'s tip,
-    /// and the stray commit.
-    fn repo_with_feature_branch() -> (tempfile::TempDir, String, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| -> String {
-            let out = crate::git::test_support::git_command()
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "git {args:?} failed");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.name", "test"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
-        git(&["switch", "-q", "-c", "other"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "stray"]);
-        let stray = git(&["rev-parse", "HEAD"]);
-        git(&["switch", "-q", "main"]);
-        git(&["switch", "-q", "-c", "feat/x"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
-        let tip = git(&["rev-parse", "HEAD"]);
-        (dir, tip, stray)
-    }
-
-    fn head_node(
-        number: u64,
-        state: &str,
-        created_at: &str,
-        head_oid: &str,
-        head_repo: Option<&str>,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "number": number,
-            "state": state,
-            "title": format!("PR {number}"),
-            "url": format!("https://github.com/octocat/Hello-World/pull/{number}"),
-            "createdAt": created_at,
-            "headRefOid": head_oid,
-            "headRepository": head_repo.map(|name| serde_json::json!({ "nameWithOwner": name })),
-        })
-    }
-
-    /// What the pull request lookup finds for the agent on `feat/x` whose
-    /// worktree is `worktree`, knowing `known`, when the branch's ref answers
-    /// `ref_value` and the search by head name answers `nodes`, for a branch dux
-    /// minted at `minted`.
-    fn deleted_branch_lookup(
-        worktree: &str,
-        known: Option<StoredPr>,
-        ref_value: &serde_json::Value,
-        nodes: &[serde_json::Value],
-        minted: Option<&str>,
-    ) -> Option<(u64, PrState)> {
-        let mut p = planned("s0", "octocat", "Hello-World", "feat/x", known);
-        p.worktree_path = worktree.to_string();
-        p.branch_minted_at = minted.map(|t| t.parse().unwrap());
-        let ps = vec![p];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_value, "s0_head": { "nodes": nodes } },
-        });
-        let (results, _) = parse_chunk_response(
-            &ps,
-            &chunk,
-            &pos_repo,
-            Some(&data),
-            &head_commit_in_local_history,
-        );
-        results[0]
-            .1
-            .as_ref()
-            .map(|pr| (pr.number, pr.state.clone()))
-    }
-
-    /// A merge that deletes the head branch leaves the ref lookup with nothing
-    /// to answer, so a pull request dux never saw while the branch existed is
-    /// found by its head name instead. Branch names get reused, so a match is
-    /// taken only when its head commit is in this agent's own branch, it came
-    /// from this repository rather than a fork, and (for a branch dux minted)
-    /// it was opened after the branch was born.
-    #[test]
-    fn a_pull_request_whose_branch_was_deleted_is_found_by_head_name_only_when_it_is_ours() {
-        let (dir, tip, stray) = repo_with_feature_branch();
-        let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
-            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
-        };
-        let ours = Some("octocat/Hello-World");
-        let null = serde_json::Value::Null;
-
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
-                None,
-            ),
-            Some((72, PrState::Merged)),
-            "the merged pull request is adopted"
-        );
-
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(
-                    72,
-                    "MERGED",
-                    "2026-10-09T10:00:00Z",
-                    &stray,
-                    ours
-                )],
-                None,
-            ),
-            None,
-            "a same-name pull request whose commit this branch does not contain is not ours"
-        );
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(
-                    72,
-                    "MERGED",
-                    "2026-10-09T10:00:00Z",
-                    "0123456789abcdef0123456789abcdef01234567",
-                    ours
-                )],
-                None,
-            ),
-            None,
-            "a head commit this clone does not have is never adopted"
-        );
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(
-                    72,
-                    "MERGED",
-                    "2026-10-09T10:00:00Z",
-                    &tip,
-                    Some("contributor/Hello-World")
-                )],
-                None,
-            ),
-            None,
-            "a fork's pull request is somebody else's"
-        );
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, None)],
-                None,
-            ),
-            None,
-            "a head repository that is gone cannot be shown to be this one"
-        );
-
-        let newest = lookup(
-            null.clone(),
-            vec![
-                head_node(60, "CLOSED", "2026-10-09T09:00:00Z", &tip, ours),
-                head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
-                head_node(80, "OPEN", "2026-10-09T11:00:00Z", &stray, ours),
-            ],
-            None,
-        )
-        .expect("one of them is ours");
-        assert_eq!(
-            newest.0, 72,
-            "the most recently created pull request that passes wins"
-        );
-    }
-
-    /// A pull request found by head name for a branch dux minted must have been
-    /// opened after the branch was born, and while the branch exists the ref
-    /// lookup is the answer.
-    #[test]
-    fn a_deleted_branchs_pull_request_is_dated_against_the_branch_and_the_ref_still_wins() {
-        let (dir, tip, _) = repo_with_feature_branch();
-        let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup = |ref_value, nodes: Vec<serde_json::Value>, minted| {
-            deleted_branch_lookup(&worktree, None, &ref_value, &nodes, minted)
-        };
-        let ours = Some("octocat/Hello-World");
-        let null = serde_json::Value::Null;
-
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(72, "MERGED", "2026-10-01T10:00:00Z", &tip, ours)],
-                Some("2026-10-09T09:00:00Z"),
-            ),
-            None,
-            "a branch dux minted cannot have had a pull request before it existed"
-        );
-        assert_eq!(
-            lookup(
-                null.clone(),
-                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
-                Some("2026-10-09T09:00:00Z"),
-            )
-            .map(|pr| pr.0),
-            Some(72)
-        );
-
-        assert_eq!(
-            lookup(
-                serde_json::json!({ "associatedPullRequests": { "nodes": [] } }),
-                vec![head_node(72, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
-                None,
-            ),
-            None,
-            "while the branch exists the ref lookup is the answer"
-        );
-    }
-
-    #[test]
-    fn a_known_merged_pull_request_gives_way_only_to_a_newer_one_that_is_ours() {
-        let (dir, tip, stray) = repo_with_feature_branch();
-        let worktree = dir.path().to_string_lossy().into_owned();
-        let lookup_with = |known, ref_value, nodes: Vec<serde_json::Value>, minted| {
-            deleted_branch_lookup(&worktree, known, &ref_value, &nodes, minted)
-        };
-        let ours = Some("octocat/Hello-World");
-        let null = serde_json::Value::Null;
-
-        // A merged pull request dux already knows does not hide a follow-up on
-        // the same branch that was merged and deleted between two checks: a
-        // newer match that passes every check above replaces it, and one that
-        // does not leaves the known one in place.
-        assert_eq!(
-            lookup_with(
-                Some(stored(10, "MERGED")),
-                null.clone(),
-                vec![head_node(11, "MERGED", "2026-10-09T10:00:00Z", &tip, ours)],
-                Some("2026-10-09T09:00:00Z"),
-            ),
-            Some((11, PrState::Merged))
-        );
-        assert_eq!(
-            lookup_with(
-                Some(stored(10, "MERGED")),
-                null.clone(),
-                vec![head_node(
-                    11,
-                    "MERGED",
-                    "2026-10-09T10:00:00Z",
-                    &stray,
-                    ours
-                )],
-                Some("2026-10-09T09:00:00Z"),
-            ),
-            Some((10, PrState::Merged))
-        );
-        // Two that pass, created in the same second: the higher number is the
-        // later one, so it wins whatever order GitHub listed them in.
-        assert_eq!(
-            lookup_with(
-                Some(stored(10, "MERGED")),
-                null.clone(),
-                vec![
-                    head_node(10, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
-                    head_node(11, "MERGED", "2026-10-09T10:00:00Z", &tip, ours),
-                ],
-                Some("2026-10-09T09:00:00Z"),
-            ),
-            Some((11, PrState::Merged))
-        );
-    }
-
-    #[test]
-    fn parse_chunk_response_merged_running_keeps_stored_unless_newer() {
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "MERGED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        // Same PR still on the branch → keep the stored terminal PR, not a re-fetch.
-        let same = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "MERGED") } });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same), &never_in_local_history);
-        assert_eq!(results[0].1.as_ref().unwrap().number, 42);
-        // A strictly-newer follow-up PR (#50) replaces it.
-        let newer = serde_json::json!({ "r0": { "s0_ref": ref_node(50, "OPEN") } });
-        let (results, _) = parse_chunk_response(
-            &ps,
-            &chunk,
-            &pos_repo,
-            Some(&newer),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().unwrap();
-        assert_eq!(pr.number, 50);
-        assert_eq!(pr.state, PrState::Open);
-        // A merge is final: a same-numbered answer claiming OPEN (a stale read
-        // replica) must NOT flip the merged badge back. This is the one place
-        // the closed-reopen rule deliberately does not reach.
-        let stale = serde_json::json!({ "r0": { "s0_ref": ref_node(42, "OPEN") } });
-        let (results, _) = parse_chunk_response(
-            &ps,
-            &chunk,
-            &pos_repo,
-            Some(&stale),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().unwrap();
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Merged);
-    }
-
-    /// The discovery alias asks for a WINDOW of nodes, in the ascending order
-    /// GitHub actually returns them in. This wraps a list of them.
-    fn ref_nodes(nodes: &[(u64, &str)]) -> serde_json::Value {
-        serde_json::json!({
-            "associatedPullRequests": {
-                "nodes": nodes
-                    .iter()
-                    .map(|(n, st)| pr_node(*n, st))
-                    .collect::<Vec<_>>(),
-            }
-        })
-    }
-
-    /// The same, for nodes that name their own repositories.
-    fn ref_nodes_from(nodes: &[(u64, &str, &str)]) -> serde_json::Value {
-        serde_json::json!({
-            "associatedPullRequests": {
-                "nodes": nodes
-                    .iter()
-                    .map(|(n, st, repo)| pr_node_from(*n, st, repo))
-                    .collect::<Vec<_>>(),
-            }
-        })
-    }
-
     fn selected(nodes: &[(u64, &str)]) -> PrInfo {
         let parsed: Vec<PrInfo> = nodes
             .iter()
@@ -4246,174 +3639,6 @@ mod tests {
     #[test]
     fn select_discovered_pr_is_empty_for_no_nodes() {
         assert!(select_discovered_pr(Vec::new()).is_none());
-    }
-
-    #[test]
-    fn parse_chunk_response_follows_a_reused_branch_to_the_newest_pull_request() {
-        // Measured against real repositories: the connection comes back
-        // ascending by number, so the stored MERGED #7 sits FIRST and the live
-        // #47 last. Reading element zero reported the merged one forever.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(7, "MERGED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_nodes(&[(7, "MERGED"), (47, "OPEN")]) },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("a pull request");
-        assert_eq!(pr.number, 47);
-        assert_eq!(pr.state, PrState::Open);
-    }
-
-    #[test]
-    fn parse_chunk_response_ignores_a_pull_request_from_another_repository() {
-        // Measured on golang/go: a fork's pull request whose head is this very
-        // ref is associated with it, so the window can hold pull requests dux
-        // must not report. Left in, the newest-and-open-first rule would prefer
-        // the foreign #99 and store it against this session's repository.
-        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": {
-                "s0_ref": ref_nodes_from(&[
-                    (12, "OPEN", "octocat/Hello-World"),
-                    (99, "OPEN", "contributor/Hello-World"),
-                ]),
-            },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("a pull request");
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.owner_repo, "octocat/Hello-World");
-    }
-
-    #[test]
-    fn parse_chunk_response_drops_only_the_node_it_cannot_parse() {
-        // An unrecognised state (a value this build has never heard of) drops
-        // that node alone; its siblings still decide the badge.
-        let ps = vec![planned("s0", "octocat", "Hello-World", "feat/x", None)];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_nodes(&[(12, "OPEN"), (99, "DRAFTED_SOMEHOW")]) },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("a pull request");
-        assert_eq!(pr.number, 12);
-    }
-
-    #[test]
-    fn parse_chunk_response_merged_row_keeps_its_number_over_an_older_open_one() {
-        // The select rule and the merge rule meeting: discovery prefers the OPEN
-        // #7, and the merge rule then refuses it, because within one repository
-        // a genuine successor to #47 always has a higher number. The stored
-        // merged badge stands.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(47, "MERGED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": { "s0_ref": ref_nodes(&[(7, "OPEN"), (47, "MERGED")]) },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("a pull request");
-        assert_eq!(pr.number, 47);
-        assert_eq!(pr.state, PrState::Merged);
-    }
-
-    #[test]
-    fn exited_entry_needs_no_network_re_queries_a_terminal_row_only_on_a_deliberate_trigger() {
-        for state in ["MERGED", "CLOSED"] {
-            let known = stored(7, state);
-            assert!(
-                exited_entry_needs_no_network(Some(&known), SyncTrigger::BlindPoll),
-                "the blind poll stays free for {state}"
-            );
-            assert!(
-                exited_entry_needs_no_network(Some(&known), SyncTrigger::Focus),
-                "focusing a finished agent must not spawn a gh process for {state}"
-            );
-            assert!(
-                !exited_entry_needs_no_network(Some(&known), SyncTrigger::OneShot),
-                "a deliberate one-shot trigger spends one discovery call on {state}, \
-                 so a reused branch heals"
-            );
-        }
-    }
-
-    #[test]
-    fn exited_entry_needs_no_network_never_skips_an_open_or_undiscovered_row() {
-        for trigger in [
-            SyncTrigger::BlindPoll,
-            SyncTrigger::Focus,
-            SyncTrigger::OneShot,
-        ] {
-            assert!(!exited_entry_needs_no_network(
-                Some(&stored(7, "OPEN")),
-                trigger
-            ));
-            assert!(!exited_entry_needs_no_network(None, trigger));
-        }
-    }
-
-    #[test]
-    fn pinned_exited_entry_needs_no_network_keeps_a_merged_pin_free() {
-        // A pin emits no discovery alias, so there is nothing a merged pin's
-        // call could ever find, under any trigger. A closed pin can reopen, so
-        // the deliberate triggers ask.
-        let merged = stored(7, "MERGED");
-        let closed = stored(7, "CLOSED");
-        for trigger in [
-            SyncTrigger::BlindPoll,
-            SyncTrigger::Focus,
-            SyncTrigger::OneShot,
-        ] {
-            assert!(pinned_exited_entry_needs_no_network(&merged, trigger));
-        }
-        assert!(pinned_exited_entry_needs_no_network(
-            &closed,
-            SyncTrigger::BlindPoll
-        ));
-        assert!(pinned_exited_entry_needs_no_network(
-            &closed,
-            SyncTrigger::Focus
-        ));
-        assert!(!pinned_exited_entry_needs_no_network(
-            &closed,
-            SyncTrigger::OneShot
-        ));
-    }
-
-    #[test]
-    fn format_sync_cycle_summary_names_the_trigger_the_counts_and_the_cost() {
-        assert_eq!(
-            format_sync_cycle_summary(SyncTrigger::BlindPoll, 5, 3, 4, 1, 2),
-            "PR sync (blind poll): 5 sessions, 3 asked, 4 answered, 1 changed, 2 GraphQL points"
-        );
-        assert_eq!(
-            format_sync_cycle_summary(SyncTrigger::Focus, 1, 0, 1, 0, 0),
-            "PR sync (focus): 1 sessions, 0 asked, 1 answered, 0 changed, 0 GraphQL points"
-        );
-        assert_eq!(
-            format_sync_cycle_summary(SyncTrigger::OneShot, 1, 1, 0, 0, 1),
-            "PR sync (one-shot): 1 sessions, 1 asked, 0 answered, 0 changed, 1 GraphQL points"
-        );
     }
 
     /// A live [`PrInfo`] the way a parsed discovery node produces one.
@@ -4466,103 +3691,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_chunk_response_closed_still_closed_keeps_stored() {
-        // The counterpart to the reopen case: discovery confirming the pull
-        // request is still closed changes nothing.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(12, "CLOSED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let same = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "CLOSED") } });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&same), &never_in_local_history);
-        let pr = results[0].1.as_ref().unwrap();
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Closed);
-    }
-
-    #[test]
-    fn parse_chunk_response_closed_ignores_a_different_lower_number() {
-        // The reopen rule matches the SAME number only: discovery answering
-        // with some other, lower-numbered pull request must not flip the
-        // stored closed badge onto it.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(12, "CLOSED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let other = serde_json::json!({ "r0": { "s0_ref": ref_node(7, "OPEN") } });
-        let (results, _) = parse_chunk_response(
-            &ps,
-            &chunk,
-            &pos_repo,
-            Some(&other),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().unwrap();
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Closed);
-    }
-
-    /// A CLOSED pull request can be reopened, and discovery already carries the
-    /// answer: the same number comes back with state OPEN. The stored CLOSED row
-    /// must yield to it, at no extra API cost.
-    #[test]
-    fn parse_chunk_response_closed_accepts_the_same_number_reopened() {
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(12, "CLOSED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let reopened = serde_json::json!({ "r0": { "s0_ref": ref_node(12, "OPEN") } });
-        let (results, _) = parse_chunk_response(
-            &ps,
-            &chunk,
-            &pos_repo,
-            Some(&reopened),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().expect("reopened pr");
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Open);
-    }
-
-    #[test]
-    fn parse_chunk_response_one_bad_repo_does_not_poison_the_batch() {
-        // s0's repo was deleted (r0: null + NOT_FOUND); s1 is fine in r1.
-        let ps = vec![
-            planned("s0", "octocat", "gone", "feat/a", None),
-            planned("s1", "octocat", "repo-b", "feat/b", None),
-        ];
-        let chunk = [0usize, 1usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let data = serde_json::json!({
-            "r0": serde_json::Value::Null,
-            // The node names s1's OWN repository, which is what makes it s1's
-            // pull request rather than some fork's.
-            "r1": { "s1_ref": ref_nodes_from(&[(9, "OPEN", "octocat/repo-b")]) },
-        });
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, Some(&data), &never_in_local_history);
-        let by_id: std::collections::HashMap<_, _> = results.into_iter().collect();
-        assert!(by_id[&"s0".to_string()].is_none());
-        assert_eq!(by_id[&"s1".to_string()].as_ref().unwrap().number, 9);
-    }
-
-    #[test]
     fn parse_rate_limit_extracts_remaining_and_reset() {
         let data = serde_json::json!({
             "rateLimit": { "remaining": 4321, "resetAt": "2030-06-01T12:00:00Z" },
@@ -4570,71 +3698,6 @@ mod tests {
         let rl = parse_rate_limit(&data).expect("rate limit");
         assert_eq!(rl.remaining, 4321);
         assert!(rl.reset_at.is_some());
-    }
-
-    #[test]
-    fn run_entries_merged_exited_reconstructs_without_network_on_the_blind_poll() {
-        // A merged + exited session is reconstructed from SQLite with no gh call
-        // on the poll (the worktree path is bogus, so any git/gh access would
-        // fail). A one-shot still spends one discovery call on it, because the
-        // branch name may have been reused for a brand new pull request.
-        let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/done".to_string(),
-            worktree_path: "/nonexistent/dux-test-path".to_string(),
-            known_pr: Some(stored(42, "MERGED")),
-            agent_exited: true,
-            pinned: None,
-            inactive: false,
-            branch_minted_at: None,
-            branch_generation: 0,
-        };
-        let trigger = SyncTrigger::BlindPoll;
-        let (results, signals) = run_entries(
-            std::slice::from_ref(&entry),
-            &std::collections::HashMap::new(),
-            &legacy_policy(),
-            trigger,
-        );
-        // Zero-network on the poll → no host was queried, so no signal.
-        assert!(signals.is_empty(), "no network call means no host signal");
-        assert_eq!(results.len(), 1);
-        let pr = results[0].1.as_ref().expect("reconstructed");
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Merged);
-    }
-
-    /// A thread that panicked holding the plan leaves a plan that is still
-    /// whole, so the sync keeps reading it rather than freezing every PR.
-    #[test]
-    fn a_poisoned_plan_is_still_synced() {
-        let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/done".to_string(),
-            worktree_path: "/nonexistent/dux-test-path".to_string(),
-            known_pr: Some(stored(42, "MERGED")),
-            agent_exited: true,
-            pinned: None,
-            inactive: false,
-            branch_minted_at: None,
-            branch_generation: 0,
-        };
-        let plan = Arc::new(Mutex::new(vec![entry]));
-        let poisoner = Arc::clone(&plan);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.lock().expect("lock");
-            panic!("poison the plan");
-        })
-        .join();
-
-        let (results, _) = run_pr_sync(
-            &plan,
-            &std::collections::HashMap::new(),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-
-        assert_eq!(results.len(), 1);
     }
 
     #[test]
@@ -4654,98 +3717,6 @@ mod tests {
         // is allowed to turn it back on.
         assert!(!inactive_sweep_due(Duration::from_secs(0), 0));
         assert!(!inactive_sweep_due(Duration::from_secs(u32::MAX.into()), 0));
-    }
-
-    #[test]
-    fn an_active_only_cycle_leaves_the_inactive_entries_alone() {
-        // Asserted on the pure narrowing rather than on an empty result, which
-        // an entry with an unresolvable remote would produce either way and so
-        // would pass with the filter removed.
-        let mut working = planning_entry();
-        working.session_id = "working".to_string();
-        let mut dormant = planning_entry();
-        dormant.session_id = "dormant".to_string();
-        dormant.inactive = true;
-        let plan = vec![working, dormant];
-
-        let narrowed: Vec<String> = entries_for_scope(plan.clone(), SyncScope::ActiveOnly)
-            .into_iter()
-            .map(|e| e.session_id)
-            .collect();
-        assert_eq!(narrowed, vec!["working".to_string()]);
-
-        let whole: Vec<String> = entries_for_scope(plan, SyncScope::Everything)
-            .into_iter()
-            .map(|e| e.session_id)
-            .collect();
-        assert_eq!(
-            whole,
-            vec!["working".to_string(), "dormant".to_string()],
-            "every other cycle still asks about both"
-        );
-    }
-
-    #[test]
-    fn run_entries_closed_exited_makes_no_call_on_the_blind_poll() {
-        // A wall of dormant sessions with closed pull requests must not tick the
-        // API every interval, so the blind poll still reconstructs from SQLite.
-        let entry = PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/done".to_string(),
-            worktree_path: "/nonexistent/dux-test-path".to_string(),
-            known_pr: Some(stored(42, "CLOSED")),
-            agent_exited: true,
-            pinned: None,
-            inactive: false,
-            branch_minted_at: None,
-            branch_generation: 0,
-        };
-        let (results, signals) = run_entries(
-            std::slice::from_ref(&entry),
-            &std::collections::HashMap::new(),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        assert!(signals.is_empty(), "no network call means no host signal");
-        let pr = results[0].1.as_ref().expect("reconstructed");
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Closed);
-    }
-
-    #[test]
-    fn merge_pr_result_open_known_preserves_stored_on_double_null() {
-        // A per-alias null (transient error) yields (None, None) for a KNOWN-open
-        // PR: preserve the stored PR rather than wiping the badge.
-        let p = planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "OPEN")),
-        );
-        let merged = merge_pr_result(&p, None, None).expect("preserved");
-        assert_eq!(merged.number, 42);
-        assert_eq!(merged.state, PrState::Open);
-    }
-
-    #[test]
-    fn parse_chunk_response_preserves_terminal_known_pr_on_whole_call_failure() {
-        // The whole-call-failure fallback must also cover a CLOSED/terminal known
-        // PR (agent still running, so it was queried), not just OPEN.
-        let ps = vec![planned(
-            "s0",
-            "octocat",
-            "Hello-World",
-            "feat/x",
-            Some(stored(42, "CLOSED")),
-        )];
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&ps, &chunk);
-        let (results, _) =
-            parse_chunk_response(&ps, &chunk, &pos_repo, None, &never_in_local_history);
-        let pr = results[0].1.as_ref().expect("kept last-known terminal PR");
-        assert_eq!(pr.number, 42);
-        assert_eq!(pr.state, PrState::Closed);
     }
 
     #[test]
@@ -5377,386 +4348,6 @@ mod tests {
         assert_eq!(lookup.number, 7);
     }
 
-    /// An entry whose worktree path is irrelevant, because these tests supply
-    /// the resolved remote themselves.
-    fn planning_entry() -> PrSyncEntry {
-        PrSyncEntry {
-            session_id: "s0".to_string(),
-            branch_name: "feat/x".to_string(),
-            worktree_path: "/nonexistent/worktree".to_string(),
-            known_pr: None,
-            agent_exited: false,
-            pinned: None,
-            inactive: false,
-            branch_minted_at: None,
-            branch_generation: 0,
-        }
-    }
-
-    /// The silent bug lives in the `known_pr: None` branch: an agent that has
-    /// never had a pull request recorded has no stored host to fall back on, so
-    /// a remote the parser did not understand was written down as an empty
-    /// result and the session was skipped, every cycle, with nothing saying
-    /// why.
-    ///
-    /// This asserts the PLAN rather than the run, which is what makes it
-    /// honest: it names the exact host, owner and repo the poller would query,
-    /// and it cannot spawn `gh` under any outcome, passing or failing.
-    ///
-    /// The remote is INJECTED rather than read out of a fixture repository.
-    /// This test used to build one and let planning shell out through
-    /// `git remote get-url`, with no isolation, so the developer's own
-    /// `url.*.insteadOf` decided the outcome: an inherited rewrite mapping
-    /// github.com onto gitlab.com made it fail. What it is actually about is
-    /// the planning logic, and that is now all it touches. The spellings a
-    /// remote can arrive in are covered by the parser's own tests in `git.rs`
-    /// and by `pull_request_lookup_resolves_an_ssh_scheme_origin_remote`, which
-    /// runs git through the isolating helper.
-    #[test]
-    fn plan_entries_queries_a_resolved_remote_for_a_session_with_no_known_pr() {
-        let entry = planning_entry();
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| {
-                git::RemoteResolution::Allowed(git::GitHubRemote {
-                    host: "github.com".to_string(),
-                    owner_repo: "octocat/Hello-World".to_string(),
-                })
-            },
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-
-        assert!(
-            results.is_empty(),
-            "a resolvable remote must be queried, not recorded as an empty result"
-        );
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].session_id, "s0");
-        assert_eq!(planned[0].host, "github.com");
-        assert_eq!(planned[0].owner, "octocat");
-        assert_eq!(planned[0].repo, "Hello-World");
-        assert_eq!(planned[0].branch, "feat/x");
-    }
-
-    /// A stored override row for the pinned tests: PR #12 on a FORK, while the
-    /// session's own remote (when a test consults it at all) is
-    /// `octocat/Hello-World`.
-    fn pinned_stored(state: &str) -> StoredPr {
-        StoredPr {
-            session_id: "s0".to_string(),
-            pr_number: 12,
-            host: "github.com".to_string(),
-            owner_repo: "forker/Hello-World".to_string(),
-            state: state.to_string(),
-            title: "Pinned".to_string(),
-            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
-        }
-    }
-
-    fn pin_of(stored: &StoredPr) -> crate::worker::PinnedPr {
-        crate::worker::PinnedPr {
-            host: stored.host.clone(),
-            owner_repo: stored.owner_repo.clone(),
-            number: stored.pr_number,
-        }
-    }
-
-    /// A pinned session queries the PINNED repo (here a fork), never the
-    /// worktree's remote: the resolver panics to prove planning does not even
-    /// look at it, and the built query carries exactly ONE alias, the by-number
-    /// one for the pinned PR. Head-ref discovery is not planned for pins.
-    #[test]
-    fn plan_entries_pinned_session_queries_only_the_pinned_repo_by_number() {
-        let stored = pinned_stored("OPEN");
-        let entry = PrSyncEntry {
-            known_pr: Some(stored.clone()),
-            pinned: Some(pin_of(&stored)),
-            ..planning_entry()
-        };
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| panic!("a pinned session must not resolve the worktree remote"),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-
-        assert!(results.is_empty(), "a pinned OPEN session is queried");
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].host, "github.com");
-        assert_eq!(planned[0].owner, "forker");
-        assert_eq!(planned[0].repo, "Hello-World");
-
-        let (q, _) = build_chunk_query(&planned, &[0]);
-        assert!(
-            q.contains("repository(owner: \"forker\", name: \"Hello-World\")"),
-            "the query targets the fork: {q}"
-        );
-        assert!(
-            q.contains("s0_num: pullRequest(number: 12)"),
-            "the pinned PR is refreshed by number: {q}"
-        );
-        assert!(
-            !q.contains("s0_ref"),
-            "no head-ref discovery for a pinned session: {q}"
-        );
-    }
-
-    /// The host gate runs on the PINNED host. A denied pin answers from the
-    /// pin's own stored row, and even a stale `known_pr` naming a DIFFERENT PR
-    /// cannot leak through as the answer for a pinned session.
-    #[test]
-    fn plan_entries_pinned_gate_runs_on_the_pinned_host_and_answers_only_the_pin() {
-        let stored = StoredPr {
-            host: "git.company.example".to_string(),
-            ..pinned_stored("OPEN")
-        };
-        // A stale non-pin row (the autodetected latest) that must NOT surface.
-        let entry = PrSyncEntry {
-            known_pr: Some(stored_pr_named(50, "OPEN", "octocat/Hello-World")),
-            pinned: Some(pin_of(&stored)),
-            ..planning_entry()
-        };
-        let policy = GithubHostPolicy::Hosts(std::iter::once("github.com".to_string()).collect());
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| panic!("a pinned session must not resolve the worktree remote"),
-            &policy,
-            SyncTrigger::BlindPoll,
-        );
-
-        assert!(planned.is_empty(), "a denied pinned host is never queried");
-        assert_eq!(results.len(), 1);
-        let pr = results[0].1.as_ref().expect("the pin is kept");
-        assert_eq!(
-            pr.number, 12,
-            "the answer is the PIN, not the stale stored latest"
-        );
-        assert_eq!(pr.owner_repo, "forker/Hello-World");
-    }
-
-    /// Merged pin + exited agent: zero network under either trigger,
-    /// reconstructed from the pin.
-    #[test]
-    fn plan_entries_pinned_merged_exited_reconstructs_the_pin_without_network() {
-        let stored = pinned_stored("MERGED");
-        let entry = PrSyncEntry {
-            known_pr: Some(stored.clone()),
-            pinned: Some(pin_of(&stored)),
-            agent_exited: true,
-            ..planning_entry()
-        };
-
-        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::OneShot] {
-            let (results, planned) = plan_entries(
-                std::slice::from_ref(&entry),
-                &|_| panic!("a pinned session must not resolve the worktree remote"),
-                &legacy_policy(),
-                trigger,
-            );
-
-            assert!(planned.is_empty(), "merged pins are never queried");
-            let pr = results[0].1.as_ref().expect("reconstructed pin");
-            assert_eq!(pr.number, 12);
-            assert_eq!(pr.state, PrState::Merged);
-        }
-    }
-
-    /// Closed pin + exited agent: skipped by the blind poll, refreshed by a
-    /// one-shot, because a closed pull request can be reopened.
-    #[test]
-    fn plan_entries_pinned_closed_exited_is_skipped_by_the_poll_and_refreshed_one_shot() {
-        let stored = pinned_stored("CLOSED");
-        let entry = PrSyncEntry {
-            known_pr: Some(stored.clone()),
-            pinned: Some(pin_of(&stored)),
-            agent_exited: true,
-            ..planning_entry()
-        };
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| panic!("a pinned session must not resolve the worktree remote"),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        assert!(planned.is_empty(), "the blind poll spends no call here");
-        let pr = results[0].1.as_ref().expect("reconstructed pin");
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Closed);
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| panic!("a pinned session must not resolve the worktree remote"),
-            &legacy_policy(),
-            SyncTrigger::OneShot,
-        );
-        assert!(results.is_empty(), "a one-shot asks about the closed pin");
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].owner, "forker");
-    }
-
-    /// The unpinned half of the same rule, at the other short-circuit site.
-    #[test]
-    fn plan_entries_closed_exited_is_skipped_by_the_poll_and_refreshed_one_shot() {
-        let entry = PrSyncEntry {
-            known_pr: Some(stored(12, "CLOSED")),
-            agent_exited: true,
-            ..planning_entry()
-        };
-        let resolve = |_: &Path| {
-            git::RemoteResolution::Allowed(git::GitHubRemote {
-                host: "github.com".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-            })
-        };
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &resolve,
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        assert!(planned.is_empty(), "the blind poll spends no call here");
-        let pr = results[0].1.as_ref().expect("reconstructed");
-        assert_eq!(pr.state, PrState::Closed);
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &resolve,
-            &legacy_policy(),
-            SyncTrigger::OneShot,
-        );
-        assert!(
-            results.is_empty(),
-            "a one-shot asks whether the closed pull request came back"
-        );
-        assert_eq!(planned.len(), 1);
-        // Discovery only: a terminal row gets no by-number alias, so noticing a
-        // reopen costs nothing extra.
-        let (q, _) = build_chunk_query(&planned, &[0]);
-        assert!(q.contains("s0_ref"), "discovery is planned: {q}");
-        assert!(!q.contains("s0_num"), "no extra by-number alias: {q}");
-    }
-
-    /// A per-alias fetch failure (the pinned repo alias came back null) keeps
-    /// the pin rather than wiping the badge, mirroring the open-known fallback.
-    #[test]
-    fn pinned_per_alias_failure_preserves_the_pin() {
-        let stored = pinned_stored("OPEN");
-        let entry = PrSyncEntry {
-            known_pr: Some(stored.clone()),
-            pinned: Some(pin_of(&stored)),
-            ..planning_entry()
-        };
-        let (_, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| panic!("no remote resolution for pins"),
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        let chunk = [0usize];
-        let (_, pos_repo) = build_chunk_query(&planned, &chunk);
-        let data = serde_json::json!({ "r0": serde_json::Value::Null });
-        let (results, _) = parse_chunk_response(
-            &planned,
-            &chunk,
-            &pos_repo,
-            Some(&data),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().expect("pin preserved");
-        assert_eq!(pr.number, 12);
-
-        // And a real answer for the pin refreshes it (a CLOSED pin can reopen).
-        let data = serde_json::json!({ "r0": { "s0_num": pr_node(12, "MERGED") } });
-        let (results, _) = parse_chunk_response(
-            &planned,
-            &chunk,
-            &pos_repo,
-            Some(&data),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().expect("refreshed pin");
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.state, PrState::Merged);
-    }
-
-    /// A stored PR naming a DIFFERENT repo than the resolved query target must
-    /// not put its number into the target repo's query: PR numbers are
-    /// per-repo, so `other/Repo#12` asked of `octocat/Hello-World` is an
-    /// unrelated pull request that would then be surfaced and persisted. The
-    /// two ways this happens for real: a detached fork pin whose row survived
-    /// somewhere, and a remote that changed under a session. Such an entry
-    /// falls back to discovery only, and a discovery miss keeps the stored
-    /// badge rather than inventing anything.
-    #[test]
-    fn a_known_pr_from_another_repo_never_emits_its_number_at_the_query_target() {
-        let entry = PrSyncEntry {
-            known_pr: Some(stored_pr_named(12, "OPEN", "forker/Hello-World")),
-            ..planning_entry()
-        };
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| {
-                git::RemoteResolution::Allowed(git::GitHubRemote {
-                    host: "github.com".to_string(),
-                    owner_repo: "octocat/Hello-World".to_string(),
-                })
-            },
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        assert!(results.is_empty());
-        assert_eq!(planned.len(), 1);
-
-        let chunk = [0usize];
-        let (q, pos_repo) = build_chunk_query(&planned, &chunk);
-        assert!(
-            !q.contains("s0_num"),
-            "the foreign row's number must not be asked of the session repo: {q}"
-        );
-        assert!(q.contains("s0_ref"), "discovery still runs: {q}");
-
-        // Discovery finding nothing keeps the stored badge (per-alias-failure
-        // semantics), and cannot surface an unrelated same-number PR because
-        // no by-number alias exists to fetch one.
-        let data = serde_json::json!({ "r0": { "s0_ref": serde_json::Value::Null } });
-        let (results, _) = parse_chunk_response(
-            &planned,
-            &chunk,
-            &pos_repo,
-            Some(&data),
-            &never_in_local_history,
-        );
-        let pr = results[0].1.as_ref().expect("stored badge kept");
-        assert_eq!(pr.owner_repo, "forker/Hello-World");
-        assert_eq!(pr.number, 12);
-
-        // And a same-repo known row still gets its by-number refresh, so the
-        // gate did not disable the branch-deleted-on-merge robustness.
-        let entry = PrSyncEntry {
-            known_pr: Some(stored_pr_named(12, "OPEN", "octocat/Hello-World")),
-            ..planning_entry()
-        };
-        let (_, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| {
-                git::RemoteResolution::Allowed(git::GitHubRemote {
-                    host: "github.com".to_string(),
-                    owner_repo: "octocat/Hello-World".to_string(),
-                })
-            },
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-        let (q, _) = build_chunk_query(&planned, &[0]);
-        assert!(q.contains("s0_num: pullRequest(number: 12)"), "{q}");
-    }
-
     /// The attach lookup constructor, per input form. Unlike
     /// `parse_pull_request_lookup` there is NO project-match refusal: a
     /// cross-repo URL is the point of the flow.
@@ -5873,198 +4464,915 @@ mod tests {
         assert!(err.contains("not signed in"), "got {err}");
     }
 
-    fn stored_pr_named(number: u64, state: &str, owner_repo: &str) -> StoredPr {
-        StoredPr {
-            session_id: "s0".to_string(),
-            pr_number: number,
-            host: "github.com".to_string(),
-            owner_repo: owner_repo.to_string(),
-            state: state.to_string(),
-            title: "t".to_string(),
-            url: format!("https://github.com/{owner_repo}/pull/{number}"),
+    // ── The pull-request sync: questions, rotation, refresh, answers ────────
+
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        text.parse().expect("an RFC 3339 time")
+    }
+
+    fn sync_branch(name: &str) -> PrSyncBranch {
+        PrSyncBranch {
+            name: name.to_string(),
+            former_names: Vec::new(),
+            identity_at: None,
+            tip: None,
+            last_ask: None,
         }
     }
 
-    /// The counterpart, so the assertion above is not vacuous: with nothing to
-    /// resolve and nothing stored, the entry really does record an empty result
-    /// and is never queried.
-    ///
-    /// The unresolvable remote is injected for the same reason as above. This
-    /// test used to build a GitLab fixture repository and let planning read it
-    /// through an unisolated `git remote get-url`, so an inherited rewrite
-    /// pointing that address at github.com made it fail outright, and one
-    /// pointing it at some other non-GitHub host let it pass while testing
-    /// nothing about the spelling it named.
-    #[test]
-    fn plan_entries_records_nothing_for_an_unresolvable_remote_with_no_known_pr() {
-        let entry = planning_entry();
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| git::RemoteResolution::Unresolved,
-            &legacy_policy(),
-            SyncTrigger::BlindPoll,
-        );
-
-        assert!(planned.is_empty(), "a non-GitHub remote is never queried");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "s0");
-        assert!(results[0].1.is_none());
+    fn asked_at(when: &str) -> BranchAskRecord {
+        BranchAskRecord {
+            at: at(when),
+            ref_gone: false,
+            returned: Vec::new(),
+        }
     }
 
-    /// A live address dux may not ask about is not the same thing as no live
-    /// address, and only the second may fall back to a remembered host.
-    ///
-    /// The agent's own remote is readable and names `git.company.example`,
-    /// which the policy does not allow. Its last known pull request is on
-    /// github.com, which the policy DOES allow. Collapsing the denied address
-    /// into "nothing resolved" made planning fall back to that stored host and
-    /// query github.com about an agent whose remote is somewhere else entirely.
-    /// The gate after the selection cannot catch it, because by then the live
-    /// address is gone.
-    ///
-    /// The address is classified by the real code rather than asserted about in
-    /// the abstract, so the test cannot pass on a hand-made verdict.
-    #[test]
-    fn a_readable_address_on_a_denied_host_never_falls_back_to_a_stored_one() {
-        let entry = PrSyncEntry {
-            known_pr: Some(StoredPr {
-                session_id: "s0".to_string(),
-                pr_number: 7,
+    /// A pull request the agent already has, last refreshed at noon.
+    fn known_row(
+        number: u64,
+        state: PrState,
+        owner_repo: &str,
+        head: Option<&str>,
+    ) -> crate::model::AgentPr {
+        let mut row = crate::model::AgentPr::found(
+            &PrInfo {
+                number,
+                state: PrState::Open,
+                title: format!("PR {number}"),
                 host: "github.com".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-                state: "OPEN".to_string(),
-                title: "Hello".to_string(),
-                url: "https://github.com/octocat/Hello-World/pull/7".to_string(),
-            }),
-            ..planning_entry()
-        };
-        // `gh` serves github.com and nothing else.
-        let policy = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
+                owner_repo: owner_repo.to_string(),
+                url: format!("https://github.com/{owner_repo}/pull/{number}"),
+                head_branch: head.map(str::to_string),
+                ..PrInfo::default()
+            },
+            at("2026-11-01T00:00:00Z"),
+        );
+        row.state = state;
+        row.last_refreshed_at = Some(at("2026-11-06T12:00:00Z"));
+        row
+    }
 
-        // The address really is READABLE and really is denied, so what the
-        // planning does below is not the unreadable case under another name.
+    fn sync_entry() -> PrSyncEntry {
+        PrSyncEntry {
+            session_id: "s0".to_string(),
+            worktree_path: "/nonexistent/worktree".to_string(),
+            current: sync_branch("feat/x"),
+            history: Vec::new(),
+            known: Vec::new(),
+            agent_exited: false,
+            inactive: false,
+            history_per_cycle: 8,
+            settled_recheck: chrono::TimeDelta::hours(12),
+        }
+    }
+
+    fn ours(_: &Path) -> git::RemoteResolution {
+        git::RemoteResolution::Allowed(git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: "octocat/Hello-World".to_string(),
+        })
+    }
+
+    const NOON: &str = "2026-11-06T12:00:00Z";
+
+    /// Each question one line: where it goes and what it asks.
+    fn described(questions: &[Question]) -> Vec<String> {
+        questions
+            .iter()
+            .map(|q| {
+                let what = match &q.ask {
+                    Ask::Discovery {
+                        branch, name, head, ..
+                    } => format!(
+                        "{branch} as {name}{}",
+                        if head.is_some() { " +head" } else { "" }
+                    ),
+                    Ask::Refresh { number } => format!("#{number}"),
+                };
+                format!("{} {}/{} {what}", q.host, q.owner, q.repo)
+            })
+            .collect()
+    }
+
+    fn plan_one(
+        entry: &PrSyncEntry,
+        resolve: &dyn Fn(&Path) -> git::RemoteResolution,
+        policy: &GithubHostPolicy,
+        trigger: SyncTrigger,
+        now: &str,
+    ) -> Vec<String> {
+        described(&plan_entries(
+            std::slice::from_ref(entry),
+            resolve,
+            policy,
+            trigger,
+            at(now),
+        ))
+    }
+
+    #[test]
+    fn a_cycle_asks_about_the_current_branch_by_every_name_a_turn_of_earlier_branches_and_each_due_pull_request()
+     {
+        let mut entry = sync_entry();
+        entry.current.former_names = vec!["feat/old".to_string()];
+        entry.history = vec![
+            PrSyncBranch {
+                last_ask: Some(asked_at("2026-11-06T09:00:00Z")),
+                ..sync_branch("spike-a")
+            },
+            sync_branch("spike-b"),
+            PrSyncBranch {
+                last_ask: Some(asked_at("2026-11-06T11:00:00Z")),
+                ..sync_branch("spike-c")
+            },
+        ];
+        entry.history_per_cycle = 2;
+        let mut attachment = known_row(7, PrState::Closed, "other/Elsewhere", None);
+        attachment.host = "git.example.com".to_string();
+        attachment.found = false;
+        attachment.attached = true;
+        entry.known = vec![attachment];
+        let policy = GithubHostPolicy::Hosts(
+            ["github.com".to_string(), "git.example.com".to_string()]
+                .into_iter()
+                .collect(),
+        );
+
+        let questions = plan_entries(
+            std::slice::from_ref(&entry),
+            &ours,
+            &policy,
+            SyncTrigger::BlindPoll,
+            at(NOON),
+        );
+
         assert_eq!(
+            described(&questions),
+            vec![
+                "github.com octocat/Hello-World feat/x as feat/x +head",
+                "github.com octocat/Hello-World feat/x as feat/old +head",
+                "github.com octocat/Hello-World spike-b as spike-b",
+                "github.com octocat/Hello-World spike-a as spike-a",
+                "git.example.com other/Elsewhere #7",
+            ]
+        );
+        let (q, pos_repo) = build_chunk_query(&questions, &[0, 1, 2, 3]);
+        assert_eq!(pos_repo, vec![0, 0, 0, 0]);
+        assert!(q.contains("r0: repository(owner: \"octocat\", name: \"Hello-World\")"));
+        assert!(q.contains(
+            "q1_ref: ref(qualifiedName: \"refs/heads/feat/old\") { associatedPullRequests(last: 20) \
+{ nodes { number state isDraft title url createdAt updatedAt closedAt mergedAt headRefName \
+headRefOid repository { nameWithOwner } } } }"
+        ));
+        assert!(q.contains(
+            "q1_head: pullRequests(headRefName: \"feat/old\", states: [OPEN, MERGED, CLOSED], last: 5) \
+{ nodes { number state isDraft title url createdAt updatedAt closedAt mergedAt headRefName \
+headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
+        ));
+        assert!(q.contains("q2_ref: ref(qualifiedName: \"refs/heads/spike-b\")"));
+        assert!(
+            !q.contains("q2_head"),
+            "a branch whose ref answered is not looked up by name"
+        );
+        assert!(
+            !q.contains("orderBy"),
+            "GitHub ignores orderBy on this connection"
+        );
+        let (q, _) = build_chunk_query(&questions, &[4]);
+        assert!(q.contains("r0: repository(owner: \"other\", name: \"Elsewhere\")"));
+        assert!(q.contains("q0_num: pullRequest(number: 7) { number state isDraft"));
+    }
+
+    #[test]
+    fn every_earlier_branch_is_asked_within_a_bounded_number_of_cycles() {
+        let mut entry = sync_entry();
+        entry.history = (1..=9).map(|n| sync_branch(&format!("b{n}"))).collect();
+        entry.history_per_cycle = 2;
+        let mut now = at(NOON);
+        let mut asked: Vec<String> = Vec::new();
+        for cycle in 1..=5 {
+            let due: Vec<String> = due_history_branches(&entry, now)
+                .into_iter()
+                .map(|b| b.name.clone())
+                .collect();
+            assert_eq!(due.len(), 2, "cycle {cycle} asks its share");
+            for branch in &mut entry.history {
+                if due.contains(&branch.name) {
+                    branch.last_ask = Some(BranchAskRecord {
+                        at: now,
+                        ref_gone: false,
+                        returned: Vec::new(),
+                    });
+                }
+            }
+            asked.extend(due);
+            if cycle == 4 {
+                let mut seen = asked.clone();
+                seen.sort();
+                seen.dedup();
+                assert_eq!(seen.len(), 8, "four cycles of two cannot cover nine");
+            }
+            now += chrono::TimeDelta::minutes(3);
+        }
+        asked.sort();
+        asked.dedup();
+        assert_eq!(
+            asked,
+            vec!["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9"]
+        );
+    }
+
+    #[test]
+    fn a_branch_with_only_merged_pull_requests_waits_for_the_settled_recheck() {
+        let mut entry = sync_entry();
+        entry.history = vec![
+            PrSyncBranch {
+                last_ask: Some(asked_at("2026-11-06T11:00:00Z")),
+                ..sync_branch("done")
+            },
+            PrSyncBranch {
+                last_ask: Some(asked_at("2026-11-06T11:59:00Z")),
+                ..sync_branch("busy")
+            },
+        ];
+        entry.known = vec![
+            known_row(3, PrState::Merged, "octocat/Hello-World", Some("done")),
+            known_row(4, PrState::Merged, "octocat/Hello-World", Some("busy")),
+            known_row(5, PrState::Closed, "octocat/Hello-World", Some("busy")),
+        ];
+        let due = |now: &str| -> Vec<String> {
+            due_history_branches(&entry, at(now))
+                .into_iter()
+                .map(|b| b.name.clone())
+                .collect()
+        };
+
+        assert_eq!(due(NOON), vec!["busy"], "asked an hour ago and settled");
+        assert_eq!(due("2026-11-06T22:59:00Z"), vec!["busy"]);
+        assert_eq!(due("2026-11-06T23:00:00Z"), vec!["done", "busy"]);
+    }
+
+    #[test]
+    fn a_pull_request_the_window_did_not_return_is_refreshed_by_number() {
+        let mut entry = sync_entry();
+        entry.known = vec![known_row(
+            5,
+            PrState::Open,
+            "octocat/Hello-World",
+            Some("feat/x"),
+        )];
+        let returned_it = BranchAskRecord {
+            at: at("2026-11-06T11:57:00Z"),
+            ref_gone: false,
+            returned: vec![crate::model::PrKey::new(
+                "github.com",
+                "octocat/hello-world",
+                5,
+            )],
+        };
+        entry.current.last_ask = Some(returned_it.clone());
+        assert_eq!(
+            plan_one(
+                &entry,
+                &ours,
+                &legacy_policy(),
+                SyncTrigger::BlindPoll,
+                NOON
+            ),
+            vec!["github.com octocat/Hello-World feat/x as feat/x"],
+            "the branch's discovery carries it"
+        );
+
+        entry.current.last_ask = Some(BranchAskRecord {
+            returned: Vec::new(),
+            ..returned_it
+        });
+        let questions = plan_entries(
+            std::slice::from_ref(&entry),
+            &ours,
+            &legacy_policy(),
+            SyncTrigger::BlindPoll,
+            at(NOON),
+        );
+        assert_eq!(
+            described(&questions),
+            vec![
+                "github.com octocat/Hello-World feat/x as feat/x",
+                "github.com octocat/Hello-World #5",
+            ]
+        );
+        let (_, pos_repo) = build_chunk_query(&questions, &[0, 1]);
+        let data = serde_json::json!({
+            "r0": {
+                "q0_ref": { "associatedPullRequests": { "nodes": [ pr_node(30, "OPEN") ] } },
+                "q1_num": pr_node(5, "OPEN"),
+            },
+        });
+        let (answers, _) = parse_chunk_response(
+            &questions,
+            &[0, 1],
+            &pos_repo,
+            Some(&data),
+            std::slice::from_ref(&entry),
+            &|_, _| false,
+        );
+        let results = assemble_results(std::slice::from_ref(&entry), &questions, answers, at(NOON));
+        let got: Vec<String> = results[0]
+            .answers
+            .iter()
+            .map(|answer| match answer {
+                PrSyncAnswer::Found(pr) => format!("found #{}", pr.number),
+                PrSyncAnswer::Refreshed(pr) => format!("refreshed #{}", pr.number),
+            })
+            .collect();
+        assert_eq!(got, vec!["found #30", "refreshed #5"]);
+        assert_eq!(results[0].asked.len(), 1);
+        assert_eq!(results[0].asked[0].0, "feat/x");
+        assert_eq!(
+            results[0].asked[0].1.returned,
+            vec![crate::model::PrKey::new(
+                "github.com",
+                "octocat/Hello-World",
+                30
+            )]
+        );
+    }
+
+    #[test]
+    fn each_pull_request_is_refreshed_on_the_cadence_its_state_sets() {
+        let mut entry = sync_entry();
+        let mut migrated_open = known_row(10, PrState::Open, "octocat/Hello-World", None);
+        migrated_open.last_refreshed_at = None;
+        let mut migrated_merged = known_row(12, PrState::Merged, "octocat/Hello-World", None);
+        migrated_merged.last_refreshed_at = None;
+        let mut elsewhere = known_row(14, PrState::Merged, "acme/widget", None);
+        elsewhere.host = "git.example.com".to_string();
+        elsewhere.last_refreshed_at = None;
+        entry.known = vec![
+            known_row(1, PrState::Open, "octocat/Hello-World", Some("feat/x")),
+            known_row(2, PrState::Draft, "octocat/Hello-World", Some("feat/x")),
+            known_row(3, PrState::Merged, "octocat/Hello-World", Some("feat/x")),
+            known_row(4, PrState::Closed, "octocat/Hello-World", Some("feat/x")),
+            migrated_open,
+            migrated_merged,
+            elsewhere,
+        ];
+        let refreshes = |entry: &PrSyncEntry, trigger, now| -> Vec<String> {
+            plan_one(
+                entry,
+                &ours,
+                &GithubHostPolicy::LegacyNameRule,
+                trigger,
+                now,
+            )
+            .into_iter()
+            .filter(|q| q.contains('#'))
+            .collect()
+        };
+        let policy = GithubHostPolicy::Hosts(
+            ["github.com".to_string(), "git.example.com".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            plan_one(&entry, &ours, &policy, SyncTrigger::BlindPoll, NOON)
+                .into_iter()
+                .filter(|q| q.contains('#'))
+                .collect::<Vec<_>>(),
+            vec![
+                "github.com octocat/Hello-World #1",
+                "github.com octocat/Hello-World #2",
+                "github.com octocat/Hello-World #4",
+                "github.com octocat/Hello-World #10",
+                "github.com octocat/Hello-World #12",
+                "git.example.com acme/widget #14",
+            ],
+            "a running agent: everything but a merge, and every row never refreshed, wherever it lives"
+        );
+
+        entry.agent_exited = true;
+        entry.known.retain(|row| row.last_refreshed_at.is_some());
+        assert_eq!(
+            refreshes(&entry, SyncTrigger::BlindPoll, NOON),
+            vec![
+                "github.com octocat/Hello-World #1",
+                "github.com octocat/Hello-World #2",
+            ],
+            "an exited agent's closed pull request waits"
+        );
+        assert_eq!(
+            refreshes(&entry, SyncTrigger::OneShot, NOON),
+            vec![
+                "github.com octocat/Hello-World #1",
+                "github.com octocat/Hello-World #2",
+                "github.com octocat/Hello-World #4",
+            ],
+            "a deliberate trigger asks about it"
+        );
+        assert_eq!(
+            refreshes(&entry, SyncTrigger::BlindPoll, "2026-11-07T00:00:00Z"),
+            vec![
+                "github.com octocat/Hello-World #1",
+                "github.com octocat/Hello-World #2",
+                "github.com octocat/Hello-World #4",
+            ],
+            "and so does the settled recheck"
+        );
+    }
+
+    #[test]
+    fn an_exited_agent_whose_branch_is_finished_is_asked_about_only_on_a_deliberate_trigger() {
+        let mut entry = sync_entry();
+        entry.agent_exited = true;
+        entry.known = vec![known_row(
+            42,
+            PrState::Merged,
+            "octocat/Hello-World",
+            Some("feat/x"),
+        )];
+        for trigger in [SyncTrigger::BlindPoll, SyncTrigger::Focus] {
+            assert_eq!(
+                plan_one(&entry, &ours, &legacy_policy(), trigger, NOON),
+                Vec::<String>::new(),
+                "{trigger:?} costs nothing"
+            );
+        }
+        assert_eq!(
+            plan_one(&entry, &ours, &legacy_policy(), SyncTrigger::OneShot, NOON),
+            vec!["github.com octocat/Hello-World feat/x as feat/x +head"],
+            "a reused branch name can carry a new pull request"
+        );
+        entry.agent_exited = false;
+        assert_eq!(
+            plan_one(
+                &entry,
+                &ours,
+                &legacy_policy(),
+                SyncTrigger::BlindPoll,
+                NOON
+            ),
+            vec!["github.com octocat/Hello-World feat/x as feat/x +head"]
+        );
+    }
+
+    #[test]
+    fn discovery_needs_a_remote_dux_may_ask_and_a_refresh_goes_where_its_pull_request_lives() {
+        let mut entry = sync_entry();
+        let mut capitalised = known_row(7, PrState::Open, "octocat/Hello-World", None);
+        capitalised.host = "GitHub.COM".to_string();
+        let mut ineligible = known_row(8, PrState::Open, "acme/widget", None);
+        ineligible.host = "git.company.example".to_string();
+        entry.known = vec![capitalised, ineligible];
+        let github = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
+        let company = |_: &Path| {
             git::resolve_remote_from_git_output(
                 b"git@git.company.example:acme/widget.git\n",
-                &policy,
+                &github,
+            )
+        };
+        assert_eq!(company(Path::new("/")), git::RemoteResolution::Denied);
+
+        let unresolved = |_: &Path| git::RemoteResolution::Unresolved;
+        let resolvers: [&dyn Fn(&Path) -> git::RemoteResolution; 2] = [&company, &unresolved];
+        for resolve in resolvers {
+            assert_eq!(
+                plan_one(&entry, resolve, &github, SyncTrigger::BlindPoll, NOON),
+                vec!["github.com octocat/Hello-World #7"],
+                "no discovery, and nothing at all for the host gh does not serve"
+            );
+        }
+        assert_eq!(
+            plan_one(&entry, &ours, &github, SyncTrigger::BlindPoll, NOON),
+            vec![
+                "github.com octocat/Hello-World feat/x as feat/x +head",
+                "github.com octocat/Hello-World #7",
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_keeps_what_the_agent_has_and_what_was_opened_after_the_branch_was_born() {
+        let node = |number: u64, state: &str, created: &str| {
+            let mut node = pr_node(number, state);
+            node["createdAt"] = serde_json::json!(created);
+            node["headRefName"] = serde_json::json!("feat/x");
+            node
+        };
+        let nodes = vec![
+            node(1, "MERGED", "2026-01-01T00:00:00Z"),
+            node(2, "CLOSED", "2026-10-01T00:00:00Z"),
+            node(3, "MERGED", "2026-11-01T00:00:00Z"),
+            node(4, "CLOSED", "2026-11-02T00:00:00Z"),
+        ];
+        let mut entry = sync_entry();
+        entry.known = vec![known_row(
+            1,
+            PrState::Merged,
+            "octocat/Hello-World",
+            Some("feat/x"),
+        )];
+        let found = |identity_at: Option<&str>, entry: &PrSyncEntry| -> Vec<u64> {
+            let mut entry = entry.clone();
+            entry.current.identity_at = identity_at.map(at);
+            let questions = plan_entries(
+                std::slice::from_ref(&entry),
+                &ours,
+                &legacy_policy(),
+                SyncTrigger::OneShot,
+                at(NOON),
+            );
+            let data = serde_json::json!({
+                "r0": { "q0_ref": { "associatedPullRequests": { "nodes": nodes } } },
+            });
+            let (answers, _) = parse_chunk_response(
+                &questions,
+                &[0],
+                &[0],
+                Some(&data),
+                std::slice::from_ref(&entry),
+                &|_, _| false,
+            );
+            match &answers[0].1 {
+                QuestionAnswer::Discovery { found, .. } => {
+                    found.iter().map(|pr| pr.number).collect()
+                }
+                QuestionAnswer::Refresh(_) => panic!("a discovery answer"),
+            }
+        };
+
+        assert_eq!(
+            found(Some("2026-10-31T23:58:00Z"), &entry),
+            vec![1, 3, 4],
+            "born at the end of October: its own two, and the one it already has"
+        );
+        assert_eq!(
+            found(None, &entry),
+            vec![1, 4],
+            "nothing says when it was born: only the newest, beside the one it has"
+        );
+    }
+
+    #[test]
+    fn a_discovery_window_drops_other_repositories_and_nodes_it_cannot_read() {
+        let mut fork = pr_node_from(4, "OPEN", "contributor/Hello-World");
+        fork["createdAt"] = serde_json::json!("2026-11-02T00:00:00Z");
+        let mut unreadable = pr_node(5, "OPEN");
+        unreadable["state"] = serde_json::json!("QUEUED");
+        let mut draft = pr_node(3, "OPEN");
+        draft["isDraft"] = serde_json::json!(true);
+        draft["headRefName"] = serde_json::json!("feat/x");
+        draft["createdAt"] = serde_json::json!("2026-11-01T10:00:00Z");
+        draft["mergedAt"] = serde_json::Value::Null;
+        let entry = sync_entry();
+        let questions = plan_entries(
+            std::slice::from_ref(&entry),
+            &ours,
+            &legacy_policy(),
+            SyncTrigger::OneShot,
+            at(NOON),
+        );
+        let data = serde_json::json!({
+            "r0": { "q0_ref": { "associatedPullRequests": { "nodes": [draft, fork, unreadable] } } },
+        });
+        let (answers, _) = parse_chunk_response(
+            &questions,
+            &[0],
+            &[0],
+            Some(&data),
+            std::slice::from_ref(&entry),
+            &|_, _| false,
+        );
+        let QuestionAnswer::Discovery {
+            found,
+            returned,
+            ref_gone,
+        } = &answers[0].1
+        else {
+            panic!("a discovery answer");
+        };
+        assert!(!ref_gone);
+        assert_eq!(
+            returned,
+            &vec![crate::model::PrKey::new(
+                "github.com",
+                "octocat/Hello-World",
+                3
+            )]
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].number, 3);
+        assert!(found[0].is_draft, "isDraft decodes");
+        assert_eq!(found[0].head_branch.as_deref(), Some("feat/x"));
+        assert_eq!(found[0].gh_created_at, Some(at("2026-11-01T10:00:00Z")));
+        assert_eq!(found[0].gh_merged_at, None);
+    }
+
+    #[test]
+    fn a_host_whose_call_failed_answers_nothing_and_leaves_the_others_answers() {
+        let mut entry = sync_entry();
+        let mut elsewhere = known_row(7, PrState::Closed, "acme/widget", None);
+        elsewhere.host = "git.example.com".to_string();
+        entry.known = vec![
+            known_row(5, PrState::Open, "octocat/Hello-World", None),
+            elsewhere,
+        ];
+        let questions = plan_entries(
+            std::slice::from_ref(&entry),
+            &|_| git::RemoteResolution::Unresolved,
+            &GithubHostPolicy::Hosts(
+                ["github.com".to_string(), "git.example.com".to_string()]
+                    .into_iter()
+                    .collect(),
             ),
-            git::RemoteResolution::Denied,
+            SyncTrigger::BlindPoll,
+            at(NOON),
         );
+        assert_eq!(
+            described(&questions),
+            vec![
+                "github.com octocat/Hello-World #5",
+                "git.example.com acme/widget #7"
+            ]
+        );
+        let entries = std::slice::from_ref(&entry);
+        let (failed, rate) =
+            parse_chunk_response(&questions, &[0], &[0], None, entries, &|_, _| false);
+        assert!(failed.is_empty() && rate.is_none());
+        let reopened =
+            serde_json::json!({ "r0": { "q0_num": pr_node_from(7, "OPEN", "acme/widget") } });
+        let (answered, _) =
+            parse_chunk_response(&questions, &[1], &[0], Some(&reopened), entries, &|_, _| {
+                false
+            });
+        let results = assemble_results(entries, &questions, answered, at(NOON));
+        let [PrSyncAnswer::Refreshed(pr)] = results[0].answers.as_slice() else {
+            panic!("one refresh, got {:?}", results[0].answers);
+        };
+        assert_eq!((pr.number, pr.state.clone()), (7, PrState::Open));
+        assert_eq!(pr.host, "git.example.com");
 
-        let (results, planned) = plan_entries(
+        let missing_repo = serde_json::json!({ "r0": null });
+        let (answered, _) = parse_chunk_response(
+            &questions,
+            &[1],
+            &[0],
+            Some(&missing_repo),
+            entries,
+            &|_, _| false,
+        );
+        assert!(
+            answered.is_empty(),
+            "a repository that answered null answers nothing"
+        );
+    }
+
+    /// The agent's worktree with a branch `feat/x` two commits ahead of `main`,
+    /// plus an unrelated commit on `other`: the repository, the branch's tip,
+    /// its first commit and the stray commit.
+    fn repo_with_feature_branch() -> (tempfile::TempDir, String, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = crate::git::test_support::git_command()
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "test"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&["switch", "-q", "-c", "other"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "stray"]);
+        let stray = git(&["rev-parse", "HEAD"]);
+        git(&["switch", "-q", "main"]);
+        git(&["switch", "-q", "-c", "feat/x"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        (dir, tip, first, stray)
+    }
+
+    fn head_node(
+        number: u64,
+        created_at: &str,
+        head_oid: &str,
+        head_repo: Option<&str>,
+    ) -> serde_json::Value {
+        let mut node = pr_node(number, "MERGED");
+        node["createdAt"] = serde_json::json!(created_at);
+        node["headRefOid"] = serde_json::json!(head_oid);
+        node["headRepository"] =
+            serde_json::json!(head_repo.map(|name| serde_json::json!({ "nameWithOwner": name })));
+        node
+    }
+
+    /// What one cycle finds for `entry` with `branch` as its only earlier
+    /// branch, whose ref answers null and whose head-name lookup answers
+    /// `nodes`.
+    fn gone_branch_lookup(
+        entry: &PrSyncEntry,
+        branch: PrSyncBranch,
+        nodes: &[serde_json::Value],
+    ) -> Vec<u64> {
+        let mut entry = entry.clone();
+        entry.history = vec![branch];
+        let questions = plan_entries(
             std::slice::from_ref(&entry),
-            &|_| {
-                git::resolve_remote_from_git_output(
-                    b"git@git.company.example:acme/widget.git\n",
-                    &policy,
-                )
+            &ours,
+            &legacy_policy(),
+            SyncTrigger::BlindPoll,
+            at(NOON),
+        );
+        assert_eq!(
+            described(&questions)[1],
+            format!(
+                "github.com octocat/Hello-World {} as {} +head",
+                entry.history[0].name, entry.history[0].name
+            )
+        );
+        let data = serde_json::json!({
+            "r0": {
+                "q0_ref": { "associatedPullRequests": { "nodes": [] } },
+                "q1_ref": null,
+                "q1_head": { "nodes": nodes },
             },
-            &policy,
-            SyncTrigger::BlindPoll,
+        });
+        let (answers, _) = parse_chunk_response(
+            &questions,
+            &[0, 1],
+            &[0, 0],
+            Some(&data),
+            std::slice::from_ref(&entry),
+            &head_commit_is_the_branchs,
         );
-
+        let results = assemble_results(std::slice::from_ref(&entry), &questions, answers, at(NOON));
         assert!(
-            planned.is_empty(),
-            "a denied live address must produce no gh call, {} were planned to {:?}",
-            planned.len(),
-            planned.iter().map(|p| p.host.clone()).collect::<Vec<_>>(),
+            results[0]
+                .asked
+                .iter()
+                .any(|(name, ask)| name == &entry.history[0].name && ask.ref_gone)
         );
-        assert_eq!(results.len(), 1);
+        results[0]
+            .answers
+            .iter()
+            .map(|answer| match answer {
+                PrSyncAnswer::Found(pr) | PrSyncAnswer::Refreshed(pr) => pr.number,
+            })
+            .collect()
+    }
+
+    /// An earlier branch whose ref a merge deleted is looked up by head name
+    /// the next time it is due, and a pull request found that way is taken only
+    /// when its head commit is the branch's tip, in the history of its local
+    /// branch, or behind its recorded tip.
+    #[test]
+    fn a_gone_branchs_pull_request_is_found_by_head_name_only_on_the_branchs_own_commits() {
+        let (dir, tip, first, stray) = repo_with_feature_branch();
+        let mut entry = sync_entry();
+        entry.worktree_path = dir.path().to_string_lossy().into_owned();
+        entry.current = sync_branch("trunk");
+        entry.known = vec![known_row(
+            9,
+            PrState::Open,
+            "octocat/Hello-World",
+            Some("trunk"),
+        )];
+        let gone = |tip: &str, local: &str| PrSyncBranch {
+            identity_at: Some(at("2026-10-09T09:00:00Z")),
+            tip: Some(tip.to_string()),
+            last_ask: Some(BranchAskRecord {
+                at: at("2026-11-06T11:00:00Z"),
+                ref_gone: true,
+                returned: Vec::new(),
+            }),
+            ..sync_branch(local)
+        };
+        let lookup =
+            |branch, nodes: Vec<serde_json::Value>| gone_branch_lookup(&entry, branch, &nodes);
+        let ours_repo = Some("octocat/Hello-World");
+
         assert_eq!(
-            results[0].1.as_ref().map(|pr| pr.number),
-            Some(7),
-            "the agent keeps the pull request it last knew about",
+            lookup(
+                gone(&tip, "gone"),
+                vec![head_node(72, "2026-10-09T10:00:00Z", &tip, ours_repo)]
+            ),
+            vec![72],
+            "its recorded tip"
+        );
+        assert_eq!(
+            lookup(
+                gone(&tip, "gone"),
+                vec![head_node(72, "2026-10-09T10:00:00Z", &first, ours_repo)]
+            ),
+            vec![72],
+            "behind its recorded tip"
+        );
+        assert_eq!(
+            lookup(
+                gone("0123456789abcdef0123456789abcdef01234567", "feat/x"),
+                vec![head_node(72, "2026-10-09T10:00:00Z", &first, ours_repo)]
+            ),
+            vec![72],
+            "in the history of the local branch that is still there"
+        );
+        assert_eq!(
+            lookup(
+                gone(&tip, "gone"),
+                vec![head_node(72, "2026-10-09T10:00:00Z", &stray, ours_repo)]
+            ),
+            Vec::<u64>::new(),
+            "a reused name whose commit is not the branch's"
+        );
+        assert_eq!(
+            lookup(
+                gone(&tip, "gone"),
+                vec![head_node(
+                    72,
+                    "2026-10-09T10:00:00Z",
+                    &tip,
+                    Some("contributor/Hello-World")
+                )]
+            ),
+            Vec::<u64>::new(),
+            "a fork's pull request is somebody else's"
+        );
+        assert_eq!(
+            lookup(
+                gone(&tip, "gone"),
+                vec![head_node(72, "2026-10-01T10:00:00Z", &tip, ours_repo)]
+            ),
+            Vec::<u64>::new(),
+            "opened before the branch was born"
         );
     }
 
-    /// The THIRD place a host can enter, and the one that is easy to miss: a
-    /// host remembered from a previous pull request, read back from SQLite and
-    /// handed straight to `gh` without passing through either parser.
-    ///
-    /// An agent whose address cannot be read and whose stored host is not
-    /// eligible must produce NO `gh` invocation at all. It keeps what it last
-    /// knew rather than being reported as having no pull request, because dux
-    /// did not ask and therefore did not find out.
     #[test]
-    fn an_unreadable_address_with_an_ineligible_stored_host_plans_no_gh_call() {
-        let entry = PrSyncEntry {
-            known_pr: Some(StoredPr {
-                session_id: "s0".to_string(),
-                pr_number: 7,
-                host: "git.company.example".to_string(),
-                owner_repo: "acme/widget".to_string(),
-                state: "OPEN".to_string(),
-                title: "Widget".to_string(),
-                url: "https://git.company.example/acme/widget/pull/7".to_string(),
-            }),
-            ..planning_entry()
-        };
-        // `gh` serves github.com and nothing else, so the stored host does not
-        // qualify. It once might have, or it may predate the policy entirely.
-        let policy = GithubHostPolicy::Hosts(["github.com".to_string()].into_iter().collect());
-
-        let (results, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| git::RemoteResolution::Unresolved,
-            &policy,
-            SyncTrigger::BlindPoll,
-        );
-
-        assert!(
-            planned.is_empty(),
-            "an ineligible stored host must reach gh through no call at all, {} were planned",
-            planned.len(),
-        );
-        assert_eq!(results.len(), 1);
+    fn format_sync_cycle_summary_names_the_trigger_the_counts_and_the_cost() {
         assert_eq!(
-            results[0].1.as_ref().map(|pr| pr.number),
-            Some(7),
-            "and the agent keeps the pull request it last knew about",
+            format_sync_cycle_summary(SyncTrigger::BlindPoll, 5, 12, 9, 2),
+            "PR sync (blind poll): 5 agents, 12 questions, 9 answered, 2 GraphQL points"
         );
-
-        // The same entry under a policy that DOES name the host is queried
-        // normally, so the gate is the policy and not the fallback itself.
-        let serving =
-            GithubHostPolicy::Hosts(["git.company.example".to_string()].into_iter().collect());
-        let (_, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| git::RemoteResolution::Unresolved,
-            &serving,
-            SyncTrigger::BlindPoll,
+        assert_eq!(
+            format_sync_cycle_summary(SyncTrigger::Focus, 1, 0, 0, 0),
+            "PR sync (focus): 1 agents, 0 questions, 0 answered, 0 GraphQL points"
         );
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].host, "git.company.example");
+        assert_eq!(
+            format_sync_cycle_summary(SyncTrigger::OneShot, 1, 1, 0, 1),
+            "PR sync (one-shot): 1 agents, 1 questions, 0 answered, 1 GraphQL points"
+        );
     }
 
-    /// The live remote is lowercased by the parser, but a stored pull request
-    /// comes straight out of SQLite, and a legacy or externally written row can
-    /// carry a capitalised host. That host is handed to `gh --hostname`, so it
-    /// is lowercased at the planning boundary whatever its source.
+    /// A thread that panicked holding the plan leaves a plan that is still
+    /// whole, so the sync keeps reading it rather than freezing every PR.
     #[test]
-    fn plan_entries_lowercases_a_host_taken_from_a_stored_pull_request() {
-        let entry = PrSyncEntry {
-            known_pr: Some(StoredPr {
-                session_id: "s0".to_string(),
-                pr_number: 7,
-                host: "GitHub.COM".to_string(),
-                owner_repo: "octocat/Hello-World".to_string(),
-                state: "OPEN".to_string(),
-                title: "t".to_string(),
-                url: "https://github.com/octocat/Hello-World/pull/7".to_string(),
-            }),
-            ..planning_entry()
-        };
+    fn a_poisoned_plan_is_still_synced() {
+        let plan = Arc::new(Mutex::new(vec![sync_entry()]));
+        let poisoner = Arc::clone(&plan);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("lock");
+            panic!("poison the plan");
+        })
+        .join();
 
-        // No remote at all, so planning must fall back to the stored PR.
-        let (_, planned) = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| git::RemoteResolution::Unresolved,
+        let (results, _) = run_pr_sync(
+            &plan,
+            &std::collections::HashMap::new(),
             &legacy_policy(),
             SyncTrigger::BlindPoll,
         );
 
-        assert_eq!(planned.len(), 1);
-        assert_eq!(planned[0].host, "github.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, "s0");
+    }
+
+    #[test]
+    fn an_active_only_cycle_leaves_the_inactive_entries_alone() {
+        let mut working = sync_entry();
+        working.session_id = "working".to_string();
+        let mut dormant = sync_entry();
+        dormant.session_id = "dormant".to_string();
+        dormant.inactive = true;
+        let plan = vec![working, dormant];
+
+        let narrowed: Vec<String> = entries_for_scope(plan.clone(), SyncScope::ActiveOnly)
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        assert_eq!(narrowed, vec!["working".to_string()]);
+
+        let whole: Vec<String> = entries_for_scope(plan, SyncScope::Everything)
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        assert_eq!(
+            whole,
+            vec!["working".to_string(), "dormant".to_string()],
+            "every other cycle still asks about both"
+        );
     }
 }

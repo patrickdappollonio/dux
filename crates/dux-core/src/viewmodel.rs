@@ -2265,17 +2265,19 @@ mod tests {
 
         engine.process_worker_event(crate::worker::WorkerEvent::PrStatusReady(vec![
             crate::worker::PrStatusResult {
-                branch_generation: engine.pr_branch_generation("s1"),
                 session_id: "s1".to_string(),
-                pr: Some(crate::model::PrInfo {
-                    number: 7,
-                    state: PrState::Merged,
-                    title: "PR 7".to_string(),
-                    host: "github.com".to_string(),
-                    owner_repo: "acme/infra".to_string(),
-                    url: "https://github.com/acme/infra/pull/7".to_string(),
-                    ..Default::default()
-                }),
+                asked: Vec::new(),
+                answers: vec![crate::worker::PrSyncAnswer::Refreshed(
+                    crate::model::PrInfo {
+                        number: 7,
+                        state: PrState::Merged,
+                        title: "PR 7".to_string(),
+                        host: "github.com".to_string(),
+                        owner_repo: "acme/infra".to_string(),
+                        url: "https://github.com/acme/infra/pull/7".to_string(),
+                        ..Default::default()
+                    },
+                )],
             },
         ]));
         let vm = engine.spine();

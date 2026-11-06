@@ -219,7 +219,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pr_inactive_sessions: HashSet::default(),
         pr_inactive_sweep_at: Arc::default(),
         pr_return_checks_owed: HashSet::default(),
-        pr_branch_generations: HashMap::default(),
+        pr_branch_asks: HashMap::default(),
         pr_branch_checks_owed: HashSet::default(),
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         branch_sync_wait: Arc::new(BranchSyncWait::default()),

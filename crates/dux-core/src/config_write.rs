@@ -2149,6 +2149,18 @@ fn patch_ui_timing_and_github(doc: &mut DocumentMut, config: &Config) {
     patch_table_u16(
         doc,
         "ui",
+        "pr_history_branches_per_cycle",
+        config.ui.pr_history_branches_per_cycle,
+    );
+    patch_table_u32(
+        doc,
+        "ui",
+        "pr_settled_recheck_seconds",
+        config.ui.pr_settled_recheck_seconds,
+    );
+    patch_table_u16(
+        doc,
+        "ui",
         "github_probe_interval_secs",
         config.ui.github_probe_interval_secs,
     );

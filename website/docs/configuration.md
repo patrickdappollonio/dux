@@ -572,6 +572,32 @@ spinner: the work keeps going, and its result still shows up when it lands.
 The web shows the same messages as toasts with their own close button; see
 [Messages](/docs/web-workspace#messages).
 
+## How much dux asks GitHub about earlier branches (`[ui]`)
+
+```toml
+[ui]
+pr_history_branches_per_cycle = 8
+pr_settled_recheck_seconds = 43200
+```
+
+dux keeps track of the pull requests of every branch an agent's worktree has been on, not
+just the one it is on now. The branch it is on now is asked about on every pull-request
+poll; the earlier ones take turns:
+
+- **`pr_history_branches_per_cycle`** is how many earlier branches each poll asks about,
+  least recently asked first, so every one comes round again within a few polls. The
+  project's default branch is never one of them. `0` asks about the current branch alone,
+  and anything above `50` is held to `50`.
+- **`pr_settled_recheck_seconds`** is how long an earlier branch whose pull requests are
+  all merged, and a closed pull request of an agent whose process exited, wait before they
+  are asked about again. The default is 12 hours; the value is held to between 30 seconds
+  and 604800 seconds (7 days).
+
+A pull request dux has found stays on the agent until you hide or detach it: a branch
+nobody pushes to any more never takes its pull request away. How often the poll itself
+runs is set by `pr_poll_interval_seconds`; see
+[How PR status stays fresh](/docs/creating-agents#how-pr-status-stays-fresh).
+
 ## Environment variables and portable paths
 
 Project paths understand `$HOME`, `${HOME}`, and `~`, and environment values expand
