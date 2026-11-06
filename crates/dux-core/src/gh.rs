@@ -390,6 +390,29 @@ fn run_entries(
     trigger: SyncTrigger,
     now: chrono::DateTime<chrono::Utc>,
 ) -> PrSyncReport {
+    run_entries_with(
+        entries,
+        backoff,
+        policy,
+        trigger,
+        now,
+        &|path| live_remote_resolver(path, policy),
+        &|args| run_gh_with_timeout(args, GH_CALL_TIMEOUT),
+    )
+}
+
+/// [`run_entries`] with how a worktree's remote is read and how `gh` is
+/// called handed in, so the grouping by host and the merging of every host's
+/// answers can be exercised without git or a `gh`.
+fn run_entries_with(
+    entries: &[PrSyncEntry],
+    backoff: &BackoffSnapshot,
+    policy: &GithubHostPolicy,
+    trigger: SyncTrigger,
+    now: chrono::DateTime<chrono::Utc>,
+    resolve_remote: &dyn Fn(&Path) -> git::RemoteResolution,
+    call_gh: &dyn Fn(&[&str]) -> GhCallOutcome,
+) -> PrSyncReport {
     // The remote each worktree names is the agent's own repository, which
     // the answers carry back whether or not anything was asked there.
     let remotes: std::cell::RefCell<BTreeMap<std::path::PathBuf, git::GitHubRemote>> =
@@ -397,7 +420,7 @@ fn run_entries(
     let questions = plan_entries(
         entries,
         &|path| {
-            let resolution = live_remote_resolver(path, policy);
+            let resolution = resolve_remote(path);
             if let git::RemoteResolution::Allowed(remote) = &resolution {
                 remotes.borrow_mut().insert(
                     path.to_path_buf(),
@@ -440,7 +463,8 @@ fn run_entries(
         let mut chunk: Vec<usize> = Vec::new();
         let mut alias_count = 0usize;
         let mut run = |chunk: &[usize]| {
-            let (found, rl, failed, limited) = run_chunk(&host, &questions, chunk, entries);
+            let (found, rl, failed, limited) =
+                run_chunk(&host, &questions, chunk, entries, call_gh);
             answers.extend(found);
             points += chunk_cost(rl.as_ref());
             rate = tighter_rate_limit(rate.take(), rl);
@@ -1414,40 +1438,39 @@ fn run_chunk(
     questions: &[Question],
     chunk: &[usize],
     entries: &[PrSyncEntry],
+    call_gh: &dyn Fn(&[&str]) -> GhCallOutcome,
 ) -> ChunkOutcome {
     let (query, pos_repo) = build_chunk_query(questions, chunk);
 
     // On a spawn failure / timeout the chunk answers nothing, and every pull
     // request keeps what it last knew.
     let qarg = format!("query={query}");
-    let (data_json, stderr): (Option<serde_json::Value>, String) = match run_gh_with_timeout(
-        &["api", "graphql", "--hostname", host, "-f", &qarg],
-        GH_CALL_TIMEOUT,
-    ) {
-        GhCallOutcome::Completed(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // IMPORTANT: `gh api graphql` exits non-zero whenever the response
-            // carries any `errors` (e.g. one deleted-repo alias returns
-            // `repository: null` + NOT_FOUND), but `data` is still present. Parse
-            // stdout regardless of exit status; a single bad alias must not
-            // poison the whole batch.
-            (
-                serde_json::from_str::<serde_json::Value>(stdout.trim()).ok(),
-                stderr,
-            )
-        }
-        GhCallOutcome::TimedOut => (
-            None,
-            format!(
-                "gh api graphql timed out after {}s",
-                GH_CALL_TIMEOUT.as_secs()
+    let (data_json, stderr): (Option<serde_json::Value>, String) =
+        match call_gh(&["api", "graphql", "--hostname", host, "-f", &qarg]) {
+            GhCallOutcome::Completed(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // IMPORTANT: `gh api graphql` exits non-zero whenever the response
+                // carries any `errors` (e.g. one deleted-repo alias returns
+                // `repository: null` + NOT_FOUND), but `data` is still present. Parse
+                // stdout regardless of exit status; a single bad alias must not
+                // poison the whole batch.
+                (
+                    serde_json::from_str::<serde_json::Value>(stdout.trim()).ok(),
+                    stderr,
+                )
+            }
+            GhCallOutcome::TimedOut => (
+                None,
+                format!(
+                    "gh api graphql timed out after {}s",
+                    GH_CALL_TIMEOUT.as_secs()
+                ),
             ),
-        ),
-        GhCallOutcome::Failed(msg) | GhCallOutcome::NotFound(msg) => {
-            (None, format!("failed to run gh: {msg}"))
-        }
-    };
+            GhCallOutcome::Failed(msg) | GhCallOutcome::NotFound(msg) => {
+                (None, format!("failed to run gh: {msg}"))
+            }
+        };
     // Collapse both an absent `data` key and an explicit `data: null` (a real
     // GraphQL execution-failure shape) to "no data", so both drive the
     // hard-failure path.
@@ -5143,6 +5166,7 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
 
     #[test]
     fn a_host_whose_call_failed_answers_nothing_and_leaves_the_others_answers() {
+        use std::os::unix::process::ExitStatusExt;
         let mut entry = sync_entry();
         let mut elsewhere = known_row(7, PrState::Closed, "acme/widget", None);
         elsewhere.host = "git.example.com".to_string();
@@ -5150,51 +5174,83 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             known_row(5, PrState::Open, "octocat/Hello-World", None),
             elsewhere,
         ];
-        let questions = plan_entries(
-            std::slice::from_ref(&entry),
-            &|_| git::RemoteResolution::Unresolved,
-            &GithubHostPolicy::Hosts(
-                ["github.com".to_string(), "git.example.com".to_string()]
-                    .into_iter()
-                    .collect(),
-            ),
-            SyncTrigger::BlindPoll,
-            at(NOON),
+        let policy = GithubHostPolicy::Hosts(
+            ["github.com".to_string(), "git.example.com".to_string()]
+                .into_iter()
+                .collect(),
         );
+        let unresolved = |_: &Path| git::RemoteResolution::Unresolved;
         assert_eq!(
-            described(&questions),
+            described(&plan_entries(
+                std::slice::from_ref(&entry),
+                &unresolved,
+                &policy,
+                SyncTrigger::BlindPoll,
+                at(NOON),
+            )),
             vec![
                 "github.com octocat/Hello-World #5",
                 "git.example.com acme/widget #7"
             ]
         );
-        let entries = std::slice::from_ref(&entry);
-        let (failed, rate) =
-            parse_chunk_response(&questions, &[0], &[0], None, entries, &|_, _| false);
-        assert!(failed.is_empty() && rate.is_none());
-        let reopened =
-            serde_json::json!({ "r0": { "q0_num": pr_node_from(7, "OPEN", "acme/widget") } });
-        let (answered, _) =
-            parse_chunk_response(&questions, &[1], &[0], Some(&reopened), entries, &|_, _| {
-                false
-            });
-        let results = assemble_results(entries, &questions, answered, at(NOON));
+        // github.com cannot be reached; git.example.com answers with `example`.
+        let sync = |example: serde_json::Value,
+                    resolve: &dyn Fn(&Path) -> git::RemoteResolution| {
+            let answer = serde_json::json!({ "data": example }).to_string();
+            run_entries_with(
+                std::slice::from_ref(&entry),
+                &BackoffSnapshot::new(),
+                &policy,
+                SyncTrigger::BlindPoll,
+                at(NOON),
+                resolve,
+                &|args: &[&str]| {
+                    if args.contains(&"github.com") {
+                        GhCallOutcome::Failed("connection refused".to_string())
+                    } else {
+                        GhCallOutcome::Completed(std::process::Output {
+                            status: std::process::ExitStatus::from_raw(0),
+                            stdout: answer.clone().into_bytes(),
+                            stderr: Vec::new(),
+                        })
+                    }
+                },
+            )
+        };
+
+        let (results, signals) = sync(
+            serde_json::json!({ "r0": { "q0_num": pr_node_from(7, "OPEN", "acme/widget") } }),
+            &unresolved,
+        );
         let [PrSyncAnswer::Refreshed(pr)] = results[0].answers.as_slice() else {
             panic!("one refresh, got {:?}", results[0].answers);
         };
         assert_eq!((pr.number, pr.state.clone()), (7, PrState::Open));
         assert_eq!(pr.host, "git.example.com");
-
-        let missing_repo = serde_json::json!({ "r0": null });
-        let (answered, _) = parse_chunk_response(
-            &questions,
-            &[1],
-            &[0],
-            Some(&missing_repo),
-            entries,
-            &|_, _| false,
+        let failed: Vec<(&str, bool)> = signals
+            .iter()
+            .map(|signal| (signal.host.as_str(), signal.hard_failed))
+            .collect();
+        assert_eq!(
+            failed,
+            vec![("git.example.com", false), ("github.com", true)]
         );
-        let results = assemble_results(entries, &questions, answered, at(NOON));
+
+        // The worktree's remote is the agent's own repository, reported even
+        // though the host it is on answered nothing.
+        let (results, _) = sync(serde_json::json!({ "r0": null }), &|_: &Path| {
+            git::RemoteResolution::Allowed(git::GitHubRemote {
+                host: "GitHub.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            })
+        });
+        assert_eq!(
+            results[0].own_repo,
+            Some(git::GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "octocat/Hello-World".to_string(),
+            })
+        );
         let [PrSyncAnswer::Unanswered(key)] = results[0].answers.as_slice() else {
             panic!(
                 "a repository that answered null says only that it was asked, got {:?}",
