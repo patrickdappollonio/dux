@@ -14,7 +14,7 @@ use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, ListItem, Paragraph};
 
-use super::components::ellipsis::{ellipsize_spans, pad_to_width};
+use super::components::ellipsis::{ellipsize_spans, fit_to_width, pad_to_width};
 use super::components::{Hint, PickerList, labelled_name, modal_hint_line};
 use super::render::centered_rect;
 use super::{App, OverlayMouseLayout, PromptState, PullRequestsPrompt, PullRequestsView};
@@ -806,7 +806,7 @@ impl App {
             ),
             Span::styled(pad_to_width(pr.state.word(), 8), Style::default().fg(color)),
             Span::styled(
-                pad_to_width(where_from, 20),
+                format!("{} ", fit_to_width(where_from, 19)),
                 Style::default().fg(self.theme.hint_desc_fg),
             ),
             Span::styled(
@@ -1091,6 +1091,30 @@ mod tests {
         assert!(
             shown.contains("attached by you") && shown.contains("in the band"),
             "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_long_branch_name_is_cut_and_never_runs_into_the_title() {
+        let mut app = test_app(default_bindings());
+        three_prs(&mut app);
+        app.engine
+            .agent_prs
+            .get_mut("session-1")
+            .expect("rows")
+            .iter_mut()
+            .find(|row| row.number == 418)
+            .expect("row")
+            .head_branch = Some("login-session-cookie-handling".to_string());
+        open_modal(&mut app);
+        let shown = screen(&draw(&mut app, 140, 40));
+        let row = shown
+            .lines()
+            .find(|line| line.contains("o/r#418"))
+            .expect(&shown);
+        assert!(
+            row.contains("login-session-cook\u{2026} Store every tab"),
+            "{row}"
         );
     }
 
