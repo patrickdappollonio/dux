@@ -174,6 +174,13 @@ pub(crate) enum AttachedBefore {
 }
 
 impl Engine {
+    /// How the surfaces name one of `session_id`'s pull requests: `#418` in
+    /// the agent's own repository, `acme/infra#77` from any other, exactly as
+    /// the status messages about it do.
+    pub fn pull_request_label(&self, session_id: &str, row: &AgentPr) -> String {
+        pr_label(self.pr_own_repos.get(session_id), row)
+    }
+
     /// The agent a pull-request change is for, its rows and its preferences,
     /// or the refusal: an unknown agent, a standalone one, or an attach still
     /// resolving for it (which owns its pull requests until it lands).
