@@ -63,7 +63,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 | [`dux agents prs detach`](/docs/cli-reference#dux-agents-prs-detach), [`hide`](/docs/cli-reference#dux-agents-prs-hide), [`unhide`](/docs/cli-reference#dux-agents-prs-unhide) `<agent> <ref>` | Detaches one you attached, hides one dux found, or shows a hidden one again in the place it had. |
 | [`dux agents prs sort <agent> auto\|manual`](/docs/cli-reference#dux-agents-prs-sort) | Orders the pull requests automatically (open, draft, merged, closed, newest first) or in your own order. |
 | [`dux agents prs move <agent> <ref> <to>`](/docs/cli-reference#dux-agents-prs-move) | Moves one to the `top`, `up`, `down`, or to a position counted from 1. |
-| [`dux agents prs branches <agent>`](/docs/cli-reference#dux-agents-prs-branches) | Every branch the agent's worktree has been on, the current one first and the rest newest first, with its former names and its pull requests, then the attached ones on none of them. |
+| [`dux agents prs branches <agent>`](/docs/cli-reference#dux-agents-prs-branches) | Every branch the agent's worktree has been on, the current one first and the rest newest first, with its former names and its pull requests, then the pull requests on none of them: the ones you attached, and any dux found on a branch not listed. |
 | [`dux terminals ls`](/docs/cli-reference#dux-terminals-ls) | Every terminal and who owns it. |
 | [`dux terminals add`](/docs/cli-reference#dux-terminals-add) | Opens a terminal: in an agent's worktree with `--agent`, at a project's root with `--project`, or a standalone one in your home folder with neither. |
 | [`dux terminals rm <terminal>`](/docs/cli-reference#dux-terminals-rm) | Closes a terminal. |
