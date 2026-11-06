@@ -4,9 +4,9 @@
 //! on.
 //!
 //! None of these needs the GitHub integration or a signed-in `gh`: a pull
-//! request must never outlive the ability to remove it. So each one reads the
-//! agent's rows from the session database, which keeps them while the
-//! integration is off, rather than from memory, which does not.
+//! request must never outlive the ability to remove it. So each one falls back
+//! to the agent's rows in the session database, which keeps them while the
+//! integration is off, when memory holds none.
 
 use super::{
     Engine, InFlightKey, STANDALONE_ADD_AS_PROJECT_REMEDY, StatusUpdate,
@@ -197,13 +197,30 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
             anyhow::bail!(pr_attach_in_flight_message(&agent));
         }
+        let (rows, prefs) = self.pr_change_base(session_id)?;
+        Ok(PrChange { agent, rows, prefs })
+    }
+
+    /// The rows and preferences a change to an agent's pull requests starts
+    /// from: memory whenever it holds the agent's rows, because a change
+    /// whose save failed lives only there until a restart, and the session
+    /// database when it does not (the integration is off, or nothing was
+    /// loaded for the agent).
+    pub(crate) fn pr_change_base(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<(Vec<AgentPr>, PrPrefs)> {
+        if let Some(rows) = self.agent_prs.get(session_id) {
+            let prefs = self.pr_prefs.get(session_id).cloned().unwrap_or_default();
+            return Ok((rows.clone(), prefs));
+        }
         let rows = self.session_store.load_agent_prs_of(session_id)?;
         let prefs = self
             .session_store
             .load_pr_prefs()?
             .remove(session_id)
             .unwrap_or_default();
-        Ok(PrChange { agent, rows, prefs })
+        Ok((rows, prefs))
     }
 
     /// Store a change and mirror it in memory. Memory takes it even when the

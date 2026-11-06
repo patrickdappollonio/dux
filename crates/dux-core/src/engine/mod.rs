@@ -5958,12 +5958,7 @@ impl Engine {
             anyhow::bail!("cannot attach PR #{number}: its state could not be read");
         };
         let key = crate::model::PrKey::new(info.host.clone(), info.owner_repo.clone(), number);
-        let mut rows = self.session_store.load_agent_prs_of(session_id)?;
-        let prefs = self
-            .session_store
-            .load_pr_prefs()?
-            .remove(session_id)
-            .unwrap_or_default();
+        let (mut rows, prefs) = self.pr_change_base(session_id)?;
         let earlier = rows.iter().find(|row| row.is(&key)).map(|row| {
             if row.attached {
                 pull_requests::AttachedBefore::Attached
@@ -12524,29 +12519,32 @@ mod tests {
         assert_eq!(engine.session_store.attached_prs_for_tests(), Vec::new());
     }
 
-    /// A detach that cannot read the preferences keeps the attachment, in
-    /// memory and on disk.
+    /// A change whose save fails holds in memory and says so, and the next
+    /// change starts from what memory holds, so it does not undo the first.
     #[test]
-    fn a_detach_that_cannot_read_the_preferences_keeps_the_attachment() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        let session = sample_session("s1", "p1", "feat");
-        engine.session_store.upsert_session(&session).unwrap();
-        engine.sessions.push(session);
-        engine
-            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
-            .expect("attach");
-        engine
-            .session_store
-            .break_pr_prefs_table_for_test()
-            .unwrap();
+    fn a_change_whose_save_fails_holds_for_the_next_change() {
+        let (mut engine, _tmp) = engine_with_prs(&[found_pr(1, 1, "a"), found_pr(2, 2, "b")]);
+        engine.session_store.run_sql_for_tests(
+            "create trigger refuse_pr_writes before insert on session_pull_requests \
+             begin select raise(fail, 'disk full'); end;",
+        );
+        let key = |n| crate::model::PrKey::new("github.com", "o/r", n);
 
-        engine
-            .detach_pull_request("s1", &crate::model::PrKey::new("github.com", "o/r", 12))
-            .expect_err("the preferences cannot be read");
+        for number in [1, 2] {
+            let update = engine.hide_pull_request("s1", &key(number)).unwrap();
+            assert_eq!(update.tone, crate::statusline::StatusTone::Error);
+            assert!(
+                update.message.contains("It holds until dux restarts."),
+                "{}",
+                update.message
+            );
+        }
 
-        assert!(engine.attached_pr("s1").is_some());
-        assert_eq!(engine.session_store.attached_prs_for_tests().len(), 1);
+        let hidden: Vec<(u64, bool)> = engine.agent_prs["s1"]
+            .iter()
+            .map(|row| (row.number, row.hidden))
+            .collect();
+        assert_eq!(hidden, vec![(1, true), (2, true)]);
     }
 
     /// With the preferences unreadable no sync result is applied for an agent
