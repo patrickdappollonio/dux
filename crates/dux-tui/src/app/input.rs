@@ -16759,6 +16759,13 @@ not_a_real_action = ["x"]
                 chrono::Utc::now(),
             )],
         );
+        app.engine.pr_own_repos.insert(
+            "session-1".to_string(),
+            dux_core::git::GitHubRemote {
+                host: "github.com".to_string(),
+                owner_repo: "o/r".to_string(),
+            },
+        );
         app.open_rename_session();
         assert!(matches!(
             app.prompt,
@@ -25118,6 +25125,8 @@ not_a_real_action = ["x"]
     #[test]
     fn detach_pull_request_drops_the_attached_pull_request_and_its_badge() {
         let mut app = test_app(default_bindings());
+        // Pull requests are held in memory only while the integration is on.
+        app.engine.github_integration_enabled = true;
         // The override row has a foreign key on the session row, so the
         // fixture session must be persisted before the pin can be.
         let session = app.engine.sessions[0].clone();
