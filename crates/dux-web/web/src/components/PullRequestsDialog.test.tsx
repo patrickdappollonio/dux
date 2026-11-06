@@ -301,11 +301,13 @@ describe("PullRequestsDialog rows", () => {
 })
 
 describe("PullRequestsDialog header", () => {
-  it("gives the view switch the touch floor under a finger", () => {
+  it("gives the view switch the touch floor under a finger, and fills the selected view", () => {
     seed(session())
     render(<PullRequestsDialog />)
     for (const tab of screen.getAllByRole("tab")) {
       expect(tab.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
+      expect(tab.className).toMatch(/(^| )dark:data-active:bg-foreground( |$)/)
+      expect(tab.className).toMatch(/(^| )dark:data-active:text-background( |$)/)
     }
   })
 

@@ -100,8 +100,10 @@ const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
 // mouse, the 40px floor under a finger.
 const ROW_CONTROL = "size-8 pointer-coarse:size-10"
 // A view tab fills its list beside a mouse and takes the 40px floor under a
-// finger.
-const VIEW_TRIGGER = "pointer-coarse:h-10"
+// finger. The selected one is a filled segment in the foreground tone, which
+// the primitive's own faint tint does not read as on this dialog's surface.
+const VIEW_TRIGGER =
+  "pointer-coarse:h-10 data-active:bg-foreground data-active:text-background dark:data-active:bg-foreground dark:data-active:text-background data-active:hover:text-background dark:data-active:hover:text-background"
 
 type View = "prs" | "branches"
 
