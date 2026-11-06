@@ -5,6 +5,7 @@ import type { ReactNode } from "react"
 
 import { PrBanner } from "@/components/PrBanner"
 import type { PrKeyView, PrView } from "@/lib/types"
+import { sessionPrs } from "@/lib/pr"
 import { stubMatchMedia } from "@/test/matchMedia"
 import { type RawWorkspace, normalizeWorkspace } from "@/lib/workspaceApi"
 
@@ -83,20 +84,25 @@ describe("PrBanner with a title that arrived over the wire", () => {
   })
 
   it("draws the title in its stored order, with no bidi control left in it", () => {
+    const crafted = pr({ title: "Fix login \u202Eexe.txt\u202C" })
     const spine = normalizeWorkspace({
       projects: [],
       sessions: [
         {
           id: "s1",
           project_id: "p1",
-          pr: pr({ title: "Fix login \u202Eexe.txt\u202C" }),
+          pr: crafted,
+          prs: [crafted],
+          prs_hidden: [pr({ number: 9, title: "Hidden \u2067one\u2069" })],
         },
       ],
       sidebar: { groups: [], agentless_start: null },
     } as unknown as RawWorkspace)
-    const { container } = render(banner([spine.sessions[0].pr as PrView]))
+    const session = spine.sessions[0]
+    const { container } = render(banner(sessionPrs(session)))
     expect(container.textContent).toContain("Fix login exe.txt")
     expect(container.textContent).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/)
+    expect(session.prs_hidden?.map((p) => p.title)).toEqual(["Hidden one"])
   })
 })
 
