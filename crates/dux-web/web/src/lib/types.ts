@@ -55,13 +55,33 @@ export interface BranchChoiceView {
 
 export interface PrView {
   number: number
-  state: "open" | "merged" | "closed"
+  state: "open" | "draft" | "merged" | "closed"
   title: string
   url: string
-  /** True when this PR was manually attached rather than autodetected from the
-   * branch name. Drives the agent menu's attach-label flip; detach is offered on
-   * any association, so it is gated on the PR's presence rather than on this. */
+  /** The same as `attached`, under its older name. */
   overridden: boolean
+  host?: string
+  owner_repo?: string
+  /** Whether it lives in the agent's own repository, so it can be named `#418`
+   * rather than `acme/infra#77`. */
+  own_repo?: boolean
+  /** The branch it merges from, once GitHub has said. */
+  head_branch?: string
+  /** dux found it on one of the agent's branches. */
+  found?: boolean
+  /** The user attached it; detach is offered only for one of these. */
+  attached?: boolean
+  created_at?: string
+  updated_at?: string
+  closed_at?: string
+  merged_at?: string
+}
+
+/** Which pull request a change names. */
+export interface PrKeyView {
+  host: string
+  owner_repo: string
+  number: number
 }
 
 /** How a tab's last run ended, recorded at the moment it ended. An unrecognised
@@ -169,12 +189,17 @@ export interface SessionView {
   workspace: AgentWorkspaceWire
   status: SessionStatus
   auto_reopen_enabled: boolean
+  /** The pull request the agent shows: the first of `prs`. */
   pr?: PrView
-  /** True while the user has detached this agent's pull request, which stops dux
-   * looking for one until they attach a PR by hand or resume detection. Lives on
-   * the session rather than on `pr` because it describes the state where there is
-   * no PR. Absent reads as false. */
-  pr_autodetect_suppressed?: boolean
+  /** Every pull request the agent shows, in its order. Absent when none. */
+  prs?: PrView[]
+  /** The pull requests the user hid. Absent when none. */
+  prs_hidden?: PrView[]
+  /** How the pull requests are ordered. */
+  pr_sort?: "automatic" | "manual"
+  /** Moves whenever the agent's pull requests, their order or its branch list
+   * change. */
+  pr_revision?: number
   /** The id of this agent's session-slot tab. Closing it hands the slot to the
    * next tab in strip order, so this pointer moves; an agent's only tab cannot be
    * closed. Read it through `isFirstTab` in `lib/agentTabs.ts` rather than

@@ -91,20 +91,6 @@ fn branch_rename_failed(old_branch: &str, new_branch: &str, err: &str) -> Status
 }
 
 impl Engine {
-    /// The number of the OPEN pull request dux knows for this agent's branch,
-    /// for the rename dialog's warning. From the pull-request sync dux already
-    /// runs; nothing is asked of GitHub here.
-    pub fn rename_open_pull_request(&self, session_id: &str) -> Option<u64> {
-        self.shown_pr(session_id)
-            .filter(|pr| {
-                matches!(
-                    pr.state,
-                    crate::model::PrState::Open | crate::model::PrState::Draft
-                )
-            })
-            .map(|pr| pr.number)
-    }
-
     /// Where to ask whether this agent's branch has been pushed, and under
     /// which name: its worktree and branch, or `None` for an agent without one.
     pub fn rename_pushed_probe(&self, session_id: &str) -> Option<(String, String)> {

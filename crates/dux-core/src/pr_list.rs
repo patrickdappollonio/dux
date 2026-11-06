@@ -232,7 +232,7 @@ fn same_set(visible: &[PrKey], wanted: &[PrKey]) -> bool {
 
 /// The one row whose move turns `before` into `after`, when one does. A swap
 /// of two neighbours is a move of either; the earlier one is taken.
-fn single_moved(before: &[PrKey], after: &[PrKey]) -> Option<PrKey> {
+pub(crate) fn single_moved(before: &[PrKey], after: &[PrKey]) -> Option<PrKey> {
     before.iter().find_map(|candidate| {
         let rest = |list: &[PrKey]| -> Vec<PrKey> {
             list.iter().filter(|k| *k != candidate).cloned().collect()

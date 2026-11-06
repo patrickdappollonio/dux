@@ -8,6 +8,7 @@ import type { BranchOrigin } from "./deleteAgent"
 import type { Prose } from "./prose"
 import type {
   AcceptedOperation,
+  PrKeyView,
   SessionView,
   StartupLogContent,
   StartupLogsList,
@@ -331,29 +332,22 @@ export const sessionsApi = {
         forceConnectedQuery(accepted, true),
       { restart_tabs: restartTabs },
     ),
-  // Attaches a pull request from the raw typed reference. Replies 202 with the keyed
-  // status op id, and the outcome rides the status stream; a synchronous refusal is a
-  // 400 and throws.
+  // Attaches a pull request from the raw typed reference, beside the ones the
+  // agent has. Replies 202 with the keyed status op id, and the outcome rides the
+  // status stream; a synchronous refusal is a 400 and throws.
   attachPullRequest: (id: string, pr: string) =>
     request<{ op_id: string }>(
-      "PUT",
-      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests`,
       { pr },
     ),
-  // Detach the agent's pull request: the pin goes if there is one, the badge
-  // clears, and dux stops looking for a PR on this agent. Synchronous; the
-  // info status rides the stream. Applies to an autodetected association too.
-  detachPullRequest: (id: string) =>
-    request<void>(
-      "DELETE",
-      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request`,
-    ),
-  // The way back from a detach: switch autodetection on again and check once
-  // now. Synchronous, shaped like the detach beside it.
-  resumePullRequestAutodetection: (id: string) =>
+  // Detach one pull request the user attached. Synchronous; the info status
+  // rides the stream.
+  detachPullRequest: (id: string, pr: PrKeyView) =>
     request<void>(
       "POST",
-      `/api/v1/sessions/${encodeURIComponent(id)}/pull-request/autodetect`,
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/detach`,
+      pr,
     ),
   // Flat model: reorder every agent as one global list. `sessionIds` must be the
   // complete session set, in the desired order (the server validates strictly).

@@ -451,7 +451,6 @@ mod tests {
                 "show-terminal",
                 "open-current-pr",
                 "detach-pull-request",
-                "resume-pull-request-autodetection",
                 "kill-running",
                 "resource-monitor",
                 "refresh-changes",

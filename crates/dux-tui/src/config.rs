@@ -182,6 +182,9 @@ const RETIRED_KEY_ACTIONS: &[&str] = &[
     "sort_agents_by_updated",
     "sort_agents_by_created",
     "sort_agents_by_name",
+    // An agent's pull requests are hidden one at a time now; there is no
+    // whole-agent detection switch to resume.
+    "resume_pull_request_autodetection",
 ];
 
 /// Remove `[keys]` entries for retired actions so an old config that still binds

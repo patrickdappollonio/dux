@@ -209,14 +209,14 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].body).toEqual({ provider: "codex" })
   })
 
-  it("submitAttachPullRequest PUTs the typed reference and closes the dialog", async () => {
+  it("submitAttachPullRequest POSTs the typed reference and closes the dialog", async () => {
     const mod = await loadStore()
     mod.openAttachPullRequest("s1")
     mod.setAttachPullRequestDraft("  #123  ")
     mod.submitAttachPullRequest()
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
-    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-request")
-    expect(actionCalls[0].method).toBe("PUT")
+    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-requests")
+    expect(actionCalls[0].method).toBe("POST")
     // The draft is trimmed; the raw reference text rides as `pr`.
     expect(actionCalls[0].body).toEqual({ pr: "#123" })
     // Deferred action: the dialog closes on submit, the outcome rides the
@@ -234,22 +234,17 @@ describe("store write actions route to REST", () => {
     expect(mod.getSnapshot().attachPullRequestTarget).toBe("s1")
   })
 
-  it("detachPullRequest DELETEs the pull-request endpoint", async () => {
+  it("detachPullRequest POSTs the pull request it names to the detach endpoint", async () => {
     const mod = await loadStore()
-    mod.detachPullRequest("s1")
+    mod.detachPullRequest("s1", { host: "github.com", owner_repo: "o/r", number: 12 })
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
-    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-request")
-    expect(actionCalls[0].method).toBe("DELETE")
-  })
-
-  it("resumePullRequestAutodetection POSTs the autodetect endpoint", async () => {
-    const mod = await loadStore()
-    mod.resumePullRequestAutodetection("s1")
-    await vi.waitFor(() => expect(actionCalls.length).toBe(1))
-    expect(actionCalls[0].url).toBe(
-      "/api/v1/sessions/s1/pull-request/autodetect",
-    )
+    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-requests/detach")
     expect(actionCalls[0].method).toBe("POST")
+    expect(actionCalls[0].body).toEqual({
+      host: "github.com",
+      owner_repo: "o/r",
+      number: 12,
+    })
   })
 
   it("pullProject POSTs the new project pull endpoint", async () => {
@@ -335,17 +330,7 @@ describe("store write actions surface REST errors as a toast", () => {
   it("detachPullRequest shows an error toast on a non-2xx", async () => {
     const mod = await loadStore()
     actionFails = true
-    mod.detachPullRequest("s1")
-    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
-    expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
-      "the server said no",
-    )
-  })
-
-  it("resumePullRequestAutodetection shows an error toast on a non-2xx", async () => {
-    const mod = await loadStore()
-    actionFails = true
-    mod.resumePullRequestAutodetection("s1")
+    mod.detachPullRequest("s1", { host: "github.com", owner_repo: "o/r", number: 12 })
     await vi.waitFor(() => expect(toast.error).toHaveBeenCalled())
     expect(vi.mocked(toast.error).mock.calls[0][0]).toContain(
       "the server said no",

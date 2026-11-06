@@ -46,7 +46,7 @@ pub enum InFlightKey {
     PrCheck(String),
     /// A manual pull-request attach is resolving for this session id, spanning
     /// the `gh` lookup and the attach that follows it. While set, this
-    /// session's other pull-request operations (detach, resume autodetection, a
+    /// session's other pull-request operations (detach, hide, show, the order, a
     /// second attach) are refused rather than left to race the attach's own
     /// writes. Marked in `Engine::dispatch_attach_pull_request` after
     /// validation and cleared in the `PullRequestResolved` attach arm, keyed on

@@ -6296,28 +6296,13 @@ impl App {
             Action::AttachPullRequest => {
                 self.github_pr_agent_command_available() && !self.pr_attach_pending_on_selection()
             }
-            // Detach is meaningful whenever the selected agent has a pull
-            // request associated at all, pinned or autodetected: an
-            // autodetected badge the user does not want is exactly what detach
-            // is for. Deliberately NOT gated on gh availability: detaching
-            // touches no network, and an association must never outlive the
-            // ability to remove it (gh could be uninstalled or signed out
-            // after the fact).
+            // Detach acts on the pull request the band shows, and only one the
+            // user attached has anything to detach. Deliberately NOT gated on
+            // gh availability: detaching touches no network, and an
+            // association must never outlive the ability to remove it.
             Action::DetachPullRequest => {
                 !self.pr_attach_pending_on_selection()
-                    && self.selected_session().is_some_and(|s| {
-                        self.engine.attached_pr(&s.id).is_some()
-                            || self.engine.shown_pr(&s.id).is_some()
-                    })
-            }
-            // The way back, offered only where it means something: while the
-            // selected agent is actually detached. Not gh-gated either, for
-            // the same reason (the suppression is dux's own state).
-            Action::ResumePullRequestAutodetection => {
-                !self.pr_attach_pending_on_selection()
-                    && self
-                        .selected_session()
-                        .is_some_and(|s| self.engine.pr_autodetect_suppressed(&s.id))
+                    && self.current_pr_info().is_some_and(|pr| pr.attached)
             }
             // Offered only in the one state it exists for, and hidden rather
             // than disabled: a command that exists only while something is
@@ -6626,10 +6611,6 @@ impl App {
             }
             "detach-pull-request" => {
                 self.detach_pull_request();
-                Ok(())
-            }
-            "resume-pull-request-autodetection" => {
-                self.resume_pull_request_autodetection();
                 Ok(())
             }
             "toggle-project" => {

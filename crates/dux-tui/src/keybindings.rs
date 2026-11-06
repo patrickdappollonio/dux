@@ -695,16 +695,8 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     BindingDef {
-        // Palette-only: detach the agent's pull request and stop looking.
+        // Palette-only: detach the pull request the agent shows.
         action: Action::DetachPullRequest,
-        default_keys: &[],
-        scopes: &[],
-        help: None,
-        hint_contexts: &[],
-    },
-    BindingDef {
-        // Palette-only: the way back from a detach.
-        action: Action::ResumePullRequestAutodetection,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -3290,7 +3282,6 @@ mod tests {
                 "show-terminal",
                 "open-current-pr",
                 "detach-pull-request",
-                "resume-pull-request-autodetection",
                 "recreate-working-copy",
                 "new-terminal-for-agent",
                 "agent-info",
@@ -3719,7 +3710,6 @@ mod tests {
             "rename-agent",
             "rerun-startup-command-on-agent",
             "resource-monitor",
-            "resume-pull-request-autodetection",
             "set-tailscale-mode",
             "show-agent",
             "show-release-notes",

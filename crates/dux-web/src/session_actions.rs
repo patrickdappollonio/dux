@@ -98,12 +98,36 @@ pub fn routes() -> Router<AppState> {
             post(recreate_working_copy),
         )
         .route(
-            "/api/v1/sessions/{id}/pull-request",
-            put(attach_pull_request).delete(detach_pull_request),
+            "/api/v1/sessions/{id}/pull-requests",
+            post(attach_pull_request),
         )
         .route(
-            "/api/v1/sessions/{id}/pull-request/autodetect",
-            post(resume_pull_request_autodetection),
+            "/api/v1/sessions/{id}/pull-requests/detach",
+            post(detach_pull_request),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/hide",
+            post(hide_pull_request),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/show",
+            post(show_pull_request),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/sort",
+            put(set_pull_request_sort),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/move",
+            post(move_pull_request),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/order",
+            put(reorder_pull_requests),
+        )
+        .route(
+            "/api/v1/sessions/{id}/pull-requests/branches",
+            axum::routing::get(pull_request_branches),
         )
 }
 
@@ -1199,23 +1223,24 @@ async fn recreate_working_copy(
     }
 }
 
-// ── Pull-request attach / detach ─────────────────────────────────────────────
+// ── Pull requests ────────────────────────────────────────────────────────────
 
-/// Body of `PUT /api/v1/sessions/:id/pull-request`: the raw reference text the
-/// user typed (a PR URL, `#123`, `owner/repo#123`, or a bare number).
+/// Body of `POST /api/v1/sessions/:id/pull-requests`: the raw reference text
+/// the user typed (a PR URL, `#123`, `owner/repo#123`, or a bare number).
 #[derive(Deserialize)]
 struct AttachPullRequestBody {
     pr: String,
 }
 
-/// Manually attach (pin) a pull request to a session. Dispatch only: the
-/// engine mints the keyed busy (broadcast by the actor arm) and spawns the gh
-/// lookup worker; the final (attached, or the failure) rides the status toast
-/// stream, and the pinned badge lands with the next pushed workspace document
-/// (announced, for a client that does not read the push, by `sessions.changed`).
+/// Attach a pull request to a session, beside the ones it has. Dispatch
+/// only: the engine mints the keyed busy (broadcast by the actor arm) and
+/// spawns the gh lookup worker; the final (attached, or the failure) rides the
+/// status toast stream and finishes the operation record, and the new row
+/// lands with the next pushed workspace document.
 async fn attach_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
     Json(raw): Json<serde_json::Value>,
 ) -> Response {
@@ -1248,89 +1273,237 @@ async fn attach_pull_request(
         )
         .await
     {
-        // The keyed status op spanning resolve and attach, so a client can
-        // correlate the eventual final on the toast stream. This is the
-        // documented deferred direction (see `rest_common`): the handler must
-        // NOT block on the `gh` lookup.
-        Ok(op_id) => accepted(Accepted { op_id: Some(op_id) }),
-        // Defense in depth for a session deleted between the check above and
-        // the dispatch: the engine's own unknown-session error stays a 404.
-        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
-        // An attach that is still resolving owns this agent's pull-request
-        // state; the engine refuses the operation and 409 is this codebase's
-        // busy-refusal code (the create and delete in-flight guards above).
-        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
-            (StatusCode::CONFLICT, e).into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        // The handler must NOT block on the `gh` lookup (see `rest_common`):
+        // the record, or the keyed op id it shares, is how a client learns
+        // how it ended.
+        Ok(record) if operation.asked() => operation_accepted(&record),
+        Ok(record) => accepted(Accepted {
+            op_id: Some(record.id),
+        }),
+        Err(e) => pull_request_refusal(e),
     }
 }
 
-/// Detach a session's pull request: removes a pin if there is one, clears the badge
-/// immediately, and stops autodetection until the agent is attached by hand or
-/// detection is resumed. Applies to an autodetected association too. Synchronous;
-/// the info status rides the stream like the sibling handlers' outcomes.
+/// How a pull-request change's refusal answers: a session or a pull request
+/// that is not there is a 404, an attach still resolving for the agent is the
+/// codebase's busy-refusal 409, and anything else is a 400.
+fn pull_request_refusal(error: String) -> Response {
+    if error.contains("unknown session")
+        || error.contains(dux_core::engine::UNKNOWN_PULL_REQUEST_MARKER)
+    {
+        return (StatusCode::NOT_FOUND, error).into_response();
+    }
+    if error.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) {
+        return (StatusCode::CONFLICT, error).into_response();
+    }
+    refusal(error, StatusCode::BAD_REQUEST)
+}
+
+/// Run one synchronous pull-request change: `200` with its status, or with
+/// `?operation=1` the `202` and the record it finished inside the call.
+async fn change_pull_requests(
+    state: &AppState,
+    headers: &HeaderMap,
+    operation: &OperationQuery,
+    id: &str,
+    command: WireCommand,
+    kind: OperationKind,
+) -> Response {
+    if !id_within_bound(id) {
+        return unknown_session();
+    }
+    let scope = scope_from_headers(headers, &state.connections);
+    if operation.asked() {
+        return match state
+            .engine
+            .apply_wire_operation(command, scope, kind)
+            .await
+        {
+            Ok((_, record)) => operation_accepted(&record),
+            Err(e) => pull_request_refusal(e),
+        };
+    }
+    match state.engine.apply_wire_recorded(command, scope, kind).await {
+        Ok(outcome) => Json(outcome.status).into_response(),
+        Err(e) => pull_request_refusal(e),
+    }
+}
+
+/// Body of the routes that change one pull request: which one.
+type PullRequestBody = dux_core::viewmodel::PrKeyView;
+
+/// `POST /api/v1/sessions/:id/pull-requests/detach`: detach one attached pull
+/// request. One dux also found stays, as found.
 async fn detach_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
+    Json(pr): Json<PullRequestBody>,
 ) -> Response {
-    if !id_within_bound(&id) {
-        return unknown_session();
-    }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::ClearPullRequestOverride { session_id: id },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        Ok(_) => StatusCode::OK.into_response(),
-        // The engine returns "unknown session: …" when the row is gone; surface
-        // that as 404, not a generic 400 (the `kill_session` pattern).
-        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
-        // An attach that is still resolving owns this agent's pull-request
-        // state; the engine refuses the operation and 409 is this codebase's
-        // busy-refusal code (the create and delete in-flight guards above).
-        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
-            (StatusCode::CONFLICT, e).into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
-    }
+    let command = WireCommand::DetachPullRequest {
+        session_id: id.clone(),
+        pr,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrDetach,
+    )
+    .await
 }
 
-/// Undo a detach: switch pull-request autodetection back on for the session
-/// and run one immediate check. Synchronous and shaped exactly like the detach
-/// beside it (same scoping, same `200`, same 404 mapping); resuming a session
-/// nobody detached is a harmless success.
-async fn resume_pull_request_autodetection(
+/// `POST /api/v1/sessions/:id/pull-requests/hide`: put one found pull request
+/// out of sight.
+async fn hide_pull_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
     headers: HeaderMap,
+    Json(pr): Json<PullRequestBody>,
 ) -> Response {
+    let command = WireCommand::HidePullRequest {
+        session_id: id.clone(),
+        pr,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrHide,
+    )
+    .await
+}
+
+/// `POST /api/v1/sessions/:id/pull-requests/show`: show a hidden pull request
+/// again.
+async fn show_pull_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(pr): Json<PullRequestBody>,
+) -> Response {
+    let command = WireCommand::ShowPullRequest {
+        session_id: id.clone(),
+        pr,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrShow,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct PullRequestSortBody {
+    /// `automatic` (or `auto`) | `manual`.
+    mode: dux_core::wire::PullRequestSort,
+}
+
+/// `PUT /api/v1/sessions/:id/pull-requests/sort`: order the agent's pull
+/// requests automatically or in the user's own order.
+async fn set_pull_request_sort(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(body): Json<PullRequestSortBody>,
+) -> Response {
+    let command = WireCommand::SetPullRequestSort {
+        session_id: id.clone(),
+        mode: body.mode,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrSort,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct MovePullRequestBody {
+    pr: PullRequestBody,
+    /// `top` | `up` | `down`, or a position counted from 1.
+    to: dux_core::wire::PullRequestMove,
+}
+
+/// `POST /api/v1/sessions/:id/pull-requests/move`: move one shown pull
+/// request in the agent's order.
+async fn move_pull_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(body): Json<MovePullRequestBody>,
+) -> Response {
+    let command = WireCommand::MovePullRequest {
+        session_id: id.clone(),
+        pr: body.pr,
+        to: body.to,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrMove,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct ReorderPullRequestsBody {
+    order: Vec<PullRequestBody>,
+}
+
+/// `PUT /api/v1/sessions/:id/pull-requests/order`: put the shown pull
+/// requests in the order a drag left them.
+async fn reorder_pull_requests(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(operation): Query<OperationQuery>,
+    headers: HeaderMap,
+    Json(body): Json<ReorderPullRequestsBody>,
+) -> Response {
+    let command = WireCommand::ReorderPullRequests {
+        session_id: id.clone(),
+        order: body.order,
+    };
+    change_pull_requests(
+        &state,
+        &headers,
+        &operation,
+        &id,
+        command,
+        OperationKind::PrMove,
+    )
+    .await
+}
+
+/// `GET /api/v1/sessions/:id/pull-requests/branches`: every branch the
+/// agent's worktree has been on, newest first, with its pull requests.
+async fn pull_request_branches(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();
     }
-    match state
-        .engine
-        .apply_wire_scoped(
-            WireCommand::ResumePullRequestAutodetection { session_id: id },
-            scope_from_headers(&headers, &state.connections),
-        )
-        .await
-    {
-        Ok(_) => StatusCode::OK.into_response(),
-        // The engine returns "unknown session: …" when the row is gone; surface
-        // that as 404, not a generic 400 (the `kill_session` pattern).
-        Err(e) if e.contains("unknown session") => (StatusCode::NOT_FOUND, e).into_response(),
-        // An attach that is still resolving owns this agent's pull-request
-        // state; the engine refuses the operation and 409 is this codebase's
-        // busy-refusal code (the create and delete in-flight guards above).
-        Err(e) if e.contains(dux_core::engine::PR_ATTACH_IN_FLIGHT_MARKER) => {
-            (StatusCode::CONFLICT, e).into_response()
-        }
-        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    match state.engine.pull_request_branches(id).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => pull_request_refusal(e),
     }
 }
 
@@ -2178,15 +2351,15 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("still launching"));
     }
 
-    /// PUT on an id no session has is the truthful 404, not the gh-gate 400
+    /// An attach on an id no session has is the truthful 404, not the gh-gate 400
     /// (the handler checks existence before dispatching).
     #[tokio::test]
     async fn attach_pull_request_404_for_unknown_session() {
         let (_tmp, app) = router_no_auth();
         let resp = send_json(
             &app,
-            "PUT",
-            "/api/v1/sessions/ghost/pull-request",
+            "POST",
+            "/api/v1/sessions/ghost/pull-requests",
             Some(serde_json::json!({ "pr": "#12" })),
         )
         .await;
@@ -2202,8 +2375,8 @@ mod tests {
         let (_tmp, app) = router_with_seeded_session("s1");
         let resp = send_json(
             &app,
-            "PUT",
-            "/api/v1/sessions/s1/pull-request",
+            "POST",
+            "/api/v1/sessions/s1/pull-requests",
             Some(serde_json::json!({ "reference": "#12" })),
         )
         .await;
@@ -2212,8 +2385,8 @@ mod tests {
 
         let resp = send_json(
             &app,
-            "PUT",
-            "/api/v1/sessions/ghost/pull-request",
+            "POST",
+            "/api/v1/sessions/ghost/pull-requests",
             Some(serde_json::json!({ "reference": "#12" })),
         )
         .await;
@@ -2302,8 +2475,8 @@ mod tests {
         let (_tmp, app) = router_with_seeded_session_and_gh("s1");
         let resp = send_json(
             &app,
-            "PUT",
-            "/api/v1/sessions/s1/pull-request",
+            "POST",
+            "/api/v1/sessions/s1/pull-requests",
             Some(serde_json::json!({ "pr": "#42" })),
         )
         .await;
@@ -2318,6 +2491,28 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let op_id = json["op_id"].as_str().expect("op_id in the 202 body");
         assert!(op_id.starts_with("op-"), "got {op_id:?}");
+
+        // Followed, the answer is the attach's own record, waiting on its
+        // lookup under the same id.
+        let (_tmp, app) = router_with_seeded_session_and_gh("s1");
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/v1/sessions/s1/pull-requests?operation=1",
+            Some(serde_json::json!({ "pr": "#42" })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let location = resp.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record["kind"], "pr.attach");
+        let id = record["id"].as_str().expect("the record's id");
+        assert!(id.starts_with("op-"), "got {id:?}");
+        assert_eq!(location, format!("/api/v1/operations/{id}"));
     }
 
     /// With a real session but no usable gh (the test engine never probes gh,
@@ -2328,8 +2523,8 @@ mod tests {
         let (_tmp, app) = router_with_seeded_session("s1");
         let resp = send_json(
             &app,
-            "PUT",
-            "/api/v1/sessions/s1/pull-request",
+            "POST",
+            "/api/v1/sessions/s1/pull-requests",
             Some(serde_json::json!({ "pr": "#12" })),
         )
         .await;
@@ -2342,42 +2537,146 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn detach_pull_request_404_for_unknown_session() {
-        let (_tmp, app) = router_no_auth();
-        let resp = send_json(&app, "DELETE", "/api/v1/sessions/ghost/pull-request", None).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    /// Detaching a session that never had a manual pin is a real detach now,
-    /// not a no-op: it suppresses autodetection just the same, and answers
-    /// 200. The engine-side proof that it clears the badge and records the
-    /// suppression lives in `dux_core::engine`; this asserts the route shape.
-    #[tokio::test]
-    async fn detach_pull_request_200_without_override() {
-        let (_tmp, app) = router_with_seeded_session("s1");
-        let resp = send_json(&app, "DELETE", "/api/v1/sessions/s1/pull-request", None).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    }
-
-    /// The way back is shaped exactly like the detach: synchronous, 200, and
-    /// resuming a session nobody detached is a harmless success.
-    #[tokio::test]
-    async fn resume_pull_request_autodetection_200_after_a_detach_and_without_one() {
-        let (_tmp, app) = router_with_seeded_session("s1");
-        for _ in 0..2 {
-            let resp = send_json(
-                &app,
+    /// The routes that change one agent's pull requests, each with a body
+    /// naming `#12` of `o/r`.
+    fn pull_request_change_routes(id: &str) -> Vec<(&'static str, String, serde_json::Value)> {
+        let pr = serde_json::json!({ "host": "github.com", "owner_repo": "o/r", "number": 12 });
+        let base = format!("/api/v1/sessions/{id}/pull-requests");
+        vec![
+            ("POST", format!("{base}/detach"), pr.clone()),
+            ("POST", format!("{base}/hide"), pr.clone()),
+            ("POST", format!("{base}/show"), pr.clone()),
+            (
+                "PUT",
+                format!("{base}/sort"),
+                serde_json::json!({ "mode": "manual" }),
+            ),
+            (
                 "POST",
-                "/api/v1/sessions/s1/pull-request/autodetect",
-                None,
-            )
-            .await;
-            assert_eq!(resp.status(), StatusCode::OK);
-            let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                format!("{base}/move"),
+                serde_json::json!({ "pr": pr.clone(), "to": "top" }),
+            ),
+            (
+                "PUT",
+                format!("{base}/order"),
+                serde_json::json!({ "order": [pr] }),
+            ),
+        ]
+    }
+
+    /// Every pull-request route answers an id no session has with a 404, the
+    /// branch list included.
+    #[tokio::test]
+    async fn the_pull_request_routes_404_for_an_unknown_session() {
+        let (_tmp, app) = router_no_auth();
+        for (method, uri, body) in pull_request_change_routes("ghost") {
+            let resp = send_json(&app, method, &uri, Some(body)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
         }
+        let resp = send_json(
+            &app,
+            "GET",
+            "/api/v1/sessions/ghost/pull-requests/branches",
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Every pull-request change answers `?operation=1` with `202` and a
+    /// record of its own kind, finished inside the call, and without it a
+    /// plain `200`. A position outside the list is refused with the range, a
+    /// pull request the agent does not have is a 404, and the branch list
+    /// reads the agent's branches.
+    #[tokio::test]
+    async fn every_pull_request_change_answers_a_followed_change_with_its_record() {
+        let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, _| {
+            let mut found = dux_core::model::AgentPr::found(
+                &dux_core::model::PrInfo {
+                    number: 12,
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                    title: "Found".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            );
+            found.attached = true;
+            found.head_branch = Some("feat".to_string());
+            engine
+                .session_store
+                .replace_agent_prs("s1", &[found], &dux_core::model::PrPrefs::default())
+                .unwrap();
+        });
+        let kinds = [
+            "pr.detach",
+            "pr.hide",
+            "pr.show",
+            "pr.sort",
+            "pr.move",
+            "pr.move",
+        ];
+        for ((method, uri, body), kind) in pull_request_change_routes("s1").into_iter().zip(kinds) {
+            let resp = send_json(&app, method, &format!("{uri}?operation=1"), Some(body)).await;
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::ACCEPTED,
+                "{method} {uri}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(record["kind"], kind, "{method} {uri}");
+            assert_eq!(record["state"], "succeeded", "{method} {uri}: {record}");
+        }
+
+        let (method, uri, body) = pull_request_change_routes("s1").remove(3);
+        let resp = send_json(&app, method, &uri, Some(body)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unfollowed, a change is a 200"
+        );
+
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/v1/sessions/s1/pull-requests/move",
+            Some(serde_json::json!({
+                "pr": { "host": "github.com", "owner_repo": "o/r", "number": 12 },
+                "to": 3,
+            })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "\"seeded\" shows 1 pull request; a position is 1 to 1."
+        );
+
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/v1/sessions/s1/pull-requests/hide",
+            Some(serde_json::json!({ "host": "github.com", "owner_repo": "o/r", "number": 99 })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let resp = send_json(
+            &app,
+            "GET",
+            "/api/v1/sessions/s1/pull-requests/branches",
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let view: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["branches"][0]["name"], "feat");
+        assert_eq!(view["branches"][0]["current"], true);
     }
 
     /// While an attach is resolving for the agent, every one of its
@@ -2385,12 +2684,13 @@ mod tests {
     /// same busy-refusal code the create and delete in-flight guards use.
     #[tokio::test]
     async fn the_pull_request_routes_409_while_an_attach_is_resolving() {
-        let cases: [(&str, &str); 3] = [
-            ("PUT", "/api/v1/sessions/s1/pull-request"),
-            ("DELETE", "/api/v1/sessions/s1/pull-request"),
-            ("POST", "/api/v1/sessions/s1/pull-request/autodetect"),
-        ];
-        for (method, uri) in cases {
+        let mut cases = vec![(
+            "POST",
+            "/api/v1/sessions/s1/pull-requests".to_string(),
+            serde_json::json!({ "pr": "#12" }),
+        )];
+        cases.extend(pull_request_change_routes("s1"));
+        for (method, uri, body) in cases {
             let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, dir| {
                 engine.github_integration_enabled = true;
                 engine.gh_status = dux_core::model::GhStatus::Available;
@@ -2404,8 +2704,7 @@ mod tests {
                         .into();
                 engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
             });
-            let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
-            let resp = send_json(&app, method, uri, body).await;
+            let resp = send_json(&app, method, &uri, Some(body)).await;
             assert_eq!(
                 resp.status(),
                 StatusCode::CONFLICT,
@@ -2425,12 +2724,13 @@ mod tests {
     #[tokio::test]
     async fn the_pull_request_routes_still_404_for_an_unknown_session_while_an_attach_is_resolving()
     {
-        let cases: [(&str, &str); 3] = [
-            ("PUT", "/api/v1/sessions/ghost/pull-request"),
-            ("DELETE", "/api/v1/sessions/ghost/pull-request"),
-            ("POST", "/api/v1/sessions/ghost/pull-request/autodetect"),
-        ];
-        for (method, uri) in cases {
+        let mut cases = vec![(
+            "POST",
+            "/api/v1/sessions/ghost/pull-requests".to_string(),
+            serde_json::json!({ "pr": "#12" }),
+        )];
+        cases.extend(pull_request_change_routes("ghost"));
+        for (method, uri, body) in cases {
             let (_tmp, app) = router_with_seeded_session_prepared("s1", |engine, dir| {
                 engine.github_integration_enabled = true;
                 engine.gh_status = dux_core::model::GhStatus::Available;
@@ -2444,8 +2744,7 @@ mod tests {
                         .into();
                 engine.mark_in_flight(dux_core::engine::InFlightKey::PrAttach("s1".to_string()));
             });
-            let body = (method == "PUT").then(|| serde_json::json!({ "pr": "#12" }));
-            let resp = send_json(&app, method, uri, body).await;
+            let resp = send_json(&app, method, &uri, Some(body)).await;
             assert_eq!(
                 resp.status(),
                 StatusCode::NOT_FOUND,
@@ -2453,20 +2752,6 @@ mod tests {
             );
             let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         }
-    }
-
-    #[tokio::test]
-    async fn resume_pull_request_autodetection_404_for_unknown_session() {
-        let (_tmp, app) = router_no_auth();
-        let resp = send_json(
-            &app,
-            "POST",
-            "/api/v1/sessions/ghost/pull-request/autodetect",
-            None,
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     }
 
     /// A CONFIRMED create (`use_existing_branch: true`) is not refused by the

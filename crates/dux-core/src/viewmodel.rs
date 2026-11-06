@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::engine::Engine;
 use crate::ids::TabIdRef;
-use crate::model::{AgentSession, PrState, Project, ProjectBranchStatus, ProviderKind};
+use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
 
 /// The projects/sessions/sidebar "spine" a web client reads via
@@ -675,15 +675,19 @@ pub struct SessionView {
     pub status: String,
     /// Whether startup auto-reopen is allowed for this agent.
     pub auto_reopen_enabled: bool,
-    /// Associated GitHub pull request, if one is tracked for this session.
+    /// The pull request the agent shows: the first of [`Self::prs`].
     pub pr: Option<PrView>,
-    /// Whether the user detached this agent's pull request, which switches
-    /// autodetection off for it until they attach one by hand or resume
-    /// detection explicitly. Lives on `SessionView` and not on `PrView`
-    /// (unlike `overridden`) precisely because it is the state in which there
-    /// is NO pull request to hang it off: it is what lets a surface offer the
-    /// way back.
-    pub(crate) pr_autodetect_suppressed: bool,
+    /// Every pull request the agent shows, in its order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<PrView>,
+    /// The pull requests the user hid, in automatic order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prs_hidden: Vec<PrView>,
+    /// How the pull requests are ordered: "automatic" | "manual".
+    pub pr_sort: &'static str,
+    /// Moves whenever the agent's pull requests, their preferences or its
+    /// branch list change, so a client re-reads what it derived from them.
+    pub pr_revision: u64,
     /// The id of this agent's **session-slot tab**: its first tab. Closing that
     /// tab hands the slot on, so the pointer moves; what cannot be closed is an
     /// agent's only tab. Published so the browser never has to infer slot-ness
@@ -1025,21 +1029,103 @@ pub struct DropPasteView {
 
 /// A pull request projected for web clients.
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a pull request sent to the web client as JSON booleans"
+)]
 pub struct PrView {
     /// The pull request's number.
     pub number: u64,
-    /// "open" | "merged" | "closed"
+    /// "open" | "draft" | "merged" | "closed"
     pub state: String,
     /// The pull request's title.
     pub title: String,
     /// The pull request's web address.
     pub url: String,
-    /// Whether this PR was manually attached (pinned) rather than autodetected:
-    /// plain provenance. On `PrView` and NOT on `SessionView`, so "overridden
-    /// without a PR" is unrepresentable. Detach itself no longer needs this
-    /// flag to propagate; it removes the PR from the view in the same spine
-    /// change.
+    /// The same as [`Self::attached`], under the name a page built before
+    /// an agent could have several pull requests reads.
     pub overridden: bool,
+    /// The GitHub host it lives on.
+    pub host: String,
+    /// Its repository, as `owner/name`.
+    pub owner_repo: String,
+    /// Whether it lives in the agent's own repository, so a surface can name
+    /// it `#418` rather than `acme/infra#77`.
+    pub own_repo: bool,
+    /// The branch it merges from, once GitHub has said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_branch: Option<String>,
+    /// dux found it on one of the agent's branches.
+    pub found: bool,
+    /// The user attached it.
+    pub attached: bool,
+    /// When it was opened on GitHub (RFC 3339).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// When GitHub last changed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    /// When it was closed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    /// When it was merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+}
+
+/// Which pull request a change names: its host, repository and number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct PrKeyView {
+    /// The GitHub host.
+    pub host: String,
+    /// The repository, as `owner/name`.
+    pub owner_repo: String,
+    /// The pull request's number.
+    pub number: u64,
+}
+
+impl From<&crate::model::PrKey> for PrKeyView {
+    fn from(key: &crate::model::PrKey) -> Self {
+        Self {
+            host: key.host.clone(),
+            owner_repo: key.owner_repo.clone(),
+            number: key.number,
+        }
+    }
+}
+
+impl PrKeyView {
+    /// The key this names.
+    #[must_use]
+    pub fn key(&self) -> crate::model::PrKey {
+        crate::model::PrKey::new(self.host.clone(), self.owner_repo.clone(), self.number)
+    }
+}
+
+/// One branch an agent's worktree has been on, with its pull requests.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrBranchView {
+    /// The branch's name now.
+    pub name: String,
+    /// The names a rename moved it away from, oldest first.
+    pub former_names: Vec<String>,
+    /// Whether the agent is on it now.
+    pub current: bool,
+    /// When dux first saw the agent on it (RFC 3339), absent for one not
+    /// recorded yet.
+    pub first_seen_at: Option<String>,
+    /// Its pull requests, shown ones first in the agent's order, then the
+    /// hidden ones.
+    pub prs: Vec<PrKeyView>,
+}
+
+/// The branch list behind the Pull requests views.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PrBranchesView {
+    /// Every branch, newest first.
+    pub branches: Vec<PrBranchView>,
+    /// The attached pull requests that are on none of them.
+    pub attached_on_no_branch: Vec<PrKeyView>,
 }
 
 /// A single changed file projected for web clients (used by the per-session
@@ -1275,20 +1361,25 @@ impl ProjectView {
 }
 
 impl PrView {
-    /// Project `pr` as dux found it, not overridden by a pin.
-    fn from_pr(pr: &crate::model::AgentPr) -> Self {
+    /// Project one of an agent's pull requests, `rows` being all of them.
+    fn from_pr(rows: &[crate::model::AgentPr], pr: &crate::model::AgentPr) -> Self {
+        let time = |at: Option<chrono::DateTime<chrono::Utc>>| at.map(|at| at.to_rfc3339());
         Self {
-            overridden: false,
+            overridden: pr.attached,
             number: pr.number,
-            state: match pr.state {
-                // The wire has no draft word yet, so a draft reads as open.
-                PrState::Open | PrState::Draft => "open",
-                PrState::Merged => "merged",
-                PrState::Closed => "closed",
-            }
-            .to_string(),
+            state: pr.state.word().to_string(),
             title: pr.title.clone(),
             url: pr.url.clone(),
+            host: pr.host.clone(),
+            owner_repo: pr.owner_repo.clone(),
+            own_repo: crate::engine::pull_requests::in_own_repository(rows, pr),
+            head_branch: pr.head_branch.clone(),
+            found: pr.found,
+            attached: pr.attached,
+            created_at: time(pr.gh_created_at),
+            updated_at: time(pr.gh_updated_at),
+            closed_at: time(pr.gh_closed_at),
+            merged_at: time(pr.gh_merged_at),
         }
     }
 }
@@ -1500,6 +1591,18 @@ impl Engine {
                 running: inputs.running_tabs,
                 restart_offer: inputs.restart_offer,
             });
+        let rows = self.agent_prs.get(&s.id).map_or(&[][..], Vec::as_slice);
+        let ordered = crate::pr_list::order(rows, self.pr_sort_mode(&s.id));
+        let prs: Vec<PrView> = ordered
+            .visible
+            .iter()
+            .map(|pr| PrView::from_pr(rows, pr))
+            .collect();
+        let prs_hidden: Vec<PrView> = ordered
+            .hidden
+            .iter()
+            .map(|pr| PrView::from_pr(rows, pr))
+            .collect();
         SessionView {
             id: s.id.clone(),
             title: s.title.clone(),
@@ -1512,11 +1615,11 @@ impl Engine {
             ),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
-            pr: self.shown_pr(&s.id).map(|pr| PrView {
-                overridden: pr.attached,
-                ..PrView::from_pr(pr)
-            }),
-            pr_autodetect_suppressed: self.pr_autodetect_suppressed(&s.id),
+            pr: prs.first().cloned(),
+            prs,
+            prs_hidden,
+            pr_sort: self.pr_sort_mode(&s.id).stored_text(),
+            pr_revision: self.pr_revision.get(&s.id).copied().unwrap_or_default(),
             slot_tab_id: s.slot_tab_id().to_string(),
             detachable: self.is_detachable(&s.id),
             tabs,
@@ -1764,6 +1867,7 @@ mod tests {
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
     use crate::ids::SessionIdRef;
     use crate::ids::TabId;
+    use crate::model::PrState;
 
     #[test]
     fn dux_version_is_projected() {
@@ -1836,32 +1940,6 @@ mod tests {
         engine.agent_prs.get_mut("s1").unwrap()[0].attached = true;
         let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
         assert!(pr.overridden, "a pinned PR reports overridden");
-    }
-
-    /// The detach flag rides `SessionView`, not `PrView`: the state it
-    /// describes is precisely the one with no PR, and it is what lets a
-    /// surface offer "resume autodetection" only where that means something.
-    #[test]
-    fn session_view_reports_a_detached_agents_suppressed_autodetection() {
-        let (mut engine, _tmp) = test_engine();
-        engine.projects.push(sample_project("p1", "/repo"));
-        engine.sessions.push(sample_session("s1", "p1", "feature"));
-
-        assert!(!engine.spine().sessions[0].pr_autodetect_suppressed);
-
-        engine.pr_prefs.insert(
-            "s1".to_string(),
-            crate::model::PrPrefs {
-                hide_created_before: Some(chrono::Utc::now()),
-                ..Default::default()
-            },
-        );
-        let view = &engine.spine().sessions[0];
-        assert!(view.pr_autodetect_suppressed);
-        assert!(
-            view.pr.is_none(),
-            "a detached agent shows no PR to hang the flag off"
-        );
     }
 
     #[test]
@@ -2144,6 +2222,65 @@ mod tests {
         assert_eq!(pr.state, "merged");
         assert_eq!(pr.title, "Add the thing");
         assert_eq!(pr.url, "https://github.com/owner/repo/pull/42");
+
+        // A draft from the agent's own repository goes before the merged one,
+        // and a hidden one from another repository is listed apart; the
+        // revision moves when GitHub says the hidden one merged.
+        let rows = engine.agent_prs.get_mut("s1").unwrap();
+        rows[0].head_branch = Some("feature".to_string());
+        let mut draft = rows[0].clone();
+        draft.number = 43;
+        draft.state = PrState::Draft;
+        let mut other = rows[0].clone();
+        other.number = 7;
+        other.owner_repo = "acme/infra".to_string();
+        other.state = PrState::Open;
+        other.found = false;
+        other.attached = true;
+        other.hidden = true;
+        rows.push(draft);
+        rows.push(other);
+        let vm = engine.spine();
+        let view = &vm.sessions[0];
+        let shown: Vec<(u64, &str, bool)> = view
+            .prs
+            .iter()
+            .map(|pr| (pr.number, pr.state.as_str(), pr.own_repo))
+            .collect();
+        assert_eq!(shown, vec![(43, "draft", true), (42, "merged", true)]);
+        assert_eq!(view.pr.as_ref().map(|pr| pr.number), Some(43));
+        assert_eq!(view.prs[1].head_branch.as_deref(), Some("feature"));
+        let hidden = &view.prs_hidden[0];
+        assert_eq!(
+            (
+                hidden.number,
+                hidden.own_repo,
+                hidden.attached,
+                hidden.overridden
+            ),
+            (7, false, true, true)
+        );
+        assert_eq!(view.pr_sort, "automatic");
+        let before = view.pr_revision;
+
+        engine.process_worker_event(crate::worker::WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                branch_generation: engine.pr_branch_generation("s1"),
+                session_id: "s1".to_string(),
+                pr: Some(crate::model::PrInfo {
+                    number: 7,
+                    state: PrState::Merged,
+                    title: "PR 7".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "acme/infra".to_string(),
+                    url: "https://github.com/acme/infra/pull/7".to_string(),
+                    ..Default::default()
+                }),
+            },
+        ]));
+        let vm = engine.spine();
+        assert_eq!(vm.sessions[0].prs_hidden[0].state, "merged");
+        assert_ne!(vm.sessions[0].pr_revision, before);
     }
 
     #[test]

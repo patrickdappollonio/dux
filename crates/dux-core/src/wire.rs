@@ -251,11 +251,12 @@ pub enum WireCommand {
     /// reason that has since passed, for a user who cannot restart dux without
     /// taking every running agent down with it.
     RecheckGithub {},
-    /// Manually attach (pin) an already-RESOLVED pull request to a session. The
-    /// fields carry what `gh pr view` answered; parsing/resolution of the raw
-    /// reference happens earlier (the attach lookup worker), so applying this is
-    /// a synchronous row + map mutation and mints no busy of its own; the
-    /// resolve→attach flow's single keyed op carries the busy and the final.
+    /// Attach an already-RESOLVED pull request to a session, beside the ones
+    /// it already has. The fields carry what `gh pr view` answered; parsing
+    /// and resolution of the raw reference happen earlier (the attach lookup
+    /// worker), so applying this is a synchronous row + map mutation and mints
+    /// no busy of its own; the resolve→attach flow's single keyed op carries
+    /// the busy and the final.
     AttachPullRequest {
         /// The agent the pull request is attached to.
         session_id: String,
@@ -272,24 +273,52 @@ pub enum WireCommand {
         /// The pull request's web address.
         url: String,
     },
-    /// Detach a session's pull request: this agent has no PR, as of now. The
-    /// pin goes if there was one, the badge clears immediately, and
-    /// autodetection is suppressed for the session (durably) so it cannot put
-    /// the badge straight back. Synchronous. Applies to an autodetected
-    /// association too, not only to a pin. Reversed by an
-    /// `AttachPullRequest` or a `ResumePullRequestAutodetection`.
-    ClearPullRequestOverride {
-        /// The agent whose pull request is detached.
+    /// Detach one pull request the user attached. One dux also found stays,
+    /// as found. Synchronous, and needs neither the integration nor `gh`.
+    DetachPullRequest {
+        /// The agent.
         session_id: String,
+        /// Which of its pull requests.
+        pr: crate::viewmodel::PrKeyView,
     },
-    /// Undo a detach: switch pull-request autodetection back on for the
-    /// session and run one immediate check, so the badge returns now rather
-    /// than at the next poll. Synchronous, and deliberately not gated on `gh`
-    /// (the suppression is dux's own state); without a usable `gh` the check
-    /// is a no-op and the session is picked up once the integration re-arms.
-    ResumePullRequestAutodetection {
-        /// The agent whose autodetection is switched back on.
+    /// Put one found pull request out of sight. Synchronous.
+    HidePullRequest {
+        /// The agent.
         session_id: String,
+        /// Which of its pull requests.
+        pr: crate::viewmodel::PrKeyView,
+    },
+    /// Show a hidden pull request again, in the place it had. Synchronous.
+    ShowPullRequest {
+        /// The agent.
+        session_id: String,
+        /// Which of its pull requests.
+        pr: crate::viewmodel::PrKeyView,
+    },
+    /// Order an agent's pull requests automatically or in the user's own
+    /// order. Synchronous.
+    SetPullRequestSort {
+        /// The agent.
+        session_id: String,
+        /// The order.
+        mode: PullRequestSort,
+    },
+    /// Move one shown pull request in the agent's order. Synchronous.
+    MovePullRequest {
+        /// The agent.
+        session_id: String,
+        /// Which of its pull requests.
+        pr: crate::viewmodel::PrKeyView,
+        /// Where to.
+        to: PullRequestMove,
+    },
+    /// Put the agent's shown pull requests in the order a drag left them; it
+    /// must name exactly the shown ones. Synchronous.
+    ReorderPullRequests {
+        /// The agent.
+        session_id: String,
+        /// Every shown pull request, in the order wanted.
+        order: Vec<crate::viewmodel::PrKeyView>,
     },
     /// Flip `ui.copy_on_select` and persist it, mirroring the web
     /// `toggle-copy-on-select` palette command. The next `config.changed` refetch
@@ -973,6 +1002,60 @@ impl SettingsPatch {
     }
 }
 
+/// How an agent's pull requests are ordered, as a change names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullRequestSort {
+    /// Open, draft, merged, closed; newest first.
+    #[serde(alias = "auto")]
+    Automatic,
+    /// The user's own order.
+    Manual,
+}
+
+impl From<PullRequestSort> for crate::pr_list::PrSortMode {
+    fn from(sort: PullRequestSort) -> Self {
+        match sort {
+            PullRequestSort::Automatic => Self::Automatic,
+            PullRequestSort::Manual => Self::Manual,
+        }
+    }
+}
+
+/// Where a move puts a pull request: `"top"`, `"up"`, `"down"`, or a
+/// position counted from 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PullRequestMove {
+    /// One of the named places.
+    Named(PullRequestMoveNamed),
+    /// A place in the shown list, counted from 1.
+    Position(usize),
+}
+
+/// The named places a move can go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullRequestMoveNamed {
+    /// First.
+    Top,
+    /// One place earlier.
+    Up,
+    /// One place later.
+    Down,
+}
+
+impl From<PullRequestMove> for crate::pr_list::MoveTo {
+    fn from(to: PullRequestMove) -> Self {
+        match to {
+            PullRequestMove::Named(PullRequestMoveNamed::Top) => Self::Top,
+            PullRequestMove::Named(PullRequestMoveNamed::Up) => Self::Up,
+            PullRequestMove::Named(PullRequestMoveNamed::Down) => Self::Down,
+            PullRequestMove::Position(n) => Self::Position(n),
+        }
+    }
+}
+
 impl WireCommand {
     /// True for the commands that mutate config-static state surfaced in the
     /// bootstrap document: the macro set, the workspace-wide env map, the
@@ -1185,6 +1268,13 @@ mod quiet_web_wire {
 /// something away is often the only place the way back is named. Written as one
 /// helper so a flip's two arms are decided together at the site rather than by
 /// remembering to append `.quiet_web()` to one branch of an `if`.
+/// The one status a pull-request change answers with.
+fn pull_request_change_answer(update: &crate::engine::StatusUpdate) -> WireDispatch {
+    WireDispatch::handled(WireCommandOutcome::with_status(WireStatus::from_update(
+        update,
+    )))
+}
+
 fn quiet_web_when(status: WireStatus, web: WebScreen) -> WireStatus {
     match web {
         WebScreen::ShowsTheOutcome => status.quiet_web(),
@@ -2577,8 +2667,7 @@ impl Engine {
         }
     }
 
-    /// Answer the commands that change which pull request an agent's branch
-    /// is shown as.
+    /// Answer the commands that change an agent's pull requests.
     fn dispatch_pull_request_command(
         &mut self,
         command: WireCommand,
@@ -2606,17 +2695,31 @@ impl Engine {
                     WireStatus::new("info", message),
                 )))
             }
-            WireCommand::ClearPullRequestOverride { session_id } => {
-                let message = self.clear_pull_request_override(&session_id)?;
-                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
-                    WireStatus::new("info", message),
-                )))
+            WireCommand::DetachPullRequest { session_id, pr } => {
+                let update = self.detach_pull_request(&session_id, &pr.key())?;
+                Ok(pull_request_change_answer(&update))
             }
-            WireCommand::ResumePullRequestAutodetection { session_id } => {
-                let message = self.resume_pr_autodetection(&session_id)?;
-                Ok(WireDispatch::handled(WireCommandOutcome::with_status(
-                    WireStatus::new("info", message),
-                )))
+            WireCommand::HidePullRequest { session_id, pr } => {
+                let update = self.hide_pull_request(&session_id, &pr.key())?;
+                Ok(pull_request_change_answer(&update))
+            }
+            WireCommand::ShowPullRequest { session_id, pr } => {
+                let update = self.show_pull_request(&session_id, &pr.key())?;
+                Ok(pull_request_change_answer(&update))
+            }
+            WireCommand::SetPullRequestSort { session_id, mode } => {
+                let update = self.set_pull_request_sort(&session_id, mode.into())?;
+                Ok(pull_request_change_answer(&update))
+            }
+            WireCommand::MovePullRequest { session_id, pr, to } => {
+                let update = self.move_pull_request(&session_id, &pr.key(), to.into())?;
+                Ok(pull_request_change_answer(&update))
+            }
+            WireCommand::ReorderPullRequests { session_id, order } => {
+                let order: Vec<crate::model::PrKey> =
+                    order.iter().map(crate::viewmodel::PrKeyView::key).collect();
+                let update = self.reorder_pull_requests(&session_id, &order)?;
+                Ok(pull_request_change_answer(&update))
             }
             other => Ok(WireDispatch::Unhandled(other)),
         }
@@ -5666,20 +5769,26 @@ impl Engine {
         }))
     }
 
-    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
+    /// Offer `command` to each group of mappings in turn; what none of them
+    /// claims comes back unhandled.
+    fn map_grouped_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
         let command = match self.map_changes_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
             WireCommandMapping::Unhandled(command) => command,
+            mapped @ WireCommandMapping::Mapped(_) => return Ok(mapped),
         };
         let command = match self.map_project_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
             WireCommandMapping::Unhandled(command) => command,
+            mapped @ WireCommandMapping::Mapped(_) => return Ok(mapped),
         };
         let command = match self.map_agent_command(command)? {
-            WireCommandMapping::Mapped(command) => return Ok(command),
             WireCommandMapping::Unhandled(command) => command,
+            mapped @ WireCommandMapping::Mapped(_) => return Ok(mapped),
         };
-        let command = match Self::map_config_set_command(command)? {
+        Self::map_config_set_command(command)
+    }
+
+    fn wire_to_command(&self, command: WireCommand) -> anyhow::Result<Command> {
+        let command = match self.map_grouped_command(command)? {
             WireCommandMapping::Mapped(command) => return Ok(command),
             WireCommandMapping::Unhandled(command) => command,
         };
@@ -5732,8 +5841,12 @@ impl Engine {
             | WireCommand::ChangeAgentProvider { .. }
             | WireCommand::CreateAgentFromPr { .. }
             | WireCommand::AttachPullRequest { .. }
-            | WireCommand::ClearPullRequestOverride { .. }
-            | WireCommand::ResumePullRequestAutodetection { .. }
+            | WireCommand::DetachPullRequest { .. }
+            | WireCommand::HidePullRequest { .. }
+            | WireCommand::ShowPullRequest { .. }
+            | WireCommand::SetPullRequestSort { .. }
+            | WireCommand::MovePullRequest { .. }
+            | WireCommand::ReorderPullRequests { .. }
             | WireCommand::SetChangesPaneVisible { .. }
             | WireCommand::SetInstanceIdentity { .. }
             | WireCommand::SetSettings(..)
@@ -9741,8 +9854,10 @@ mod tests {
         assert_eq!(other.created_op_id, None);
     }
 
+    /// Attaching adds beside what the agent has, and every pull-request
+    /// change answers with exactly one status, read from its wire shape.
     #[test]
-    fn attach_pull_request_pins_and_clear_override_unpins() {
+    fn attaching_adds_and_every_pull_request_change_answers_once() {
         let (mut engine, _tmp) = test_engine();
         enable_gh(&mut engine);
         let session = sample_session("s1", "p1", "feat");
@@ -9752,94 +9867,102 @@ mod tests {
             .expect("persist session");
         engine.sessions.push(session);
 
-        let outcome = engine
-            .apply_wire(WireCommand::AttachPullRequest {
-                session_id: "s1".to_string(),
-                host: "GitHub.com".to_string(),
-                owner_repo: "fork/r".to_string(),
-                number: 12,
-                title: "Pinned".to_string(),
-                state: "OPEN".to_string(),
-                url: "https://github.com/fork/r/pull/12".to_string(),
-            })
-            .expect("attach");
-        let status = outcome.status.expect("attach confirmation");
-        assert_eq!(status.tone, "info");
-        assert!(status.message.contains("#12"), "got {:?}", status.message);
-
-        // The pin is persisted, mirrored in memory, and drives the badge.
+        for (owner_repo, number) in [("fork/r", 12), ("o/r", 13)] {
+            let outcome = engine
+                .apply_wire(WireCommand::AttachPullRequest {
+                    session_id: "s1".to_string(),
+                    host: "GitHub.com".to_string(),
+                    owner_repo: owner_repo.to_string(),
+                    number,
+                    title: "Pinned".to_string(),
+                    state: "OPEN".to_string(),
+                    url: format!("https://github.com/{owner_repo}/pull/{number}"),
+                })
+                .expect("attach");
+            let status = outcome.status.expect("attach confirmation");
+            assert_eq!(status.tone, "info");
+            assert!(
+                status.message.contains(&format!("#{number}")),
+                "got {:?}",
+                status.message
+            );
+        }
         let stored = engine.session_store.attached_prs_for_tests();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].pr_number, 12);
-        assert_eq!(
-            stored[0].host, "github.com",
+        let mut numbers: Vec<u64> = stored.iter().map(|pr| pr.pr_number).collect();
+        numbers.sort_unstable();
+        assert_eq!(numbers, vec![12, 13], "the second attach adds");
+        assert!(
+            stored.iter().all(|pr| pr.host == "github.com"),
             "hosts are lowercased at the boundary"
         );
-        assert_eq!(engine.attached_pr("s1").map(|p| p.number), Some(12));
-        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
-        // The sync snapshot now carries the pin for the worker.
-        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
-        let pin = entries[0].pinned.as_ref().expect("pinned sync entry");
-        assert_eq!(pin.number, 12);
-        assert_eq!(pin.owner_repo, "fork/r");
 
-        // Detach: the row and the map entry go, the badge goes WITH them (a
-        // detach means "no pull request", now, not at the next cycle), and the
-        // session drops out of the sync plan entirely.
-        let outcome = engine
-            .apply_wire(WireCommand::ClearPullRequestOverride {
-                session_id: "s1".to_string(),
-            })
-            .expect("detach");
-        assert_eq!(outcome.status.expect("detach confirmation").tone, "info");
+        let commands = [
+            r#"{"command":"detach_pull_request","args":{"session_id":"s1","pr":{"host":"github.com","owner_repo":"fork/r","number":12}}}"#,
+            r#"{"command":"hide_pull_request","args":{"session_id":"s1","pr":{"host":"github.com","owner_repo":"o/r","number":13}}}"#,
+            r#"{"command":"show_pull_request","args":{"session_id":"s1","pr":{"host":"github.com","owner_repo":"o/r","number":13}}}"#,
+            r#"{"command":"set_pull_request_sort","args":{"session_id":"s1","mode":"manual"}}"#,
+            r#"{"command":"set_pull_request_sort","args":{"session_id":"s1","mode":"auto"}}"#,
+            r#"{"command":"move_pull_request","args":{"session_id":"s1","pr":{"host":"github.com","owner_repo":"o/r","number":13},"to":"top"}}"#,
+            r#"{"command":"move_pull_request","args":{"session_id":"s1","pr":{"host":"github.com","owner_repo":"o/r","number":13},"to":1}}"#,
+            r#"{"command":"reorder_pull_requests","args":{"session_id":"s1","order":[{"host":"github.com","owner_repo":"o/r","number":13}]}}"#,
+        ];
+        for json in commands {
+            let command: WireCommand = serde_json::from_str(json).expect(json);
+            let outcome = engine.apply_wire(command).expect(json);
+            let status = outcome.status.expect(json);
+            assert_eq!(status.tone, "info", "{json}: {}", status.message);
+        }
         assert_eq!(
-            engine.session_store.attached_prs_for_tests(),
-            Vec::<crate::storage::StoredPr>::new()
-        );
-        assert!(engine.agent_prs.values().flatten().all(|row| !row.attached));
-        assert!(
-            engine.shown_pr("s1").is_none(),
-            "the badge disappears with the detach"
-        );
-        assert!(
-            engine.pr_sync_sessions.lock().unwrap().is_empty(),
-            "a detached session is not planned for at all"
-        );
-
-        // Resume: the session rejoins the plan, and the confirmation says so.
-        let outcome = engine
-            .apply_wire(WireCommand::ResumePullRequestAutodetection {
-                session_id: "s1".to_string(),
-            })
-            .expect("resume");
-        let status = outcome.status.expect("resume confirmation");
-        assert_eq!(status.tone, "info");
-        assert!(
-            status.message.contains("Resumed"),
-            "got {:?}",
-            status.message
-        );
-        assert!(
             engine
-                .pr_prefs
-                .values()
-                .all(|p| p.hide_created_before.is_none())
+                .agent_prs
+                .get("s1")
+                .map(|rows| rows.iter().map(|row| row.number).collect::<Vec<_>>()),
+            Some(vec![13]),
+            "the detach took the attached-only one off"
         );
-        assert_eq!(engine.pr_sync_sessions.lock().unwrap().len(), 1);
+        assert_eq!(
+            engine.pr_sort_mode("s1"),
+            crate::pr_list::PrSortMode::Automatic
+        );
     }
 
-    /// Both PR-detachment commands refuse a session that is not there, so the
+    /// Every pull-request change refuses a session that is not there, so the
     /// REST layer can map the message onto a 404 the way its siblings do.
     #[test]
-    fn detach_and_resume_refuse_an_unknown_session() {
+    fn every_pull_request_change_refuses_an_unknown_session() {
         let (mut engine, _tmp) = test_engine();
         enable_gh(&mut engine);
+        let pr = crate::viewmodel::PrKeyView {
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            number: 1,
+        };
+        let session_id = || "ghost".to_string();
         for command in [
-            WireCommand::ClearPullRequestOverride {
-                session_id: "ghost".to_string(),
+            WireCommand::DetachPullRequest {
+                session_id: session_id(),
+                pr: pr.clone(),
             },
-            WireCommand::ResumePullRequestAutodetection {
-                session_id: "ghost".to_string(),
+            WireCommand::HidePullRequest {
+                session_id: session_id(),
+                pr: pr.clone(),
+            },
+            WireCommand::ShowPullRequest {
+                session_id: session_id(),
+                pr: pr.clone(),
+            },
+            WireCommand::SetPullRequestSort {
+                session_id: session_id(),
+                mode: PullRequestSort::Manual,
+            },
+            WireCommand::MovePullRequest {
+                session_id: session_id(),
+                pr: pr.clone(),
+                to: PullRequestMove::Named(PullRequestMoveNamed::Top),
+            },
+            WireCommand::ReorderPullRequests {
+                session_id: session_id(),
+                order: vec![pr.clone()],
             },
         ] {
             let err = engine
@@ -9875,7 +9998,11 @@ mod tests {
             .apply_pr_attach("s1", "GitHub.Example.COM ".trim(), "o/r", 2, "", "OPEN", "")
             .expect("attach with a capitalised host");
         assert_eq!(
-            engine.attached_pr("s1").map(|p| p.host.as_str()),
+            engine
+                .agent_prs
+                .get("s1")
+                .and_then(|rows| rows.iter().find(|row| row.number == 2))
+                .map(|p| p.host.as_str()),
             Some("github.example.com"),
             "hosts store lowercased"
         );
@@ -9984,11 +10111,11 @@ mod tests {
         assert!(!engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())));
     }
 
-    /// The headline of the mutual-blocking ruling: while an attach is
-    /// resolving, a detach for the same agent is refused outright with an
-    /// honest message instead of racing the attach's own write.
+    /// While an attach is resolving, a change to the same agent's pull
+    /// requests is refused outright with an honest message instead of racing
+    /// the attach's own write.
     #[test]
-    fn a_pending_attach_blocks_detach_and_resume_for_the_same_session() {
+    fn a_pending_attach_blocks_the_other_pull_request_changes_for_the_same_session() {
         let (mut engine, _tmp) = test_engine();
         enable_gh(&mut engine);
         engine.projects.push(sample_project("p1", "/tmp/p1"));
@@ -10005,31 +10132,23 @@ mod tests {
         assert!(engine.is_in_flight(&crate::engine::InFlightKey::PrAttach("s1".to_string())));
 
         let err = engine
-            .clear_pull_request_override("s1")
-            .expect_err("a detach must not race a resolving attach");
+            .set_pull_request_sort("s1", crate::pr_list::PrSortMode::Manual)
+            .expect_err("a change must not race a resolving attach");
         assert!(
             err.to_string()
                 .contains(crate::engine::PR_ATTACH_IN_FLIGHT_MARKER),
             "got {err:#}",
         );
-        assert!(
-            !engine.pr_autodetect_suppressed("s1"),
-            "the refused detach must not have written the suppression"
-        );
-
-        let err = engine
-            .resume_pr_autodetection("s1")
-            .expect_err("a resume must not race a resolving attach either");
-        assert!(
-            err.to_string()
-                .contains(crate::engine::PR_ATTACH_IN_FLIGHT_MARKER),
-            "got {err:#}",
+        assert_eq!(
+            engine.pr_sort_mode("s1"),
+            crate::pr_list::PrSortMode::Automatic,
+            "the refused change wrote nothing"
         );
 
         // The block is per session: another agent's PR operations are untouched.
         engine
-            .clear_pull_request_override("s2")
-            .expect("an unrelated agent still detaches");
+            .set_pull_request_sort("s2", crate::pr_list::PrSortMode::Manual)
+            .expect("an unrelated agent still changes");
     }
 
     /// Every attach dispatch ends in exactly one `PullRequestResolved`, and
@@ -10070,11 +10189,8 @@ mod tests {
             "a landed attach unblocks the session"
         );
         engine
-            .clear_pull_request_override("s1")
+            .detach_pull_request("s1", &crate::model::PrKey::new("github.com", "o/r", 12))
             .expect("detach works again once the attach has landed");
-        engine
-            .resume_pr_autodetection("s1")
-            .expect("and so does resume");
 
         // The failure path: a lookup that never found a PR must unblock too,
         // and the user's very next act is typically the detach they were
@@ -10094,8 +10210,8 @@ mod tests {
             "a failed attach unblocks the session as surely as a successful one"
         );
         engine
-            .clear_pull_request_override("s1")
-            .expect("detach immediately after a failed attach");
+            .set_pull_request_sort("s1", crate::pr_list::PrSortMode::Manual)
+            .expect("a change immediately after a failed attach");
     }
 
     /// The fallback resolution path (no keyed op id, or an op id the map no

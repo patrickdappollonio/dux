@@ -399,7 +399,13 @@ pub(crate) enum EngineRequest {
         String,
         String,
         StatusScope,
-        oneshot::Sender<Result<String, String>>,
+        oneshot::Sender<Result<OperationView, String>>,
+    ),
+    /// The branch list behind the Pull requests views: every branch the
+    /// agent's worktree has been on, with its pull requests. Read-only.
+    PullRequestBranches(
+        String,
+        oneshot::Sender<Result<dux_core::viewmodel::PrBranchesView, String>>,
     ),
     /// Bump and return the next monotonic changed-files revision for a session
     /// (one actor round-trip over the engine's single SQLite connection). The
@@ -1977,20 +1983,33 @@ impl EngineHandle {
         rx.await.ok()
     }
 
-    /// Manually attach (pin) a pull request to a session from the raw typed
-    /// reference. Returns the keyed status op id the REST handler echoes in its
-    /// `202` body; the outcome rides the status toast stream. A synchronous
-    /// refusal (gh unavailable, empty reference, unknown session) is `Err` with
-    /// the engine's message.
+    /// Attach a pull request to a session from the raw typed reference.
+    /// Returns the operation record the attach is followed by, its id being
+    /// the keyed status op id; the outcome rides the status toast stream and
+    /// finishes the record. A synchronous refusal (gh unavailable, empty
+    /// reference, unknown session) is `Err` with the engine's message.
     pub(crate) async fn attach_pull_request(
         &self,
         session_id: String,
         raw: String,
         scope: StatusScope,
-    ) -> Result<String, String> {
+    ) -> Result<OperationView, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::AttachPullRequest(session_id, raw, scope, tx))
+            .await
+            .map_err(|_| "engine thread gone".to_string())?;
+        rx.await.map_err(|_| "engine reply dropped".to_string())?
+    }
+
+    /// See [`EngineRequest::PullRequestBranches`].
+    pub(crate) async fn pull_request_branches(
+        &self,
+        session_id: String,
+    ) -> Result<dux_core::viewmodel::PrBranchesView, String> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::PullRequestBranches(session_id, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -2560,6 +2579,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::SlotTabId(..)
         | EngineRequest::SessionWorktree(..)
         | EngineRequest::SessionBranchDeleteInputs(..)
+        | EngineRequest::PullRequestBranches(..)
         | EngineRequest::RenamePushedProbe(..)
         | EngineRequest::SessionGitAccess(..)
         | EngineRequest::SessionMissingDirectoryReason(..)
@@ -4498,7 +4518,7 @@ fn handle_attach_pull_request(
     session_id: &str,
     raw: &str,
     origin: StatusScope,
-    reply: oneshot::Sender<Result<String, String>>,
+    reply: oneshot::Sender<Result<OperationView, String>>,
     status_tx: &mut StatusEmitter,
 ) {
     engine.current_origin = origin;
@@ -4506,12 +4526,19 @@ fn handle_attach_pull_request(
     engine.current_origin = StatusScope::All;
     let result = match result {
         Ok((op_id, pending)) => {
+            // The record waits on the attach's own key, so the final the
+            // lookup ends in finishes it at the emitter. Opened before the
+            // busy goes out, so nothing the attach raises lands first.
+            engine.open_operation(&op_id, OperationKind::PrAttach);
             for status in
                 dux_core::wire::wire_statuses_from_reaction(&EventReaction::Status(pending))
             {
                 let _ = status_tx.send(status);
             }
-            Ok(op_id)
+            engine
+                .operations
+                .peek(&op_id, Instant::now())
+                .ok_or_else(|| MISSING_OPERATION_RECORD.to_string())
         }
         Err(error) => Err(error.to_string()),
     };
@@ -4761,6 +4788,14 @@ fn handle_request(
         }
         EngineRequest::RenamePushedProbe(session_id, reply) => {
             answer(reply, engine.rename_pushed_probe(&session_id));
+        }
+        EngineRequest::PullRequestBranches(session_id, reply) => {
+            answer(
+                reply,
+                engine
+                    .pull_request_branches(&session_id)
+                    .map_err(|err| format!("{err:#}")),
+            );
         }
         EngineRequest::NoteChangedFilesOutcome(session_id, failure) => {
             engine.post_changed_files_outcome(&session_id, failure.as_deref());
@@ -9518,6 +9553,11 @@ mod tests {
                 false,
             ),
             (
+                "PullRequestBranches",
+                EngineRequest::PullRequestBranches("s1".into(), dead_reply()),
+                false,
+            ),
+            (
                 "RenamePushedProbe",
                 EngineRequest::RenamePushedProbe("s1".into(), dead_reply()),
                 false,
@@ -9771,7 +9811,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            48,
+            49,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

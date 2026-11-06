@@ -19,6 +19,7 @@ mod lifecycle;
 mod pending_removals;
 mod pr_sync_control;
 mod project_base;
+pub(crate) mod pull_requests;
 mod reload_origin;
 pub(crate) mod removal;
 mod rename;
@@ -115,6 +116,7 @@ pub(crate) use pending_removals::{
     stored_occupant,
 };
 pub use pr_sync_control::PrSyncControl;
+pub use pull_requests::UNKNOWN_PULL_REQUEST_MARKER;
 pub use removal::{
     ProjectDeletionOutcome, RemovalCoordination, StartupRerunClaim, project_deletion_final,
     removal_waiting_message,
@@ -584,15 +586,12 @@ pub struct Engine {
     pub agent_prs: HashMap<String, Vec<crate::model::AgentPr>>,
     /// Each agent's pull-request preferences, by session id: the in-memory
     /// mirror of `session_pr_prefs`. An agent with none has the defaults.
-    /// While an agent's `hide_created_before` is set, its pull requests were
-    /// put out of sight by a detach and nothing is detected for it until it
-    /// is resumed or a pull request is attached.
     pub pr_prefs: HashMap<String, crate::model::PrPrefs>,
     /// `Some` while the preferences behind `pr_prefs` could not be read,
     /// holding when to try the read again. Until a read succeeds no
     /// detection runs or applies for an agent with nothing attached, since
-    /// any of them may be one the user detached; an attached pull request is
-    /// the user's own answer and still syncs.
+    /// the preferences decide whether a pull request it finds arrives hidden;
+    /// an attached pull request is the user's own answer and still syncs.
     pub pr_prefs_retry_at: Option<Instant>,
     /// Every branch each agent's worktree has been on, by session id, kept
     /// current wherever the branch list is written.
@@ -5042,24 +5041,25 @@ impl Engine {
         }
     }
 
-    /// The pull request an agent shows: the one it has attached, else the
-    /// first in its order. `None` when it has none it shows.
+    /// The pull request an agent shows: the first in its order, the one the
+    /// banner, the badge and the command line all name. `None` when it shows
+    /// none.
     pub fn shown_pr(&self, session_id: &str) -> Option<&crate::model::AgentPr> {
-        let rows = self.agent_prs.get(session_id)?;
-        rows.iter()
-            .find(|row| row.attached && !row.hidden)
-            .or_else(|| {
-                crate::pr_list::shown(
-                    rows,
-                    self.pr_prefs
-                        .get(session_id)
-                        .map(|prefs| prefs.sort_mode)
-                        .unwrap_or_default(),
-                )
-            })
+        crate::pr_list::shown(
+            self.agent_prs.get(session_id)?,
+            self.pr_sort_mode(session_id),
+        )
     }
 
-    /// The pull request the user attached to an agent, if any.
+    /// How an agent's pull requests are ordered.
+    pub fn pr_sort_mode(&self, session_id: &str) -> crate::pr_list::PrSortMode {
+        self.pr_prefs
+            .get(session_id)
+            .map(|prefs| prefs.sort_mode)
+            .unwrap_or_default()
+    }
+
+    /// A pull request the user attached to an agent, if any.
     pub fn attached_pr(&self, session_id: &str) -> Option<&crate::model::AgentPr> {
         self.agent_prs
             .get(session_id)?
@@ -5067,20 +5067,12 @@ impl Engine {
             .find(|row| row.attached)
     }
 
-    /// Whether the user switched pull-request detection off for an agent by
-    /// detaching, and has not resumed it since.
-    pub fn pr_autodetect_suppressed(&self, session_id: &str) -> bool {
-        self.pr_prefs
-            .get(session_id)
-            .is_some_and(|prefs| prefs.hide_created_before.is_some())
-    }
-
     /// Whether pull-request autodetection may run or apply for `session_id`:
     /// an attached pull request always syncs, anything else only once the
-    /// preferences are known and detection was not switched off.
+    /// preferences are known, since they decide whether a new one arrives
+    /// hidden.
     pub(crate) fn pr_autodetect_allowed(&self, session_id: &str) -> bool {
-        self.attached_pr(session_id).is_some()
-            || (self.pr_prefs_retry_at.is_none() && !self.pr_autodetect_suppressed(session_id))
+        self.attached_pr(session_id).is_some() || self.pr_prefs_retry_at.is_none()
     }
 
     /// Make an agent's pull requests `rows` in memory, moving its revision
@@ -5934,11 +5926,12 @@ impl Engine {
         }
     }
 
-    /// Apply a manual pull-request attachment: persist the override row, mirror
-    /// it in memory, show the badge immediately, and re-derive the sync snapshot
-    /// so the next cycle queries the pin. Shared by the `AttachPullRequest` wire
-    /// command and the `PullRequestResolved` attach handler, so both surfaces
-    /// apply the exact same mutation. Returns the user-facing confirmation.
+    /// Apply a manual pull-request attachment: add the pull request to the
+    /// agent's list as attached, mirror it in memory and re-derive the sync
+    /// snapshot so the next cycle refreshes it. Attaching adds; the agent's
+    /// other pull requests stay. Shared by the `AttachPullRequest` wire command
+    /// and the `PullRequestResolved` attach handler, so both surfaces apply the
+    /// exact same mutation. Returns the user-facing confirmation.
     #[expect(
         clippy::too_many_arguments,
         reason = "each argument is one field of the pull request being attached, passed straight from the wire command and the resolver"
@@ -5968,8 +5961,8 @@ impl Engine {
         let agent_name = session.display_label();
         // Store the host exactly as the sync planner would derive it (empty
         // means github.com, lowercased): a raw wire command can carry any
-        // spelling, and an unnormalized stored pin would never match the
-        // planner's target, so the pin would never refresh.
+        // spelling, and an unnormalized stored row would never match the
+        // planner's target, so it would never refresh.
         let host = crate::gh::normalized_github_host(host);
         let url = if url.trim().is_empty() {
             crate::gh::pull_request_url(&host, owner_repo, number)
@@ -5989,23 +5982,23 @@ impl Engine {
             anyhow::bail!("cannot attach PR #{number}: its state could not be read");
         };
         let key = crate::model::PrKey::new(info.host.clone(), info.owner_repo.clone(), number);
-        // One attached pull request per agent: attaching another replaces
-        // the earlier one, whose row goes unless the sync also found it.
-        let mut rows: Vec<crate::model::AgentPr> = self
+        let mut rows = self.session_store.load_agent_prs_of(session_id)?;
+        let prefs = self
             .session_store
-            .load_agent_prs_of(session_id)?
-            .into_iter()
-            .filter_map(|mut row| {
-                if row.is(&key) {
-                    return Some(row);
-                }
-                row.attached = false;
-                row.found.then_some(row)
-            })
-            .collect();
+            .load_pr_prefs()?
+            .remove(session_id)
+            .unwrap_or_default();
+        let earlier = rows.iter().find(|row| row.is(&key)).map(|row| {
+            if row.attached {
+                pull_requests::AttachedBefore::Attached
+            } else {
+                pull_requests::AttachedBefore::FoundOnly
+            }
+        });
         if let Some(row) = rows.iter_mut().find(|row| row.is(&key)) {
             row.refresh_from(&info);
             row.attached = true;
+            // Attaching is asking to see it.
             row.hidden = false;
         } else {
             let mut row = crate::model::AgentPr::found(&info, chrono::Utc::now());
@@ -6013,196 +6006,11 @@ impl Engine {
             row.attached = true;
             rows.push(row);
         }
-        // Plugging a pull request back in by hand lifts an earlier detach: the
-        // user has said what this agent's PR is, so the session is tracked
-        // again (against the attached one, and by detection once it is
-        // detached). The rows and the preference change in one transaction
-        // before memory does.
-        let mut prefs = self
-            .session_store
-            .load_pr_prefs()?
-            .remove(session_id)
-            .unwrap_or_default();
-        prefs.hide_created_before = None;
-        self.session_store
-            .replace_agent_prs(session_id, &rows, &prefs)?;
-        self.set_pr_prefs(session_id, prefs);
-        self.set_agent_prs(session_id, rows);
-        self.update_pr_sync_sessions();
-        Ok(crate::status_text![
-            "Attached PR ",
-            n(format!("#{}", number)),
-            " (",
-            n(owner_repo),
-            ") to agent ",
-            q(agent_name),
-            ". dux will track \
-             this pull request until you detach it; autodetection is paused for this agent."
-        ])
-    }
-
-    /// Detach a session's pull request: this agent has no PR, as of now. The
-    /// pin goes if there was one, the badge is cleared immediately (rather
-    /// than surviving until some later sync cycle re-evaluates), and the
-    /// session is recorded as suppressed so autodetection cannot put the badge
-    /// straight back. Applies to an AUTODETECTED association too, which is the
-    /// case the old pin-only detach could not answer at all.
-    ///
-    /// The suppression is durable: a restart is not the user changing their
-    /// mind. It is lifted by a manual attach or by
-    /// [`Self::resume_pr_autodetection`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unknown session, a standalone agent, an attach
-    /// still running for the agent, or a session database write that fails.
-    pub fn clear_pull_request_override(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
-            anyhow::bail!("unknown session: {session_id}");
-        };
-        let agent_name = session.display_label();
-        // A standalone agent has no branch, so it has no pull request and
-        // never can. Refused HERE, immediately after the existence check and
-        // BEFORE the one-attach-at-a-time mutual block below, so the answer is
-        // "this agent has no pull requests" rather than "wait for the attach
-        // to finish" about a feature it does not have.
-        let _ = self.branch_git_workspace(
-            session_id,
-            "attach, detach or track a pull request for",
-            STANDALONE_ADD_AS_PROJECT_REMEDY,
-        )?;
-        // A manual attach for this agent is mid-flight, so its outcome is
-        // still to come: detaching now would be undone (or half-undone) by the
-        // attach landing a moment later. Refuse instead of racing it. The
-        // guard sits AFTER the existence check so an unknown session still
-        // gets the unknown-session error (the surfaces' 404).
-        //
-        // Deliberately `PrAttach` only. `InFlightKey::PrCheck` (the resume
-        // one-shot and the background checks) must NEVER block these
-        // operations: a background poll is not the user's own half-finished
-        // act, and blocking on it would make detach fail at random moments.
-        if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
-            anyhow::bail!(pr_attach_in_flight_message(&agent_name));
-        }
-        // The attached pull request goes unless the sync also found it, every
-        // found one is put out of sight, and detection is switched off, all
-        // in one transaction before memory does, so the snapshot this detach
-        // produces already excludes the session.
-        let rows: Vec<crate::model::AgentPr> = self
-            .session_store
-            .load_agent_prs_of(session_id)?
-            .into_iter()
-            .filter(|row| row.found)
-            .map(|mut row| {
-                row.attached = false;
-                row.hidden = true;
-                row
-            })
-            .collect();
-        let mut prefs = self
-            .session_store
-            .load_pr_prefs()?
-            .remove(session_id)
-            .unwrap_or_default();
-        prefs.hide_created_before = Some(chrono::Utc::now());
-        self.session_store
-            .replace_agent_prs(session_id, &rows, &prefs)?;
-        self.set_pr_prefs(session_id, prefs);
-        // The badge goes now. Callers reach this through a wire command, and
-        // every wire command is a spine mutation, so the cleared badge is
-        // published to the web with this change rather than a cycle later; the
-        // TUI rebuilds its rows off the same call.
-        self.set_agent_prs(session_id, rows);
-        self.update_pr_sync_sessions();
-        Ok(crate::status_text![
-            "Detached the pull request from agent ",
-            q(agent_name),
-            ". dux will stop looking for \
-             one on this agent until you attach a pull request by hand or resume autodetection \
-             for it."
-        ])
-    }
-
-    /// Undo a detach: autodetection is switched back on for the session and one
-    /// immediate check runs so the badge comes back now rather than at the next
-    /// poll. Deliberately not gated on `gh` (like the detach itself): the
-    /// suppression is dux's own state, and clearing it must never depend on a
-    /// CLI that could have been uninstalled since. Without a usable `gh` the
-    /// check is a no-op and the next cycle after the integration re-arms picks
-    /// the session up.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unknown session, a standalone agent, an attach
-    /// still running for the agent, or a session database write that fails.
-    pub fn resume_pr_autodetection(&mut self, session_id: &str) -> anyhow::Result<StatusText> {
-        let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
-            anyhow::bail!("unknown session: {session_id}");
-        };
-        let agent_name = session.display_label();
-        // A standalone agent has no branch, so it has no pull request and
-        // never can. Refused HERE, immediately after the existence check and
-        // BEFORE the one-attach-at-a-time mutual block below, so the answer is
-        // "this agent has no pull requests" rather than "wait for the attach
-        // to finish" about a feature it does not have.
-        let _ = self.branch_git_workspace(
-            session_id,
-            "attach, detach or track a pull request for",
-            STANDALONE_ADD_AS_PROJECT_REMEDY,
-        )?;
-        // Same mutual block as the detach beside it: an attach that is still
-        // resolving owns this agent's pull-request state until it lands or
-        // fails. `PrCheck` is deliberately not consulted here either.
-        if self.is_in_flight(&InFlightKey::PrAttach(session_id.to_string())) {
-            anyhow::bail!(pr_attach_in_flight_message(&agent_name));
-        }
-        let was_suppressed = self.pr_autodetect_suppressed(session_id);
-        if was_suppressed {
-            // The pull requests the detach put out of sight come back with it.
-            let rows: Vec<crate::model::AgentPr> = self
-                .session_store
-                .load_agent_prs_of(session_id)?
-                .into_iter()
-                .map(|mut row| {
-                    row.hidden = false;
-                    row
-                })
-                .collect();
-            let mut prefs = self
-                .session_store
-                .load_pr_prefs()?
-                .remove(session_id)
-                .unwrap_or_default();
-            prefs.hide_created_before = None;
-            self.session_store
-                .replace_agent_prs(session_id, &rows, &prefs)?;
-            self.set_pr_prefs(session_id, prefs);
-            self.set_agent_prs(session_id, rows);
-        }
-        self.update_pr_sync_sessions();
-        // A zero interval on purpose: the user just asked for this, so the
-        // debounce a background trigger would respect has nothing to protect.
-        self.spawn_pr_check_for_session(session_id, Duration::from_secs(0));
-        // The one-shot above is a no-op while gh is unusable, so the message
-        // must not claim a check that never started.
-        let tail = if self.pr_agent_command_available() {
-            "dux is checking GitHub for a pull request on its branch now."
-        } else {
-            "dux will check GitHub once the GitHub integration is enabled and gh is signed in."
-        };
-        if was_suppressed {
-            Ok(crate::status_text![
-                "Resumed pull-request autodetection for agent ",
-                q(agent_name),
-                format!(". {}", tail)
-            ])
-        } else {
-            Ok(crate::status_text![
-                "Pull-request autodetection was already running for agent ",
-                q(agent_name),
-                format!("; {}", tail)
-            ])
-        }
+        let message =
+            pull_requests::attach_message(&agent_name, &rows, &key, earlier, prefs.sort_mode);
+        self.commit_pr_change(session_id, &agent_name, rows, prefs)
+            .map_err(|failure| anyhow::anyhow!(failure.to_string()))?;
+        Ok(message)
     }
 }
 
@@ -8579,13 +8387,34 @@ mod tests {
         // Arm the mutual block that the workspace gate must beat.
         engine.mark_in_flight(InFlightKey::PrAttach("sa1".to_string()));
 
-        let detach = engine.clear_pull_request_override("sa1").unwrap_err();
-        let resume = engine.resume_pr_autodetection("sa1").unwrap_err();
+        let key = crate::model::PrKey::new("github.com", "o/r", 1);
+        let detach = engine.detach_pull_request("sa1", &key).unwrap_err();
+        let hide = engine.hide_pull_request("sa1", &key).unwrap_err();
+        let show = engine.show_pull_request("sa1", &key).unwrap_err();
+        let sort = engine
+            .set_pull_request_sort("sa1", crate::pr_list::PrSortMode::Manual)
+            .unwrap_err();
+        let moved = engine
+            .move_pull_request("sa1", &key, crate::pr_list::MoveTo::Top)
+            .unwrap_err();
+        let reorder = engine
+            .reorder_pull_requests("sa1", std::slice::from_ref(&key))
+            .unwrap_err();
+        let branches = engine.pull_request_branches("sa1").unwrap_err();
         let attach = engine
             .dispatch_attach_pull_request("sa1", "https://github.com/o/r/pull/1")
             .unwrap_err();
 
-        for (what, err) in [("detach", detach), ("resume", resume), ("attach", attach)] {
+        for (what, err) in [
+            ("detach", detach),
+            ("hide", hide),
+            ("show", show),
+            ("sort", sort),
+            ("move", moved),
+            ("reorder", reorder),
+            ("branches", branches),
+            ("attach", attach),
+        ] {
             let message = err.to_string();
             assert!(
                 message.contains("standalone agent"),
@@ -8609,7 +8438,7 @@ mod tests {
     fn an_unknown_id_still_gets_the_unknown_session_error() {
         let (mut engine, _tmp, _folder) = engine_with_a_standalone_agent();
         let err = engine
-            .clear_pull_request_override("nope")
+            .detach_pull_request("nope", &crate::model::PrKey::new("github.com", "o/r", 1))
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown session"), "got {err:?}");
@@ -12502,12 +12331,11 @@ mod tests {
         assert_eq!(info.state, crate::model::PrState::Open);
     }
 
-    /// A pinned PR wins over the `session_prs` latest at seed time: the latest
-    /// row can be a HIGHER-numbered autodetected PR, and the badge must show the
-    /// pin. The pin is also known as attached so the identity guard and the
-    /// sync planner know about it from boot.
+    /// The badge shows the first pull request in the agent's order, whether
+    /// the user attached it or dux found it: an attached merged one comes
+    /// after a found open one.
     #[test]
-    fn seeding_shows_the_attached_pull_request_over_the_latest_found_one() {
+    fn seeding_shows_the_first_pull_request_in_order_whether_attached_or_found() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine
@@ -12532,8 +12360,8 @@ mod tests {
                 pr_number: 10,
                 host: "github.com".to_string(),
                 owner_repo: "fork/r".to_string(),
-                state: "OPEN".to_string(),
-                title: "Pinned".to_string(),
+                state: "MERGED".to_string(),
+                title: "Attached".to_string(),
                 url: "https://github.com/fork/r/pull/10".to_string(),
             },
             crate::storage::SeededPr::Attached,
@@ -12541,13 +12369,11 @@ mod tests {
 
         engine.seed_pull_requests_from_store();
 
-        let info = engine.shown_pr("s1").expect("seeded PR status");
-        assert_eq!(info.number, 10, "the pin wins over the latest stored PR");
-        assert_eq!(info.owner_repo, "fork/r");
+        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(50));
         assert_eq!(
             engine.attached_pr("s1").map(|p| p.number),
             Some(10),
-            "the override map is loaded alongside the badge",
+            "the attached one is loaded alongside"
         );
     }
 
@@ -12585,10 +12411,6 @@ mod tests {
         engine.seed_pull_requests_from_store();
 
         assert!(
-            engine.pr_autodetect_suppressed("s1"),
-            "seeding loads the durable suppression into the in-memory mirror"
-        );
-        assert!(
             engine.shown_pr("s1").is_none(),
             "a detached agent must come back from a restart with no badge"
         );
@@ -12599,52 +12421,129 @@ mod tests {
         );
     }
 
-    /// Detach is the whole feature: the badge goes now, the pin goes, and the
-    /// session is recorded as suppressed both in memory and on disk.
-    #[test]
-    fn detach_clears_the_badge_now_and_suppresses_autodetection() {
-        let (mut engine, _tmp) = test_engine();
+    fn pr_info(
+        number: u64,
+        owner_repo: &str,
+        state: crate::model::PrState,
+        created_day: u32,
+    ) -> crate::model::PrInfo {
+        use chrono::TimeZone;
+        crate::model::PrInfo {
+            number,
+            state,
+            title: format!("PR {number}"),
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+            url: format!("https://github.com/{owner_repo}/pull/{number}"),
+            gh_created_at: Some(
+                chrono::Utc
+                    .with_ymd_and_hms(2026, 1, created_day, 0, 0, 0)
+                    .unwrap(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// A pull request dux found on `head`, opened on day `created_day`.
+    fn found_pr(number: u64, created_day: u32, head: &str) -> crate::model::AgentPr {
+        let mut row = crate::model::AgentPr::found(
+            &pr_info(number, "o/r", crate::model::PrState::Open, created_day),
+            chrono::Utc::now(),
+        );
+        row.head_branch = Some(head.to_string());
+        row
+    }
+
+    /// A pull request the user attached from `owner_repo`.
+    fn attached_only_pr(number: u64, owner_repo: &str, head: &str) -> crate::model::AgentPr {
+        let mut row = crate::model::AgentPr::found(
+            &pr_info(number, owner_repo, crate::model::PrState::Open, 1),
+            chrono::Utc::now(),
+        );
+        row.found = false;
+        row.attached = true;
+        row.head_branch = Some(head.to_string());
+        row
+    }
+
+    /// An engine with the integration on and agent `s1` (branch `feat`)
+    /// holding `rows`, stored and loaded as a start would.
+    fn engine_with_prs(
+        rows: &[crate::model::AgentPr],
+    ) -> (Engine, crate::test_scratch::ScratchDir) {
+        let (mut engine, tmp) = test_engine();
         engine.github_integration_enabled = true;
-        engine.gh_status = crate::model::GhStatus::Available;
         let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
+        engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
         engine
-            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+            .session_store
+            .replace_agent_prs("s1", rows, &crate::model::PrPrefs::default())
+            .unwrap();
+        engine.seed_pull_requests_from_store();
+        (engine, tmp)
+    }
+
+    fn stored_row(engine: &Engine, number: u64) -> Option<crate::model::AgentPr> {
+        engine
+            .session_store
+            .load_agent_prs_of("s1")
+            .unwrap()
+            .into_iter()
+            .find(|row| row.number == number)
+    }
+
+    fn shown_numbers(engine: &Engine) -> Vec<u64> {
+        engine.spine().sessions[0]
+            .prs
+            .iter()
+            .map(|pr| pr.number)
+            .collect()
+    }
+
+    /// Detaching a pull request only attached takes it off the agent, and
+    /// leaves the agent's other pull requests and its preferences alone.
+    #[test]
+    fn detaching_an_attached_pull_request_removes_it_and_leaves_the_preferences_alone() {
+        let (mut engine, _tmp) = engine_with_prs(&[found_pr(50, 2, "feat")]);
+        engine.gh_status = crate::model::GhStatus::Available;
+        engine
+            .apply_pr_attach("s1", "github.com", "acme/infra", 12, "Pinned", "OPEN", "")
             .expect("attach");
-        assert!(engine.shown_pr("s1").is_some());
+        assert_eq!(shown_numbers(&engine).len(), 2);
 
-        engine.clear_pull_request_override("s1").expect("detach");
+        let update = engine
+            .detach_pull_request(
+                "s1",
+                &crate::model::PrKey::new("github.com", "acme/infra", 12),
+            )
+            .expect("detach");
 
-        assert!(
-            engine.shown_pr("s1").is_none(),
-            "the badge must disappear with the detach, not one sync cycle later"
-        );
-        assert!(
-            engine.agent_prs.values().flatten().all(|row| !row.attached),
-            "the pin goes too"
-        );
-        assert!(engine.pr_autodetect_suppressed("s1"));
+        assert_eq!(shown_numbers(&engine), vec![50]);
+        assert_eq!(stored_row(&engine, 12), None);
+        assert!(stored_row(&engine, 50).is_some());
         assert_eq!(
             engine.session_store.detached_sessions_for_tests(),
-            vec!["s1".to_string()],
-            "the detach is durable"
+            Vec::<String>::new(),
+            "a detach no longer switches anything off for the agent"
+        );
+        assert!(
+            update.message.starts_with("Detached acme/infra#12 from ")
+                && update.message.contains("Attach it again"),
+            "{}",
+            update.message
         );
     }
 
-    /// An attach whose suppression cannot be lifted keeps neither the pin nor
-    /// the lifted suppression, in memory or on disk.
+    /// An attach that cannot read the preferences changes nothing, in memory
+    /// or on disk.
     #[test]
-    fn an_attach_that_cannot_lift_the_suppression_changes_nothing() {
+    fn an_attach_that_cannot_read_the_preferences_changes_nothing() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         let session = sample_session("s1", "p1", "feat");
         engine.session_store.upsert_session(&session).unwrap();
         engine.sessions.push(session);
-        engine.clear_pull_request_override("s1").expect("detach");
         engine
             .session_store
             .break_pr_prefs_table_for_test()
@@ -12652,17 +12551,16 @@ mod tests {
 
         engine
             .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
-            .expect_err("the suppression write fails");
+            .expect_err("the preferences cannot be read");
 
-        assert!(engine.pr_autodetect_suppressed("s1"));
         assert!(engine.agent_prs.values().flatten().all(|row| !row.attached));
         assert_eq!(engine.session_store.attached_prs_for_tests(), Vec::new());
     }
 
-    /// A detach whose suppression cannot be written keeps the pin, in memory
-    /// and on disk.
+    /// A detach that cannot read the preferences keeps the attachment, in
+    /// memory and on disk.
     #[test]
-    fn a_detach_that_cannot_write_the_suppression_keeps_the_pin() {
+    fn a_detach_that_cannot_read_the_preferences_keeps_the_attachment() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         let session = sample_session("s1", "p1", "feat");
@@ -12677,8 +12575,8 @@ mod tests {
             .unwrap();
 
         engine
-            .clear_pull_request_override("s1")
-            .expect_err("the suppression write fails");
+            .detach_pull_request("s1", &crate::model::PrKey::new("github.com", "o/r", 12))
+            .expect_err("the preferences cannot be read");
 
         assert!(engine.attached_pr("s1").is_some());
         assert_eq!(engine.session_store.attached_prs_for_tests().len(), 1);
@@ -12754,49 +12652,79 @@ mod tests {
         assert_eq!(engine.shown_pr("s1").map(|pr| pr.number), Some(8));
     }
 
-    /// Detach is no longer a no-op without a pin: an AUTODETECTED badge is
-    /// exactly the case the user is complaining about, so it must clear too.
+    /// Detach, hide and show need no GitHub integration: with it off, each
+    /// changes the stored row, and each one that has nothing to do says so
+    /// and changes nothing.
     #[test]
-    fn detach_without_a_pin_still_clears_the_badge_and_suppresses() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        engine.agent_prs.insert(
-            "s1".to_string(),
-            vec![crate::model::AgentPr::found(
-                &crate::model::PrInfo {
-                    number: 12,
-                    state: crate::model::PrState::Open,
-                    title: "Autodetected".to_string(),
-                    host: "github.com".to_string(),
-                    owner_repo: "o/r".to_string(),
-                    url: "https://github.com/o/r/pull/12".to_string(),
-                    ..Default::default()
-                },
-                chrono::Utc::now(),
-            )],
-        );
+    fn detach_hide_and_show_work_with_the_integration_off_and_confirm_what_they_leave() {
+        let mut both = found_pr(12, 2, "feat");
+        both.attached = true;
+        let (mut engine, _tmp) =
+            engine_with_prs(&[both, attached_only_pr(77, "acme/infra", "main")]);
+        engine.github_integration_enabled = false;
+        engine.clear_agent_prs();
+        let twelve = crate::model::PrKey::new("github.com", "o/r", 12);
+        let seventy_seven = crate::model::PrKey::new("github.com", "acme/infra", 77);
 
-        let revision = engine.pr_revision.get("s1").copied();
-
-        let message = engine.clear_pull_request_override("s1").expect("detach");
-
+        let update = engine.detach_pull_request("s1", &twelve).unwrap();
+        let row = stored_row(&engine, 12).expect("a found row stays");
+        assert!(row.found && !row.attached);
         assert!(
-            engine.shown_pr("s1").is_none(),
-            "an autodetected badge is detachable, got {:?}",
-            engine.shown_pr("s1"),
+            update.message.starts_with("Detached #12 from ")
+                && update.message.contains("found it on branch \"feat\""),
+            "{}",
+            update.message
         );
-        assert!(engine.pr_autodetect_suppressed("s1"));
-        assert_ne!(engine.pr_revision.get("s1").copied(), revision);
+
+        let update = engine.detach_pull_request("s1", &twelve).unwrap();
+        assert_eq!(stored_row(&engine, 12), Some(row.clone()));
         assert!(
-            !message.contains("no manually attached pull request"),
-            "the old honest-no-op copy is now false, got {message:?}"
+            update.message.contains("nothing to detach"),
+            "{}",
+            update.message
         );
+
+        let update = engine.hide_pull_request("s1", &seventy_seven).unwrap();
+        assert!(!stored_row(&engine, 77).unwrap().hidden);
+        assert!(
+            update.message.starts_with("acme/infra#77 on ") && update.message.contains("detach it"),
+            "{}",
+            update.message
+        );
+
+        let update = engine.hide_pull_request("s1", &twelve).unwrap();
+        assert!(stored_row(&engine, 12).unwrap().hidden);
+        assert!(
+            update.message.starts_with("Hid #12 on "),
+            "{}",
+            update.message
+        );
+        let update = engine.hide_pull_request("s1", &twelve).unwrap();
+        assert!(
+            update.message.contains("already hidden"),
+            "{}",
+            update.message
+        );
+
+        let update = engine.show_pull_request("s1", &twelve).unwrap();
+        assert!(!stored_row(&engine, 12).unwrap().hidden);
+        assert!(
+            update.message.contains("is back on") && update.message.contains("the place it had"),
+            "{}",
+            update.message
+        );
+        let update = engine.show_pull_request("s1", &twelve).unwrap();
+        assert!(
+            update.message.contains("is not hidden"),
+            "{}",
+            update.message
+        );
+
+        let unknown = engine
+            .hide_pull_request("s1", &crate::model::PrKey::new("github.com", "o/r", 99))
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains(UNKNOWN_PULL_REQUEST_MARKER), "{unknown}");
     }
 
     /// The branch list in memory follows a write to it, and the agent's
@@ -12826,195 +12754,262 @@ mod tests {
         assert_eq!(engine.pr_revision.get("s1").copied(), revision);
     }
 
-    /// A suppressed session is left out of the sync snapshot entirely, so the
-    /// poll loop never asks GitHub about it and can never re-badge it.
+    /// The branch list puts each pull request on the branch GitHub names as
+    /// its head, under the branch's name now or one it had before a rename;
+    /// attached ones on no branch are listed apart. The rename warning reads
+    /// the same names.
     #[test]
-    fn a_suppressed_session_is_excluded_from_the_sync_entries() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        for id in ["s1", "s2"] {
-            let session = sample_session(id, "p1", id);
-            engine
-                .session_store
-                .upsert_session(&session)
-                .expect("seed session");
-            engine.sessions.push(session);
-        }
+    fn the_branch_list_groups_pull_requests_by_former_names() {
+        use chrono::TimeZone;
+        let on_old_name = found_pr(12, 3, "old-feat");
+        let mut merged = found_pr(7, 1, "spike");
+        merged.state = crate::model::PrState::Merged;
+        let mut unknown_head = found_pr(8, 2, "x");
+        unknown_head.head_branch = None;
+        let (mut engine, _tmp) = engine_with_prs(&[
+            on_old_name,
+            merged,
+            unknown_head,
+            attached_only_pr(77, "acme/infra", "main"),
+        ]);
+        let day = |d| Some(chrono::Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap());
+        engine.branch_histories.insert(
+            "s1".to_string(),
+            vec![
+                crate::branch_history::BranchHistoryEntry {
+                    name: "spike".to_string(),
+                    born_here: true,
+                    identity: None,
+                    tip: None,
+                    first_seen_at: day(1),
+                    former_names: Vec::new(),
+                },
+                crate::branch_history::BranchHistoryEntry {
+                    name: "feat".to_string(),
+                    born_here: false,
+                    identity: None,
+                    tip: None,
+                    first_seen_at: day(3),
+                    former_names: vec!["old-feat".to_string()],
+                },
+            ],
+        );
 
-        engine.clear_pull_request_override("s1").expect("detach");
+        let view = engine.pull_request_branches("s1").unwrap();
 
-        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
-        let ids: Vec<String> = entries.into_iter().map(|e| e.session_id).collect();
+        let names: Vec<(&str, bool, Vec<u64>)> = view
+            .branches
+            .iter()
+            .map(|b| {
+                (
+                    b.name.as_str(),
+                    b.current,
+                    b.prs.iter().map(|k| k.number).collect(),
+                )
+            })
+            .collect();
         assert_eq!(
-            ids,
-            vec!["s2".to_string()],
-            "a detached agent must not be planned for at all"
+            names,
+            vec![("feat", true, vec![12]), ("spike", false, vec![7])]
         );
+        assert_eq!(view.branches[0].former_names, vec!["old-feat".to_string()]);
+        assert_eq!(
+            view.attached_on_no_branch
+                .iter()
+                .map(|k| (k.owner_repo.as_str(), k.number))
+                .collect::<Vec<_>>(),
+            vec![("acme/infra", 77)]
+        );
+        assert_eq!(engine.rename_open_pull_request("s1"), Some(12));
     }
 
-    /// The one-shot paths (focus, create, a branch move, agent exit) must respect the
-    /// detach too, or focusing a detached agent would re-detect its PR.
+    /// The sort mode and every move rewrite the order the agent shows, and
+    /// each answer says what happened: a move from the automatic order
+    /// switches to the user's own and says whether a saved one was replaced,
+    /// a move in the user's own order is quiet on the web, and a move with
+    /// nowhere to go, a position outside the list and a drag over a list that
+    /// changed each leave the order as it was.
     #[test]
-    fn a_suppressed_session_gets_no_one_shot_pr_check() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        engine.gh_status = crate::model::GhStatus::Available;
-        let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        engine.clear_pull_request_override("s1").expect("detach");
+    fn sorting_and_moving_rewrite_the_order_and_say_how() {
+        use crate::pr_list::{MoveTo, PrSortMode};
+        let (mut engine, _tmp) = engine_with_prs(&[
+            found_pr(1, 1, "a"),
+            found_pr(2, 2, "b"),
+            found_pr(3, 3, "c"),
+        ]);
+        let key = |n| crate::model::PrKey::new("github.com", "o/r", n);
+        assert_eq!(shown_numbers(&engine), vec![3, 2, 1]);
+        assert_eq!(engine.spine().sessions[0].pr_sort, "automatic");
 
-        engine.spawn_pr_check_for_session("s1", Duration::from_secs(0));
-
+        let update = engine
+            .move_pull_request("s1", &key(1), MoveTo::Top)
+            .unwrap();
+        assert_eq!(shown_numbers(&engine), vec![1, 3, 2]);
+        assert_eq!(engine.spine().sessions[0].pr_sort, "manual");
         assert!(
-            !engine.pr_last_checked.contains_key("s1"),
-            "a suppressed session must be skipped before the check is stamped"
+            update.message.starts_with("Moved #1 to the top on ")
+                && update
+                    .message
+                    .contains("choose Automatic under Sort to go back"),
+            "{}",
+            update.message
         );
+
+        let update = engine
+            .set_pull_request_sort("s1", PrSortMode::Automatic)
+            .unwrap();
+        assert_eq!(shown_numbers(&engine), vec![3, 2, 1]);
+        assert!(
+            update
+                .message
+                .contains("automatic order: open, draft, merged, closed"),
+            "{}",
+            update.message
+        );
+
+        let update = engine.move_pull_request("s1", &key(2), MoveTo::Up).unwrap();
+        assert_eq!(shown_numbers(&engine), vec![2, 3, 1]);
+        assert!(
+            update
+                .message
+                .contains("the order you had saved before is replaced"),
+            "{}",
+            update.message
+        );
+
+        let update = engine.move_pull_request("s1", &key(2), MoveTo::Up).unwrap();
+        assert!(
+            update.message.contains("already at the top"),
+            "{}",
+            update.message
+        );
+        let update = engine
+            .move_pull_request("s1", &key(1), MoveTo::Down)
+            .unwrap();
+        assert!(
+            update.message.contains("already at the bottom"),
+            "{}",
+            update.message
+        );
+        assert_eq!(shown_numbers(&engine), vec![2, 3, 1]);
+
+        let update = engine
+            .move_pull_request("s1", &key(1), MoveTo::Position(1))
+            .unwrap();
+        assert_eq!(shown_numbers(&engine), vec![1, 2, 3]);
+        assert!(update.message.starts_with("Moved #1 to position 1 on "));
+        assert!(update.quiet_on.web && !update.quiet_on.tui);
+
+        let refused = engine
+            .move_pull_request("s1", &key(1), MoveTo::Position(4))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.ends_with("shows 3 pull requests; a position is 1 to 3."),
+            "{refused}"
+        );
+
+        let update = engine
+            .set_pull_request_sort("s1", PrSortMode::Manual)
+            .unwrap();
+        assert!(
+            update.message.contains("already in your order"),
+            "{}",
+            update.message
+        );
+
+        let update = engine
+            .reorder_pull_requests("s1", &[key(1), key(2)])
+            .unwrap();
+        assert_eq!(update.tone, crate::statusline::StatusTone::Warning);
+        assert!(update.message.contains("changed while you were dragging"));
+        assert_eq!(shown_numbers(&engine), vec![1, 2, 3]);
+        engine
+            .reorder_pull_requests("s1", &[key(3), key(1), key(2)])
+            .unwrap();
+        assert_eq!(shown_numbers(&engine), vec![3, 1, 2]);
+
+        engine.hide_pull_request("s1", &key(3)).unwrap();
+        let refused = engine
+            .move_pull_request("s1", &key(3), MoveTo::Top)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("is hidden"), "{refused}");
     }
 
-    /// Plugging the PR back in by hand is the documented way out of a detach,
-    /// so an attach clears the suppression in memory and on disk.
+    /// Attaching adds beside the pull requests dux found, says how many the
+    /// agent has and which one the banner shows, and leaves the hide cutoff
+    /// alone. Attaching one already attached, or one dux found, says so.
     #[test]
-    fn a_manual_attach_lifts_the_suppression() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        engine.gh_status = crate::model::GhStatus::Available;
-        let session = sample_session("s1", "p1", "feat");
+    fn attaching_adds_beside_the_found_pull_requests_and_keeps_the_hide_cutoff() {
+        let (mut engine, _tmp) = engine_with_prs(&[found_pr(50, 5, "feat")]);
+        let cutoff = crate::model::PrPrefs {
+            hide_created_before: Some(chrono::Utc::now()),
+            ..Default::default()
+        };
+        let rows = engine.session_store.load_agent_prs_of("s1").unwrap();
         engine
             .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        engine.clear_pull_request_override("s1").expect("detach");
+            .replace_agent_prs("s1", &rows, &cutoff)
+            .unwrap();
+        engine.seed_pull_requests_from_store();
 
-        engine
-            .apply_pr_attach("s1", "github.com", "o/r", 12, "Pinned", "OPEN", "")
+        let message = engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Mine", "OPEN", "")
             .expect("attach");
 
-        assert!(
-            engine
-                .pr_prefs
-                .values()
-                .all(|p| p.hide_created_before.is_none())
-        );
+        assert_eq!(shown_numbers(&engine), vec![50, 12]);
+        assert!(stored_row(&engine, 12).is_some_and(|row| row.attached && !row.found));
+        assert!(stored_row(&engine, 50).is_some_and(|row| row.found && !row.attached));
         assert_eq!(
             engine.session_store.detached_sessions_for_tests(),
-            Vec::<String>::new()
+            vec!["s1".to_string()],
+            "only the import sets or clears the cutoff"
         );
-        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
-        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
-        assert_eq!(
-            entries.len(),
-            1,
-            "the session is planned for again once it is attached"
+        assert!(
+            message.to_string().starts_with("Attached #12 to ")
+                && message.to_string().contains(
+                    "It has 2 pull requests now; the banner shows #50 because open ones come first."
+                ),
+            "{message}"
         );
+
+        let again = engine
+            .apply_pr_attach("s1", "github.com", "o/r", 12, "Mine", "OPEN", "")
+            .expect("attach again");
+        assert!(again.to_string().contains("is already attached"), "{again}");
+        let found = engine
+            .apply_pr_attach("s1", "github.com", "o/r", 50, "Found", "OPEN", "")
+            .expect("attach the found one");
+        assert!(
+            found.to_string().contains("was already found on"),
+            "{found}"
+        );
+        assert!(stored_row(&engine, 50).is_some_and(|row| row.found && row.attached));
     }
 
-    /// The way back from a detach: the suppression is lifted in memory and on
-    /// disk, the session rejoins the sync plan, and one immediate check is
-    /// spawned so the badge can come back now rather than at the next poll.
+    /// A hide and a show each outlive a restart: the rows are rebuilt from
+    /// the database exactly as a fresh start does.
     #[test]
-    fn resume_lifts_the_suppression_and_checks_once_immediately() {
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        engine.gh_status = crate::model::GhStatus::Available;
-        let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        engine.clear_pull_request_override("s1").expect("detach");
-        assert!(engine.pr_sync_sessions.lock().unwrap().is_empty());
-
-        engine.resume_pr_autodetection("s1").expect("resume");
-
-        assert!(
-            engine
-                .pr_prefs
-                .values()
-                .all(|p| p.hide_created_before.is_none())
-        );
-        assert!(
-            engine
-                .session_store
-                .detached_sessions_for_tests()
-                .is_empty(),
-            "the resume is durable too"
-        );
-        let entries = engine.pr_sync_sessions.lock().unwrap().clone();
-        assert_eq!(
-            entries.len(),
-            1,
-            "the session is planned for again from this cycle on"
-        );
-        assert!(
-            engine.pr_last_checked.contains_key("s1"),
-            "one immediate check runs, so the badge does not wait for the poll"
-        );
-    }
-
-    /// A detach followed by a fresh engine over the same database: the badge
-    /// stays gone, and the resume brings detection back for good.
-    #[test]
-    fn a_detach_survives_a_restart_and_a_resume_survives_one_too() {
-        // "Restart" here is the seeding layer: the in-memory mirrors are
-        // dropped and rebuilt from the database exactly as a fresh boot does.
-        // That the rows themselves survive a real file reopen is proven by
-        // `storage::pr_tests::an_agents_pull_requests_and_preferences_round_trip_a_reopen`.
+    fn a_hide_survives_a_restart_and_a_show_survives_one_too() {
         fn reboot(engine: &mut Engine) {
             engine.clear_agent_prs();
             engine.pr_prefs.clear();
             engine.seed_pull_requests_from_store();
         }
+        let (mut engine, _tmp) = engine_with_prs(&[found_pr(12, 1, "feat")]);
+        let key = crate::model::PrKey::new("github.com", "o/r", 12);
 
-        let (mut engine, _tmp) = test_engine();
-        engine.github_integration_enabled = true;
-        let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        engine.session_store.seed_pr_for_tests(
-            &crate::storage::StoredPr {
-                session_id: "s1".to_string(),
-                pr_number: 12,
-                host: "github.com".to_string(),
-                owner_repo: "o/r".to_string(),
-                state: "OPEN".to_string(),
-                title: "Detected".to_string(),
-                url: "https://github.com/o/r/pull/12".to_string(),
-            },
-            crate::storage::SeededPr::Found,
-        );
-        engine.clear_pull_request_override("s1").expect("detach");
-
+        engine.hide_pull_request("s1", &key).expect("hide");
         reboot(&mut engine);
-        assert!(engine.pr_autodetect_suppressed("s1"));
         assert!(
             engine.shown_pr("s1").is_none(),
-            "the detach outlives the process"
+            "the hide outlives the process"
         );
 
-        engine.resume_pr_autodetection("s1").expect("resume");
-
-        // And so does the resume.
+        engine.show_pull_request("s1", &key).expect("show");
         reboot(&mut engine);
-        assert!(
-            engine
-                .pr_prefs
-                .values()
-                .all(|p| p.hide_created_before.is_none())
-        );
-        assert_eq!(
-            engine.shown_pr("s1").map(|p| p.number),
-            Some(12),
-            "the remembered association badges again once detection is back"
-        );
+        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
     }
 
     #[test]

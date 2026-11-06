@@ -13,7 +13,6 @@ import {
   Pencil,
   Play,
   Plus,
-  Radar,
   RefreshCw,
   RotateCcw,
   ScrollText,
@@ -65,13 +64,12 @@ import {
   openStartupLogs,
   openStopAgent,
   rerunStartupCommand,
-  resumePullRequestAutodetection,
   sessionActiveElsewhere,
   standaloneEditorHash,
   toggleSessionAutoReopen,
   useDux,
 } from "@/lib/store"
-import type { SessionView } from "@/lib/types"
+import type { PrKeyView, SessionView } from "@/lib/types"
 
 // Every per-agent action, in one place so no surface can drift from another.
 //
@@ -97,15 +95,14 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // pull requests, startup commands. They are about a branch dux manages, and
   // a standalone agent has none whatever its folder contains.
   const branchGit = supportsBranchGit(session.workspace)
-  const prOverridden = session.pr?.overridden ?? false
-  // Detach answers "this agent has no PR", so it is offered on ANY association,
-  // pinned or autodetected: an autodetected badge the user does not want is the
-  // case it exists for, and gating on the pin hid it from exactly those people.
-  const prAssociated = session.pr != null
-  // The way back, offered only where it means something. Both are gh-free: the
-  // suppression is dux's own state, so it must be removable even if gh went
-  // away after the detach.
-  const prSuppressed = session.pr_autodetect_suppressed ?? false
+  // Detach acts on the pull request the agent shows, and only one the user
+  // attached has anything to detach. gh-free, so an attachment never outlives
+  // the ability to remove it.
+  const shownPr = session.pr
+  const detachable =
+    shownPr && (shownPr.attached ?? shownPr.overridden) && shownPr.host && shownPr.owner_repo
+      ? { host: shownPr.host, owner_repo: shownPr.owner_repo, number: shownPr.number }
+      : null
   // While another connection input-owns one of this agent's PTYs, the mutating
   // entries disable: deleting, renaming or relaunching an agent someone else is
   // driving surprises them. `sessionActiveElsewhere` answers from a mounted
@@ -198,9 +195,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         sessionId={session.id}
         branchGit={branchGit}
         ghAvailable={ghAvailable}
-        prOverridden={prOverridden}
-        prAssociated={prAssociated}
-        prSuppressed={prSuppressed}
+        detachable={detachable}
         activeElsewhere={activeElsewhere}
       />
       <DropdownMenuSeparator />
@@ -331,17 +326,14 @@ function AgentIdentityAndSetupItems({
   sessionId,
   branchGit,
   ghAvailable,
-  prOverridden,
-  prAssociated,
-  prSuppressed,
+  detachable,
   activeElsewhere,
 }: {
   sessionId: string
   branchGit: boolean
   ghAvailable: boolean
-  prOverridden: boolean
-  prAssociated: boolean
-  prSuppressed: boolean
+  /** The attached pull request the agent shows, the one Detach acts on. */
+  detachable: PrKeyView | null
   activeElsewhere: boolean
 }) {
   return (
@@ -365,27 +357,16 @@ function AgentIdentityAndSetupItems({
           onClick={() => openAttachPullRequest(sessionId)}
         >
           <GitPullRequest />
-          {prOverridden
-            ? "Change attached pull request…"
-            : "Attach pull request…"}
+          Attach pull request…
         </DropdownMenuItem>
       ) : null}
-      {branchGit && prAssociated ? (
+      {branchGit && detachable ? (
         <DropdownMenuItem
           disabled={activeElsewhere}
-          onClick={() => detachPullRequest(sessionId)}
+          onClick={() => detachPullRequest(sessionId, detachable)}
         >
           <Unlink />
           Detach pull request
-        </DropdownMenuItem>
-      ) : null}
-      {branchGit && prSuppressed ? (
-        <DropdownMenuItem
-          disabled={activeElsewhere}
-          onClick={() => resumePullRequestAutodetection(sessionId)}
-        >
-          <Radar />
-          Resume PR autodetection
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuItem onClick={() => openAgentInfo(sessionId)}>

@@ -51,8 +51,8 @@ export function AttachPullRequestDialog() {
         <DialogHeader>
           <DialogTitle>Attach pull request</DialogTitle>
           <DialogDescription>
-            Pins a GitHub pull request to this agent and pauses branch-name
-            autodetection until you detach it.
+            Adds a GitHub pull request to this agent, beside the ones found on
+            its branches. Autodetection keeps running.
           </DialogDescription>
         </DialogHeader>
         {pr ? (
@@ -62,8 +62,7 @@ export function AttachPullRequestDialog() {
               <InlineCode>#{pr.number}</InlineCode>{" "}
               <InlineCode>{pr.title}</InlineCode>
             </span>
-            {pr.overridden ? " (manually attached)" : ""}. Attaching replaces
-            it.
+            {pr.overridden ? " (manually attached)" : ""}.
           </p>
         ) : null}
         <Input

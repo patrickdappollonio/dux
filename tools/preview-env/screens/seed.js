@@ -208,7 +208,7 @@ async function seedPullRequest() {
   const by = await agents()
   const session = by["fix-login-redirect"]
   if (session.pr && session.pr.number) return
-  await api("PUT", `/api/v1/sessions/${session.id}/pull-request`, { pr: "acme/demo-api#123" })
+  await api("POST", `/api/v1/sessions/${session.id}/pull-requests`, { pr: "acme/demo-api#123" })
   await sleep(4000)
   const now = (await get("/api/v1/sessions")).find((s) => s.id === session.id)
   console.log("pull request:", JSON.stringify(now.pr))

@@ -4872,10 +4872,9 @@ impl App {
         };
     }
 
-    /// `detach-pull-request`: the selected agent has no pull request as of now.
-    /// Drops a pin if there is one, clears the badge, and stops autodetection
-    /// until it is attached by hand or detection is resumed. Synchronous and
-    /// reversible both ways, so no modal and no confirmation.
+    /// `detach-pull-request`: detach the pull request the band shows, when
+    /// the user attached it. Synchronous and reversible (attach it again), so
+    /// no modal and no confirmation.
     pub(crate) fn detach_pull_request(&mut self) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error(
@@ -4883,25 +4882,15 @@ impl App {
             );
             return;
         };
-        match self.engine.clear_pull_request_override(&session_id) {
-            Ok(message) => self.set_info(message),
-            Err(err) => self.set_error(format!("{err:#}")),
-        }
-    }
-
-    /// `resume-pull-request-autodetection`: the way back from a detach. Turns
-    /// detection on again for the selected agent and runs one check right
-    /// away. Synchronous and reversible, so no modal and no confirmation.
-    pub(crate) fn resume_pull_request_autodetection(&mut self) {
-        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
-            self.set_error(
-                "No agent session selected. Select an agent to resume its pull-request \
-                 autodetection.",
-            );
+        let Some(key) = self.current_pr_info().map(crate::model::AgentPr::key) else {
+            self.set_error("The selected agent shows no pull request to detach.");
             return;
         };
-        match self.engine.resume_pr_autodetection(&session_id) {
-            Ok(message) => self.set_info(message),
+        match self.engine.detach_pull_request(&session_id, &key) {
+            Ok(update) if update.tone == StatusTone::Error => {
+                self.set_error(update.message);
+            }
+            Ok(update) => self.set_info(update.message),
             Err(err) => self.set_error(format!("{err:#}")),
         }
     }

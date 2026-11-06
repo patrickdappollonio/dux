@@ -21,7 +21,6 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     openAttachPullRequest: vi.fn(),
     detachPullRequest: vi.fn(),
-    resumePullRequestAutodetection: vi.fn(),
     openStopAgent: vi.fn(),
     openRecreateWorkingCopy: vi.fn(),
   }
@@ -67,9 +66,6 @@ const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
 const store = await import("@/lib/store")
 const openAttachPullRequest = vi.mocked(store.openAttachPullRequest)
 const detachPullRequest = vi.mocked(store.detachPullRequest)
-const resumePullRequestAutodetection = vi.mocked(
-  store.resumePullRequestAutodetection,
-)
 const openStopAgent = vi.mocked(store.openStopAgent)
 const openRecreateWorkingCopy = vi.mocked(store.openRecreateWorkingCopy)
 
@@ -132,13 +128,18 @@ const prAuto = {
   url: "https://github.com/o/r/pull/12",
   overridden: false,
 }
-const prPinned = { ...prAuto, overridden: true }
+const prPinned = {
+  ...prAuto,
+  overridden: true,
+  attached: true,
+  host: "github.com",
+  owner_repo: "o/r",
+}
 
 beforeEach(() => {
   installStubs()
   openAttachPullRequest.mockClear()
   detachPullRequest.mockClear()
-  resumePullRequestAutodetection.mockClear()
   openStopAgent.mockClear()
 })
 
@@ -161,7 +162,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Enable agent auto-reopen",
     "Rename agent…",
     "Change agent provider…",
-    "Change attached pull request…",
+    "Attach pull request…",
     "Detach pull request",
     "Delete agent…",
   ]
@@ -361,9 +362,7 @@ describe("AgentActionsMenu for a standalone agent", () => {
     for (const absent of [
       /Fork agent/,
       /Attach pull request/,
-      /attached pull request/,
       /Detach pull request/,
-      /Resume PR autodetection/,
       /Configure startup command/,
       /Rerun startup command/,
     ]) {
@@ -503,59 +502,19 @@ describe("AgentActionsMenu pull-request entries", () => {
     expect(openAttachPullRequest).toHaveBeenCalledWith("s1")
   })
 
-  it("keeps the attach label on an AUTODETECTED PR (label flips on the override, not presence)", async () => {
+  it("offers no detach on a PR dux found, which has nothing to detach", async () => {
     const session = makeSession({ id: "s1", pr: prAuto })
     seed(session, true)
     await openMenu(session)
     expect(screen.getByText("Attach pull request…")).toBeTruthy()
-    expect(screen.queryByText("Change attached pull request…")).toBeNull()
-  })
-
-  it("offers detach on an AUTODETECTED PR, the case detaching exists for", async () => {
-    const session = makeSession({ id: "s1", pr: prAuto })
-    seed(session, true)
-    await openMenu(session)
-    fireEvent.click(screen.getByText("Detach pull request"))
-    expect(detachPullRequest).toHaveBeenCalledWith("s1")
-  })
-
-  it("offers the resume way back only while the agent is detached", async () => {
-    const detached = makeSession({ id: "s1", pr_autodetect_suppressed: true })
-    seed(detached, true)
-    await openMenu(detached)
-    const resume = screen
-      .getByText("Resume PR autodetection")
-      .closest('[role="menuitem"]')
-    expect(resume).toBeTruthy()
-    // Opens no dialog, so no trailing ellipsis; a leading icon is required.
-    expect(resume!.textContent?.endsWith("…")).toBe(false)
-    expect(resume!.querySelector("svg")).toBeTruthy()
-    // Nothing is associated while detached, so there is nothing to detach.
     expect(screen.queryByText("Detach pull request")).toBeNull()
-    fireEvent.click(screen.getByText("Resume PR autodetection"))
-    expect(resumePullRequestAutodetection).toHaveBeenCalledWith("s1")
   })
 
-  it("keeps resume available without gh (the suppression is dux's own state)", async () => {
-    const detached = makeSession({ id: "s1", pr_autodetect_suppressed: true })
-    seed(detached, false)
-    await openMenu(detached)
-    expect(screen.getByText("Resume PR autodetection")).toBeTruthy()
-  })
-
-  it("hides resume on an agent nobody detached", async () => {
-    const session = makeSession({ id: "s1", pr: prAuto })
-    seed(session, true)
-    await openMenu(session)
-    expect(screen.queryByText("Resume PR autodetection")).toBeNull()
-  })
-
-  it("flips to the change label and offers detach while an override is pinned", async () => {
+  it("offers detach on an attached PR, and attaching another stays offered", async () => {
     const session = makeSession({ id: "s1", pr: prPinned })
     seed(session, true)
     await openMenu(session)
-    expect(screen.getByText("Change attached pull request…")).toBeTruthy()
-    expect(screen.queryByText("Attach pull request…")).toBeNull()
+    expect(screen.getByText("Attach pull request…")).toBeTruthy()
     const detach = screen
       .getByText("Detach pull request")
       .closest('[role="menuitem"]')
@@ -564,7 +523,11 @@ describe("AgentActionsMenu pull-request entries", () => {
     expect(detach!.textContent?.endsWith("…")).toBe(false)
     expect(detach!.querySelector("svg")).toBeTruthy()
     fireEvent.click(screen.getByText("Detach pull request"))
-    expect(detachPullRequest).toHaveBeenCalledWith("s1")
+    expect(detachPullRequest).toHaveBeenCalledWith("s1", {
+      host: "github.com",
+      owner_repo: "o/r",
+      number: 12,
+    })
   })
 
   it("keeps detach available without gh (detaching talks to nothing)", async () => {

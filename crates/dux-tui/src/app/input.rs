@@ -16736,12 +16736,13 @@ not_a_real_action = ["x"]
         assert_eq!(app.engine.sessions[0].title.as_deref(), Some("shiny"));
     }
 
-    /// The dialog knows the open pull request from the sync dux already runs,
-    /// and folds in the background answer about a pushed copy only for the
-    /// agent it asked about.
+    /// The dialog knows the open pull request on the agent's branch from the
+    /// sync dux already runs, and folds in the background answer about a
+    /// pushed copy only for the agent it asked about.
     #[test]
     fn the_rename_dialog_learns_the_open_pull_request_and_the_pushed_answer() {
         let mut app = test_app(default_bindings());
+        let branch = app.engine.sessions[0].branch_name().map(str::to_string);
         app.engine.agent_prs.insert(
             "session-1".to_string(),
             vec![crate::model::AgentPr::found(
@@ -16752,6 +16753,7 @@ not_a_real_action = ["x"]
                     host: "github.com".to_string(),
                     owner_repo: "o/r".to_string(),
                     url: "https://github.com/o/r/pull/42".to_string(),
+                    head_branch: branch,
                     ..Default::default()
                 },
                 chrono::Utc::now(),
@@ -24954,8 +24956,8 @@ not_a_real_action = ["x"]
         );
         app.engine.clear_agent_prs();
 
-        // An AUTODETECTED badge is detachable too: it is the case the user
-        // wants gone, and the old pin-only gate hid the command from them.
+        // A pull request dux found has nothing to detach (it is hidden
+        // instead), so the command is not offered for one.
         app.engine.agent_prs.insert(
             "session-1".to_string(),
             vec![crate::model::AgentPr::found(
@@ -24972,9 +24974,9 @@ not_a_real_action = ["x"]
             )],
         );
         assert!(
-            !app.filtered_palette_commands("detach-pull-request")
+            app.filtered_palette_commands("detach-pull-request")
                 .is_empty(),
-            "an autodetected association is detachable"
+            "a found pull request is not detachable"
         );
         app.engine.clear_agent_prs();
 
@@ -25018,18 +25020,7 @@ not_a_real_action = ["x"]
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
         attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
-        app.engine.pr_prefs.insert(
-            "session-1".to_string(),
-            crate::model::PrPrefs {
-                hide_created_before: Some(chrono::Utc::now()),
-                ..Default::default()
-            },
-        );
-        for name in [
-            "attach-pull-request",
-            "detach-pull-request",
-            "resume-pull-request-autodetection",
-        ] {
+        for name in ["attach-pull-request", "detach-pull-request"] {
             assert!(
                 !app.filtered_palette_commands(name).is_empty(),
                 "{name} is offered before the attach starts"
@@ -25040,11 +25031,7 @@ not_a_real_action = ["x"]
             .mark_in_flight(dux_core::engine::InFlightKey::PrAttach(
                 "session-1".to_string(),
             ));
-        for name in [
-            "attach-pull-request",
-            "detach-pull-request",
-            "resume-pull-request-autodetection",
-        ] {
+        for name in ["attach-pull-request", "detach-pull-request"] {
             assert!(
                 app.filtered_palette_commands(name).is_empty(),
                 "{name} must be hidden while an attach is resolving for this agent"
@@ -25065,57 +25052,12 @@ not_a_real_action = ["x"]
             .mark_in_flight(dux_core::engine::InFlightKey::PrCheck(
                 "session-1".to_string(),
             ));
-        for name in [
-            "attach-pull-request",
-            "detach-pull-request",
-            "resume-pull-request-autodetection",
-        ] {
+        for name in ["attach-pull-request", "detach-pull-request"] {
             assert!(
                 !app.filtered_palette_commands(name).is_empty(),
                 "{name} comes back once this agent's attach is done"
             );
         }
-    }
-
-    /// The way back is offered only where it means something: while the
-    /// selected agent is actually detached. Like detach, it is not gh-gated.
-    #[test]
-    fn command_palette_offers_resume_only_while_the_selected_agent_is_detached() {
-        let mut app = test_app(default_bindings());
-
-        assert!(
-            app.filtered_palette_commands("resume-pull-request-autodetection")
-                .is_empty(),
-            "nothing to resume on an agent nobody detached"
-        );
-
-        app.engine.pr_prefs.insert(
-            "session-1".to_string(),
-            crate::model::PrPrefs {
-                hide_created_before: Some(chrono::Utc::now()),
-                ..Default::default()
-            },
-        );
-        assert!(
-            !app.filtered_palette_commands("resume-pull-request-autodetection")
-                .is_empty(),
-            "a detach must be undoable without gh"
-        );
-
-        // Scoped to the SELECTED agent: another agent's detach is not this
-        // agent's way back.
-        app.engine.pr_prefs.clear();
-        app.engine.pr_prefs.insert(
-            "session-2".to_string(),
-            crate::model::PrPrefs {
-                hide_created_before: Some(chrono::Utc::now()),
-                ..Default::default()
-            },
-        );
-        assert!(
-            app.filtered_palette_commands("resume-pull-request-autodetection")
-                .is_empty()
-        );
     }
 
     #[test]
@@ -25174,7 +25116,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn detach_pull_request_drops_the_pin_and_the_badge_and_resume_puts_it_back() {
+    fn detach_pull_request_drops_the_attached_pull_request_and_its_badge() {
         let mut app = test_app(default_bindings());
         // The override row has a foreign key on the session row, so the
         // fixture session must be persisted before the pin can be.
@@ -25209,31 +25151,7 @@ not_a_real_action = ["x"]
             app.status.message()
         );
 
-        // The detach is recorded, so autodetection stays off for the agent.
-        assert!(app.engine.pr_autodetect_suppressed("session-1"));
-
-        // And the palette carries the way back out.
-        //
-        // The pre-clear stays here on purpose, unlike the picker tests: the
-        // detach message is NEWS about something that happened, not a hint about
-        // what is on screen, so the queue is right to keep showing it and the
-        // resume message is right to wait its turn. This test wants to read the
-        // second message without waiting a window for it.
-        app.set_info(String::new());
-        app.execute_command("resume-pull-request-autodetection")
-            .expect("resume");
-        assert!(
-            app.engine
-                .pr_prefs
-                .values()
-                .all(|p| p.hide_created_before.is_none())
-        );
-        assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
-        assert!(
-            app.status.message().contains("Resumed"),
-            "got {:?}",
-            app.status.message()
-        );
+        assert!(app.engine.shown_pr("session-1").is_none(), "the badge goes");
     }
 
     #[test]

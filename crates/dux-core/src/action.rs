@@ -114,13 +114,10 @@ pub enum Action {
     OpenMacroBar,
     /// Open the selected agent's current pull request in the default browser.
     OpenCurrentPullRequest,
-    /// Attach a GitHub pull request to the selected agent, pausing autodetection.
+    /// Attach a GitHub pull request to the selected agent, beside the ones dux finds.
     AttachPullRequest,
-    /// Detach the selected agent's pull request and stop looking for one on it, until you attach a
-    /// pull request by hand or resume autodetection.
+    /// Detach the pull request the selected agent shows, when you attached it.
     DetachPullRequest,
-    /// Start looking for a pull request on the selected agent's branch again, after a detach.
-    ResumePullRequestAutodetection,
     /// Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent
     /// while dux chords stay active; fullscreen, keys go to the agent verbatim.
     ToggleFullscreen,
@@ -421,7 +418,6 @@ impl Action {
             Action::OpenCurrentPullRequest => "open_current_pull_request",
             Action::AttachPullRequest => "attach_pull_request",
             Action::DetachPullRequest => "detach_pull_request",
-            Action::ResumePullRequestAutodetection => "resume_pull_request_autodetection",
             Action::ToggleFullscreen => "toggle_fullscreen",
             Action::ScrollPageUp => "scroll_page_up",
             Action::ScrollPageDown => "scroll_page_down",
@@ -627,13 +623,10 @@ impl Action {
                 "Open the selected agent's current pull request in the default browser."
             }
             Action::AttachPullRequest => {
-                "Attach a GitHub pull request to the selected agent, pausing autodetection."
+                "Attach a GitHub pull request to the selected agent, beside the ones dux finds."
             }
             Action::DetachPullRequest => {
-                "Detach the selected agent's pull request and stop looking for one on it, until you attach a pull request by hand or resume autodetection."
-            }
-            Action::ResumePullRequestAutodetection => {
-                "Start looking for a pull request on the selected agent's branch again, after a detach."
+                "Detach the pull request the selected agent shows, when you attached it."
             }
             Action::ToggleFullscreen => {
                 "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go to the agent verbatim."
@@ -875,7 +868,6 @@ impl Action {
             | Action::ForceReconnectAgent
             | Action::AttachPullRequest
             | Action::DetachPullRequest
-            | Action::ResumePullRequestAutodetection
             | Action::RefreshChanges
             | Action::ChangeDefaultProvider
             | Action::ChangeProjectDefaultProvider

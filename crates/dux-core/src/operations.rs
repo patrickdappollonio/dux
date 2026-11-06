@@ -31,8 +31,9 @@
 //!   the pull-request lookup hands off, from a pull request), an agent delete
 //!   that removes its worktree, a stop that waits for the agent to exit, a
 //!   start that launches, a project removal that deletes worktrees, the
-//!   project adds that run git first, and a clone (which, once it has added
-//!   its project, hands off to its agent create).
+//!   project adds that run git first, a pull-request attach (which waits on
+//!   its `gh` lookup), and a clone (which, once it has added its project,
+//!   hands off to its agent create).
 //! - When a tab's launch reports back (`Engine::drive_web_launch_followup`),
 //!   for a tab created or started by a route, because the launch's own status
 //!   says nothing about which request it answers.
@@ -58,6 +59,8 @@
 //! | `POST` and `DELETE` on the three terminal addresses | inside the call |
 //! | `PUT` and `DELETE` on `/macros/{name}` and `/global-env/{name}` | inside the call |
 //! | `POST /config/reload` | its reload's owner saying how it ended (`Engine::finish_config_reload_operations`) |
+//! | `POST /sessions/{id}/pull-requests` | the attach op's final, at the emitter |
+//! | `POST` on `/sessions/{id}/pull-requests/{detach,hide,show,move}`, `PUT` on `.../sort` and `.../order` | inside the call |
 //!
 //! A config reload has one owner per way of serving, and each says how the
 //! reload ended: the terminal UI's handlers for a reloaded config, an adopted
@@ -149,6 +152,25 @@ pub enum OperationKind {
     /// Reloading the config.
     #[serde(rename = "config.reload")]
     ConfigReload,
+    /// Attaching a pull request to an agent.
+    #[serde(rename = "pr.attach")]
+    PrAttach,
+    /// Detaching a pull request from an agent.
+    #[serde(rename = "pr.detach")]
+    PrDetach,
+    /// Hiding one of an agent's pull requests.
+    #[serde(rename = "pr.hide")]
+    PrHide,
+    /// Showing a hidden pull request again.
+    #[serde(rename = "pr.show")]
+    PrShow,
+    /// Choosing how an agent's pull requests are ordered.
+    #[serde(rename = "pr.sort")]
+    PrSort,
+    /// Moving one of an agent's pull requests, or putting them all in a new
+    /// order.
+    #[serde(rename = "pr.move")]
+    PrMove,
 }
 
 impl OperationKind {
@@ -173,6 +195,12 @@ impl OperationKind {
             Self::EnvSet => "saving a global environment variable",
             Self::EnvRemove => "removing a global environment variable",
             Self::ConfigReload => "reloading the config",
+            Self::PrAttach => "attaching a pull request",
+            Self::PrDetach => "detaching a pull request",
+            Self::PrHide => "hiding a pull request",
+            Self::PrShow => "showing a pull request again",
+            Self::PrSort => "sorting pull requests",
+            Self::PrMove => "moving a pull request",
         }
     }
 }
