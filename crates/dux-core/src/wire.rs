@@ -9777,9 +9777,13 @@ mod tests {
         );
         assert_eq!(engine.attached_pr("s1").map(|p| p.number), Some(12));
         assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
-        // The sync snapshot now carries the pin for the worker.
+        // The sync snapshot now carries the attached pull request for the worker.
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
-        let pin = entries[0].pinned.as_ref().expect("pinned sync entry");
+        let pin = entries[0]
+            .known
+            .iter()
+            .find(|row| row.attached)
+            .expect("attached pull request in the sync entry");
         assert_eq!(pin.number, 12);
         assert_eq!(pin.owner_repo, "fork/r");
 
@@ -9801,9 +9805,10 @@ mod tests {
             engine.shown_pr("s1").is_none(),
             "the badge disappears with the detach"
         );
-        assert!(
-            engine.pr_sync_sessions.lock().unwrap().is_empty(),
-            "a detached session is not planned for at all"
+        assert_eq!(
+            engine.pr_sync_sessions.lock().unwrap().len(),
+            1,
+            "a detached session is still planned for, and what it finds is kept out of sight"
         );
 
         // Resume: the session rejoins the plan, and the confirmation says so.

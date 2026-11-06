@@ -2085,6 +2085,26 @@ pub(crate) fn branch_contains_commit(repo_path: &Path, commit: &str, branch: &st
     }
 }
 
+/// Whether the commit `ancestor` is in the history of the commit
+/// `descendant` (a commit counts as its own ancestor). Both must be full
+/// object ids, and a commit this clone does not have is a no: the question is
+/// asked to prove a pull request is a branch's, and an unanswerable one proves
+/// nothing. It shells out to git, so callers run it in a background worker.
+pub(crate) fn commit_is_ancestor_of(repo_path: &Path, ancestor: &str, descendant: &str) -> bool {
+    if !is_object_id(ancestor) || !is_object_id(descendant) {
+        return false;
+    }
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant, "--"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.code() == Some(0))
+}
+
 fn is_object_id(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }

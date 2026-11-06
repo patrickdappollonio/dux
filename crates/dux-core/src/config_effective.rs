@@ -28,8 +28,9 @@ use crate::config::{
     DEFAULT_HEARTBEAT_SECONDS, DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
     DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS, DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
     DEFAULT_UPLOAD_DIRECTORY, LOG_VIEWER_LINES_MAX, MAX_AGENT_TABS_MAX, MAX_LOG_KEEP,
-    MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS, MAX_PR_POLL_INTERVAL_SECONDS,
-    MAX_SHUTDOWN_TIMEOUT_SECONDS, MIN_PR_POLL_INTERVAL_SECONDS, TailscaleMode, WebDragDropPaste,
+    MAX_PR_HISTORY_BRANCHES_PER_CYCLE, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+    MAX_PR_POLL_INTERVAL_SECONDS, MAX_PR_SETTLED_RECHECK_SECONDS, MAX_SHUTDOWN_TIMEOUT_SECONDS,
+    MIN_PR_POLL_INTERVAL_SECONDS, TailscaleMode, WebDragDropPaste,
 };
 use crate::flat_list::FlatSortMode;
 use crate::term_identity::TerminalIdentityMode;
@@ -159,6 +160,22 @@ pub fn effective_pr_poll_inactive_interval_seconds(configured: u32) -> u32 {
     configured.clamp(
         u32::from(MIN_PR_POLL_INTERVAL_SECONDS),
         MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+    )
+}
+
+/// `[ui] pr_history_branches_per_cycle`: held to at most
+/// [`MAX_PR_HISTORY_BRANCHES_PER_CYCLE`]; `0` asks only about the current
+/// branch.
+pub fn effective_pr_history_branches_per_cycle(configured: u16) -> u16 {
+    configured.min(MAX_PR_HISTORY_BRANCHES_PER_CYCLE)
+}
+
+/// `[ui] pr_settled_recheck_seconds`: held between the poll's floor and
+/// [`MAX_PR_SETTLED_RECHECK_SECONDS`].
+pub fn effective_pr_settled_recheck_seconds(configured: u32) -> u32 {
+    configured.clamp(
+        u32::from(MIN_PR_POLL_INTERVAL_SECONDS),
+        MAX_PR_SETTLED_RECHECK_SECONDS,
     )
 }
 
@@ -732,23 +749,9 @@ fn logging_corrections(found: &mut Corrections, config: &Config) {
     }
 }
 
-/// `[ui]`'s tab cap, pull-request polls and pane sizes.
-fn ui_corrections(found: &mut Corrections, config: &Config) {
+/// `[ui]`'s pull-request polls and how much each one asks.
+fn pr_poll_corrections(found: &mut Corrections, config: &Config) {
     let ui = &config.ui;
-    let tabs = ui.agent_tabs_max;
-    found.note(
-        &["ui", "agent_tabs_max"],
-        &json(&tabs),
-        json(&effective_agent_tabs_max(tabs)),
-        &|| {
-            numbered(
-                u64::from(tabs),
-                u64::from(effective_agent_tabs_max(tabs)),
-                u64::from(MAX_AGENT_TABS_MAX),
-                "0 means the default",
-            )
-        },
-    );
     let poll = ui.pr_poll_interval_seconds;
     found.note(
         &["ui", "pr_poll_interval_seconds"],
@@ -781,6 +784,54 @@ fn ui_corrections(found: &mut Corrections, config: &Config) {
             )
         },
     );
+    let per_cycle = ui.pr_history_branches_per_cycle;
+    found.note(
+        &["ui", "pr_history_branches_per_cycle"],
+        &json(&per_cycle),
+        json(&effective_pr_history_branches_per_cycle(per_cycle)),
+        &|| {
+            numbered(
+                u64::from(per_cycle),
+                u64::from(effective_pr_history_branches_per_cycle(per_cycle)),
+                u64::from(MAX_PR_HISTORY_BRANCHES_PER_CYCLE),
+                "0 asks about the current branch alone",
+            )
+        },
+    );
+    let settled = ui.pr_settled_recheck_seconds;
+    found.note(
+        &["ui", "pr_settled_recheck_seconds"],
+        &json(&settled),
+        json(&effective_pr_settled_recheck_seconds(settled)),
+        &|| {
+            numbered(
+                u64::from(settled),
+                u64::from(effective_pr_settled_recheck_seconds(settled)),
+                u64::from(MAX_PR_SETTLED_RECHECK_SECONDS),
+                &format!("a recheck waits at least {MIN_PR_POLL_INTERVAL_SECONDS} seconds"),
+            )
+        },
+    );
+}
+
+/// `[ui]`'s tab cap, pull-request polls and pane sizes.
+fn ui_corrections(found: &mut Corrections, config: &Config) {
+    let ui = &config.ui;
+    let tabs = ui.agent_tabs_max;
+    found.note(
+        &["ui", "agent_tabs_max"],
+        &json(&tabs),
+        json(&effective_agent_tabs_max(tabs)),
+        &|| {
+            numbered(
+                u64::from(tabs),
+                u64::from(effective_agent_tabs_max(tabs)),
+                u64::from(MAX_AGENT_TABS_MAX),
+                "0 means the default",
+            )
+        },
+    );
+    pr_poll_corrections(found, config);
     for (key, pct) in [
         ("terminal_pane_height_pct", ui.terminal_pane_height_pct),
         ("staged_pane_height_pct", ui.staged_pane_height_pct),

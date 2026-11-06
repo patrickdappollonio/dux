@@ -2673,8 +2673,7 @@ impl Engine {
         // rows go with the session row, so anything left here would be pure
         // in-memory residue for an agent that no longer exists.
         // The attached one goes with the rest; leaving it would ghost-gate the
-        // identity guard and the detach palette entry for a later session
-        // reusing the id.
+        // detach palette entry for a later session reusing the id.
         self.agent_prs.remove(&session.id);
         self.branch_histories.remove(&session.id);
         self.pr_revision.remove(&session.id);
@@ -2691,7 +2690,7 @@ impl Engine {
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_prefs.remove(&session.id);
-        self.pr_branch_generations.remove(&session.id);
+        self.pr_branch_asks.remove(&session.id);
         self.pr_branch_checks_owed.remove(&session.id);
         // Re-derive the PR-sync plan from the surviving sessions. The periodic
         // poller snapshots this list every cycle, so leaving the deleted
@@ -3563,9 +3562,9 @@ impl Engine {
     /// Log a pull-request badge move for one session, if it moved.
     ///
     /// Raised here rather than in the sync worker because this is the point a
-    /// result survives every guard and becomes what the user sees; a result
-    /// dropped for a deleted, detached or pinned session logs its own reason at
-    /// debug instead. A session with no branch to name logs nothing.
+    /// result becomes what the user sees; a result dropped for a deleted
+    /// session logs its own reason at debug instead. A session with no branch
+    /// to name logs nothing.
     fn log_pr_badge_change(
         session: Option<&AgentSession>,
         previous: Option<&crate::model::PrInfo>,
@@ -4009,11 +4008,6 @@ impl Engine {
                     continue;
                 }
                 self.unsaved_branch_drifts.remove(&session_id);
-                // Checks still in flight asked about the branch the agent left.
-                *self
-                    .pr_branch_generations
-                    .entry(session.id.clone())
-                    .or_default() += 1;
                 // A drift onto another branch ends any claim that the agent is on
                 // the branch dux minted under a new name.
                 if let Err(err) = self.session_store.delete_minted_branch_rename(&session.id) {
@@ -4507,13 +4501,11 @@ impl Engine {
         }
     }
 
-    fn pr_status_result_is_current(
-        &mut self,
-        session_id: &str,
-        branch_generation: u64,
-        maybe_pr: Option<&crate::model::PrInfo>,
-        checked_at: Instant,
-    ) -> bool {
+    /// Whether a sync answer for `session_id` still has an agent to apply to,
+    /// clearing its check's in-flight guard and stamping its debounce either
+    /// way it can. Answers are about a named branch or a numbered pull request,
+    /// so they stay true after the agent drifts or is renamed.
+    fn pr_status_result_is_current(&mut self, session_id: &str, checked_at: Instant) -> bool {
         self.clear_in_flight(&InFlightKey::PrCheck(session_id.to_string()));
         if !self.sessions.iter().any(|session| session.id == session_id) {
             logger::debug(&format!(
@@ -4521,45 +4513,8 @@ impl Engine {
             ));
             return false;
         }
-        // An answer asked under an earlier branch generation is about a branch
-        // the agent has since drifted off, not the one it is on now. An
-        // explicit rename keeps the generation: it renames only the local
-        // branch, so GitHub's branch and its pull request still carry the name
-        // the check asked about. Dropped before the debounce is stamped, so
-        // the check the drift itself asks for is not refused as too recent. A
-        // pin is about its pull request, not the branch, so it is exempt.
-        let current = self.pr_branch_generation(session_id);
-        if self.attached_pr(session_id).is_none() && branch_generation != current {
-            logger::debug(&format!(
-                "[gh-integration] dropping PR result for session {session_id}: it was asked \
-                 under branch generation {branch_generation}, and the agent has since moved \
-                 to generation {current}",
-            ));
-            return false;
-        }
         self.pr_last_checked
             .insert(session_id.to_string(), checked_at);
-        if !self.pr_autodetect_allowed(session_id) {
-            logger::debug(&format!(
-                "[gh-integration] dropping PR result for session {session_id}: it is detached, \
-                 or the detaches could not be read",
-            ));
-            return false;
-        }
-        if let Some(pin) = self.attached_pr(session_id) {
-            let pin = pin.key();
-            let matches_pin = maybe_pr.is_some_and(|pr| {
-                pin == crate::model::PrKey::new(pr.host.clone(), pr.owner_repo.clone(), pr.number)
-            });
-            if !matches_pin {
-                logger::debug(&format!(
-                    "[gh-integration] dropping PR result for pinned session \
-                     {session_id} (does not match the pin, PR #{})",
-                    pin.number,
-                ));
-                return false;
-            }
-        }
         true
     }
 
@@ -4582,43 +4537,87 @@ impl Engine {
         ));
     }
 
-    /// Store what the sync found for an agent. An answer only adds a row or
-    /// updates one: an empty answer removes nothing, because no answer proves
-    /// a pull request is not the agent's. Reports whether anything changed.
-    fn apply_pr_status_result(
+    /// Store what one sync brought back for an agent. An answer only adds a
+    /// row or updates one: nothing is ever removed, because no answer proves a
+    /// pull request is not the agent's. A row keeps whether it is attached or
+    /// hidden and its place in the manual order; a new one is hidden when the
+    /// agent had detection switched off and it was opened on GitHub before
+    /// then, or nobody can say when it was. Nothing is added while the
+    /// preferences that hold that cutoff could not be read. Reports whether
+    /// anything an agent shows changed.
+    pub(crate) fn apply_pr_sync_answers(
         &mut self,
         session_id: &str,
-        maybe_pr: Option<crate::model::PrInfo>,
+        answers: Vec<crate::worker::PrSyncAnswer>,
+        asked: Vec<(String, crate::worker::BranchAskRecord)>,
+        now: chrono::DateTime<Utc>,
     ) -> bool {
-        let Some(pr) = maybe_pr else {
-            return false;
-        };
+        if !asked.is_empty() {
+            let asks = self
+                .pr_branch_asks
+                .entry(session_id.to_string())
+                .or_default();
+            asks.extend(asked);
+        }
         let previous = self
             .shown_pr(session_id)
             .map(crate::model::AgentPr::to_info);
-        let key = crate::model::PrKey::new(pr.host.clone(), pr.owner_repo.clone(), pr.number);
-        // An agent with an attached pull request is asked about that one only
-        // (the guard above dropped anything else), so its answer refreshes the
-        // attached row without claiming the sync found it.
-        let attached = self.attached_pr(session_id).is_some();
-        let mut rows = self.agent_prs.get(session_id).cloned().unwrap_or_default();
-        let index = if let Some(index) = rows.iter().position(|row| row.is(&key)) {
-            rows[index].refresh_from(&pr);
-            rows[index].found |= !attached;
-            index
-        } else {
-            rows.push(crate::model::AgentPr::found(&pr, chrono::Utc::now()));
-            rows.len() - 1
-        };
-        if let Err(err) = self.session_store.upsert_agent_pr(session_id, &rows[index]) {
-            logger::error(&format!(
-                "failed to persist PR status for {session_id} (PR #{}): {err}",
-                pr.number,
-            ));
-            self.report_unsaved_pr_status(session_id, &err.to_string());
+        let before = self.agent_prs.get(session_id).cloned().unwrap_or_default();
+        let mut rows = before.clone();
+        let cutoff = self
+            .pr_prefs
+            .get(session_id)
+            .and_then(|prefs| prefs.hide_created_before);
+        let prefs_unread = self.pr_prefs_retry_at.is_some();
+        let mut touched: Vec<usize> = Vec::new();
+        for answer in answers {
+            let (info, found) = match answer {
+                crate::worker::PrSyncAnswer::Found(info) => (info, true),
+                crate::worker::PrSyncAnswer::Refreshed(info) => (info, false),
+            };
+            let key =
+                crate::model::PrKey::new(info.host.clone(), info.owner_repo.clone(), info.number);
+            let index = if let Some(index) = rows.iter().position(|row| row.is(&key)) {
+                rows[index].refresh_from(&info);
+                rows[index].found |= found;
+                index
+            } else if found && !prefs_unread {
+                let mut row = crate::model::AgentPr::found(&info, now);
+                row.hidden = cutoff.is_some_and(|cutoff| {
+                    info.gh_created_at.is_none_or(|created| created < cutoff)
+                });
+                rows.push(row);
+                rows.len() - 1
+            } else {
+                continue;
+            };
+            rows[index].last_refreshed_at = Some(now);
+            if !touched.contains(&index) {
+                touched.push(index);
+            }
         }
-        let before = self.pr_revision.get(session_id).copied();
-        self.set_agent_prs(session_id, rows);
+        for &index in &touched {
+            if let Err(err) = self.session_store.upsert_agent_pr(session_id, &rows[index]) {
+                logger::error(&format!(
+                    "failed to persist PR status for {session_id} (PR #{}): {err}",
+                    rows[index].number,
+                ));
+                self.report_unsaved_pr_status(session_id, &err.to_string());
+            }
+        }
+        // When GitHub last answered is bookkeeping, not anything an agent
+        // shows, so it alone moves no revision.
+        let shown_changed = rows.len() != before.len()
+            || rows.iter().zip(&before).any(|(new, old)| {
+                let mut old = old.clone();
+                old.last_refreshed_at = new.last_refreshed_at;
+                *new != old
+            });
+        if shown_changed {
+            self.set_agent_prs(session_id, rows);
+        } else if !touched.is_empty() {
+            self.agent_prs.insert(session_id.to_string(), rows);
+        }
         Self::log_pr_badge_change(
             self.sessions
                 .iter()
@@ -4628,7 +4627,7 @@ impl Engine {
                 .map(crate::model::AgentPr::to_info)
                 .as_ref(),
         );
-        self.pr_revision.get(session_id).copied() != before
+        shown_changed
     }
 
     fn process_pr_status_ready(
@@ -4636,22 +4635,20 @@ impl Engine {
         results: Vec<crate::worker::PrStatusResult>,
     ) -> EventReaction {
         let checked_at = Instant::now();
+        let now = Utc::now();
         let mut changed = false;
+        let mut asked_any = false;
         let mut finished: Vec<String> = Vec::new();
         for crate::worker::PrStatusResult {
             session_id,
-            branch_generation,
-            pr: maybe_pr,
+            answers,
+            asked,
         } in results
         {
             finished.push(session_id.clone());
-            if self.pr_status_result_is_current(
-                &session_id,
-                branch_generation,
-                maybe_pr.as_ref(),
-                checked_at,
-            ) {
-                changed |= self.apply_pr_status_result(&session_id, maybe_pr);
+            if self.pr_status_result_is_current(&session_id, checked_at) {
+                asked_any |= !asked.is_empty();
+                changed |= self.apply_pr_sync_answers(&session_id, answers, asked, now);
             }
         }
         // Each finished check may have been holding up the one an agent is
@@ -4660,6 +4657,11 @@ impl Engine {
             self.retry_owed_branch_check(&session_id);
         }
         if !changed {
+            // The plan carries what each branch's last ask learned, which is
+            // what puts the next cycle's earlier branches in turn.
+            if asked_any {
+                self.write_pr_sync_plan();
+            }
             return EventReaction::Nothing;
         }
         self.update_pr_sync_sessions();
@@ -7031,7 +7033,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .map(|entry| entry.branch_name.clone())
+            .map(|entry| entry.current.name.clone())
             .collect();
         assert_eq!(planned, vec!["new".to_string()]);
         assert!(
@@ -7056,7 +7058,7 @@ mod tests {
             .checked_sub(std::time::Duration::from_millis(9_500))
             .expect("the monotonic clock reads later than the rewind");
         engine.pr_last_checked.insert("s1".to_string(), dispatched);
-        let asked_for_a = pr_status_ready(&engine, vec![("s1".to_string(), None)]);
+        let asked_for_a = pr_status_ready(vec![("s1".to_string(), None)]);
 
         engine.process_worker_event(WorkerEvent::branch_sync_moved(vec![(
             "s1".to_string(),
@@ -7466,7 +7468,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .map(|entry| entry.branch_name.clone())
+            .map(|entry| entry.current.name.clone())
             .collect();
         assert_eq!(planned, vec!["new-branch".to_string()]);
         assert!(
@@ -7477,7 +7479,9 @@ mod tests {
         // so a pull request older than the agent is still refused for it, and
         // that survives a restart.
         let created_at = engine.sessions[0].created_at;
-        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0]
+            .current
+            .identity_at;
         assert_eq!(minted, Some(created_at));
         assert_eq!(
             engine.session_store.load_minted_branch_renames().unwrap(),
@@ -7488,7 +7492,9 @@ mod tests {
             "s1".to_string(),
             "develop".to_string(),
         )]));
-        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0]
+            .current
+            .identity_at;
         assert_eq!(minted, None);
         // And renaming that other branch to the name the minted one once had
         // does not make it the minted one: the drift ended the marker.
@@ -7502,7 +7508,9 @@ mod tests {
                 crate::engine::Final::info("renamed"),
             ),
         });
-        let minted = engine.pr_sync_sessions.lock().unwrap()[0].branch_minted_at;
+        let minted = engine.pr_sync_sessions.lock().unwrap()[0]
+            .current
+            .identity_at;
         assert_eq!(minted, None);
         assert_eq!(
             engine.session_store.load_minted_branch_renames().unwrap(),
@@ -7841,16 +7849,19 @@ mod tests {
 
     // ── PrStatusReady ────────────────────────────────────────────────────
 
-    /// A `PrStatusReady` whose results carry each agent's current branch
-    /// generation, as a check that raced nothing would.
-    fn pr_status_ready(engine: &Engine, results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
+    /// A `PrStatusReady` in which discovery found each agent's pull request,
+    /// or nothing for a `None`.
+    fn pr_status_ready(results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
         WorkerEvent::PrStatusReady(
             results
                 .into_iter()
                 .map(|(session_id, pr)| crate::worker::PrStatusResult {
-                    branch_generation: engine.pr_branch_generation(&session_id),
                     session_id,
-                    pr,
+                    answers: pr
+                        .into_iter()
+                        .map(crate::worker::PrSyncAnswer::Found)
+                        .collect(),
+                    asked: Vec::new(),
                 })
                 .collect(),
         )
@@ -7872,13 +7883,10 @@ mod tests {
             ..Default::default()
         };
 
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![
-                ("deleted".into(), Some(pr.clone())),
-                ("live".into(), Some(pr)),
-            ],
-        ));
+        let reaction = engine.process_worker_event(pr_status_ready(vec![
+            ("deleted".into(), Some(pr.clone())),
+            ("live".into(), Some(pr)),
+        ]));
 
         assert!(matches!(reaction, EventReaction::RebuildLeftItems));
         assert!(engine.shown_pr("deleted").is_none());
@@ -8681,8 +8689,8 @@ mod tests {
             url: "https://github.com/octo/repo/pull/42".to_string(),
             ..Default::default()
         };
-        let reaction = engine
-            .process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), Some(pr))]));
+        let reaction =
+            engine.process_worker_event(pr_status_ready(vec![("s1".to_string(), Some(pr))]));
 
         // changed -> RebuildLeftItems (engine writes the timestamp directly).
         assert!(
@@ -8699,10 +8707,61 @@ mod tests {
         assert_eq!(row.pr_number, 42);
         assert_eq!(row.state, "OPEN");
         assert_eq!(row.title, "Add feature");
+
+        // A row carried over from before this table existed was never
+        // refreshed and may say OPEN for a pull request long merged; the first
+        // refresh puts it right.
+        engine.session_store.seed_pr_for_tests(
+            &crate::storage::StoredPr {
+                session_id: "s1".to_string(),
+                pr_number: 10,
+                host: "github.com".to_string(),
+                owner_repo: "octo/repo".to_string(),
+                state: "OPEN".to_string(),
+                title: "Migrated".to_string(),
+                url: String::new(),
+            },
+            crate::storage::SeededPr::Found,
+        );
+        engine.github_integration_enabled = true;
+        engine.seed_pull_requests_from_store();
+        let migrated = |engine: &Engine| {
+            engine.agent_prs["s1"]
+                .iter()
+                .find(|row| row.number == 10)
+                .cloned()
+                .expect("the migrated row")
+        };
+        assert_eq!(migrated(&engine).last_refreshed_at, None);
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".to_string(),
+                answers: vec![crate::worker::PrSyncAnswer::Refreshed(PrInfo {
+                    number: 10,
+                    state: PrState::Merged,
+                    title: "Migrated".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "octo/repo".to_string(),
+                    url: "https://github.com/octo/repo/pull/10".to_string(),
+                    head_branch: Some("old-branch".to_string()),
+                    ..Default::default()
+                })],
+                asked: Vec::new(),
+            },
+        ]));
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        let row = migrated(&engine);
+        assert_eq!(row.state, PrState::Merged);
+        assert_eq!(row.head_branch.as_deref(), Some("old-branch"));
+        assert!(row.last_refreshed_at.is_some());
+        let stored = engine.session_store.load_agent_prs_of("s1").unwrap();
+        let stored = stored.iter().find(|row| row.number == 10).unwrap();
+        assert_eq!(stored.state, PrState::Merged);
+        assert_eq!(stored.head_branch.as_deref(), Some("old-branch"));
     }
 
     #[test]
-    fn pr_status_ready_skips_results_for_deleted_sessions_and_previous_branches() {
+    fn pr_status_ready_drops_results_for_deleted_sessions_and_keeps_them_across_a_drift() {
         // The PR check is async: its result can land AFTER the session was
         // deleted. Applying it anyway would (a) attempt an sqlite upsert that
         // fails the sessions FOREIGN KEY, logging a scary ERROR on every
@@ -8722,10 +8781,8 @@ mod tests {
         // "ghost" is not a session the engine knows (deleted before the
         // result arrived). The result must be dropped whole: no status, no
         // timestamp, no store row, and no changed-flag rebuild.
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("ghost".to_string(), Some(pr))],
-        ));
+        let reaction =
+            engine.process_worker_event(pr_status_ready(vec![("ghost".to_string(), Some(pr))]));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -8752,7 +8809,7 @@ mod tests {
             url: "https://example".into(),
             ..Default::default()
         };
-        let asked_before_rename = pr_status_ready(&engine, vec![("s1".into(), Some(pr(12)))]);
+        let asked_before_rename = pr_status_ready(vec![("s1".into(), Some(pr(12)))]);
         engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
             session_id: "s1".into(),
             new_branch: "feat/b".into(),
@@ -8766,26 +8823,66 @@ mod tests {
         engine.process_worker_event(asked_before_rename);
         assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
 
-        // One in flight while the agent drifts onto another branch asked about
-        // a branch the agent has left: dropped before anything is saved or
-        // the debounce is stamped.
-        let asked_before_drift = pr_status_ready(&engine, vec![("s1".into(), Some(pr(13)))]);
+        // One in flight while the agent drifts onto another branch is about
+        // the branch it asked under, which is still one of the agent's, so it
+        // is kept too.
+        let asked_before_drift = pr_status_ready(vec![("s1".into(), Some(pr(13)))]);
         engine.process_worker_event(WorkerEvent::branch_sync_moved(vec![(
             "s1".to_string(),
             "develop".to_string(),
         )]));
-        let stamped = engine.pr_last_checked.get("s1").copied();
         let reaction = engine.process_worker_event(asked_before_drift);
-        assert!(matches!(reaction, EventReaction::Nothing));
-        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
-        assert_eq!(engine.pr_last_checked.get("s1").copied(), stamped);
-        assert!(
-            engine
-                .session_store
-                .latest_found_prs_for_tests()
-                .iter()
-                .all(|p| p.pr_number != 13)
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        let mut numbers: Vec<u64> = engine.agent_prs["s1"].iter().map(|p| p.number).collect();
+        numbers.sort_unstable();
+        assert_eq!(numbers, vec![12, 13]);
+
+        // An agent that moves from branch-a (open #20) to branch-b (open #12)
+        // keeps both, each on its own branch, and the newer one is the one a
+        // rename would affect, however the numbers compare.
+        let session = sample_session("s2", "p1", "branch-a");
+        engine.session_store.upsert_session(&session).unwrap();
+        engine.sessions.push(session);
+        let on = |number: u64, head: &str, created: &str| PrInfo {
+            head_branch: Some(head.to_string()),
+            gh_created_at: Some(created.parse().unwrap()),
+            ..pr(number)
+        };
+        engine.process_worker_event(pr_status_ready(vec![(
+            "s2".into(),
+            Some(on(20, "branch-a", "2026-11-01T00:00:00Z")),
+        )]));
+        engine.process_worker_event(WorkerEvent::branch_sync_moved(vec![(
+            "s2".to_string(),
+            "branch-b".to_string(),
+        )]));
+        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s2".into(),
+                answers: vec![
+                    crate::worker::PrSyncAnswer::Found(on(12, "branch-b", "2026-11-05T00:00:00Z")),
+                    crate::worker::PrSyncAnswer::Refreshed(on(
+                        20,
+                        "branch-a",
+                        "2026-11-01T00:00:00Z",
+                    )),
+                ],
+                asked: Vec::new(),
+            },
+        ]));
+        let mut rows: Vec<(u64, Option<String>)> = engine.agent_prs["s2"]
+            .iter()
+            .map(|p| (p.number, p.head_branch.clone()))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (12, Some("branch-b".to_string())),
+                (20, Some("branch-a".to_string())),
+            ]
         );
+        assert_eq!(engine.rename_open_pull_request("s2"), Some(12));
     }
 
     #[test]
@@ -8862,7 +8959,7 @@ mod tests {
         let minted = |id: &str| {
             plan.iter()
                 .find(|e| e.session_id == id)
-                .map(|e| e.branch_minted_at)
+                .map(|e| e.current.identity_at)
         };
         assert_eq!(minted("live"), Some(Some(live_created_at)));
         assert_eq!(
@@ -8875,6 +8972,73 @@ mod tests {
             Some(None),
             "the agent has moved off its own branch"
         );
+
+        // Every branch the worktree has been on is in the plan, under every
+        // name it had, except the project's leading branch; what the last
+        // cycle learned about each rides along, and so do the two settings.
+        let history_entry = |name: &str| crate::branch_history::BranchHistoryEntry {
+            name: name.to_string(),
+            born_here: false,
+            identity: None,
+            tip: None,
+            first_seen_at: None,
+            former_names: Vec::new(),
+        };
+        engine.branch_histories.insert(
+            "live".to_string(),
+            vec![
+                crate::branch_history::BranchHistoryEntry {
+                    former_names: vec!["feat/a0".to_string()],
+                    ..history_entry("feat/a")
+                },
+                history_entry("main"),
+                crate::branch_history::BranchHistoryEntry {
+                    identity: Some(crate::branch_history::BranchIdentity {
+                        unix: 1_790_000_000,
+                        oid: "a".repeat(40),
+                    }),
+                    tip: Some("b".repeat(40)),
+                    former_names: vec!["spike-0".to_string()],
+                    ..history_entry("spike")
+                },
+            ],
+        );
+        engine.config.ui.pr_history_branches_per_cycle = 99;
+        engine.config.ui.pr_settled_recheck_seconds = 600;
+        engine.update_pr_sync_sessions();
+        let plan = engine.pr_sync_sessions.lock().unwrap().clone();
+        let live = plan.iter().find(|e| e.session_id == "live").unwrap();
+        assert_eq!(live.current.former_names, vec!["feat/a0".to_string()]);
+        let history: Vec<(&str, &[String])> = live
+            .history
+            .iter()
+            .map(|b| (b.name.as_str(), b.former_names.as_slice()))
+            .collect();
+        assert_eq!(history, vec![("spike", &["spike-0".to_string()][..])]);
+        assert_eq!(
+            live.history[0].identity_at,
+            chrono::DateTime::from_timestamp(1_790_000_000, 0)
+        );
+        assert_eq!(live.history[0].tip, Some("b".repeat(40)));
+        assert_eq!(live.history[0].last_ask, None);
+        assert_eq!(live.history_per_cycle, 50, "clamped");
+        assert_eq!(live.settled_recheck, chrono::TimeDelta::seconds(600));
+
+        let record = crate::worker::BranchAskRecord {
+            at: "2026-11-06T12:00:00Z".parse().unwrap(),
+            ref_gone: true,
+            returned: Vec::new(),
+        };
+        engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "live".to_string(),
+                answers: Vec::new(),
+                asked: vec![("spike".to_string(), record.clone())],
+            },
+        ]));
+        let plan = engine.pr_sync_sessions.lock().unwrap().clone();
+        let live = plan.iter().find(|e| e.session_id == "live").unwrap();
+        assert_eq!(live.history[0].last_ask, Some(record));
     }
 
     #[test]
@@ -9117,10 +9281,10 @@ mod tests {
             vec![crate::model::AgentPr::found(&pr, chrono::Utc::now())],
         );
 
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), None), ("s2".to_string(), None)],
-        ));
+        let reaction = engine.process_worker_event(pr_status_ready(vec![
+            ("s1".to_string(), None),
+            ("s2".to_string(), None),
+        ]));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -9139,8 +9303,7 @@ mod tests {
         engine.projects.push(sample_project("p1", "/tmp/p1"));
         engine.sessions.push(sample_session("s1", "p1", "feat/a"));
         // No pull request known; sending None for s1 leaves changed=false.
-        let reaction =
-            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
+        let reaction = engine.process_worker_event(pr_status_ready(vec![("s1".to_string(), None)]));
 
         assert!(
             matches!(reaction, EventReaction::Nothing),
@@ -9148,119 +9311,36 @@ mod tests {
             reaction_kind(&reaction),
         );
         assert!(engine.pr_last_checked.contains_key("s1"));
-    }
 
-    /// The identity guard, in both directions. While a session is pinned, a
-    /// sync result is accepted ONLY when its (host, `owner_repo`, number) matches
-    /// the pin: a `Some(other_pr)` (the one-shot check racing an attach, or an
-    /// early-return path answering from a stale `known_pr`) must not overwrite
-    /// the pin, and a `None` must not clear it.
-    #[test]
-    fn pr_status_ready_identity_guard_drops_results_that_do_not_match_the_pin() {
-        let (mut engine, _tmp) = test_engine();
-        let session = sample_session("s1", "p1", "feat");
-        engine
-            .session_store
-            .upsert_session(&session)
-            .expect("seed session");
-        engine.sessions.push(session);
-        let pinned = crate::storage::StoredPr {
-            session_id: "s1".to_string(),
-            pr_number: 12,
-            host: "github.com".to_string(),
-            owner_repo: "forker/Hello-World".to_string(),
-            state: "OPEN".to_string(),
-            title: "Pinned".to_string(),
-            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
-        };
-        let mut row = crate::model::AgentPr::found(
-            &crate::gh::reconstruct_pr_from_stored(&pinned).unwrap(),
-            chrono::Utc::now(),
-        );
-        row.found = false;
-        row.attached = true;
-        engine.agent_prs.insert("s1".to_string(), vec![row]);
-
-        // Direction 1: a racing one-shot answers with a DIFFERENT PR.
-        let other = PrInfo {
-            number: 50,
+        // A refresh that says what the row already says is only bookkeeping:
+        // when GitHub answered is stored, and nothing an agent shows moves.
+        let pr = PrInfo {
+            number: 1,
             state: PrState::Open,
-            title: "Autodetected".to_string(),
-            host: "github.com".to_string(),
-            owner_repo: "octocat/Hello-World".to_string(),
-            url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
+            title: "x".into(),
+            host: "github.com".into(),
+            owner_repo: "o/r".into(),
+            url: "https://github.com/o/r/pull/1".into(),
             ..Default::default()
         };
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), Some(other))],
-        ));
-        assert!(
-            matches!(reaction, EventReaction::Nothing),
-            "a non-pin result changes nothing, got {}",
-            reaction_kind(&reaction),
-        );
-        assert_eq!(
-            engine.shown_pr("s1").map(|p| p.number),
-            Some(12),
-            "the badge still shows the pin"
-        );
-        assert!(
-            engine.session_store.latest_found_prs_for_tests().is_empty(),
-            "the dropped result never reaches upsert_pr"
-        );
-
-        // Direction 2: a None (e.g. discovery finding nothing) cannot clear it.
-        let reaction =
-            engine.process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), None)]));
+        engine.process_worker_event(pr_status_ready(vec![("s1".to_string(), Some(pr.clone()))]));
+        let revision = engine.pr_revision.get("s1").copied();
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".to_string(),
+                answers: vec![crate::worker::PrSyncAnswer::Refreshed(pr)],
+                asked: Vec::new(),
+            },
+        ]));
         assert!(matches!(reaction, EventReaction::Nothing));
-        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
-
-        // A result matching the pin IS accepted, and refreshes the override
-        // row's cached state so a restart renders the fresh state.
-        let refreshed = PrInfo {
-            number: 12,
-            state: PrState::Merged,
-            title: "Pinned".to_string(),
-            host: "github.com".to_string(),
-            owner_repo: "forker/Hello-World".to_string(),
-            url: "https://github.com/forker/Hello-World/pull/12".to_string(),
-            ..Default::default()
-        };
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), Some(refreshed))],
-        ));
-        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
-        assert_eq!(
-            engine.shown_pr("s1").map(|p| p.state.clone()),
-            Some(PrState::Merged)
-        );
-        let rows = engine.session_store.attached_prs_for_tests();
-        assert_eq!(rows[0].state, "MERGED", "the pin's cached state refreshes");
-        assert_eq!(
-            engine.attached_pr("s1").map(|p| p.state.stored_text()),
-            Some("MERGED"),
-            "the in-memory pin refreshes too"
-        );
-        // An accepted PINNED result must never land in `session_prs`: the
-        // override row is the pin's durable cache, and a fork row written into
-        // `session_prs` would become the post-detach `known_pr`, making the
-        // next cycle emit the FORK's number against the session's OWN repo.
-        assert!(
-            engine.session_store.latest_found_prs_for_tests().is_empty(),
-            "a pinned cycle leaves session_prs untouched"
-        );
+        assert_eq!(engine.pr_revision.get("s1").copied(), revision);
     }
 
-    /// The full detach cycle: pin a FORK PR, accept one pinned
-    /// sync result, detach, and check what the next cycle would do. Under the
-    /// detach-suppresses-everything rule the session is simply absent from the
-    /// snapshot, so there is no cycle to smuggle the fork into; the residue
-    /// half is still asserted at the store, because a resume later puts the
-    /// session back in the plan and `session_prs` is what feeds its `known_pr`.
+    /// A pull request the user attached from another repository is refreshed
+    /// by its number like any other, and a refresh never claims the sync found
+    /// it: a later detach leaves nothing of it behind.
     #[test]
-    fn detaching_a_fork_pin_leaves_no_fork_residue_for_the_next_cycle() {
+    fn a_refreshed_attachment_is_never_marked_found_and_a_detach_leaves_nothing() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = crate::model::GhStatus::Available;
@@ -9277,13 +9357,12 @@ mod tests {
                 "forker/Hello-World",
                 12,
                 "Pinned",
-                "OPEN",
+                "CLOSED",
                 "",
             )
-            .expect("attach the fork pin");
+            .expect("attach the fork pull request");
 
-        // One accepted pinned cycle (the state refresh path).
-        let refreshed = PrInfo {
+        let reopened = PrInfo {
             number: 12,
             state: PrState::Open,
             title: "Pinned".to_string(),
@@ -9292,41 +9371,38 @@ mod tests {
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
             ..Default::default()
         };
-        engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), Some(refreshed))],
-        ));
+        let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+            crate::worker::PrStatusResult {
+                session_id: "s1".to_string(),
+                answers: vec![crate::worker::PrSyncAnswer::Refreshed(reopened)],
+                asked: Vec::new(),
+            },
+        ]));
+
+        assert!(matches!(reaction, EventReaction::RebuildLeftItems));
+        let row = engine.attached_pr("s1").expect("still attached");
+        assert_eq!(row.state, PrState::Open, "the reopen is noticed");
+        assert!(!row.found, "a refresh is not a discovery");
+        assert_eq!(
+            engine.session_store.attached_prs_for_tests()[0].state,
+            "OPEN"
+        );
 
         engine.clear_pull_request_override("s1").expect("detach");
-
-        // The next cycle's snapshot: the detached session is not in it at all.
-        assert!(
-            engine.pr_sync_sessions.lock().unwrap().is_empty(),
-            "a detached session is excluded from the plan entirely"
-        );
-        // And the fork left no residue behind for a later resume to pick up:
-        // a pinned cycle never writes `session_prs`, so the row that would
-        // become a resumed session's `known_pr` does not exist.
-        assert!(
-            engine.session_store.latest_found_prs_for_tests().is_empty(),
-            "the fork pin must leave nothing in session_prs to resume onto"
-        );
-        engine.resume_pr_autodetection("s1").expect("resume");
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
-        assert!(entries[0].pinned.is_none());
         assert!(
-            entries[0].known_pr.is_none(),
-            "the fork pin must not survive detach as known_pr, got {:?}",
-            entries[0].known_pr,
+            entries[0].known.iter().all(|row| row.number != 12),
+            "the detached pull request is gone from the next cycle, got {:?}",
+            entries[0].known,
         );
     }
 
-    /// The in-flight race: a PR check dispatched BEFORE the detach answers
-    /// after it. The result must be dropped before it can reach `upsert_pr` or
-    /// the badge, or the agent re-badges one tick after the user detached it.
+    /// A result that lands after the user detached an agent's pull requests
+    /// is still recorded, out of sight: nothing says when GitHub opened it, so
+    /// it cannot be shown to be newer than the detach.
     #[test]
-    fn an_in_flight_pr_result_for_a_suppressed_session_is_dropped() {
+    fn a_pull_request_found_after_a_detach_is_kept_out_of_sight() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = crate::model::GhStatus::Available;
@@ -9347,22 +9423,80 @@ mod tests {
             url: "https://github.com/o/r/pull/12".to_string(),
             ..Default::default()
         };
-        let reaction = engine.process_worker_event(pr_status_ready(
-            &engine,
-            vec![("s1".to_string(), Some(late))],
-        ));
+        engine.process_worker_event(pr_status_ready(vec![("s1".to_string(), Some(late))]));
 
         assert!(
             engine.shown_pr("s1").is_none(),
             "a late result must not re-badge a detached agent"
         );
+        let rows = engine.session_store.load_agent_prs_of("s1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].hidden, "it is kept, out of sight");
+
+        // Opened before the detach: out of sight. Opened after it: shown.
+        let cutoff = engine.pr_prefs["s1"]
+            .hide_created_before
+            .expect("the detach cutoff");
+        let opened = |number: u64, at: chrono::DateTime<Utc>| PrInfo {
+            number,
+            state: PrState::Open,
+            title: format!("PR {number}"),
+            host: "github.com".to_string(),
+            owner_repo: "o/r".to_string(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            gh_created_at: Some(at),
+            ..Default::default()
+        };
+        let cycle = |engine: &mut Engine| {
+            engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
+                crate::worker::PrStatusResult {
+                    session_id: "s1".to_string(),
+                    answers: vec![
+                        crate::worker::PrSyncAnswer::Found(opened(
+                            20,
+                            cutoff - chrono::TimeDelta::days(1),
+                        )),
+                        crate::worker::PrSyncAnswer::Found(opened(
+                            21,
+                            cutoff + chrono::TimeDelta::hours(1),
+                        )),
+                    ],
+                    asked: Vec::new(),
+                },
+            ]));
+        };
+        cycle(&mut engine);
+        let hidden = |engine: &Engine, number: u64| {
+            engine.agent_prs["s1"]
+                .iter()
+                .find(|row| row.number == number)
+                .map(|row| row.hidden)
+        };
+        assert_eq!(hidden(&engine, 20), Some(true));
+        assert_eq!(hidden(&engine, 21), Some(false));
+        assert_eq!(engine.shown_pr("s1").map(|row| row.number), Some(21));
+
+        // Shown again by the user, it stays shown however often it is found.
+        let mut rows = engine.agent_prs["s1"].clone();
+        for row in &mut rows {
+            row.hidden = false;
+        }
+        let prefs = engine.pr_prefs["s1"].clone();
+        engine
+            .session_store
+            .replace_agent_prs("s1", &rows, &prefs)
+            .unwrap();
+        engine.set_agent_prs("s1", rows);
+        cycle(&mut engine);
+        cycle(&mut engine);
+        assert_eq!(hidden(&engine, 20), Some(false));
         assert!(
-            engine.session_store.latest_found_prs_for_tests().is_empty(),
-            "and it must not be persisted either, or a restart would resurrect it"
-        );
-        assert!(
-            matches!(reaction, EventReaction::Nothing),
-            "nothing changed, so there is nothing to rebuild"
+            engine
+                .session_store
+                .load_agent_prs_of("s1")
+                .unwrap()
+                .iter()
+                .all(|row| !row.hidden)
         );
     }
 

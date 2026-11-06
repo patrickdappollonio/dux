@@ -20,7 +20,8 @@ use uuid::Uuid;
 /// their callers already reach them by.
 pub use crate::config_effective::{
     effective_agent_tabs_max, effective_log_keep, effective_log_viewer_lines,
-    effective_pr_poll_inactive_interval_seconds, effective_pr_poll_interval_seconds,
+    effective_pr_history_branches_per_cycle, effective_pr_poll_inactive_interval_seconds,
+    effective_pr_poll_interval_seconds, effective_pr_settled_recheck_seconds,
     effective_upload_directory,
 };
 
@@ -526,6 +527,25 @@ pub(crate) const DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 43_200;
 /// useful backstop already, so a fat-fingered value is clamped rather than
 /// silently turning the slow clock off; `0` is how you turn it off on purpose.
 pub(crate) const MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS: u32 = 604_800;
+
+/// Default number of an agent's earlier branches the pull-request sync asks
+/// GitHub about per cycle, beside the branch it is on now. The rest wait their
+/// turn, least recently asked first, so every one is asked again within a
+/// bounded number of cycles.
+pub(crate) const DEFAULT_PR_HISTORY_BRANCHES_PER_CYCLE: u16 = 8;
+
+/// Ceiling on the earlier branches asked about per agent per cycle. Each one
+/// is a question in the same batched query, so a huge value would only make
+/// every query bigger without making any branch fresher than the poll itself.
+pub(crate) const MAX_PR_HISTORY_BRANCHES_PER_CYCLE: u16 = 50;
+
+/// Default seconds before an earlier branch whose pull requests are all merged,
+/// or a closed pull request of an agent whose process exited, is asked about
+/// again (twelve hours).
+pub(crate) const DEFAULT_PR_SETTLED_RECHECK_SECONDS: u32 = 43_200;
+
+/// Ceiling on that recheck (seven days), the same as the inactive poll's.
+pub(crate) const MAX_PR_SETTLED_RECHECK_SECONDS: u32 = 604_800;
 
 /// Default seconds between re-checks of `gh` while dux cannot use it. Five
 /// minutes is short enough that a rate limit or a brief outage clears itself
@@ -1807,6 +1827,16 @@ pub struct UiConfig {
     /// moment they become active again, and on the deliberate one-shot
     /// triggers. Clamped to [`MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS`].
     pub pr_poll_inactive_interval_seconds: u32,
+    /// How many of an agent's earlier branches each pull-request poll asks
+    /// GitHub about, beside the branch it is on now. The rest wait their turn,
+    /// least recently asked first. `0` asks only about the current branch.
+    /// Clamped to [`MAX_PR_HISTORY_BRANCHES_PER_CYCLE`].
+    pub pr_history_branches_per_cycle: u16,
+    /// Seconds before an earlier branch whose pull requests are all merged, or
+    /// a closed pull request of an agent whose process exited, is asked about
+    /// again. Clamped to between the poll's floor and
+    /// [`MAX_PR_SETTLED_RECHECK_SECONDS`].
+    pub pr_settled_recheck_seconds: u32,
     /// Seconds between re-checks of the `gh` CLI while dux cannot use it.
     ///
     /// dux asks `gh` once at startup. When that answer is anything but "installed
@@ -2421,6 +2451,8 @@ impl Default for UiConfig {
             github_integration: true,
             pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
             pr_poll_inactive_interval_seconds: DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+            pr_history_branches_per_cycle: DEFAULT_PR_HISTORY_BRANCHES_PER_CYCLE,
+            pr_settled_recheck_seconds: DEFAULT_PR_SETTLED_RECHECK_SECONDS,
             github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
             copy_on_select: true,
             terminal_font_family: String::new(),
@@ -3182,6 +3214,8 @@ impl Default for Config {
                 github_integration: true,
                 pr_poll_interval_seconds: DEFAULT_PR_POLL_INTERVAL_SECONDS,
                 pr_poll_inactive_interval_seconds: DEFAULT_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+                pr_history_branches_per_cycle: DEFAULT_PR_HISTORY_BRANCHES_PER_CYCLE,
+                pr_settled_recheck_seconds: DEFAULT_PR_SETTLED_RECHECK_SECONDS,
                 github_probe_interval_secs: DEFAULT_GITHUB_PROBE_INTERVAL_SECONDS,
                 copy_on_select: true,
                 terminal_font_family: String::new(),
@@ -9672,6 +9706,31 @@ mod agent_tabs_cap_tests {
             MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
             "the ceiling itself is allowed"
         );
+    }
+
+    #[test]
+    fn the_pull_request_history_settings_default_to_eight_branches_and_twelve_hours() {
+        let ui = UiConfig::default();
+        assert_eq!(ui.pr_history_branches_per_cycle, 8);
+        assert_eq!(ui.pr_settled_recheck_seconds, 43_200);
+        assert_eq!(Config::default().ui.pr_history_branches_per_cycle, 8);
+        assert_eq!(Config::default().ui.pr_settled_recheck_seconds, 43_200);
+    }
+
+    #[test]
+    fn the_pull_request_history_settings_are_clamped_to_their_ranges() {
+        assert_eq!(
+            effective_pr_history_branches_per_cycle(0),
+            0,
+            "0 asks about the current branch alone"
+        );
+        assert_eq!(effective_pr_history_branches_per_cycle(8), 8);
+        assert_eq!(effective_pr_history_branches_per_cycle(50), 50);
+        assert_eq!(effective_pr_history_branches_per_cycle(u16::MAX), 50);
+        assert_eq!(effective_pr_settled_recheck_seconds(0), 30);
+        assert_eq!(effective_pr_settled_recheck_seconds(43_200), 43_200);
+        assert_eq!(effective_pr_settled_recheck_seconds(604_800), 604_800);
+        assert_eq!(effective_pr_settled_recheck_seconds(u32::MAX), 604_800);
     }
 
     #[test]

@@ -585,14 +585,14 @@ pub struct Engine {
     /// Each agent's pull-request preferences, by session id: the in-memory
     /// mirror of `session_pr_prefs`. An agent with none has the defaults.
     /// While an agent's `hide_created_before` is set, its pull requests were
-    /// put out of sight by a detach and nothing is detected for it until it
-    /// is resumed or a pull request is attached.
+    /// put out of sight by a detach, and one the sync finds that GitHub
+    /// opened before then is recorded out of sight too.
     pub pr_prefs: HashMap<String, crate::model::PrPrefs>,
     /// `Some` while the preferences behind `pr_prefs` could not be read,
-    /// holding when to try the read again. Until a read succeeds no
-    /// detection runs or applies for an agent with nothing attached, since
-    /// any of them may be one the user detached; an attached pull request is
-    /// the user's own answer and still syncs.
+    /// holding when to try the read again. Until a read succeeds the sync adds
+    /// no pull request to any agent, since whether a new one belongs out of
+    /// sight is in those preferences; the ones agents already have still
+    /// refresh.
     pub pr_prefs_retry_at: Option<Instant>,
     /// Every branch each agent's worktree has been on, by session id, kept
     /// current wherever the branch list is written.
@@ -640,14 +640,11 @@ pub struct Engine {
     /// looking after it, and a set that retried forever would be a queue nobody
     /// drains.
     pub pr_return_checks_owed: std::collections::HashSet<String>,
-    /// Which branch, as GitHub sees it, each agent's pull-request checks are
-    /// about: bumped when the agent drifts onto another branch, and kept by an
-    /// explicit rename, which only renames the local branch while the remote
-    /// branch and its pull request keep the old name. A check's result carries
-    /// the generation it was asked under and is dropped when it no longer
-    /// matches. Runtime only: a restart starts every agent at zero, and no
-    /// check survives a restart to be compared.
-    pub pr_branch_generations: HashMap<String, u64>,
+    /// What the pull-request sync last learned about each of an agent's
+    /// branches, by session id and then branch name: what puts the earlier
+    /// branches in turn and tells a gone ref to be looked up by head name.
+    /// Runtime only: after a restart the turns simply start over.
+    pub pr_branch_asks: HashMap<String, HashMap<String, crate::worker::BranchAskRecord>>,
     /// Agents whose branch moved while their pull-request check could not run
     /// (one for the old branch was still in flight, or inside its debounce).
     /// Each is owed exactly one check for the branch it is on, dispatched when
@@ -3433,6 +3430,9 @@ impl Engine {
             )),
             Ordering::Relaxed,
         );
+        // The plan carries how many earlier branches a cycle asks about and the
+        // settled recheck, so a reload that changed them takes effect at once.
+        self.write_pr_sync_plan();
         self.spawn_branch_sync_worker();
     }
 
@@ -5015,9 +5015,9 @@ impl Engine {
     }
 
     /// Read the pull-request preferences into `pr_prefs`. On failure the
-    /// preferences already in memory stand, detection is held off for agents
-    /// with nothing attached, and a retry is scheduled. Answers whether the
-    /// read succeeded.
+    /// preferences already in memory stand, the sync adds no pull request
+    /// until they read, and a retry is scheduled. Answers whether the read
+    /// succeeded.
     fn read_pr_prefs(&mut self) -> bool {
         match self.session_store.load_pr_prefs() {
             Ok(prefs) => {
@@ -5033,7 +5033,7 @@ impl Engine {
             Err(err) => {
                 crate::logger::warn(&format!(
                     "[gh-integration] could not load pull-request preferences, so no pull \
-                     request is autodetected until they load; retrying in {}s: {err:#}",
+                     request is added to an agent until they load; retrying in {}s: {err:#}",
                     PR_PREFS_RETRY.as_secs(),
                 ));
                 self.pr_prefs_retry_at = Some(Instant::now() + PR_PREFS_RETRY);
@@ -5073,14 +5073,6 @@ impl Engine {
         self.pr_prefs
             .get(session_id)
             .is_some_and(|prefs| prefs.hide_created_before.is_some())
-    }
-
-    /// Whether pull-request autodetection may run or apply for `session_id`:
-    /// an attached pull request always syncs, anything else only once the
-    /// preferences are known and detection was not switched off.
-    pub(crate) fn pr_autodetect_allowed(&self, session_id: &str) -> bool {
-        self.attached_pr(session_id).is_some()
-            || (self.pr_prefs_retry_at.is_none() && !self.pr_autodetect_suppressed(session_id))
     }
 
     /// Make an agent's pull requests `rows` in memory, moving its revision
@@ -5188,7 +5180,9 @@ impl Engine {
                 return;
             }
         };
-        let ids: Vec<String> = self
+        // An agent both in memory and in the store is visited once: a second
+        // visit would find its rows already taken and clear them.
+        let ids: std::collections::BTreeSet<String> = self
             .agent_prs
             .keys()
             .chain(stored.keys())
@@ -5210,26 +5204,12 @@ impl Engine {
         }
     }
 
-    /// What the pull-request sync already knows about an agent: the pull
-    /// request attached to it, else its highest-numbered found one.
-    fn known_pr_for_sync(&self, session_id: &str) -> Option<crate::storage::StoredPr> {
-        let rows = self.agent_prs.get(session_id)?;
-        rows.iter()
-            .find(|row| row.attached)
-            .or_else(|| {
-                rows.iter()
-                    .filter(|row| row.found)
-                    .max_by_key(|row| row.number)
-            })
-            .map(|row| row.to_stored(session_id))
-    }
-
     /// Check an agent's pull request for the branch it is on now, because that
     /// branch just changed (a rename or a drift). When a check that is still
     /// running, or the debounce it started, refuses this one, the agent is owed
     /// it: [`Self::retry_owed_branch_check`] dispatches it once the running
     /// check finishes, and a timer when the debounce window passes. A refusal
-    /// for a lasting reason (GitHub unavailable, a detach, a standalone agent,
+    /// for a lasting reason (GitHub unavailable, a standalone agent,
     /// a missing working copy) owes nothing.
     pub(crate) fn request_branch_pr_check(&mut self, session_id: &str) {
         if self.spawn_pr_check_for_session(session_id, PR_CHECK_MIN_INTERVAL) {
@@ -5272,14 +5252,6 @@ impl Engine {
         if self.pr_branch_checks_owed.contains(session_id) {
             self.request_branch_pr_check(session_id);
         }
-    }
-
-    /// The agent's current branch generation. See [`Self::pr_branch_generations`].
-    pub(crate) fn pr_branch_generation(&self, session_id: &str) -> u64 {
-        self.pr_branch_generations
-            .get(session_id)
-            .copied()
-            .unwrap_or_default()
     }
 
     /// The name an explicit rename gave the branch dux minted for this agent,
@@ -5338,14 +5310,6 @@ impl Engine {
         if self.is_in_flight(&InFlightKey::PrCheck(session_id.to_string())) {
             return false;
         }
-        // The user detached this agent's pull request, so there is nothing to
-        // detect for it. Checked before the debounce stamp so a resume gets a
-        // genuinely immediate check rather than one the skipped calls pushed
-        // out. `update_pr_sync_sessions` drops the session from the batched
-        // loop for the same reason; this is the one-shot half.
-        if !self.pr_autodetect_allowed(session_id) {
-            return false;
-        }
         // A standalone agent has no branch, so there is no pull request to
         // check for. Refused HERE rather than only in the batched enumerator
         // because several triggers route straight into this one-shot,
@@ -5374,36 +5338,12 @@ impl Engine {
         let Some(session) = self.sessions.iter().find(|s| s.id == session_id) else {
             return false;
         };
-        // A pinned session checks against its PIN, exactly like the batched
-        // loop: the override row is the known PR and the pin identity rides
-        // along so the one-shot check queries the pinned repo only. Without
-        // this, a one-shot racing an attach could answer for the remote-derived
-        // repo (the identity guard would drop it, but there is no reason to
-        // spend the call).
-        let pinned_row = self
-            .attached_pr(session_id)
-            .map(|row| row.to_stored(session_id));
-        let known_pr = self.known_pr_for_sync(session_id);
         // The workspace gate above already refused a standalone id, so a
-        // managed workspace is guaranteed here; reading it is what keeps the
-        // entry from being built with an empty branch name.
-        let Some(managed) = session.workspace.as_managed() else {
+        // managed workspace is guaranteed here.
+        let Some(entry) =
+            self.pr_sync_entry(session, self.minted_branch_rename(session_id).as_deref())
+        else {
             return false;
-        };
-        let entry = PrSyncEntry {
-            session_id: session.id.clone(),
-            branch_name: managed.branch_name.clone(),
-            worktree_path: managed.worktree_path.clone(),
-            known_pr,
-            agent_exited: !self.providers.contains_key(session.slot_tab_id()),
-            pinned: pinned_row.as_ref().map(pinned_pr_from_stored),
-            // A single-session check is somebody asking about THIS agent, so
-            // the flag the blind poll narrows on has nothing to say here; it is
-            // recorded truthfully all the same.
-            inactive: crate::flat_list::is_inactive(session),
-            branch_minted_at: session
-                .branch_minted_at(self.minted_branch_rename(session_id).as_deref()),
-            branch_generation: self.pr_branch_generation(session_id),
         };
         let label = format!("pr-check:{}", entry.session_id);
         let backoff = Arc::clone(&self.pr_backoff);
@@ -5431,13 +5371,7 @@ impl Engine {
                 // failure arms the pause (and clears it on recovery) even when the
                 // blind poll is disabled.
                 Self::apply_pr_backoff(&backoff, &signals, &tx);
-                let _ = tx.send(WorkerEvent::PrStatusReady(vec![
-                    crate::worker::PrStatusResult {
-                        session_id: entry.session_id,
-                        branch_generation: entry.branch_generation,
-                        pr: result,
-                    },
-                ]));
+                let _ = tx.send(WorkerEvent::PrStatusReady(vec![result]));
             },
         );
         true
@@ -5883,55 +5817,94 @@ impl Engine {
         returned
     }
 
-    fn write_pr_sync_plan(&self) {
+    pub(crate) fn write_pr_sync_plan(&self) {
         let minted_renames: HashMap<String, String> = self
             .session_store
             .load_minted_branch_renames()
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let plan: Vec<PrSyncEntry> = self
+            .sessions
+            .iter()
+            // A working copy that is gone is not polled: every question the
+            // sync asks runs git in that directory.
+            .filter(|s| !self.working_copy_missing(&s.id))
+            .filter_map(|s| self.pr_sync_entry(s, minted_renames.get(&s.id).map(String::as_str)))
+            .collect();
+        *self
+            .pr_sync_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan;
+    }
 
-        {
-            let mut guard = self
-                .pr_sync_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *guard = self
-                .sessions
-                .iter()
-                // A detached session is left out of the plan entirely: dux was
-                // told there is no pull request here, so it neither asks
-                // GitHub nor has anything to answer with.
-                // So is every unpinned one while the detaches cannot be read.
-                .filter(|s| self.pr_autodetect_allowed(&s.id))
-                // A working copy that is gone is not polled: every question the
-                // sync asks runs git in that directory.
-                .filter(|s| !self.working_copy_missing(&s.id))
-                // A standalone agent has no branch to open a pull request
-                // from, so it is never enrolled. Reading the branch identity
-                // out of the workspace is the gate and the projection at once.
-                .filter_map(|s| {
-                    let managed = s.workspace.as_managed()?;
-                    // A pinned session syncs against its PIN: the override row
-                    // is the known PR (the `session_prs` latest can be a
-                    // different, autodetected PR) and the pin identity rides
-                    // along so the planner queries the pinned repo only.
-                    let pinned_row = self.attached_pr(&s.id).map(|row| row.to_stored(&s.id));
-                    Some(PrSyncEntry {
-                        session_id: s.id.clone(),
-                        branch_name: managed.branch_name.clone(),
-                        worktree_path: managed.worktree_path.clone(),
-                        known_pr: self.known_pr_for_sync(&s.id),
-                        agent_exited: !self.providers.contains_key(s.slot_tab_id()),
-                        pinned: pinned_row.as_ref().map(pinned_pr_from_stored),
-                        inactive: crate::flat_list::is_inactive(s),
-                        branch_minted_at: s
-                            .branch_minted_at(minted_renames.get(&s.id).map(String::as_str)),
-                        branch_generation: self.pr_branch_generation(&s.id),
-                    })
-                })
-                .collect();
-        }
+    /// What the pull-request sync asks about `session`: the branch it is on
+    /// now, every other branch its worktree has been on except the project's
+    /// leading branch, and every pull request it has. `None` for a standalone
+    /// agent, which has no branch to open a pull request from.
+    /// `minted_rename` is the name an explicit rename gave the branch dux
+    /// minted for it, if one did.
+    fn pr_sync_entry(
+        &self,
+        session: &crate::model::AgentSession,
+        minted_rename: Option<&str>,
+    ) -> Option<PrSyncEntry> {
+        let managed = session.workspace.as_managed()?;
+        let history = self
+            .branch_histories
+            .get(&session.id)
+            .map_or(&[][..], Vec::as_slice);
+        let asks = self.pr_branch_asks.get(&session.id);
+        let last_ask = |name: &str| asks.and_then(|asks| asks.get(name)).cloned();
+        // The leading branch is where everybody's work lands, so its pull
+        // requests are not this agent's. Unknown, nothing is excluded by name.
+        let leading = self
+            .projects
+            .iter()
+            .find(|p| p.id == managed.project_id)
+            .and_then(|p| p.leading_branch.as_deref());
+        let current_entry = history
+            .iter()
+            .find(|entry| entry.name == managed.branch_name);
+        let current = crate::worker::PrSyncBranch {
+            name: managed.branch_name.clone(),
+            former_names: current_entry.map_or_else(Vec::new, |e| e.former_names.clone()),
+            identity_at: session.branch_minted_at(minted_rename),
+            tip: None,
+            last_ask: last_ask(&managed.branch_name),
+        };
+        let history = history
+            .iter()
+            .filter(|entry| entry.name != managed.branch_name)
+            .filter(|entry| leading != Some(entry.name.as_str()))
+            .map(|entry| crate::worker::PrSyncBranch {
+                name: entry.name.clone(),
+                former_names: entry.former_names.clone(),
+                identity_at: entry
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| chrono::DateTime::from_timestamp(identity.unix, 0)),
+                tip: entry.tip.clone(),
+                last_ask: last_ask(&entry.name),
+            })
+            .collect();
+        Some(PrSyncEntry {
+            session_id: session.id.clone(),
+            worktree_path: managed.worktree_path.clone(),
+            current,
+            history,
+            known: self.agent_prs.get(&session.id).cloned().unwrap_or_default(),
+            agent_exited: !self.providers.contains_key(session.slot_tab_id()),
+            inactive: crate::flat_list::is_inactive(session),
+            history_per_cycle: usize::from(crate::config::effective_pr_history_branches_per_cycle(
+                self.config.ui.pr_history_branches_per_cycle,
+            )),
+            settled_recheck: chrono::TimeDelta::seconds(i64::from(
+                crate::config::effective_pr_settled_recheck_seconds(
+                    self.config.ui.pr_settled_recheck_seconds,
+                ),
+            )),
+        })
     }
 
     /// Apply a manual pull-request attachment: persist the override row, mirror
@@ -6337,15 +6310,6 @@ impl Engine {
                 });
         }
         Ok((op_id, pending))
-    }
-}
-
-/// Project a stored override row into the pin identity the sync planner reads.
-pub(crate) fn pinned_pr_from_stored(row: &crate::storage::StoredPr) -> crate::worker::PinnedPr {
-    crate::worker::PinnedPr {
-        host: row.host.clone(),
-        owner_repo: row.owner_repo.clone(),
-        number: row.pr_number,
     }
 }
 
@@ -12726,19 +12690,18 @@ mod tests {
             url: "https://github.com/o/r/pull/8".into(),
             ..Default::default()
         };
-        let sync = |engine: &Engine| {
+        let sync = || {
             crate::worker::WorkerEvent::PrStatusReady(vec![crate::worker::PrStatusResult {
-                branch_generation: engine.pr_branch_generation("s1"),
                 session_id: "s1".to_string(),
-                pr: Some(pr.clone()),
+                answers: vec![crate::worker::PrSyncAnswer::Found(pr.clone())],
+                asked: Vec::new(),
             }])
         };
-        assert!(!engine.spawn_pr_check_for_session("s1", Duration::from_secs(0)));
-        engine.process_worker_event(sync(&engine));
+        engine.process_worker_event(sync());
         assert_eq!(
             engine.shown_pr("s1").map(|pr| pr.number),
             Some(7),
-            "a sync result is dropped"
+            "nothing is added while the cutoff that may hide it cannot be read"
         );
 
         engine.retry_unread_pr_prefs();
@@ -12750,7 +12713,7 @@ mod tests {
         engine.pr_prefs_retry_at = Some(Instant::now());
         engine.retry_unread_pr_prefs();
         assert_eq!(engine.pr_prefs_retry_at, None);
-        engine.process_worker_event(sync(&engine));
+        engine.process_worker_event(sync());
         assert_eq!(engine.shown_pr("s1").map(|pr| pr.number), Some(8));
     }
 
@@ -12826,10 +12789,10 @@ mod tests {
         assert_eq!(engine.pr_revision.get("s1").copied(), revision);
     }
 
-    /// A suppressed session is left out of the sync snapshot entirely, so the
-    /// poll loop never asks GitHub about it and can never re-badge it.
+    /// A suppressed session stays in the sync snapshot: what it finds from
+    /// then on is recorded out of sight, and its rows still refresh.
     #[test]
-    fn a_suppressed_session_is_excluded_from_the_sync_entries() {
+    fn a_suppressed_session_stays_in_the_sync_entries() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         for id in ["s1", "s2"] {
@@ -12845,17 +12808,14 @@ mod tests {
 
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
         let ids: Vec<String> = entries.into_iter().map(|e| e.session_id).collect();
-        assert_eq!(
-            ids,
-            vec!["s2".to_string()],
-            "a detached agent must not be planned for at all"
-        );
+        assert_eq!(ids, vec!["s1".to_string(), "s2".to_string()]);
     }
 
-    /// The one-shot paths (focus, create, a branch move, agent exit) must respect the
-    /// detach too, or focusing a detached agent would re-detect its PR.
+    /// The one-shot paths (focus, create, a branch move, agent exit) check a
+    /// detached agent like any other: the detach decides what is shown, not
+    /// what is asked.
     #[test]
-    fn a_suppressed_session_gets_no_one_shot_pr_check() {
+    fn a_suppressed_session_still_gets_its_one_shot_pr_check() {
         let (mut engine, _tmp) = test_engine();
         engine.github_integration_enabled = true;
         engine.gh_status = crate::model::GhStatus::Available;
@@ -12869,10 +12829,7 @@ mod tests {
 
         engine.spawn_pr_check_for_session("s1", Duration::from_secs(0));
 
-        assert!(
-            !engine.pr_last_checked.contains_key("s1"),
-            "a suppressed session must be skipped before the check is stamped"
-        );
+        assert!(engine.pr_last_checked.contains_key("s1"));
     }
 
     /// Plugging the PR back in by hand is the documented way out of a detach,
@@ -12928,7 +12885,6 @@ mod tests {
             .expect("seed session");
         engine.sessions.push(session);
         engine.clear_pull_request_override("s1").expect("detach");
-        assert!(engine.pr_sync_sessions.lock().unwrap().is_empty());
 
         engine.resume_pr_autodetection("s1").expect("resume");
 

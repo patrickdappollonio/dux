@@ -275,7 +275,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         pr_inactive_sessions: HashSet::new(),
         pr_inactive_sweep_at: Arc::default(),
         pr_return_checks_owed: HashSet::new(),
-        pr_branch_generations: HashMap::new(),
+        pr_branch_asks: HashMap::new(),
         pr_branch_checks_owed: HashSet::new(),
         branch_sync_interval_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         branch_sync_wait: Arc::new(dux_core::engine::BranchSyncWait::default()),

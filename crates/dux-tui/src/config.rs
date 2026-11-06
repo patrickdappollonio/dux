@@ -693,6 +693,20 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U32(c.ui.pr_poll_inactive_interval_seconds),
         },
         ConfigEntry::Field {
+            key: "pr_history_branches_per_cycle",
+            comment: Some(CommentSource::Static(
+                "# How many of an agent's earlier branches each pull-request poll asks\n# GitHub about, beside the branch it is on now. dux tracks the pull\n# requests of every branch an agent's worktree has been on; the earlier\n# branches take turns, least recently asked first, so each one is asked\n# again within a bounded number of polls. The project's default branch is\n# never one of them. Set to 0 to ask only about the current branch.\n# Any other value is clamped to at most 50, and dux logs a warning when it\n# clamps one.",
+            )),
+            value_fn: |c| FieldValue::U16(c.ui.pr_history_branches_per_cycle),
+        },
+        ConfigEntry::Field {
+            key: "pr_settled_recheck_seconds",
+            comment: Some(CommentSource::Static(
+                "# Seconds before dux asks GitHub again about an earlier branch whose pull\n# requests are all merged, and about a closed pull request of an agent\n# whose process exited. Such a pull request rarely moves, but a branch name\n# can be reused for a new pull request and a closed one can be reopened,\n# so neither is left alone for good. The default is 12 hours. The value is\n# clamped to between 30 seconds and 604800 seconds (7 days), and dux logs a\n# warning when it clamps one.",
+            )),
+            value_fn: |c| FieldValue::U32(c.ui.pr_settled_recheck_seconds),
+        },
+        ConfigEntry::Field {
             key: "copy_on_select",
             comment: Some(CommentSource::Static(
                 "# Web UI only: auto-copy selected terminal text to the clipboard\n# (X11-style \"highlight to copy\"). When enabled, dragging a selection in\n# the browser terminal copies it, and so does lifting your finger after a\n# press-and-hold selection on a touch screen; Ctrl-Shift-c / Ctrl-Insert (or\n# Cmd-c on a Mac) copy regardless. Change it at runtime from the web UI's\n# Preferences dialog.",

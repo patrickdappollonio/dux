@@ -665,16 +665,25 @@ How the two settings behave:
   the agent right away rather than waiting out the slow clock. The event-driven refreshes
   above ignore which section an agent is in.
 
-When a branch name is reused, dux follows the most recent pull request on it, preferring
-one that is open.
+Every branch the agent's worktree has been on is tracked, not only the current one, and a
+pull request dux finds on any of them stays with the agent. The earlier branches take turns
+on the poll; [How much dux asks GitHub about earlier branches](/docs/configuration#how-much-dux-asks-github-about-earlier-branches-ui)
+has the two settings for that. A pull request that is already merged is not asked about
+again, and every other one is refreshed wherever it lives, an attached one from another
+repository included.
+
+When a branch name is reused, dux keeps the pull requests opened after the branch was born
+and leaves older ones alone. When it cannot tell when the branch was born, it takes the most
+recent pull request on it, preferring one that is open.
 
 A pull request that was merged, and its branch deleted, before dux ever saw it is still
-found by the branch's name, and so is a newer one that replaced a pull request dux already
-knew. Because branch names get reused, dux takes such a match only when:
+found by the branch's name. Because branch names get reused, dux takes such a match only
+when:
 
 - the pull request came from the agent's own repository rather than a fork,
-- its last commit is in the agent's local branch, and
-- for a branch dux created, it was opened after the agent was.
+- its last commit is the branch's: in the agent's local branch, or the last commit dux saw
+  on the branch, or behind it, and
+- it was opened after the branch was born, when dux knows when that was.
 
 Anything else is left alone, and you can attach the pull request by hand.
 
