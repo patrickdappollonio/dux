@@ -196,6 +196,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --color-dux-pr-open: var(--dux-pr-open);
     --color-dux-pr-open-hover: var(--dux-pr-open-hover);
     --color-dux-pr-open-tint: var(--dux-pr-open-tint);
+    --color-dux-pr-draft: var(--dux-pr-draft);
+    --color-dux-pr-draft-hover: var(--dux-pr-draft-hover);
+    --color-dux-pr-draft-tint: var(--dux-pr-draft-tint);
     --color-dux-pr-merged: var(--dux-pr-merged);
     --color-dux-pr-merged-hover: var(--dux-pr-merged-hover);
     --color-dux-pr-merged-tint: var(--dux-pr-merged-tint);
@@ -475,6 +478,12 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
     --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    /* GitHub's draft gray: its fg-muted for text on a dark surface and its
+       neutral emphasis for tinted surfaces, with its lighter gray as the
+       hover. */
+    --dux-pr-draft: #8b949e;
+    --dux-pr-draft-hover: #b1bac4;
+    --dux-pr-draft-tint: #6e7781;
     --dux-pr-merged: oklch(71.4% 0.203 305.504);
     --dux-pr-merged-hover: oklch(82.7% 0.119 306.383);
     --dux-pr-merged-tint: oklch(55.8% 0.288 302.321);
@@ -547,6 +556,9 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-pr-open: oklch(72.3% 0.219 149.579);
     --dux-pr-open-hover: oklch(79.2% 0.209 151.711);
     --dux-pr-open-tint: oklch(62.7% 0.194 149.214);
+    --dux-pr-draft: #8b949e;
+    --dux-pr-draft-hover: #b1bac4;
+    --dux-pr-draft-tint: #6e7781;
     --dux-pr-merged: oklch(71.4% 0.203 305.504);
     --dux-pr-merged-hover: oklch(82.7% 0.119 306.383);
     --dux-pr-merged-tint: oklch(55.8% 0.288 302.321);

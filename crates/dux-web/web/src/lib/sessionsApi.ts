@@ -8,6 +8,7 @@ import type { BranchOrigin } from "./deleteAgent"
 import type { Prose } from "./prose"
 import type {
   AcceptedOperation,
+  PrBranchesView,
   PrKeyView,
   SessionView,
   StartupLogContent,
@@ -348,6 +349,45 @@ export const sessionsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/detach`,
       pr,
+    ),
+  // Hide, show again, sort and move are synchronous too: the final status rides
+  // the stream and the changed list arrives with the next workspace document.
+  hidePullRequest: (id: string, pr: PrKeyView) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/hide`,
+      pr,
+    ),
+  showPullRequest: (id: string, pr: PrKeyView) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/show`,
+      pr,
+    ),
+  setPullRequestSort: (id: string, mode: "automatic" | "manual") =>
+    request<void>(
+      "PUT",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/sort`,
+      { mode },
+    ),
+  movePullRequest: (id: string, pr: PrKeyView, to: "top" | "up" | "down") =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/move`,
+      { pr, to },
+    ),
+  // The order a drag left the shown pull requests in. It must name exactly
+  // the shown set; one that changed meanwhile is refused as stale.
+  reorderPullRequests: (id: string, order: PrKeyView[]) =>
+    request<void>(
+      "PUT",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/order`,
+      { order },
+    ),
+  pullRequestBranches: (id: string) =>
+    request<PrBranchesView>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/pull-requests/branches`,
     ),
   // Flat model: reorder every agent as one global list. `sessionIds` must be the
   // complete session set, in the desired order (the server validates strictly).

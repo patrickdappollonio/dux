@@ -10,6 +10,9 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { sessionLabel } from "@/lib/agentWorkspace"
+import { formatRegularCount } from "@/lib/formatRegularCount"
+import { sessionPrs } from "@/lib/pr"
 import {
   closeAttachPullRequest,
   setAttachPullRequestDraft,
@@ -17,10 +20,10 @@ import {
   useDux,
 } from "@/lib/store"
 
-// Pin a pull request to an agent. One text field for the raw reference; the
-// lookup runs server-side and its outcome rides the status toast stream, so
-// submitting closes the dialog at once. When the agent already shows a PR the
-// body names it, so replacing it is an informed act.
+// Attach a pull request to an agent, beside the ones it has. One text field for
+// the raw reference; the lookup runs server-side and its outcome rides the
+// status toast stream, so submitting closes the dialog at once. The body says
+// how many the agent has, because attaching adds rather than replaces.
 export function AttachPullRequestDialog() {
   const { attachPullRequestTarget, attachPullRequestDraft, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === attachPullRequestTarget)
@@ -32,7 +35,8 @@ export function AttachPullRequestDialog() {
     closeAttachPullRequest,
   )
 
-  const pr = session?.pr
+  const name = session ? sessionLabel(session) : ""
+  const count = session ? sessionPrs(session).length : 0
   const empty = attachPullRequestDraft.trim() === ""
 
   function handleSubmit() {
@@ -51,20 +55,17 @@ export function AttachPullRequestDialog() {
         <DialogHeader>
           <DialogTitle>Attach pull request</DialogTitle>
           <DialogDescription>
-            Adds a GitHub pull request to this agent, beside the ones found on
-            its branches. Autodetection keeps running.
+            Adds a GitHub pull request to <InlineCode>{name}</InlineCode>,
+            beside the ones found on its branches. Autodetection keeps running.
           </DialogDescription>
         </DialogHeader>
-        {pr ? (
-          <p className="text-sm text-muted-foreground">
-            Currently showing{" "}
-            <span className="text-foreground">
-              <InlineCode>#{pr.number}</InlineCode>{" "}
-              <InlineCode>{pr.title}</InlineCode>
-            </span>
-            {pr.overridden ? " (manually attached)" : ""}.
-          </p>
-        ) : null}
+        <p className="text-sm text-muted-foreground">
+          <InlineCode>{name}</InlineCode>{" "}
+          {count === 0
+            ? "has no pull requests yet."
+            : `has ${formatRegularCount(count, "pull request")} now.`}{" "}
+          One from another repository works too.
+        </p>
         <Input
           value={attachPullRequestDraft}
           onChange={(e) => setAttachPullRequestDraft(e.target.value)}

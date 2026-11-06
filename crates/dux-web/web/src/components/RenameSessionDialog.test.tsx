@@ -27,6 +27,7 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => {
     sessionsApi: {
       ...actual.sessionsApi,
       branchPushed: vi.fn(),
+      pullRequestBranches: vi.fn(),
       patch: vi.fn(),
     },
   }
@@ -56,6 +57,7 @@ const submitRename = vi.mocked(store.submitRename)
 const setRenameDraft = vi.mocked(store.setRenameDraft)
 const setRenameBranch = vi.mocked(store.setRenameBranch)
 const branchPushed = vi.mocked(api.sessionsApi.branchPushed)
+const pullRequestBranches = vi.mocked(api.sessionsApi.pullRequestBranches)
 const patch = vi.mocked(api.sessionsApi.patch)
 
 const managedSession = {
@@ -124,6 +126,8 @@ beforeEach(() => {
   patch.mockResolvedValue({})
   branchPushed.mockReset()
   branchPushed.mockResolvedValue({ pushed: false })
+  pullRequestBranches.mockReset()
+  pullRequestBranches.mockRejectedValue(new Error("offline test"))
 })
 
 afterEach(() => {
@@ -216,12 +220,38 @@ describe("RenameSessionDialog", () => {
     ])
   })
 
-  it("warns that the open pull request and the pushed branch keep the old name", async () => {
+  const key = { host: "github.com", owner_repo: "o/r", number: 42 }
+  it.each([
+    [
+      "the open pull request the agent shows",
+      { number: 42, state: "open", title: "Login", url: "u", overridden: false },
+      null,
+    ],
+    [
+      "a draft pull request on a name the branch had before",
+      {
+        number: 42,
+        state: "draft",
+        title: "Login",
+        url: "u",
+        overridden: false,
+        host: "github.com",
+        owner_repo: "o/r",
+        own_repo: true,
+        found: true,
+        head_branch: "feat/old-login",
+      },
+      {
+        branches: [
+          { name: "feat/login", former_names: ["feat/old-login"], current: true, prs: [key] },
+        ],
+        attached_on_no_branch: [],
+      },
+    ],
+  ])("warns that %s and the pushed branch keep the old name", async (_, pr, branches) => {
     branchPushed.mockResolvedValue({ pushed: true })
-    seed("s1", {
-      ...managedSession,
-      pr: { number: 42, state: "open", title: "Login", url: "u", overridden: false },
-    })
+    if (branches) pullRequestBranches.mockResolvedValue(branches)
+    seed("s1", { ...managedSession, pr, prs: [pr] })
     renderDialog()
     await waitFor(() =>
       expect(note().textContent).toBe(

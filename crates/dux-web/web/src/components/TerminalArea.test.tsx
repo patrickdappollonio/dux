@@ -476,8 +476,8 @@ describe("terminalAreaModel", () => {
   })
 
   it("has no pull request when the selected session names none", () => {
-    expect(model().pr).toBeNull()
-    expect(model({ selectedSessionId: null }).pr).toBeNull()
+    expect(model().prs).toEqual([])
+    expect(model({ selectedSessionId: null }).prs).toEqual([])
   })
 
   it("cards a dormant extra tab and leaves the live slot tab alone", () => {

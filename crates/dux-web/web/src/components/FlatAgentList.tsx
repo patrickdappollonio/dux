@@ -99,6 +99,8 @@ import {
   prIconClass,
   prIconHoverClass,
   prStateLabel,
+  prBadgeTooltip,
+  sessionPrs,
 } from "@/lib/pr"
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
@@ -350,37 +352,7 @@ function AgentFlatRow({
               {/* Line one: name + PR + time. */}
               <span className="flex items-center gap-2">
                 <RowName text={label} query={query} />
-                {session.pr ? (
-                  <SimpleTooltip
-                    content={`#${session.pr.number} · ${session.pr.title} (${prStateLabel(session.pr.state)})`}
-                    side="right"
-                  >
-                    <a
-                      href={session.pr.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      aria-label={prAriaLabel(session.pr.number, session.pr.state)}
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors",
-                        prIconClass(session.pr.state),
-                        prIconHoverClass(session.pr.state),
-                      )}
-                      onClick={(event) => {
-                        // `stopPropagation` keeps the click off the row's select
-                        // handler; `preventDefault` keeps this to ONE tab, since
-                        // the anchor's `target="_blank"` would open a second.
-                        event.preventDefault()
-                        event.stopPropagation()
-                        window.open(session.pr!.url, "_blank", "noopener")
-                      }}
-                    >
-                      <GitPullRequest className="size-3.5" />
-                      <span className="text-xs font-medium tabular-nums">
-                        #{session.pr.number}
-                      </span>
-                    </a>
-                  </SimpleTooltip>
-                ) : null}
+                {session.pr ? <AgentRowPrBadge session={session} /> : null}
                 {/* Typing cue: the violet caret, kept as the RIGHTMOST indicator so
                     its position is stable whether or not a PR badge is shown (the PR
                     sits to its left). The working pulse is suppressed while
@@ -1260,5 +1232,54 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         )}
       </div>
     </div>
+  )
+}
+
+// The row's pull-request badge. One pull request keeps the `#N` it always
+// had; with several, the glyph carries the count, colored by the shown one.
+// Either way a click opens the shown pull request, and the tooltip says how
+// many more the banner steps through.
+function AgentRowPrBadge({ session }: { session: SessionView }) {
+  const prs = sessionPrs(session)
+  const shown = session.pr!
+  const many = prs.length > 1
+  return (
+    <SimpleTooltip
+      content={
+        many
+          ? prBadgeTooltip(prs)
+          : `#${shown.number} · ${shown.title} (${prStateLabel(shown.state)})`
+      }
+      side="right"
+    >
+      <a
+        href={shown.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={
+          many
+            ? `${prAriaLabel(shown.number, shown.state)}, and ${prs.length - 1} more`
+            : prAriaLabel(shown.number, shown.state)
+        }
+        className={cn(
+          "inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 transition-colors",
+          prIconClass(shown.state),
+          prIconHoverClass(shown.state),
+        )}
+        onClick={(event) => {
+          // `stopPropagation` keeps the click off the row's select
+          // handler; `preventDefault` keeps this to ONE tab, since
+          // the anchor's `target="_blank"` would open a second.
+          event.preventDefault()
+          event.stopPropagation()
+          window.open(shown.url, "_blank", "noopener")
+        }}
+      >
+        <GitPullRequest className="size-3.5" />
+        <span className="text-xs font-medium tabular-nums">
+          {many ? prs.length : `#${shown.number}`}
+        </span>
+      </a>
+    </SimpleTooltip>
   )
 }

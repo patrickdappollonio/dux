@@ -158,6 +158,8 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+type Store = typeof import("./store")
+
 async function loadStore() {
   const mod = await import("./store")
   await vi.waitFor(() => {
@@ -246,17 +248,39 @@ describe("store write actions route to REST", () => {
     expect(mod.getSnapshot().attachPullRequestTarget).toBe("s1")
   })
 
-  it("detachPullRequest POSTs the pull request it names to the detach endpoint", async () => {
+  const key = { host: "github.com", owner_repo: "o/r", number: 12 }
+  it.each([
+    ["detachPullRequest", (m: Store) => m.detachPullRequest("s1", key), "POST", "/detach", key],
+    ["hidePullRequest", (m: Store) => m.hidePullRequest("s1", key), "POST", "/hide", key],
+    ["showPullRequest", (m: Store) => m.showPullRequest("s1", key), "POST", "/show", key],
+    [
+      "setPullRequestSort",
+      (m: Store) => m.setPullRequestSort("s1", "manual"),
+      "PUT",
+      "/sort",
+      { mode: "manual" },
+    ],
+    [
+      "movePullRequest",
+      (m: Store) => m.movePullRequest("s1", key, "top"),
+      "POST",
+      "/move",
+      { pr: key, to: "top" },
+    ],
+    [
+      "reorderPullRequests",
+      (m: Store) => m.reorderPullRequests("s1", [key]),
+      "PUT",
+      "/order",
+      { order: [key] },
+    ],
+  ] as const)("%s sends the change the server's pull-request route reads", async (_, act, method, path, body) => {
     const mod = await loadStore()
-    mod.detachPullRequest("s1", { host: "github.com", owner_repo: "o/r", number: 12 })
+    act(mod)
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
-    expect(actionCalls[0].url).toBe("/api/v1/sessions/s1/pull-requests/detach")
-    expect(actionCalls[0].method).toBe("POST")
-    expect(actionCalls[0].body).toEqual({
-      host: "github.com",
-      owner_repo: "o/r",
-      number: 12,
-    })
+    expect(actionCalls[0].url).toBe(`/api/v1/sessions/s1/pull-requests${path}`)
+    expect(actionCalls[0].method).toBe(method)
+    expect(actionCalls[0].body).toEqual(body)
   })
 
   it("pullProject POSTs the new project pull endpoint", async () => {

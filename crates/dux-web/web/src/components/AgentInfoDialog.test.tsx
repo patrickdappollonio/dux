@@ -99,7 +99,7 @@ function renderDialogOpenFor(
 // The pull request row's value, read whole: its number is a chip, so the row's
 // sentence spans more than one element.
 function prRow(): HTMLElement {
-  return screen.getByText("Pull request").nextElementSibling as HTMLElement
+  return screen.getByText(/^Pull requests?$/).nextElementSibling as HTMLElement
 }
 
 beforeEach(() => {
@@ -250,6 +250,45 @@ describe("AgentInfoDialog", () => {
     })
     expect(prRow().textContent).toMatch(/#12 \(merged\) Fix the frobnicator/)
     expect(screen.queryByText(/manually attached/)).toBeNull()
+  })
+
+  it("lists every shown pull request, naming the attached ones", () => {
+    const found = {
+      number: 12,
+      state: "open",
+      title: "Fix the frobnicator",
+      url: "https://github.com/o/r/pull/12",
+      overridden: false,
+      attached: false,
+    }
+    const attached = {
+      ...found,
+      number: 77,
+      state: "draft",
+      title: "Allow the preview host",
+      url: "https://github.com/acme/infra/pull/77",
+      overridden: true,
+      attached: true,
+      owner_repo: "acme/infra",
+      own_repo: false,
+    }
+    renderDialogOpenFor({
+      title: "server-mode",
+      workspace: {
+        kind: "managed",
+        branch_name: "feat",
+        initial_branch: "feat",
+        branch_provenance: "created",
+        source_branch: "main",
+      },
+      pr: found,
+      prs: [found, attached],
+    })
+    const lines = [...prRow().children].map((line) => line.textContent)
+    expect(lines).toEqual([
+      "#12 (open) Fix the frobnicator",
+      "acme/infra#77 (draft) Allow the preview host (manually attached)",
+    ])
   })
 
   it("omits the pull request row when the session has none", () => {

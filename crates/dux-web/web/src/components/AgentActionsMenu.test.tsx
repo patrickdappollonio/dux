@@ -6,21 +6,15 @@ import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import { stubCoarsePointer, type MatchMediaStub } from "@/test/matchMedia"
 
-// The agent ⋯ menu's pull-request entries. What is pinned here is the GATING:
-// the attach item exists only with a usable gh (matching the project menu's
-// from-PR gate) and its label flips on the OVERRIDE (a manually attached PR),
-// not on mere PR presence; the detach item exists whenever ANY pull request is
-// associated, pinned or autodetected; and the resume item exists only while
-// the agent is detached. Neither detach nor resume needs gh, since both talk
-// to dux's own state.
+// The agent ⋯ menu: the gating of each entry, its shape (leading icon, the
+// trailing ellipsis on an entry that opens a dialog) and where it routes.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
-    openAttachPullRequest: vi.fn(),
-    detachPullRequest: vi.fn(),
+    openPullRequests: vi.fn(),
     openStopAgent: vi.fn(),
     openRecreateWorkingCopy: vi.fn(),
   }
@@ -64,8 +58,7 @@ const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
   "@/components/ui/dropdown-menu"
 )
 const store = await import("@/lib/store")
-const openAttachPullRequest = vi.mocked(store.openAttachPullRequest)
-const detachPullRequest = vi.mocked(store.detachPullRequest)
+const openPullRequests = vi.mocked(store.openPullRequests)
 const openStopAgent = vi.mocked(store.openStopAgent)
 const openRecreateWorkingCopy = vi.mocked(store.openRecreateWorkingCopy)
 
@@ -138,8 +131,7 @@ const prPinned = {
 
 beforeEach(() => {
   installStubs()
-  openAttachPullRequest.mockClear()
-  detachPullRequest.mockClear()
+  openPullRequests.mockClear()
   openStopAgent.mockClear()
 })
 
@@ -162,13 +154,12 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Enable agent auto-reopen",
     "Rename agent…",
     "Change agent provider…",
-    "Attach pull request…",
-    "Detach pull request",
     "Delete agent…",
   ]
   const enabledLabels = [
     "Project…",
     "Fork agent…",
+    "Pull requests…",
     "Agent info…",
     "Configure startup command…",
     "Configure environment variables…",
@@ -361,8 +352,7 @@ describe("AgentActionsMenu for a standalone agent", () => {
     await openMenu(session)
     for (const absent of [
       /Fork agent/,
-      /Attach pull request/,
-      /Detach pull request/,
+      /Pull requests/,
       /Configure startup command/,
       /Rerun startup command/,
     ]) {
@@ -459,83 +449,25 @@ describe("AgentActionsMenu terminal entry names where the shell opens", () => {
   })
 })
 
-describe("AgentActionsMenu pull-request entries", () => {
-  it("hides both entries without a usable gh and no override", async () => {
-    seed(makeSession({ id: "s1" }), false)
-    await openMenu(makeSession({ id: "s1" }))
-    expect(screen.queryByText(/Attach pull request/)).toBeNull()
-    expect(screen.queryByText(/attached pull request/)).toBeNull()
-    expect(screen.queryByText("Detach pull request")).toBeNull()
-  })
-
-  // The recovery the whole re-check exists for: dux booted while GitHub was
-  // rate-limiting, so the menu had no pull-request entries; a later probe found
-  // gh working, the bootstrap document was refetched, and the entry has to be
-  // there without reloading the page.
-  it("gains the attach entry once gh becomes available, with no reload", async () => {
-    seed(makeSession({ id: "s1" }), false)
-    const first = await openMenu(makeSession({ id: "s1" }))
-    expect(first).toBeTruthy()
-    expect(screen.queryByText("Attach pull request…")).toBeNull()
-    cleanup()
-
-    seed(makeSession({ id: "s1" }), true)
-    await openMenu(makeSession({ id: "s1" }))
-    expect(screen.getByText("Attach pull request…")).toBeTruthy()
-  })
-
-  it("offers the attach entry with gh, with icon and trailing ellipsis, routed to the store", async () => {
-    const session = makeSession({ id: "s1" })
-    seed(session, true)
-    await openMenu(session)
-    const item = screen
-      .getByText("Attach pull request…")
-      .closest('[role="menuitem"]')
-    expect(item).toBeTruthy()
-    // Trailing "…" marks an item that opens a dialog; a leading lucide icon is
-    // required on every item in these menus.
-    expect(item!.textContent?.endsWith("…")).toBe(true)
-    expect(item!.querySelector("svg")).toBeTruthy()
-    // No PR associated at all: nothing to detach.
-    expect(screen.queryByText("Detach pull request")).toBeNull()
-    fireEvent.click(screen.getByText("Attach pull request…"))
-    expect(openAttachPullRequest).toHaveBeenCalledWith("s1")
-  })
-
-  it("offers no detach on a PR dux found, which has nothing to detach", async () => {
-    const session = makeSession({ id: "s1", pr: prAuto })
-    seed(session, true)
-    await openMenu(session)
-    expect(screen.getByText("Attach pull request…")).toBeTruthy()
-    expect(screen.queryByText("Detach pull request")).toBeNull()
-  })
-
-  it("offers detach on an attached PR, and attaching another stays offered", async () => {
-    const session = makeSession({ id: "s1", pr: prPinned })
-    seed(session, true)
-    await openMenu(session)
-    expect(screen.getByText("Attach pull request…")).toBeTruthy()
-    const detach = screen
-      .getByText("Detach pull request")
-      .closest('[role="menuitem"]')
-    expect(detach).toBeTruthy()
-    // Reversible action: icon yes, but NO trailing ellipsis and no confirm.
-    expect(detach!.textContent?.endsWith("…")).toBe(false)
-    expect(detach!.querySelector("svg")).toBeTruthy()
-    fireEvent.click(screen.getByText("Detach pull request"))
-    expect(detachPullRequest).toHaveBeenCalledWith("s1", {
-      host: "github.com",
-      owner_repo: "o/r",
-      number: 12,
-    })
-  })
-
-  it("keeps detach available without gh (detaching talks to nothing)", async () => {
-    const session = makeSession({ id: "s1", pr: prPinned })
-    seed(session, false)
-    await openMenu(session)
-    expect(screen.queryByText(/pull request…/)).toBeNull()
-    expect(screen.getByText("Detach pull request")).toBeTruthy()
+describe("AgentActionsMenu pull-request entry", () => {
+  // One entry for everything about pull requests, with or without gh: the
+  // dialog behind it says when attaching needs a signed-in gh, and hiding or
+  // detaching never talks to GitHub, so a pull request never outlives the way
+  // to remove it.
+  it("offers Pull requests… with or without gh, with icon and trailing ellipsis, routed to the store", async () => {
+    for (const gh of [true, false]) {
+      const session = makeSession({ id: "s1", pr: prPinned })
+      seed(session, gh)
+      await openMenu(session)
+      const item = screen.getByText("Pull requests…").closest('[role="menuitem"]')
+      expect(item).toBeTruthy()
+      expect(item!.querySelector("svg")).toBeTruthy()
+      expect(screen.queryByText(/Attach pull request/)).toBeNull()
+      expect(screen.queryByText(/Detach pull request/)).toBeNull()
+      fireEvent.click(screen.getByText("Pull requests…"))
+      expect(openPullRequests).toHaveBeenLastCalledWith("s1")
+      cleanup()
+    }
   })
 })
 

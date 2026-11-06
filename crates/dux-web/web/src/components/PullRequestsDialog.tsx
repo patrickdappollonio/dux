@@ -1,0 +1,771 @@
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react"
+import {
+  DndContext,
+  MouseSensor,
+  TouchSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core"
+import type { DragEndEvent } from "@dnd-kit/core"
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable"
+import {
+  ArrowDown,
+  ArrowDownWideNarrow,
+  ArrowUp,
+  ArrowUpToLine,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Ellipsis,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  GitBranch,
+  GitPullRequest,
+  GripVertical,
+  Plus,
+  Unlink,
+} from "lucide-react"
+
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { InlineCode } from "@/components/ui/inline-code"
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@/components/ui/sheet"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { sessionLabel } from "@/lib/agentWorkspace"
+import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "@/lib/dragActivation"
+import {
+  prActivity,
+  prIconClass,
+  prKeyOf,
+  prName,
+  prOrigin,
+  prRowAction,
+  prStateLabel,
+  samePrKey,
+  sessionPrs,
+} from "@/lib/pr"
+import { moveItem } from "@/lib/reorder"
+import { sessionsApi } from "@/lib/sessionsApi"
+import {
+  closePullRequests,
+  detachPullRequest,
+  hidePullRequest,
+  movePullRequest,
+  openAttachPullRequest,
+  reorderPullRequests,
+  setPullRequestSort,
+  showPullRequest,
+  useDux,
+} from "@/lib/store"
+import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import type { PrBranchesView, PrKeyView, PrView, SessionView } from "@/lib/types"
+import { cn } from "@/lib/utils"
+
+// The header's one height token: the view switch and the Sort control sit
+// side by side at it, lifted to the touch floor on a coarse pointer.
+const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
+// A row's own controls (the grip, the `⋯`, Show again): compact beside a
+// mouse, the 40px floor under a finger.
+const ROW_CONTROL = "size-8 pointer-coarse:size-10"
+
+type View = "prs" | "branches"
+
+// Every pull request an agent has, in two views: the list in the agent's order
+// with a way to hide, detach, reorder and show again, and the branch log that
+// says which branch each was found on. A dialog on a computer and a bottom
+// sheet on a phone, around one body. Keyed to its agent, so it closes itself
+// when the agent leaves the spine.
+export function PullRequestsDialog() {
+  const { pullRequestsTarget, spine, bootstrap } = useDux()
+  const isMobile = useIsMobile()
+  const session = spine?.sessions.find((s) => s.id === pullRequestsTarget)
+  const open = useVanishedTargetGuard(
+    pullRequestsTarget !== null,
+    session !== undefined,
+    closePullRequests,
+  )
+  const onOpenChange = (o: boolean) => {
+    if (!o) closePullRequests()
+  }
+  const body =
+    open && session ? (
+      <PullRequestsBody
+        session={session}
+        phone={isMobile}
+        canAttach={bootstrap?.gh_available ?? false}
+      />
+    ) : null
+  if (isMobile) {
+    return (
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent
+          side="bottom"
+          className="max-h-[85dvh] gap-0 overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(env(safe-area-inset-bottom),0.75rem)]"
+        >
+          {body}
+        </SheetContent>
+      </Sheet>
+    )
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent showCloseButton={false} className="gap-3 sm:max-w-[640px]">
+        {body}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PullRequestsBody({
+  session,
+  phone,
+  canAttach,
+}: {
+  session: SessionView
+  phone: boolean
+  canAttach: boolean
+}) {
+  const [view, setView] = useState<View>("prs")
+  const name = sessionLabel(session)
+  const visible = sessionPrs(session)
+  const hidden = session.prs_hidden ?? []
+  const manual = session.pr_sort === "manual"
+  const branches = useBranches(session.id, session.pr_revision ?? 0)
+  const Title = phone ? SheetTitle : DialogTitle
+  const Description = phone ? SheetDescription : DialogDescription
+
+  return (
+    <div className={cn("flex min-h-0 flex-col gap-3", phone && "p-4")}>
+      <div className={cn("flex flex-col gap-1", phone && "pr-10")}>
+        <Title>Pull requests</Title>
+        <Description>
+          {view === "prs" ? (
+            <>
+              Found on the branches <InlineCode>{name}</InlineCode> has been on,
+              plus the ones you attached.{" "}
+              {manual
+                ? "In your order; the first one is what the banner shows. New ones found later go after yours."
+                : "Open ones come first, newest first, and the first one is what the banner shows."}
+            </>
+          ) : (
+            <>
+              Every branch <InlineCode>{name}</InlineCode> has had checked out
+              in its worktree, newest first, with the pull requests found for
+              each.
+            </>
+          )}
+        </Description>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Tabs
+          value={view}
+          onValueChange={(v) => setView(v as View)}
+          className="min-w-0 flex-1"
+        >
+          <TabsList
+            className={cn(
+              "w-full group-data-horizontal/tabs:h-9 pointer-coarse:group-data-horizontal/tabs:h-10",
+            )}
+          >
+            <TabsTrigger value="prs">
+              <GitPullRequest />
+              Pull requests
+              <span className="tabular-nums opacity-70">{visible.length}</span>
+            </TabsTrigger>
+            <TabsTrigger value="branches">
+              <GitBranch />
+              Branches
+              {branches.data ? (
+                <span className="tabular-nums opacity-70">
+                  {branches.data.branches.length}
+                </span>
+              ) : null}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <SortControl sessionId={session.id} manual={manual} />
+      </div>
+
+      {view === "prs" ? (
+        <PullRequestsView
+          session={session}
+          name={name}
+          visible={visible}
+          hidden={hidden}
+        />
+      ) : (
+        <BranchesView
+          prs={[...visible, ...hidden]}
+          hidden={hidden}
+          branches={branches}
+        />
+      )}
+
+      <div
+        className={cn(
+          "-mx-4 -mb-4 flex items-center gap-2 border-t bg-muted/50 p-4",
+          phone && "mx-0 mb-0 rounded-none bg-transparent px-0 pb-0",
+        )}
+      >
+        {canAttach ? (
+          <Button
+            variant="outline"
+            className={cn(HEADER_HEIGHT, phone && "flex-1")}
+            onClick={() => openAttachPullRequest(session.id)}
+          >
+            <Plus />
+            Attach pull request…
+          </Button>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Attaching needs a signed-in gh.
+          </p>
+        )}
+        {phone ? null : (
+          <Button
+            variant="outline"
+            className={cn("ml-auto", HEADER_HEIGHT)}
+            onClick={closePullRequests}
+          >
+            Close
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The order control, modelled on the agents pane's Sort: a static trigger,
+// with the active mode marked in its menu.
+function SortControl({ sessionId, manual }: { sessionId: string; manual: boolean }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="outline"
+            aria-label="Sort pull requests"
+            className={cn("shrink-0", HEADER_HEIGHT)}
+          />
+        }
+      >
+        <ArrowDownWideNarrow />
+        Sort
+        <ChevronDown className="opacity-60" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onClick={() => setPullRequestSort(sessionId, "automatic")}>
+          {manual ? <span className="size-4" /> : <Check />}
+          Automatic
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setPullRequestSort(sessionId, "manual")}>
+          {manual ? <Check /> : <span className="size-4" />}
+          Manual
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function keyId(key: PrKeyView): string {
+  return `${key.host}/${key.owner_repo}#${key.number}`
+}
+
+function PullRequestsView({
+  session,
+  name,
+  visible,
+  hidden,
+}: {
+  session: SessionView
+  name: string
+  visible: PrView[]
+  hidden: PrView[]
+}) {
+  // A drop is shown at once, ahead of the server: the order it left, tied to
+  // the revision it was made against. A new revision means the server has
+  // answered (or something else changed the list), and its order wins again.
+  const [dropped, setDropped] = useState<{ revision: number; ids: string[] } | null>(
+    null,
+  )
+  const revision = session.pr_revision ?? 0
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
+    useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
+  )
+  const keyed = visible.flatMap((pr) => {
+    const key = prKeyOf(pr)
+    return key ? [{ pr, key, id: keyId(key) }] : []
+  })
+  const serverIds = keyed.map((row) => row.id)
+  const ids =
+    dropped && dropped.revision === revision && dropped.ids.length === serverIds.length
+      ? dropped.ids
+      : serverIds
+  const byId = new Map(keyed.map((row) => [row.id, row]))
+  const rows = ids.flatMap((id) => {
+    const row = byId.get(id)
+    return row ? [row] : []
+  })
+
+  function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over) return
+    const next = moveItem(ids, String(active.id), String(over.id))
+    if (next === ids) return
+    setDropped({ revision, ids: next })
+    const order = next.flatMap((id) => {
+      const row = byId.get(id)
+      return row ? [row.key] : []
+    })
+    void reorderPullRequests(session.id, order).then((ok) => {
+      if (!ok) setDropped(null)
+    })
+  }
+
+  if (visible.length === 0 && hidden.length === 0) {
+    return (
+      <p className="py-6 text-center text-sm text-muted-foreground">
+        No pull requests yet. dux looks on every branch{" "}
+        <InlineCode>{name}</InlineCode> has been on, every few minutes.
+      </p>
+    )
+  }
+
+  return (
+    <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+          <ul className="flex flex-col gap-1">
+            {rows.map((row, index) => (
+              <SortablePrRow
+                key={row.id}
+                id={row.id}
+                pr={row.pr}
+                sessionId={session.id}
+                prKey={row.key}
+                first={index === 0}
+                last={index === rows.length - 1}
+              />
+            ))}
+          </ul>
+        </SortableContext>
+      </DndContext>
+      {hidden.length > 0 ? (
+        <HiddenSection sessionId={session.id} hidden={hidden} />
+      ) : null}
+    </div>
+  )
+}
+
+function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
+  const tone = prIconClass(pr.state)
+  const origin = prOrigin(pr)
+  const activity = prActivity(pr)
+  return (
+    <>
+      <GitPullRequest className={cn("mt-0.5 size-4 shrink-0", tone)} />
+      <span className={cn("flex min-w-0 flex-1 flex-col gap-0.5", muted && "opacity-70")}>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className={cn("shrink-0 font-semibold", tone)}>{prName(pr)}</span>
+          <span className="truncate">{pr.title}</span>
+          {(pr.attached ?? pr.overridden) ? (
+            <Badge variant="secondary" className="shrink-0">
+              Attached
+            </Badge>
+          ) : null}
+        </span>
+        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+          <span className={tone}>{prStateLabel(pr.state)}</span>
+          {origin?.kind === "branch" ? (
+            <Detail>
+              <GitBranch className="size-3" />
+              {origin.name}
+            </Detail>
+          ) : origin?.kind === "attached" ? (
+            <Detail>attached by you</Detail>
+          ) : null}
+          {activity ? <Detail>{activity}</Detail> : null}
+        </span>
+      </span>
+    </>
+  )
+}
+
+function Detail({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <span aria-hidden>•</span>
+      <span className="inline-flex min-w-0 items-center gap-1">{children}</span>
+    </>
+  )
+}
+
+// One draggable row. The drag starts on the grip alone, so the row's text can
+// be selected and its `⋯` pressed without arming it.
+function SortablePrRow({
+  id,
+  pr,
+  prKey,
+  sessionId,
+  first,
+  last,
+}: {
+  id: string
+  pr: PrView
+  prKey: PrKeyView
+  sessionId: string
+  first: boolean
+  last: boolean
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id })
+  const style: CSSProperties = {
+    // Vertical reorder list: lock the drag to the Y axis.
+    transform: transform ? `translate3d(0, ${Math.round(transform.y)}px, 0)` : undefined,
+    transition,
+  }
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "group/pr-row flex items-start gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50 motion-reduce:transition-none",
+        isDragging && "z-10 bg-muted shadow-lg",
+      )}
+    >
+      <button
+        type="button"
+        ref={setActivatorNodeRef}
+        {...attributes}
+        {...listeners}
+        aria-label={`Drag ${prName(pr)}`}
+        className={cn(
+          "flex shrink-0 cursor-grab touch-manipulation items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+          ROW_CONTROL,
+        )}
+      >
+        <GripVertical className="size-4" />
+      </button>
+      <PrRowText pr={pr} />
+      <RowMenu pr={pr} prKey={prKey} sessionId={sessionId} first={first} last={last} />
+    </li>
+  )
+}
+
+function RowMenu({
+  pr,
+  prKey,
+  sessionId,
+  first,
+  last,
+}: {
+  pr: PrView
+  prKey: PrKeyView
+  sessionId: string
+  first: boolean
+  last: boolean
+}) {
+  const action = prRowAction(pr)
+  return (
+    <DropdownMenu>
+      {/* Reveals on hover or focus, stays while its menu is open, and is
+        * always there under a finger, which has no hover. */}
+      <div
+        className={cn(
+          "flex shrink-0 items-center transition-opacity duration-200 motion-reduce:transition-none md:opacity-0 md:group-hover/pr-row:opacity-100 md:group-focus-within/pr-row:opacity-100 md:has-[[data-popup-open]]:opacity-100",
+          ALWAYS_REVEALED_ON_TOUCH,
+        )}
+      >
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={`Actions for ${prName(pr)}`}
+              className={ROW_CONTROL}
+            />
+          }
+        >
+          <Ellipsis />
+        </DropdownMenuTrigger>
+      </div>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem
+          render={<a href={pr.url} target="_blank" rel="noopener noreferrer" />}
+        >
+          <ExternalLink />
+          Open on GitHub
+        </DropdownMenuItem>
+        {first ? null : (
+          <>
+            <DropdownMenuItem onClick={() => movePullRequest(sessionId, prKey, "top")}>
+              <ArrowUpToLine />
+              Move to top
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => movePullRequest(sessionId, prKey, "up")}>
+              <ArrowUp />
+              Move up
+            </DropdownMenuItem>
+          </>
+        )}
+        {last ? null : (
+          <DropdownMenuItem onClick={() => movePullRequest(sessionId, prKey, "down")}>
+            <ArrowDown />
+            Move down
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuSeparator />
+        {/* Neither confirms: Hide comes back from the Hidden section and a
+          * detached pull request is attached again from this dialog. */}
+        {action === "detach" ? (
+          <DropdownMenuItem onClick={() => detachPullRequest(sessionId, prKey)}>
+            <Unlink />
+            Detach
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onClick={() => hidePullRequest(sessionId, prKey)}>
+            <EyeOff />
+            Hide
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrView[] }) {
+  return (
+    <Collapsible className="mt-1">
+      <CollapsibleTrigger
+        render={
+          <button
+            type="button"
+            className="group/hidden flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground pointer-coarse:h-10"
+          />
+        }
+      >
+        <ChevronRight className="size-4 transition-transform group-data-[panel-open]/hidden:rotate-90 motion-reduce:transition-none" />
+        Hidden
+        <Badge variant="secondary" className="tabular-nums">
+          {hidden.length}
+        </Badge>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ul className="flex flex-col gap-1">
+          {hidden.map((pr) => {
+            const key = prKeyOf(pr)
+            return (
+              <li key={pr.url} className="flex items-start gap-2 rounded-lg px-1 py-1.5">
+                {/* Stands in for the grip, so hidden rows line up with the
+                  * shown ones above. */}
+                <span aria-hidden className={cn("shrink-0", ROW_CONTROL)} />
+                <PrRowText pr={pr} muted />
+                {key ? (
+                  <Button
+                    variant="outline"
+                    className="h-8 shrink-0 pointer-coarse:h-10"
+                    onClick={() => showPullRequest(sessionId, key)}
+                  >
+                    <Eye />
+                    Show again
+                  </Button>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+type BranchesState = { data: PrBranchesView | null; error: string | null }
+
+// The branch log, read while the dialog is open and read again whenever the
+// agent's pull requests, their order or its branch list move, which is what
+// `pr_revision` counts.
+function useBranches(sessionId: string, revision: number): BranchesState {
+  const [state, setState] = useState<BranchesState>({ data: null, error: null })
+  useEffect(() => {
+    let live = true
+    sessionsApi.pullRequestBranches(sessionId).then(
+      (data) => {
+        if (live) setState({ data, error: null })
+      },
+      (e: unknown) => {
+        if (live)
+          setState((prev) => ({
+            data: prev.data,
+            error: e instanceof Error ? e.message : "Could not read the branches.",
+          }))
+      },
+    )
+    return () => {
+      live = false
+    }
+  }, [sessionId, revision])
+  return state
+}
+
+function formatFirstSeen(iso: string): string | null {
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return null
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+}
+
+function BranchesView({
+  prs,
+  hidden,
+  branches,
+}: {
+  prs: PrView[]
+  hidden: PrView[]
+  branches: BranchesState
+}) {
+  const find = (key: PrKeyView) =>
+    prs.find((pr) => {
+      const own = prKeyOf(pr)
+      return own !== null && samePrKey(own, key)
+    })
+  const isHidden = (key: PrKeyView) =>
+    hidden.some((pr) => {
+      const own = prKeyOf(pr)
+      return own !== null && samePrKey(own, key)
+    })
+  if (!branches.data) {
+    return (
+      <p className="py-6 text-center text-sm text-muted-foreground">
+        {branches.error ?? "Reading the branches…"}
+      </p>
+    )
+  }
+  const { branches: rows, attached_on_no_branch: loose } = branches.data
+  return (
+    <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
+      {branches.error ? (
+        <p className="text-xs text-destructive">{branches.error}</p>
+      ) : null}
+      <ul className="flex flex-col gap-1">
+        {rows.map((branch) => {
+          const seen = branch.first_seen_at ? formatFirstSeen(branch.first_seen_at) : null
+          return (
+            <li key={branch.name} className="flex items-start gap-3 rounded-lg px-1 py-1.5">
+              <GitBranch className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate font-medium">{branch.name}</span>
+                  {branch.current ? (
+                    <Badge variant="secondary" className="shrink-0">
+                      Current
+                    </Badge>
+                  ) : null}
+                </span>
+                <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+                  {seen ? <span>first seen {seen}</span> : null}
+                  {branch.former_names.length > 0 ? (
+                    <span>
+                      was{" "}
+                      {branch.former_names.map((former, i) => (
+                        <span key={former}>
+                          {i > 0 ? ", " : null}
+                          <InlineCode>{former}</InlineCode>
+                        </span>
+                      ))}
+                    </span>
+                  ) : null}
+                </span>
+              </span>
+              <span className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-sm">
+                {branch.prs.length === 0 ? (
+                  <span className="text-muted-foreground">No pull request</span>
+                ) : (
+                  branch.prs.map((key) => {
+                    const pr = find(key)
+                    return (
+                      <span key={keyId(key)} className="inline-flex items-center gap-1">
+                        <a
+                          href={pr?.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded px-1 font-medium hover:underline",
+                            pr ? prIconClass(pr.state) : "text-muted-foreground",
+                          )}
+                        >
+                          <GitPullRequest className="size-3.5" />
+                          {pr ? prName(pr) : `#${key.number}`}
+                        </a>
+                        {isHidden(key) ? (
+                          <span className="text-muted-foreground">hidden</span>
+                        ) : null}
+                      </span>
+                    )
+                  })
+                )}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+      {loose.map((key) => {
+        const pr = find(key)
+        return (
+          <p key={keyId(key)} className="mt-1 text-sm text-muted-foreground">
+            <InlineCode>{pr ? prName(pr) : `${key.owner_repo}#${key.number}`}</InlineCode>{" "}
+            was attached by you, so it belongs to no branch here.
+          </p>
+        )
+      })}
+    </div>
+  )
+}

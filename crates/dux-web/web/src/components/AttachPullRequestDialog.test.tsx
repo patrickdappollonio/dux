@@ -8,7 +8,7 @@ import type { DuxState } from "@/lib/store"
 // dialog fires, while every other store export stays intact. The submit's HTTP
 // contract (PUT with the typed text) is covered at the store level in
 // `lib/restActionsStore.test.ts`; what is pinned here is the dialog's wiring:
-// the current-PR line, the submit/close paths, and the vanished-target guard.
+// the count line, the submit/close paths, and the vanished-target guard.
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
@@ -68,10 +68,6 @@ const withAutoPr = {
     overridden: false,
   },
 }
-const withPinnedPr = {
-  ...bare,
-  pr: { ...withAutoPr.pr, overridden: true },
-}
 
 beforeEach(() => {
   installBootStubs()
@@ -86,31 +82,31 @@ afterEach(() => {
 })
 
 describe("AttachPullRequestDialog", () => {
-  it("renders the field with the exact placeholder and no current-PR line", () => {
+  it("renders the field with the exact placeholder and says the agent has none yet", () => {
     seed("s1", "", [bare])
     render(<AttachPullRequestDialog />)
     expect(screen.getByPlaceholderText("PR URL, #123, or 123")).toBeTruthy()
-    expect(screen.queryByText(/Currently showing/)).toBeNull()
-  })
-
-  it("names the current PR so overriding is explicit", () => {
-    seed("s1", "", [withAutoPr])
-    render(<AttachPullRequestDialog />)
-    expect(screen.getByText(/Currently showing/)).toBeTruthy()
-    expect(screen.getByText(/Currently showing/).textContent).toContain(
-      "#7 Fix the flap",
+    expect(screen.getByText(/One from another repository/).textContent).toBe(
+      "quacky-mallard has no pull requests yet. One from another repository works too.",
     )
-    // The number is the shared chip.
-    expect(screen.getByText("#7", { selector: "code" })).toBeTruthy()
-    expect(screen.getByText("Fix the flap", { selector: "code" })).toBeTruthy()
-    // Autodetected: not called out as manually attached.
-    expect(screen.queryByText(/manually attached/)).toBeNull()
   })
 
-  it("says 'manually attached' when the shown PR is an override", () => {
-    seed("s1", "", [withPinnedPr])
+  it("names the agent as a chip and counts the pull requests it has, since attaching adds", () => {
+    seed("s1", "", [
+      {
+        ...withAutoPr,
+        prs: [withAutoPr.pr, { ...withAutoPr.pr, number: 8 }, { ...withAutoPr.pr, number: 9 }],
+      },
+    ])
     render(<AttachPullRequestDialog />)
-    expect(screen.getByText(/manually attached/)).toBeTruthy()
+    expect(screen.getByText(/beside the ones found/).textContent).toBe(
+      "Adds a GitHub pull request to quacky-mallard, beside the ones found on its branches. Autodetection keeps running.",
+    )
+    const count = screen.getByText(/One from another repository/)
+    expect(count.textContent).toBe(
+      "quacky-mallard has 3 pull requests now. One from another repository works too.",
+    )
+    expect(count.querySelector("code")?.textContent).toBe("quacky-mallard")
   })
 
   it("routes typing to the store draft", () => {

@@ -13,11 +13,17 @@ import { DormantTabSurface } from "@/components/DormantTabSurface"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MobileActionFlap } from "@/components/MobileActionFlap"
+import { PrListMenuItems } from "@/components/PrListMenu"
 import type { PaneMenuSubject } from "@/components/PaneMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TheaterChrome } from "@/components/TheaterChrome"
 import { TheaterPill } from "@/components/TheaterPill"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { useTheaterFlight } from "@/hooks/use-theater-flight"
 import { useChromeGesture } from "@/hooks/use-theater"
 import { usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
@@ -32,6 +38,7 @@ import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
   navigateUp,
+  openPullRequests,
   selectSession,
   selectTerminal,
   useDux,
@@ -41,6 +48,7 @@ import {
   prIconClass,
   prIconHoverClass,
   prStateLabel,
+  sessionPrs,
 } from "@/lib/pr"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -337,10 +345,10 @@ interface TerminalHeaderProps {
 // of half a dozen near-identical terminals you are looking at. The actions live
 // in the flap hanging off the band below.
 //
-// The pull request stays as the compact chip, the phone's whole PR surface: one
-// tap to the review, opening the same URL every other PR control does. It
-// carries `#N` beside the glyph, as the sidebar row and the desktop banner do,
-// so the chip can be matched against the tab open in the review.
+// The pull requests stay as the compact chip, the phone's whole PR surface: one
+// tap to the review, or with several to the list of them. It carries `#N`
+// beside the glyph, as the sidebar row and the desktop banner do, so the chip
+// can be matched against the tab open in the review.
 function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -360,33 +368,69 @@ function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProp
           projectName={projectName}
         />
       </div>
-      {session.pr ? (
-        <SimpleTooltip
-          content={`#${session.pr.number} · ${prStateLabel(session.pr.state)} · ${session.pr.title}`}
-        >
-          <a
-            href={session.pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={prAriaLabel(session.pr.number, session.pr.state)}
-            className={cn(
-              "inline-flex h-10 w-auto shrink-0 items-center justify-center gap-1 rounded-md px-2 transition-colors",
-              prIconClass(session.pr.state),
-              prIconHoverClass(session.pr.state),
-            )}
-          >
-            <GitPullRequest className="size-4 shrink-0" />
-            {/* The number is data, so it stays where this surface otherwise
-              * prefers icon-only, and the chip is content-sized rather than
-              * square. `shrink-0` makes the identity give up width first: a
-              * truncated agent name still reads, half a PR number does not. */}
-            <span className="text-xs font-medium tabular-nums">
-              #{session.pr.number}
-            </span>
-          </a>
-        </SimpleTooltip>
-      ) : null}
+      {session.pr ? <HeaderPrChip session={session} /> : null}
     </header>
+  )
+}
+
+// The header's pull-request chip. With one pull request it is a link to it;
+// with several it reads "#418 +2" in the shown one's color and opens the list
+// of them as a bottom sheet (the shared dropdown primitive at phone width).
+function HeaderPrChip({ session }: { session: SessionView }) {
+  const shown = session.pr!
+  const prs = sessionPrs(session)
+  const chipClass = cn(
+    "inline-flex h-10 min-w-10 w-auto shrink-0 items-center justify-center gap-1 rounded-md px-2 transition-colors",
+    prIconClass(shown.state),
+    prIconHoverClass(shown.state),
+  )
+  // The number is data, so it stays where this surface otherwise prefers
+  // icon-only, and the chip is content-sized rather than square. `shrink-0`
+  // makes the identity give up width first: a truncated agent name still
+  // reads, half a PR number does not.
+  const face = (
+    <>
+      <GitPullRequest className="size-4 shrink-0" />
+      <span className="text-xs font-medium tabular-nums">
+        #{shown.number}
+        {prs.length > 1 ? ` +${prs.length - 1}` : null}
+      </span>
+    </>
+  )
+  if (prs.length > 1) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <button
+              type="button"
+              aria-label={`${prAriaLabel(shown.number, shown.state)}, and ${prs.length - 1} more`}
+              className={chipClass}
+            />
+          }
+        >
+          {face}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <PrListMenuItems prs={prs} onManage={() => openPullRequests(session.id)} />
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+  return (
+    <SimpleTooltip
+      content={`#${shown.number} · ${prStateLabel(shown.state)} · ${shown.title}`}
+    >
+      <a
+        href={shown.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={prAriaLabel(shown.number, shown.state)}
+        className={chipClass}
+      >
+        {face}
+      </a>
+    </SimpleTooltip>
   )
 }
 

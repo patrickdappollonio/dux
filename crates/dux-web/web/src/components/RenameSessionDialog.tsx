@@ -15,12 +15,14 @@ import { Input } from "@/components/ui/input"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
+import { renameWarningPr, sessionPrs } from "@/lib/pr"
 import { renderProse } from "@/lib/prose"
 import {
   renameBlockedReason,
   renameBranchNoteProse,
 } from "@/lib/renameAgent"
 import { sessionsApi } from "@/lib/sessionsApi"
+import type { PrKeyView } from "@/lib/types"
 import {
   closeRename,
   setRenameBranch,
@@ -35,7 +37,7 @@ import {
 // because an empty name goes back to it. Every agent's name follows the same
 // rules, a standalone agent's included. An agent with a branch also gets an unticked "Also rename the git branch"
 // box, with a line saying what stays on the old name when the branch has an
-// open pull request or a pushed copy.
+// open or draft pull request or a pushed copy.
 export function RenameSessionDialog() {
   const { renameTarget, renameDraft, renameBranch, renamePending, spine } = useDux()
   const session = spine?.sessions.find((s) => s.id === renameTarget)
@@ -52,7 +54,21 @@ export function RenameSessionDialog() {
       })
     : ""
   const branchNamed = branch !== null
-  const openPr = session?.pr?.state === "open" ? session.pr.number : null
+  // The branch read's pull requests for the branch being renamed, which
+  // counts the names it had before, tagged with the agent it was asked about.
+  const [branchPrs, setBranchPrs] = useState<{
+    id: string
+    prs: PrKeyView[]
+  } | null>(null)
+  const openPr =
+    session && branch !== null
+      ? renameWarningPr({
+          visible: sessionPrs(session),
+          hidden: session.prs_hidden ?? [],
+          branch,
+          onBranch: branchPrs?.id === renameTarget ? branchPrs.prs : null,
+        })
+      : null
 
   // Whether the branch has a pushed copy, tagged with the agent it was asked
   // about so an answer that lands after the dialog moved on is ignored.
@@ -78,6 +94,14 @@ export function RenameSessionDialog() {
         if (live) setPushedAnswer({ id, pushed: answer.pushed === true })
       })
       // No answer is no warning: the box still says what it does.
+      .catch(() => {})
+    sessionsApi
+      .pullRequestBranches(id)
+      .then((answer) => {
+        const current = answer.branches.find((b) => b.current)
+        if (live) setBranchPrs({ id, prs: current?.prs ?? [] })
+      })
+      // Without the branch read, the branch's name now is still matched.
       .catch(() => {})
     return () => {
       live = false

@@ -1652,6 +1652,28 @@ describe("MobileShell agent header PR chip", () => {
     expect(chip().getAttribute("aria-label")).toBe("Pull request #123, open")
   })
 
+  it("with several pull requests reads +n and opens the list as a sheet instead of a link", async () => {
+    mockState = prState(openPr)
+    const sessions = (
+      mockState.spine as unknown as { sessions: Record<string, unknown>[] }
+    ).sessions
+    sessions[0].prs = [
+      openPr,
+      { ...openPr, number: 77, url: "https://github.com/o/r/pull/77" },
+      { ...openPr, number: 415, state: "merged", url: "https://github.com/o/r/pull/415" },
+    ]
+    render(<MobileShell />)
+    const button = chip()
+    expect(button.textContent).toBe("#123 +2")
+    expect(button.getAttribute("href")).toBeNull()
+    expect(button.className).toContain("text-dux-pr-open")
+    expect(button.className).toMatch(/(?:^|\s)min-w-10(?:\s|$)/)
+    await act(async () => {
+      fireEvent.click(button)
+    })
+    expect(screen.getByText("3 pull requests on this agent")).toBeTruthy()
+  })
+
   // WIDTH BUDGET. jsdom has no layout engine, so this is arithmetic over the
   // geometry the classes above pin down rather than a rendered measurement:
   // the header is `px-3 gap-2` around Back (`min-w-11`), the identity (the
