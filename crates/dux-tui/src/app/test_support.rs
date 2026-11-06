@@ -779,9 +779,6 @@ fn test_app_opens_worktrees_only_in_the_stand_in_editor() {
     assert!(err.to_string().starts_with("test guard:"), "{err}");
 }
 
-/// The repository every test app is built on never signs a commit, even for a
-/// developer whose global config signs everything: the app's own git commands
-/// inherit that global config, so the answer has to live in the repository.
 /// The Pull requests modal as it opens for `session_id`.
 pub(crate) fn pull_requests_prompt(session_id: &str) -> crate::app::PullRequestsPrompt {
     crate::app::PullRequestsPrompt {
@@ -814,6 +811,9 @@ pub(crate) fn found_pr(
     )
 }
 
+/// The repository every test app is built on never signs a commit, even for a
+/// developer whose global config signs everything: the app's own git commands
+/// inherit that global config, so the answer has to live in the repository.
 #[test]
 fn the_shared_fixture_repository_never_signs_under_a_signing_global_config() {
     let dir = tempfile::tempdir().expect("tempdir");
