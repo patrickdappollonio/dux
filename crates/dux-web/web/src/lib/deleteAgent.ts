@@ -193,15 +193,14 @@ export function otherBranchesWarningProse(
   return sentences(parts)
 }
 
-/**
- * How long the delete dialog waits on a branch check before it says it is
- * still checking, so an answer that lands inside it never flashes the line.
- */
-export const BRANCHES_CHECKING_GRACE_MS = 400
-
 /** What the branch boxes say while the dialog is still asking git about them. */
 export function branchesCheckingProse(): Prose {
   return ["Checking the branches…"]
+}
+
+/** What the delete dialog's pill says once git answered about the branches. */
+export function branchesCheckedProse(): Prose {
+  return ["Branches checked"]
 }
 
 /** What the branch boxes say when git could not be asked about them. */

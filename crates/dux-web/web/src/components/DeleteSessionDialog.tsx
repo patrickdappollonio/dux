@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
+import { Check, CircleAlert, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -23,7 +24,7 @@ import {
 } from "@/lib/agentWorkspace"
 import {
   branchesCheckFailedProse,
-  BRANCHES_CHECKING_GRACE_MS,
+  branchesCheckedProse,
   branchesCheckingProse,
   currentBranchLabelProse,
   branchLossProse,
@@ -33,6 +34,7 @@ import {
   protectedBranchesProse,
 } from "@/lib/deleteAgent"
 import { type Prose, renderProse } from "@/lib/prose"
+import { cn } from "@/lib/utils"
 import {
   type BranchBoxAnswer,
   type BranchOffer,
@@ -54,6 +56,18 @@ type OfferState =
   | { state: "ready"; offer: BranchOffer }
 
 const PENDING: OfferState = { state: "pending" }
+
+// How long "Branches checked" stays up before the pill leaves.
+const CHECKED_PILL_MS = 1500
+
+// The offer for one open of the dialog, kept under the agent it was asked for
+// so a dialog that moves straight to another agent never shows the first
+// one's answer. `settled` is set once the checked pill has had its time.
+interface OfferEntry {
+  target: string
+  offer: OfferState
+  settled: boolean
+}
 
 function lossAnswer(
   count: { count: number; has_remote_refs: boolean } | null,
@@ -161,6 +175,65 @@ function deleteSessionView(session: SessionView | undefined): DeleteSessionView 
   }
 }
 
+// Grows its content in and shrinks it away by animating the row track rather
+// than popping it, so the centered dialog resizes smoothly instead of jumping.
+// The spacing above the content rides inside it, so a closed one takes no
+// room at all; a closed one stays mounted but is out of reach.
+function Collapse({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none",
+        open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+      )}
+      aria-hidden={!open}
+      inert={!open}
+    >
+      <div className="min-h-0 overflow-hidden">
+        <div className="flex flex-col gap-4 pt-4">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+// One pill for the whole branch check, drawn from the dialog's first frame so
+// its arrival moves nothing: a spinner while git is asked, a check once it
+// answered, and the warning tone with the reason when it could not be asked.
+// Every state has an icon of its own, so the tone is never the only signal.
+function BranchCheckPill({ offer }: { offer: OfferState }) {
+  const [icon, prose, tone] =
+    offer.state === "pending"
+      ? [
+          <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />,
+          branchesCheckingProse(),
+          "border-border text-muted-foreground",
+        ]
+      : offer.state === "ready"
+        ? [
+            <Check className="size-3.5 shrink-0 text-dux-success" />,
+            branchesCheckedProse(),
+            "border-dux-success/40 bg-dux-success/10",
+          ]
+        : [
+            <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-dux-warning" />,
+            branchesCheckFailedProse(offer.reason),
+            "border-dux-warning/40 bg-dux-warning/10",
+          ]
+  return (
+    <div
+      role="status"
+      className={cn(
+        "flex min-h-7 items-start gap-1.5 self-start border px-2.5 py-1 text-xs",
+        offer.state === "failed" ? "rounded-lg" : "items-center rounded-full",
+        tone,
+      )}
+    >
+      {icon}
+      <span>{renderProse(prose)}</span>
+    </div>
+  )
+}
+
 function BranchWarning({ prose }: { prose: Prose | null }) {
   if (prose === null || prose.length === 0) return null
   // The danger sits in the warning text, never in a red checkbox: the box is an
@@ -175,10 +248,11 @@ export function DeleteSessionDialog() {
   // reopening on another agent picks up ITS default.
   const [currentAnswer, setCurrentAnswer] = useState<boolean | null>(null)
   const [othersAnswer, setOthersAnswer] = useState<boolean | null>(null)
-  const [offer, setOffer] = useState<OfferState>(PENDING)
-  const [checkingShown, setCheckingShown] = useState(false)
+  const [entry, setEntry] = useState<OfferEntry | null>(null)
 
   const session = spine?.sessions.find((s) => s.id === deleteTarget)
+  const ours = entry !== null && entry.target === deleteTarget ? entry : null
+  const offer = ours?.offer ?? PENDING
   const { name, managed, folder } = deleteSessionView(session)
   const ready = offer.state === "ready" ? offer.offer : null
   const current = ready?.current ?? null
@@ -193,7 +267,7 @@ export function DeleteSessionDialog() {
     setDeleteWorktree(false)
     setCurrentAnswer(null)
     setOthersAnswer(null)
-    setOffer(PENDING)
+    setEntry(null)
   }
 
   // The component stays mounted across opens, so a vanish-close must reset the
@@ -212,44 +286,42 @@ export function DeleteSessionDialog() {
     deleteTarget,
   )
 
-  // Asked exactly when the branch offer is on screen; with the worktree kept
-  // there is nothing to render.
-  const askOffer = isOpen && managed !== null && deleteWorktree
+  // Asked once per open, as the dialog opens, so the answer is in hand by the
+  // time the worktree box is ticked; ticking it again never asks again.
+  const askOffer = isOpen && managed !== null
+  const asked = ours !== null
   useEffect(() => {
-    if (!askOffer || !deleteTarget) return
+    if (!askOffer || !deleteTarget || asked) return
     let live = true
+    const answered = (next: OfferState) => {
+      if (live) setEntry({ target: deleteTarget, offer: next, settled: false })
+    }
     sessionsApi
       .branchUnpushed(deleteTarget)
-      .then((answer) => {
-        if (live) setOffer({ state: "ready", offer: answer })
-      })
-      .catch((e: unknown) => {
-        if (!live) return
-        setOffer({
+      .then((answer) => answered({ state: "ready", offer: answer }))
+      .catch((e: unknown) =>
+        answered({
           state: "failed",
           reason: e instanceof Error ? e.message : String(e),
-        })
-      })
+        }),
+      )
     return () => {
       live = false
     }
-  }, [askOffer, deleteTarget])
+  }, [askOffer, deleteTarget, asked])
 
-  // The pending box is drawn at the tick, but its "Checking" line waits out the
-  // grace: most checks answer inside it, and a line drawn for those flashed in
-  // and out and moved the dialog twice. Every check starts its own grace.
-  const checking = askOffer && offer.state === "pending"
+  // A failed check keeps its pill, since the reason is the only place it is said.
+  const checkedPending = ours?.offer.state === "ready" && !ours.settled
   useEffect(() => {
-    if (!checking) return
+    if (!checkedPending) return
     const timer = setTimeout(
-      () => setCheckingShown(true),
-      BRANCHES_CHECKING_GRACE_MS,
+      () =>
+        setEntry((prev) => (prev === null ? prev : { ...prev, settled: true })),
+      CHECKED_PILL_MS,
     )
-    return () => {
-      clearTimeout(timer)
-      setCheckingShown(false)
-    }
-  }, [checking])
+    return () => clearTimeout(timer)
+  }, [checkedPending])
+  const pillShown = !(ours?.offer.state === "ready" && ours.settled)
 
   async function handleConfirm() {
     if (!deleteTarget) return
@@ -300,92 +372,88 @@ export function DeleteSessionDialog() {
           </p>
         )}
         {managed && (
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="delete-worktree"
-              checked={deleteWorktree}
-              onCheckedChange={setDeleteWorktree}
-            />
-            <label htmlFor="delete-worktree" className="text-sm">
-              Also delete the git worktree (irreversible)
-            </label>
-          </div>
-        )}
-        {managed && deleteWorktree && (
-          // Revealed by the worktree box rather than sitting beside it disabled: git
-          // will not delete a branch still checked out, so there is nothing to offer.
-          <>
-            {(ready === null || current !== null) && (
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="delete-branch"
-                  checked={deleteCurrent}
-                  disabled={current === null}
-                  onCheckedChange={setCurrentAnswer}
-                />
-                <label htmlFor="delete-branch" className="min-w-0 text-sm">
-                  {renderProse(
-                    currentBranchLabelProse(current?.name ?? managed.branch_name),
-                  )}
-                </label>
-              </div>
-            )}
-            {ready &&
-              current === null &&
-              !own.includes(ready.current_name) && (
-                // In the first box's place: only that box failed.
-                <p className="text-sm text-muted-foreground">
-                  {renderProse(
-                    branchesCheckFailedProse("git could not read the branch"),
-                  )}
-                </p>
-              )}
-            {ready && current && (
-              <BranchWarning prose={currentBranchWarningProse(current.origin)} />
-            )}
-            {ready && others.length > 0 && (
-              <>
+          // One child of the dialog's grid, so the rows collapsing inside it
+          // take their spacing with them instead of leaving a gap behind.
+          <div className="flex flex-col">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="delete-worktree"
+                checked={deleteWorktree}
+                onCheckedChange={setDeleteWorktree}
+              />
+              <label htmlFor="delete-worktree" className="text-sm">
+                Also delete the git worktree (irreversible)
+              </label>
+            </div>
+            {/* Revealed by the worktree box rather than sitting beside it disabled:
+                git will not delete a branch still checked out, so there is
+                nothing to offer. */}
+            <Collapse open={deleteWorktree}>
+              {(ready === null || current !== null) && (
                 <div className="flex items-center gap-2">
                   <Checkbox
-                    id="delete-other-branches"
-                    checked={deleteOthers}
-                    onCheckedChange={setOthersAnswer}
+                    id="delete-branch"
+                    checked={deleteCurrent}
+                    disabled={current === null}
+                    onCheckedChange={setCurrentAnswer}
                   />
-                  <label
-                    htmlFor="delete-other-branches"
-                    className="min-w-0 text-sm"
-                  >
+                  <label htmlFor="delete-branch" className="min-w-0 text-sm">
                     {renderProse(
-                      otherBranchesLabelProse(others.map((o) => o.name)),
+                      currentBranchLabelProse(current?.name ?? managed.branch_name),
                     )}
                   </label>
                 </div>
-                <BranchWarning
-                  prose={otherBranchesWarningProse(others, deleteOthers)}
-                />
-              </>
-            )}
-            {(offer.state === "failed" ||
-              (offer.state === "pending" && checkingShown)) && (
-              <p className="text-sm text-muted-foreground">
-                {renderProse(
-                  offer.state === "pending"
-                    ? branchesCheckingProse()
-                    : branchesCheckFailedProse(offer.reason),
+              )}
+              {ready &&
+                current === null &&
+                !own.includes(ready.current_name) && (
+                  // In the first box's place: only that box failed.
+                  <p className="text-sm text-muted-foreground">
+                    {renderProse(
+                      branchesCheckFailedProse("git could not read the branch"),
+                    )}
+                  </p>
                 )}
-              </p>
-            )}
-            {ready && (
-              <BranchWarning
-                prose={lossProse(ready, deleteCurrent, deleteOthers)}
-              />
-            )}
-            {own.length > 0 && (
-              <p className="text-sm text-muted-foreground">
-                {renderProse(protectedBranchesProse(own))}
-              </p>
-            )}
-          </>
+              {ready && current && (
+                <BranchWarning prose={currentBranchWarningProse(current.origin)} />
+              )}
+              {ready && others.length > 0 && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="delete-other-branches"
+                      checked={deleteOthers}
+                      onCheckedChange={setOthersAnswer}
+                    />
+                    <label
+                      htmlFor="delete-other-branches"
+                      className="min-w-0 text-sm"
+                    >
+                      {renderProse(
+                        otherBranchesLabelProse(others.map((o) => o.name)),
+                      )}
+                    </label>
+                  </div>
+                  <BranchWarning
+                    prose={otherBranchesWarningProse(others, deleteOthers)}
+                  />
+                </>
+              )}
+              {ready && (
+                <BranchWarning
+                  prose={lossProse(ready, deleteCurrent, deleteOthers)}
+                />
+              )}
+              {own.length > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  {renderProse(protectedBranchesProse(own))}
+                </p>
+              )}
+            </Collapse>
+            <Collapse open={pillShown}>
+              <BranchCheckPill offer={offer} />
+            </Collapse>
+          </div>
         )}
         <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the checkboxes and the buttons. */}

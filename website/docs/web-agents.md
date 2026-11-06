@@ -412,9 +412,12 @@ it only passed through between two of dux's checks, so the dialog can offer all 
 - **"Also delete the other branches this agent was on: …"** names every other branch the
   worktree has been on that still exists. It appears only when there is at least one.
 
-Until dux has read the branches from git, which takes a moment, the dialog says "Checking the
+dux starts reading the branches from git as soon as the dialog opens, so the answer is
+usually in by the time you tick the worktree box. Until it is, the dialog says "Checking the
 branches…" (the browser shows the first box disabled; the terminal UI shows no branch box
-yet). Press **Delete** before that, or after git could not be asked, and every branch is kept.
+yet). In the browser that note then says "Branches checked" for a moment before it goes away.
+Press **Delete** before git has answered, or after git could not be asked, and every branch
+is kept. When git could not be asked the dialog says why; cancel and open it again to retry.
 
 Where each box starts depends on whether dux can prove the branch is its own:
 
