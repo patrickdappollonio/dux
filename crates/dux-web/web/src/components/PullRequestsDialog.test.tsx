@@ -411,6 +411,8 @@ describe("PullRequestsDialog branches view", () => {
         { host: "github.com", owner_repo: "acme/api", number: 380 },
         { host: "github.com", owner_repo: "acme/api", number: 370 },
         { host: "github.com", owner_repo: "acme/old-api", number: 360 },
+        // Not on the spine yet: the answer and the spine are out of step.
+        { host: "github.com", owner_repo: "acme/infra", number: 350 },
       ],
     })
     seed(
@@ -451,6 +453,7 @@ describe("PullRequestsDialog branches view", () => {
     expect(apart).toContain(
       "acme/old-api#360 was found on store-tab-rows in another repository, so it belongs to no branch here.",
     )
+    expect(apart).toContain("acme/infra#350 belongs to no branch here.")
     for (const name of ["#418", "#402"]) {
       const chip = screen.getByRole("link", { name })
       expect(chip.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)

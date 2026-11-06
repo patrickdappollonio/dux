@@ -839,14 +839,18 @@ function BranchesView({
         return (
           <p key={keyId(key)} className="mt-1 text-sm text-muted-foreground">
             <InlineCode>{pr ? prName(pr) : `${key.owner_repo}#${key.number}`}</InlineCode>{" "}
-            {pr?.attached ? (
+            {/* A key the spine does not hold yet says nothing about how the
+                agent got it, so the sentence claims nothing. */}
+            {!pr ? (
+              "belongs to no branch here."
+            ) : pr.attached ? (
               "was attached by you, so it belongs to no branch here."
-            ) : pr?.head_branch && listed.has(pr.head_branch) ? (
+            ) : pr.head_branch && listed.has(pr.head_branch) ? (
               <>
                 was found on <InlineCode>{pr.head_branch}</InlineCode> in another repository, so it
                 belongs to no branch here.
               </>
-            ) : pr?.head_branch ? (
+            ) : pr.head_branch ? (
               <>
                 was found on <InlineCode>{pr.head_branch}</InlineCode>, a branch not listed here.
               </>
