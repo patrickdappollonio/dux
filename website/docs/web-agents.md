@@ -421,7 +421,8 @@ on … aren't pushed anywhere", naming up to two branches and counting them past
 browser shows that answer for a few seconds before it goes away; the terminal UI keeps it
 above the boxes. Press **Delete** before git has answered, or after git could not be asked,
 and every branch is kept. When git could not be asked, or could not count the commits, the
-dialog says why; cancel and open it again to retry.
+dialog says why; cancel and open it again to retry. A box whose commits git could not count
+is disabled and unticked, so its branches are kept.
 
 Where each box starts depends on whether dux can prove the branch is its own:
 

@@ -1599,6 +1599,59 @@ impl BranchOfferReply {
     fn others_default(&self) -> bool {
         !self.others.is_empty() && self.others.iter().all(|other| other.origin.is_duxs())
     }
+
+    /// The offer the dialogs read, so the command line asks it the same
+    /// questions they do.
+    fn offer(&self) -> crate::branch_history::BranchOffer {
+        crate::branch_history::BranchOffer {
+            current_name: self.current_name.clone(),
+            current: self.current.clone(),
+            current_unpushed: count_answer(
+                self.current_unpushed,
+                self.current_unpushed_error.as_ref(),
+            ),
+            others: self.others.clone(),
+            others_unpushed: count_answer(
+                self.others_unpushed,
+                self.others_unpushed_error.as_ref(),
+            ),
+            both_unpushed: count_answer(self.both_unpushed, self.both_unpushed_error.as_ref()),
+            protected: self.protected.clone(),
+            newly_seen: Vec::new(),
+        }
+    }
+}
+
+/// Which boxes git could not count (`[first, second]`) and the sentence the
+/// dialogs show for them, `None` when it counted every offered box.
+fn uncounted_boxes(offer: &BranchOfferReply) -> Option<([bool; 2], String)> {
+    let offer = offer.offer();
+    let [current, others] = offer.count_failures();
+    if current.is_none() && others.is_none() {
+        return None;
+    }
+    let current_name = offer.current.as_ref().map(|current| current.name.as_str());
+    let others_names: Vec<&str> = offer.others.iter().map(|o| o.name.as_str()).collect();
+    let sentence = crate::delete_agent_prose::branches_checked_prose(
+        current_name,
+        &offer.current_unpushed,
+        &others_names,
+        &offer.others_unpushed,
+        &offer.both_unpushed,
+    )
+    .err()
+    .unwrap_or_else(|| {
+        let offered: Vec<&str> = current_name
+            .into_iter()
+            .chain(others_names.clone())
+            .collect();
+        crate::delete_agent_prose::unpushed_count_failure_prose(
+            &offered,
+            current.or(others).unwrap_or_default(),
+        )
+    })
+    .plain();
+    Some(([current.is_some(), others.is_some()], sentence))
 }
 
 /// One box over `branches` with its answer: a ticked box pins every branch
@@ -1623,6 +1676,13 @@ fn box_over(
         },
         unchecked: None,
         offered: branches.iter().map(|branch| branch.name.clone()).collect(),
+    }
+}
+
+fn failed_check() -> crate::branch_history::BoxWire {
+    crate::branch_history::BoxWire {
+        unchecked: Some(crate::branch_history::Unchecked::Failed),
+        ..crate::branch_history::BoxWire::default()
     }
 }
 
@@ -1671,6 +1731,32 @@ fn loss_note(
     crate::delete_agent_prose::branch_loss_prose(&deleted, &lost).map(|prose| prose.plain())
 }
 
+/// Which boxes git could not count (`[first, second]`). Such a box cannot be
+/// answered, so, as in the dialogs, it keeps its branches and `notes` gains
+/// the dialogs' sentence for it.
+///
+/// # Errors
+///
+/// That sentence, when a flag asked to delete such a box's branches, rather
+/// than deleting on an unknown count.
+fn uncounted_answers(
+    offer: &BranchOfferReply,
+    delete_branch: Option<bool>,
+    delete_other_branches: Option<bool>,
+    notes: &mut Vec<String>,
+) -> Result<[bool; 2], CliError> {
+    let Some((uncounted, sentence)) = uncounted_boxes(offer) else {
+        return Ok([false; 2]);
+    };
+    if (uncounted[0] && delete_branch == Some(true))
+        || (uncounted[1] && delete_other_branches == Some(true))
+    {
+        return Err(CliError::new(Exit::Usage, sentence));
+    }
+    notes.push(sentence);
+    Ok(uncounted)
+}
+
 fn plan_branch_answers(
     offer: &BranchOfferReply,
     delete_branch: Option<bool>,
@@ -1687,7 +1773,8 @@ fn plan_branch_answers(
     };
     let mut question = String::new();
     let mut notes: Vec<String> = Vec::new();
-    let current_ticked = delete_branch.unwrap_or_else(|| offer.current_default());
+    let uncounted = uncounted_answers(offer, delete_branch, delete_other_branches, &mut notes)?;
+    let current_ticked = !uncounted[0] && delete_branch.unwrap_or_else(|| offer.current_default());
     let current = match &offer.current {
         Some(current) => {
             let _ = write!(
@@ -1700,7 +1787,11 @@ fn plan_branch_answers(
                 },
                 current.name
             );
-            box_over(&[current], state(current_ticked))
+            if uncounted[0] {
+                failed_check()
+            } else {
+                box_over(&[current], state(current_ticked))
+            }
         }
         None if offer.protected.contains(&offer.current_name) => not_offered(),
         None if delete_branch == Some(true) => {
@@ -1716,13 +1807,11 @@ fn plan_branch_answers(
             if !offer.current_name.is_empty() {
                 let _ = write!(question, " {}", offer.current_name);
             }
-            crate::branch_history::BoxWire {
-                unchecked: Some(crate::branch_history::Unchecked::Failed),
-                ..crate::branch_history::BoxWire::default()
-            }
+            failed_check()
         }
     };
-    let others_ticked = delete_other_branches.unwrap_or_else(|| offer.others_default());
+    let others_ticked =
+        !uncounted[1] && delete_other_branches.unwrap_or_else(|| offer.others_default());
     let others = if offer.others.is_empty() {
         if delete_other_branches == Some(true) {
             notes.push("It was on no other branch to delete.".to_string());
@@ -1741,8 +1830,12 @@ fn plan_branch_answers(
             },
             names.join(", ")
         );
-        let others: Vec<&crate::branch_history::OfferedBranch> = offer.others.iter().collect();
-        box_over(&others, state(others_ticked))
+        if uncounted[1] {
+            failed_check()
+        } else {
+            let others: Vec<&crate::branch_history::OfferedBranch> = offer.others.iter().collect();
+            box_over(&others, state(others_ticked))
+        }
     };
     // The project's own branches the agent was on, which the dialogs name as
     // kept too.
@@ -2698,6 +2791,15 @@ mod agents_rm_tests {
         delete: Option<bool>,
         others: Option<bool>,
     ) -> Planned {
+        try_plan(offer, worktree, delete, others).unwrap()
+    }
+
+    fn try_plan(
+        offer: &'static str,
+        worktree: Worktrees,
+        delete: Option<bool>,
+        others: Option<bool>,
+    ) -> Result<Planned, CliError> {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
@@ -2726,7 +2828,6 @@ mod agents_rm_tests {
             others,
             IfAttached::Refuse,
         )
-        .unwrap()
     }
 
     /// The project's own branch is offered in no box: the command line says
@@ -2928,5 +3029,105 @@ mod agents_rm_tests {
             Some(true),
         );
         assert_eq!(planned.notice, None);
+    }
+
+    /// git could not count what the first box loses: as in the dialogs, it is
+    /// sent as a failed check whatever its default, the question names its
+    /// branch as kept, and the line before it says why in the dialogs' words.
+    #[test]
+    fn a_box_whose_count_failed_is_kept_and_says_why() {
+        let planned = plan(
+            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed_error":"git timed out",
+               "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":1,"has_remote_refs":true},
+               "both_unpushed":{"count":4,"has_remote_refs":true},"protected":[]}"#,
+            None,
+            Some(true),
+        );
+        assert!(
+            planned.question.contains(", keeping its branch agent-x")
+                && planned
+                    .question
+                    .contains(", deleting the other branch it was on: spike"),
+            "{}",
+            planned.question
+        );
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "dux could not count the unpushed commits on agent-x (git timed out); check it \
+                 before deleting it. Deleting spike loses 1 commit that is on no remote and no \
+                 branch that stays."
+            )
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["current"]["unchecked"], "failed");
+        assert_eq!(body["branches"]["current"]["delete"], false);
+        assert_eq!(body["branches"]["others"]["delete"], true);
+    }
+
+    /// A joint count that failed leaves neither box answerable, so an explicit
+    /// keep is no refusal and both branches are named as kept.
+    #[test]
+    fn a_failed_joint_count_keeps_both_boxes() {
+        let planned = plan(
+            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed":{"count":3,"has_remote_refs":true},
+               "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
+               "others_unpushed":{"count":1,"has_remote_refs":true},
+               "both_unpushed_error":"git timed out","protected":[]}"#,
+            None,
+            Some(false),
+        );
+        assert!(
+            planned.question.contains(", keeping its branch agent-x")
+                && planned
+                    .question
+                    .contains(", keeping the other branch it was on: spike"),
+            "{}",
+            planned.question
+        );
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "dux could not count the unpushed commits on agent-x and spike (git timed out); \
+                 check them before deleting them."
+            )
+        );
+        let body = planned.body.unwrap();
+        assert_eq!(body["branches"]["current"]["unchecked"], "failed");
+        assert_eq!(body["branches"]["others"]["unchecked"], "failed");
+    }
+
+    /// A flag that asks to delete a branch git could not count is refused
+    /// before anything is asked, rather than deleting on an unknown count.
+    #[test]
+    fn deleting_a_branch_whose_count_failed_is_refused() {
+        let current_failed = r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+               "current_unpushed_error":"git timed out","others":[],"protected":[]}"#;
+        let refused = try_plan(current_failed, Worktrees::Delete, Some(true), None)
+            .err()
+            .unwrap();
+        assert_eq!(refused.exit, Exit::Usage);
+        assert_eq!(
+            refused.message,
+            "dux could not count the unpushed commits on agent-x (git timed out); check it \
+             before deleting it."
+        );
+        let others_failed = r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed":{"count":0,"has_remote_refs":true},
+               "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"after"}],
+               "others_unpushed_error":"git timed out",
+               "both_unpushed":{"count":0,"has_remote_refs":true},"protected":[]}"#;
+        let refused = try_plan(others_failed, Worktrees::Delete, Some(false), Some(true))
+            .err()
+            .unwrap();
+        assert_eq!(refused.exit, Exit::Usage);
+        assert_eq!(
+            refused.message,
+            "dux could not count the unpushed commits on spike (git timed out); check it before \
+             deleting it."
+        );
     }
 }

@@ -65,6 +65,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "both delete-dialog boxes' answers as a request carries them, and their validation",
     ),
     (
+        "dux_core::branch_history::BranchOffer",
+        Vetted::Type("crates/dux-core/src/branch_history.rs", "BranchOffer"),
+        "the branches a delete dialog offers and what each box loses, asked the dialogs' questions",
+    ),
+    (
         "dux_core::branch_history::BranchOrigin",
         Vetted::Type("crates/dux-core/src/branch_history.rs", "BranchOrigin"),
         "who made a branch the delete dialog offers, and whether dux vouches for it",
