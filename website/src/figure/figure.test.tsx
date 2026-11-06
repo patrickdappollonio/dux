@@ -5,6 +5,7 @@ import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { ChangedFiles } from "@/components/ChangedFiles"
 import { InsetHeader } from "@/components/InsetHeader"
 import { PrBanner } from "@/components/PrBanner"
+import { sessionPrs } from "@/lib/pr"
 import { AppSidebar } from "@/components/Sidebar"
 import { SidebarProvider } from "@/components/ui/sidebar"
 
@@ -59,7 +60,16 @@ const CASES: { name: string; render: () => string }[] = [
   },
   {
     name: "PrBanner",
-    render: () => renderToStaticMarkup(<PrBanner pr={session.pr!} position="top" />),
+    render: () =>
+      renderToStaticMarkup(
+        <PrBanner
+          prs={sessionPrs(session)}
+          cursor={null}
+          onCursor={() => {}}
+          onManage={() => {}}
+          position="top"
+        />,
+      ),
   },
   { name: "ChangedFiles", render: () => renderToStaticMarkup(<ChangedFiles />) },
 ]

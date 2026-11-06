@@ -6,6 +6,7 @@ import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { PrBanner } from "@/components/PrBanner"
 import { AppSidebar } from "@/components/Sidebar"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+import { sessionPrs } from "@/lib/pr"
 import { useDux } from "@/lib/store"
 
 import { StaticTerminal } from "./StaticTerminal"
@@ -45,7 +46,15 @@ export function WebUIFigure() {
         <InsetHeader />
         <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 flex-[74] flex-col overflow-hidden">
-            {session?.pr ? <PrBanner pr={session.pr} position="top" /> : null}
+            {session && sessionPrs(session).length > 0 ? (
+              <PrBanner
+                prs={sessionPrs(session)}
+                cursor={null}
+                onCursor={() => {}}
+                onManage={() => {}}
+                position="top"
+              />
+            ) : null}
             {session ? (
               <AgentTabsStrip
                 session={session}
