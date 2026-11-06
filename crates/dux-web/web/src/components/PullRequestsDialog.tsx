@@ -98,6 +98,9 @@ const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
 // A row's own controls (the grip, the `⋯`, Show again): compact beside a
 // mouse, the 40px floor under a finger.
 const ROW_CONTROL = "size-8 pointer-coarse:size-10"
+// A view tab fills its list beside a mouse and takes the 40px floor under a
+// finger.
+const VIEW_TRIGGER = "pointer-coarse:h-10"
 
 type View = "prs" | "branches"
 
@@ -194,17 +197,15 @@ function PullRequestsBody({
           onValueChange={(v) => setView(v as View)}
           className="min-w-0 flex-1"
         >
-          <TabsList
-            className={cn(
-              "w-full group-data-horizontal/tabs:h-9 pointer-coarse:group-data-horizontal/tabs:h-10",
-            )}
-          >
-            <TabsTrigger value="prs">
+          {/* Under a finger the list drops its inset so each trigger reaches
+              the 40px floor while the list stays at Sort's height. */}
+          <TabsList className="w-full group-data-horizontal/tabs:h-9 pointer-coarse:p-0 pointer-coarse:group-data-horizontal/tabs:h-10">
+            <TabsTrigger value="prs" className={VIEW_TRIGGER}>
               <GitPullRequest />
               Pull requests
               <span className="tabular-nums opacity-70">{visible.length}</span>
             </TabsTrigger>
-            <TabsTrigger value="branches">
+            <TabsTrigger value="branches" className={VIEW_TRIGGER}>
               <GitBranch />
               Branches
               {branches.data ? (
@@ -215,7 +216,7 @@ function PullRequestsBody({
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        <SortControl sessionId={session.id} manual={manual} />
+        <SortControl sessionId={session.id} manual={manual} phone={phone} />
       </div>
 
       {view === "prs" ? (
@@ -269,7 +270,17 @@ function PullRequestsBody({
 
 // The order control, modelled on the agents pane's Sort: a static trigger,
 // with the active mode marked in its menu.
-function SortControl({ sessionId, manual }: { sessionId: string; manual: boolean }) {
+// On a phone the word goes, so the row fits the narrowest sheet beside the two
+// view tabs, whose counts are data and stay.
+function SortControl({
+  sessionId,
+  manual,
+  phone,
+}: {
+  sessionId: string
+  manual: boolean
+  phone: boolean
+}) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -282,7 +293,7 @@ function SortControl({ sessionId, manual }: { sessionId: string; manual: boolean
         }
       >
         <ArrowDownWideNarrow />
-        Sort
+        {phone ? null : "Sort"}
         <ChevronDown className="opacity-60" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

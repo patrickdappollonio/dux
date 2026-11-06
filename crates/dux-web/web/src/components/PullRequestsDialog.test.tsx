@@ -276,6 +276,32 @@ describe("PullRequestsDialog rows", () => {
   })
 })
 
+describe("PullRequestsDialog header", () => {
+  it("gives the view switch the touch floor under a finger", () => {
+    seed(session())
+    render(<PullRequestsDialog />)
+    for (const tab of screen.getAllByRole("tab")) {
+      expect(tab.className).toMatch(/(^| )pointer-coarse:h-10( |$)/)
+    }
+  })
+
+  it("draws Sort as its icon alone on a phone, still named for a screen reader", () => {
+    const desktopWidth = window.innerWidth
+    Object.defineProperty(window, "innerWidth", { value: 360, configurable: true })
+    try {
+      seed(session())
+      render(<PullRequestsDialog />)
+      const sort = screen.getByRole("button", { name: "Sort pull requests" })
+      expect(sort.textContent).toBe("")
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        value: desktopWidth,
+        configurable: true,
+      })
+    }
+  })
+})
+
 describe("PullRequestsDialog footer", () => {
   it("offers attaching with a signed-in gh", () => {
     seed(session())
