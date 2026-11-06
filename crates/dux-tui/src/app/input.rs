@@ -16751,6 +16751,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "o/r".to_string(),
                 url: "https://github.com/o/r/pull/42".to_string(),
+                ..Default::default()
             },
         );
         app.open_rename_session();
@@ -20622,6 +20623,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
         app.focus = FocusPane::Left;
@@ -21897,6 +21899,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: url.clone(),
+                ..Default::default()
             },
         );
         app.mouse_layout.pr_banner = Some(Rect::new(20, 19, 57, 1));
@@ -24687,6 +24690,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -24802,6 +24806,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
 
@@ -24929,6 +24934,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "o/r".to_string(),
                 url: "https://github.com/o/r/pull/7".to_string(),
+                ..Default::default()
             },
         );
         assert!(
@@ -25381,6 +25387,7 @@ not_a_real_action = ["x"]
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
 

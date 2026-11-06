@@ -5727,6 +5727,7 @@ mod tests {
                 host: "github.com".into(),
                 owner_repo: "o/r".into(),
                 url: "https://example".into(),
+                ..Default::default()
             },
         );
 

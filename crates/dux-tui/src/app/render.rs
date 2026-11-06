@@ -2772,7 +2772,10 @@ impl App {
             let pr_color = match pr.state {
                 crate::model::PrState::Merged => self.theme.pr_merged_label,
                 crate::model::PrState::Closed => self.theme.pr_closed_label,
-                crate::model::PrState::Open => self.theme.pr_open_label,
+                // Draft has no color of its own here yet, so it wears open's.
+                crate::model::PrState::Open | crate::model::PrState::Draft => {
+                    self.theme.pr_open_label
+                }
             };
             Span::styled(
                 format!("{}#{}", self.glyphs().pull_request, pr.number),
@@ -15415,7 +15418,8 @@ impl App {
             .set_style(area, Style::default().bg(self.theme.app_bg));
 
         let bg = match pr.state {
-            PrState::Open => self.theme.pr_open_bg,
+            // Draft has no color of its own here yet, so it wears open's.
+            PrState::Open | PrState::Draft => self.theme.pr_open_bg,
             PrState::Merged => self.theme.pr_merged_bg,
             PrState::Closed => self.theme.pr_closed_bg,
         };
@@ -28589,6 +28593,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "owner/repo".to_string(),
             url: "https://github.com/owner/repo/pull/42".to_string(),
+            ..PrInfo::default()
         };
         let id = app.selected_session().expect("a selected agent").id.clone();
         app.engine.pr_statuses.insert(id, pr.clone());

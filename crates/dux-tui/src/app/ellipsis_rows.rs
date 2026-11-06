@@ -515,6 +515,7 @@ fn the_pr_banner_cuts_a_wide_title_before_its_right_cap() {
             host: "github.com".to_string(),
             owner_repo: "owner/repo".to_string(),
             url: "https://github.com/owner/repo/pull/42".to_string(),
+            ..Default::default()
         },
     );
     for (w, h) in [(120, 40), (80, 24)] {

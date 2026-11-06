@@ -1876,11 +1876,7 @@ pub(crate) struct RefusalBlink {
 /// The lowercase state word for a PR, matching the web's `prStateLabel` casing
 /// (`open`/`merged`/`closed`) so both surfaces read the same.
 pub(crate) fn pr_state_word(state: &crate::model::PrState) -> &'static str {
-    match state {
-        crate::model::PrState::Open => "open",
-        crate::model::PrState::Merged => "merged",
-        crate::model::PrState::Closed => "closed",
-    }
+    state.word()
 }
 
 /// The LOCATION field an agent row shows and its search matches: the project's
@@ -9470,6 +9466,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "o/r".to_string(),
             url: "https://github.com/o/r/pull/42".to_string(),
+            ..Default::default()
         };
 
         // No PR known: no line at all.

@@ -1767,6 +1767,7 @@ mod tests {
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
 

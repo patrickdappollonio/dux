@@ -83,23 +83,67 @@ pub enum GhStatus {
 }
 
 /// State of a GitHub pull request.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum PrState {
-    /// The pull request is open.
+    /// The pull request is open and ready for review. The default, because it
+    /// is the state every pull request starts in.
+    #[default]
     Open,
+    /// The pull request is open as a draft.
+    Draft,
     /// The pull request was merged.
     Merged,
     /// The pull request was closed without merging.
     Closed,
 }
 
-/// Cached information about a GitHub pull request associated with a session.
-#[derive(Clone, Debug)]
+impl PrState {
+    /// The lowercase word both surfaces print for the state.
+    #[must_use]
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Draft => "draft",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+
+    /// The state GitHub reports (`OPEN`, `MERGED`, `CLOSED`) plus whether an
+    /// open one is a draft, as one state. A draft flag on a merged or closed
+    /// pull request means nothing and is ignored.
+    #[must_use]
+    pub fn with_draft(self, is_draft: bool) -> Self {
+        match self {
+            Self::Open if is_draft => Self::Draft,
+            other => other,
+        }
+    }
+
+    /// The state text the database and GitHub use, which has no draft: a
+    /// draft is stored as `OPEN` with a separate flag, so an older dux reading
+    /// the row decodes it as open instead of dropping it.
+    #[must_use]
+    pub fn stored_text(&self) -> &'static str {
+        match self {
+            Self::Open | Self::Draft => "OPEN",
+            Self::Merged => "MERGED",
+            Self::Closed => "CLOSED",
+        }
+    }
+}
+
+/// Cached information about a GitHub pull request associated with a session:
+/// one answer from GitHub.
+#[derive(Clone, Debug, Default)]
 pub struct PrInfo {
     /// The pull request's number.
     pub number: u64,
-    /// Whether it is open, merged or closed.
+    /// Whether it is open, merged or closed, as GitHub reports it. Never
+    /// [`PrState::Draft`]: an open draft is `Open` with [`Self::is_draft`] set.
     pub state: PrState,
+    /// Whether an open pull request is a draft (GraphQL `isDraft`).
+    pub is_draft: bool,
     /// The pull request's title.
     pub title: String,
     /// The GitHub host it lives on.
@@ -108,6 +152,203 @@ pub struct PrInfo {
     pub owner_repo: String,
     /// The pull request's web address.
     pub url: String,
+    /// The branch the pull request merges from (GraphQL `headRefName`), when
+    /// the answer said.
+    pub head_branch: Option<String>,
+    /// When it was opened on GitHub, when the answer said.
+    pub gh_created_at: Option<DateTime<Utc>>,
+    /// When GitHub last changed it, when the answer said.
+    pub gh_updated_at: Option<DateTime<Utc>>,
+    /// When it was closed, when the answer said.
+    pub gh_closed_at: Option<DateTime<Utc>>,
+    /// When it was merged, when the answer said.
+    pub gh_merged_at: Option<DateTime<Utc>>,
+}
+
+/// Which pull request a row is: its host, repository and number. Two keys are
+/// equal when the host and the repository match ignoring ASCII case, because
+/// GitHub treats both case-insensitively.
+#[derive(Clone, Debug)]
+pub struct PrKey {
+    /// The GitHub host.
+    pub host: String,
+    /// The repository, as `owner/name`.
+    pub owner_repo: String,
+    /// The pull request's number.
+    pub number: u64,
+}
+
+impl PrKey {
+    /// The key for pull request `number` in `owner_repo` on `host`.
+    pub fn new(host: impl Into<String>, owner_repo: impl Into<String>, number: u64) -> Self {
+        Self {
+            host: host.into(),
+            owner_repo: owner_repo.into(),
+            number,
+        }
+    }
+}
+
+impl PartialEq for PrKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.number == other.number
+            && self.host.eq_ignore_ascii_case(&other.host)
+            && self.owner_repo.eq_ignore_ascii_case(&other.owner_repo)
+    }
+}
+
+impl Eq for PrKey {}
+
+impl std::hash::Hash for PrKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.number.hash(state);
+        self.host.to_ascii_lowercase().hash(state);
+        self.owner_repo.to_ascii_lowercase().hash(state);
+    }
+}
+
+/// One pull request an agent has: found by the sync on one of its branches,
+/// attached by the user, or both. A row exists while either is true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPr {
+    /// The GitHub host.
+    pub host: String,
+    /// The repository, as `owner/name`, in the case GitHub reported.
+    pub owner_repo: String,
+    /// The pull request's number.
+    pub number: u64,
+    /// Its state, draft included.
+    pub state: PrState,
+    /// Its title.
+    pub title: String,
+    /// Its web address.
+    pub url: String,
+    /// The branch it merges from, `None` until GitHub has said.
+    pub head_branch: Option<String>,
+    /// The sync found it on one of the agent's branches.
+    pub found: bool,
+    /// The user attached it.
+    pub attached: bool,
+    /// The user hid it.
+    pub hidden: bool,
+    /// Its place in the agent's manual order, `None` until the user arranges
+    /// the list with it present.
+    pub manual_slot: Option<u32>,
+    /// When it was opened on GitHub.
+    pub gh_created_at: Option<DateTime<Utc>>,
+    /// When GitHub last changed it.
+    pub gh_updated_at: Option<DateTime<Utc>>,
+    /// When it was closed.
+    pub gh_closed_at: Option<DateTime<Utc>>,
+    /// When it was merged.
+    pub gh_merged_at: Option<DateTime<Utc>>,
+    /// When dux first stored it.
+    pub first_recorded_at: DateTime<Utc>,
+    /// When GitHub last answered for it.
+    pub last_refreshed_at: Option<DateTime<Utc>>,
+}
+
+impl AgentPr {
+    /// A row for a pull request the sync found, first recorded at `recorded_at`.
+    #[must_use]
+    pub fn found(info: &PrInfo, recorded_at: DateTime<Utc>) -> Self {
+        let mut row = Self {
+            host: String::new(),
+            owner_repo: String::new(),
+            number: info.number,
+            state: PrState::Open,
+            title: String::new(),
+            url: String::new(),
+            head_branch: None,
+            found: true,
+            attached: false,
+            hidden: false,
+            manual_slot: None,
+            gh_created_at: None,
+            gh_updated_at: None,
+            gh_closed_at: None,
+            gh_merged_at: None,
+            first_recorded_at: recorded_at,
+            last_refreshed_at: None,
+        };
+        row.refresh_from(info);
+        row
+    }
+
+    /// Which pull request this is.
+    #[must_use]
+    pub fn key(&self) -> PrKey {
+        PrKey::new(self.host.clone(), self.owner_repo.clone(), self.number)
+    }
+
+    /// Whether this row is the pull request `key` names.
+    #[must_use]
+    pub fn is(&self, key: &PrKey) -> bool {
+        self.number == key.number
+            && self.host.eq_ignore_ascii_case(&key.host)
+            && self.owner_repo.eq_ignore_ascii_case(&key.owner_repo)
+    }
+
+    /// Take what a fresh GitHub answer says about this pull request. What the
+    /// answer leaves out (a head branch, a time) keeps the value already known.
+    pub fn refresh_from(&mut self, info: &PrInfo) {
+        self.host.clone_from(&info.host);
+        self.owner_repo.clone_from(&info.owner_repo);
+        self.number = info.number;
+        self.state = info.state.clone().with_draft(info.is_draft);
+        self.title.clone_from(&info.title);
+        self.url.clone_from(&info.url);
+        if info.head_branch.is_some() {
+            self.head_branch.clone_from(&info.head_branch);
+        }
+        for (mine, theirs) in [
+            (&mut self.gh_created_at, info.gh_created_at),
+            (&mut self.gh_updated_at, info.gh_updated_at),
+            (&mut self.gh_closed_at, info.gh_closed_at),
+            (&mut self.gh_merged_at, info.gh_merged_at),
+        ] {
+            if theirs.is_some() {
+                *mine = theirs;
+            }
+        }
+    }
+
+    /// The row as one GitHub answer.
+    #[must_use]
+    pub fn to_info(&self) -> PrInfo {
+        PrInfo {
+            number: self.number,
+            state: match self.state {
+                PrState::Draft => PrState::Open,
+                ref other => other.clone(),
+            },
+            is_draft: self.state == PrState::Draft,
+            title: self.title.clone(),
+            host: self.host.clone(),
+            owner_repo: self.owner_repo.clone(),
+            url: self.url.clone(),
+            head_branch: self.head_branch.clone(),
+            gh_created_at: self.gh_created_at,
+            gh_updated_at: self.gh_updated_at,
+            gh_closed_at: self.gh_closed_at,
+            gh_merged_at: self.gh_merged_at,
+        }
+    }
+
+    /// The row in the shape the pull-request sync takes as what it already
+    /// knows about `session_id`.
+    #[must_use]
+    pub fn to_stored(&self, session_id: &str) -> crate::storage::StoredPr {
+        crate::storage::StoredPr {
+            session_id: session_id.to_string(),
+            pr_number: self.number,
+            host: self.host.clone(),
+            owner_repo: self.owner_repo.clone(),
+            state: self.state.stored_text().to_string(),
+            title: self.title.clone(),
+            url: self.url.clone(),
+        }
+    }
 }
 
 /// A provider's name, as configured under `[providers]`.
@@ -1625,6 +1866,62 @@ mod changed_file_kind_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pull_request_key_ignores_the_case_of_its_host_and_repository() {
+        let lower = PrKey::new("github.com", "ada/widget", 77);
+        let mixed = PrKey::new("GitHub.com", "Ada/Widget", 77);
+        assert_eq!(lower, mixed);
+        let mut set = std::collections::HashSet::new();
+        set.insert(lower);
+        assert!(set.contains(&mixed), "equal keys hash alike");
+        assert_ne!(
+            PrKey::new("github.com", "ada/widget", 77),
+            PrKey::new("github.com", "ada/gadget", 77),
+            "the same number in another repository is another pull request"
+        );
+        assert_ne!(
+            PrKey::new("github.com", "ada/widget", 77),
+            PrKey::new("github.example.com", "ada/widget", 77)
+        );
+    }
+
+    #[test]
+    fn an_open_draft_answer_becomes_a_draft_row_and_back() {
+        let info = PrInfo {
+            number: 5,
+            state: PrState::Open,
+            is_draft: true,
+            title: "Sketch".to_string(),
+            host: "github.com".to_string(),
+            owner_repo: "ada/widget".to_string(),
+            url: "https://github.com/ada/widget/pull/5".to_string(),
+            ..PrInfo::default()
+        };
+        let recorded = Utc::now();
+        let row = AgentPr::found(&info, recorded);
+        assert_eq!(row.state, PrState::Draft);
+        assert!(row.found && !row.attached && !row.hidden);
+        assert_eq!(row.first_recorded_at, recorded);
+        let stored = row.to_stored("s1");
+        assert_eq!(stored.state, "OPEN", "a draft is stored as open");
+        let back = row.to_info();
+        assert_eq!(back.state, PrState::Open);
+        assert!(back.is_draft);
+        let merged = AgentPr::found(
+            &PrInfo {
+                state: PrState::Merged,
+                is_draft: true,
+                ..info
+            },
+            recorded,
+        );
+        assert_eq!(
+            merged.state,
+            PrState::Merged,
+            "only an open pull request can be a draft"
+        );
+    }
 
     fn session_with_focus(last_focused_tab: Option<&str>) -> AgentSession {
         let now = Utc::now();

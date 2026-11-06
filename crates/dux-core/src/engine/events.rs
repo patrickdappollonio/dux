@@ -16,7 +16,7 @@ use crate::engine::{CreateLaunchOutcome, Engine, InFlightKey, ResolvedFinal};
 use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::logger;
 use crate::model::{
-    AgentSession, GhStatus, PrState, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
+    AgentSession, GhStatus, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
 use crate::prose::ProseSegment;
 use crate::startup::StartupCommandLogListing;
@@ -4589,11 +4589,7 @@ impl Engine {
         );
         match maybe_pr {
             Some(pr) => {
-                let state = match pr.state {
-                    PrState::Open => "OPEN",
-                    PrState::Merged => "MERGED",
-                    PrState::Closed => "CLOSED",
-                };
+                let state = pr.state.stored_text();
                 let pr_number = pr.number;
                 let row = StoredPr {
                     session_id: session_id.clone(),
@@ -7862,6 +7858,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://github.com/o/r/pull/17".into(),
+            ..Default::default()
         };
 
         let reaction = engine.process_worker_event(pr_status_ready(
@@ -8671,6 +8668,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "octo/repo".to_string(),
             url: "https://github.com/octo/repo/pull/42".to_string(),
+            ..Default::default()
         };
         let reaction = engine
             .process_worker_event(pr_status_ready(&engine, vec![("s1".to_string(), Some(pr))]));
@@ -8710,6 +8708,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://example".into(),
+            ..Default::default()
         };
 
         // "ghost" is not a session the engine knows (deleted before the
@@ -8746,6 +8745,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://example".into(),
+            ..Default::default()
         };
         let asked_before_rename = pr_status_ready(&engine, vec![("s1".into(), Some(pr(12)))]);
         engine.process_worker_event(WorkerEvent::BranchRenameCompleted {
@@ -8803,6 +8803,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://example".into(),
+            ..Default::default()
         };
         engine.pr_statuses.insert(session_id.clone(), pr);
         engine
@@ -9116,6 +9117,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://example".into(),
+            ..Default::default()
         };
         engine.pr_statuses.insert("s1".to_string(), pr);
 
@@ -9192,6 +9194,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "octocat/Hello-World".to_string(),
             url: "https://github.com/octocat/Hello-World/pull/50".to_string(),
+            ..Default::default()
         };
         let reaction = engine.process_worker_event(pr_status_ready(
             &engine,
@@ -9231,6 +9234,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+            ..Default::default()
         };
         let reaction = engine.process_worker_event(pr_status_ready(
             &engine,
@@ -9299,6 +9303,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "forker/Hello-World".to_string(),
             url: "https://github.com/forker/Hello-World/pull/12".to_string(),
+            ..Default::default()
         };
         engine.process_worker_event(pr_status_ready(
             &engine,
@@ -9357,6 +9362,7 @@ mod tests {
             host: "github.com".to_string(),
             owner_repo: "o/r".to_string(),
             url: "https://github.com/o/r/pull/12".to_string(),
+            ..Default::default()
         };
         let reaction = engine.process_worker_event(pr_status_ready(
             &engine,

@@ -1683,11 +1683,7 @@ pub(crate) fn pr_badge_changed(previous: Option<&PrInfo>, fresh: Option<&PrInfo>
 
 /// One PR state as it reads in a log line.
 fn pr_state_word(state: &PrState) -> &'static str {
-    match state {
-        PrState::Open => "open",
-        PrState::Merged => "merged",
-        PrState::Closed => "closed",
-    }
+    state.word()
 }
 
 /// The per-cycle debug summary. `sessions` is everything the cycle considered,
@@ -1941,6 +1937,7 @@ fn reconstruct_from_stored(stored: &StoredPr) -> Option<PrInfo> {
         host: stored.host.clone(),
         owner_repo: stored.owner_repo.clone(),
         url: stored.url.clone(),
+        ..PrInfo::default()
     })
 }
 
@@ -1981,6 +1978,7 @@ fn parse_pr_json_value(obj: &serde_json::Value, host: &str, owner_repo: &str) ->
         host: normalize_github_host(host).to_string(),
         owner_repo: owner_repo.to_string(),
         url,
+        ..PrInfo::default()
     })
 }
 

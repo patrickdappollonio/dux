@@ -12571,6 +12571,7 @@ mod tests {
             host: "github.com".into(),
             owner_repo: "o/r".into(),
             url: "https://github.com/o/r/pull/8".into(),
+            ..Default::default()
         };
         let sync = |engine: &Engine| {
             crate::worker::WorkerEvent::PrStatusReady(vec![crate::worker::PrStatusResult {
@@ -12620,6 +12621,7 @@ mod tests {
                 host: "github.com".to_string(),
                 owner_repo: "o/r".to_string(),
                 url: "https://github.com/o/r/pull/12".to_string(),
+                ..Default::default()
             },
         );
 

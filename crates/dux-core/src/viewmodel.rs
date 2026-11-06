@@ -1281,7 +1281,8 @@ impl PrView {
             overridden: false,
             number: pr.number,
             state: match pr.state {
-                PrState::Open => "open",
+                // The wire has no draft word yet, so a draft reads as open.
+                PrState::Open | PrState::Draft => "open",
                 PrState::Merged => "merged",
                 PrState::Closed => "closed",
             }
@@ -1822,6 +1823,7 @@ mod tests {
                 host: "github.com".to_string(),
                 owner_repo: "fork/r".to_string(),
                 url: "https://github.com/fork/r/pull/12".to_string(),
+                ..Default::default()
             },
         );
 
@@ -2127,6 +2129,7 @@ mod tests {
                 host: "github.com".to_string(),
                 owner_repo: "owner/repo".to_string(),
                 url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
             },
         );
 
