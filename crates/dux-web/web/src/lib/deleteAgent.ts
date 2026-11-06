@@ -195,12 +195,82 @@ export function otherBranchesWarningProse(
 
 /** What the branch boxes say while the dialog is still asking git about them. */
 export function branchesCheckingProse(): Prose {
-  return ["Checking the branches…"]
+  return ["Looking for unpushed work on the branches…"]
 }
 
-/** What the delete dialog's pill says once git answered about the branches. */
-export function branchesCheckedProse(): Prose {
-  return ["Branches checked"]
+/** What git answered about the commits a box would delete, or why it could not count. */
+export type UnpushedAnswer =
+  | { count: number; has_remote_refs: boolean }
+  | { failed: string }
+
+/**
+ * What git answered about the branches the boxes offer (`current`, the first
+ * box's, when there is one, and `others`), said before anything is ticked:
+ * whether deleting them would lose work that exists nowhere else. The count is
+ * the one a tick of every offered box would lose, so it agrees with the loss
+ * warning; `failed` is the sentence for a count git could not make.
+ *
+ * The commits are said to be on the branches whose own box's count is not
+ * zero, or on every offered branch when only their union holds them. More
+ * than two such branches are counted rather than named, and the second box
+ * counts as a whole, since git counts it as one. Mirrors dux-core's
+ * `branches_checked_prose`, pinned by the shared prose fixture.
+ */
+export function branchesCheckedProse(
+  current: string | null,
+  currentLost: UnpushedAnswer,
+  others: readonly string[],
+  othersLost: UnpushedAnswer,
+  bothLost: UnpushedAnswer,
+): { ok: Prose } | { failed: Prose } {
+  const offered = [...(current === null ? [] : [current]), ...others]
+  if (offered.length === 0) return { ok: ["No branches to check"] }
+  const lost =
+    current !== null ? (others.length > 0 ? bothLost : currentLost) : othersLost
+  if ("failed" in lost)
+    return { failed: unpushedCountFailureProse(offered, lost.failed) }
+  const noRemote = !lost.has_remote_refs
+  if (lost.count === 0) {
+    const where: Prose =
+      offered.length <= 2
+        ? nameList(offered, noRemote ? " and " : " or ")
+        : [
+            noRemote
+              ? `the ${offered.length} branches`
+              : `any of the ${offered.length} branches`,
+          ]
+    return {
+      ok: noRemote
+        ? [
+            "Everything on ",
+            ...where,
+            " is also on another branch, and this repository has no remote",
+          ]
+        : ["No unpushed work on ", ...where],
+    }
+  }
+  const holds = (answer: UnpushedAnswer) => !("failed" in answer) && answer.count > 0
+  const named = [
+    ...(current !== null && holds(currentLost) ? [current] : []),
+    ...(holds(othersLost) ? others : []),
+  ]
+  const holding = named.length > 0 ? named : offered
+  const one = lost.count === 1
+  const where: Prose =
+    holding.length > 2 ? [`${holding.length} branches`] : nameList(holding, " and ")
+  const tail = noRemote
+    ? one
+      ? " is on no other branch, and this repository has no remote"
+      : " are on no other branch, and this repository has no remote"
+    : one
+      ? " isn't pushed anywhere"
+      : " aren't pushed anywhere"
+  return {
+    ok: joinProse(
+      [[one ? "1 commit on " : `${lost.count} commits on `], where, [tail]],
+      "",
+    ),
+  }
 }
 
 /** What the branch boxes say when git could not be asked about them. */

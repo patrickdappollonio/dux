@@ -12699,7 +12699,8 @@ impl App {
     }
 
     /// What stands in for the branch boxes while git has not answered about
-    /// them, or could not.
+    /// them, or could not, and once it has, its answer above them: whether
+    /// deleting them would lose work that exists nowhere else.
     fn delete_agent_branch_status_lines(
         &self,
         offer: &crate::app::DeleteBranchOffer,
@@ -12731,6 +12732,29 @@ impl App {
                         warning,
                         inner_width,
                     ));
+                } else {
+                    let others: Vec<&str> = offer
+                        .others
+                        .iter()
+                        .map(|other| other.name.as_str())
+                        .collect();
+                    let answer = copy::branches_checked_prose(
+                        offer.current.as_ref().map(|current| current.name.as_str()),
+                        &offer.current_unpushed,
+                        &others,
+                        &offer.others_unpushed,
+                        &offer.both_unpushed,
+                    );
+                    lines.extend(match answer {
+                        Ok(answer) => self.indented_prose_lines(
+                            &Prose::new()
+                                .text(format!("{} ", self.glyphs().check))
+                                .then(answer),
+                            Style::default().fg(self.theme.success_fg),
+                            inner_width,
+                        ),
+                        Err(failed) => self.indented_prose_lines(&failed, warning, inner_width),
+                    });
                 }
                 if !offer.protected.is_empty() {
                     let names: Vec<&str> = offer.protected.iter().map(String::as_str).collect();
@@ -28157,16 +28181,20 @@ mod tests {
 
     /// Until git has answered there is nothing to pin a branch to, so no
     /// branch box is offered and the dialog says it is still checking; when
-    /// git could not be asked it says that, and that the branches stay.
+    /// git could not be asked it says that, and that the branches stay; once
+    /// it answered, the dialog says above the boxes what deleting them loses.
     #[test]
-    fn the_branch_boxes_wait_for_git_and_say_so() {
+    fn the_branch_boxes_wait_for_git_and_say_what_it_found() {
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt_with(
             crate::app::DeleteBranchOffer::Pending,
             dux_core::engine::WorktreeOnDelete::Remove,
         );
         let screen = rendered_screen(&mut app);
-        assert!(screen.contains("Checking the branches"), "{screen}");
+        assert!(
+            screen.contains("Looking for unpushed work on the branches"),
+            "{screen}"
+        );
         assert!(!screen.contains("Also delete the branch"), "{screen}");
 
         app.prompt = delete_agent_prompt_with(
@@ -28176,6 +28204,35 @@ mod tests {
         let screen = rendered_screen(&mut app);
         assert!(screen.contains("so they will be kept"), "{screen}");
         assert!(!screen.contains("Also delete the branch"), "{screen}");
+
+        let unpushed = |count| {
+            Ok(dux_core::git::UnpushedCommits {
+                count,
+                has_remote_refs: true,
+            })
+        };
+        app.prompt = delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+                current_name: "feature".to_string(),
+                current: Some(dux_core::branch_history::OfferedBranch {
+                    name: "feature".to_string(),
+                    oid: "a".repeat(40),
+                    origin: dux_core::branch_history::BranchOrigin::Dux,
+                }),
+                current_unpushed: unpushed(2),
+                others: Vec::new(),
+                others_unpushed: unpushed(0),
+                both_unpushed: unpushed(2),
+                newly_seen: Vec::new(),
+                protected: Vec::new(),
+            }),
+            dux_core::engine::WorktreeOnDelete::Remove,
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("2 commits on"), "{screen}");
+        assert!(screen.contains("aren't pushed anywhere"), "{screen}");
+        assert!(screen.contains("Also delete the branch"), "{screen}");
+        assert!(!screen.contains("Looking for unpushed work"), "{screen}");
     }
 
     /// When git read every branch but the one the worktree is on, the dialog

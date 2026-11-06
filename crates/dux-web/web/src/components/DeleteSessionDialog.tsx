@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Check, CircleAlert, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -33,6 +33,7 @@ import {
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
+  type UnpushedAnswer,
 } from "@/lib/deleteAgent"
 import { type Prose, renderProse } from "@/lib/prose"
 import { cn } from "@/lib/utils"
@@ -64,30 +65,41 @@ function currentBranchFailed(offer: BranchOffer): boolean {
   return offer.current === null && !offer.protected.includes(offer.current_name)
 }
 
-// What the check says as a whole. A ready offer whose current branch could not
-// be read is a failed check, so the pill and the first box never disagree;
-// `branch` names that one branch, since every other branch was checked, and is
-// `null` when git could not be asked at all.
+// What the check says as a whole, and the sentence it says it in. A ready offer
+// whose current branch could not be read is a failed check, so the pill and the
+// first box never disagree, and so is one whose commits git could not count.
 type BranchCheck =
   | { state: "pending" }
-  | { state: "checked" }
-  | { state: "failed"; reason: string; branch: string | null }
+  | { state: "checked"; prose: Prose }
+  | { state: "failed"; prose: Prose }
 
 function branchCheck(offer: OfferState): BranchCheck {
   if (offer.state === "pending") return offer
   if (offer.state === "failed")
-    return { state: "failed", reason: offer.reason, branch: null }
-  return currentBranchFailed(offer.offer)
-    ? {
-        state: "failed",
-        reason: "git could not read the branch",
-        branch: offer.offer.current_name,
-      }
-    : { state: "checked" }
+    return { state: "failed", prose: branchesCheckFailedProse(offer.reason) }
+  const ready = offer.offer
+  if (currentBranchFailed(ready))
+    return {
+      state: "failed",
+      prose: currentBranchCheckFailedProse(
+        ready.current_name,
+        "git could not read the branch",
+      ),
+    }
+  const answer = branchesCheckedProse(
+    ready.current?.name ?? null,
+    lossAnswer(ready.current_unpushed, ready.current_unpushed_error),
+    ready.others.map((other) => other.name),
+    lossAnswer(ready.others_unpushed, ready.others_unpushed_error),
+    lossAnswer(ready.both_unpushed, ready.both_unpushed_error),
+  )
+  return "ok" in answer
+    ? { state: "checked", prose: answer.ok }
+    : { state: "failed", prose: answer.failed }
 }
 
-// How long "Branches checked" stays up before the pill leaves.
-const CHECKED_PILL_MS = 1500
+// How long the answer stays up before the pill leaves.
+const CHECKED_PILL_MS = 3000
 
 // The offer for one open of the dialog, kept under the agent it was asked for
 // so a dialog that moves straight to another agent never shows the first
@@ -101,7 +113,7 @@ interface OfferEntry {
 function lossAnswer(
   count: { count: number; has_remote_refs: boolean } | null,
   error: string | null,
-): { count: number; has_remote_refs: boolean } | { failed: string } {
+): UnpushedAnswer {
   return count ?? { failed: error ?? "no count came back" }
 }
 
@@ -253,42 +265,72 @@ function AnimatedHeight({ children }: { children: ReactNode }) {
   )
 }
 
+// Whether `el`'s text has wrapped past its first line, followed as its size
+// changes. A line height the page cannot read reads as one line.
+function useWrapped(el: RefObject<HTMLElement | null>): boolean {
+  const [wrapped, setWrapped] = useState(false)
+  useEffect(() => {
+    const node = el.current
+    if (!node || typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver((entries) => {
+      const box = entries[entries.length - 1]?.borderBoxSize?.[0]
+      const height = box ? box.blockSize : node.getBoundingClientRect().height
+      const line = parseFloat(getComputedStyle(node).lineHeight)
+      setWrapped(Number.isFinite(line) && height > line * 1.5)
+    })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [el])
+  return wrapped
+}
+
 // One pill for the whole branch check, drawn from the dialog's first frame so
-// its arrival moves nothing: a spinner while git is asked, a check once it
-// answered, and the warning tone with the reason when it could not be asked.
-// Every state has an icon of its own, so the tone is never the only signal.
+// its arrival moves nothing: a spinner while git is asked, a check with the
+// answer once it answered, and the warning tone with the reason when it could
+// not answer. Every state has an icon of its own, so the tone is never the only
+// signal. The icon sits on the first line however many the text wraps to, and
+// a pill that wraps becomes a rounded rectangle, since a capsule that tall has
+// corners eating its text. A chip moves to the next line whole rather than
+// splitting, unless it is longer than a line on its own; its negative margin
+// keeps it from making its line taller than the text's, so a wrapped pill
+// grows by whole lines and its padding stays even.
 function BranchCheckPill({ check }: { check: BranchCheck }) {
+  const text = useRef<HTMLSpanElement>(null)
+  const wrapped = useWrapped(text)
   const [icon, prose, tone] =
     check.state === "pending"
       ? [
-          <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />,
+          <Loader2 className="mt-px size-3.5 shrink-0 motion-safe:animate-spin" />,
           branchesCheckingProse(),
           "border-border text-muted-foreground",
         ]
       : check.state === "checked"
         ? [
-            <Check className="size-3.5 shrink-0 text-dux-success" />,
-            branchesCheckedProse(),
+            <Check className="mt-px size-3.5 shrink-0 text-dux-success" />,
+            check.prose,
             "border-dux-success/40 bg-dux-success/10",
           ]
         : [
-            <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-dux-warning" />,
-            check.branch === null
-              ? branchesCheckFailedProse(check.reason)
-              : currentBranchCheckFailedProse(check.branch, check.reason),
+            <CircleAlert className="mt-px size-3.5 shrink-0 text-dux-warning" />,
+            check.prose,
             "border-dux-warning/40 bg-dux-warning/10",
           ]
   return (
     <div
       role="status"
       className={cn(
-        "flex min-h-7 items-start gap-1.5 self-start border px-2.5 py-1 text-xs",
-        check.state === "failed" ? "rounded-lg" : "items-center rounded-full",
+        "flex items-start gap-1.5 self-start border px-2.5 py-[5px] text-xs",
+        check.state === "failed" || wrapped ? "rounded-lg" : "rounded-full",
         tone,
       )}
     >
       {icon}
-      <span>{renderProse(prose)}</span>
+      <span
+        ref={text}
+        className="min-w-0 [&_[data-slot=inline-code]]:-my-[3px] [&_[data-slot=inline-code]]:inline-block [&_[data-slot=inline-code]]:leading-none"
+      >
+        {renderProse(prose)}
+      </span>
     </div>
   )
 }
@@ -324,7 +366,8 @@ export function DeleteSessionDialog() {
   const check = branchCheck(offer)
   // The first box is left out only for the project's own branch; a failed
   // check keeps it, disabled, with the reason said once, in the pill.
-  const firstBoxShown = current !== null || check.state !== "checked"
+  const firstBoxShown =
+    ready === null || current !== null || currentBranchFailed(ready)
 
   function reset() {
     setDeleteWorktree(false)

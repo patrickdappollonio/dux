@@ -197,7 +197,92 @@ pub fn other_branches_warning_prose(others: &[(&str, BranchOrigin)], state: BoxS
 
 /// What the branch boxes say while the dialog is still asking git about them.
 pub fn branches_checking_prose() -> Prose {
-    Prose::new().text("Checking the branches\u{2026}")
+    Prose::new().text("Looking for unpushed work on the branches\u{2026}")
+}
+
+/// What git answered about the branches the boxes offer (`current`, the
+/// first box's, when there is one, and `others`), said before anything is
+/// ticked: whether deleting them would lose work that exists nowhere else.
+/// The count is the one a tick of every offered box would lose, so it agrees
+/// with the loss warning.
+///
+/// The commits are said to be on the branches whose own box's count is not
+/// zero, or on every offered branch when only their union holds them. More
+/// than two such branches are counted rather than named, and the second box
+/// counts as a whole, since git counts it as one.
+///
+/// # Errors
+///
+/// The sentence saying git could not count the commits, when the count the
+/// offered boxes would lose is an error.
+pub fn branches_checked_prose(
+    current: Option<&str>,
+    current_lost: &UnpushedAnswer,
+    others: &[&str],
+    others_lost: &UnpushedAnswer,
+    both_lost: &UnpushedAnswer,
+) -> Result<Prose, Prose> {
+    let offered: Vec<&str> = current.into_iter().chain(others.iter().copied()).collect();
+    if offered.is_empty() {
+        return Ok(Prose::new().text("No branches to check"));
+    }
+    let lost = match (current, others.is_empty()) {
+        (Some(_), false) => both_lost,
+        (Some(_), true) => current_lost,
+        (None, _) => others_lost,
+    };
+    let answer = match lost {
+        Ok(answer) => *answer,
+        Err(reason) => return Err(unpushed_count_failure_prose(&offered, reason)),
+    };
+    let no_remote = !answer.has_remote_refs;
+    if answer.count == 0 {
+        let mut prose = Prose::new().text(if no_remote {
+            "Everything on "
+        } else {
+            "No unpushed work on "
+        });
+        match (offered.len(), no_remote) {
+            (1 | 2, _) => push_list(
+                &mut prose,
+                &offered,
+                if no_remote { " and " } else { " or " },
+            ),
+            (many, true) => prose.push_text(format!("the {many} branches")),
+            (many, false) => prose.push_text(format!("any of the {many} branches")),
+        }
+        if no_remote {
+            prose.push_text(" is also on another branch, and this repository has no remote");
+        }
+        return Ok(prose);
+    }
+    let holds = |lost: &UnpushedAnswer| matches!(lost, Ok(lost) if lost.count > 0);
+    let mut holding: Vec<&str> = current
+        .filter(|_| holds(current_lost))
+        .into_iter()
+        .chain(others.iter().copied().filter(|_| holds(others_lost)))
+        .collect();
+    if holding.is_empty() {
+        holding = offered;
+    }
+    let one = answer.count == 1;
+    let mut prose = Prose::new().text(if one {
+        "1 commit on ".to_string()
+    } else {
+        format!("{} commits on ", answer.count)
+    });
+    if holding.len() > 2 {
+        prose.push_text(format!("{} branches", holding.len()));
+    } else {
+        push_list(&mut prose, &holding, " and ");
+    }
+    prose.push_text(match (no_remote, one) {
+        (false, true) => " isn't pushed anywhere",
+        (false, false) => " aren't pushed anywhere",
+        (true, true) => " is on no other branch, and this repository has no remote",
+        (true, false) => " are on no other branch, and this repository has no remote",
+    });
+    Ok(prose)
 }
 
 /// What the branch boxes say when git could not be asked about them.

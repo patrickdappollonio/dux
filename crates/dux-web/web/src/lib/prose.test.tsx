@@ -16,7 +16,9 @@ import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import {
   type BranchOrigin,
+  type UnpushedAnswer,
   branchesCheckFailedProse,
+  branchesCheckedProse,
   currentBranchCheckFailedProse,
   branchesCheckingProse,
   currentBranchLabelProse,
@@ -221,6 +223,16 @@ describe("the sentences both surfaces print", () => {
         )
       case "delete_branches_checking":
         return branchesCheckingProse()
+      case "delete_branches_checked": {
+        const answer = branchesCheckedProse(
+          args.current as string | null,
+          args.current_lost as UnpushedAnswer,
+          args.others as string[],
+          args.others_lost as UnpushedAnswer,
+          args.both_lost as UnpushedAnswer,
+        )
+        return "ok" in answer ? answer.ok : answer.failed
+      }
       case "delete_branches_check_failed":
         return branchesCheckFailedProse(args.reason as string)
       case "delete_current_branch_check_failed":
