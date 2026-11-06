@@ -18,7 +18,7 @@ interface Props {
   currentSlug?: string;
   /** Headings from the rendered markdown, used for the "On this page" list. */
   headings?: Heading[];
-  /** Path to the markdown source, relative to website/docs, for the edit link. */
+  /** Path of the file a fix to this page goes in, relative to the repository root, for the edit link. */
   editPath?: string;
 }
 
@@ -50,7 +50,7 @@ const breadcrumb = {
 };
 
 const editUrl = editPath
-  ? `https://github.com/patrickdappollonio/dux/blob/main/website/docs/${editPath}`
+  ? `https://github.com/patrickdappollonio/dux/blob/main/${editPath}`
   : undefined;
 
 const gridClass =

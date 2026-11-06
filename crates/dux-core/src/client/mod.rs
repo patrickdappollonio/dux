@@ -41,6 +41,37 @@ pub enum Exit {
 }
 
 impl Exit {
+    /// Every way a command can fail, in the order of their codes.
+    pub const ALL: [Exit; 6] = [
+        Exit::Failed,
+        Exit::Usage,
+        Exit::Refused,
+        Exit::NotRunning,
+        Exit::PasswordNeeded,
+        Exit::Unknown,
+    ];
+
+    /// What the code tells the person or script that reads it, as the help
+    /// and the reference page print it.
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Exit::Failed => "the change failed, or what was named does not exist",
+            Exit::Usage => "the command line is wrong",
+            Exit::Refused => {
+                "refused: someone is attached, another change is in the way, or the change was \
+                 not confirmed"
+            }
+            Exit::NotRunning => "dux isn't running, or does not answer",
+            Exit::PasswordNeeded => {
+                // backtick-ok: printed by `dux --help` and the reference page only.
+                "the remote asks for its password; sign in with `dux remote login`"
+            }
+            Exit::Unknown => {
+                "the outcome is unknown: the wait ran out, and the change keeps running"
+            }
+        }
+    }
+
     /// The process exit code.
     pub fn code(self) -> i32 {
         match self {

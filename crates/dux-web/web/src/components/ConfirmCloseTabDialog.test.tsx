@@ -249,7 +249,13 @@ describe("ConfirmCloseTabDialog", () => {
       },
       { status: 200, body: { detached: true } },
     ]
-    const fetchMock = vi.fn(async () => {
+    // The real store behind the dialog keeps its own boot running on real
+    // timers (its app socket reconnecting, then asking the sign-in status), and
+    // those requests land on whichever fetch is stubbed at the time. Only the
+    // close route takes a scripted answer; everything else stays offline.
+    const closeRoute = "/api/v1/sessions/s1/tabs/s1"
+    const fetchMock = vi.fn(async (input: unknown) => {
+      if (!String(input).startsWith(closeRoute)) throw new Error("offline test")
       const answer = answers.shift()!
       return {
         ok: answer.status < 300,
@@ -278,7 +284,9 @@ describe("ConfirmCloseTabDialog", () => {
 
     fireEvent.click(override)
     await vi.waitFor(() => expect(closeCloseTab).toHaveBeenCalled(), { timeout: 5000 })
-    const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+    const urls = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.startsWith(closeRoute))
     expect(urls).toEqual([
       "/api/v1/sessions/s1/tabs/s1",
       "/api/v1/sessions/s1/tabs/s1?force_connected=k1",

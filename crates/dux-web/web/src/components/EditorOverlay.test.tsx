@@ -460,6 +460,11 @@ async function mountWithDirtyTab() {
   return box as HTMLTextAreaElement
 }
 
+// Loaded at collection, where no test timeout applies: the first load of the
+// editor and the store behind it is the slowest step in the file, and inside a
+// test it is charged to whichever case happens to run first.
+await import("@/components/EditorOverlay")
+
 describe("a save the server refuses", () => {
   beforeEach(async () => {
     vi.clearAllMocks()

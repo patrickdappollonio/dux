@@ -1,5 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+// Loaded once at collection, where no test timeout applies. Its first load is
+// by far the slowest step in the file; left to the first test, a busy machine
+// pushes that test past its timeout. Every test still imports its own fresh
+// instance after `vi.resetModules`. Under jsdom there is a window, so this
+// instance boots for real; its app socket is stopped at once, or it would keep
+// reconnecting on real timers into the tests' fakes.
+import { eventsSocket as collectionSocket } from "./store"
+collectionSocket.dispose()
+
 import type { Bootstrap } from "./bootstrapApi"
 
 // Drives the real store's boot/config.changed path under jsdom (so a real
@@ -80,7 +90,12 @@ beforeEach(() => {
   vi.resetModules()
 })
 
-afterEach(() => {
+// `vi.resetModules` gives the next test a fresh store but does not stop this
+// one: its app socket would keep reconnecting on real timers, and every socket
+// and request it makes would land on the next test's fakes.
+afterEach(async () => {
+  const store = await import("./store")
+  store.eventsSocket.dispose()
   vi.unstubAllGlobals()
   document.head.innerHTML = ""
 })

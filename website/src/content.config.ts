@@ -17,6 +17,10 @@ const docs = defineCollection({
     group: z.string().default("Guides"),
     // Sort order within a group and across groups. Lower floats to the top.
     order: z.number().default(100),
+    // The file a fix to this page goes in, relative to the repository root,
+    // for the "Edit this page" link, when the page is generated from it rather
+    // than written by hand. Left out, the link points at the page's own file.
+    editSource: z.string().optional(),
   }),
 });
 

@@ -90,6 +90,16 @@ auto-detects, so `forward_scroll` applies to the terminal UI only.
 Yes, when the `gh` CLI is installed and authenticated. See
 [Creating an agent from a GitHub PR](/docs/creating-agents#creating-an-agent-from-a-github-pr).
 
+### Does dux work with GitLab or Bitbucket?
+
+Yes for git, no for pull requests. Cloning a project, worktrees, agents, commit, push and
+pull all work with GitLab, Bitbucket or anything else git can reach. The pull request
+features (starting an agent from a pull request, the PR banner and status pill, attaching a
+pull request) go through the `gh` CLI, so they cover GitHub, GitHub Enterprise included, and
+nothing else. Hand dux a GitLab merge request address and it refuses, naming the host. See
+[Creating an agent from a GitHub PR](/docs/creating-agents#creating-an-agent-from-a-github-pr)
+and [The PR banner](/docs/web-git#the-pr-banner).
+
 ### Do agents step on each other?
 
 No. Each agent in a project gets its own git worktree on its own branch, so two agents

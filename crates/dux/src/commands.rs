@@ -2,26 +2,80 @@
 //! accepts is declared here and parsed before a lock is taken or an engine
 //! starts; `main` only dispatches on the result.
 
+use std::fmt::Write as _;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use dux_core::client::connect::LocalFlag;
 
 const SERVER_ABOUT: &str = "\
-Run the dux web UI over the headless engine. The web UI has one optional
+Run the dux web UI without the terminal UI. The web UI has one optional
 password for one owner, and everyone who gets in shares the one workspace. Set
 it with `dux config set server.auth.password`; [server.auth] require decides
 who is asked for it (by default everyone but this machine and your tailnet).
 With no password, anyone who can reach a non-loopback address controls your
 agents and terminals, and dux says so loudly as it starts.";
 
-const ROOT_AFTER_HELP: &str = "\
-Environment variables:
-  DUX_HOME    Override the config directory (must be an absolute path).
-              When unset, defaults to:
-                macOS: ~/.dux/
-                Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/
-  DUX_REMOTE  The saved remote to talk to when neither --remote nor --local
-              is given. It wins over the default set with `dux remote default`.
+/// An environment variable dux reads, as `dux --help` and the reference page
+/// list it.
+#[derive(Debug)]
+pub(crate) struct EnvironmentVariable {
+    pub name: &'static str,
+    /// The description, one entry per line `--help` prints. An entry that
+    /// starts with spaces is an item of a list, which the reference page puts
+    /// on a line of its own; every other entry continues the sentence before.
+    pub lines: &'static [&'static str],
+}
 
+pub(crate) const ENVIRONMENT: &[EnvironmentVariable] = &[
+    EnvironmentVariable {
+        name: "DUX_HOME",
+        lines: &[
+            "Override the config directory (must be an absolute path).",
+            "When unset, defaults to:",
+            "  macOS: ~/.dux/",
+            "  Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/",
+        ],
+    },
+    EnvironmentVariable {
+        name: "DUX_REMOTE",
+        lines: &[
+            "The saved remote to talk to when neither --remote nor --local",
+            "is given. It wins over the default set with `dux remote default`.",
+        ],
+    },
+];
+
+/// Every exit code a command can end with and what it means, success first.
+pub(crate) fn exit_codes() -> Vec<(i32, &'static str)> {
+    std::iter::once((0, "success"))
+        .chain(
+            dux_core::client::Exit::ALL
+                .iter()
+                .map(|exit| (exit.code(), exit.meaning())),
+        )
+        .collect()
+}
+
+/// The widest line of an exit code's row in `dux --help`.
+const EXIT_ROW_WIDTH: usize = 77;
+
+/// What `dux --help` prints after the commands: the environment variables,
+/// where state lives, and the exit codes.
+fn root_after_help() -> String {
+    let mut out = String::from("Environment variables:\n");
+    let column = ENVIRONMENT
+        .iter()
+        .map(|var| var.name.len())
+        .max()
+        .unwrap_or(0);
+    for var in ENVIRONMENT {
+        for (index, line) in var.lines.iter().enumerate() {
+            let name = if index == 0 { var.name } else { "" };
+            let _ = writeln!(out, "  {name:<column$}  {line}");
+        }
+    }
+    out.push_str(
+        "\n\
 First run writes a full default config to config.toml in that directory, and
 session state is stored beside it in sessions.sqlite3.
 
@@ -29,22 +83,31 @@ Projects, agents, terminals, `dux server connections` and `dux operations`
 need a running dux: the one on this machine, or a saved remote. Macros,
 providers, keys, themes and env read and edit config.toml when dux is stopped,
 and `dux server logs` reads server.log. These commands end with these exit
-codes:
-  0  success
-  1  the change failed, or what was named does not exist
-  2  the command line is wrong
-  3  refused: someone is attached, another change is in the way, or the
-     change was not confirmed
-  4  dux isn't running, or does not answer
-  5  the remote asks for its password; sign in with `dux remote login`
-  6  the outcome is unknown: the wait ran out, and the change keeps running";
+codes:",
+    );
+    for (code, meaning) in exit_codes() {
+        let mut line = format!("  {code} ");
+        for word in meaning.split(' ') {
+            if line.len() + 1 + word.len() > EXIT_ROW_WIDTH {
+                out.push('\n');
+                out.push_str(&line);
+                line = "    ".to_string();
+            }
+            line.push(' ');
+            line.push_str(word);
+        }
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "dux",
     version,
     about = "Terminal and web UI for AI worktree sessions, and a command line for their state. Run with no command to launch the terminal UI.",
-    after_help = ROOT_AFTER_HELP
+    after_help = root_after_help()
 )]
 pub(crate) struct Cli {
     /// Talk to this saved remote instead of the local dux.
@@ -61,9 +124,10 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Serve the web UI over the headless engine, or inspect a running server.
+    /// Serve the web UI without the terminal UI, or inspect a running server.
     Server(ServerCmd),
     /// Manage the configuration file on this machine.
+    // The help of its subcommands lives in crates/dux-tui/src/config_spec.rs.
     #[command(disable_help_flag = true)]
     Config(ConfigCmd),
     /// Projects dux knows about.
@@ -75,11 +139,11 @@ pub(crate) enum Command {
     /// Macros from config.toml.
     Macros(MacrosCmd),
     /// Providers from config.toml.
-    Providers(NamedReadCmd),
+    Providers(ProvidersCmd),
     /// Keybindings from config.toml.
-    Keys(ListOnlyCmd),
+    Keys(KeysCmd),
     /// Themes dux can load.
-    Themes(ListOnlyCmd),
+    Themes(ThemesCmd),
     /// The global environment from config.toml.
     Env(EnvCmd),
     /// Saved remote duxes and the sign-ins for them.
@@ -96,7 +160,7 @@ pub(crate) enum Command {
 #[command(before_help = SERVER_ABOUT)]
 pub(crate) struct ServerCmd {
     /// Bind this exact address, overriding [server] host and port. An IP:port
-    /// socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
+    /// address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
     #[arg(long, value_name = "ADDR:PORT")]
     pub bind: Option<String>,
 
@@ -289,7 +353,7 @@ pub(crate) enum Format {
 
 #[derive(Args, Debug)]
 pub(crate) struct ListFlags {
-    /// Output format.
+    /// How to print the list: `table` to read, `json` for a script.
     #[arg(long, value_enum, default_value = "table")]
     pub format: Format,
     /// Print only the ids, one per line.
@@ -307,6 +371,7 @@ pub(crate) struct ChangeFlags {
     #[arg(long)]
     pub no_wait: bool,
     /// Wait at most this many seconds for the change to finish (at most a day).
+    /// Not with --no-wait.
     #[arg(long, value_name = "SECONDS", conflicts_with = "no_wait")]
     pub wait_timeout: Option<u64>,
 }
@@ -344,18 +409,21 @@ pub(crate) struct GuardedChangeFlags {
 ))]
 pub(crate) struct AddAgentArgs {
     /// The project to create the agent in, on a new branch unless
-    /// --from-pr or --from-worktree says otherwise.
+    /// --from-pr or --from-worktree says otherwise. Not with --fork or
+    /// --standalone.
     #[arg(long, value_name = "PROJECT", conflicts_with_all = ["fork", "standalone"])]
     pub project: Option<String>,
     /// The agent's name, which is also its branch's name in a project.
     #[arg(long)]
     pub name: Option<String>,
-    /// Create the agent on the branch of that name that already exists.
+    /// Create the agent on the branch of that name that already exists. Not
+    /// with --from-pr, --from-worktree, --fork or --standalone.
     #[arg(long, conflicts_with_all = ["from_pr", "from_worktree", "fork", "standalone"])]
     pub existing_branch: bool,
     /// Create the agent from this pull request: a number or its address with
     /// --project, or an address or owner/repo#123 alone, which clones the
-    /// repository (or adds a checkout of it) when no project has it.
+    /// repository (or adds a checkout of it) when no project has it. Not with
+    /// --from-worktree, --fork or --standalone.
     #[arg(
         long,
         value_name = "PR",
@@ -365,6 +433,7 @@ pub(crate) struct AddAgentArgs {
     /// The folder to clone the pull request's repository into, or the existing
     /// checkout of it to add as a project, when no project has it. By default
     /// the server's project-browser start folder plus the repository's name.
+    /// Needs --from-pr, and not with --project.
     #[arg(
         long,
         value_name = "FOLDER",
@@ -376,23 +445,26 @@ pub(crate) struct AddAgentArgs {
     /// cannot be used as it is (it has diverged, is checked out elsewhere, or
     /// could not be compared). Without this such a create is refused and
     /// nothing is made, because pushes from a copy land on the copy's branch
-    /// and not on the pull request.
+    /// and not on the pull request. Needs --from-pr.
     #[arg(long, requires = "from_pr")]
     pub review_copy: bool,
-    /// Create the agent on this worktree the project already has.
+    /// Create the agent on this worktree the project already has. Needs
+    /// --project.
     #[arg(long, value_name = "PATH", requires = "project")]
     pub from_worktree: Option<String>,
     /// Create a standalone agent in this folder of your own, with no project.
+    /// Not with --fork.
     #[arg(long, value_name = "FOLDER", conflicts_with = "fork")]
     pub standalone: Option<String>,
     /// The provider a standalone agent runs (the global default otherwise).
+    /// Not with --project, --fork or --from-pr.
     #[arg(long, value_name = "NAME", conflicts_with_all = ["project", "fork", "from_pr"])]
     pub provider: Option<String>,
     /// Fork this agent: a new worktree from its branch.
     #[arg(long, value_name = "AGENT")]
     pub fork: Option<String>,
     /// Copy the uncommitted changes of the project's checkout into the new
-    /// worktree.
+    /// worktree. Not with --from-pr, --from-worktree, --fork or --standalone.
     #[arg(long, conflicts_with_all = ["from_pr", "from_worktree", "fork", "standalone"])]
     pub copy_uncommitted: bool,
     #[command(flatten)]
@@ -403,7 +475,7 @@ pub(crate) struct AddAgentArgs {
 /// neither is named.
 #[derive(Args, Debug)]
 pub(crate) struct AddTerminalArgs {
-    /// Open it in this agent's worktree.
+    /// Open it in this agent's worktree. Not with --project.
     #[arg(long, value_name = "AGENT", conflicts_with = "project")]
     pub agent: Option<String>,
     /// Open it at this project's root.
@@ -429,9 +501,13 @@ pub(crate) enum ProjectsSub {
     #[command(visible_alias = "list")]
     Ls(ListFlags),
     /// Show one project.
-    Show { project: String },
+    Show {
+        /// A project's id or name; a name two projects share is refused with both ids.
+        project: String,
+    },
     /// Add a project from a path and print its id last.
     Add {
+        /// The folder of the repository to add, on the machine dux runs on.
         path: String,
         /// The project's name (the folder's name by default).
         #[arg(long)]
@@ -449,6 +525,7 @@ pub(crate) enum ProjectsSub {
     /// --delete-worktrees is given.
     #[command(visible_alias = "remove")]
     Rm {
+        /// A project's id or name; a name two projects share is refused with both ids.
         project: String,
         /// Also delete its agents and their worktrees.
         #[arg(long)]
@@ -468,6 +545,7 @@ pub(crate) enum WorktreesSub {
     /// List a project's worktrees.
     #[command(visible_alias = "list")]
     Ls {
+        /// A project's id or name; a name two projects share is refused with both ids.
         project: String,
         #[command(flatten)]
         list: ListFlags,
@@ -495,7 +573,10 @@ pub(crate) enum AgentsSub {
         list: ListFlags,
     },
     /// Show one agent.
-    Show { agent: String },
+    Show {
+        /// An agent's id or name; a name two agents share is refused with both ids.
+        agent: String,
+    },
     /// Create an agent and print its id last.
     Add(AddAgentArgs),
     /// Delete an agent. With no branch flag, only the branch dux made for the
@@ -503,13 +584,14 @@ pub(crate) enum AgentsSub {
     /// that branch; every other branch is kept.
     #[command(visible_alias = "remove")]
     Rm {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// Also remove the agent's worktree.
         #[arg(long)]
         delete_worktree: bool,
         /// Delete the branch its worktree is on, at the commit it points at
         /// now. Needs --delete-worktree: git will not delete a branch a
-        /// worktree still has checked out.
+        /// worktree still has checked out. Not with --keep-branch.
         #[arg(long, conflicts_with = "keep_branch", requires = "delete_worktree")]
         delete_branch: bool,
         /// Keep the branch its worktree is on. With --delete-worktree, the
@@ -519,7 +601,8 @@ pub(crate) enum AgentsSub {
         #[arg(long)]
         keep_branch: bool,
         /// Delete every other branch its worktree has been on, each at the
-        /// commit it points at now. Needs --delete-worktree.
+        /// commit it points at now. Needs --delete-worktree, and not with
+        /// --keep-other-branches.
         #[arg(
             long,
             conflicts_with = "keep_other_branches",
@@ -537,12 +620,14 @@ pub(crate) enum AgentsSub {
     },
     /// Stop everything an agent runs.
     Stop {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
     },
     /// Start an agent.
     Start {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         #[command(flatten)]
         change: ChangeFlags,
@@ -559,12 +644,14 @@ pub(crate) enum TabsSub {
     /// List an agent's tabs.
     #[command(visible_alias = "list")]
     Ls {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         #[command(flatten)]
         list: ListFlags,
     },
     /// Add a tab to an agent.
     Add {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         /// The provider the tab runs (the project's by default).
         #[arg(long, value_name = "NAME")]
@@ -575,21 +662,27 @@ pub(crate) enum TabsSub {
     /// Close a tab.
     #[command(visible_alias = "remove")]
     Rm {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
+        /// A tab's id or the label the tab strip shows it under.
         tab: String,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
     },
     /// Start a tab.
     Start {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
+        /// A tab's id or the label the tab strip shows it under.
         tab: String,
         #[command(flatten)]
         change: ChangeFlags,
     },
     /// Stop a tab.
     Stop {
+        /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
+        /// A tab's id or the label the tab strip shows it under.
         tab: String,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
@@ -612,6 +705,8 @@ pub(crate) enum TerminalsSub {
     /// Close a terminal.
     #[command(visible_alias = "remove")]
     Rm {
+        /// A terminal's id or its name in the list; a name two terminals share is
+        /// refused with both ids.
         terminal: String,
         #[command(flatten)]
         guarded: GuardedChangeFlags,
@@ -619,18 +714,21 @@ pub(crate) enum TerminalsSub {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct NamedReadCmd {
+pub(crate) struct ProvidersCmd {
     #[command(subcommand)]
-    pub command: NamedReadSub,
+    pub command: ProvidersSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum NamedReadSub {
-    /// List them.
+pub(crate) enum ProvidersSub {
+    /// List the providers, built-in and your own.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
-    /// Show one by name.
-    Show { name: String },
+    /// Show one provider and the command it runs.
+    Show {
+        /// The provider's name, as `dux providers ls` lists it.
+        name: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -645,9 +743,13 @@ pub(crate) enum MacrosSub {
     #[command(visible_alias = "list")]
     Ls(ListFlags),
     /// Show one macro by name.
-    Show { name: String },
+    Show {
+        /// The macro's name, as `dux macros ls` lists it.
+        name: String,
+    },
     /// Add a macro, or replace the one with that name.
     Add {
+        /// The macro's name; an existing macro with this name is replaced.
         name: String,
         /// The text the macro types.
         text: String,
@@ -660,6 +762,7 @@ pub(crate) enum MacrosSub {
     /// Remove a macro.
     #[command(visible_alias = "remove")]
     Rm {
+        /// The macro's name, as `dux macros ls` lists it.
         name: String,
         #[command(flatten)]
         change: ChangeFlags,
@@ -667,14 +770,28 @@ pub(crate) enum MacrosSub {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct ListOnlyCmd {
+pub(crate) struct KeysCmd {
     #[command(subcommand)]
-    pub command: ListOnlySub,
+    pub command: KeysSub,
 }
 
 #[derive(Subcommand, Debug)]
-pub(crate) enum ListOnlySub {
-    /// List them.
+pub(crate) enum KeysSub {
+    /// List every action the terminal UI binds and the keys it uses, yours or
+    /// the default.
+    #[command(visible_alias = "list")]
+    Ls(ListFlags),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ThemesCmd {
+    #[command(subcommand)]
+    pub command: ThemesSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ThemesSub {
+    /// List the themes dux can load, marking the one ui.theme names.
     #[command(visible_alias = "list")]
     Ls(ListFlags),
 }
@@ -698,6 +815,7 @@ pub(crate) enum EnvSub {
     },
     /// Set a variable; the value is asked for, or read from stdin.
     Set {
+        /// The variable's name, for example `GITHUB_TOKEN`.
         name: String,
         /// Read the value from standard input.
         #[arg(long)]
@@ -708,6 +826,7 @@ pub(crate) enum EnvSub {
     /// Remove a variable.
     #[command(visible_alias = "remove")]
     Rm {
+        /// The variable's name, as `dux env ls` lists it.
         name: String,
         #[command(flatten)]
         change: ChangeFlags,
@@ -724,7 +843,10 @@ pub(crate) struct RemoteCmd {
 pub(crate) enum RemoteSub {
     /// Save a remote under a name.
     Add {
+        /// The name to save the remote under, used with --remote.
         name: String,
+        /// The address of the remote dux's web UI, for example
+        /// `https://box.tailnet-name.ts.net`.
         url: String,
         /// Allow plain http:// to an address that is neither this machine nor
         /// a Tailscale address. The password then crosses the network
@@ -737,24 +859,33 @@ pub(crate) enum RemoteSub {
     Ls(ListFlags),
     /// Forget a saved remote.
     #[command(visible_alias = "remove")]
-    Rm { name: String },
+    Rm {
+        /// The saved remote's name, as `dux remote ls` lists it.
+        name: String,
+    },
     /// Choose, or with --unset clear, the remote used when none is named.
     Default {
+        /// The saved remote's name, as `dux remote ls` lists it. Needed unless
+        /// --unset is given.
         #[arg(required_unless_present = "unset")]
         name: Option<String>,
-        /// Clear the default remote.
+        /// Clear the default remote. Not with a name.
         #[arg(long, conflicts_with = "name")]
         unset: bool,
     },
     /// Sign in to a remote (the selected one when no name is given).
     Login {
+        /// The saved remote's name (the selected one when left out).
         name: Option<String>,
         /// Read the password from standard input instead of asking for it.
         #[arg(long)]
         stdin: bool,
     },
     /// Sign out of a remote (the selected one when no name is given).
-    Logout { name: Option<String> },
+    Logout {
+        /// The saved remote's name (the selected one when left out).
+        name: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -766,7 +897,10 @@ pub(crate) struct OperationsCmd {
 #[derive(Subcommand, Debug)]
 pub(crate) enum OperationsSub {
     /// Show where a change stands.
-    Show { id: String },
+    Show {
+        /// The operation id a change printed when it started.
+        id: String,
+    },
 }
 
 #[cfg(test)]
@@ -878,6 +1012,43 @@ mod tests {
             assert!(help.contains(needle), "missing {needle}:\n{help}");
         }
         assert!(!help.contains("no login"), "{help}");
+    }
+
+    #[test]
+    fn top_level_help_ends_with_the_variables_and_the_exit_codes_word_for_word() {
+        use clap::CommandFactory as _;
+        let after = Cli::command()
+            .get_after_help()
+            .map(ToString::to_string)
+            .expect("after help");
+        assert_eq!(
+            after,
+            "\
+Environment variables:
+  DUX_HOME    Override the config directory (must be an absolute path).
+              When unset, defaults to:
+                macOS: ~/.dux/
+                Linux: $XDG_CONFIG_HOME/dux/ or ~/.config/dux/
+  DUX_REMOTE  The saved remote to talk to when neither --remote nor --local
+              is given. It wins over the default set with `dux remote default`.
+
+First run writes a full default config to config.toml in that directory, and
+session state is stored beside it in sessions.sqlite3.
+
+Projects, agents, terminals, `dux server connections` and `dux operations`
+need a running dux: the one on this machine, or a saved remote. Macros,
+providers, keys, themes and env read and edit config.toml when dux is stopped,
+and `dux server logs` reads server.log. These commands end with these exit
+codes:
+  0  success
+  1  the change failed, or what was named does not exist
+  2  the command line is wrong
+  3  refused: someone is attached, another change is in the way, or the
+     change was not confirmed
+  4  dux isn't running, or does not answer
+  5  the remote asks for its password; sign in with `dux remote login`
+  6  the outcome is unknown: the wait ran out, and the change keeps running"
+        );
     }
 
     #[test]

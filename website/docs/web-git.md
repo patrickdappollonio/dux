@@ -150,6 +150,11 @@ The changes pane's header carries two controls: an **Open editor** button that t
 
 ## The PR banner
 
+> [!NOTE]
+> The banner, and attaching a pull request by hand, go through the `gh` CLI, so they cover
+> GitHub and GitHub Enterprise hosts `gh` is signed in to. Commit, push and pull work with any
+> host git can reach.
+
 When a session is tied to a GitHub pull request, a one-line strip shows the PR number, its
 state, and its title, color-coded (open is green, merged is purple, closed is red).
 Clicking it opens the PR in a new tab. You can move the banner above or below the terminal

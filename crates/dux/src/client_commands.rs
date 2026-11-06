@@ -14,8 +14,8 @@ use std::io::Write;
 
 use crate::commands::{
     AddAgentArgs, AgentsSub, ChangeFlags, ConnectionsSub, EnvSub, Format, GuardedChangeFlags,
-    ListFlags, ListOnlySub, MacrosSub, NamedReadSub, OperationsSub, ProjectsSub, RemoteSource,
-    RemoteSub, ServerSub, TabsSub, TerminalsSub, WorktreesSub,
+    KeysSub, ListFlags, MacrosSub, OperationsSub, ProjectsSub, ProvidersSub, RemoteSource,
+    RemoteSub, ServerSub, TabsSub, TerminalsSub, ThemesSub, WorktreesSub,
 };
 
 /// What `--remote` and `--local` said, before the variable and the saved
@@ -563,24 +563,24 @@ pub(crate) fn macros(command: MacrosSub, selection: &Selection) -> Result<String
     }
 }
 
-pub(crate) fn providers(command: NamedReadSub, selection: &Selection) -> Result<String, CliError> {
+pub(crate) fn providers(command: ProvidersSub, selection: &Selection) -> Result<String, CliError> {
     match command {
-        NamedReadSub::Ls(list) => read_with(selection, |source| {
+        ProvidersSub::Ls(list) => read_with(selection, |source| {
             resources::providers_ls(source, shape(&list))
         }),
-        NamedReadSub::Show { name } => {
+        ProvidersSub::Show { name } => {
             read_with(selection, |source| resources::providers_show(source, &name))
         }
     }
 }
 
-pub(crate) fn keys(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
-    let ListOnlySub::Ls(list) = command;
+pub(crate) fn keys(command: KeysSub, selection: &Selection) -> Result<String, CliError> {
+    let KeysSub::Ls(list) = command;
     read_with(selection, |source| resources::keys_ls(source, shape(&list)))
 }
 
-pub(crate) fn themes(command: ListOnlySub, selection: &Selection) -> Result<String, CliError> {
-    let ListOnlySub::Ls(list) = command;
+pub(crate) fn themes(command: ThemesSub, selection: &Selection) -> Result<String, CliError> {
+    let ThemesSub::Ls(list) = command;
     read_with(selection, |source| {
         resources::themes_ls(source, shape(&list))
     })

@@ -18,7 +18,9 @@ dux macros add Review "review this diff for bugs" --surface agent
 
 The commands are nouns with verbs under them, the way `docker` does it: `ls` (also
 `list`), `show`, `add`, `rm` (also `remove`), and `start` and `stop` where they make
-sense. `--help` works at every level, from `dux --help` down to `dux agents tabs rm --help`.
+sense. `--help` works at every level, from `dux --help` down to `dux agents tabs rm --help`,
+and the [command line reference](/docs/cli-reference) lists every flag of every command
+with that same text.
 
 ## It talks to a running dux
 
@@ -45,28 +47,28 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 
 | Command | What it does |
 |---|---|
-| `dux projects ls`, `show <project>` | Projects, with their branch and how many agents each has. |
-| `dux projects add <path>` | Adds a project. `--name` names it, `--checkout-default` checks the repository's default branch out first, and `--init` makes a plain folder a git repository with a first commit. |
-| `dux projects rm <project>` | Removes a project and its agents from dux. Their worktrees stay on disk unless you add `--delete-worktrees`. |
-| `dux projects worktrees ls <project>` | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
-| `dux agents ls`, `show <agent>` | Agents and their state. `--project` keeps one project's; `--worktrees` prints just each agent's id and folder. |
-| `dux agents add` | Creates an agent: in a project, from a pull request, as a fork, or in a folder of your own. See [Creating an agent](#creating-an-agent). |
-| `dux agents rm <agent>` | Deletes an agent. `--delete-worktree` removes its worktree too. `--delete-branch` or `--keep-branch` decides the branch the worktree is on, and `--delete-other-branches` or `--keep-other-branches` decides every other branch it has been on, like the delete dialogs' two boxes. The confirmation names each branch it will delete, the line before it says how many commits deleting them loses when that is any at all, and each is deleted only at the commit it pointed at when the command read it. The project's own branch is never deleted, and the confirmation says so. When a branch flag names only one of the two, keep or delete, the other is decided as the dialogs' box starts, ticked or not, and the confirmation names what that deletes and what it keeps, so `--keep-other-branches` alone still deletes the branch dux created for the agent when the dialog would. When dux could not read the branch the worktree is on, the confirmation says that branch is kept. Without `--delete-worktree` every branch is kept. With no branch flag at all, only the branch dux created for the agent goes, and only while dux can prove it is still that branch. The delete flags need `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
-| `dux agents stop <agent>`, `start <agent>` | Stops everything an agent runs, or starts it again. |
-| `dux agents tabs ls <agent>` | The agent's provider tabs and whether each is running. |
-| `dux agents tabs add <agent>` | Adds a tab, running the project's provider unless `--provider` names another. |
-| `dux agents tabs rm`, `start`, `stop` `<agent> <tab>` | Closes, starts or stops one tab. Stopping keeps the tab, closing removes it. |
-| `dux terminals ls` | Every terminal and who owns it. |
-| `dux terminals add` | Opens a terminal: in an agent's worktree with `--agent`, at a project's root with `--project`, or a standalone one in your home folder with neither. |
-| `dux terminals rm <terminal>` | Closes a terminal. |
-| `dux macros ls`, `show`, `add`, `rm` | Macros. `add <name> <text>` takes `--surface agent`, `terminal` or `both` (`agent` by default) and replaces a macro of the same name. |
-| `dux providers ls`, `show <name>` | Providers, built-in and your own. |
-| `dux keys ls` | The terminal UI's keybindings. |
-| `dux themes ls` | The themes dux can load, and which one is in use. |
-| `dux env ls`, `set <name>`, `rm <name>` | The global environment. |
-| `dux server logs`, `dux server connections ls` | The server's log (`-f` follows it, `--lines <N>` picks how many lines to start from) and who is connected; see [Server mode](/docs/server-mode#the-servers-own-log). |
-| `dux remote …` | Other machines' duxes; see [below](#another-machines-dux). |
-| `dux operations show <id>` | Where a change started earlier stands. |
+| [`dux projects ls`](/docs/cli-reference#dux-projects-ls), `show <project>` | Projects, with their branch and how many agents each has. |
+| [`dux projects add <path>`](/docs/cli-reference#dux-projects-add) | Adds a project. `--name` names it, `--checkout-default` checks the repository's default branch out first, and `--init` makes a plain folder a git repository with a first commit. |
+| [`dux projects rm <project>`](/docs/cli-reference#dux-projects-rm) | Removes a project and its agents from dux. Their worktrees stay on disk unless you add `--delete-worktrees`. |
+| [`dux projects worktrees ls <project>`](/docs/cli-reference#dux-projects-worktrees-ls) | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
+| [`dux agents ls`](/docs/cli-reference#dux-agents-ls), `show <agent>` | Agents and their state. `--project` keeps one project's; `--worktrees` prints just each agent's id and folder. |
+| [`dux agents add`](/docs/cli-reference#dux-agents-add) | Creates an agent: in a project, from a pull request, as a fork, or in a folder of your own. See [Creating an agent](#creating-an-agent). |
+| [`dux agents rm <agent>`](/docs/cli-reference#dux-agents-rm) | Deletes an agent. `--delete-worktree` removes its worktree too. `--delete-branch` or `--keep-branch` decides the branch the worktree is on, and `--delete-other-branches` or `--keep-other-branches` decides every other branch it has been on, like the delete dialogs' two boxes. The confirmation names each branch it will delete, the line before it says how many commits deleting them loses when that is any at all, and each is deleted only at the commit it pointed at when the command read it. The project's own branch is never deleted, and the confirmation says so. When a branch flag names only one of the two, keep or delete, the other is decided as the dialogs' box starts, ticked or not, and the confirmation names what that deletes and what it keeps, so `--keep-other-branches` alone still deletes the branch dux created for the agent when the dialog would. When dux could not read the branch the worktree is on, the confirmation says that branch is kept. Without `--delete-worktree` every branch is kept. With no branch flag at all, only the branch dux created for the agent goes, and only while dux can prove it is still that branch. The delete flags need `--delete-worktree`, because git will not delete a branch a worktree still has checked out. |
+| [`dux agents stop <agent>`](/docs/cli-reference#dux-agents-stop), `start <agent>` | Stops everything an agent runs, or starts it again. |
+| [`dux agents tabs ls <agent>`](/docs/cli-reference#dux-agents-tabs-ls) | The agent's provider tabs and whether each is running. |
+| [`dux agents tabs add <agent>`](/docs/cli-reference#dux-agents-tabs-add) | Adds a tab, running the project's provider unless `--provider` names another. |
+| [`dux agents tabs rm`](/docs/cli-reference#dux-agents-tabs-rm), `start`, `stop` `<agent> <tab>` | Closes, starts or stops one tab. Stopping keeps the tab, closing removes it. |
+| [`dux terminals ls`](/docs/cli-reference#dux-terminals-ls) | Every terminal and who owns it. |
+| [`dux terminals add`](/docs/cli-reference#dux-terminals-add) | Opens a terminal: in an agent's worktree with `--agent`, at a project's root with `--project`, or a standalone one in your home folder with neither. |
+| [`dux terminals rm <terminal>`](/docs/cli-reference#dux-terminals-rm) | Closes a terminal. |
+| [`dux macros ls`](/docs/cli-reference#dux-macros-ls), `show`, `add`, `rm` | Macros. `add <name> <text>` takes `--surface agent`, `terminal` or `both` (`agent` by default) and replaces a macro of the same name. |
+| [`dux providers ls`](/docs/cli-reference#dux-providers-ls), `show <name>` | Providers, built-in and your own. |
+| [`dux keys ls`](/docs/cli-reference#dux-keys-ls) | The terminal UI's keybindings. |
+| [`dux themes ls`](/docs/cli-reference#dux-themes-ls) | The themes dux can load, and which one is in use. |
+| [`dux env ls`](/docs/cli-reference#dux-env-ls), `set <name>`, `rm <name>` | The global environment. |
+| [`dux server logs`](/docs/cli-reference#dux-server-logs), `dux server connections ls` | The server's log (`-f` follows it, `--lines <N>` picks how many lines to start from) and who is connected; see [Server mode](/docs/server-mode#the-servers-own-log). |
+| [`dux remote …`](/docs/cli-reference#dux-remote) | Other machines' duxes; see [below](#another-machines-dux). |
+| [`dux operations show <id>`](/docs/cli-reference#dux-operations-show) | Where a change started earlier stands. |
 
 A project, agent, tab, terminal or macro is named by its id or by its name. A name that
 two of them share is refused with both ids, so you can pick one. A new project, agent,

@@ -130,6 +130,9 @@ export abstract class ReconnectingSocket {
   // `close()` and never when the far end said stop. Fired for a parked socket
   // too: parking changes when the next attempt happens, not whether one is coming.
   onReconnecting: () => void = () => {}
+  // Fired once by `dispose()`, so a consumer can stop the work it scheduled for
+  // this socket's sake.
+  onDispose: () => void = () => {}
   // The retry schedule, published on every arming, every attempt, the give-up
   // and every open. The offline overlay reads it to say which attempt failed and
   // when the next one is due.
@@ -586,12 +589,14 @@ export abstract class ReconnectingSocket {
   // or switched to a different target). Everything `close()` does, plus the wake
   // listeners, which is the difference between the two.
   dispose(): void {
+    const first = !this.disposed
     this.disposed = true
     this.stopped = true
     this.detachWakeSignals()
     this.authUnsubscribe?.()
     this.authUnsubscribe = null
     this.close()
+    if (first) this.onDispose()
   }
 
   // Reset the backoff when the connection is confirmed usable, so the next drop

@@ -1,6 +1,8 @@
 //! The `dux` binary: the terminal UI, `dux server`, and the command line that talks to a running
 //! dux.
 
+#[cfg(test)]
+mod cli_reference;
 mod client_commands;
 mod commands;
 mod companion;

@@ -1198,6 +1198,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "clap",
  "crokey",
  "crossterm",
  "dux-core",

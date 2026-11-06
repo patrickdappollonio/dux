@@ -394,6 +394,13 @@ What to do next, for the cases that need more than the table says:
 
 ## Creating an agent from a GitHub PR
 
+> [!NOTE]
+> Pull request features work through the `gh` CLI, so they cover github.com and any GitHub
+> Enterprise host `gh` is signed in to. A GitLab merge request, a Bitbucket pull request or
+> any other forge's address is refused with a sentence naming the host. Plain git does not
+> care: cloning a project and everything an agent does in its worktree works with any host
+> git can reach.
+
 In the browser, **New agent from PR…** in the menu the **▾** beside **New agent…** at the
 bottom of the sidebar opens, under **Agents**, or in a project's own `⋯` menu to start from that
 project. In
@@ -691,6 +698,11 @@ If your GitHub API quota runs low, or GitHub starts erroring, dux pauses PR chec
 it recovers and tells you: a status line in the terminal UI, a toast in the browser.
 
 #### The PR banner
+
+> [!NOTE]
+> Status tracking and the banner go through `gh`, so they follow pull requests on GitHub and
+> GitHub Enterprise only. On a GitLab or Bitbucket project the agent works as usual and
+> simply has no pill.
 
 Above or below the agent's terminal, a one-line banner carries the pull request's number,
 its state and its title, on both surfaces.
