@@ -646,6 +646,14 @@ impl Engine {
         let managed =
             self.branch_git_workspace(session_id, PR_FEATURE, STANDALONE_ADD_AS_PROJECT_REMEDY)?;
         let current = managed.branch_name.as_str();
+        // The sync never tracks the project's leading branch, so the view
+        // does not list it either, unless the worktree is on it right now.
+        // Unknown, nothing is excluded by name.
+        let leading = self
+            .projects
+            .iter()
+            .find(|p| p.id == managed.project_id)
+            .and_then(|p| p.leading_branch.as_deref());
         let rows = self
             .agent_prs
             .get(session_id)
@@ -663,6 +671,7 @@ impl Engine {
             .get(session_id)
             .cloned()
             .unwrap_or_default();
+        history.retain(|entry| entry.name == current || leading != Some(entry.name.as_str()));
         if !history.iter().any(|entry| entry.name == current) {
             history.push(crate::branch_history::BranchHistoryEntry {
                 name: current.to_string(),

@@ -123,10 +123,13 @@ impl Pr {
     }
 
     /// One entry of `dux agents show`'s lists: its name, state, where it
-    /// comes from (its branch, else `attached`) and its link.
+    /// comes from (its branch when dux found it, else `attached`) and its
+    /// link. An attached pull request's head branch is not where dux found
+    /// it, so it reads `attached` as it does on the web and in the terminal.
     fn list_line(&self) -> String {
         let from = self
             .branch()
+            .filter(|_| self.found)
             .or_else(|| self.attached.then_some("attached"));
         match from {
             Some(from) => format!("{} {} {from} {}", self.label(), self.state, self.url),
@@ -3781,6 +3784,28 @@ mod pull_request_tests {
 
     fn reads() -> Dux {
         dux(|_| Reply::json(404, "{}"))
+    }
+
+    #[test]
+    fn an_attached_pull_request_names_no_branch_unless_dux_found_it_too() {
+        let attached_with_head =
+            Pr::deserialize(pr(9, "octo/hello", "open", Some("feature"), "attached")).unwrap();
+        assert_eq!(
+            attached_with_head.list_line(),
+            "#9 open attached https://github.com/octo/hello/pull/9"
+        );
+        let both = Pr::deserialize(pr(
+            9,
+            "octo/hello",
+            "open",
+            Some("feature"),
+            "found+attached",
+        ))
+        .unwrap();
+        assert_eq!(
+            both.list_line(),
+            "#9 open feature https://github.com/octo/hello/pull/9"
+        );
     }
 
     #[test]

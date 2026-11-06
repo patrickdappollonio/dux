@@ -1757,7 +1757,7 @@ mod tests {
                 .send(url.to_string());
             Ok(())
         });
-        // `pr_statuses` is keyed by SESSION id, not by tab.
+        // The engine keys an agent's pull requests by SESSION id, not by tab.
         app.engine.agent_prs.insert(
             "session-1".to_string(),
             vec![crate::model::AgentPr::found(

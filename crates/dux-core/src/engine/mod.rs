@@ -2251,8 +2251,9 @@ pub const STANDALONE_ADD_AS_PROJECT_REMEDY: &str =
 /// concurrent `gh` calls for the same session.
 pub const PR_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(10);
 
-/// How long after a failed read of the pull-request detaches dux reads them
-/// again, while autodetection waits on them.
+/// How long after a failed read of the stored pull-request preferences (hidden
+/// pull requests and their order) dux reads them again. Until a read succeeds
+/// no pull request is added to an agent, so a hidden one cannot reappear.
 const PR_PREFS_RETRY: Duration = Duration::from_secs(60);
 
 /// Tighter debounce for foreground-focus PR checks (switching to / activating an
@@ -12832,9 +12833,21 @@ mod tests {
         let (mut engine, _tmp) =
             engine_with_prs(&[on_old_name, merged, unknown_head.clone(), elsewhere_on_feat]);
         let day = |d| Some(chrono::Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap());
+        engine.projects.push(crate::model::Project {
+            leading_branch: Some("main".to_string()),
+            ..sample_project("p1", "/src/p1")
+        });
         engine.branch_histories.insert(
             "s1".to_string(),
             vec![
+                crate::branch_history::BranchHistoryEntry {
+                    name: "main".to_string(),
+                    born_here: false,
+                    identity: None,
+                    tip: None,
+                    first_seen_at: day(2),
+                    former_names: Vec::new(),
+                },
                 crate::branch_history::BranchHistoryEntry {
                     name: "spike".to_string(),
                     born_here: true,

@@ -230,7 +230,7 @@ or a bare number resolved against the project's remote.
 Attaching **adds** to the agent's list; it never replaces a pull request it already has,
 and autodetection keeps running beside it. A pull request from another repository works
 too, and the list names it with its repository (`acme/infra#77`) so it is never confused
-with one of the agent's own. The Agent Info dialog lists every pull request the agent has.
+with one of the agent's own. The Agent Info dialog lists the pull requests the agent shows, not the ones you hid.
 
 ### Hiding and detaching
 
@@ -239,8 +239,8 @@ Every pull request in the list can be taken out of it, one at a time:
 - **Hide** is for a pull request dux found. It leaves the banner and the list for a
   **Hidden** section at the bottom of the dialog, and dux never brings it back by itself.
   **Show again** there puts it back in the place it had.
-- **Detach** is for one you attached. It goes from the agent entirely; attach it again
-  whenever you like.
+- **Detach** is for one you attached. It goes from the agent; attach it again whenever you
+  like. One dux had also found stays, as found, and can then be hidden.
 
 A pull request dux has found is never dropped by dux itself: a branch nobody pushes to any
 more keeps its pull request until you hide it.
