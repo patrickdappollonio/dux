@@ -370,7 +370,7 @@ describe("PullRequestsDialog footer", () => {
 describe("PullRequestsDialog branches view", () => {
   it("lists every branch with its pull requests and the attachments on none", async () => {
     const answer = await pullRequestBranches("s1")
-    // The server lists newest first; the current branch still goes on top.
+    // The order is the server's to decide, so the dialog keeps it as sent.
     pullRequestBranches.mockResolvedValue({
       ...answer,
       branches: [answer.branches[1], answer.branches[0], answer.branches[2]],
@@ -383,7 +383,7 @@ describe("PullRequestsDialog branches view", () => {
     expect(await screen.findByText("spike-tab-ids")).toBeTruthy()
     expect(
       [...document.querySelectorAll("[data-slot='branch-name']")].map((el) => el.textContent),
-    ).toEqual(["store-tab-rows", "tab-state-by-id", "spike-tab-ids"])
+    ).toEqual(["tab-state-by-id", "store-tab-rows", "spike-tab-ids"])
     expect(screen.queryByLabelText("Sort pull requests")).toBeNull()
     // Switching views keeps the dialog's top where it was: it is anchored by
     // its top, and the other view's sentence still holds its place, unseen.

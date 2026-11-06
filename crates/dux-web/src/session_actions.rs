@@ -1496,7 +1496,8 @@ async fn reorder_pull_requests(
 }
 
 /// `GET /api/v1/sessions/:id/pull-requests/branches`: every branch the
-/// agent's worktree has been on, newest first, with its pull requests.
+/// agent's worktree has been on, the one checked out now first and the rest
+/// newest first, with its pull requests.
 async fn pull_request_branches(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     if !id_within_bound(&id) {
         return unknown_session();

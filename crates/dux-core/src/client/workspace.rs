@@ -804,7 +804,8 @@ pub fn prs_ls(client: &Client, query: &str, shape: Shape) -> Result<String, CliE
 }
 
 /// `dux agents prs branches <a>`: every branch the agent's worktree has been
-/// on, newest first, with its pull requests, then the attached pull requests
+/// on, the one checked out now first and the rest newest first, with its pull
+/// requests, then the attached pull requests
 /// that are on none of them.
 ///
 /// # Errors

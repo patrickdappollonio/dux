@@ -741,13 +741,8 @@ function BranchesView({
       </p>
     )
   }
-  const { attached_on_no_branch: loose } = branches.data
-  // The branch checked out now on top, then the rest in the server's order,
-  // newest first.
-  const rows = [
-    ...branches.data.branches.filter((b) => b.current),
-    ...branches.data.branches.filter((b) => !b.current),
-  ]
+  // The server's order: the branch checked out now first, then newest first.
+  const { branches: rows, attached_on_no_branch: loose } = branches.data
   return (
     <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
       {branches.error ? (

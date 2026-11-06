@@ -12811,8 +12811,9 @@ mod tests {
         assert_eq!(engine.pr_revision.get("s1").copied(), revision);
     }
 
-    /// The branch list puts each pull request of the agent's own repository
-    /// on the branch GitHub names as its head, under the branch's name now or
+    /// The branch list leads with the branch checked out now and lists the
+    /// rest newest first. It puts each pull request of the agent's own
+    /// repository on the branch GitHub names as its head, under the branch's name now or
     /// one it had before a rename; attached ones on no branch, and those from
     /// another repository whose head happens to share a name, are listed
     /// apart. The rename warning reads the same names, and falls back to the
@@ -12850,6 +12851,14 @@ mod tests {
                     first_seen_at: day(3),
                     former_names: vec!["old-feat".to_string()],
                 },
+                crate::branch_history::BranchHistoryEntry {
+                    name: "later".to_string(),
+                    born_here: true,
+                    identity: None,
+                    tip: None,
+                    first_seen_at: day(5),
+                    former_names: Vec::new(),
+                },
             ],
         );
 
@@ -12868,7 +12877,11 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![("feat", true, vec![12]), ("spike", false, vec![7])]
+            vec![
+                ("feat", true, vec![12]),
+                ("later", false, vec![]),
+                ("spike", false, vec![7])
+            ]
         );
         assert_eq!(view.branches[0].former_names, vec!["old-feat".to_string()]);
         assert_eq!(

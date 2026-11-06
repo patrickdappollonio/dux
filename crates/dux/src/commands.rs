@@ -742,9 +742,10 @@ pub(crate) enum PrsSub {
         #[command(flatten)]
         change: ChangeFlags,
     },
-    /// List every branch an agent's worktree has been on, newest first, with
-    /// the names it had before a rename and its pull requests, then the
-    /// attached pull requests that are on none of them.
+    /// List every branch an agent's worktree has been on, the one checked out
+    /// now first and the rest newest first, with the names each had before a
+    /// rename and its pull requests, then the attached pull requests that are
+    /// on none of them.
     Branches {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,

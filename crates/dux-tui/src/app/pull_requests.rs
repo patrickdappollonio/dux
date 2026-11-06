@@ -207,7 +207,7 @@ impl App {
                     return rows;
                 };
                 rows.push(ModalRow::Heading(
-                    "Branches this worktree has been on, newest first",
+                    "Branches this worktree has been on, current first",
                 ));
                 rows.extend((0..branches.branches.len()).map(ModalRow::Branch));
                 if !branches.attached_on_no_branch.is_empty() {

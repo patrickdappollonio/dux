@@ -632,8 +632,8 @@ impl Engine {
         }
     }
 
-    /// Every branch the agent's worktree has been on, newest first, each with
-    /// its pull requests, and the attached pull requests that are on none of
+    /// Every branch the agent's worktree has been on, the one checked out now
+    /// first and the rest newest first, each with its pull requests, and the attached pull requests that are on none of
     /// them. A pull request is on a branch when it lives in the agent's own
     /// repository and GitHub's head branch is the branch's name or one of the
     /// names it had before a rename; a head of the same name in another
@@ -673,12 +673,17 @@ impl Engine {
                 former_names: Vec::new(),
             });
         }
-        // A branch not recorded yet is the newest there is.
-        history.sort_by(|a, b| match (a.first_seen_at, b.first_seen_at) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (Some(x), Some(y)) => y.cmp(&x),
+        // The branch checked out now leads, then the rest newest first; a
+        // branch not recorded yet is the newest there is.
+        history.sort_by(|a, b| {
+            (b.name == current).cmp(&(a.name == current)).then_with(|| {
+                match (a.first_seen_at, b.first_seen_at) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => y.cmp(&x),
+                }
+            })
         });
         let own = self.pr_own_repos.get(session_id);
         let on = |entry: &crate::branch_history::BranchHistoryEntry, row: &AgentPr| {
