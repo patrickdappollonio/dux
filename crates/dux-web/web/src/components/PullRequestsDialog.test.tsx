@@ -384,6 +384,13 @@ describe("PullRequestsDialog branches view", () => {
     expect(
       [...document.querySelectorAll("[data-slot='branch-name']")].map((el) => el.textContent),
     ).toEqual(["store-tab-rows", "tab-state-by-id", "spike-tab-ids"])
+    expect(screen.queryByLabelText("Sort pull requests")).toBeNull()
+    // Switching views keeps the dialog's top where it was: it is anchored by
+    // its top, and the other view's sentence still holds its place, unseen.
+    expect(document.querySelector("[data-slot='dialog-content']")?.className).toMatch(
+      /(^| )translate-y-0( |$)/,
+    )
+    expect(screen.getByText(/Open ones come first/).closest("[aria-hidden='true']")).not.toBeNull()
     expect(screen.getByText("Current").className).toMatch(/(^| )text-muted-foreground( |$)/)
     expect(screen.getByText("spike-tab-ids").closest("li")?.className).toMatch(
       /(^| )items-center( |$)/,

@@ -145,7 +145,12 @@ export function PullRequestsDialog() {
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton={false} className="gap-3 sm:max-w-[640px]">
+      {/* Anchored by its top, so a view whose list is shorter or longer
+        * grows the dialog downward instead of moving its header. */}
+      <DialogContent
+        showCloseButton={false}
+        className="top-[max(1rem,10dvh)] translate-y-0 gap-3 sm:max-w-[640px]"
+      >
         {body}
       </DialogContent>
     </Dialog>
@@ -174,22 +179,27 @@ function PullRequestsBody({
     <div className={cn("flex min-h-0 flex-col gap-3", phone && "p-4")}>
       <div className={cn("flex flex-col gap-1", phone && "pr-10")}>
         <Title>Pull requests</Title>
-        <Description>
-          {view === "prs" ? (
-            <>
-              Found on the branches <InlineCode>{name}</InlineCode> has been on,
-              plus the ones you attached.{" "}
-              {manual
-                ? "In your order; the first one is what the banner shows. New ones found later go after yours."
-                : "Open ones come first, newest first, and the first one is what the banner shows."}
-            </>
-          ) : (
-            <>
-              Every branch <InlineCode>{name}</InlineCode> has had checked out
-              in its worktree, newest first, with the pull requests found for
-              each.
-            </>
-          )}
+        {/* Both views' sentences share one cell, the other one unseen, so
+          * switching views never changes the header's height. */}
+        <Description className="grid">
+          <span
+            className={cn("col-start-1 row-start-1", view !== "prs" && "invisible")}
+            aria-hidden={view !== "prs" || undefined}
+          >
+            Found on the branches <InlineCode>{name}</InlineCode> has been on,
+            plus the ones you attached.{" "}
+            {manual
+              ? "In your order; the first one is what the banner shows. New ones found later go after yours."
+              : "Open ones come first, newest first, and the first one is what the banner shows."}
+          </span>
+          <span
+            className={cn("col-start-1 row-start-1", view !== "branches" && "invisible")}
+            aria-hidden={view !== "branches" || undefined}
+          >
+            Every branch <InlineCode>{name}</InlineCode> has had checked out
+            in its worktree, the current one first and then the newest, with
+            the pull requests found for each.
+          </span>
         </Description>
       </div>
 
@@ -218,7 +228,10 @@ function PullRequestsBody({
             </TabsTrigger>
           </TabsList>
         </Tabs>
-        <SortControl sessionId={session.id} manual={manual} phone={phone} />
+        {/* Sort orders the pull requests view and nothing in the other. */}
+        {view === "prs" ? (
+          <SortControl sessionId={session.id} manual={manual} phone={phone} />
+        ) : null}
       </div>
 
       {view === "prs" ? (
