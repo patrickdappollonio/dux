@@ -6117,8 +6117,14 @@ mod tests {
             .expect("the fresh copy committed")
             .id
             .clone();
+        // The integration is off here, so the pin is in the session database
+        // only; memory mirrors pull requests only while they are shown.
         let pin = engine
-            .attached_pr(&copy)
+            .session_store
+            .load_agent_prs_of(&copy)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.attached)
             .expect("the copy is pinned to its pull request");
         assert_eq!(pin.number, 42);
         assert_eq!(pin.owner_repo, "owner/repo");

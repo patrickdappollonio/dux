@@ -223,9 +223,12 @@ impl Engine {
         Ok((rows, prefs))
     }
 
-    /// Store a change and mirror it in memory. Memory takes it even when the
-    /// write fails, so what the user just did holds until a restart; the
-    /// failure is the sentence that says so.
+    /// Store a change and, with the GitHub integration on, mirror it in
+    /// memory. Memory takes it even when the write fails, so what the user
+    /// just did holds until a restart; the failure is the sentence that says
+    /// so. With the integration off memory holds no pull requests, because
+    /// nothing shows them, so a change that could not be saved did not
+    /// happen, and the failure says only that.
     pub(crate) fn commit_pr_change(
         &mut self,
         session_id: &str,
@@ -236,14 +239,22 @@ impl Engine {
         let saved = self
             .session_store
             .replace_agent_prs(session_id, &rows, &prefs);
-        self.set_pr_prefs(session_id, prefs);
-        self.set_agent_prs(session_id, rows);
-        self.update_pr_sync_sessions();
+        let mirrored = self.github_integration_enabled;
+        if mirrored {
+            self.set_pr_prefs(session_id, prefs);
+            self.set_agent_prs(session_id, rows);
+            self.update_pr_sync_sessions();
+        }
         saved.map_err(|err| {
+            let tail = if mirrored {
+                " It holds until dux restarts."
+            } else {
+                ""
+            };
             crate::status_text![
                 "Could not save the change to ",
                 q(agent),
-                format!("'s pull requests: {err:#}. It holds until dux restarts.")
+                format!("'s pull requests: {err:#}.{tail}")
             ]
         })
     }

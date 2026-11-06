@@ -12617,8 +12617,8 @@ mod tests {
     }
 
     /// Detach, hide and show need no GitHub integration: with it off, each
-    /// changes the stored row, and each one that has nothing to do says so
-    /// and changes nothing.
+    /// changes the stored row and nothing is shown for it, and each one that
+    /// has nothing to do says so and changes nothing.
     #[test]
     fn detach_hide_and_show_work_with_the_integration_off_and_confirm_what_they_leave() {
         let mut both = found_pr(12, 2, "feat");
@@ -12689,6 +12689,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(unknown.contains(UNKNOWN_PULL_REQUEST_MARKER), "{unknown}");
+        assert!(engine.shown_pr("s1").is_none());
+        let view = &engine.spine().sessions[0];
+        assert!(
+            view.pr.is_none() && view.prs.is_empty() && view.prs_hidden.is_empty(),
+            "with the integration off nothing is shown, whatever changed"
+        );
     }
 
     /// The branch list in memory follows a write to it, and the agent's
