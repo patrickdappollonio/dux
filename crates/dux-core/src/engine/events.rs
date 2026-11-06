@@ -4543,15 +4543,15 @@ impl Engine {
     /// hidden and its place in the manual order; a new one is hidden when the
     /// agent had detection switched off and it was opened on GitHub before
     /// then, or nobody can say when it was. Nothing is added while the
-    /// preferences that hold that cutoff could not be read. Reports whether
-    /// anything an agent shows changed.
+    /// preferences that hold that cutoff could not be read. Reports what it
+    /// changed.
     pub(crate) fn apply_pr_sync_answers(
         &mut self,
         session_id: &str,
         answers: Vec<crate::worker::PrSyncAnswer>,
         asked: Vec<(String, crate::worker::BranchAskRecord)>,
         now: chrono::DateTime<Utc>,
-    ) -> bool {
+    ) -> PrSyncApplied {
         if !asked.is_empty() {
             let asks = self
                 .pr_branch_asks
@@ -4627,7 +4627,13 @@ impl Engine {
                 .map(crate::model::AgentPr::to_info)
                 .as_ref(),
         );
-        shown_changed
+        if shown_changed {
+            PrSyncApplied::Shown
+        } else if touched.is_empty() {
+            PrSyncApplied::Nothing
+        } else {
+            PrSyncApplied::Bookkeeping
+        }
     }
 
     fn process_pr_status_ready(
@@ -4637,7 +4643,9 @@ impl Engine {
         let checked_at = Instant::now();
         let now = Utc::now();
         let mut changed = false;
-        let mut asked_any = false;
+        // What the plan carries moved: when a branch or a row was last
+        // asked, which decides what the next cycle asks.
+        let mut plan_stale = false;
         let mut finished: Vec<String> = Vec::new();
         for crate::worker::PrStatusResult {
             session_id,
@@ -4651,8 +4659,12 @@ impl Engine {
                 if let Some(own_repo) = own_repo {
                     changed |= self.record_own_pr_repository(&session_id, own_repo);
                 }
-                asked_any |= !asked.is_empty();
-                changed |= self.apply_pr_sync_answers(&session_id, answers, asked, now);
+                plan_stale |= !asked.is_empty();
+                match self.apply_pr_sync_answers(&session_id, answers, asked, now) {
+                    PrSyncApplied::Shown => changed = true,
+                    PrSyncApplied::Bookkeeping => plan_stale = true,
+                    PrSyncApplied::Nothing => {}
+                }
             }
         }
         // Each finished check may have been holding up the one an agent is
@@ -4661,9 +4673,7 @@ impl Engine {
             self.retry_owed_branch_check(&session_id);
         }
         if !changed {
-            // The plan carries what each branch's last ask learned, which is
-            // what puts the next cycle's earlier branches in turn.
-            if asked_any {
+            if plan_stale {
                 self.write_pr_sync_plan();
             }
             return EventReaction::Nothing;
@@ -5523,6 +5533,18 @@ impl Engine {
             }
         }
     }
+}
+
+/// What applying one agent's sync answers changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrSyncApplied {
+    /// No row was touched.
+    Nothing,
+    /// Only when GitHub last answered moved, which nothing shows but the
+    /// next cycle's plan reads.
+    Bookkeeping,
+    /// Something an agent shows changed.
+    Shown,
 }
 
 #[cfg(test)]
@@ -9340,6 +9362,12 @@ mod tests {
         };
         engine.process_worker_event(pr_status_ready(vec![("s1".to_string(), Some(pr.clone()))]));
         let revision = engine.pr_revision.get("s1").copied();
+        // The plan the next cycle reads holds the row as of an hour ago, so a
+        // refresh that only stamps the answer must still reach it, or the
+        // row's cadence is judged on a stale stamp.
+        let an_hour_ago = Utc::now() - chrono::TimeDelta::hours(1);
+        engine.agent_prs.get_mut("s1").unwrap()[0].last_refreshed_at = Some(an_hour_ago);
+        engine.write_pr_sync_plan();
         let reaction = engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
             crate::worker::PrStatusResult {
                 session_id: "s1".to_string(),
@@ -9350,6 +9378,11 @@ mod tests {
         ]));
         assert!(matches!(reaction, EventReaction::Nothing));
         assert_eq!(engine.pr_revision.get("s1").copied(), revision);
+        let planned = engine.pr_sync_sessions.lock().unwrap()[0].known[0].last_refreshed_at;
+        assert!(
+            planned.is_some_and(|at| at > an_hour_ago),
+            "the plan carries the new stamp, got {planned:?}"
+        );
     }
 
     /// A pull request the user attached from another repository is refreshed
