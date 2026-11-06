@@ -200,6 +200,26 @@ pub fn branches_checking_prose() -> Prose {
     Prose::new().text("Looking for unpushed work on the branches\u{2026}")
 }
 
+/// Why git could not count what each box (`[first, second]`) would lose, or
+/// `None` for a box it counted or that is not offered (its answer `None`). A box is counted by its
+/// own count and, while the other box is offered too, by the count of both
+/// together, since ticking both needs that one. A box with a reason cannot be
+/// answered: both dialogs draw it disabled and unticked and send it as a failed
+/// check, so its branches are kept. Mirrored by the browser's
+/// `boxCountFailures`.
+pub fn box_count_failures<'a>(
+    current_lost: Option<&'a UnpushedAnswer>,
+    others_lost: Option<&'a UnpushedAnswer>,
+    both_lost: &'a UnpushedAnswer,
+) -> [Option<&'a str>; 2] {
+    let failed = |answer: &'a UnpushedAnswer| answer.as_ref().err().map(String::as_str);
+    let both = failed(both_lost).filter(|_| current_lost.is_some() && others_lost.is_some());
+    [
+        current_lost.and_then(|lost| failed(lost).or(both)),
+        others_lost.and_then(|lost| failed(lost).or(both)),
+    ]
+}
+
 /// What git answered about the branches the boxes offer (`current`, the
 /// first box's, when there is one, and `others`), said before anything is
 /// ticked: whether deleting them would lose work that exists nowhere else.
@@ -216,8 +236,8 @@ pub fn branches_checking_prose() -> Prose {
 ///
 /// # Errors
 ///
-/// The sentence saying git could not count the commits, when the count the
-/// offered boxes would lose is an error.
+/// The sentence saying git could not count the commits, naming the branches
+/// of every box [`box_count_failures`] says it could not count.
 pub fn branches_checked_prose(
     current: Option<&str>,
     current_lost: &UnpushedAnswer,
@@ -228,6 +248,19 @@ pub fn branches_checked_prose(
     let offered: Vec<&str> = current.into_iter().chain(others.iter().copied()).collect();
     if offered.is_empty() {
         return Ok(None);
+    }
+    let [current_failed, others_failed] = box_count_failures(
+        current.map(|_| current_lost),
+        (!others.is_empty()).then_some(others_lost),
+        both_lost,
+    );
+    if let Some(reason) = current_failed.or(others_failed) {
+        let uncounted: Vec<&str> = current
+            .filter(|_| current_failed.is_some())
+            .into_iter()
+            .chain(others.iter().copied().filter(|_| others_failed.is_some()))
+            .collect();
+        return Err(unpushed_count_failure_prose(&uncounted, reason));
     }
     let lost = match (current, others.is_empty()) {
         (Some(_), false) => both_lost,

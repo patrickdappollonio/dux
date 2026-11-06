@@ -5184,11 +5184,11 @@ impl App {
             ),
             (
                 DeleteAgentFocus::BranchCheckbox,
-                branch_boxes && offer.offers_current(),
+                branch_boxes && offer.current_answerable(),
             ),
             (
                 DeleteAgentFocus::OtherBranchesCheckbox,
-                branch_boxes && offer.offers_others(),
+                branch_boxes && offer.others_answerable(),
             ),
         ];
         let action = self.bindings.lookup(&key, BindingScope::Dialog);
@@ -10113,11 +10113,11 @@ impl App {
             return;
         }
         match checkbox_id {
-            OverlayCheckboxId::DeleteAgentBranch if offer.offers_current() => {
+            OverlayCheckboxId::DeleteAgentBranch if offer.current_answerable() => {
                 *delete_branch = Some(!offer.current_ticked(*delete_branch));
                 *focus = DeleteAgentFocus::BranchCheckbox;
             }
-            OverlayCheckboxId::DeleteAgentOtherBranches if offer.offers_others() => {
+            OverlayCheckboxId::DeleteAgentOtherBranches if offer.others_answerable() => {
                 *delete_other_branches = Some(!offer.others_ticked(*delete_other_branches));
                 *focus = DeleteAgentFocus::OtherBranchesCheckbox;
             }
@@ -30254,6 +30254,48 @@ cyan = "#00ffff"
                 .unwrap();
             assert_eq!(delete_agent_focus(app), *expected, "{why}");
         }
+    }
+
+    /// A box whose loss git could not count cannot be answered: it is no focus
+    /// stop, a click does not tick it, and even a branch dux made goes as a
+    /// failed check, so it is kept. The other box still answers.
+    #[test]
+    fn a_box_git_could_not_count_is_skipped_and_its_branch_kept() {
+        use DeleteAgentFocus::{Cancel, Delete, OtherBranchesCheckbox, WorktreeCheckbox};
+        use dux_core::branch_history::{BranchOrigin, Unchecked};
+        use dux_core::engine::WorktreeOnDelete::Remove;
+        let mut offer = branch_offer(BranchOrigin::Dux, &["spike"], BranchOrigin::Dux);
+        offer.current_unpushed = Err("git rev-list failed".to_string());
+        let mut app = test_app(default_bindings());
+        app.prompt =
+            delete_agent_prompt_state(&app, crate::app::DeleteBranchOffer::Ready(offer), Remove);
+        tab_through(
+            &mut app,
+            &[Delete, WorktreeCheckbox, OtherBranchesCheckbox, Cancel],
+            "the uncounted first box is no stop",
+        );
+        app.toggle_delete_agent_branch_box(OverlayCheckboxId::DeleteAgentBranch);
+        let PromptState::ConfirmDeleteAgent {
+            target,
+            offer,
+            delete_branch,
+            delete_other_branches,
+            ..
+        } = &app.prompt
+        else {
+            panic!("expected the delete-agent confirmation");
+        };
+        assert_eq!(*delete_branch, None, "a click must not tick it");
+        assert!(!offer.current_ticked(*delete_branch));
+        let answers = target
+            .branch_answers(Remove, offer, *delete_branch, *delete_other_branches)
+            .expect("the boxes were on screen");
+        let current = answers.current.expect("the first box answers");
+        assert_eq!(current.unchecked, Some(Unchecked::Failed));
+        assert!(!current.delete && current.branches.is_empty());
+        let others = answers.others.expect("the second box answers");
+        assert!(others.delete, "the counted box keeps its default");
+        assert_eq!(others.branches.len(), 1);
     }
 
     /// A branch box is a focus stop only while it is painted and enabled, so

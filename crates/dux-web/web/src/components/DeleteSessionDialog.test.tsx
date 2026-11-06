@@ -325,6 +325,24 @@ describe("DeleteSessionDialog", () => {
     }
   })
 
+  // Every box's row is the touch floor on a phone, so a tap beside a box
+  // still lands on it.
+  it("gives the worktree and branch rows the touch floor", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [
+        { name: "spike", origin: "dux", oid: OID_B },
+      ]),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    for (const id of ["delete-worktree", "delete-branch", "delete-other-branches"]) {
+      const row = document.getElementById(id)!.parentElement!
+      expect(row.className).toContain("max-md:min-h-10")
+    }
+  })
+
   // A box with nothing it can answer is drawn disabled, and so is its label.
   it("draws the first box and its label disabled while it cannot be answered", () => {
     branchUnpushed.mockReturnValue(new Promise(() => {}))
@@ -714,6 +732,101 @@ describe("DeleteSessionDialog", () => {
     }
   })
 
+  // A box whose loss git could not count cannot be answered: it is disabled
+  // and unticked even for a branch dux made, the delete keeps that branch as
+  // a failed check, and the reason is said once, in the pill.
+  it("disables and unticks a box whose unpushed count failed, and keeps its branch", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [], {
+        current_unpushed: null,
+        current_unpushed_error: "git rev-list failed",
+        both_unpushed: null,
+        both_unpushed_error: "git rev-list failed",
+      }),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() =>
+      expect(screen.getByRole("status").textContent).toMatch(/could not count/),
+    )
+    expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+    expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+    fireEvent.click(currentBox())
+    expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith(
+      "s1",
+      true,
+      {
+        current: { delete: false, branches: [], unchecked: "failed" },
+        others: { delete: false, branches: [], unchecked: "not_offered" },
+      },
+      null,
+    )
+  })
+
+  // Only the box whose own count failed is disabled; the other still answers,
+  // and the pill names only the branch it could not count.
+  it("disables only the box whose count failed", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer(
+        { name: "dux/s1", origin: "dux" },
+        [{ name: "spike", origin: "dux", oid: OID_B }],
+        {
+          others_unpushed: null,
+          others_unpushed_error: "git rev-list failed",
+        },
+      ),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    expect(screen.getByRole("status").textContent).toBe(
+      "dux could not count the unpushed commits on spike (git rev-list failed); check it before deleting it.",
+    )
+    expect(othersBox()!.getAttribute("aria-disabled")).toBe("true")
+    expect(othersBox()!.getAttribute("aria-checked")).toBe("false")
+    expect(currentBox().getAttribute("aria-disabled")).not.toBe("true")
+    expect(currentBox().getAttribute("aria-checked")).toBe("true")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+    expect(deleteSession).toHaveBeenCalledWith(
+      "s1",
+      true,
+      {
+        current: {
+          delete: true,
+          branches: [{ name: "dux/s1", oid: OID_A }],
+          offered: ["dux/s1"],
+        },
+        others: { delete: false, branches: [], unchecked: "failed" },
+      },
+      null,
+    )
+  })
+
+  // The count for both boxes together is the one a tick of both needs, so a
+  // failure there disables both.
+  it("disables both boxes when only their joint count failed", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer(
+        { name: "dux/s1", origin: "dux" },
+        [{ name: "spike", origin: "dux", oid: OID_B }],
+        { both_unpushed: null, both_unpushed_error: "git rev-list failed" },
+      ),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() => expect(othersBox()).toBeTruthy())
+    expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+    expect(othersBox()!.getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getAllByText(/could not count/)).toHaveLength(1)
+  })
+
   it("asks git about the branches when the dialog opens, once for the whole open", async () => {
     vi.useFakeTimers()
     try {
@@ -996,10 +1109,8 @@ describe("DeleteSessionDialog names", () => {
       "Also delete the other branches this agent was on: a and b",
     )
     expect(chipsIn(others)).toEqual(["a", "b"])
-    // The count sentence is about the boxes ticked right now.
-    fireEvent.click(currentBox())
-    expect(chipsIn(paragraph(/dux could not count the unpushed commits on develop/)))
-      .toEqual(["develop"])
+    // A count git could not make is said in the pill alone.
+    expect(chipsIn(screen.getByRole("status"))).toEqual(["develop"])
     expect(chipsIn(paragraph(/existed before the agent\. dux cannot tell when/)))
       .toEqual(["a", "b"])
   })

@@ -1846,9 +1846,14 @@ enum Truncation {
 pub(super) struct DeleteAgentBranchBoxes {
     pub(super) current_label: Option<Prose>,
     pub(super) current_ticked: bool,
+    /// Whether the first box can be answered: git counted what it would lose.
+    /// One it could not count is painted dimmed and unticked.
+    pub(super) current_use: BranchBoxUse,
     pub(super) current_warning: Option<Prose>,
     pub(super) others_label: Option<Prose>,
     pub(super) others_ticked: bool,
+    /// Whether the second box can be answered, as for the first.
+    pub(super) others_use: BranchBoxUse,
     pub(super) others_warning: Option<Prose>,
     /// What deleting the boxes ticked right now loses, which changes with
     /// every tick; `None` when it loses no commit.
@@ -1868,14 +1873,18 @@ impl DeleteAgentBranchBoxes {
             return Self {
                 current_label: None,
                 current_ticked: false,
+                current_use: BranchBoxUse::Disabled,
                 current_warning: None,
                 others_label: None,
                 others_ticked: false,
+                others_use: BranchBoxUse::Disabled,
                 others_warning: None,
                 loss: None,
             };
         };
-        let others_ticked = delete_other_branches.unwrap_or_else(|| offer.others_default());
+        let [current_uncounted, others_uncounted] = offer.count_failures();
+        let others_ticked = others_uncounted.is_none()
+            && delete_other_branches.unwrap_or_else(|| offer.others_default());
         let others: Vec<(&str, dux_core::branch_history::BranchOrigin)> = offer
             .others
             .iter()
@@ -1883,14 +1892,17 @@ impl DeleteAgentBranchBoxes {
             .collect();
         let names: Vec<&str> = others.iter().map(|(name, _)| *name).collect();
         let current = offer.current.as_ref();
-        let current_ticked = delete_branch.unwrap_or_else(|| offer.current_default());
+        let current_ticked =
+            current_uncounted.is_none() && delete_branch.unwrap_or_else(|| offer.current_default());
         Self {
             current_label: current.map(|current| copy::current_branch_label_prose(&current.name)),
             current_ticked,
+            current_use: BranchBoxUse::from(current.is_some() && current_uncounted.is_none()),
             current_warning: current
                 .and_then(|current| copy::current_branch_warning_prose(current.origin)),
             others_label: (!names.is_empty()).then(|| copy::other_branches_label_prose(&names)),
             others_ticked,
+            others_use: BranchBoxUse::from(!names.is_empty() && others_uncounted.is_none()),
             others_warning: (!others.is_empty())
                 .then(|| {
                     copy::other_branches_warning_prose(
@@ -1918,6 +1930,39 @@ impl DeleteAgentBranchBoxes {
                 )
                 .and_then(|(deleted, lost)| copy::branch_loss_prose(&deleted, lost)),
         }
+    }
+}
+
+/// Whether a delete-dialog branch box can be answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BranchBoxUse {
+    /// It can: git counted what ticking it loses.
+    Enabled,
+    /// It cannot, so it is painted dimmed and unticked.
+    Disabled,
+}
+
+impl From<bool> for BranchBoxUse {
+    /// Enabled for a box that can be answered.
+    fn from(answerable: bool) -> Self {
+        if answerable {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+/// The look of the delete dialog's box at `stop`: dimmed when it cannot be
+/// answered, whatever has focus, and otherwise focused or not.
+fn delete_agent_box_state(
+    focus: DeleteAgentFocus,
+    stop: DeleteAgentFocus,
+    usable: BranchBoxUse,
+) -> CheckboxState {
+    match usable {
+        BranchBoxUse::Enabled => CheckboxState::of(focus, stop),
+        BranchBoxUse::Disabled => CheckboxState::Disabled,
     }
 }
 
@@ -2170,10 +2215,12 @@ impl App {
         let marker_style = checkbox.marker_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.hint_key_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_dim_key_fg),
         });
         let label_style = checkbox.label_style(match state {
             CheckboxState::Focused => Style::default().fg(self.theme.button_active_fg),
             CheckboxState::Normal => Style::default().fg(self.theme.input_label_fg),
+            CheckboxState::Disabled => Style::default().fg(self.theme.hint_dim_desc_fg),
         });
         let layout = checkbox
             .layout(area.width, marker_style, label_style)
@@ -12669,7 +12716,7 @@ impl App {
         let measure = |checkbox: Checkbox<'_>, checked: bool, stop: DeleteAgentFocus| {
             checkbox
                 .checked(CheckMark::from(checked))
-                .state(CheckboxState::of(focus, stop))
+                .state(delete_agent_box_state(focus, stop, BranchBoxUse::Enabled))
                 .height_at(inner_width)
         };
         let prose_box = |label: Option<&Prose>, checked: bool, stop: DeleteAgentFocus| {
@@ -12843,7 +12890,7 @@ impl App {
         });
         let mut prose_box = |area: Option<Rect>,
                              label: Option<&Prose>,
-                             ticked: bool,
+                             (ticked, enabled): (bool, BranchBoxUse),
                              stop: DeleteAgentFocus,
                              id: OverlayCheckboxId| {
             let (area, label) = (area?, label?);
@@ -12852,7 +12899,7 @@ impl App {
                 area,
                 label,
                 CheckMark::from(ticked),
-                CheckboxState::of(focus, stop),
+                delete_agent_box_state(focus, stop, enabled),
                 None,
             );
             Some(OverlayCheckbox { id, rect })
@@ -12860,14 +12907,14 @@ impl App {
         let branch = prose_box(
             branch_checkbox_area,
             branches.current_label.as_ref(),
-            branches.current_ticked,
+            (branches.current_ticked, branches.current_use),
             DeleteAgentFocus::BranchCheckbox,
             OverlayCheckboxId::DeleteAgentBranch,
         );
         let others = prose_box(
             other_checkbox_area,
             branches.others_label.as_ref(),
-            branches.others_ticked,
+            (branches.others_ticked, branches.others_use),
             DeleteAgentFocus::OtherBranchesCheckbox,
             OverlayCheckboxId::DeleteAgentOtherBranches,
         );
@@ -28296,6 +28343,51 @@ mod tests {
         assert!(screen.contains("refactor-cache"), "{screen}");
         assert!(screen.contains("so it will be kept"), "{screen}");
         assert!(!screen.contains("check the branches"), "{screen}");
+    }
+
+    /// A box whose loss git could not count is drawn unticked and dimmed even
+    /// for a branch dux made, and the reason is said once, above the boxes,
+    /// never again as what the ticks lose.
+    #[test]
+    fn a_box_git_could_not_count_is_drawn_unticked_and_dimmed() {
+        use dux_core::branch_history::BranchOrigin;
+        use ratatui::style::Modifier;
+        let mut app = test_app(default_bindings());
+        let mut prompt = delete_agent_prompt(
+            BranchOrigin::Dux,
+            dux_core::engine::WorktreeOnDelete::Remove,
+            &[],
+            BranchOrigin::Dux,
+            None,
+        );
+        if let PromptState::ConfirmDeleteAgent {
+            offer: crate::app::DeleteBranchOffer::Ready(offer),
+            ..
+        } = &mut prompt
+        {
+            offer.current_unpushed = Err("git rev-list failed".to_string());
+            offer.both_unpushed = Err("git rev-list failed".to_string());
+        }
+        app.prompt = prompt;
+        let screen = rendered_screen(&mut app);
+        assert_eq!(screen.matches("could not count").count(), 1, "{screen}");
+        assert!(screen.contains("[ ] Also delete the branch"), "{screen}");
+        let buf = render_to_buffer(&mut app);
+        let row = (0..buf.area.height)
+            .find(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("[ ] Also delete the branch")
+            })
+            .expect("the branch box row");
+        let marker = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == "[")
+            .expect("the marker");
+        assert!(
+            buf[(marker, row)].modifier.contains(Modifier::DIM),
+            "the uncounted box must be dimmed"
+        );
     }
 
     /// A branch dux cannot vouch for is still offered, with the sentence that

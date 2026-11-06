@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Check, CircleAlert, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,7 @@ import {
   type AgentWorkspaceWire,
 } from "@/lib/agentWorkspace"
 import {
+  boxCountFailures,
   branchesCheckFailedProse,
   branchesCheckedProse,
   currentBranchCheckFailedProse,
@@ -51,7 +52,8 @@ import { closeDelete, deleteSession, useDux } from "@/lib/store"
 // whose entries are pinned to the commits the server read; until then, and
 // when the check failed, they are disabled and every branch is kept. A ready
 // offer may still have no first box: the project's own branch is offered in
-// no box, and a branch git could not read is a failed check for that box.
+// no box, and a branch git could not read is a failed check for that box, as
+// is a box whose loss git could not count.
 type OfferState =
   | { state: "pending" }
   | { state: "failed"; reason: string }
@@ -117,6 +119,21 @@ function lossAnswer(
   error: string | null,
 ): UnpushedAnswer {
   return count ?? { failed: error ?? "no count came back" }
+}
+
+// Why git could not count what each box (`[first, second]`) would lose. Such
+// a box cannot be answered: it is disabled and unticked, and its branches are
+// kept as a failed check.
+function countFailures(offer: BranchOffer): [string | null, string | null] {
+  return boxCountFailures(
+    offer.current === null
+      ? null
+      : lossAnswer(offer.current_unpushed, offer.current_unpushed_error),
+    offer.others.length === 0
+      ? null
+      : lossAnswer(offer.others_unpushed, offer.others_unpushed_error),
+    lossAnswer(offer.both_unpushed, offer.both_unpushed_error),
+  )
 }
 
 // What deleting the boxes ticked right now loses, or `null` with nothing
@@ -185,14 +202,19 @@ function branchAnswers(
   // Decided from the name the offer was read for, never from where the
   // worktree is by now.
   const { current, others } = offer.offer
+  const [currentUncounted, othersUncounted] = countFailures(offer.offer)
   return {
     current: current
-      ? boxAnswer([current], deleteCurrent)
+      ? currentUncounted !== null
+        ? unchecked("failed")
+        : boxAnswer([current], deleteCurrent)
       : unchecked(currentBranchFailed(offer.offer) ? "failed" : "not_offered"),
     others:
       others.length === 0
         ? unchecked("not_offered")
-        : boxAnswer(others, deleteOthers),
+        : othersUncounted !== null
+          ? unchecked("failed")
+          : boxAnswer(others, deleteOthers),
   }
 }
 
@@ -365,10 +387,18 @@ export function DeleteSessionDialog() {
   const current = ready?.current ?? null
   const others = ready?.others ?? []
   const own = ready?.protected ?? []
-  const deleteCurrent = current
-    ? (currentAnswer ?? currentDefault(current))
+  const [currentUncounted, othersUncounted] = ready
+    ? countFailures(ready)
+    : [null, null]
+  const currentAnswerable = current !== null && currentUncounted === null
+  const othersAnswerable = others.length > 0 && othersUncounted === null
+  const deleteCurrent =
+    current && currentAnswerable
+      ? (currentAnswer ?? currentDefault(current))
+      : false
+  const deleteOthers = othersAnswerable
+    ? (othersAnswer ?? othersDefault(others))
     : false
-  const deleteOthers = ready ? (othersAnswer ?? othersDefault(others)) : false
   const check = branchCheck(offer)
   // The first box is left out only for the project's own branch; a failed
   // check keeps it, disabled, with the reason said once, in the pill.
@@ -491,60 +521,46 @@ export function DeleteSessionDialog() {
           // One child of the dialog's grid, so the rows collapsing inside it
           // take their spacing with them instead of leaving a gap behind.
           <div className="flex flex-col">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="delete-worktree"
-                checked={deleteWorktree}
-                onCheckedChange={setDeleteWorktree}
-              />
-              <label htmlFor="delete-worktree" className="text-sm">
-                Also delete the git worktree (irreversible)
-              </label>
-            </div>
+            <CheckboxRow
+              id="delete-worktree"
+              checked={deleteWorktree}
+              onCheckedChange={setDeleteWorktree}
+            >
+              Also delete the git worktree (irreversible)
+            </CheckboxRow>
             {/* Revealed by the worktree box rather than sitting beside it disabled:
                 git will not delete a branch still checked out, so there is
                 nothing to offer. */}
             <Collapse open={deleteWorktree}>
               {firstBoxShown && (
-                <div className="flex items-center gap-2">
-                  <Checkbox
-                    id="delete-branch"
-                    checked={deleteCurrent}
-                    disabled={current === null}
-                    onCheckedChange={setCurrentAnswer}
-                  />
-                  <label
-                    htmlFor="delete-branch"
-                    className="min-w-0 text-sm peer-data-disabled:cursor-not-allowed peer-data-disabled:opacity-50"
-                  >
-                    {renderProse(
-                      currentBranchLabelProse(
-                        current?.name ?? ready?.current_name ?? managed.branch_name,
-                      ),
-                    )}
-                  </label>
-                </div>
+                <CheckboxRow
+                  id="delete-branch"
+                  checked={deleteCurrent}
+                  disabled={!currentAnswerable}
+                  onCheckedChange={setCurrentAnswer}
+                >
+                  {renderProse(
+                    currentBranchLabelProse(
+                      current?.name ?? ready?.current_name ?? managed.branch_name,
+                    ),
+                  )}
+                </CheckboxRow>
               )}
               {ready && current && (
                 <BranchWarning prose={currentBranchWarningProse(current.origin)} />
               )}
               {ready && others.length > 0 && (
                 <>
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="delete-other-branches"
-                      checked={deleteOthers}
-                      onCheckedChange={setOthersAnswer}
-                    />
-                    <label
-                      htmlFor="delete-other-branches"
-                      className="min-w-0 text-sm"
-                    >
-                      {renderProse(
-                        otherBranchesLabelProse(others.map((o) => o.name)),
-                      )}
-                    </label>
-                  </div>
+                  <CheckboxRow
+                    id="delete-other-branches"
+                    checked={deleteOthers}
+                    disabled={!othersAnswerable}
+                    onCheckedChange={setOthersAnswer}
+                  >
+                    {renderProse(
+                      otherBranchesLabelProse(others.map((o) => o.name)),
+                    )}
+                  </CheckboxRow>
                   <BranchWarning
                     prose={otherBranchesWarningProse(others, deleteOthers)}
                   />

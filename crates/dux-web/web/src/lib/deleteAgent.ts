@@ -208,7 +208,8 @@ export type UnpushedAnswer =
  * box's, when there is one, and `others`), said before anything is ticked:
  * whether deleting them would lose work that exists nowhere else. The count is
  * the one a tick of every offered box would lose, so it agrees with the loss
- * warning; `failed` is the sentence for a count git could not make.
+ * warning; `failed` is the sentence for a count git could not make, naming
+ * the branches of every box `boxCountFailures` says it could not count.
  *
  * The commits are said to be on the branches whose own box's count is not
  * zero, or on every offered branch when only their union holds them. More
@@ -226,6 +227,22 @@ export function branchesCheckedProse(
 ): { ok: Prose | null } | { failed: Prose } {
   const offered = [...(current === null ? [] : [current]), ...others]
   if (offered.length === 0) return { ok: null }
+  const [currentFailed, othersFailed] = boxCountFailures(
+    current === null ? null : currentLost,
+    others.length > 0 ? othersLost : null,
+    bothLost,
+  )
+  const reason = currentFailed ?? othersFailed
+  if (reason !== null)
+    return {
+      failed: unpushedCountFailureProse(
+        [
+          ...(current !== null && currentFailed !== null ? [current] : []),
+          ...(othersFailed !== null ? others : []),
+        ],
+        reason,
+      ),
+    }
   const lost =
     current !== null ? (others.length > 0 ? bothLost : currentLost) : othersLost
   if ("failed" in lost)
@@ -272,6 +289,29 @@ export function branchesCheckedProse(
       "",
     ),
   }
+}
+
+/**
+ * Why git could not count what each box (`[first, second]`) would lose, or
+ * `null` for a box it counted or that is not offered (its answer `null`). A box is counted by its
+ * own count and, while the other box is offered too, by the count of both
+ * together, since ticking both needs that one. A box with a reason cannot be
+ * answered: it is disabled and unticked, and keeps its branches. Mirrors
+ * dux-core's `box_count_failures`.
+ */
+export function boxCountFailures(
+  currentLost: UnpushedAnswer | null,
+  othersLost: UnpushedAnswer | null,
+  bothLost: UnpushedAnswer,
+): [string | null, string | null] {
+  const failed = (answer: UnpushedAnswer) =>
+    "failed" in answer ? answer.failed : null
+  const both =
+    currentLost !== null && othersLost !== null ? failed(bothLost) : null
+  return [
+    currentLost === null ? null : (failed(currentLost) ?? both),
+    othersLost === null ? null : (failed(othersLost) ?? both),
+  ]
 }
 
 /** What the branch boxes say when git could not be asked about them. */

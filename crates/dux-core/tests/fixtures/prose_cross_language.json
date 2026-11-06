@@ -1632,6 +1632,35 @@
       ]
     },
     {
+      "what": "the branch check's answer when git could not count one box of two",
+      "sentence": "delete_branches_checked",
+      "args": {
+        "current": "drifted",
+        "current_lost": {
+          "failed": "git rev-list failed"
+        },
+        "others": [
+          "born"
+        ],
+        "others_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        },
+        "both_lost": {
+          "count": 0,
+          "has_remote_refs": true
+        }
+      },
+      "segments": [
+        "dux could not count the unpushed commits on ",
+        {
+          "name": "drifted",
+          "quoted": false
+        },
+        " (git rev-list failed); check it before deleting it."
+      ]
+    },
+    {
       "what": "the branch boxes when git could not be asked",
       "sentence": "delete_branches_check_failed",
       "args": {

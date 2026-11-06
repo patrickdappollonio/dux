@@ -1625,6 +1625,17 @@ impl BranchOffer {
         Some((names, lost))
     }
 
+    /// Why git could not count what each box (`[first, second]`) would lose;
+    /// a box with a reason is disabled, unticked and kept. See
+    /// [`crate::delete_agent_prose::box_count_failures`].
+    pub fn count_failures(&self) -> [Option<&str>; 2] {
+        crate::delete_agent_prose::box_count_failures(
+            self.current.as_ref().map(|_| &self.current_unpushed),
+            (!self.others.is_empty()).then_some(&self.others_unpushed),
+            &self.both_unpushed,
+        )
+    }
+
     /// The second box's default: ticked only when dux can prove every branch
     /// in it is its own.
     pub fn others_default(&self) -> bool {
