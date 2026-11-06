@@ -1,12 +1,19 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-// Loaded once at collection, where no test timeout applies and, with no window
-// stubbed yet, the store boots nothing. Its first load is by far the slowest
-// step in the file; left to the first test, a busy machine pushes that test
-// past its timeout. Every test still imports its own fresh instance after
-// `vi.resetModules`.
-import "./store"
+// Loaded once at collection, where no test timeout applies. Its first load is
+// by far the slowest step in the file; left to the first test, a busy machine
+// pushes that test past its timeout. Every test still imports its own fresh
+// instance after `vi.resetModules`. Under jsdom there is a window, so this
+// instance boots for real; its app socket is stopped at once, or it would keep
+// reconnecting on real timers into the tests' fakes.
+import { eventsSocket as collectionSocket } from "./store"
+collectionSocket.dispose()
+
+// The run-identity hard reload, recorded rather than performed: jsdom cannot
+// navigate.
+const { reloadPage } = vi.hoisted(() => ({ reloadPage: vi.fn() }))
+vi.mock("./reloadPage", () => ({ reloadPage }))
 
 // JSDOM DELIBERATELY, AND WITHOUT IT THE FILE TESTS THE WRONG BRANCH. The store
 // runs `boot()` only where there is a `window`, so in the default node
@@ -32,6 +39,8 @@ let buildAnswers: "ok" | "unreachable" = "ok"
 /// How many times the run-identity endpoint has been asked, so a test can pin
 /// that an unknown answer is followed by another question.
 let buildProbeCount = 0
+/// The run the identity endpoint reports, moved by a test to stand for a restart.
+let buildProcess = "run-1"
 
 const fetchMock = vi.fn(async (url: string) => {
   // The public status route answers as every dux does: no password here.
@@ -48,7 +57,7 @@ const fetchMock = vi.fn(async (url: string) => {
     return {
       ok: true,
       status: 200,
-      json: async () => ({ version: "development", process: "run-1" }),
+      json: async () => ({ version: "development", process: buildProcess }),
       text: async () => "",
       headers: { get: () => null },
     } as unknown as Response
@@ -101,6 +110,8 @@ beforeEach(async () => {
   fetchMock.mockClear()
   buildAnswers = "ok"
   buildProbeCount = 0
+  buildProcess = "run-1"
+  reloadPage.mockClear()
   // Re-stub per test, BEFORE the store is imported: `boot()` fires its reads at
   // import time, and `afterEach` unstubs, so a module-scope stub would leave
   // every test after the first talking to jsdom's own fetch.
@@ -188,11 +199,12 @@ describe("the PTY retry gate", () => {
   // fire-and-forget, so a page loaded during a blip used to keep a null baseline
   // for its whole life, and a null baseline never reports a change: the
   // run-identity hard reload was silently switched off for that tab. It re-asks
-  // now, backing off, and gives up after a few minutes rather than asking for
-  // the rest of the tab's life; an events reconnect starts the asking again.
-  it("re-asks for the boot baseline on a backoff that a reconnect restarts and disposal cancels", async () => {
+  // now, backing off, and never gives up while it has no baseline, because a
+  // reconnect has nothing to compare a new run against until it does.
+  it("keeps asking for a missing boot baseline, so a restart after the endpoint recovers still reloads", async () => {
     // Rebuild the store with the endpoint already unreachable, so the read boot
     // itself performs is the one that comes back unknown.
+    store.eventsSocket.dispose()
     vi.resetModules()
     buildAnswers = "unreachable"
     buildProbeCount = 0
@@ -201,8 +213,68 @@ describe("the PTY retry gate", () => {
       store = await import("./store")
       await vi.advanceTimersByTimeAsync(1)
       expect(buildProbeCount).toBe(1)
-      // Each re-ask lands at its backoff step and not a millisecond before.
+      // The boot's own open, which is not a reconnect and asks nothing.
+      store.eventsSocket.onOpen()
+      // Each re-ask lands at its backoff step and not a millisecond before, and
+      // past the last step the asking carries on at that step's gap.
       let asked = 1
+      for (const gap of [5000, 10000, 20000, 40000, 60000, 60000, 60000]) {
+        await vi.advanceTimersByTimeAsync(gap - 2)
+        expect(buildProbeCount).toBe(asked)
+        await vi.advanceTimersByTimeAsync(2)
+        asked += 1
+        expect(buildProbeCount).toBe(asked)
+      }
+
+      // The endpoint answers again, still the same run: the next re-ask learns
+      // it as the baseline within one gap, and the asking ends there.
+      buildAnswers = "ok"
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(buildProbeCount).toBe(asked + 1)
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(buildProbeCount).toBe(asked + 1)
+      expect(reloadPage).not.toHaveBeenCalled()
+
+      // dux restarts, and the reconnect that follows sees the new run.
+      buildProcess = "run-2"
+      store.eventsSocket.onConn("closed")
+      store.eventsSocket.onOpen()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(reloadPage).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops the endless asking for a missing baseline when the app socket is disposed", async () => {
+    store.eventsSocket.dispose()
+    vi.resetModules()
+    buildAnswers = "unreachable"
+    buildProbeCount = 0
+    vi.useFakeTimers()
+    try {
+      store = await import("./store")
+      await vi.advanceTimersByTimeAsync(400_000)
+      const asked = buildProbeCount
+      expect(asked).toBeGreaterThan(7)
+      store.eventsSocket.dispose()
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(buildProbeCount).toBe(asked)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // With a baseline known, an unknown run check is worth a few re-asks and not
+  // a request a minute for the life of the tab: the next reconnect asks again.
+  it("backs off a run check that follows a known baseline, stops after the last step, and restarts on a reconnect", async () => {
+    await reachReconnect()
+    buildAnswers = "unreachable"
+    vi.useFakeTimers()
+    try {
+      store.eventsSocket.onOpen()
+      await vi.advanceTimersByTimeAsync(1)
+      let asked = buildProbeCount
       for (const gap of [5000, 10000, 20000, 40000, 60000, 60000]) {
         await vi.advanceTimersByTimeAsync(gap - 2)
         expect(buildProbeCount).toBe(asked)
@@ -212,36 +284,15 @@ describe("the PTY retry gate", () => {
       }
       // The sixth re-ask was the last one.
       await vi.advanceTimersByTimeAsync(600_000)
-      expect(buildProbeCount).toBe(7)
+      expect(buildProbeCount).toBe(asked)
 
-      // The boot's own open, a drop, and a reconnect against an endpoint that
-      // answers again: the reconnect's run check asks at once, and since its
-      // answer cannot fill the baseline, the baseline is asked for at the first
-      // step, after which the sequence is over.
-      buildAnswers = "ok"
-      store.eventsSocket.onOpen()
+      // A reconnect asks at once and backs off from the first step again.
       store.eventsSocket.onConn("closed")
       store.eventsSocket.onOpen()
       await vi.advanceTimersByTimeAsync(1)
-      expect(buildProbeCount).toBe(8)
+      expect(buildProbeCount).toBe(asked + 1)
       await vi.advanceTimersByTimeAsync(5000)
-      expect(buildProbeCount).toBe(9)
-      await vi.advanceTimersByTimeAsync(600_000)
-      expect(buildProbeCount).toBe(9)
-
-      // A later reconnect that answers unknown backs off from the first step.
-      buildAnswers = "unreachable"
-      store.eventsSocket.onConn("closed")
-      store.eventsSocket.onOpen()
-      await vi.advanceTimersByTimeAsync(1)
-      expect(buildProbeCount).toBe(10)
-      await vi.advanceTimersByTimeAsync(5000)
-      expect(buildProbeCount).toBe(11)
-
-      // Disposing the app socket leaves no re-ask scheduled.
-      store.eventsSocket.dispose()
-      await vi.advanceTimersByTimeAsync(600_000)
-      expect(buildProbeCount).toBe(11)
+      expect(buildProbeCount).toBe(asked + 2)
     } finally {
       vi.useRealTimers()
     }

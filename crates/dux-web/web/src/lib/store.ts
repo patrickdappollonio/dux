@@ -1502,18 +1502,23 @@ function gateCovered(): boolean {
 let skipNextEventsOnOpenLoad = false
 
 // Which run of which build of dux this tab loaded against, read once at boot
-// (see `buildApi.ts`). `null` until that read lands, or forever if it failed,
-// and a null baseline never forces a reload: unknown is not "changed".
+// (see `buildApi.ts`). `null` until a read of it lands, and a null baseline
+// never forces a reload: unknown is not "changed".
 let serverIdentityBaseline: ServerIdentity | null = null
 
 // The gaps before each re-ask of an identity read that answered UNKNOWN. A blip
 // on the one endpoint that decides whether this tab is running against the
 // server that served it is not a reason to stop asking at once, but a server
-// that never answers it is not worth a request every few seconds for the life
-// of the tab either: after the last gap (about three minutes in all) the asking
-// stops until the events socket reconnects, which is the moment dux can have
+// that never answers it is not worth a request every few seconds either.
+//
+// Without a baseline the asking never stops: it carries on at the last gap,
+// because a reconnect compares against the baseline, and a tab that has none
+// cannot notice a restart however many times it reconnects. A run check that
+// follows a known baseline stops after the last gap (about three minutes in
+// all) until the events socket reconnects, which is the moment dux can have
 // been restarted underneath the page and so the moment the question matters.
 const IDENTITY_REPROBE_BACKOFF_MS = [5000, 10000, 20000, 40000, 60000, 60000]
+const IDENTITY_REPROBE_FLOOR_MS = IDENTITY_REPROBE_BACKOFF_MS[IDENTITY_REPROBE_BACKOFF_MS.length - 1]
 let identityReprobeTimer: ReturnType<typeof setTimeout> | null = null
 let identityReprobesUsed = 0
 // Set when the app socket is disposed: the page is torn down and nothing may
@@ -1539,7 +1544,9 @@ function resetIdentityReprobes(): void {
 function scheduleIdentityReprobe(): void {
   if (!hasBrowser || identityReprobesStopped) return
   if (identityReprobeTimer !== null) return
-  const gap = IDENTITY_REPROBE_BACKOFF_MS[identityReprobesUsed]
+  const gap =
+    IDENTITY_REPROBE_BACKOFF_MS[identityReprobesUsed] ??
+    (serverIdentityBaseline === null ? IDENTITY_REPROBE_FLOOR_MS : undefined)
   if (gap === undefined) return
   identityReprobesUsed += 1
   identityReprobeTimer = setTimeout(() => {
@@ -1728,7 +1735,9 @@ function resumeAfterSignIn(): void {
   skipNextEventsOnOpenLoad = false
   // The run check owed since the sign-out (see the `subscribeAuth` below). Run
   // here as well as by a reopening socket's `onOpen`, because a socket that
-  // stayed open has no `onOpen` coming.
+  // stayed open has no `onOpen` coming. Like a reconnect, it is a fresh ask,
+  // so any earlier backoff starts over behind it.
+  resetIdentityReprobes()
   if (serverIdentityBaseline === null) void loadServerIdentityBaseline()
   else void reloadIfServerChanged()
   if (state.conn !== "open") return
