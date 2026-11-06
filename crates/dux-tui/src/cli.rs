@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 
 use crate::config::{self, Config, DuxPaths};
+use crate::config_spec::config_flags;
 use crate::git;
 use crate::keybindings::RuntimeBindings;
 use crate::logger;
@@ -120,7 +121,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
     match sub {
         "reset" => {
             let all = args[1..].iter().any(|a| a == "--all");
-            reject_unknown_flags(&args[1..], &["--all"])?;
+            reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_reset(
                 paths,
                 if all {
@@ -133,7 +134,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
         }
         "diff" => {
             let raw = args[1..].iter().any(|a| a == "--raw");
-            reject_unknown_flags(&args[1..], &["--raw"])?;
+            reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_diff(
                 paths,
                 if raw {
@@ -151,7 +152,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             } else {
                 dux_core::config_keys::HeldBack::Masked
             };
-            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_regenerate(
                 paths,
                 if yes {
@@ -170,7 +171,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             } else {
                 dux_core::config_keys::HeldBack::Masked
             };
-            reject_unknown_flags(&args[1..], &["--yes", "--show"])?;
+            reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_restore_docs(
                 paths,
                 if yes {
@@ -207,50 +208,30 @@ fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// `dux config --help`: the description of `dux config` and then of each of
+/// its subcommands in full, so one help holds every flag and warning.
 fn print_config_help(out: &mut dyn std::io::Write) -> Result<()> {
-    writeln!(
-        out,
-        "\
-dux config: manage the dux configuration file
-
-Subcommands:
-  dux config path          Print the config file path
-  dux config get <setting> Print one setting's value, for example
-                           `dux config get server.port`. Values that can
-                           hold secrets (env, projects) need --show
-  dux config set <setting> <value>
-                           Change one setting, keeping the file's comments,
-                           and have a running dux reload, saying whether it
-                           worked (exit 1 if it refused or half applied,
-                           6 if it gave no answer in time). Lists are one
-                           TOML array: '[\"a\", \"b\"]'
-  dux config set server.auth.password
-                           Set the web UI password: asked for twice without
-                           echo, with a strength meter. Never a command-line
-                           argument; add --stdin to pipe it in instead.
-                           env.<NAME> values are asked for the same way
-  dux config diff          Show settings that differ from defaults (summary;
-                           [env] and project details are summarized, never
-                           printed, so it is safe to paste into a bug report)
-  dux config diff --raw    Show a unified diff against the default config.
-                           This prints the WHOLE config, [env] values included:
-                           redact it before sharing.
-  dux config reset         Remove config, logs and saved remotes (keeps agents
-                           and worktrees)
-  dux config reset --all   Full factory reset: remove config, logs, saved remotes,
-                           sessions, and worktrees (deletes nothing if a program
-                           dux started still runs)
-  dux config regenerate    Preview a fresh default config (shows diff; [env]
-                           and other sensitive values are hidden unless you
-                           add --show)
-  dux config regenerate --yes
-                           Overwrite the config file with fresh defaults
-  dux config restore-docs  Preview re-adding the explanatory comments to your
-                           config, keeping every value you have set (hides
-                           values like regenerate; --show reveals them)
-  dux config restore-docs --yes
-                           Apply it (writes a timestamped backup first)"
-    )?;
+    let mut command = crate::config_spec::config_command();
+    command.build();
+    let about = command
+        .get_about()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let mut about = about.chars();
+    let lowered: String = about
+        .next()
+        .map(|first| first.to_lowercase().chain(about).collect())
+        .unwrap_or_default();
+    let root = command
+        .clone()
+        .help_template("{usage-heading} {usage}\n\n{all-args}")
+        .render_long_help()
+        .to_string();
+    write!(out, "dux config: {lowered}\n\n{}", root.trim_end())?;
+    for sub in command.get_subcommands_mut() {
+        write!(out, "\n\n{}", sub.render_long_help().to_string().trim_end())?;
+    }
+    writeln!(out)?;
     Ok(())
 }
 
@@ -1841,6 +1822,21 @@ mod tests {
 
     #[test]
     fn a_config_result_whose_reader_went_away_ends_quietly_and_any_other_print_failure_is_said() {
+        let mut printed = Vec::new();
+        print_config_help(&mut ResultOut(&mut printed)).expect("printed");
+        let help = String::from_utf8(printed).expect("text");
+        assert!(
+            help.starts_with("dux config: manage the dux configuration file\n"),
+            "{help}"
+        );
+        for needle in [
+            "This prints the WHOLE config, [env] values included: redact it before sharing",
+            "asked for twice without echo, with a strength meter",
+            "Remove config, logs and saved remotes (keeps agents and worktrees)",
+        ] {
+            assert!(help.contains(needle), "missing {needle}:\n{help}");
+        }
+
         let gone = print_config_help(&mut ResultOut(Refusing(std::io::ErrorKind::BrokenPipe)));
         assert!(finish_config(gone).is_ok());
 

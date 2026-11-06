@@ -9,6 +9,9 @@ path = "src/lib.rs"
 [dependencies]
 dux-core.workspace = true
 anyhow.workspace = true
+# Describes `dux config` for its help and the reference page; the same version
+# the dux binary parses its command line with.
+clap = { version = "4.6.7", features = ["derive"] }
 arboard = "3.4.1"
 chrono.workspace = true
 crossterm = "0.29.0"

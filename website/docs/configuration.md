@@ -60,6 +60,9 @@ A handful of subcommands handle the file without you hunting for it:
     Browser tabs and saved remotes that knew it treat the reset dux as a different one.
     See the warning below.
 
+Every flag of every `dux config` subcommand is in the
+[command line reference](/docs/cli-reference#dux-config).
+
 Hand-edits are preserved across saves: your comments and ordering survive.
 
 `dux config` always works on this machine's file. When the command line has a remote

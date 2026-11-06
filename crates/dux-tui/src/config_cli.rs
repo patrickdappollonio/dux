@@ -10,6 +10,7 @@ use crate::numeric::usize_to_u64;
 use std::io::{Read, Write};
 
 use crate::config::ConfigRead;
+use crate::config_spec::config_flags;
 use anyhow::{Result, anyhow, bail};
 use dux_core::auth::{Password, PasswordPolicy, StrengthLabel};
 use dux_core::client::reload::ReloadAnswer;
@@ -210,8 +211,12 @@ pub(crate) fn run_get(
 ) -> Result<()> {
     // The terminal UI's own start check joins the one list `get` reports from.
     crate::config::install_canonical_renderer();
-    let show = args.iter().any(|a| a == "--show");
-    let rest: Vec<&String> = args.iter().filter(|a| *a != "--show").collect();
+    let flags = config_flags("get");
+    let show = args.iter().any(|a| flags.contains(&a.as_str()));
+    let rest: Vec<&String> = args
+        .iter()
+        .filter(|a| !flags.contains(&a.as_str()))
+        .collect();
     let [path] = rest.as_slice() else {
         bail!("usage: dux config get <setting> [--show], for example `dux config get server.port`");
     };
@@ -308,7 +313,9 @@ pub(crate) fn run_set(
     if let Some(first) = args.iter().find(|arg| !arg.starts_with("--"))
         && let Ok(key) = config_keys::lookup(first)
         && matches!(key.policy, WritePolicy::Secret(_))
-        && args.iter().any(|arg| arg != first && arg != "--stdin")
+        && args
+            .iter()
+            .any(|arg| arg != first && !config_flags("set").contains(&arg.as_str()))
     {
         let what = match key.policy {
             WritePolicy::Secret(SecretKind::PasswordHash { .. }) => "the password",
@@ -520,7 +527,7 @@ fn parse_set_args(args: &[String]) -> Result<SetArgs> {
     for arg in args {
         if !flags_done && arg == "--" {
             flags_done = true;
-        } else if !flags_done && arg == "--stdin" {
+        } else if !flags_done && config_flags("set").contains(&arg.as_str()) {
             stdin = true;
         } else if !flags_done && arg.starts_with("--") {
             bail!("{UNKNOWN_FLAG}");

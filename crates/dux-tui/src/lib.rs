@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod config_cli;
 mod config_saver;
+mod config_spec;
 mod diff;
 // The terminal-focus grace state machine is core-owned (`dux_core::focus`),
 // shared by rule with the web's viewed-ping grace.
@@ -30,6 +31,7 @@ pub use server_screen::{ServerScreenTick, ServerStatusScreen, restore_terminal};
 /// than a bare one. Re-exported so `crates/dux/src/main.rs` can call it on the
 /// `dux server` path, which never goes through the TUI's `ensure_config`.
 pub use config::install_canonical_renderer;
+pub use config_spec::config_command;
 
 /// The hidden password prompt `dux remote login` signs in with.
 pub use config_cli::{SecretInput, read_env_value, read_sign_in_password};
