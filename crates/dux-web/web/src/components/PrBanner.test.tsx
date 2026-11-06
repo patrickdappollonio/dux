@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import { PrBanner } from "@/components/PrBanner"
@@ -175,8 +175,11 @@ describe("PrBanner with several pull requests", () => {
       screen.getByLabelText("Previous pull request"),
       screen.getByLabelText("Next pull request"),
       screen.getByLabelText("All pull requests"),
+      screen.getByRole("link"),
     ].map((el) => el.className.split(/\s+/).filter((c) => /(^|:)h-/.test(c)).sort().join(" "))
     expect(new Set(heights).size).toBe(1)
+    // The strip's border sits outside that height, so nothing in it is cut.
+    expect(screen.getByTestId("pr-banner").className).toMatch(/(^| )box-content( |$)/)
     expect(heights[0]).toContain("pointer-coarse:h-10")
   })
 
@@ -189,6 +192,10 @@ describe("PrBanner with several pull requests", () => {
         fireEvent.click(screen.getByLabelText("All pull requests"))
       })
       expect(screen.getByText("3 pull requests on this agent")).toBeTruthy()
+      const list = screen.getByRole("menu")
+      expect(list.className).toContain("md:w-[min(27.5rem,calc(100vw-2rem))]")
+      const row = within(list).getByText("#418").closest("a") as HTMLElement
+      expect(row.className).toMatch(/(^| )items-center( |$)/)
       expect(screen.getByText("attached by you", { exact: false })).toBeTruthy()
       const manage = screen.getByText("Pull requests…")
       fireEvent.click(manage)

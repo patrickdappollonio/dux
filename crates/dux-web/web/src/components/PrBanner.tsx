@@ -70,8 +70,10 @@ export function PrBanner({
   return (
     <div
       data-testid="pr-banner"
+      // `box-content` keeps the edge border outside the height token, so the
+      // link and the controls are the strip's full height and none spills.
       className={cn(
-        "flex shrink-0 items-center text-sm",
+        "box-content flex shrink-0 items-center text-sm",
         STRIP_HEIGHT,
         position === "top" ? "border-b" : "border-t",
         prBannerClass(pr.state),
@@ -82,7 +84,8 @@ export function PrBanner({
         target="_blank"
         rel="noopener noreferrer"
         className={cn(
-          "flex h-full min-w-0 flex-1 items-center gap-2 px-3 transition-colors",
+          "flex min-w-0 flex-1 items-center gap-2 px-3 transition-colors",
+          STRIP_HEIGHT,
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           prBannerLinkHoverClass(pr.state),
         )}
@@ -146,8 +149,9 @@ export function PrBanner({
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
+            alignOffset={8}
             side={position === "top" ? "bottom" : "top"}
-            className="w-96 max-w-[calc(100vw-2rem)]"
+            className="md:w-[min(27.5rem,calc(100vw-2rem))]"
           >
             <PrListMenuItems prs={prs} onManage={onManage} />
           </DropdownMenuContent>

@@ -49,9 +49,9 @@ function PrListMenuRow({ pr }: { pr: PrView }) {
     // new-tab meaning.
     <DropdownMenuItem
       render={<a href={pr.url} target="_blank" rel="noopener noreferrer" />}
-      className="items-start gap-2 py-1.5"
+      className="items-center gap-2 py-1.5"
     >
-      <GitPullRequest className={cn("mt-0.5", tone)} />
+      <GitPullRequest className={tone} />
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="flex min-w-0 items-baseline gap-1.5">
           <span className={cn("shrink-0 font-semibold", tone)}>{prName(pr)}</span>
@@ -73,7 +73,7 @@ function PrListMenuRow({ pr }: { pr: PrView }) {
           ) : null}
         </span>
       </span>
-      <ExternalLink className="mt-0.5 text-muted-foreground" />
+      <ExternalLink className="text-muted-foreground" />
     </DropdownMenuItem>
   )
 }
