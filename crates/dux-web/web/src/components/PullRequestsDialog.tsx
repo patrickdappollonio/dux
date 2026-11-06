@@ -98,6 +98,12 @@ const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
 // A row's own controls (the grip, the `⋯`, Show again): compact beside a
 // mouse, the 40px floor under a finger.
 const ROW_CONTROL = "size-8 pointer-coarse:size-10"
+// The grip and the `⋯` on a phone under a finger: narrower, keeping the floor
+// in height, so a phone-width row leaves its title a readable width. Narrowing
+// is safe on that axis because the grip sits between the sheet's edge and the
+// row's text, and the `⋯` between the text and the sheet's edge, none of which
+// takes a tap; above and below they are the rows' own full-height controls.
+const ROW_CONTROL_NARROW = "max-md:pointer-coarse:w-7"
 // A view tab fills its list beside a mouse and takes the 40px floor under a
 // finger. The selected one is a filled segment in the foreground tone, which
 // the primitive's own faint tint does not read as on this dialog's surface.
@@ -431,7 +437,11 @@ function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
   const activity = prActivity(pr)
   return (
     <>
-      <GitPullRequest className={cn("size-4 shrink-0", tone, muted && "opacity-60")} />
+      {/* On a phone the grip holds the leading slot, and the state is still
+        * the colored name and the first word under the title. */}
+      <GitPullRequest
+        className={cn("size-4 shrink-0 max-md:hidden", tone, muted && "opacity-60")}
+      />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-2">
           <span className={cn("shrink-0 font-semibold", tone, muted && "opacity-60")}>
@@ -467,16 +477,28 @@ function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
           ) : origin?.kind === "attached" ? (
             <Detail>attached by you</Detail>
           ) : null}
-          {activity ? <Detail>{activity}</Detail> : null}
+          {/* On a phone the state and the branch are what the line keeps. */}
+          {activity ? <Detail className="max-md:hidden">{activity}</Detail> : null}
         </span>
       </span>
     </>
   )
 }
 
-function Detail({ children, shrink = false }: { children: ReactNode; shrink?: boolean }) {
+function Detail({
+  children,
+  shrink = false,
+  className,
+}: {
+  children: ReactNode
+  shrink?: boolean
+  className?: string
+}) {
   return (
-    <span className={cn("inline-flex items-center gap-1.5", shrink ? "min-w-0" : "shrink-0")}>
+    <span
+      data-slot="pr-detail"
+      className={cn("inline-flex items-center gap-1.5", shrink ? "min-w-0" : "shrink-0", className)}
+    >
       <span aria-hidden>•</span>
       <span className={cn("inline-flex items-center gap-1", shrink && "min-w-0")}>{children}</span>
     </span>
@@ -534,6 +556,7 @@ function SortablePrRow({
         className={cn(
           "flex shrink-0 cursor-grab touch-manipulation items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
           ROW_CONTROL,
+          ROW_CONTROL_NARROW,
         )}
       >
         <GripVertical className="size-4" />
@@ -574,7 +597,7 @@ function RowMenu({
               variant="ghost"
               size="icon"
               aria-label={`Actions for ${prName(pr)}`}
-              className={ROW_CONTROL}
+              className={cn(ROW_CONTROL, ROW_CONTROL_NARROW)}
             />
           }
         >
@@ -648,7 +671,7 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
               <li key={pr.url} className="flex items-center gap-2 rounded-lg px-1 py-1.5">
                 {/* Stands in for the grip, so hidden rows line up with the
                   * shown ones above. */}
-                <span aria-hidden className={cn("shrink-0", ROW_CONTROL)} />
+                <span aria-hidden className={cn("shrink-0", ROW_CONTROL, ROW_CONTROL_NARROW)} />
                 {/* Show again goes under the text once the two no longer fit
                   * side by side, rather than squeezing the title. */}
                 <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">

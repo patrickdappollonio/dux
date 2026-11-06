@@ -267,8 +267,9 @@ describe("PullRequestsDialog rows", () => {
     })
   })
 
-  it("keeps a row's details on one line with the branch giving way first, beside a small muted Attached tag", () => {
-    seed(session())
+  it("keeps a row's details on one line with the branch giving way first, beside a small muted Attached tag, and gives the title the width on a phone", () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600e3).toISOString()
+    seed(session({ prs: [found, attached, { ...both, merged_at: twoDaysAgo }] }))
     render(<PullRequestsDialog />)
     const branch = screen.getByText("tab-slot-pointer")
     expect(branch.className).toMatch(/(^| )truncate( |$)/)
@@ -281,6 +282,25 @@ describe("PullRequestsDialog rows", () => {
     expect(screen.getByLabelText("Drag #418").closest("li")?.className).toMatch(
       /(^| )items-center( |$)/,
     )
+    // On a phone the title keeps a readable width beside the grip: the
+    // relative time and the leading state icon go (the state is still the
+    // first word below the title), and the grip and the menu narrow under a
+    // finger, keeping the 40px floor in height.
+    const when = within(details).getByText(/^merged .+/)
+    expect(when.closest("[data-slot='pr-detail']")?.className).toMatch(/(^| )max-md:hidden( |$)/)
+    expect(within(details).getByText("tab-slot-pointer").closest("[data-slot='pr-detail']")
+      ?.className).not.toMatch(/max-md:hidden/)
+    const row = screen.getByLabelText("Drag #415").closest("li") as HTMLElement
+    expect(row.querySelector("svg.lucide-git-pull-request")?.getAttribute("class")).toMatch(
+      /(^| )max-md:hidden( |$)/,
+    )
+    for (const control of [
+      screen.getByLabelText("Drag #415"),
+      within(row).getByLabelText("Actions for #415"),
+    ]) {
+      expect(control.className).toMatch(/(^| )max-md:pointer-coarse:w-7( |$)/)
+      expect(control.className).toMatch(/(^| )pointer-coarse:size-10( |$)/)
+    }
   })
 
   it("says how the order is kept, and Sort switches it", async () => {
