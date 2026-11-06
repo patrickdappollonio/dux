@@ -275,6 +275,64 @@ describe("DeleteSessionDialog", () => {
     )
   })
 
+  // A ready answer that could not read the current branch is a failed check:
+  // the pill never says the branches were checked, and the reason is said once.
+  it("keeps the warning pill when git could not read the current branch", async () => {
+    vi.useFakeTimers()
+    try {
+      let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+      branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      await act(async () => answer(offer(null)))
+      const reason =
+        "dux could not check the branches (git could not read the branch), so they will be kept."
+      expect(screen.getByRole("status").textContent).toBe(reason)
+      act(() => vi.advanceTimersByTime(5000))
+      expect(screen.getByRole("status").textContent).toBe(reason)
+      expect(screen.queryByText("Branches checked")).toBeNull()
+      expect(screen.getAllByText(/could not check the branches/)).toHaveLength(1)
+      expect(currentBox().getAttribute("aria-disabled")).toBe("true")
+      expect(currentBox().getAttribute("aria-checked")).toBe("false")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The pill's own height follows what it measures, so a one-line pill turning
+  // into a two-line one can be transitioned rather than jumping.
+  it("sizes the pill's wrapper to the pill's measured height as it changes", () => {
+    const observers: { cb: ResizeObserverCallback; el: Element }[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private cb: ResizeObserverCallback) {}
+        observe(el: Element) {
+          observers.push({ cb: this.cb, el })
+        }
+        disconnect() {}
+      },
+    )
+    const resize = (blockSize: number) =>
+      act(() => {
+        for (const { cb, el } of observers) {
+          const entry = { target: el, borderBoxSize: [{ blockSize, inlineSize: 100 }] }
+          cb([entry] as unknown as ResizeObserverEntry[], {} as ResizeObserver)
+        }
+      })
+    branchUnpushed.mockReturnValue(new Promise(() => {}))
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    const content = screen.getByRole("status").parentElement!
+    const wrapper = content.parentElement!
+    expect(observers.map((o) => o.el)).toContain(content)
+    resize(28)
+    expect(wrapper.style.height).toBe("28px")
+    resize(42)
+    expect(wrapper.style.height).toBe("42px")
+  })
+
   // The project's own branch is named and offered in no box: never a failed
   // check, and the delete says the box was not offered.
   it("names the project's own branch and offers no box for it", async () => {

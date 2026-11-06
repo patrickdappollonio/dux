@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Check, CircleAlert, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -56,6 +56,26 @@ type OfferState =
   | { state: "ready"; offer: BranchOffer }
 
 const PENDING: OfferState = { state: "pending" }
+
+// A ready offer with no first box for a branch that is not the project's own:
+// git could not read the branch the worktree is on.
+function currentBranchFailed(offer: BranchOffer): boolean {
+  return offer.current === null && !offer.protected.includes(offer.current_name)
+}
+
+// What the check says as a whole. A ready offer whose current branch could not
+// be read is a failed check, so the pill and the first box never disagree.
+type BranchCheck =
+  | { state: "pending" }
+  | { state: "checked" }
+  | { state: "failed"; reason: string }
+
+function branchCheck(offer: OfferState): BranchCheck {
+  if (offer.state !== "ready") return offer
+  return currentBranchFailed(offer.offer)
+    ? { state: "failed", reason: "git could not read the branch" }
+    : { state: "checked" }
+}
 
 // How long "Branches checked" stays up before the pill leaves.
 const CHECKED_PILL_MS = 1500
@@ -141,11 +161,11 @@ function branchAnswers(
   }
   // Decided from the name the offer was read for, never from where the
   // worktree is by now.
-  const { current, others, protected: own, current_name } = offer.offer
+  const { current, others } = offer.offer
   return {
     current: current
       ? boxAnswer([current], deleteCurrent)
-      : unchecked(own.includes(current_name) ? "not_offered" : "failed"),
+      : unchecked(currentBranchFailed(offer.offer) ? "failed" : "not_offered"),
     others:
       others.length === 0
         ? unchecked("not_offered")
@@ -196,19 +216,47 @@ function Collapse({ open, children }: { open: boolean; children: ReactNode }) {
   )
 }
 
+// Follows its content's height with a transition, so a change of what the
+// content says (one line becoming two) resizes the centered dialog smoothly
+// instead of in one frame. Until the first measurement the height is natural.
+function AnimatedHeight({ children }: { children: ReactNode }) {
+  const inner = useRef<HTMLDivElement>(null)
+  const [height, setHeight] = useState<number | null>(null)
+  useEffect(() => {
+    const el = inner.current
+    if (!el || typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver((entries) => {
+      const box = entries[entries.length - 1]?.borderBoxSize?.[0]
+      setHeight(box ? box.blockSize : el.getBoundingClientRect().height)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+  return (
+    <div
+      className="overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
+      style={height === null ? undefined : { height }}
+    >
+      <div ref={inner} className="flex flex-col items-start">
+        {children}
+      </div>
+    </div>
+  )
+}
+
 // One pill for the whole branch check, drawn from the dialog's first frame so
 // its arrival moves nothing: a spinner while git is asked, a check once it
 // answered, and the warning tone with the reason when it could not be asked.
 // Every state has an icon of its own, so the tone is never the only signal.
-function BranchCheckPill({ offer }: { offer: OfferState }) {
+function BranchCheckPill({ check }: { check: BranchCheck }) {
   const [icon, prose, tone] =
-    offer.state === "pending"
+    check.state === "pending"
       ? [
           <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />,
           branchesCheckingProse(),
           "border-border text-muted-foreground",
         ]
-      : offer.state === "ready"
+      : check.state === "checked"
         ? [
             <Check className="size-3.5 shrink-0 text-dux-success" />,
             branchesCheckedProse(),
@@ -216,7 +264,7 @@ function BranchCheckPill({ offer }: { offer: OfferState }) {
           ]
         : [
             <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-dux-warning" />,
-            branchesCheckFailedProse(offer.reason),
+            branchesCheckFailedProse(check.reason),
             "border-dux-warning/40 bg-dux-warning/10",
           ]
   return (
@@ -224,7 +272,7 @@ function BranchCheckPill({ offer }: { offer: OfferState }) {
       role="status"
       className={cn(
         "flex min-h-7 items-start gap-1.5 self-start border px-2.5 py-1 text-xs",
-        offer.state === "failed" ? "rounded-lg" : "items-center rounded-full",
+        check.state === "failed" ? "rounded-lg" : "items-center rounded-full",
         tone,
       )}
     >
@@ -262,6 +310,10 @@ export function DeleteSessionDialog() {
     ? (currentAnswer ?? currentDefault(current))
     : false
   const deleteOthers = ready ? (othersAnswer ?? othersDefault(others)) : false
+  const check = branchCheck(offer)
+  // The first box is left out only for the project's own branch; a failed
+  // check keeps it, disabled, with the reason said once, in the pill.
+  const firstBoxShown = current !== null || check.state !== "checked"
 
   function reset() {
     setDeleteWorktree(false)
@@ -311,7 +363,8 @@ export function DeleteSessionDialog() {
   }, [askOffer, deleteTarget, asked])
 
   // A failed check keeps its pill, since the reason is the only place it is said.
-  const checkedPending = ours?.offer.state === "ready" && !ours.settled
+  const checked = ours !== null && branchCheck(ours.offer).state === "checked"
+  const checkedPending = checked && !ours?.settled
   useEffect(() => {
     if (!checkedPending) return
     const timer = setTimeout(
@@ -321,7 +374,7 @@ export function DeleteSessionDialog() {
     )
     return () => clearTimeout(timer)
   }, [checkedPending])
-  const pillShown = !(ours?.offer.state === "ready" && ours.settled)
+  const pillShown = !(checked && ours?.settled)
 
   async function handleConfirm() {
     if (!deleteTarget) return
@@ -389,7 +442,7 @@ export function DeleteSessionDialog() {
                 git will not delete a branch still checked out, so there is
                 nothing to offer. */}
             <Collapse open={deleteWorktree}>
-              {(ready === null || current !== null) && (
+              {firstBoxShown && (
                 <div className="flex items-center gap-2">
                   <Checkbox
                     id="delete-branch"
@@ -399,21 +452,13 @@ export function DeleteSessionDialog() {
                   />
                   <label htmlFor="delete-branch" className="min-w-0 text-sm">
                     {renderProse(
-                      currentBranchLabelProse(current?.name ?? managed.branch_name),
+                      currentBranchLabelProse(
+                        current?.name ?? ready?.current_name ?? managed.branch_name,
+                      ),
                     )}
                   </label>
                 </div>
               )}
-              {ready &&
-                current === null &&
-                !own.includes(ready.current_name) && (
-                  // In the first box's place: only that box failed.
-                  <p className="text-sm text-muted-foreground">
-                    {renderProse(
-                      branchesCheckFailedProse("git could not read the branch"),
-                    )}
-                  </p>
-                )}
               {ready && current && (
                 <BranchWarning prose={currentBranchWarningProse(current.origin)} />
               )}
@@ -451,7 +496,9 @@ export function DeleteSessionDialog() {
               )}
             </Collapse>
             <Collapse open={pillShown}>
-              <BranchCheckPill offer={offer} />
+              <AnimatedHeight>
+                <BranchCheckPill check={check} />
+              </AnimatedHeight>
             </Collapse>
           </div>
         )}
