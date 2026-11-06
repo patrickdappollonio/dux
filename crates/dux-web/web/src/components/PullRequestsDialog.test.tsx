@@ -32,6 +32,19 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => {
   }
 })
 
+// jsdom never runs a sort, so dnd-kit would hand back no transition at all; a
+// fixed one stands in for the animation it gives a row that is moving.
+vi.mock("@dnd-kit/sortable", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dnd-kit/sortable")>()
+  return {
+    ...actual,
+    useSortable: (args: Parameters<typeof actual.useSortable>[0]) => ({
+      ...actual.useSortable(args),
+      transition: "transform 250ms ease",
+    }),
+  }
+})
+
 function installBootStubs() {
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
@@ -263,6 +276,17 @@ describe("PullRequestsDialog rows", () => {
     })
     fireEvent.click(await screen.findByText("Automatic"))
     expect(store.setPullRequestSort).toHaveBeenCalledWith("s1", "automatic")
+  })
+
+  it("animates a moving row only when motion is welcome", () => {
+    seed(session({ pr_sort: "manual" }))
+    const { unmount } = render(<PullRequestsDialog />)
+    const row = () => screen.getByLabelText("Drag #418").closest("li") as HTMLElement
+    expect(row().style.transition).toBe("transform 250ms ease")
+    unmount()
+    media.set("(prefers-reduced-motion: reduce)", true)
+    render(<PullRequestsDialog />)
+    expect(row().style.transition).toBe("")
   })
 
   it("says where dux looks when the agent has none", () => {

@@ -61,6 +61,7 @@ import {
 } from "@/components/ui/sheet"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "@/lib/dragActivation"
@@ -474,17 +475,19 @@ function SortablePrRow({
     transition,
     isDragging,
   } = useSortable({ id })
+  const reducedMotion = usePrefersReducedMotion()
   const style: CSSProperties = {
     // Vertical reorder list: lock the drag to the Y axis.
     transform: transform ? `translate3d(0, ${Math.round(transform.y)}px, 0)` : undefined,
-    transition,
+    // An inline transition outranks any `motion-reduce:` class, so it goes here.
+    transition: reducedMotion ? undefined : transition,
   }
   return (
     <li
       ref={setNodeRef}
       style={style}
       className={cn(
-        "group/pr-row flex items-start gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50 motion-reduce:transition-none",
+        "group/pr-row flex items-start gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50",
         isDragging && "z-10 bg-muted shadow-lg",
       )}
     >
