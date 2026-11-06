@@ -71,6 +71,7 @@ function currentBranchFailed(offer: BranchOffer): boolean {
 type BranchCheck =
   | { state: "pending" }
   | { state: "checked"; prose: Prose }
+  | { state: "none" }
   | { state: "failed"; prose: Prose }
 
 function branchCheck(offer: OfferState): BranchCheck {
@@ -93,9 +94,10 @@ function branchCheck(offer: OfferState): BranchCheck {
     lossAnswer(ready.others_unpushed, ready.others_unpushed_error),
     lossAnswer(ready.both_unpushed, ready.both_unpushed_error),
   )
-  return "ok" in answer
-    ? { state: "checked", prose: answer.ok }
-    : { state: "failed", prose: answer.failed }
+  if ("failed" in answer) return { state: "failed", prose: answer.failed }
+  return answer.ok === null
+    ? { state: "none" }
+    : { state: "checked", prose: answer.ok }
 }
 
 // How long the answer stays up before the pill leaves.
@@ -294,7 +296,11 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // splitting, unless it is longer than a line on its own; its negative margin
 // keeps it from making its line taller than the text's, so a wrapped pill
 // grows by whole lines and its padding stays even.
-function BranchCheckPill({ check }: { check: BranchCheck }) {
+function BranchCheckPill({
+  check,
+}: {
+  check: Exclude<BranchCheck, { state: "none" }>
+}) {
   const text = useRef<HTMLSpanElement>(null)
   const wrapped = useWrapped(text)
   const [icon, prose, tone] =
@@ -428,7 +434,10 @@ export function DeleteSessionDialog() {
     )
     return () => clearTimeout(timer)
   }, [checkedPending])
-  const pillShown = !(checked && ours?.settled)
+  // Nothing offered (the project's own branch) leaves nothing to say, so the
+  // pending pill, which had to be drawn before the dialog could know, goes at once.
+  const nothingOffered = ours !== null && branchCheck(ours.offer).state === "none"
+  const pillShown = !(checked && ours?.settled) && !nothingOffered
 
   async function handleConfirm() {
     if (!deleteTarget) return
@@ -554,7 +563,9 @@ export function DeleteSessionDialog() {
             </Collapse>
             <Collapse open={pillShown}>
               <AnimatedHeight>
-                <BranchCheckPill check={check} />
+                <BranchCheckPill
+                  check={check.state === "none" ? { state: "pending" } : check}
+                />
               </AnimatedHeight>
             </Collapse>
             {/* Misclick-safe spacing between the checkboxes and the buttons,

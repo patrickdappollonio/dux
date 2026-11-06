@@ -211,6 +211,9 @@ pub fn branches_checking_prose() -> Prose {
 /// than two such branches are counted rather than named, and the second box
 /// counts as a whole, since git counts it as one.
 ///
+/// `None` when no box offers a branch (the agent is on the project's own), so
+/// there is nothing to say and the surface shows no answer at all.
+///
 /// # Errors
 ///
 /// The sentence saying git could not count the commits, when the count the
@@ -221,10 +224,10 @@ pub fn branches_checked_prose(
     others: &[&str],
     others_lost: &UnpushedAnswer,
     both_lost: &UnpushedAnswer,
-) -> Result<Prose, Prose> {
+) -> Result<Option<Prose>, Prose> {
     let offered: Vec<&str> = current.into_iter().chain(others.iter().copied()).collect();
     if offered.is_empty() {
-        return Ok(Prose::new().text("No branches to check"));
+        return Ok(None);
     }
     let lost = match (current, others.is_empty()) {
         (Some(_), false) => both_lost,
@@ -254,7 +257,7 @@ pub fn branches_checked_prose(
         if no_remote {
             prose.push_text(" is also on another branch, and this repository has no remote");
         }
-        return Ok(prose);
+        return Ok(Some(prose));
     }
     let holds = |lost: &UnpushedAnswer| matches!(lost, Ok(lost) if lost.count > 0);
     let mut holding: Vec<&str> = current
@@ -282,7 +285,7 @@ pub fn branches_checked_prose(
         (true, true) => " is on no other branch, and this repository has no remote",
         (true, false) => " are on no other branch, and this repository has no remote",
     });
-    Ok(prose)
+    Ok(Some(prose))
 }
 
 /// What the branch boxes say when git could not be asked about them.
@@ -311,4 +314,21 @@ pub fn protected_branches_prose(branches: &[&str]) -> Prose {
     } else {
         " are the project's own branches, so dux keeps them."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_offered_branch_leaves_nothing_to_say() {
+        let none = Ok(crate::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        });
+        assert!(matches!(
+            branches_checked_prose(None, &none, &[], &none, &none),
+            Ok(None)
+        ));
+    }
 }

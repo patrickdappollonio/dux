@@ -385,6 +385,8 @@ describe("DeleteSessionDialog", () => {
     tickWorktree()
     expect(await screen.findByText(/is the project's own branch, so dux keeps it\./)).toBeTruthy()
     expect(screen.queryByText(/could not check the branches/)).toBeNull()
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.queryByText(/No branches to check/)).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     const notOffered = { delete: false, branches: [], unchecked: "not_offered" }
     expect(deleteSession).toHaveBeenCalledWith(
@@ -595,6 +597,21 @@ describe("DeleteSessionDialog", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // With nothing offered the pending pill, drawn before the dialog could know,
+  // goes at once: no green answer and no hold.
+  it("removes the pending pill at once when no branch is offered", async () => {
+    let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+    branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    expect(screen.getByRole("status").textContent).toBe(
+      "Looking for unpushed work on the branches…",
+    )
+    await act(async () => answer(offer(null, [], { protected: ["dux/s1"] })))
+    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.queryByText(/No branches to check/)).toBeNull()
   })
 
   // The answer says, before anything is ticked, whether deleting the branches

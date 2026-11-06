@@ -12746,13 +12746,14 @@ impl App {
                         &offer.both_unpushed,
                     );
                     lines.extend(match answer {
-                        Ok(answer) => self.indented_prose_lines(
+                        Ok(Some(answer)) => self.indented_prose_lines(
                             &Prose::new()
                                 .text(format!("{} ", self.glyphs().check))
                                 .then(answer),
                             Style::default().fg(self.theme.success_fg),
                             inner_width,
                         ),
+                        Ok(None) => Vec::new(),
                         Err(failed) => self.indented_prose_lines(&failed, warning, inner_width),
                     });
                 }
@@ -28232,6 +28233,35 @@ mod tests {
         assert!(screen.contains("2 commits on"), "{screen}");
         assert!(screen.contains("aren't pushed anywhere"), "{screen}");
         assert!(screen.contains("Also delete the branch"), "{screen}");
+        assert!(!screen.contains("Looking for unpushed work"), "{screen}");
+    }
+
+    /// On the project's own branch no box is offered, so the answer spot stays
+    /// empty: no checked line and no sentence about there being nothing to check.
+    #[test]
+    fn the_project_s_own_branch_leaves_the_answer_spot_empty() {
+        let none_unpushed = dux_core::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        };
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+                current_name: "main".to_string(),
+                current: None,
+                current_unpushed: Ok(none_unpushed),
+                others: Vec::new(),
+                others_unpushed: Ok(none_unpushed),
+                both_unpushed: Ok(none_unpushed),
+                newly_seen: Vec::new(),
+                protected: vec!["main".to_string()],
+            }),
+            dux_core::engine::WorktreeOnDelete::Remove,
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("the project's own branch"), "{screen}");
+        assert!(!screen.contains("No branches to check"), "{screen}");
+        assert!(!screen.contains(app.glyphs().check), "{screen}");
         assert!(!screen.contains("Looking for unpushed work"), "{screen}");
     }
 

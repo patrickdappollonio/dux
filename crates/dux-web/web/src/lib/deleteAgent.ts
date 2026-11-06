@@ -213,7 +213,8 @@ export type UnpushedAnswer =
  * The commits are said to be on the branches whose own box's count is not
  * zero, or on every offered branch when only their union holds them. More
  * than two such branches are counted rather than named, and the second box
- * counts as a whole, since git counts it as one. Mirrors dux-core's
+ * counts as a whole, since git counts it as one. `ok: null` is no box offering
+ * a branch, which has nothing to say. Mirrors dux-core's
  * `branches_checked_prose`, pinned by the shared prose fixture.
  */
 export function branchesCheckedProse(
@@ -222,9 +223,9 @@ export function branchesCheckedProse(
   others: readonly string[],
   othersLost: UnpushedAnswer,
   bothLost: UnpushedAnswer,
-): { ok: Prose } | { failed: Prose } {
+): { ok: Prose | null } | { failed: Prose } {
   const offered = [...(current === null ? [] : [current]), ...others]
-  if (offered.length === 0) return { ok: ["No branches to check"] }
+  if (offered.length === 0) return { ok: null }
   const lost =
     current !== null ? (others.length > 0 ? bothLost : currentLost) : othersLost
   if ("failed" in lost)

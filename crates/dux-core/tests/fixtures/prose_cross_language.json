@@ -1632,29 +1632,6 @@
       ]
     },
     {
-      "what": "the branch check's answer when the only branch is the project's own",
-      "sentence": "delete_branches_checked",
-      "args": {
-        "current": null,
-        "current_lost": {
-          "count": 0,
-          "has_remote_refs": true
-        },
-        "others": [],
-        "others_lost": {
-          "count": 0,
-          "has_remote_refs": true
-        },
-        "both_lost": {
-          "count": 0,
-          "has_remote_refs": true
-        }
-      },
-      "segments": [
-        "No branches to check"
-      ]
-    },
-    {
       "what": "the branch boxes when git could not be asked",
       "sentence": "delete_branches_check_failed",
       "args": {

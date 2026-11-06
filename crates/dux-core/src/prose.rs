@@ -457,7 +457,10 @@ mod tests {
                     &lost("others_lost"),
                     &lost("both_lost"),
                 )
-                .unwrap_or_else(|failed| failed)
+                .map_or_else(
+                    |failed| failed,
+                    |said| said.expect("a fixture case says something"),
+                )
             }
             "delete_branches_check_failed" => {
                 crate::delete_agent_prose::branches_check_failed_prose(&s("reason"))
