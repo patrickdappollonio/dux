@@ -843,11 +843,11 @@ impl SessionStore {
     /// runtime state, never config.
     ///
     /// The tables are detected, created and filled in ONE transaction, and
-    /// only by the open that creates them, so the one-pull-request tables
-    /// they replace are imported once. Those are left exactly as they were: a
-    /// downgrade reads them as it left them, and nothing it writes there is
-    /// imported again, since that would bring back pull requests the user
-    /// detached here.
+    /// only the open that creates the rows table fills them, so the
+    /// one-pull-request tables they replace are imported once. Those are
+    /// left exactly as they were: a downgrade reads them as it left them, and
+    /// nothing it writes there is imported again, since that would bring back
+    /// pull requests the user detached here.
     ///
     /// Host and repository compare without regard to case, as GitHub does,
     /// while keeping the case GitHub reported for display.
@@ -858,6 +858,24 @@ impl SessionStore {
              where type = 'table' and name = 'session_pull_requests')",
             [],
             |row| row.get(0),
+        )?;
+        // Created on every open, so a database that has the rows table without
+        // these still gets them; only the import is tied to the rows table.
+        tx.execute_batch(
+            r"
+            create table if not exists session_pr_prefs (
+                session_id text primary key,
+                sort_mode text not null default 'automatic',
+                hide_created_before text
+            );
+            create table if not exists session_branch_former_names (
+                session_id text not null,
+                branch_name text not null,
+                former_name text not null,
+                renamed_at text not null,
+                primary key (session_id, branch_name, former_name)
+            );
+            ",
         )?;
         if !exists {
             tx.execute_batch(
@@ -883,18 +901,6 @@ impl SessionStore {
                     first_recorded_at text not null,
                     last_refreshed_at text,
                     primary key (session_id, host, owner_repo, pr_number)
-                );
-                create table if not exists session_pr_prefs (
-                    session_id text primary key,
-                    sort_mode text not null default 'automatic',
-                    hide_created_before text
-                );
-                create table if not exists session_branch_former_names (
-                    session_id text not null,
-                    branch_name text not null,
-                    former_name text not null,
-                    renamed_at text not null,
-                    primary key (session_id, branch_name, former_name)
                 );
                 ",
             )?;
@@ -2735,10 +2741,19 @@ impl SessionStore {
         conn: &Connection,
         session_id: &str,
         pr: &crate::model::AgentPr,
+        write: PrRowWrite,
     ) -> Result<()> {
         let time = |at: Option<DateTime<Utc>>| at.map(|at| at.to_rfc3339());
+        let user_flags = match write {
+            PrRowWrite::Exact => {
+                "found = excluded.found, attached = excluded.attached, \
+                 hidden = excluded.hidden, manual_slot = excluded.manual_slot,"
+            }
+            PrRowWrite::Refresh => "found = found or excluded.found,",
+        };
         conn.execute(
-            r"
+            &format!(
+                r"
             insert into session_pull_requests
                 (session_id, host, owner_repo, pr_number, state, is_draft, title, url,
                  head_branch, found, attached, hidden, manual_slot, gh_created_at,
@@ -2754,16 +2769,14 @@ impl SessionStore {
                 title = excluded.title,
                 url = excluded.url,
                 head_branch = excluded.head_branch,
-                found = excluded.found,
-                attached = excluded.attached,
-                hidden = excluded.hidden,
-                manual_slot = excluded.manual_slot,
+                {user_flags}
                 gh_created_at = excluded.gh_created_at,
                 gh_updated_at = excluded.gh_updated_at,
                 gh_closed_at = excluded.gh_closed_at,
                 gh_merged_at = excluded.gh_merged_at,
                 last_refreshed_at = excluded.last_refreshed_at
-            ",
+            "
+            ),
             params![
                 session_id,
                 pr.host,
@@ -2789,18 +2802,23 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Insert one of an agent's pull requests, or update the row already there
-    /// (its first-recorded time stays).
+    /// Insert one of an agent's pull requests, or refresh what GitHub says
+    /// about the row already there. A stored row keeps its first-recorded
+    /// time, whether it is attached or hidden and its manual slot, and stays
+    /// found once found: the caller may have built `pr` without having read
+    /// the stored row, and those are the user's to change, through
+    /// [`Self::replace_agent_prs`].
     ///
     /// # Errors
     ///
     /// Fails when the database write fails.
     pub fn upsert_agent_pr(&self, session_id: &str, pr: &crate::model::AgentPr) -> Result<()> {
-        Self::write_agent_pr(&self.conn, session_id, pr)
+        Self::write_agent_pr(&self.conn, session_id, pr, PrRowWrite::Refresh)
     }
 
     /// Make an agent's pull requests exactly `rows` and its preferences
     /// `prefs`, in one transaction, so a failure leaves neither change behind.
+    /// Rows in a state this build cannot read are left as they are.
     ///
     /// # Errors
     ///
@@ -2812,12 +2830,16 @@ impl SessionStore {
         prefs: &crate::model::PrPrefs,
     ) -> Result<()> {
         let tx = immediate_tx(&self.conn)?;
+        // Only the states `load_agent_prs` reads: a row a newer dux wrote in a
+        // state this build skips was never in `rows`, so it is not this
+        // build's to remove.
         tx.execute(
-            "delete from session_pull_requests where session_id = ?1",
+            "delete from session_pull_requests \
+             where session_id = ?1 and state in ('OPEN', 'MERGED', 'CLOSED')",
             params![session_id],
         )?;
         for row in rows {
-            Self::write_agent_pr(&tx, session_id, row)?;
+            Self::write_agent_pr(&tx, session_id, row, PrRowWrite::Exact)?;
         }
         tx.execute(
             "insert into session_pr_prefs (session_id, sort_mode, hide_created_before) \
@@ -6700,6 +6722,11 @@ mod pr_tests {
         let mut other_repo = found("bob/gadget", 77, PrState::Merged);
         other_repo.attached = true;
         other_repo.found = false;
+        let mut arranged = found("ada/widget", 78, PrState::Open);
+        arranged.attached = true;
+        arranged.found = false;
+        arranged.hidden = true;
+        arranged.manual_slot = Some(0);
         let prefs = PrPrefs {
             sort_mode: crate::pr_list::PrSortMode::Manual,
             hide_created_before: None,
@@ -6707,22 +6734,38 @@ mod pr_tests {
         {
             let store = SessionStore::open(&db).unwrap();
             store.upsert_session(&test_session("s1", now, now)).unwrap();
+            // A row a newer dux wrote, in a state this build does not know.
+            store.run_sql_for_tests(
+                "insert into session_pull_requests \
+                 (session_id, host, owner_repo, pr_number, state, first_recorded_at) \
+                 values ('s1', 'github.com', 'ada/widget', 90, 'QUEUED', \
+                         '2026-01-01T00:00:00+00:00');",
+            );
             store
-                .replace_agent_prs("s1", &[draft.clone(), other_repo.clone()], &prefs)
+                .replace_agent_prs(
+                    "s1",
+                    &[draft.clone(), other_repo.clone(), arranged.clone()],
+                    &prefs,
+                )
                 .unwrap();
             // The same pull request spelled in another case is the same row.
             let mut refreshed = draft.clone();
             refreshed.owner_repo = "Ada/Widget".to_string();
             refreshed.title = "Renamed".to_string();
             store.upsert_agent_pr("s1", &refreshed).unwrap();
+            // The sync finding a pull request it had no row for in memory
+            // keeps what the user did with the stored one.
+            store
+                .upsert_agent_pr("s1", &found("ada/widget", 78, PrState::Open))
+                .unwrap();
         }
         let store = SessionStore::open(&db).unwrap();
         let mut rows = store.load_agent_prs().unwrap().remove("s1").unwrap();
-        rows.sort_by_key(|row| row.owner_repo.to_ascii_lowercase());
+        rows.sort_by_key(|row| (row.owner_repo.to_ascii_lowercase(), row.number));
         assert_eq!(
             rows.len(),
-            2,
-            "two #77 from different repositories: {rows:?}"
+            3,
+            "two #77 from different repositories and #78: {rows:?}"
         );
         assert_eq!(rows[0].state, PrState::Draft);
         assert_eq!(rows[0].owner_repo, "Ada/Widget");
@@ -6730,9 +6773,21 @@ mod pr_tests {
         assert_eq!(rows[0].head_branch.as_deref(), Some("feature"));
         assert_eq!(rows[0].manual_slot, Some(2));
         assert_eq!(rows[0].gh_created_at, draft.gh_created_at);
-        assert_eq!(rows[1].state, PrState::Merged);
-        assert!(rows[1].attached && !rows[1].found);
+        assert_eq!(rows[1].number, 78);
+        assert!(rows[1].found && rows[1].attached && rows[1].hidden);
+        assert_eq!(rows[1].manual_slot, Some(0));
+        assert_eq!(rows[2].state, PrState::Merged);
+        assert!(rows[2].attached && !rows[2].found);
         assert_eq!(store.load_pr_prefs().unwrap().get("s1"), Some(&prefs));
+        let unknown: i64 = store
+            .conn
+            .query_row(
+                "select count(*) from session_pull_requests where pr_number = 90",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unknown, 1, "a row this build cannot read is left alone");
     }
 
     /// The database as an older dux left it: the new tables are not there yet
@@ -6819,7 +6874,27 @@ mod pr_tests {
             .query_row("select count(*) from session_prs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(old_rows, 4, "the old table is left as it was written");
+
+        // The rows table without the other two, as a partly applied schema
+        // leaves it: opening creates them and imports nothing again.
+        store.run_sql_for_tests(
+            "drop table session_pr_prefs; drop table session_branch_former_names;",
+        );
+        drop(store);
+        let store = SessionStore::open(&db).unwrap();
+        assert!(store.load_pr_prefs().unwrap().is_empty());
+        store.load_branch_history("s1").unwrap();
+        assert_eq!(summary(&store, "s1"), vec![(12, true, true, false)]);
     }
+}
+
+/// What writing a pull-request row over a stored one keeps.
+#[derive(Clone, Copy)]
+enum PrRowWrite {
+    /// The row becomes exactly what was written.
+    Exact,
+    /// What GitHub says is written; the user's flags and slot stay.
+    Refresh,
 }
 
 /// Read one `agent_tabs` row. Shared by every tab query so the slot tab and an

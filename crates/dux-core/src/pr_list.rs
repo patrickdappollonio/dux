@@ -295,8 +295,15 @@ pub fn arrange(rows: &mut [AgentPr], mode: PrSortMode, change: Arrange) -> Arran
     if let Some(moved) = moved {
         place(&mut full, &wanted, &moved);
     } else {
-        for key in &wanted {
-            place(&mut full, &wanted, key);
+        // Hidden rows keep their places; the visible places take the wanted
+        // order.
+        let mut next = wanted.iter();
+        for slot in &mut full {
+            if visible.contains(slot)
+                && let Some(key) = next.next()
+            {
+                slot.clone_from(key);
+            }
         }
     }
     let replaced_saved =
@@ -548,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn a_drop_naming_anything_but_the_visible_set_is_stale() {
+    fn a_drop_takes_the_order_it_names_and_refuses_anything_but_the_visible_set() {
         let mut rows = vec![
             row(1, PrState::Open, Some(3)),
             row(2, PrState::Open, Some(2)),
@@ -570,6 +577,37 @@ mod tests {
             ArrangeOutcome::Moved { .. }
         ));
         assert_eq!(visible(&rows, PrSortMode::Manual), vec![2, 1]);
+
+        // A reversal is more than one move.
+        rows[2].hidden = false;
+        assert!(matches!(
+            arrange(&mut rows, PrSortMode::Manual, drop(vec![3, 1, 2])),
+            ArrangeOutcome::Moved { .. }
+        ));
+        assert_eq!(visible(&rows, PrSortMode::Manual), vec![3, 1, 2]);
+        assert!(matches!(
+            arrange(&mut rows, PrSortMode::Manual, drop(vec![2, 1, 3])),
+            ArrangeOutcome::Moved { .. }
+        ));
+        assert_eq!(visible(&rows, PrSortMode::Manual), vec![2, 1, 3]);
+
+        // Two separate swaps with a hidden row between them: the hidden row
+        // keeps its place in the sequence.
+        let mut rows = vec![
+            row(1, PrState::Open, Some(5)),
+            row(2, PrState::Open, Some(4)),
+            row(9, PrState::Open, Some(3)),
+            row(3, PrState::Open, Some(2)),
+            row(4, PrState::Open, Some(1)),
+        ];
+        rows[2].hidden = true;
+        assert!(matches!(
+            arrange(&mut rows, PrSortMode::Automatic, drop(vec![2, 1, 4, 3])),
+            ArrangeOutcome::Moved { .. }
+        ));
+        assert_eq!(visible(&rows, PrSortMode::Manual), vec![2, 1, 4, 3]);
+        rows[2].hidden = false;
+        assert_eq!(visible(&rows, PrSortMode::Manual), vec![2, 1, 9, 4, 3]);
     }
 
     #[test]
