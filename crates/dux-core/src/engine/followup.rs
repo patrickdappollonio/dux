@@ -247,7 +247,8 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // `fanout_reaction` that only nudges browsers to refetch the
             // bootstrap document carrying `gh_available`; the terminal UI reads
             // the engine's status live, so neither arm can double anything.
-            | EventReaction::GhAvailabilityChanged { .. } => FollowupOwner::Drainer,
+            | EventReaction::GhAvailabilityChanged { .. }
+            | EventReaction::GithubFactsChanged => FollowupOwner::Drainer,
     }
 }
 

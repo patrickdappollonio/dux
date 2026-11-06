@@ -290,7 +290,11 @@ impl App {
             }
             let start_folder = dux_core::project_browser::resolve_start_dir(&self.engine.config);
             (
-                super::sessions::clone_destination_for(&start_folder, &offer.address),
+                super::sessions::clone_destination_for(
+                    &start_folder,
+                    &offer.address,
+                    &self.engine.clone_github_hosts(),
+                ),
                 false,
                 start_folder,
             )

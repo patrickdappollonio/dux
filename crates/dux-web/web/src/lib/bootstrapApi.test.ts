@@ -45,6 +45,28 @@ describe("fetchBootstrap", () => {
     })
   })
 
+  it("reads a GitHub hosts value it does not know as github.com alone", async () => {
+    for (const [sent, read] of [
+      [{ kind: "hosts", hosts: ["ghe.corp.example"] }, { kind: "hosts", hosts: ["ghe.corp.example"] }],
+      [{ kind: "name_rule" }, { kind: "name_rule" }],
+      [{ kind: "every_host" }, { kind: "hosts", hosts: [] }],
+      [{ kind: "hosts", hosts: [7] }, { kind: "hosts", hosts: [] }],
+      ["github.com", { kind: "hosts", hosts: [] }],
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ({
+          ok: true,
+          status: 200,
+          json: async () => ({ github_hosts: sent }),
+          text: async () => "",
+          headers: { get: () => null },
+        })) as unknown as typeof fetch,
+      )
+      expect((await fetchBootstrap()).github_hosts).toEqual(read)
+    }
+  })
+
   it("throws a BootstrapFetchError carrying the HTTP status on a non-2xx", async () => {
     vi.stubGlobal(
       "fetch",

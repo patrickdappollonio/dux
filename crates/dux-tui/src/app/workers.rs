@@ -662,12 +662,15 @@ impl App {
             return;
         }
         match reaction {
-            EventReaction::Nothing
+            EventReaction::Nothing => {}
             // The terminal UI reads `Engine::gh_status` live every time it gates
             // a pull-request command, so the flip is already visible here and
-            // the accompanying keyed status carries the explanation. The arm
-            // exists so a surface that DOES need to react cannot forget to.
-            | EventReaction::GhAvailabilityChanged { .. } => {}
+            // the accompanying keyed status carries the explanation. The one
+            // thing held rather than read live is an open clone form's
+            // suggested destination, which follows the GitHub hosts.
+            EventReaction::GhAvailabilityChanged { .. } | EventReaction::GithubFactsChanged => {
+                self.refresh_clone_destination_suggestion();
+            }
             EventReaction::Status(update) => self.apply_status_update(update),
             EventReaction::ClearStatus(key) => {
                 // The `Final::Clear` outcome of a StatusOp: dismiss the keyed

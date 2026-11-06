@@ -229,7 +229,9 @@ impl Engine {
         }
         // For a pull request the address is built here from the policy and the
         // protocols as they are now, whatever the request carries. A typed
-        // short `host/owner/repo` is expanded with the same protocols.
+        // address is expanded with the same hosts and protocols the folder
+        // suggestion is built from, which the integration being off narrows to
+        // `github.com` over https.
         let offer = match &request.pull_request {
             Some(target) => Some(self.clone_offer_for(target)?),
             None => None,
@@ -239,9 +241,10 @@ impl Engine {
                 url: offer.address.clone(),
                 ..request.clone()
             },
-            None => match crate::clone_project::expand_short_address(
+            None => match crate::clone_project::expand_typed_address(
                 &request.url,
-                &self.github_git_protocols(),
+                &self.clone_git_protocols(),
+                &self.clone_github_hosts(),
             ) {
                 Some(url) => CloneRequest {
                     url,
@@ -715,32 +718,62 @@ mod tests {
         }
     }
 
-    /// A short `host/owner/repo` reaches the clone as the address `gh` would
-    /// use for that host.
+    /// A typed address reaches the clone as the address it names: a short
+    /// one as the address `gh` would use for that host, and a pasted page loses
+    /// its page path on `github.com` and on a host the policy allows, and only
+    /// there. With the GitHub integration off, whatever the probe last said,
+    /// only `github.com` is GitHub's and a short form is cloned over https.
     #[test]
-    fn a_short_address_is_cloned_from_the_address_gh_uses() {
-        let (mut engine, tmp) = test_engine();
-        engine.set_github_git_protocols(
-            [("github.com".to_string(), crate::gh::GitProtocol::Ssh)].into(),
-        );
-        let destination = std::fs::canonicalize(tmp.path()).unwrap().join("dest");
-        let request = CloneRequest {
-            url: "github.com/acme/widget".to_string(),
-            path: destination.to_string_lossy().into_owned(),
-            agent_name: Some("first".to_string()),
-            random_name: false,
-            pull_request: None,
-            add_existing: false,
-            review_copy: UpfrontReviewCopy::default(),
-        };
-        crate::engine::fail_next_worker_spawn();
-        let busy = engine
-            .begin_clone_project(&request, CloneAskedBy::OtherSurface)
-            .expect("the clone is dispatched");
-        assert!(
-            busy.message.contains("git@github.com:acme/widget.git"),
-            "{busy:?}"
-        );
+    fn a_typed_address_is_cloned_from_the_address_it_names() {
+        let ghe_page = "https://ghe.corp.example/acme/widget/issues";
+        for (integration, typed, expected) in [
+            (
+                true,
+                "github.com/acme/widget",
+                "git@github.com:acme/widget.git",
+            ),
+            (true, "acme/widget", "git@github.com:acme/widget.git"),
+            (
+                true,
+                "https://github.com/acme/widget/issues",
+                "https://github.com/acme/widget.git",
+            ),
+            (true, ghe_page, "https://ghe.corp.example/acme/widget.git"),
+            (false, "acme/widget", "https://github.com/acme/widget.git"),
+            (
+                false,
+                "https://github.com/acme/widget/issues",
+                "https://github.com/acme/widget.git",
+            ),
+            (false, ghe_page, ghe_page),
+        ] {
+            let (mut engine, tmp) = test_engine();
+            engine.github_integration_enabled = integration;
+            engine.set_github_git_protocols(
+                [("github.com".to_string(), crate::gh::GitProtocol::Ssh)].into(),
+            );
+            engine.set_github_host_policy(crate::gh::GithubHostPolicy::Hosts(
+                ["ghe.corp.example".to_string()].into(),
+            ));
+            let destination = std::fs::canonicalize(tmp.path()).unwrap().join("dest");
+            let request = CloneRequest {
+                url: typed.to_string(),
+                path: destination.to_string_lossy().into_owned(),
+                agent_name: Some("first".to_string()),
+                random_name: false,
+                pull_request: None,
+                add_existing: false,
+                review_copy: UpfrontReviewCopy::default(),
+            };
+            crate::engine::fail_next_worker_spawn();
+            let busy = engine
+                .begin_clone_project(&request, CloneAskedBy::OtherSurface)
+                .expect("the clone is dispatched");
+            assert!(
+                busy.message.contains(expected),
+                "integration {integration}, {typed}: {busy:?}"
+            );
+        }
     }
 
     /// A clone whose worker thread cannot start ends its busy with the reason

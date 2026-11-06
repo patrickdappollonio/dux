@@ -20,7 +20,7 @@ import {
   isValidAgentName,
   sanitizeAgentName,
 } from "./agentName"
-import { cloneDirName } from "./cloneDirName"
+import { cloneDirName, GITHUB_COM_ONLY } from "./cloneDirName"
 import { git } from "./git"
 import {
   projectsApi,
@@ -1997,6 +1997,9 @@ function applyBootstrap(b: Bootstrap): void {
   // emits the moment the decision resolves (which is how a browser already open
   // during a slow release-notes fetch still gets the screen). Guarded inside.
   offerAutomaticFirstLoad(b.pending_first_load ?? null)
+  // The GitHub hosts may have moved under an open clone dialog; a destination
+  // the user has not edited follows them, as it follows the address.
+  if (state.cloneProject) patchCloneProject({}, false)
 }
 
 // Repaint the tab title's `(N) ` prefix and the favicon's attention dot from
@@ -6140,9 +6143,11 @@ export function closeAddProject(): void {
 
 // The clone dialog's destination while the user has not typed one: the start
 // folder plus the folder the address would clone into, or nothing until both
-// are known.
+// are known. The hosts are the server's, so the folder is the one its clone
+// reads out of the address; before the bootstrap document arrives (or from a
+// server that does not send them) only github.com is GitHub's.
 function defaultCloneDestination(url: string, startFolder: string | null): string {
-  const name = cloneDirName(url)
+  const name = cloneDirName(url, state.bootstrap?.github_hosts ?? GITHUB_COM_ONLY)
   if (startFolder === null || name === null) return ""
   return `${startFolder.replace(/\/+$/, "")}/${name}`
 }

@@ -761,6 +761,53 @@ impl GithubHostPolicy {
     }
 }
 
+/// The hosts dux reads an address on as GitHub's, so that a page path pasted
+/// from a browser comes off it: `github.com` always, which needs no sign-in to
+/// be GitHub, plus the hosts the [`GithubHostPolicy`] allows while the GitHub
+/// integration is on. The clone and the destination folder it suggests ask the
+/// same value, and the bootstrap document carries it as `github_hosts` so the
+/// browser's folder suggestion can ask it too.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GithubHosts {
+    /// `github.com` and exactly these hosts, lowercased.
+    Hosts {
+        /// The hosts besides `github.com`.
+        hosts: Vec<String>,
+    },
+    /// `github.com` and any host whose name starts with `github.`: the rule an
+    /// older `gh`, which cannot list its hosts, leaves dux with.
+    NameRule,
+}
+
+impl GithubHosts {
+    /// `github.com` alone, which is what the integration being off leaves.
+    pub fn github_com_only() -> Self {
+        Self::Hosts { hosts: Vec::new() }
+    }
+
+    /// The hosts `policy` lets dux ask `gh` about, plus `github.com`.
+    pub fn from_policy(policy: &GithubHostPolicy) -> Self {
+        match policy {
+            GithubHostPolicy::DenyAll => Self::github_com_only(),
+            GithubHostPolicy::Hosts(hosts) => Self::Hosts {
+                hosts: hosts.iter().cloned().collect(),
+            },
+            GithubHostPolicy::LegacyNameRule => Self::NameRule,
+        }
+    }
+
+    /// Whether `host` (lowercase, with a web port when it has one) is read as
+    /// GitHub's.
+    pub fn contains(&self, host: &str) -> bool {
+        host == "github.com"
+            || match self {
+                Self::Hosts { hosts } => hosts.iter().any(|known| known == host),
+                Self::NameRule => host.starts_with("github."),
+            }
+    }
+}
+
 /// How `gh` clones from a host, as its `gitProtocol` setting says. A missing or
 /// unrecognised value is https, which is also what `gh repo clone` falls back to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

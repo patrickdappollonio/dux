@@ -6101,6 +6101,7 @@ impl App {
     /// destination until the user has edited the destination themselves, and
     /// any change to the destination counts as that edit.
     fn edit_clone_field(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        let github_hosts = self.engine.clone_github_hosts();
         let PromptState::CloneProject {
             address,
             destination,
@@ -6125,6 +6126,7 @@ impl App {
                     destination.set_text(super::sessions::clone_destination_for(
                         start_folder,
                         &address.text,
+                        &github_hosts,
                     ));
                 }
             }
@@ -32557,6 +32559,7 @@ cyan = "#00ffff"
         let destination = super::super::sessions::clone_destination_for(
             relative,
             "https://example.com/acme/w.git",
+            &dux_core::gh::GithubHosts::github_com_only(),
         );
         assert!(
             std::path::Path::new(&destination).is_absolute() && destination.ends_with("/w"),

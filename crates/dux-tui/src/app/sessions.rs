@@ -45,9 +45,15 @@ use uuid::Uuid;
 
 /// Where a clone of `address` goes by default: the repository's folder name
 /// inside `start_folder`, or the start folder itself (with its trailing
-/// separator) while the address names no repository yet.
-pub(crate) fn clone_destination_for(start_folder: &Path, address: &str) -> String {
-    let name = dux_core::clone_project::clone_dir_name(address).unwrap_or_default();
+/// separator) while the address names no repository yet. `hosts` are the
+/// engine's [`dux_core::engine::Engine::clone_github_hosts`], the ones the
+/// clone itself reads the address with.
+pub(crate) fn clone_destination_for(
+    start_folder: &Path,
+    address: &str,
+    hosts: &dux_core::gh::GithubHosts,
+) -> String {
+    let name = dux_core::clone_project::clone_dir_name(address, hosts).unwrap_or_default();
     // A start folder spelled relative to the working directory would be read
     // against the server's directory by the clone, not this one.
     let start_folder = if start_folder.is_relative() {
@@ -62,6 +68,25 @@ pub(crate) fn clone_destination_for(start_folder: &Path, address: &str) -> Strin
 }
 
 impl App {
+    /// Re-derive an open clone form's suggested destination from the GitHub
+    /// hosts as they are now, unless the user has edited it: the hosts can
+    /// move under the form (a `gh` probe, the integration switched), and the
+    /// suggestion must stay the folder the clone will use.
+    pub(crate) fn refresh_clone_destination_suggestion(&mut self) {
+        let hosts = self.engine.clone_github_hosts();
+        if let PromptState::CloneProject {
+            address,
+            destination,
+            destination_edited: false,
+            start_folder,
+            pull_request: None,
+            ..
+        } = &mut self.prompt
+        {
+            destination.set_text(clone_destination_for(start_folder, &address.text, &hosts));
+        }
+    }
+
     pub(crate) fn open_project_browser(&mut self) {
         {
             self.open_folder_browser(BrowsePurpose::AddProject);
@@ -1177,7 +1202,11 @@ impl App {
         }
         self.prompt = PromptState::CloneProject {
             address: TextInput::new(),
-            destination: TextInput::with_text(clone_destination_for(&start_folder, "")),
+            destination: TextInput::with_text(clone_destination_for(
+                &start_folder,
+                "",
+                &self.engine.clone_github_hosts(),
+            )),
             destination_edited: false,
             start_folder,
             agent_name,

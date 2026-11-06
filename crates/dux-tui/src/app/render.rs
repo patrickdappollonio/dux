@@ -10766,7 +10766,7 @@ impl App {
             &[
                 (
                     address_label,
-                    " Repository address (host/owner/repo or anything git clone accepts):",
+                    " Repository address (owner/repo, a GitHub page link, or any git address):",
                     address_area,
                     address,
                     CloneProjectFocus::Address,

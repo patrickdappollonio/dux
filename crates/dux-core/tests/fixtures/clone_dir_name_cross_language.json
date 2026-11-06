@@ -1,5 +1,5 @@
 {
-  "note": "The folder a clone of each address lands in, by git's own rule. Read by `the_shared_clone_folder_name_fixture_holds` in crates/dux-core/src/clone_project.rs, which checks that `clone_dir_name(address)` is `name` (null for an address with no usable name).",
+  "note": "The folder a clone of each address lands in. For a spelling the clone rewrites (owner/repo, host/owner/repo, a page pasted from a GitHub host) it is the repository's name; otherwise it is git's own rule for the text as typed. Each case is read with `github_hosts`, the hosts read as GitHub's besides github.com (github.com alone when absent), shaped as the bootstrap document carries them. Read by `the_shared_clone_folder_name_fixture_holds` in crates/dux-core/src/clone_project.rs and by cloneDirName.test.ts in the web UI, which check that the address gives `name` (null for an address with no usable name).",
   "cases": [
     {
       "what": "https with .git",
@@ -75,6 +75,177 @@
       "what": "only a suffix",
       "address": "/.git",
       "name": null
+    },
+    {
+      "what": "a bare owner/repo",
+      "address": "owner/repo",
+      "name": "repo"
+    },
+    {
+      "what": "owner/repo with a pull request number",
+      "address": "owner/repo#123",
+      "name": "repo"
+    },
+    {
+      "what": "a short github.com address",
+      "address": "github.com/owner/repo",
+      "name": "repo"
+    },
+    {
+      "what": "a short github.com address with a page path",
+      "address": "github.com/owner/repo/tree/main",
+      "name": "repo"
+    },
+    {
+      "what": "a pasted GitHub issues page",
+      "address": "https://github.com/owner/repo/issues",
+      "name": "repo"
+    },
+    {
+      "what": "a pasted GitHub pull request",
+      "address": "https://github.com/owner/repo/pull/7/files",
+      "name": "repo"
+    },
+    {
+      "what": "a pasted GitHub page in capitals over http",
+      "address": "HTTP://GitHub.com/owner/repo/security/dependabot",
+      "name": "repo"
+    },
+    {
+      "what": "a pasted GitHub page with a query",
+      "address": "https://github.com/owner/repo/issues?q=is:open",
+      "name": "repo"
+    },
+    {
+      "what": "a pasted GitHub page with a fragment",
+      "address": "https://github.com/owner/repo#readme",
+      "name": "repo"
+    },
+    {
+      "what": "a short GitLab subgroup",
+      "address": "gitlab.com/group/subgroup/repo",
+      "name": "repo"
+    },
+    {
+      "what": "a long path on another host is git's rule",
+      "address": "https://gitlab.com/group/project/-/issues",
+      "name": "issues"
+    },
+    {
+      "what": "a GitHub Enterprise page is git's rule, since only github.com is read by route",
+      "address": "https://ghe.corp.example/owner/repo/issues",
+      "name": "issues"
+    },
+    {
+      "what": "a local path spelled like a GitHub page",
+      "address": "./github.com/owner/repo/issues",
+      "name": "issues"
+    },
+    {
+      "what": "a GitHub page with only github.com known",
+      "address": "https://github.com/owner/repo/issues",
+      "github_hosts": {
+        "kind": "hosts",
+        "hosts": []
+      },
+      "name": "repo"
+    },
+    {
+      "what": "a GitHub Enterprise page on a host dux knows",
+      "address": "https://ghe.corp.example/owner/repo/issues",
+      "github_hosts": {
+        "kind": "hosts",
+        "hosts": [
+          "ghe.corp.example"
+        ]
+      },
+      "name": "repo"
+    },
+    {
+      "what": "a short GitHub Enterprise page on a host dux knows",
+      "address": "ghe.corp.example/owner/repo/pull/7",
+      "github_hosts": {
+        "kind": "hosts",
+        "hosts": [
+          "ghe.corp.example"
+        ]
+      },
+      "name": "repo"
+    },
+    {
+      "what": "a GitHub Enterprise page with a port dux knows",
+      "address": "https://ghe.corp.example:8443/owner/repo/tree/main",
+      "github_hosts": {
+        "kind": "hosts",
+        "hosts": [
+          "ghe.corp.example:8443"
+        ]
+      },
+      "name": "repo"
+    },
+    {
+      "what": "a GitHub Enterprise page under the older name rule",
+      "address": "https://github.corp.example/owner/repo/tree/main",
+      "github_hosts": {
+        "kind": "name_rule"
+      },
+      "name": "repo"
+    },
+    {
+      "what": "the same page with no name rule is git's rule",
+      "address": "https://github.corp.example/owner/repo/tree/main",
+      "name": "main"
+    },
+    {
+      "what": "a GitLab subgroup is git's rule even beside known hosts",
+      "address": "https://gitlab.com/group/subgroup/repo",
+      "github_hosts": {
+        "kind": "hosts",
+        "hosts": [
+          "ghe.corp.example"
+        ]
+      },
+      "name": "repo"
+    },
+    {
+      "what": "a GitHub page with only a query",
+      "address": "https://github.com/owner/repo?tab=readme-ov-file",
+      "name": "repo"
+    },
+    {
+      "what": "a short GitHub page with a query holding a colon",
+      "address": "github.com/owner/repo/issues?q=is:open",
+      "name": "repo"
+    },
+    {
+      "what": "a byte-order mark before a pasted page",
+      "address": "\ufeffhttps://github.com/owner/repo/issues",
+      "name": "repo"
+    },
+    {
+      "what": "an escape in the repository is git's rule",
+      "address": "https://github.com/owner/repo%23x/issues",
+      "name": "issues"
+    },
+    {
+      "what": "owner/repo with a page path and no host is git's rule",
+      "address": "owner/repo/tree/main",
+      "name": "main"
+    },
+    {
+      "what": "a pull request number too big for a number is git's rule",
+      "address": "owner/repo#99999999999999999999999",
+      "name": "repo#99999999999999999999999"
+    },
+    {
+      "what": "a fragment on a host that is not GitHub's is git's rule",
+      "address": "gitlab.example/owner/repo#readme",
+      "name": "repo#readme"
+    },
+    {
+      "what": "a query on a host that is not GitHub's is git's rule",
+      "address": "gitlab.example/owner/repo?x=1",
+      "name": "repo?x=1"
     }
   ]
 }

@@ -6786,6 +6786,12 @@ impl App {
         } else {
             self.set_info(format!("GitHub integration {state}."));
         }
+        // Browsers on this serve hold the switch, whether GitHub features work
+        // and the clone dialog's GitHub hosts in their bootstrap document, and
+        // turning the integration off starts no probe that would tell them, so
+        // they are told to refetch it here.
+        self.notify_companion(&dux_core::engine::EventReaction::GithubFactsChanged);
+        self.refresh_clone_destination_suggestion();
     }
 
     /// Flip whether a new agent prompt starts with a random pet name, and save it.

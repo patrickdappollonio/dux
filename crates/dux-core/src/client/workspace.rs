@@ -1464,7 +1464,13 @@ fn clone_folder(
             path: String,
         }
         let start: Browse = client.get_json("/api/v1/browse")?;
-        let dir = crate::clone_project::clone_dir_name(&offer.address).unwrap_or_else(|| {
+        // The offer's address is one dux built, exactly `owner/repo` on its
+        // host, so no host reading can cut it and `github.com` alone will do.
+        let dir = crate::clone_project::clone_dir_name(
+            &offer.address,
+            &crate::gh::GithubHosts::github_com_only(),
+        )
+        .unwrap_or_else(|| {
             offer
                 .owner_repo
                 .rsplit('/')

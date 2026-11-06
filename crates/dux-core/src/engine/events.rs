@@ -529,6 +529,14 @@ pub enum EventReaction {
         /// Whether GitHub features work now.
         available: bool,
     },
+    /// The GitHub facts a browser holds in its bootstrap document moved
+    /// without an availability transition: a `gh` probe moved the hosts a
+    /// typed clone address is read as GitHub's on
+    /// ([`Engine::clone_github_hosts`]), or the terminal UI switched the
+    /// integration. Like [`Self::GhAvailabilityChanged`] it is for the
+    /// browser, which refetches the document; the terminal UI reads it all
+    /// live.
+    GithubFactsChanged,
 }
 
 /// Result of `Engine::detach_conflicting_worktree_session`. The App caller
@@ -4295,6 +4303,7 @@ impl Engine {
         // status: a probe that moves NotInstalled to Unreachable changes
         // nothing anybody can see.
         let was_available = self.pr_agent_command_available();
+        let hosts_before = self.clone_github_hosts();
         let (status, unreachable_reason) = self.adopt_gh_probe(outcome);
         self.gh_status = status;
         if matches!(status, GhStatus::Available) && self.github_integration_enabled {
@@ -4326,6 +4335,8 @@ impl Engine {
             reactions.push(EventReaction::GhAvailabilityChanged {
                 available: now_available,
             });
+        } else if self.clone_github_hosts() != hosts_before {
+            reactions.push(EventReaction::GithubFactsChanged);
         }
         // Silent on success. A status goes out when the user asked, whatever the
         // answer, or when availability was lost; a gain says nothing, because a
@@ -6784,6 +6795,7 @@ mod tests {
             EventReaction::ClearStatus(_) => "ClearStatus",
             EventReaction::TailscaleModeApplied { .. } => "TailscaleModeApplied",
             EventReaction::GhAvailabilityChanged { .. } => "GhAvailabilityChanged",
+            EventReaction::GithubFactsChanged => "GithubFactsChanged",
             EventReaction::Multi(_) => "Multi",
             EventReaction::RebuildLeftItems => "RebuildLeftItems",
             EventReaction::ReloadChangedFiles => "ReloadChangedFiles",
@@ -7995,6 +8007,40 @@ mod tests {
             EventReaction::GhAvailabilityChanged { available: true }
         ));
         assert_eq!(engine.gh_status, GhStatus::Available);
+    }
+
+    /// A probe that moves only the hosts tells the browser to refetch the
+    /// clone dialog's hosts; one that moves nothing tells it nothing.
+    #[test]
+    fn gh_status_checked_moving_only_the_hosts_says_so() {
+        let (mut engine, _tmp) = test_engine();
+        engine.github_integration_enabled = true;
+        engine.gh_status = GhStatus::Available;
+        let decided = |hosts: &[&str]| crate::gh::GhProbe::Decided {
+            available: true,
+            policy: crate::gh::GithubHostPolicy::Hosts(
+                hosts.iter().map(|host| (*host).to_string()).collect(),
+            ),
+            protocols: BTreeMap::default(),
+        };
+        engine.set_github_host_policy(crate::gh::GithubHostPolicy::Hosts(
+            ["github.com".to_string()].into(),
+        ));
+
+        let moved = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: decided(&["github.com", "ghe.corp.example"]),
+        });
+        assert!(
+            matches!(moved, EventReaction::GithubFactsChanged),
+            "{moved:?}"
+        );
+
+        let same = engine.process_worker_event(WorkerEvent::GhStatusChecked {
+            generation: engine.gh_probe.generation,
+            outcome: decided(&["github.com", "ghe.corp.example"]),
+        });
+        assert!(matches!(same, EventReaction::Nothing), "{same:?}");
     }
 
     #[test]

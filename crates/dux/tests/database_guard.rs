@@ -167,6 +167,11 @@ const VETTED: &[(&str, Vetted, &str)] = &[
         "the data a server answers with about a review copy; it has no code of its own",
     ),
     (
+        "dux_core::gh::GithubHosts",
+        Vetted::Type("crates/dux-core/src/gh.rs", "GithubHosts"),
+        "the hosts an address is read as GitHub's on, a plain list with a lookup",
+    ),
+    (
         "dux_core::clone_project::clone_dir_name",
         Vetted::Function("crates/dux-core/src/clone_project.rs", "clone_dir_name"),
         "the folder name at the end of a clone address",

@@ -98,6 +98,13 @@ pub struct BootstrapView {
     /// currently reachable (a banner the user can't currently see is still a
     /// real preference once `gh` comes back).
     pub github_integration: bool,
+    /// The hosts an address typed into the clone dialog is read as GitHub's
+    /// on ([`Engine::clone_github_hosts`]), so the browser suggests the same
+    /// destination folder the clone will use. It moves when the GitHub
+    /// integration is switched, from a browser or from the terminal UI, and
+    /// when a `gh` probe moves the host policy; each of those has browsers
+    /// refetch this document.
+    pub github_hosts: crate::gh::GithubHosts,
     /// Mirrors `config.ui.copy_on_select`: whether selecting text in the web
     /// terminal auto-copies it (default true). Read by the terminal pane and by
     /// the web's Preferences dialog.
@@ -1655,6 +1662,7 @@ impl Engine {
                 .copy_uncommitted_changes_by_default,
             gh_available: self.pr_agent_command_available(),
             github_integration: self.config.ui.github_integration,
+            github_hosts: self.clone_github_hosts(),
             copy_on_select: self.config.ui.copy_on_select,
             terminal_font_family: crate::config_effective::effective_terminal_font_family(
                 &self.config.ui.terminal_font_family,
@@ -2924,6 +2932,25 @@ mod tests {
     }
 
     #[test]
+    fn github_hosts_follow_the_policy_only_while_the_integration_is_on() {
+        let (mut engine, _tmp) = test_engine();
+        engine.set_github_host_policy(crate::gh::GithubHostPolicy::LegacyNameRule);
+        assert_eq!(
+            engine.bootstrap().github_hosts,
+            crate::gh::GithubHosts::github_com_only()
+        );
+        engine.github_integration_enabled = true;
+        assert_eq!(
+            engine.bootstrap().github_hosts,
+            crate::gh::GithubHosts::NameRule
+        );
+        assert_eq!(
+            serde_json::to_value(crate::gh::GithubHosts::github_com_only()).unwrap(),
+            serde_json::json!({"kind": "hosts", "hosts": []})
+        );
+    }
+
+    #[test]
     fn available_providers_lists_configured_defaults_sorted() {
         let (engine, _tmp) = test_engine();
 
@@ -3595,6 +3622,7 @@ mod tests {
             "randomize_agent_names_by_default",
             "gh_available",
             "github_integration",
+            "github_hosts",
             "copy_on_select",
             "terminal_font_family",
             "terminal_font_size",

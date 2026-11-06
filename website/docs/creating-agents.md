@@ -274,14 +274,37 @@ launcher's **▾** opens, and in the app menu's **Add project** submenu. In the 
 
 Both open the same short form:
 
-- **The address.** Anything `git clone` takes: `https://…`, `ssh://…`,
-  `git@host:owner/repo.git`, a `file://` address, or a plain path. A short
-  `host/owner/repo` works too, on any host whose name has a dot in it, like
-  `github.com/owner/repo`. dux turns it into `git@github.com:owner/repo.git` when its
-  GitHub integration sees that your `gh` uses SSH for that host, and into
-  `https://github.com/owner/repo.git` otherwise, which is also what you get while the
-  GitHub integration is off. To clone a local folder whose path happens to look like that
-  (say `github.com/owner/repo` under your current folder), start it with `./`.
+- **The address.** Anything `git clone` takes, plus the spellings you would copy from a
+  browser or type from memory:
+  - **`owner/repo`** is a repository on GitHub, like `example/application`. A pull
+    request number after it (`example/application#123`) is ignored.
+  - **`host/owner/repo`** works on any host whose name has a dot in it and no port, like
+    `github.com/example/application` or `gitlab.example.com/team/app`.
+  - **A page pasted from GitHub**, like `https://github.com/example/application/issues`,
+    `…/tree/main`, `…/pull/7`, `…/security/dependabot` or `…?tab=readme-ov-file`, clones
+    the repository the page belongs to: everything after `owner/repo` comes off. A full
+    address keeps the `https://` or `http://` and the port you pasted
+    (`https://github.com/example/application.git` here); without the `https://`
+    (`github.com/example/application/tree/main`) it is read like `host/owner/repo`. That
+    goes for `github.com` always, and while the GitHub integration is on, for every host
+    your `gh` is signed in to (and, with older `gh` versions, hosts whose name starts with
+    `github.`). To work on a pull request itself, use
+    [New agent from PR](#creating-an-agent-from-a-github-pr).
+  - **Nothing is cut anywhere else.** `owner/repo/tree/main` with no host, and
+    `host/owner/repo` with more after it on a host that is not GitHub's, go to `git clone`
+    exactly as typed, which reads them as folders on disk. On those hosts a longer path can
+    be the repository itself, so for one in a GitLab subgroup paste its full address,
+    `https://gitlab.com/group/subgroup/repo.git` or `git@gitlab.com:group/subgroup/repo.git`.
+  - **Everything else goes to `git clone` exactly as typed:** a full address with nothing
+    after `owner/repo`, `ssh://…`, `git@host:owner/repo.git`, a `file://` address, a path
+    on disk (one that starts with `/`, `./`, `../` or `~`), and a page address carrying a
+    user name, a token or a `%` escape.
+
+  `owner/repo` and `host/owner/repo`, and a GitHub page written without `https://`, become
+  `git@host:owner/repo.git` when the GitHub integration is on and sees that your `gh`
+  uses SSH for that host, and `https://host/owner/repo.git` otherwise, which is also what
+  you get while the GitHub integration is off. To clone a local folder whose path looks
+  like one of these (say `owner/repo` under your current folder), start it with `./`.
 - **The destination folder.** It fills itself in as your project browser's start
   directory plus the repository's name, and keeps following the address until you edit
   it. A leading `~` works; otherwise give a full path.

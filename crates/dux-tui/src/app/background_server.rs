@@ -1524,6 +1524,7 @@ pub(crate) mod tests {
             EventReaction::OpenNewAgentPromptForPr { .. } => "OpenNewAgentPromptForPr",
             EventReaction::Nothing => "Nothing",
             EventReaction::Status(_) => "Status",
+            EventReaction::GithubFactsChanged => "GithubFactsChanged",
             _ => "other",
         }
     }
@@ -1857,6 +1858,77 @@ pub(crate) mod tests {
             vec!["ApplyReloadedConfig".to_string()],
             "the reload must reach the seam, or a browser never learns config changed"
         );
+    }
+
+    /// Turning the GitHub integration off here starts no probe, so nothing
+    /// else would tell a browser on this serve that the switch, whether GitHub
+    /// features work and the clone dialog's GitHub hosts all moved.
+    #[test]
+    fn switching_the_github_integration_here_tells_the_browsers() {
+        let mut app = test_app(default_bindings());
+        let (companion, recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        app.engine.github_integration_enabled = true;
+        app.engine.config.ui.github_integration = true;
+
+        app.toggle_github_integration();
+
+        assert!(!app.engine.github_integration_enabled);
+        assert!(
+            recorded
+                .lock()
+                .expect("not poisoned")
+                .reactions
+                .contains(&"GithubFactsChanged".to_string()),
+            "the browsers must be told to refetch their bootstrap document"
+        );
+    }
+
+    /// An open clone form's untouched destination follows the GitHub hosts as
+    /// they move, and an edited one stays the user's.
+    #[test]
+    fn an_open_clone_form_follows_the_github_hosts_until_its_destination_is_edited() {
+        let mut app = test_app(default_bindings());
+        app.open_clone_project_prompt();
+        let page = "https://ghe.corp.example/owner/repo/issues";
+        let destination = |app: &App| match &app.prompt {
+            PromptState::CloneProject { destination, .. } => destination.text.clone(),
+            _ => panic!("the clone form is open"),
+        };
+        if let PromptState::CloneProject { address, .. } = &mut app.prompt {
+            address.set_text(page.to_string());
+        }
+        app.refresh_clone_destination_suggestion();
+        assert!(
+            destination(&app).ends_with("/issues"),
+            "{}",
+            destination(&app)
+        );
+
+        app.engine.github_integration_enabled = true;
+        app.engine
+            .set_github_host_policy(dux_core::gh::GithubHostPolicy::Hosts(
+                ["ghe.corp.example".to_string()].into(),
+            ));
+        app.apply_reaction(EventReaction::GithubFactsChanged);
+        assert!(
+            destination(&app).ends_with("/repo"),
+            "{}",
+            destination(&app)
+        );
+
+        if let PromptState::CloneProject {
+            destination,
+            destination_edited,
+            ..
+        } = &mut app.prompt
+        {
+            destination.set_text("/srv/mine".to_string());
+            *destination_edited = true;
+        }
+        app.engine.github_integration_enabled = false;
+        app.apply_reaction(EventReaction::GithubFactsChanged);
+        assert_eq!(destination(&app), "/srv/mine");
     }
 
     /// A change made in a browser has to rebuild this surface's sidebar. Nothing

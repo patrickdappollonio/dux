@@ -6,6 +6,7 @@
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import type { DropPasteProfile } from "./fileDrop"
+import { type GithubHosts, normalizeGithubHosts } from "./cloneDirName"
 import type { FlatSortKey } from "./flatList"
 import type { MacroView } from "./types"
 
@@ -41,6 +42,11 @@ export interface Bootstrap {
   /** Raw `config.ui.github_integration` flag, distinct from the `gh_available`
    * composite: false means integration is off, not merely that `gh` is unreachable. */
   github_integration: boolean
+  /** The hosts an address typed into the clone dialog is read as GitHub's on,
+   * the same ones the server's clone reads it with, so the suggested folder is
+   * the one the clone uses. Older servers omit it; consumers fall back to
+   * github.com alone. */
+  github_hosts?: GithubHosts
   /** Mirrors `config.ui.copy_on_select`: whether selecting text in the web
    * terminal auto-copies it to the clipboard (default true). */
   copy_on_select: boolean
@@ -275,5 +281,10 @@ export async function fetchBootstrap(): Promise<Bootstrap> {
       resp.status,
     )
   }
-  return (await resp.json()) as Bootstrap
+  const bootstrap = (await resp.json()) as Bootstrap
+  // Degraded once, here, so nothing downstream meets a kind it cannot read.
+  if (bootstrap.github_hosts !== undefined) {
+    bootstrap.github_hosts = normalizeGithubHosts(bootstrap.github_hosts)
+  }
+  return bootstrap
 }

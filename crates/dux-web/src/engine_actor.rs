@@ -2908,7 +2908,11 @@ impl EngineService {
         // GitHub features work has to ride that same signal: without it a
         // browser keeps hiding (or offering) the pull-request entries, and a
         // momentary rate limit stands until the page is reloaded.
-        if peek_gh_availability_changed(reaction).is_some() {
+        // The integration switch and the hosts the clone dialog's folder
+        // suggestion reads ride the same document, so a change to only those
+        // nudges the same way.
+        if peek_gh_availability_changed(reaction).is_some() || peeks_github_facts_changed(reaction)
+        {
             let _ = self.config_reload_tx.send(());
         }
         // NOT origin-routed, deliberately, and for the same reason as the launch
@@ -3718,6 +3722,16 @@ fn peek_gh_availability_changed(reaction: &EventReaction) -> Option<bool> {
         EventReaction::GhAvailabilityChanged { available } => Some(*available),
         EventReaction::Multi(reactions) => reactions.iter().find_map(peek_gh_availability_changed),
         _ => None,
+    }
+}
+
+/// Whether this reaction (or one nested inside a `Multi`) says the GitHub
+/// facts the bootstrap document carries moved.
+fn peeks_github_facts_changed(reaction: &EventReaction) -> bool {
+    match reaction {
+        EventReaction::GithubFactsChanged => true,
+        EventReaction::Multi(reactions) => reactions.iter().any(peeks_github_facts_changed),
+        _ => false,
     }
 }
 
@@ -6070,6 +6084,37 @@ mod tests {
     ///
     /// Web-originated statuses are a third thing entirely and are unaffected here:
     /// they are scoped per connection inside `handle_request`, before any of this.
+    /// The GitHub facts a browser holds in its bootstrap document moving
+    /// without an availability transition (a probe moving the hosts, the
+    /// terminal UI switching the integration) has browsers refetch it, nested
+    /// in a `Multi` or not, and an unrelated reaction does not.
+    #[test]
+    fn moved_github_facts_have_browsers_refetch_the_bootstrap_document() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = crate::test_support::bootstrap_test_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut reloads = handle.subscribe_config_reloads();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+
+        svc.fanout_reaction(
+            &mut engine,
+            &EventReaction::RebuildLeftItems,
+            FollowupRouting::ByOrigin,
+        );
+        assert!(reloads.try_recv().is_err(), "nothing moved");
+
+        for reaction in [
+            EventReaction::GithubFactsChanged,
+            EventReaction::Multi(vec![
+                EventReaction::RebuildLeftItems,
+                EventReaction::GithubFactsChanged,
+            ]),
+        ] {
+            svc.fanout_reaction(&mut engine, &reaction, FollowupRouting::ByOrigin);
+            assert!(reloads.try_recv().is_ok(), "{reaction:?}");
+        }
+    }
+
     #[test]
     fn the_drain_seam_carries_worker_finals_to_clients_and_nothing_else() {
         let (_tmp, paths) = temp_paths();

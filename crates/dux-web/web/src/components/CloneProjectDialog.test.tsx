@@ -21,6 +21,8 @@ let posted: unknown[] = []
 // What the folder check answers, in order, and what it was asked.
 let destinationReplies: (Response | Promise<Response>)[] = []
 let checked: unknown[] = []
+// The bootstrap document the fake server hands out.
+let bootstrapBody: unknown = {}
 
 function held() {
   let release: (r: Response) => void = () => {}
@@ -49,6 +51,9 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     )
   }
   const u = String(url)
+  if (u.endsWith("/api/v1/bootstrap")) {
+    return reply(200, JSON.stringify(bootstrapBody))
+  }
   if (u.endsWith("/api/v1/browse")) {
     return browseReplies.shift() ?? reply(200, JSON.stringify({ path: "/home/u", entries: [] }))
   }
@@ -141,6 +146,27 @@ describe("CloneProjectDialog", () => {
     type(destination(), "/srv/checkouts/mine")
     type(address(), "https://github.com/owner/third.git")
     expect(destination().value).toBe("/srv/checkouts/mine")
+  })
+
+  it("fills the repository's folder for a page pasted from GitHub", async () => {
+    await open()
+    type(address(), "https://github.com/owner/repo/issues")
+    expect(destination().value).toBe("/home/u/repo")
+  })
+
+  it("follows the GitHub hosts the server sends, until the destination is edited", async () => {
+    await open()
+    type(address(), "https://ghe.corp.example/owner/repo/issues")
+    expect(destination().value).toBe("/home/u/issues")
+
+    bootstrapBody = { macros: [], github_hosts: { kind: "hosts", hosts: ["ghe.corp.example"] } }
+    await store.reloadMacrosDraft()
+    await waitFor(() => expect(destination().value).toBe("/home/u/repo"))
+
+    type(destination(), "/srv/mine")
+    bootstrapBody = { macros: [], github_hosts: { kind: "hosts", hosts: [] } }
+    await store.reloadMacrosDraft()
+    expect(destination().value).toBe("/srv/mine")
   })
 
   it("fills the destination when the start folder lands after the address was typed", async () => {

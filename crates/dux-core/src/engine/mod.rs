@@ -4801,6 +4801,30 @@ impl Engine {
             .clone()
     }
 
+    /// The hosts a typed clone address is read as GitHub's on, for the clone
+    /// and for the folder it suggests: `github.com` always, and the hosts the
+    /// policy allows only while the GitHub integration is on, so turning it off
+    /// takes them away at once rather than at the next probe.
+    pub fn clone_github_hosts(&self) -> crate::gh::GithubHosts {
+        if self.github_integration_enabled {
+            crate::gh::GithubHosts::from_policy(&self.github_host_policy())
+        } else {
+            crate::gh::GithubHosts::github_com_only()
+        }
+    }
+
+    /// `gh`'s git protocols for a typed short clone address: none while the
+    /// GitHub integration is off, so a short form is cloned over https then.
+    pub fn clone_git_protocols(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::gh::GitProtocol> {
+        if self.github_integration_enabled {
+            self.github_git_protocols()
+        } else {
+            std::collections::BTreeMap::new()
+        }
+    }
+
     /// Replace the protocol map. Only the probe's completion handler does this.
     pub fn set_github_git_protocols(
         &self,

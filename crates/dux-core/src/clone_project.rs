@@ -196,7 +196,7 @@ pub(crate) fn prepare_clone(
     home: Option<&Path>,
     projects: &[&str],
 ) -> Result<PreparedClone, StatusText> {
-    let url = request.url.trim();
+    let url = trim_typed_address(&request.url);
     if url.is_empty() {
         return Err("Paste the address of the repository to clone.".into());
     }
@@ -227,44 +227,253 @@ pub(crate) fn prepare_clone(
     })
 }
 
-/// The full address a short `host/owner/repo` stands for, or `None` for any
-/// other text, which is cloned exactly as typed. Short means no scheme, no `@`
-/// and no `:`, and exactly three non-empty segments whose first is a host name
-/// with a dot in it, like `github.com` (so `localhost/o/r` stays a path); the
-/// repository may end in `.git` and the whole in one `/`. A relative path of
-/// that shape is expanded too, and `./` in front of it keeps it a path. The
-/// address is the one `gh repo clone` would use for that host, ssh or https
-/// by `protocols`, so a host with no recorded protocol is cloned over https.
-pub(crate) fn expand_short_address(
+/// The address to clone for what a person typed into the clone field, or
+/// `None` when the text goes to git exactly as typed: the address of the
+/// repository [`typed_clone_repository`] reads in it.
+pub(crate) fn expand_typed_address(
     text: &str,
     protocols: &std::collections::BTreeMap<String, crate::gh::GitProtocol>,
+    hosts: &crate::gh::GithubHosts,
 ) -> Option<String> {
-    let text = text.trim();
-    if text.contains("://") || text.contains('@') || text.contains(':') {
+    typed_clone_repository(text, hosts).map(|repository| repository.address(protocols))
+}
+
+/// What the browser's `String.prototype.trim` trims, a byte-order mark among
+/// it, so this side and the browser's folder suggestion agree on where typed
+/// text starts and ends, and the address handed to git carries none of it.
+pub(crate) fn trim_typed_address(text: &str) -> &str {
+    text.trim_matches(|c: char| {
+        matches!(
+            c,
+            '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+                ..='\u{200a}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202f}'
+                    | '\u{205f}'
+                    | '\u{3000}'
+                    | '\u{feff}'
+        )
+    })
+}
+
+/// A repository the clone field's text names in a spelling dux rewrites.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TypedCloneRepository {
+    /// Lowercase, with a web port when the address gave one.
+    host: String,
+    owner: String,
+    /// The repository's name with any `.git` off, which is also the folder the
+    /// clone lands in.
+    repo: String,
+    /// `http` or `https` for a pasted web address, which keeps the scheme it
+    /// was written with; `None` for a short form, cloned the way `gh` would.
+    web_scheme: Option<&'static str>,
+}
+
+impl TypedCloneRepository {
+    /// The address to clone from: the pasted scheme for a web address, else
+    /// the one `gh repo clone` would use, ssh or https by `protocols`.
+    fn address(
+        &self,
+        protocols: &std::collections::BTreeMap<String, crate::gh::GitProtocol>,
+    ) -> String {
+        let owner_repo = format!("{}/{}", self.owner, self.repo);
+        match self.web_scheme {
+            Some(scheme) => format!("{scheme}://{}/{owner_repo}.git", self.host),
+            None => crate::pr_reference::clone_address(&self.host, &owner_repo, protocols),
+        }
+    }
+}
+
+/// The repository typed text names, when it is one of the spellings the clone
+/// rewrites rather than handing to git as typed:
+///
+/// * `owner/repo` is on `github.com`, and `host/owner/repo` (a host with a dot
+///   in it and no port) is on that host.
+/// * On a GitHub host (`hosts`), whatever follows `owner/repo` is a page from a
+///   browser and comes off: a path (`/issues`, `/tree/main`, `/pull/7`), a
+///   query (`?tab=readme-ov-file`) or a fragment (`#readme`). A web address
+///   keeps the scheme and port it was written with.
+/// * Elsewhere nothing is cut, a query or a fragment included, and the text
+///   goes as typed: a longer path can be the repository itself (a GitLab
+///   subgroup is `group/subgroup/repo`).
+///
+/// Everything else goes as typed: a web address that is exactly
+/// `owner/repo`, scp-style, `ssh://`, `git://`, `file://`, a local path
+/// (`/`, `.`, `~` in front, so `./owner/repo` stays a folder), anything with a
+/// user, a password or a percent escape in it, and anything outside printable
+/// ASCII. A pull request number is ignored: the repository is cloned.
+///
+/// The spelling is read twice, and both readings must name the same
+/// repository. Once by [`typed_shape`], a deliberately small grammar that the
+/// browser's folder suggestion (`cloneDirName.ts`) repeats line for line, and
+/// once by the pull-request field's parser, [`crate::pr_reference`], which
+/// knows every way a browser or git could read the text. Where the parser
+/// reads it differently, or refuses it, nothing is rewritten.
+pub(crate) fn typed_clone_repository(
+    text: &str,
+    hosts: &crate::gh::GithubHosts,
+) -> Option<TypedCloneRepository> {
+    let text = trim_typed_address(text);
+    let shape = typed_shape(text, hosts)?;
+    let reference = crate::pr_reference::parse_typed_reference(text).ok()?;
+    let parsed_host = reference.host.as_deref().unwrap_or("github.com");
+    let owner_repo = format!("{}/{}", shape.owner, shape.repo);
+    (parsed_host == shape.host && reference.owner_repo.as_deref() == Some(owner_repo.as_str()))
+        .then_some(shape)
+}
+
+/// The grammar [`typed_clone_repository`] reads a spelling by, kept small
+/// enough for the browser's twin to repeat exactly: see its rules there.
+fn typed_shape(text: &str, hosts: &crate::gh::GithubHosts) -> Option<TypedCloneRepository> {
+    if text.is_empty()
+        || !text
+            .bytes()
+            .all(|b| (0x21..=0x7e).contains(&b) && b != b'\\')
+        || text.starts_with(['/', '.', '~'])
+    {
         return None;
     }
-    let text = text.strip_suffix('/').unwrap_or(text);
-    let mut segments = text.split('/');
-    let (Some(host), Some(owner), Some(repo), None) = (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) else {
+    let lowered = text.to_ascii_lowercase();
+    let web_scheme = ["https", "http"]
+        .into_iter()
+        .find(|scheme| lowered.starts_with(&format!("{scheme}://")));
+    let rest = &text[web_scheme.map_or(0, |scheme| scheme.len() + "://".len())..];
+    // The page is everything before the first `?` or `#`; a fragment is what
+    // follows the first `#`.
+    let (page, tail) = rest.split_at(rest.find(['?', '#']).unwrap_or(rest.len()));
+    let fragment = rest.split_once('#').map(|(_, fragment)| fragment);
+    let segments: Vec<&str> = page.split('/').filter(|part| !part.is_empty()).collect();
+    if segments.iter().any(|part| part.bytes().all(|b| b == b'.')) {
+        return None;
+    }
+    let (host, path) = if let Some(scheme) = web_scheme {
+        if page.contains('%') || fragment.is_some_and(|fragment| fragment.contains('%')) {
+            return None;
+        }
+        let host = typed_web_host(page.split('/').next().unwrap_or_default(), scheme)?;
+        // Only a page on a GitHub host is rewritten; anything else, and
+        // an address that is exactly the repository, goes as typed.
+        if !hosts.contains(&host) || (segments.len() <= 3 && tail.is_empty()) {
+            return None;
+        }
+        (host, &segments[1..])
+    } else {
+        let first = *segments.first()?;
+        let looks_like_host = first.contains(['.', ':']) || first.eq_ignore_ascii_case("localhost");
+        let (host, path) = if looks_like_host {
+            (first.to_ascii_lowercase(), &segments[1..])
+        } else {
+            ("github.com".to_string(), &segments[..])
+        };
+        let github = !looks_like_host || hosts.contains(&host);
+        // Only a GitHub host has a page to cut a query or a fragment off;
+        // elsewhere the text goes as typed. A colon is a port or scp, and an
+        // `@` a user: neither has a short form.
+        if (!github && !tail.is_empty()) || page.contains([':', '@']) {
+            return None;
+        }
+        if looks_like_host
+            && !(host.contains('.') && host.split('.').all(|label| !label.is_empty()))
+        {
+            return None;
+        }
+        // `owner/repo/...` with no host is a relative path as much as a
+        // page, and on another host the longer path can be the repository.
+        if path.len() > 2 && (!looks_like_host || !github) {
+            return None;
+        }
+        (host, path)
+    };
+    let [owner, repo, ..] = path else {
         return None;
     };
-    let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    // Every label of the host must be non-empty, so `./rel/path` and
-    // `../rel/path` stay local paths.
-    let is_host = host.contains('.') && host.split('.').all(|label| !label.is_empty());
-    if !is_host || owner.is_empty() || repo.is_empty() {
+    let repo = strip_dot_git_suffix(repo);
+    let is_name = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    if !is_name(owner) || !is_name(repo) || repo.eq_ignore_ascii_case(".git") {
         return None;
     }
-    Some(crate::pr_reference::clone_address(
-        &host.to_ascii_lowercase(),
-        &format!("{owner}/{repo}"),
-        protocols,
-    ))
+    // A fragment that is all digits is a pull request number, and one too big
+    // for a number is refused by the parser, so it is refused here too.
+    if path.len() == 2
+        && fragment.is_some_and(|fragment| {
+            !fragment.is_empty()
+                && fragment.bytes().all(|b| b.is_ascii_digit())
+                && fragment.parse::<u64>().is_err()
+        })
+    {
+        return None;
+    }
+    Some(TypedCloneRepository {
+        host,
+        owner: (*owner).to_string(),
+        repo: repo.to_string(),
+        web_scheme,
+    })
+}
+
+/// A web address's host as the `url` crate spells it, or `None` for an
+/// authority the small grammar does not read: letters, digits, dots and
+/// hyphens in non-empty labels, a last label that cannot read as an IPv4
+/// number, and an optional port that is dropped when it is the scheme's own.
+fn typed_web_host(authority: &str, scheme: &str) -> Option<String> {
+    let (name, port) = match authority.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (authority, None),
+    };
+    let labels: Vec<&str> = name.split('.').collect();
+    let last = labels
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        || labels.iter().any(|label| label.is_empty())
+        || last.bytes().all(|b| b.is_ascii_digit())
+        || last.starts_with("0x")
+    {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    let port = match port.filter(|port| !port.is_empty()) {
+        None => None,
+        Some(port) => {
+            if !port.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let Ok(port) = port.parse::<u64>() else {
+                return None;
+            };
+            if port > 65535 {
+                return None;
+            }
+            let default = if scheme == "https" { 443 } else { 80 };
+            (port != default).then_some(port)
+        }
+    };
+    Some(match port {
+        Some(port) => format!("{name}:{port}"),
+        None => name,
+    })
+}
+
+/// `value` with a trailing `.git` off, in any case, unless that would leave
+/// nothing: the parser's own rule.
+fn strip_dot_git_suffix(value: &str) -> &str {
+    let len = value.len();
+    if len > 4 && value.is_char_boundary(len - 4) && value[len - 4..].eq_ignore_ascii_case(".git") {
+        &value[..len - 4]
+    } else {
+        value
+    }
 }
 
 /// Refuse a destination that is already a project. Both sides are
@@ -1410,11 +1619,18 @@ pub(crate) fn redact_remote_userinfo(text: &str) -> String {
     redacted
 }
 
-/// The folder name `git clone` picks for `address`, or `None` when the address
-/// names none: trailing slashes and a trailing `.git` come off, and the name is
-/// what follows the last `/`, or the `:` of an scp-style `host:path`.
-pub fn clone_dir_name(address: &str) -> Option<String> {
-    let trimmed = address.trim().trim_end_matches('/');
+/// The folder name a clone of `address` lands in, or `None` when the address
+/// names none. For a spelling the clone rewrites (see
+/// [`typed_clone_repository`], asked with the same `hosts`), it is the
+/// repository's name, so a page pasted from a browser
+/// (`https://github.com/o/r/issues`) suggests `r`. Everything else follows
+/// git's own rule: trailing slashes and a trailing `.git` come off, and the
+/// name is what follows the last `/`, or the `:` of an scp-style `host:path`.
+pub fn clone_dir_name(address: &str, hosts: &crate::gh::GithubHosts) -> Option<String> {
+    if let Some(repository) = typed_clone_repository(address, hosts) {
+        return Some(repository.repo);
+    }
+    let trimmed = trim_typed_address(address).trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let trimmed = trimmed.trim_end_matches('/');
     let name = trimmed.rsplit(['/', ':']).next().unwrap_or(trimmed);
@@ -1434,68 +1650,274 @@ mod tests {
     struct DirNameCase {
         what: String,
         address: String,
+        /// The hosts the case is read with; `github.com` alone when absent.
+        #[serde(default = "crate::gh::GithubHosts::github_com_only")]
+        github_hosts: crate::gh::GithubHosts,
         name: Option<String>,
     }
 
+    fn protocols(
+        entries: &[(&str, crate::gh::GitProtocol)],
+    ) -> std::collections::BTreeMap<String, crate::gh::GitProtocol> {
+        entries
+            .iter()
+            .map(|(host, protocol)| (host.to_string(), *protocol))
+            .collect()
+    }
+
+    /// The GitHub hosts of the typed-address tests. A web port is part of the
+    /// host, as the policy names it.
+    fn test_github_hosts() -> crate::gh::GithubHosts {
+        crate::gh::GithubHosts::Hosts {
+            hosts: vec![
+                "ghe.corp.example".to_string(),
+                "ghe.corp.example:8443".to_string(),
+            ],
+        }
+    }
+
     #[test]
-    fn a_short_address_expands_to_the_one_gh_uses_for_its_host() {
+    fn a_typed_address_expands_to_the_repository_it_names() {
         use crate::gh::GitProtocol::{Https, Ssh};
-        let protocols = |entries: &[(&str, crate::gh::GitProtocol)]| {
-            entries
-                .iter()
-                .map(|(host, protocol)| (host.to_string(), *protocol))
-                .collect::<std::collections::BTreeMap<_, _>>()
-        };
-        let ssh = protocols(&[("github.com", Ssh)]);
+        let ssh = protocols(&[("github.com", Ssh), ("ghe.corp.example", Ssh)]);
         let https = protocols(&[("github.com", Https)]);
         let none = protocols(&[]);
         for (text, map, expected) in [
+            // owner/repo is on github.com.
+            ("o/r", &ssh, "git@github.com:o/r.git"),
+            ("o/r.git", &https, "https://github.com/o/r.git"),
+            ("o/r#123", &none, "https://github.com/o/r.git"),
+            // host/owner/repo, on any host with a dot.
             ("github.com/o/r", &ssh, "git@github.com:o/r.git"),
-            ("github.com/o/r.git", &ssh, "git@github.com:o/r.git"),
             ("  GitHub.com/o/r/ ", &ssh, "git@github.com:o/r.git"),
             ("github.com/o/r", &https, "https://github.com/o/r.git"),
             ("github.com/o/r", &none, "https://github.com/o/r.git"),
             ("gitlab.example/o/r", &ssh, "https://gitlab.example/o/r.git"),
             ("v1.2/a/b", &none, "https://v1.2/a/b.git"),
+            // A page path on a GitHub host comes off, keeping what was pasted.
+            ("github.com/o/r/tree/main", &ssh, "git@github.com:o/r.git"),
+            (
+                "https://github.com/o/r/issues",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "https://github.com/o/r/pull/7",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "https://github.com/o/r/pull/7/files",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "https://github.com/o/r/security/dependabot",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "https://github.com/o/r/this/is/a/made/up/path",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "http://github.com/o/r/issues",
+                &ssh,
+                "http://github.com/o/r.git",
+            ),
+            (
+                "https://ghe.corp.example:8443/o/r/tree/main",
+                &ssh,
+                "https://ghe.corp.example:8443/o/r.git",
+            ),
+            (
+                "ghe.corp.example/o/r/issues",
+                &ssh,
+                "git@ghe.corp.example:o/r.git",
+            ),
+            // A query or a fragment on a GitHub host is page too.
+            (
+                "https://github.com/o/r?tab=readme-ov-file",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "https://github.com/o/r#readme",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            (
+                "github.com/o/r/issues?q=is:open",
+                &ssh,
+                "git@github.com:o/r.git",
+            ),
+            // The scheme's own port is no port.
+            (
+                "https://github.com:443/o/r/issues",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
+            // What a browser trims, a byte-order mark among it.
+            (
+                "\u{feff}https://github.com/o/r/issues\u{3000}",
+                &ssh,
+                "https://github.com/o/r.git",
+            ),
         ] {
             assert_eq!(
-                expand_short_address(text, map).as_deref(),
+                expand_typed_address(text, map, &test_github_hosts()).as_deref(),
                 Some(expected),
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_typed_address_that_is_not_a_short_form_or_a_github_page_goes_as_typed() {
+        let ssh = protocols(&[("github.com", crate::gh::GitProtocol::Ssh)]);
         for text in [
+            // A full address with nothing after the repository.
             "https://github.com/o/r",
+            "https://github.com/o/r.git",
             "git@github.com:o/r",
+            "git@github.com:o/r.git",
             "ssh://git@github.com/o/r.git",
+            "git://github.com/o/r.git",
             "file:///srv/o/r",
-            "github.com:8443/o/r",
+            // Longer paths elsewhere are the repository: a GitLab subgroup.
+            "gitlab.com/group/subgroup/repo",
+            "https://gitlab.com/group/subgroup/repo",
+            "https://gitlab.com/group/subgroup/repo.git",
+            // A user or password in a routed address is not rewritten.
+            "https://user:token@github.com/o/r/issues",
+            // Local paths.
             "/abs/path",
             "/srv/o/r",
+            "/o/r",
             "./rel/path",
+            "./owner/repo",
             "./github.com/o/r",
             "../rel/path",
-            "localhost/o/r",
             "~/x/y",
-            "owner/repo",
+            "localhost/o/r",
+            // Nothing that is a repository.
+            "#123",
+            "123",
+            "",
             "a/b/c",
-            "github.com/o/r/extra",
+            "github.com:8443/o/r",
+            "github.com:123/scriptaculous/pull/7",
             "github.com//r",
             "github.com/o/.git",
+            "o/r:tags",
+            // Pages and short forms that are not GitHub's.
+            "gitlab.com/group/project/-/issues?q=a:b",
+            "gitlab.example/o/r#readme",
+            "gitlab.example/o/r?x=1",
+            "https://gitlab.com/o/r/issues",
+            "owner/repo/tree/main",
+            // An escape a rebuilt address would have to carry.
+            "https://github.com/o/r%23x/issues",
+            "https://github.com/o/r/blob/main/a%20b",
+            // Spellings a browser reads differently from how they look.
+            "https:/github.com/o/r/issues",
+            "https:///github.com/o/r/issues",
+            "https://github.com/o/r/../x/issues",
+            "https://github.com\\o\\r\\issues",
+            "https://@github.com/o/r/issues",
+            "https://1.2.3.4/o/r/issues",
+            "o/r#99999999999999999999999",
         ] {
-            assert_eq!(expand_short_address(text, &ssh), None, "{text:?}");
+            assert_eq!(
+                expand_typed_address(text, &ssh, &test_github_hosts()),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_on_a_host_is_read_by_route_only_under_hosts_that_name_it() {
+        let ssh = protocols(&[]);
+        let page = "https://github.example/o/r/issues";
+        for (hosts, expected) in [
+            (crate::gh::GithubHosts::github_com_only(), None),
+            (
+                crate::gh::GithubHosts::NameRule,
+                Some("https://github.example/o/r.git"),
+            ),
+            (
+                crate::gh::GithubHosts::Hosts {
+                    hosts: vec!["github.example".to_string()],
+                },
+                Some("https://github.example/o/r.git"),
+            ),
+        ] {
+            assert_eq!(
+                expand_typed_address(page, &ssh, &hosts).as_deref(),
+                expected,
+                "{hosts:?}"
+            );
+        }
+    }
+
+    fn dir_name_fixture() -> DirNameFixture {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/clone_dir_name_cross_language.json");
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    /// The browser's folder suggestion repeats the small grammar and not the
+    /// parser, so the twins agree only while the parser reads every spelling
+    /// the grammar accepts as the same repository. Held over every address the
+    /// shared fixture carries and a list of spellings a browser or git reads
+    /// differently from how they look.
+    #[test]
+    fn the_parser_reads_every_rewritten_spelling_as_the_small_grammar_does() {
+        let mut texts: Vec<String> = dir_name_fixture()
+            .cases
+            .into_iter()
+            .map(|case| case.address)
+            .collect();
+        for text in [
+            "https://github.com:0443/o/r/issues",
+            "https://github.com:/o/r/issues",
+            "https://GitHub.com/O/R.GIT/issues",
+            "https://github.com/o/r/pull/99999999999999999999999",
+            "https://github.com/o/r#99999999999999999999999",
+            "https://github.com/o/r/a/../../x/y",
+            "github.com/o/r#1?x",
+            "github.com/o/r?x#1",
+            "github.com/o/r/x?y=http://z",
+            "o/r?x=a:b",
+            "o/r#a:b",
+            "o_r/r-x.y",
+            "github.com/o/r.git.git/issues",
+        ] {
+            texts.push(text.to_string());
+        }
+        for hosts in [
+            crate::gh::GithubHosts::github_com_only(),
+            crate::gh::GithubHosts::NameRule,
+            test_github_hosts(),
+        ] {
+            for text in &texts {
+                let trimmed = trim_typed_address(text);
+                assert_eq!(
+                    typed_shape(trimmed, &hosts),
+                    typed_clone_repository(text, &hosts),
+                    "{text:?} under {hosts:?}"
+                );
+            }
         }
     }
 
     #[test]
     fn the_shared_clone_folder_name_fixture_holds() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/clone_dir_name_cross_language.json");
-        let fixture: DirNameFixture =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        for case in fixture.cases {
+        for case in dir_name_fixture().cases {
             assert_eq!(
-                clone_dir_name(&case.address),
+                clone_dir_name(&case.address, &case.github_hosts),
                 case.name,
                 "{}: {:?}",
                 case.what,
