@@ -122,7 +122,7 @@ fn section(
         .or_else(|| command.get_before_help())
         .map(ToString::to_string);
     for text in [about, before].into_iter().flatten() {
-        let _ = writeln!(page, "{}\n", prose(&text));
+        let _ = writeln!(page, "{}\n", sentence(prose(&text)));
     }
     let usage = command.clone().render_usage().to_string();
     let usage: Vec<&str> = usage
@@ -199,12 +199,16 @@ fn help_of(arg: &Arg) -> String {
 
 /// An argument's help with the sentences about its values after it.
 fn described(arg: &Arg) -> String {
-    let help = cell(&help_of(arg));
-    let values = values(arg);
-    if values.is_empty() || help.is_empty() || help.ends_with('.') {
-        format!("{help}{values}")
+    format!("{}{}", sentence(cell(&help_of(arg))), values(arg))
+}
+
+/// clap drops the period that ends a one-line doc comment; the page puts it
+/// back so every description reads as a sentence.
+fn sentence(text: String) -> String {
+    if text.is_empty() || text.ends_with(['.', '!', '?', ':']) {
+        text
     } else {
-        format!("{help}.{values}")
+        text + "."
     }
 }
 
@@ -499,7 +503,7 @@ mod tests {
         let page = render(tiny(), Command::new("config"));
         assert!(
             page.contains(
-                "| `<AGENT>` | Required. Pipe `a\\|b` to \\<AGENT\\> or c\\|d, unless `--dry-run` (or `--x`) |\n"
+                "| `<AGENT>` | Required. Pipe `a\\|b` to \\<AGENT\\> or c\\|d, unless `--dry-run` (or `--x`). |\n"
             ),
             "{page}"
         );
@@ -521,7 +525,7 @@ mod tests {
         assert!(!page.contains("ghost"), "{page}");
         assert!(!page.contains("`tool help`"), "{page}");
         assert!(
-            page.contains("| `--remote` | `<remote>` | Global one |"),
+            page.contains("| `--remote` | `<remote>` | Global one. |"),
             "{page}"
         );
     }

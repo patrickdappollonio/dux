@@ -15,8 +15,8 @@ commands fit together, and examples, see [The command line](/docs/command-line).
 
 | Flag | Value | Description |
 |---|---|---|
-| `--remote` | `<NAME>` | Talk to this saved remote instead of the local dux |
-| `--local` |  | Talk to the dux on this machine, whatever a saved default says |
+| `--remote` | `<NAME>` | Talk to this saved remote instead of the local dux. |
+| `--local` |  | Talk to the dux on this machine, whatever a saved default says. |
 | `-h`, `--help` | | Print the help for the command. |
 | `-V`, `--version` | | Print the version; `dux` alone takes it. |
 
@@ -62,7 +62,7 @@ dux [OPTIONS] [COMMAND]
 
 ## `dux server`
 
-Serve the web UI over the headless engine, or inspect a running server
+Serve the web UI over the headless engine, or inspect a running server.
 
 Run the dux web UI over the headless engine. The web UI has one optional
 password for one owner, and everyone who gets in shares the one workspace. Set
@@ -77,16 +77,16 @@ dux server [OPTIONS] [COMMAND]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--bind` | `<ADDR:PORT>` | Bind this exact address, overriding [server] host and port. An IP:port socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890 |
-| `--port` | `<PORT>` | Override [server] port only (ignored when `--bind` is set). dux binds host:port, and the machine's Tailscale address unless disabled |
-| `--no-tailscale` |  | Skip Tailscale detection this run (serve the configured host only) |
+| `--bind` | `<ADDR:PORT>` | Bind this exact address, overriding [server] host and port. An IP:port socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890. |
+| `--port` | `<PORT>` | Override [server] port only (ignored when `--bind` is set). dux binds host:port, and the machine's Tailscale address unless disabled. |
+| `--no-tailscale` |  | Skip Tailscale detection this run (serve the configured host only). |
 
 - [`dux server logs`](#dux-server-logs): Show the server's log: the last lines of server.log, read from the file when dux is not running
 - [`dux server connections`](#dux-server-connections): The connections attached to the server
 
 ### `dux server logs`
 
-Show the server's log: the last lines of server.log, read from the file when dux is not running
+Show the server's log: the last lines of server.log, read from the file when dux is not running.
 
 ```text
 dux server logs [OPTIONS]
@@ -94,12 +94,12 @@ dux server logs [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `-f`, `--follow` |  | Keep printing new lines as they are written, until interrupted |
+| `-f`, `--follow` |  | Keep printing new lines as they are written, until interrupted. |
 | `--lines` | `<N>` | How many of the last lines to start from. Default: `100`. |
 
 ### `dux server connections`
 
-The connections attached to the server
+The connections attached to the server.
 
 ```text
 dux server connections [OPTIONS] <COMMAND>
@@ -111,7 +111,7 @@ dux server connections [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List the connections
+List the connections.
 
 ```text
 dux server connections ls [OPTIONS]
@@ -120,11 +120,11 @@ dux server connections ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ## `dux config`
 
-Manage the dux configuration file
+Manage the dux configuration file.
 
 ```text
 dux config <COMMAND>
@@ -140,7 +140,7 @@ dux config <COMMAND>
 
 ### `dux config path`
 
-Print the config file path
+Print the config file path.
 
 ```text
 dux config path
@@ -148,7 +148,7 @@ dux config path
 
 ### `dux config get`
 
-Print one setting's value, for example `dux config get server.port`
+Print one setting's value, for example `dux config get server.port`.
 
 ```text
 dux config get [OPTIONS] <SETTING>
@@ -156,11 +156,11 @@ dux config get [OPTIONS] <SETTING>
 
 | Argument | Description |
 |---|---|
-| `<SETTING>` | Required. The setting's dotted name, for example `server.port` |
+| `<SETTING>` | Required. The setting's dotted name, for example `server.port`. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--show` |  | Values that can hold secrets (env, projects) need `--show` |
+| `--show` |  | Values that can hold secrets (env, projects) need `--show`. |
 
 ### `dux config set`
 
@@ -174,16 +174,16 @@ dux config set [OPTIONS] <SETTING> [VALUE]
 
 | Argument | Description |
 |---|---|
-| `<SETTING>` | Required. The setting's dotted name, for example `server.port` |
-| `<VALUE>` | Optional. The new value. Lists are one TOML array: `'["a", "b"]'`. A value that starts with two dashes goes after `--`. Left out for the password and env.\<NAME\> values, which are asked for |
+| `<SETTING>` | Required. The setting's dotted name, for example `server.port`. |
+| `<VALUE>` | Optional. The new value. Lists are one TOML array: `'["a", "b"]'`. A value that starts with two dashes goes after `--`. Left out for the password and env.\<NAME\> values, which are asked for. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--stdin` |  | Pipe the password or an env.\<NAME\> value in instead of being asked for it |
+| `--stdin` |  | Pipe the password or an env.\<NAME\> value in instead of being asked for it. |
 
 ### `dux config diff`
 
-Show settings that differ from defaults (summary; [env] and project details are summarized, never printed, so it is safe to paste into a bug report)
+Show settings that differ from defaults (summary; [env] and project details are summarized, never printed, so it is safe to paste into a bug report).
 
 ```text
 dux config diff [OPTIONS]
@@ -191,11 +191,11 @@ dux config diff [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--raw` |  | Show a unified diff against the default config. This prints the WHOLE config, [env] values included: redact it before sharing |
+| `--raw` |  | Show a unified diff against the default config. This prints the WHOLE config, [env] values included: redact it before sharing. |
 
 ### `dux config reset`
 
-Remove config, logs and saved remotes (keeps agents and worktrees)
+Remove config, logs and saved remotes (keeps agents and worktrees).
 
 ```text
 dux config reset [OPTIONS]
@@ -203,11 +203,11 @@ dux config reset [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--all` |  | Full factory reset: remove config, logs, saved remotes, sessions, and worktrees (deletes nothing if a program dux started still runs) |
+| `--all` |  | Full factory reset: remove config, logs, saved remotes, sessions, and worktrees (deletes nothing if a program dux started still runs). |
 
 ### `dux config regenerate`
 
-Preview a fresh default config (shows diff; [env] and other sensitive values are hidden unless you add `--show`)
+Preview a fresh default config (shows diff; [env] and other sensitive values are hidden unless you add `--show`).
 
 ```text
 dux config regenerate [OPTIONS]
@@ -215,12 +215,12 @@ dux config regenerate [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Overwrite the config file with fresh defaults |
-| `--show` |  | Show [env] and other sensitive values in the preview |
+| `--yes` |  | Overwrite the config file with fresh defaults. |
+| `--show` |  | Show [env] and other sensitive values in the preview. |
 
 ### `dux config restore-docs`
 
-Preview re-adding the explanatory comments to your config, keeping every value you have set (hides values like regenerate; `--show` reveals them)
+Preview re-adding the explanatory comments to your config, keeping every value you have set (hides values like regenerate; `--show` reveals them).
 
 ```text
 dux config restore-docs [OPTIONS]
@@ -228,12 +228,12 @@ dux config restore-docs [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Apply it (writes a timestamped backup first) |
-| `--show` |  | Show the hidden values in the preview |
+| `--yes` |  | Apply it (writes a timestamped backup first). |
+| `--show` |  | Show the hidden values in the preview. |
 
 ## `dux projects`
 
-Projects dux knows about
+Projects dux knows about.
 
 ```text
 dux projects [OPTIONS] <COMMAND>
@@ -249,7 +249,7 @@ dux projects [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List projects
+List projects.
 
 ```text
 dux projects ls [OPTIONS]
@@ -258,11 +258,11 @@ dux projects ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux projects show`
 
-Show one project
+Show one project.
 
 ```text
 dux projects show [OPTIONS] <PROJECT>
@@ -270,11 +270,11 @@ dux projects show [OPTIONS] <PROJECT>
 
 | Argument | Description |
 |---|---|
-| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids |
+| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids. |
 
 ### `dux projects add`
 
-Add a project from a path and print its id last
+Add a project from a path and print its id last.
 
 ```text
 dux projects add [OPTIONS] <PATH>
@@ -282,22 +282,22 @@ dux projects add [OPTIONS] <PATH>
 
 | Argument | Description |
 |---|---|
-| `<PATH>` | Required. The folder of the repository to add, on the machine dux runs on |
+| `<PATH>` | Required. The folder of the repository to add, on the machine dux runs on. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--name` | `<NAME>` | The project's name (the folder's name by default) |
-| `--checkout-default` |  | Check the repository's default branch out first |
-| `--init` |  | Make a plain folder a git repository first, with a first commit |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--name` | `<NAME>` | The project's name (the folder's name by default). |
+| `--checkout-default` |  | Check the repository's default branch out first. |
+| `--init` |  | Make a plain folder a git repository first, with a first commit. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux projects rm`
 
 Also: `remove`
 
-Remove a project. Its agents' worktrees stay on disk unless `--delete-worktrees` is given
+Remove a project. Its agents' worktrees stay on disk unless `--delete-worktrees` is given.
 
 ```text
 dux projects rm [OPTIONS] <PROJECT>
@@ -305,19 +305,19 @@ dux projects rm [OPTIONS] <PROJECT>
 
 | Argument | Description |
 |---|---|
-| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids |
+| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--delete-worktrees` |  | Also delete its agents and their worktrees |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--delete-worktrees` |  | Also delete its agents and their worktrees. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ### `dux projects worktrees`
 
-The worktrees of a project
+The worktrees of a project.
 
 ```text
 dux projects worktrees [OPTIONS] <COMMAND>
@@ -329,7 +329,7 @@ dux projects worktrees [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List a project's worktrees
+List a project's worktrees.
 
 ```text
 dux projects worktrees ls [OPTIONS] <PROJECT>
@@ -337,16 +337,16 @@ dux projects worktrees ls [OPTIONS] <PROJECT>
 
 | Argument | Description |
 |---|---|
-| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids |
+| `<PROJECT>` | Required. A project's id or name; a name two projects share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ## `dux agents`
 
-Agents, their tabs and their worktrees
+Agents, their tabs and their worktrees.
 
 ```text
 dux agents [OPTIONS] <COMMAND>
@@ -364,7 +364,7 @@ dux agents [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List agents
+List agents.
 
 ```text
 dux agents ls [OPTIONS]
@@ -372,14 +372,14 @@ dux agents ls [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--project` | `<PROJECT>` | Only the agents of this project |
-| `--worktrees` |  | Print only each agent's id and the folder it works in |
+| `--project` | `<PROJECT>` | Only the agents of this project. |
+| `--worktrees` |  | Print only each agent's id and the folder it works in. |
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux agents show`
 
-Show one agent
+Show one agent.
 
 ```text
 dux agents show [OPTIONS] <AGENT>
@@ -387,11 +387,11 @@ dux agents show [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 ### `dux agents add`
 
-Create an agent and print its id last
+Create an agent and print its id last.
 
 ```text
 dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDER>|--from-pr <PR>>
@@ -399,26 +399,26 @@ dux agents add [OPTIONS] <--project <PROJECT>|--fork <AGENT>|--standalone <FOLDE
 
 | Flag | Value | Description |
 |---|---|---|
-| `--project` | `<PROJECT>` | The project to create the agent in, on a new branch unless `--from-pr` or `--from-worktree` says otherwise. Not with `--fork` or `--standalone` |
-| `--name` | `<NAME>` | The agent's name, which is also its branch's name in a project |
-| `--existing-branch` |  | Create the agent on the branch of that name that already exists. Not with `--from-pr`, `--from-worktree`, `--fork` or `--standalone` |
-| `--from-pr` | `<PR>` | Create the agent from this pull request: a number or its address with `--project`, or an address or owner/repo#123 alone, which clones the repository (or adds a checkout of it) when no project has it. Not with `--from-worktree`, `--fork` or `--standalone` |
-| `--path` | `<FOLDER>` | The folder to clone the pull request's repository into, or the existing checkout of it to add as a project, when no project has it. By default the server's project-browser start folder plus the repository's name. Needs `--from-pr`, and not with `--project` |
-| `--review-copy` |  | Agree to a separate review copy of the pull request when its own branch cannot be used as it is (it has diverged, is checked out elsewhere, or could not be compared). Without this such a create is refused and nothing is made, because pushes from a copy land on the copy's branch and not on the pull request. Needs `--from-pr` |
-| `--from-worktree` | `<PATH>` | Create the agent on this worktree the project already has. Needs `--project` |
-| `--standalone` | `<FOLDER>` | Create a standalone agent in this folder of your own, with no project. Not with `--fork` |
-| `--provider` | `<NAME>` | The provider a standalone agent runs (the global default otherwise). Not with `--project`, `--fork` or `--from-pr` |
-| `--fork` | `<AGENT>` | Fork this agent: a new worktree from its branch |
-| `--copy-uncommitted` |  | Copy the uncommitted changes of the project's checkout into the new worktree. Not with `--from-pr`, `--from-worktree`, `--fork` or `--standalone` |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--project` | `<PROJECT>` | The project to create the agent in, on a new branch unless `--from-pr` or `--from-worktree` says otherwise. Not with `--fork` or `--standalone`. |
+| `--name` | `<NAME>` | The agent's name, which is also its branch's name in a project. |
+| `--existing-branch` |  | Create the agent on the branch of that name that already exists. Not with `--from-pr`, `--from-worktree`, `--fork` or `--standalone`. |
+| `--from-pr` | `<PR>` | Create the agent from this pull request: a number or its address with `--project`, or an address or owner/repo#123 alone, which clones the repository (or adds a checkout of it) when no project has it. Not with `--from-worktree`, `--fork` or `--standalone`. |
+| `--path` | `<FOLDER>` | The folder to clone the pull request's repository into, or the existing checkout of it to add as a project, when no project has it. By default the server's project-browser start folder plus the repository's name. Needs `--from-pr`, and not with `--project`. |
+| `--review-copy` |  | Agree to a separate review copy of the pull request when its own branch cannot be used as it is (it has diverged, is checked out elsewhere, or could not be compared). Without this such a create is refused and nothing is made, because pushes from a copy land on the copy's branch and not on the pull request. Needs `--from-pr`. |
+| `--from-worktree` | `<PATH>` | Create the agent on this worktree the project already has. Needs `--project`. |
+| `--standalone` | `<FOLDER>` | Create a standalone agent in this folder of your own, with no project. Not with `--fork`. |
+| `--provider` | `<NAME>` | The provider a standalone agent runs (the global default otherwise). Not with `--project`, `--fork` or `--from-pr`. |
+| `--fork` | `<AGENT>` | Fork this agent: a new worktree from its branch. |
+| `--copy-uncommitted` |  | Copy the uncommitted changes of the project's checkout into the new worktree. Not with `--from-pr`, `--from-worktree`, `--fork` or `--standalone`. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux agents rm`
 
 Also: `remove`
 
-Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept
+Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept.
 
 ```text
 dux agents rm [OPTIONS] <AGENT>
@@ -426,23 +426,23 @@ dux agents rm [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--delete-worktree` |  | Also remove the agent's worktree |
-| `--delete-branch` |  | Delete the branch its worktree is on, at the commit it points at now. Needs `--delete-worktree`: git will not delete a branch a worktree still has checked out. Not with `--keep-branch` |
-| `--keep-branch` |  | Keep the branch its worktree is on. With `--delete-worktree`, the other branches it has been on are still decided as the delete dialog would tick them, unless `--keep-other-branches` or `--delete-other-branches` says otherwise |
-| `--delete-other-branches` |  | Delete every other branch its worktree has been on, each at the commit it points at now. Needs `--delete-worktree`, and not with `--keep-other-branches` |
-| `--keep-other-branches` |  | Keep every other branch its worktree has been on. With `--delete-worktree`, the branch it is on now is still decided as the delete dialog would tick it, unless `--keep-branch` or `--delete-branch` says otherwise |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--delete-worktree` |  | Also remove the agent's worktree. |
+| `--delete-branch` |  | Delete the branch its worktree is on, at the commit it points at now. Needs `--delete-worktree`: git will not delete a branch a worktree still has checked out. Not with `--keep-branch`. |
+| `--keep-branch` |  | Keep the branch its worktree is on. With `--delete-worktree`, the other branches it has been on are still decided as the delete dialog would tick them, unless `--keep-other-branches` or `--delete-other-branches` says otherwise. |
+| `--delete-other-branches` |  | Delete every other branch its worktree has been on, each at the commit it points at now. Needs `--delete-worktree`, and not with `--keep-other-branches`. |
+| `--keep-other-branches` |  | Keep every other branch its worktree has been on. With `--delete-worktree`, the branch it is on now is still decided as the delete dialog would tick it, unless `--keep-branch` or `--delete-branch` says otherwise. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ### `dux agents stop`
 
-Stop everything an agent runs
+Stop everything an agent runs.
 
 ```text
 dux agents stop [OPTIONS] <AGENT>
@@ -450,18 +450,18 @@ dux agents stop [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ### `dux agents start`
 
-Start an agent
+Start an agent.
 
 ```text
 dux agents start [OPTIONS] <AGENT>
@@ -469,17 +469,17 @@ dux agents start [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux agents tabs`
 
-An agent's provider tabs
+An agent's provider tabs.
 
 ```text
 dux agents tabs [OPTIONS] <COMMAND>
@@ -495,7 +495,7 @@ dux agents tabs [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List an agent's tabs
+List an agent's tabs.
 
 ```text
 dux agents tabs ls [OPTIONS] <AGENT>
@@ -503,16 +503,16 @@ dux agents tabs ls [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux agents tabs add`
 
-Add a tab to an agent
+Add a tab to an agent.
 
 ```text
 dux agents tabs add [OPTIONS] <AGENT>
@@ -520,20 +520,20 @@ dux agents tabs add [OPTIONS] <AGENT>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--provider` | `<NAME>` | The provider the tab runs (the project's by default) |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--provider` | `<NAME>` | The provider the tab runs (the project's by default). |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux agents tabs rm`
 
 Also: `remove`
 
-Close a tab
+Close a tab.
 
 ```text
 dux agents tabs rm [OPTIONS] <AGENT> <TAB>
@@ -541,19 +541,19 @@ dux agents tabs rm [OPTIONS] <AGENT> <TAB>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
-| `<TAB>` | Required. A tab's id or the label the tab strip shows it under |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<TAB>` | Required. A tab's id or the label the tab strip shows it under. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ### `dux agents tabs start`
 
-Start a tab
+Start a tab.
 
 ```text
 dux agents tabs start [OPTIONS] <AGENT> <TAB>
@@ -561,18 +561,18 @@ dux agents tabs start [OPTIONS] <AGENT> <TAB>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
-| `<TAB>` | Required. A tab's id or the label the tab strip shows it under |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<TAB>` | Required. A tab's id or the label the tab strip shows it under. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux agents tabs stop`
 
-Stop a tab
+Stop a tab.
 
 ```text
 dux agents tabs stop [OPTIONS] <AGENT> <TAB>
@@ -580,19 +580,19 @@ dux agents tabs stop [OPTIONS] <AGENT> <TAB>
 
 | Argument | Description |
 |---|---|
-| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids |
-| `<TAB>` | Required. A tab's id or the label the tab strip shows it under |
+| `<AGENT>` | Required. An agent's id or name; a name two agents share is refused with both ids. |
+| `<TAB>` | Required. A tab's id or the label the tab strip shows it under. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ## `dux terminals`
 
-Terminals, project-owned, agent-owned and standalone
+Terminals, project-owned, agent-owned and standalone.
 
 ```text
 dux terminals [OPTIONS] <COMMAND>
@@ -606,7 +606,7 @@ dux terminals [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List terminals
+List terminals.
 
 ```text
 dux terminals ls [OPTIONS]
@@ -615,11 +615,11 @@ dux terminals ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux terminals add`
 
-Open a terminal and print its id last
+Open a terminal and print its id last.
 
 ```text
 dux terminals add [OPTIONS]
@@ -627,17 +627,17 @@ dux terminals add [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--agent` | `<AGENT>` | Open it in this agent's worktree. Not with `--project` |
-| `--project` | `<PROJECT>` | Open it at this project's root |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--agent` | `<AGENT>` | Open it in this agent's worktree. Not with `--project`. |
+| `--project` | `<PROJECT>` | Open it at this project's root. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux terminals rm`
 
 Also: `remove`
 
-Close a terminal
+Close a terminal.
 
 ```text
 dux terminals rm [OPTIONS] <TERMINAL>
@@ -645,18 +645,18 @@ dux terminals rm [OPTIONS] <TERMINAL>
 
 | Argument | Description |
 |---|---|
-| `<TERMINAL>` | Required. A terminal's id or its name in the list; a name two terminals share is refused with both ids |
+| `<TERMINAL>` | Required. A terminal's id or its name in the list; a name two terminals share is refused with both ids. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
 
 ## `dux macros`
 
-Macros from config.toml
+Macros from config.toml.
 
 ```text
 dux macros [OPTIONS] <COMMAND>
@@ -671,7 +671,7 @@ dux macros [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List the macros
+List the macros.
 
 ```text
 dux macros ls [OPTIONS]
@@ -680,11 +680,11 @@ dux macros ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux macros show`
 
-Show one macro by name
+Show one macro by name.
 
 ```text
 dux macros show [OPTIONS] <NAME>
@@ -692,11 +692,11 @@ dux macros show [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The macro's name, as `dux macros ls` lists it |
+| `<NAME>` | Required. The macro's name, as `dux macros ls` lists it. |
 
 ### `dux macros add`
 
-Add a macro, or replace the one with that name
+Add a macro, or replace the one with that name.
 
 ```text
 dux macros add [OPTIONS] <NAME> <TEXT>
@@ -704,21 +704,21 @@ dux macros add [OPTIONS] <NAME> <TEXT>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The macro's name; an existing macro with this name is replaced |
-| `<TEXT>` | Required. The text the macro types |
+| `<NAME>` | Required. The macro's name; an existing macro with this name is replaced. |
+| `<TEXT>` | Required. The text the macro types. |
 
 | Flag | Value | Description |
 |---|---|---|
 | `--surface` | `<SURFACE>` | Where the macro is offered: in agents, terminals, or both. One of `agent`, `terminal`, `both`. Default: `agent`. |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux macros rm`
 
 Also: `remove`
 
-Remove a macro
+Remove a macro.
 
 ```text
 dux macros rm [OPTIONS] <NAME>
@@ -726,17 +726,17 @@ dux macros rm [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The macro's name, as `dux macros ls` lists it |
+| `<NAME>` | Required. The macro's name, as `dux macros ls` lists it. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ## `dux providers`
 
-Providers from config.toml
+Providers from config.toml.
 
 ```text
 dux providers [OPTIONS] <COMMAND>
@@ -749,7 +749,7 @@ dux providers [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List the providers, built-in and your own
+List the providers, built-in and your own.
 
 ```text
 dux providers ls [OPTIONS]
@@ -758,11 +758,11 @@ dux providers ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux providers show`
 
-Show one provider and the command it runs
+Show one provider and the command it runs.
 
 ```text
 dux providers show [OPTIONS] <NAME>
@@ -770,11 +770,11 @@ dux providers show [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The provider's name, as `dux providers ls` lists it |
+| `<NAME>` | Required. The provider's name, as `dux providers ls` lists it. |
 
 ## `dux keys`
 
-Keybindings from config.toml
+Keybindings from config.toml.
 
 ```text
 dux keys [OPTIONS] <COMMAND>
@@ -786,7 +786,7 @@ dux keys [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List every action the terminal UI binds and the keys it uses, yours or the default
+List every action the terminal UI binds and the keys it uses, yours or the default.
 
 ```text
 dux keys ls [OPTIONS]
@@ -795,11 +795,11 @@ dux keys ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ## `dux themes`
 
-Themes dux can load
+Themes dux can load.
 
 ```text
 dux themes [OPTIONS] <COMMAND>
@@ -811,7 +811,7 @@ dux themes [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List the themes dux can load, marking the one ui.theme names
+List the themes dux can load, marking the one ui.theme names.
 
 ```text
 dux themes ls [OPTIONS]
@@ -820,11 +820,11 @@ dux themes ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ## `dux env`
 
-The global environment from config.toml
+The global environment from config.toml.
 
 ```text
 dux env [OPTIONS] <COMMAND>
@@ -838,7 +838,7 @@ dux env [OPTIONS] <COMMAND>
 
 Also: `list`
 
-List the variables
+List the variables.
 
 ```text
 dux env ls [OPTIONS]
@@ -846,13 +846,13 @@ dux env ls [OPTIONS]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--show` |  | Print the values too, which may be secrets |
+| `--show` |  | Print the values too, which may be secrets. |
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux env set`
 
-Set a variable; the value is asked for, or read from stdin
+Set a variable; the value is asked for, or read from stdin.
 
 ```text
 dux env set [OPTIONS] <NAME>
@@ -860,20 +860,20 @@ dux env set [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The variable's name, for example `GITHUB_TOKEN` |
+| `<NAME>` | Required. The variable's name, for example `GITHUB_TOKEN`. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--stdin` |  | Read the value from standard input |
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--stdin` |  | Read the value from standard input. |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ### `dux env rm`
 
 Also: `remove`
 
-Remove a variable
+Remove a variable.
 
 ```text
 dux env rm [OPTIONS] <NAME>
@@ -881,17 +881,17 @@ dux env rm [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The variable's name, as `dux env ls` lists it |
+| `<NAME>` | Required. The variable's name, as `dux env ls` lists it. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--yes` |  | Do not ask for confirmation (required without a terminal) |
-| `--no-wait` |  | Print the operation id and return without waiting for the change |
-| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait` |
+| `--yes` |  | Do not ask for confirmation (required without a terminal). |
+| `--no-wait` |  | Print the operation id and return without waiting for the change. |
+| `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
 
 ## `dux remote`
 
-Saved remote duxes and the sign-ins for them
+Saved remote duxes and the sign-ins for them.
 
 ```text
 dux remote [OPTIONS] <COMMAND>
@@ -906,7 +906,7 @@ dux remote [OPTIONS] <COMMAND>
 
 ### `dux remote add`
 
-Save a remote under a name
+Save a remote under a name.
 
 ```text
 dux remote add [OPTIONS] <NAME> <URL>
@@ -914,18 +914,18 @@ dux remote add [OPTIONS] <NAME> <URL>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The name to save the remote under, used with `--remote` |
-| `<URL>` | Required. The address of the remote dux's web UI, for example `https://box.tailnet-name.ts.net` |
+| `<NAME>` | Required. The name to save the remote under, used with `--remote`. |
+| `<URL>` | Required. The address of the remote dux's web UI, for example `https://box.tailnet-name.ts.net`. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--insecure` |  | Allow plain http:// to an address that is neither this machine nor a Tailscale address. The password then crosses the network unencrypted, and every login says so |
+| `--insecure` |  | Allow plain http:// to an address that is neither this machine nor a Tailscale address. The password then crosses the network unencrypted, and every login says so. |
 
 ### `dux remote ls`
 
 Also: `list`
 
-List saved remotes
+List saved remotes.
 
 ```text
 dux remote ls [OPTIONS]
@@ -934,13 +934,13 @@ dux remote ls [OPTIONS]
 | Flag | Value | Description |
 |---|---|---|
 | `--format` | `<FORMAT>` | How to print the list: `table` to read, `json` for a script. One of `table`, `json`. Default: `table`. |
-| `-q`, `--quiet` |  | Print only the ids, one per line |
+| `-q`, `--quiet` |  | Print only the ids, one per line. |
 
 ### `dux remote rm`
 
 Also: `remove`
 
-Forget a saved remote
+Forget a saved remote.
 
 ```text
 dux remote rm [OPTIONS] <NAME>
@@ -948,11 +948,11 @@ dux remote rm [OPTIONS] <NAME>
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Required. The saved remote's name, as `dux remote ls` lists it |
+| `<NAME>` | Required. The saved remote's name, as `dux remote ls` lists it. |
 
 ### `dux remote default`
 
-Choose, or with `--unset` clear, the remote used when none is named
+Choose, or with `--unset` clear, the remote used when none is named.
 
 ```text
 dux remote default [OPTIONS] [NAME]
@@ -960,15 +960,15 @@ dux remote default [OPTIONS] [NAME]
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Optional. The saved remote's name, as `dux remote ls` lists it. Needed unless `--unset` is given |
+| `<NAME>` | Optional. The saved remote's name, as `dux remote ls` lists it. Needed unless `--unset` is given. |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--unset` |  | Clear the default remote. Not with a name |
+| `--unset` |  | Clear the default remote. Not with a name. |
 
 ### `dux remote login`
 
-Sign in to a remote (the selected one when no name is given)
+Sign in to a remote (the selected one when no name is given).
 
 ```text
 dux remote login [OPTIONS] [NAME]
@@ -976,15 +976,15 @@ dux remote login [OPTIONS] [NAME]
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Optional. The saved remote's name (the selected one when left out) |
+| `<NAME>` | Optional. The saved remote's name (the selected one when left out). |
 
 | Flag | Value | Description |
 |---|---|---|
-| `--stdin` |  | Read the password from standard input instead of asking for it |
+| `--stdin` |  | Read the password from standard input instead of asking for it. |
 
 ### `dux remote logout`
 
-Sign out of a remote (the selected one when no name is given)
+Sign out of a remote (the selected one when no name is given).
 
 ```text
 dux remote logout [OPTIONS] [NAME]
@@ -992,11 +992,11 @@ dux remote logout [OPTIONS] [NAME]
 
 | Argument | Description |
 |---|---|
-| `<NAME>` | Optional. The saved remote's name (the selected one when left out) |
+| `<NAME>` | Optional. The saved remote's name (the selected one when left out). |
 
 ## `dux operations`
 
-Look up a change that was started earlier
+Look up a change that was started earlier.
 
 ```text
 dux operations [OPTIONS] <COMMAND>
@@ -1006,7 +1006,7 @@ dux operations [OPTIONS] <COMMAND>
 
 ### `dux operations show`
 
-Show where a change stands
+Show where a change stands.
 
 ```text
 dux operations show [OPTIONS] <ID>
@@ -1014,4 +1014,4 @@ dux operations show [OPTIONS] <ID>
 
 | Argument | Description |
 |---|---|
-| `<ID>` | Required. The operation id a change printed when it started |
+| `<ID>` | Required. The operation id a change printed when it started. |
