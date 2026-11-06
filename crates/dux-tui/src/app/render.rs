@@ -2768,7 +2768,7 @@ impl App {
     /// The pull request badge an agent row pins to its right edge, when the
     /// agent has a pull request.
     fn agent_row_pr_badge(&self, session: &AgentSession) -> Option<Span<'static>> {
-        self.engine.pr_statuses.get(&session.id).map(|pr| {
+        self.engine.shown_pr(&session.id).map(|pr| {
             let pr_color = match pr.state {
                 crate::model::PrState::Merged => self.theme.pr_merged_label,
                 crate::model::PrState::Closed => self.theme.pr_closed_label,
@@ -3571,7 +3571,7 @@ impl App {
         let covered = !matches!(self.fullscreen_overlay, FullscreenOverlay::None);
         let pr_info = if !is_input && !covered {
             self.selected_session()
-                .and_then(|s| self.engine.pr_statuses.get(&s.id))
+                .and_then(|s| self.engine.shown_pr(&s.id))
                 .cloned()
         } else {
             None
@@ -6473,7 +6473,12 @@ impl App {
                         "gh CLI could not be reached, so dux is retrying periodically".to_string(),
                     ),
                     GhStatus::Available => {
-                        let count = self.engine.pr_statuses.len();
+                        let count = self
+                            .engine
+                            .agent_prs
+                            .keys()
+                            .filter(|id| self.engine.shown_pr(id).is_some())
+                            .count();
                         (
                             self.glyphs().check,
                             format!("Active: tracking PRs for {}", count_of(count, "session")),
@@ -13921,8 +13926,7 @@ impl App {
                 let name = session.display_label();
                 let pr_suffix = self
                     .engine
-                    .pr_statuses
-                    .get(&session.id)
+                    .shown_pr(&session.id)
                     .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))
                     .unwrap_or_default();
                 format!(" {provider} agent · {name}{pr_suffix} ")
@@ -15401,7 +15405,7 @@ impl App {
     /// opens the pull request, the way the web banner is one link across the
     /// whole strip. The rect is published only where the band is actually
     /// painted, so every early return below leaves it unset.
-    fn render_pr_banner(&mut self, frame: &mut Frame<'_>, area: Rect, pr: &crate::model::PrInfo) {
+    fn render_pr_banner(&mut self, frame: &mut Frame<'_>, area: Rect, pr: &crate::model::AgentPr) {
         use crate::model::PrState;
 
         if area.height < 1 || area.width < 6 {
@@ -28583,7 +28587,7 @@ mod tests {
 
     /// Give the selected agent a known pull request, the way the PR poller
     /// would, so the banner lane is drawn.
-    fn install_pr(app: &mut App) -> crate::model::PrInfo {
+    fn install_pr(app: &mut App) -> crate::model::AgentPr {
         use crate::model::{PrInfo, PrState};
 
         let pr = PrInfo {
@@ -28596,8 +28600,9 @@ mod tests {
             ..PrInfo::default()
         };
         let id = app.selected_session().expect("a selected agent").id.clone();
-        app.engine.pr_statuses.insert(id, pr.clone());
-        pr
+        let row = crate::model::AgentPr::found(&pr, chrono::Utc::now());
+        app.engine.agent_prs.insert(id, vec![row.clone()]);
+        row
     }
 
     /// The band the banner paints IS the click target: the whole row of the

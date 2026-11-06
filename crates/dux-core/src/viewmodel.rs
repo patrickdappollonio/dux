@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::engine::Engine;
 use crate::ids::TabIdRef;
-use crate::model::{AgentSession, PrInfo, PrState, Project, ProjectBranchStatus, ProviderKind};
+use crate::model::{AgentSession, PrState, Project, ProjectBranchStatus, ProviderKind};
 use crate::worker::{ResourceKind, ResourceStats};
 
 /// The projects/sessions/sidebar "spine" a web client reads via
@@ -1276,7 +1276,7 @@ impl ProjectView {
 
 impl PrView {
     /// Project `pr` as dux found it, not overridden by a pin.
-    fn from_pr(pr: &PrInfo) -> Self {
+    fn from_pr(pr: &crate::model::AgentPr) -> Self {
         Self {
             overridden: false,
             number: pr.number,
@@ -1512,11 +1512,11 @@ impl Engine {
             ),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
-            pr: self.pr_statuses.get(&s.id).map(|pr| PrView {
-                overridden: self.pr_overrides.contains_key(&s.id),
+            pr: self.shown_pr(&s.id).map(|pr| PrView {
+                overridden: pr.attached,
                 ..PrView::from_pr(pr)
             }),
-            pr_autodetect_suppressed: self.pr_suppressions.contains(&s.id),
+            pr_autodetect_suppressed: self.pr_autodetect_suppressed(&s.id),
             slot_tab_id: s.slot_tab_id().to_string(),
             detachable: self.is_detachable(&s.id),
             tabs,
@@ -1806,7 +1806,7 @@ mod tests {
     }
 
     /// `overridden` lives on `PrView` (so "overridden without a PR" is
-    /// unrepresentable) and flips with the engine's `pr_overrides` map, which
+    /// unrepresentable) and flips with the shown row's attached flag, which
     /// is also what makes a detach observable to the web's sessions fingerprint
     /// before the PR data itself changes.
     #[test]
@@ -1814,34 +1814,26 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
-        engine.pr_statuses.insert(
+        engine.agent_prs.insert(
             "s1".to_string(),
-            crate::model::PrInfo {
-                number: 12,
-                state: crate::model::PrState::Open,
-                title: "Pinned".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "fork/r".to_string(),
-                url: "https://github.com/fork/r/pull/12".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &crate::model::PrInfo {
+                    number: 12,
+                    state: crate::model::PrState::Open,
+                    title: "Pinned".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "fork/r".to_string(),
+                    url: "https://github.com/fork/r/pull/12".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
         assert!(!pr.overridden, "autodetected PRs are not overridden");
 
-        engine.pr_overrides.insert(
-            "s1".to_string(),
-            crate::storage::StoredPr {
-                session_id: "s1".to_string(),
-                pr_number: 12,
-                host: "github.com".to_string(),
-                owner_repo: "fork/r".to_string(),
-                state: "OPEN".to_string(),
-                title: "Pinned".to_string(),
-                url: "https://github.com/fork/r/pull/12".to_string(),
-            },
-        );
+        engine.agent_prs.get_mut("s1").unwrap()[0].attached = true;
         let pr = engine.spine().sessions[0].pr.clone().expect("pr view");
         assert!(pr.overridden, "a pinned PR reports overridden");
     }
@@ -1857,7 +1849,13 @@ mod tests {
 
         assert!(!engine.spine().sessions[0].pr_autodetect_suppressed);
 
-        engine.pr_suppressions.insert("s1".to_string());
+        engine.pr_prefs.insert(
+            "s1".to_string(),
+            crate::model::PrPrefs {
+                hide_created_before: Some(chrono::Utc::now()),
+                ..Default::default()
+            },
+        );
         let view = &engine.spine().sessions[0];
         assert!(view.pr_autodetect_suppressed);
         assert!(
@@ -2120,17 +2118,20 @@ mod tests {
         let (mut engine, _tmp) = test_engine();
         engine.projects.push(sample_project("p1", "/repo"));
         engine.sessions.push(sample_session("s1", "p1", "feature"));
-        engine.pr_statuses.insert(
+        engine.agent_prs.insert(
             "s1".to_string(),
-            PrInfo {
-                number: 42,
-                state: PrState::Merged,
-                title: "Add the thing".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &crate::model::PrInfo {
+                    number: 42,
+                    state: PrState::Merged,
+                    title: "Add the thing".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let vm = engine.spine();

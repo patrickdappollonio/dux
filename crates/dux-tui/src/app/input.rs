@@ -16742,17 +16742,20 @@ not_a_real_action = ["x"]
     #[test]
     fn the_rename_dialog_learns_the_open_pull_request_and_the_pushed_answer() {
         let mut app = test_app(default_bindings());
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            dux_core::model::PrInfo {
-                number: 42,
-                state: dux_core::model::PrState::Open,
-                title: "Login".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "o/r".to_string(),
-                url: "https://github.com/o/r/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &dux_core::model::PrInfo {
+                    number: 42,
+                    state: dux_core::model::PrState::Open,
+                    title: "Login".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                    url: "https://github.com/o/r/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
         app.open_rename_session();
         assert!(matches!(
@@ -20614,17 +20617,20 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         let id = app.engine.sessions[0].id.clone();
         app.engine.mark_session_status(&id, SessionStatus::Active);
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             id.clone(),
-            PrInfo {
-                number: 42,
-                state: PrState::Open,
-                title: "Demo".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &PrInfo {
+                    number: 42,
+                    state: PrState::Open,
+                    title: "Demo".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
         app.focus = FocusPane::Left;
         app.left_section = LeftSection::Projects;
@@ -21890,17 +21896,20 @@ not_a_real_action = ["x"]
 
         let session_id = app.engine.sessions[0].id.clone();
         let url = "https://github.com/owner/repo/pull/42".to_string();
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             session_id,
-            PrInfo {
-                number: 42,
-                state: PrState::Open,
-                title: "Teach the banner to open its pull request".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: url.clone(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &PrInfo {
+                    number: 42,
+                    state: PrState::Open,
+                    title: "Teach the banner to open its pull request".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: url.clone(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
         app.mouse_layout.pr_banner = Some(Rect::new(20, 19, 57, 1));
         url
@@ -24681,17 +24690,20 @@ not_a_real_action = ["x"]
         );
 
         let mut app = test_app(default_bindings());
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            PrInfo {
-                number: 42,
-                state: PrState::Merged,
-                title: "Demo PR".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &PrInfo {
+                    number: 42,
+                    state: PrState::Merged,
+                    title: "Demo PR".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
         assert_eq!(
             palette_names(&app, "open pr"),
@@ -24797,17 +24809,20 @@ not_a_real_action = ["x"]
     #[test]
     fn command_palette_shows_current_pr_command_with_known_pr() {
         let mut app = test_app(default_bindings());
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            PrInfo {
-                number: 42,
-                state: PrState::Merged,
-                title: "Demo PR".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &PrInfo {
+                    number: 42,
+                    state: PrState::Merged,
+                    title: "Demo PR".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let commands = app.filtered_palette_commands("open-current-pr");
@@ -24897,6 +24912,24 @@ not_a_real_action = ["x"]
         }
     }
 
+    /// Give the engine's memory `stored` as the agent's attached pull request.
+    fn attach_in_memory(app: &mut App, stored: &dux_core::storage::StoredPr) {
+        let info = dux_core::model::PrInfo {
+            number: stored.pr_number,
+            title: stored.title.clone(),
+            host: stored.host.clone(),
+            owner_repo: stored.owner_repo.clone(),
+            url: stored.url.clone(),
+            ..Default::default()
+        };
+        let mut row = dux_core::model::AgentPr::found(&info, chrono::Utc::now());
+        row.found = false;
+        row.attached = true;
+        app.engine
+            .agent_prs
+            .insert(stored.session_id.clone(), vec![row]);
+    }
+
     #[test]
     fn command_palette_gates_the_pull_request_commands_on_gh_and_the_association() {
         let mut app = test_app(default_bindings());
@@ -24913,36 +24946,37 @@ not_a_real_action = ["x"]
             app.filtered_palette_commands("detach-pull-request")
                 .is_empty()
         );
-        app.engine
-            .pr_overrides
-            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
+        attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
         assert!(
             !app.filtered_palette_commands("detach-pull-request")
                 .is_empty(),
             "a pin must be removable without gh"
         );
-        app.engine.pr_overrides.clear();
+        app.engine.clear_agent_prs();
 
         // An AUTODETECTED badge is detachable too: it is the case the user
         // wants gone, and the old pin-only gate hid the command from them.
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            dux_core::model::PrInfo {
-                number: 7,
-                state: dux_core::model::PrState::Open,
-                title: "Autodetected".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "o/r".to_string(),
-                url: "https://github.com/o/r/pull/7".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &dux_core::model::PrInfo {
+                    number: 7,
+                    state: dux_core::model::PrState::Open,
+                    title: "Autodetected".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "o/r".to_string(),
+                    url: "https://github.com/o/r/pull/7".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
         assert!(
             !app.filtered_palette_commands("detach-pull-request")
                 .is_empty(),
             "an autodetected association is detachable"
         );
-        app.engine.pr_statuses.clear();
+        app.engine.clear_agent_prs();
 
         // gh available, selected session has no PR at all: attach only.
         app.engine.github_integration_enabled = true;
@@ -24963,9 +24997,7 @@ not_a_real_action = ["x"]
         );
 
         // Pin the selected session: detach appears alongside attach.
-        app.engine
-            .pr_overrides
-            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
+        attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
         assert!(
             !app.filtered_palette_commands("attach-pull-request")
                 .is_empty()
@@ -24985,10 +25017,14 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         app.engine.github_integration_enabled = true;
         app.engine.gh_status = dux_core::model::GhStatus::Available;
-        app.engine
-            .pr_overrides
-            .insert("session-1".to_string(), pinned_stored_pr("session-1"));
-        app.engine.pr_suppressions.insert("session-1".to_string());
+        attach_in_memory(&mut app, &pinned_stored_pr("session-1"));
+        app.engine.pr_prefs.insert(
+            "session-1".to_string(),
+            crate::model::PrPrefs {
+                hide_created_before: Some(chrono::Utc::now()),
+                ..Default::default()
+            },
+        );
         for name in [
             "attach-pull-request",
             "detach-pull-request",
@@ -25053,7 +25089,13 @@ not_a_real_action = ["x"]
             "nothing to resume on an agent nobody detached"
         );
 
-        app.engine.pr_suppressions.insert("session-1".to_string());
+        app.engine.pr_prefs.insert(
+            "session-1".to_string(),
+            crate::model::PrPrefs {
+                hide_created_before: Some(chrono::Utc::now()),
+                ..Default::default()
+            },
+        );
         assert!(
             !app.filtered_palette_commands("resume-pull-request-autodetection")
                 .is_empty(),
@@ -25062,8 +25104,14 @@ not_a_real_action = ["x"]
 
         // Scoped to the SELECTED agent: another agent's detach is not this
         // agent's way back.
-        app.engine.pr_suppressions.clear();
-        app.engine.pr_suppressions.insert("session-2".to_string());
+        app.engine.pr_prefs.clear();
+        app.engine.pr_prefs.insert(
+            "session-2".to_string(),
+            crate::model::PrPrefs {
+                hide_created_before: Some(chrono::Utc::now()),
+                ..Default::default()
+            },
+        );
         assert!(
             app.filtered_palette_commands("resume-pull-request-autodetection")
                 .is_empty()
@@ -25138,20 +25186,20 @@ not_a_real_action = ["x"]
         let stored = pinned_stored_pr("session-1");
         app.engine
             .session_store
-            .upsert_pr_override(&stored)
-            .expect("persist pin");
-        app.engine
-            .pr_overrides
-            .insert("session-1".to_string(), stored);
+            .seed_pr_for_tests(&stored, dux_core::storage::SeededPr::Attached);
+        attach_in_memory(&mut app, &stored);
 
         app.execute_command("detach-pull-request").expect("detach");
-        assert!(app.engine.pr_overrides.is_empty(), "the pin must be gone");
         assert!(
             app.engine
-                .session_store
-                .load_pr_overrides()
-                .expect("load overrides")
-                .is_empty(),
+                .agent_prs
+                .values()
+                .flatten()
+                .all(|row| !row.attached),
+            "the pin must be gone"
+        );
+        assert!(
+            app.engine.session_store.attached_prs_for_tests().is_empty(),
             "the stored pin row must be gone too"
         );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
@@ -25162,7 +25210,7 @@ not_a_real_action = ["x"]
         );
 
         // The detach is recorded, so autodetection stays off for the agent.
-        assert!(app.engine.pr_suppressions.contains("session-1"));
+        assert!(app.engine.pr_autodetect_suppressed("session-1"));
 
         // And the palette carries the way back out.
         //
@@ -25174,7 +25222,12 @@ not_a_real_action = ["x"]
         app.set_info(String::new());
         app.execute_command("resume-pull-request-autodetection")
             .expect("resume");
-        assert!(app.engine.pr_suppressions.is_empty());
+        assert!(
+            app.engine
+                .pr_prefs
+                .values()
+                .all(|p| p.hide_created_before.is_none())
+        );
         assert_eq!(app.status.tone(), crate::statusline::StatusTone::Info);
         assert!(
             app.status.message().contains("Resumed"),
@@ -25378,17 +25431,20 @@ not_a_real_action = ["x"]
     #[test]
     fn footer_hints_show_pr_only_for_center_focus_with_known_pr() {
         let mut app = test_app(default_bindings());
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            PrInfo {
-                number: 42,
-                state: PrState::Closed,
-                title: "Demo PR".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &PrInfo {
+                    number: 42,
+                    state: PrState::Closed,
+                    title: "Demo PR".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let center_hints = app.footer_hints_for(crate::keybindings::HintContext::Center);

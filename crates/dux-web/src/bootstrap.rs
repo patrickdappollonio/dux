@@ -262,10 +262,11 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
         unsaved_branch_drifts: std::collections::HashMap::new(),
         gh_status: GhStatus::Unknown,
         gh_probe: dux_core::engine::GhProbeState::default(),
-        pr_statuses: HashMap::new(),
-        pr_overrides: HashMap::new(),
-        pr_suppressions: HashSet::new(),
-        pr_suppressions_retry_at: None,
+        agent_prs: std::collections::HashMap::new(),
+        pr_prefs: std::collections::HashMap::new(),
+        pr_prefs_retry_at: None,
+        branch_histories: std::collections::HashMap::new(),
+        pr_revision: std::collections::HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
         pr_sync: Arc::new(dux_core::engine::PrSyncControl::default()),
@@ -312,7 +313,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     engine.normalize_restored_sessions();
     // Seed from the persisted `latest_prs` rows so PR state shows before the first
     // network poll, and shows at all when `gh` is unavailable.
-    engine.seed_pr_statuses_from_store();
+    engine.seed_pull_requests_from_store();
 
     Ok(engine)
 }

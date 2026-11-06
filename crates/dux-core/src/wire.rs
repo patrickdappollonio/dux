@@ -3054,7 +3054,7 @@ impl Engine {
             // answer this probe is about to replace, and doubles the API traffic.
             self.spawn_gh_status_check();
         } else {
-            self.pr_statuses.clear();
+            self.clear_agent_prs();
             self.disarm_pr_sync();
         }
         let detail = if next {
@@ -7965,7 +7965,7 @@ mod tests {
             !engine.pr_sync.is_armed(),
             "disabling must disarm PR sync and clear cached PR statuses"
         );
-        assert!(engine.pr_statuses.is_empty());
+        assert!(engine.agent_prs.is_empty());
     }
 
     #[test]
@@ -9768,15 +9768,15 @@ mod tests {
         assert!(status.message.contains("#12"), "got {:?}", status.message);
 
         // The pin is persisted, mirrored in memory, and drives the badge.
-        let stored = engine.session_store.load_pr_overrides().expect("load");
+        let stored = engine.session_store.attached_prs_for_tests();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].pr_number, 12);
         assert_eq!(
             stored[0].host, "github.com",
             "hosts are lowercased at the boundary"
         );
-        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
-        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.attached_pr("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
         // The sync snapshot now carries the pin for the worker.
         let entries = engine.pr_sync_sessions.lock().unwrap().clone();
         let pin = entries[0].pinned.as_ref().expect("pinned sync entry");
@@ -9793,12 +9793,12 @@ mod tests {
             .expect("detach");
         assert_eq!(outcome.status.expect("detach confirmation").tone, "info");
         assert_eq!(
-            engine.session_store.load_pr_overrides().unwrap(),
+            engine.session_store.attached_prs_for_tests(),
             Vec::<crate::storage::StoredPr>::new()
         );
-        assert!(engine.pr_overrides.is_empty());
+        assert!(engine.agent_prs.values().flatten().all(|row| !row.attached));
         assert!(
-            !engine.pr_statuses.contains_key("s1"),
+            engine.shown_pr("s1").is_none(),
             "the badge disappears with the detach"
         );
         assert!(
@@ -9819,7 +9819,12 @@ mod tests {
             "got {:?}",
             status.message
         );
-        assert!(engine.pr_suppressions.is_empty());
+        assert!(
+            engine
+                .pr_prefs
+                .values()
+                .all(|p| p.hide_created_before.is_none())
+        );
         assert_eq!(engine.pr_sync_sessions.lock().unwrap().len(), 1);
     }
 
@@ -9861,7 +9866,7 @@ mod tests {
             .apply_pr_attach("s1", "", "o/r", 1, "", "OPEN", "")
             .expect("attach with an empty host");
         assert_eq!(
-            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            engine.attached_pr("s1").map(|p| p.host.as_str()),
             Some("github.com"),
             "an empty host stores as github.com"
         );
@@ -9870,7 +9875,7 @@ mod tests {
             .apply_pr_attach("s1", "GitHub.Example.COM ".trim(), "o/r", 2, "", "OPEN", "")
             .expect("attach with a capitalised host");
         assert_eq!(
-            engine.pr_overrides.get("s1").map(|p| p.host.as_str()),
+            engine.attached_pr("s1").map(|p| p.host.as_str()),
             Some("github.example.com"),
             "hosts store lowercased"
         );
@@ -9911,7 +9916,7 @@ mod tests {
             })
             .expect_err("only OPEN/MERGED/CLOSED are storable states");
         assert!(err.to_string().contains("DRAFT"), "got {err:#}");
-        assert!(engine.pr_overrides.is_empty());
+        assert!(engine.agent_prs.values().flatten().all(|row| !row.attached));
     }
 
     #[test]
@@ -10008,7 +10013,7 @@ mod tests {
             "got {err:#}",
         );
         assert!(
-            !engine.pr_suppressions.contains("s1"),
+            !engine.pr_autodetect_suppressed("s1"),
             "the refused detach must not have written the suppression"
         );
 
@@ -10163,17 +10168,19 @@ mod tests {
         assert_eq!(final_status.key.as_deref(), Some(op_id.as_str()));
         assert!(final_status.message.contains("#12"), "{final_status:?}");
         assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
-        assert_eq!(engine.pr_overrides.get("s1").map(|p| p.pr_number), Some(12));
-        assert_eq!(engine.pr_statuses.get("s1").map(|p| p.number), Some(12));
-        assert_eq!(engine.session_store.load_pr_overrides().unwrap().len(), 1);
+        assert_eq!(engine.attached_pr("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.shown_pr("s1").map(|p| p.number), Some(12));
+        assert_eq!(engine.session_store.attached_prs_for_tests().len(), 1);
 
         // Session deleted mid-lookup: nothing is attached, the operation ends
         // with its spinner retired and no sentence (an answer about an agent
         // that is gone is nobody's news), and no orphan row is written for the
         // dead id.
-        engine.pr_overrides.clear();
-        engine.pr_statuses.clear();
-        engine.session_store.delete_pr_override("s1").unwrap();
+        engine.clear_agent_prs();
+        engine
+            .session_store
+            .replace_agent_prs("s1", &[], &crate::model::PrPrefs::default())
+            .unwrap();
         let (op_id, _) = engine
             .dispatch_attach_pull_request("s1", "#12")
             .expect("dispatch");
@@ -10195,9 +10202,9 @@ mod tests {
             crate::engine::EventReaction::ClearStatus(ref key) if key == &op_id
         ));
         assert!(!engine.pending_pr_attach_ops.contains_key(&op_id));
-        assert!(engine.pr_overrides.is_empty());
+        assert!(engine.agent_prs.values().flatten().all(|row| !row.attached));
         assert!(
-            engine.session_store.load_pr_overrides().unwrap().is_empty(),
+            engine.session_store.attached_prs_for_tests().is_empty(),
             "no override row is written for a dead session id"
         );
     }

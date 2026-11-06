@@ -295,6 +295,25 @@ pub struct BranchHistoryEntry {
     /// The commit the branch pointed at when dux last saw the agent on it,
     /// which a branch whose reflog git expired must still descend from.
     pub tip: Option<String>,
+    /// When dux first recorded the branch, `None` for one not recorded yet.
+    /// A branch recorded when the list was created carries that moment.
+    pub first_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The names a dux rename moved this branch away from, oldest first.
+    pub former_names: Vec<String>,
+}
+
+impl BranchHistoryEntry {
+    /// A branch the agent was not born on that the list has not recorded.
+    fn unrecorded(name: String, identity: Option<BranchIdentity>, tip: Option<String>) -> Self {
+        Self {
+            name,
+            born_here: false,
+            identity,
+            tip,
+            first_seen_at: None,
+            former_names: Vec::new(),
+        }
+    }
 }
 
 /// A branch dux saw the agent's worktree on: its name, which ref it is (its
@@ -946,6 +965,8 @@ pub fn unasked_plan(
                 born_here: true,
                 identity: None,
                 tip: None,
+                first_seen_at: None,
+                former_names: Vec::new(),
             },
         );
     }
@@ -1003,6 +1024,8 @@ pub fn plan_branch_removal(
                 born_here: false,
                 identity: None,
                 tip: None,
+                first_seen_at: None,
+                former_names: Vec::new(),
             });
         let answer = request.answer_for(BranchRole::Current, &entry.name);
         planner.plan(BranchRole::Current, &entry, answer);
@@ -1029,6 +1052,8 @@ pub fn plan_branch_removal(
             born_here: false,
             identity: None,
             tip: None,
+            first_seen_at: None,
+            former_names: Vec::new(),
         };
         planner.keep(role, &entry, KeptBecause::Unrecorded);
     }
@@ -1108,6 +1133,8 @@ pub(crate) fn resolve_plan(repo: &Path, worktree: &Path, plan: &BranchPlan) -> R
                         born_here: true,
                         identity: identity.clone(),
                         tip: tip.clone(),
+                        first_seen_at: None,
+                        former_names: Vec::new(),
                     };
                     if birth_is_duxs(repo, &entry, checked_out_here.as_deref(), *agent_created_at) {
                         Ok(())
@@ -1150,6 +1177,8 @@ pub(crate) fn resolve_plan(repo: &Path, worktree: &Path, plan: &BranchPlan) -> R
             born_here: false,
             identity: kept.identity.clone(),
             tip: kept.tip.clone(),
+            first_seen_at: None,
+            former_names: Vec::new(),
         };
         // Whatever the box said, a different branch under the name is not the
         // one the agent was on, and the message says that instead. The
@@ -1447,6 +1476,8 @@ impl BranchPlan {
                 born_here: true,
                 identity: None,
                 tip: None,
+                first_seen_at: None,
+                former_names: Vec::new(),
             });
         }
         plan_branch_removal(
@@ -1683,11 +1714,8 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
         .filter(|name| !history.iter().any(|entry| entry.name == *name))
         .collect();
     let newly_seen = identities_of(repo, fresh);
-    history.extend(newly_seen.iter().map(|seen| BranchHistoryEntry {
-        name: seen.name.clone(),
-        born_here: false,
-        identity: seen.identity.clone(),
-        tip: seen.tip.clone(),
+    history.extend(newly_seen.iter().map(|seen| {
+        BranchHistoryEntry::unrecorded(seen.name.clone(), seen.identity.clone(), seen.tip.clone())
     }));
     let local = local_branches(repo).unwrap_or_default();
     let checked_out_here = crate::git::current_branch_opt(worktree).ok().flatten();
@@ -1718,11 +1746,8 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
                 .iter()
                 .find(|entry| entry.name == inputs.branch_name)
                 .cloned()
-                .unwrap_or(BranchHistoryEntry {
-                    name: inputs.branch_name.clone(),
-                    born_here: false,
-                    identity: None,
-                    tip: None,
+                .unwrap_or_else(|| {
+                    BranchHistoryEntry::unrecorded(inputs.branch_name.clone(), None, None)
                 });
             current = offer(&entry);
         }
@@ -1968,6 +1993,8 @@ mod tests {
             born_here: false,
             identity: None,
             tip: None,
+            first_seen_at: None,
+            former_names: Vec::new(),
         }
     }
 
@@ -2126,6 +2153,8 @@ mod tests {
             born_here: true,
             identity: Some(identity.clone()),
             tip: None,
+            first_seen_at: None,
+            former_names: Vec::new(),
         };
         let origin = |entry: &BranchHistoryEntry| {
             branch_origin(

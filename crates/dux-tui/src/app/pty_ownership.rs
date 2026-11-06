@@ -1758,17 +1758,20 @@ mod tests {
             Ok(())
         });
         // `pr_statuses` is keyed by SESSION id, not by tab.
-        app.engine.pr_statuses.insert(
+        app.engine.agent_prs.insert(
             "session-1".to_string(),
-            crate::model::PrInfo {
-                number: 42,
-                state: crate::model::PrState::Open,
-                title: "Teach the banner to open its pull request".to_string(),
-                host: "github.com".to_string(),
-                owner_repo: "owner/repo".to_string(),
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..Default::default()
-            },
+            vec![crate::model::AgentPr::found(
+                &crate::model::PrInfo {
+                    number: 42,
+                    state: crate::model::PrState::Open,
+                    title: "Teach the banner to open its pull request".to_string(),
+                    host: "github.com".to_string(),
+                    owner_repo: "owner/repo".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");

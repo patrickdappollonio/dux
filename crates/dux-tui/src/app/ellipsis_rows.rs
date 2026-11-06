@@ -506,17 +506,20 @@ fn the_pr_banner_cuts_a_wide_title_before_its_right_cap() {
     use crate::model::{PrInfo, PrState};
     let mut app = test_app(default_bindings());
     let id = app.selected_session().expect("a selected agent").id.clone();
-    app.engine.pr_statuses.insert(
+    app.engine.agent_prs.insert(
         id,
-        PrInfo {
-            number: 42,
-            state: PrState::Open,
-            title: LONG_CJK.repeat(3),
-            host: "github.com".to_string(),
-            owner_repo: "owner/repo".to_string(),
-            url: "https://github.com/owner/repo/pull/42".to_string(),
-            ..Default::default()
-        },
+        vec![crate::model::AgentPr::found(
+            &PrInfo {
+                number: 42,
+                state: PrState::Open,
+                title: LONG_CJK.repeat(3),
+                host: "github.com".to_string(),
+                owner_repo: "owner/repo".to_string(),
+                url: "https://github.com/owner/repo/pull/42".to_string(),
+                ..Default::default()
+            },
+            chrono::Utc::now(),
+        )],
     );
     for (w, h) in [(120, 40), (80, 24)] {
         let buf = render_at(&mut app, w, h);

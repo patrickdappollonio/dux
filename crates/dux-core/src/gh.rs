@@ -1915,7 +1915,7 @@ fn parse_rate_limit(data: &serde_json::Value) -> Option<RateLimitInfo> {
 /// Used wherever a call is skipped or failed and the stored row is the answer.
 /// Reconstruct a live [`PrInfo`] from a stored PR row's decoded state, or `None`
 /// when the stored state string is unrecognized. Shared by the PR-sync
-/// reconstruction paths and by `Engine::seed_pr_statuses_from_store` (startup PR
+/// reconstruction paths and by `Engine::seed_pull_requests_from_store` (startup PR
 /// badge seeding), so the "OPEN"/"MERGED"/"CLOSED" decode lives in exactly one
 /// place instead of being re-implemented per surface.
 pub(crate) fn reconstruct_pr_from_stored(stored: &StoredPr) -> Option<PrInfo> {

@@ -6049,7 +6049,7 @@ mod tests {
             .id
             .clone();
         assert!(
-            !engine.pr_overrides.contains_key(&ordinary),
+            engine.attached_pr(&ordinary).is_none(),
             "an ordinary create finds its pull request by branch name, as before"
         );
 
@@ -6118,14 +6118,13 @@ mod tests {
             .id
             .clone();
         let pin = engine
-            .pr_overrides
-            .get(&copy)
+            .attached_pr(&copy)
             .expect("the copy is pinned to its pull request");
-        assert_eq!(pin.pr_number, 42);
+        assert_eq!(pin.number, 42);
         assert_eq!(pin.owner_repo, "owner/repo");
-        assert_eq!(pin.state, "OPEN");
+        assert_eq!(pin.state, crate::model::PrState::Open);
         assert_eq!(pin.title, "Fix the bug");
-        let stored = engine.session_store.load_pr_overrides().unwrap();
+        let stored = engine.session_store.attached_prs_for_tests();
         assert!(
             stored
                 .iter()
@@ -6178,7 +6177,7 @@ mod tests {
             .expect("the copy is committed all the same")
             .id
             .clone();
-        assert!(!engine.pr_overrides.contains_key(&copy));
+        assert!(engine.attached_pr(&copy).is_none());
     }
 
     /// A startup command that fails ends the create in a sticky error, and

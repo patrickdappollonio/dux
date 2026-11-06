@@ -95,9 +95,13 @@ impl Engine {
     /// for the rename dialog's warning. From the pull-request sync dux already
     /// runs; nothing is asked of GitHub here.
     pub fn rename_open_pull_request(&self, session_id: &str) -> Option<u64> {
-        self.pr_statuses
-            .get(session_id)
-            .filter(|pr| pr.state == crate::model::PrState::Open)
+        self.shown_pr(session_id)
+            .filter(|pr| {
+                matches!(
+                    pr.state,
+                    crate::model::PrState::Open | crate::model::PrState::Draft
+                )
+            })
             .map(|pr| pr.number)
     }
 

@@ -30,6 +30,16 @@ pub struct StoredPr {
     pub url: String,
 }
 
+/// How [`SessionStore::seed_pr_for_tests`] associates a pull request.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug)]
+pub enum SeededPr {
+    /// Found by the sync on one of the agent's branches.
+    Found,
+    /// Attached by the user.
+    Attached,
+}
+
 /// The `app_state` key holding the last dux version whose first-load screen was
 /// shown. One key, one meaning; see [`SessionStore::last_seen_version`].
 const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
@@ -246,6 +256,7 @@ impl SessionStore {
         self.migrate_pull_request_tables()?;
         self.migrate_housekeeping_tables()?;
         self.migrate_branch_history()?;
+        self.migrate_session_pull_requests()?;
         // The slot-tab passes run last: they write `agent_tabs` rows, so the
         // table has to exist, and a failure in any of them aborts the open. A
         // workspace whose first tabs are unaddressable is worse than a startup
@@ -253,6 +264,7 @@ impl SessionStore {
         self.sweep_orphan_agent_tabs()?;
         self.sweep_orphan_minted_branch_renames()?;
         self.sweep_orphan_branch_history()?;
+        self.sweep_orphan_pull_request_rows()?;
         self.backfill_slot_tabs()?;
         self.heal_slot_tab_pointers()?;
         Ok(())
@@ -801,6 +813,134 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Drop the pull-request rows, preferences and former branch names whose
+    /// session is gone, for the same reason as
+    /// [`Self::sweep_orphan_minted_branch_renames`].
+    fn sweep_orphan_pull_request_rows(&self) -> Result<()> {
+        for table in [
+            "session_pull_requests",
+            "session_pr_prefs",
+            "session_branch_former_names",
+        ] {
+            self.conn
+                .execute(
+                    &format!(
+                        "delete from {table} \
+                         where session_id not in (select id from agent_sessions)"
+                    ),
+                    [],
+                )
+                .with_context(|| {
+                    format!("failed to sweep {table} rows whose agent no longer exists")
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Every pull request each agent has (`session_pull_requests`), each
+    /// agent's sort preference (`session_pr_prefs`) and the names a rename
+    /// moved a branch away from (`session_branch_former_names`): derived
+    /// runtime state, never config.
+    ///
+    /// The tables are detected, created and filled in ONE transaction, and
+    /// only by the open that creates them, so the one-pull-request tables
+    /// they replace are imported once. Those are left exactly as they were: a
+    /// downgrade reads them as it left them, and nothing it writes there is
+    /// imported again, since that would bring back pull requests the user
+    /// detached here.
+    ///
+    /// Host and repository compare without regard to case, as GitHub does,
+    /// while keeping the case GitHub reported for display.
+    fn migrate_session_pull_requests(&self) -> Result<()> {
+        let tx = immediate_tx(&self.conn).context("failed to start the pull request migration")?;
+        let exists: bool = tx.query_row(
+            "select exists(select 1 from sqlite_master \
+             where type = 'table' and name = 'session_pull_requests')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.execute_batch(
+                r"
+                create table session_pull_requests (
+                    session_id text not null,
+                    host text not null collate nocase,
+                    owner_repo text not null collate nocase,
+                    pr_number integer not null,
+                    state text not null,
+                    is_draft integer not null default 0,
+                    title text not null default '',
+                    url text not null default '',
+                    head_branch text,
+                    found integer not null default 0,
+                    attached integer not null default 0,
+                    hidden integer not null default 0,
+                    manual_slot integer,
+                    gh_created_at text,
+                    gh_updated_at text,
+                    gh_closed_at text,
+                    gh_merged_at text,
+                    first_recorded_at text not null,
+                    last_refreshed_at text,
+                    primary key (session_id, host, owner_repo, pr_number)
+                );
+                create table if not exists session_pr_prefs (
+                    session_id text primary key,
+                    sort_mode text not null default 'automatic',
+                    hide_created_before text
+                );
+                create table if not exists session_branch_former_names (
+                    session_id text not null,
+                    branch_name text not null,
+                    former_name text not null,
+                    renamed_at text not null,
+                    primary key (session_id, branch_name, former_name)
+                );
+                ",
+            )?;
+            let now = Utc::now().to_rfc3339();
+            // Every pull request dux ever associated, including ones on a
+            // branch whose remote ref is gone, which discovery could no longer
+            // find. Its first refresh fills in the branch, the draft flag and
+            // the times.
+            tx.execute(
+                "insert or ignore into session_pull_requests \
+                 (session_id, host, owner_repo, pr_number, state, title, url, found, \
+                  first_recorded_at) \
+                 select session_id, host, owner_repo, pr_number, state, title, url, 1, ?1 \
+                 from session_prs",
+                params![now],
+            )?;
+            tx.execute(
+                "insert into session_pull_requests \
+                 (session_id, host, owner_repo, pr_number, state, title, url, attached, \
+                  first_recorded_at) \
+                 select session_id, host, owner_repo, pr_number, state, title, url, 1, ?1 \
+                 from session_pr_overrides where true \
+                 on conflict(session_id, host, owner_repo, pr_number) do update set \
+                 attached = 1, state = excluded.state, title = excluded.title, \
+                 url = excluded.url",
+                params![now],
+            )?;
+            // An agent whose detection was switched off keeps what it had out
+            // of sight, and anything found later that GitHub opened before now.
+            tx.execute(
+                "update session_pull_requests set hidden = 1 \
+                 where found = 1 \
+                   and session_id in (select session_id from session_pr_suppressions)",
+                [],
+            )?;
+            tx.execute(
+                "insert or ignore into session_pr_prefs (session_id, hide_created_before) \
+                 select session_id, ?1 from session_pr_suppressions",
+                params![now],
+            )?;
+        }
+        tx.commit()
+            .context("failed to commit the pull request migration")?;
+        Ok(())
+    }
+
     /// Every branch each agent's worktree has been on (see
     /// [`crate::branch_history`]): derived runtime state, never config.
     ///
@@ -1044,6 +1184,29 @@ impl SessionStore {
                 params![session_id, new, Utc::now().to_rfc3339()],
             )?;
         }
+        // The branch keeps every name it has had, because GitHub keeps the
+        // remote branch under the name it was pushed with. Written in this
+        // transaction so a crash cannot leave the renamed branch blind to it.
+        tx.execute(
+            "update or ignore session_branch_former_names set branch_name = ?3 \
+             where session_id = ?1 and branch_name = ?2",
+            params![session_id, old, new],
+        )?;
+        tx.execute(
+            "delete from session_branch_former_names where session_id = ?1 and branch_name = ?2",
+            params![session_id, old],
+        )?;
+        tx.execute(
+            "insert or ignore into session_branch_former_names \
+             (session_id, branch_name, former_name, renamed_at) values (?1, ?2, ?3, ?4)",
+            params![session_id, new, old, Utc::now().to_rfc3339()],
+        )?;
+        // Renamed back to a name it once had: that name is current, not former.
+        tx.execute(
+            "delete from session_branch_former_names \
+             where session_id = ?1 and branch_name = former_name",
+            params![session_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1057,25 +1220,84 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<crate::branch_history::BranchHistoryEntry>> {
+        Ok(self
+            .load_branch_histories(Some(session_id))?
+            .remove(session_id)
+            .unwrap_or_default())
+    }
+
+    /// Every agent's branch list, by session id, each the birth branch first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
+    pub fn load_all_branch_histories(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<crate::branch_history::BranchHistoryEntry>>>
+    {
+        self.load_branch_histories(None)
+    }
+
+    /// The branch lists of one agent, or of every agent for `None`.
+    fn load_branch_histories(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, Vec<crate::branch_history::BranchHistoryEntry>>>
+    {
+        let mut former: std::collections::HashMap<(String, String), Vec<String>> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "select session_id, branch_name, former_name from session_branch_former_names \
+                 where ?1 is null or session_id = ?1 order by renamed_at, former_name",
+            )?;
+            let rows = stmt.query_map(params![session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (session, branch, name) = row?;
+                former.entry((session, branch)).or_default().push(name);
+            }
+        }
         let mut stmt = self.conn.prepare(
-            "select branch_name, born_here, identity_unix, identity_oid, tip_oid \
-             from session_branch_history where session_id = ?1 \
-             order by born_here desc, first_seen_at, branch_name",
+            "select session_id, branch_name, born_here, identity_unix, identity_oid, tip_oid, \
+             first_seen_at from session_branch_history where ?1 is null or session_id = ?1 \
+             order by session_id, born_here desc, first_seen_at, branch_name",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
-            let unix: Option<i64> = row.get(2)?;
-            let oid: Option<String> = row.get(3)?;
-            Ok(crate::branch_history::BranchHistoryEntry {
-                name: row.get(0)?,
-                born_here: row.get(1)?,
-                identity: unix
-                    .zip(oid)
-                    .map(|(unix, oid)| crate::branch_history::BranchIdentity { unix, oid }),
-                tip: row.get(4)?,
-            })
+            let unix: Option<i64> = row.get(3)?;
+            let oid: Option<String> = row.get(4)?;
+            let first_seen_at: String = row.get(6)?;
+            let session: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            Ok((
+                session,
+                crate::branch_history::BranchHistoryEntry {
+                    name,
+                    born_here: row.get(2)?,
+                    identity: unix
+                        .zip(oid)
+                        .map(|(unix, oid)| crate::branch_history::BranchIdentity { unix, oid }),
+                    tip: row.get(5)?,
+                    first_seen_at: parse_time(&first_seen_at),
+                    former_names: Vec::new(),
+                },
+            ))
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to read an agent's branch history")
+        let mut histories: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (session, mut entry) = row.context("failed to read an agent's branch history")?;
+            entry.former_names = former
+                .remove(&(session.clone(), entry.name.clone()))
+                .unwrap_or_default();
+            histories.entry(session).or_default().push(entry);
+        }
+        Ok(histories)
     }
 
     /// Give every session that predates the slot pointer a real first-tab row,
@@ -2374,11 +2596,21 @@ impl SessionStore {
              (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
             params![project_id],
         )?;
-        tx.execute(
-            "delete from session_branch_history where session_id in \
-             (select id from agent_sessions where project_id = ?1 and workspace_kind = 'managed')",
-            params![project_id],
-        )?;
+        for table in [
+            "session_branch_history",
+            "session_pull_requests",
+            "session_pr_prefs",
+            "session_branch_former_names",
+        ] {
+            tx.execute(
+                &format!(
+                    "delete from {table} where session_id in \
+                     (select id from agent_sessions \
+                      where project_id = ?1 and workspace_kind = 'managed')"
+                ),
+                params![project_id],
+            )?;
+        }
         // Drop the per-session changed-files rev counters BEFORE the sessions
         // themselves (the subquery resolves the ids while the rows still exist),
         // so a project removal cannot leave orphaned `changes_rev` rows behind.
@@ -2410,251 +2642,222 @@ impl SessionStore {
         Ok(ids)
     }
 
-    /// Insert a PR association or update its state and title if it already exists.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the database write fails.
-    pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
-        self.conn.execute(
-            r"
-            insert into session_prs (session_id, pr_number, host, owner_repo, state, title, url)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            on conflict(session_id, pr_number) do update set
-                host=excluded.host,
-                owner_repo=excluded.owner_repo,
-                state=excluded.state,
-                title=excluded.title,
-                url=excluded.url
-            ",
-            params![
-                pr.session_id,
-                pr.pr_number.cast_signed(),
-                pr.host,
-                pr.owner_repo,
-                pr.state,
-                pr.title,
-                pr.url
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Load all known PRs for a session, ordered by `pr_number` descending (latest first).
+    /// Every agent's pull requests, by session id.
     ///
     /// # Errors
     ///
     /// Fails when the database read fails.
-    pub fn load_prs(&self, session_id: &str) -> Result<Vec<StoredPr>> {
+    pub fn load_agent_prs(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<crate::model::AgentPr>>> {
         let mut stmt = self.conn.prepare(
             r"
-            select pr_number, host, owner_repo, state, title, url
-            from session_prs
-            where session_id = ?1
-            order by pr_number desc
+            select session_id, host, owner_repo, pr_number, state, is_draft, title, url,
+                   head_branch, found, attached, hidden, manual_slot, gh_created_at,
+                   gh_updated_at, gh_closed_at, gh_merged_at, first_recorded_at,
+                   last_refreshed_at
+            from session_pull_requests
+            order by session_id, first_recorded_at, host, owner_repo, pr_number
             ",
         )?;
-        let sid = session_id.to_string();
-        let rows = stmt.query_map(params![session_id], |row| {
-            let pr_number = row.get::<_, i64>(0)?.cast_unsigned();
+        let rows = stmt.query_map([], |row| {
             let host: String = row.get(1)?;
             let owner_repo: String = row.get(2)?;
-            Ok(StoredPr {
-                session_id: sid.clone(),
-                pr_number,
-                host: host.clone(),
-                owner_repo: owner_repo.clone(),
-                state: row.get(3)?,
-                title: row.get(4)?,
-                url: normalize_pr_url(row.get(5)?, &host, &owner_repo, pr_number),
-            })
+            let number = row.get::<_, i64>(3)?.cast_unsigned();
+            let state: String = row.get(4)?;
+            let is_draft: bool = row.get(5)?;
+            let time = |index: usize| -> rusqlite::Result<Option<DateTime<Utc>>> {
+                Ok(row
+                    .get::<_, Option<String>>(index)?
+                    .as_deref()
+                    .and_then(parse_time))
+            };
+            let first_recorded_at: String = row.get(17)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                state,
+                crate::model::AgentPr {
+                    url: normalize_pr_url(row.get(7)?, &host, &owner_repo, number),
+                    host,
+                    owner_repo,
+                    number,
+                    state: if is_draft {
+                        crate::model::PrState::Draft
+                    } else {
+                        crate::model::PrState::Open
+                    },
+                    title: row.get(6)?,
+                    head_branch: row.get(8)?,
+                    found: row.get(9)?,
+                    attached: row.get(10)?,
+                    hidden: row.get(11)?,
+                    manual_slot: row
+                        .get::<_, Option<i64>>(12)?
+                        .and_then(|slot| u32::try_from(slot).ok()),
+                    gh_created_at: time(13)?,
+                    gh_updated_at: time(14)?,
+                    gh_closed_at: time(15)?,
+                    gh_merged_at: time(16)?,
+                    first_recorded_at: parse_time(&first_recorded_at).unwrap_or_default(),
+                    last_refreshed_at: time(18)?,
+                },
+            ))
         })?;
-        let mut prs = Vec::new();
+        let mut result: std::collections::HashMap<String, Vec<crate::model::AgentPr>> =
+            std::collections::HashMap::new();
         for row in rows {
-            prs.push(row?);
-        }
-        Ok(prs)
-    }
-
-    /// Load the latest (highest-numbered) PR for each session that has at least one.
-    pub(crate) fn load_all_latest_prs(&self) -> Result<Vec<StoredPr>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            select session_id, pr_number, host, owner_repo, state, title, url
-            from session_prs
-            where (session_id, pr_number) in (
-                select session_id, max(pr_number) from session_prs group by session_id
-            )
-            ",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
-            let host: String = row.get(2)?;
-            let owner_repo: String = row.get(3)?;
-            Ok(StoredPr {
-                session_id: row.get(0)?,
-                pr_number,
-                host: host.clone(),
-                owner_repo: owner_repo.clone(),
-                state: row.get(4)?,
-                title: row.get(5)?,
-                url: normalize_pr_url(row.get(6)?, &host, &owner_repo, pr_number),
-            })
-        })?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
+            let (session_id, state, mut pr) = row?;
+            // A state this build does not know is skipped rather than guessed.
+            pr.state = match state.as_str() {
+                "OPEN" => pr.state,
+                "MERGED" => crate::model::PrState::Merged,
+                "CLOSED" => crate::model::PrState::Closed,
+                _ => continue,
+            };
+            result.entry(session_id).or_default().push(pr);
         }
         Ok(result)
     }
 
-    /// Insert or replace a session's manually attached (pinned) pull request.
-    /// One row per session: attaching again replaces the previous pin.
+    /// One agent's pull requests.
     ///
     /// # Errors
     ///
-    /// Fails when the database write fails.
-    pub fn upsert_pr_override(&self, pr: &StoredPr) -> Result<()> {
-        self.conn.execute(
+    /// Fails when the database read fails.
+    pub fn load_agent_prs_of(&self, session_id: &str) -> Result<Vec<crate::model::AgentPr>> {
+        Ok(self
+            .load_agent_prs()?
+            .remove(session_id)
+            .unwrap_or_default())
+    }
+
+    fn write_agent_pr(
+        conn: &Connection,
+        session_id: &str,
+        pr: &crate::model::AgentPr,
+    ) -> Result<()> {
+        let time = |at: Option<DateTime<Utc>>| at.map(|at| at.to_rfc3339());
+        conn.execute(
             r"
-            insert into session_pr_overrides
-                (session_id, host, owner_repo, pr_number, state, title, url)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            on conflict(session_id) do update set
-                host=excluded.host,
-                owner_repo=excluded.owner_repo,
-                pr_number=excluded.pr_number,
-                state=excluded.state,
-                title=excluded.title,
-                url=excluded.url
+            insert into session_pull_requests
+                (session_id, host, owner_repo, pr_number, state, is_draft, title, url,
+                 head_branch, found, attached, hidden, manual_slot, gh_created_at,
+                 gh_updated_at, gh_closed_at, gh_merged_at, first_recorded_at,
+                 last_refreshed_at)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19)
+            on conflict(session_id, host, owner_repo, pr_number) do update set
+                host = excluded.host,
+                owner_repo = excluded.owner_repo,
+                state = excluded.state,
+                is_draft = excluded.is_draft,
+                title = excluded.title,
+                url = excluded.url,
+                head_branch = excluded.head_branch,
+                found = excluded.found,
+                attached = excluded.attached,
+                hidden = excluded.hidden,
+                manual_slot = excluded.manual_slot,
+                gh_created_at = excluded.gh_created_at,
+                gh_updated_at = excluded.gh_updated_at,
+                gh_closed_at = excluded.gh_closed_at,
+                gh_merged_at = excluded.gh_merged_at,
+                last_refreshed_at = excluded.last_refreshed_at
             ",
             params![
-                pr.session_id,
+                session_id,
                 pr.host,
                 pr.owner_repo,
-                pr.pr_number.cast_signed(),
-                pr.state,
+                pr.number.cast_signed(),
+                pr.state.stored_text(),
+                pr.state == crate::model::PrState::Draft,
                 pr.title,
-                pr.url
+                pr.url,
+                pr.head_branch,
+                pr.found,
+                pr.attached,
+                pr.hidden,
+                pr.manual_slot.map(i64::from),
+                time(pr.gh_created_at),
+                time(pr.gh_updated_at),
+                time(pr.gh_closed_at),
+                time(pr.gh_merged_at),
+                pr.first_recorded_at.to_rfc3339(),
+                time(pr.last_refreshed_at),
             ],
         )?;
         Ok(())
     }
 
-    /// Load every session's pinned pull request (at most one per session).
+    /// Insert one of an agent's pull requests, or update the row already there
+    /// (its first-recorded time stays).
     ///
     /// # Errors
     ///
-    /// Fails when the database read fails.
-    pub fn load_pr_overrides(&self) -> Result<Vec<StoredPr>> {
-        let mut stmt = self.conn.prepare(
-            r"
-            select session_id, pr_number, host, owner_repo, state, title, url
-            from session_pr_overrides
-            ",
+    /// Fails when the database write fails.
+    pub fn upsert_agent_pr(&self, session_id: &str, pr: &crate::model::AgentPr) -> Result<()> {
+        Self::write_agent_pr(&self.conn, session_id, pr)
+    }
+
+    /// Make an agent's pull requests exactly `rows` and its preferences
+    /// `prefs`, in one transaction, so a failure leaves neither change behind.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a database write fails; nothing is written then.
+    pub fn replace_agent_prs(
+        &self,
+        session_id: &str,
+        rows: &[crate::model::AgentPr],
+        prefs: &crate::model::PrPrefs,
+    ) -> Result<()> {
+        let tx = immediate_tx(&self.conn)?;
+        tx.execute(
+            "delete from session_pull_requests where session_id = ?1",
+            params![session_id],
         )?;
-        let rows = stmt.query_map([], |row| {
-            let pr_number = row.get::<_, i64>(1)?.cast_unsigned();
-            let host: String = row.get(2)?;
-            let owner_repo: String = row.get(3)?;
-            Ok(StoredPr {
-                session_id: row.get(0)?,
-                pr_number,
-                host: host.clone(),
-                owner_repo: owner_repo.clone(),
-                state: row.get(4)?,
-                title: row.get(5)?,
-                url: normalize_pr_url(row.get(6)?, &host, &owner_repo, pr_number),
-            })
-        })?;
-        let mut result = Vec::new();
         for row in rows {
-            result.push(row?);
+            Self::write_agent_pr(&tx, session_id, row)?;
         }
-        Ok(result)
-    }
-
-    /// Remove a session's pinned pull request, if any (a no-op otherwise).
-    pub(crate) fn delete_pr_override(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "delete from session_pr_overrides where session_id = ?1",
-            params![session_id],
+        tx.execute(
+            "insert into session_pr_prefs (session_id, sort_mode, hide_created_before) \
+             values (?1, ?2, ?3) on conflict(session_id) do update set \
+             sort_mode = excluded.sort_mode, hide_created_before = excluded.hide_created_before",
+            params![
+                session_id,
+                prefs.sort_mode.stored_text(),
+                prefs.hide_created_before.map(|at| at.to_rfc3339()),
+            ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
-    /// Record that a session's pull-request autodetection is suppressed (the
-    /// user detached). Idempotent: suppressing an already-suppressed session
-    /// changes nothing.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the database write fails.
-    pub fn set_pr_suppressed(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "insert into session_pr_suppressions (session_id) values (?1) \
-             on conflict(session_id) do nothing",
-            params![session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Clear a session's suppression so autodetection runs again (a no-op when
-    /// the session was not suppressed).
-    ///
-    /// # Errors
-    ///
-    /// Fails when the database write fails.
-    pub fn delete_pr_suppression(&self, session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "delete from session_pr_suppressions where session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Pin a session's pull request and lift its suppression in one
-    /// transaction, so a failure leaves neither change behind.
-    ///
-    /// # Errors
-    ///
-    /// Fails when either database write fails.
-    pub(crate) fn attach_pr_override(&self, pr: &StoredPr) -> Result<()> {
-        self.immediate(|store| {
-            store.upsert_pr_override(pr)?;
-            store.delete_pr_suppression(&pr.session_id)
-        })
-    }
-
-    /// Remove a session's pin and suppress its autodetection in one
-    /// transaction, so a failure leaves neither change behind.
-    ///
-    /// # Errors
-    ///
-    /// Fails when either database write fails.
-    pub(crate) fn detach_pr_override(&self, session_id: &str) -> Result<()> {
-        self.immediate(|store| {
-            store.delete_pr_override(session_id)?;
-            store.set_pr_suppressed(session_id)
-        })
-    }
-
-    /// Every session id whose pull-request autodetection is suppressed. Loaded
-    /// once at boot into the engine's in-memory mirror.
+    /// Every agent's pull-request preferences, by session id. An agent with no
+    /// row has the defaults.
     ///
     /// # Errors
     ///
     /// Fails when the database read fails.
-    pub fn load_pr_suppressions(&self) -> Result<Vec<String>> {
+    pub fn load_pr_prefs(
+        &self,
+    ) -> Result<std::collections::HashMap<String, crate::model::PrPrefs>> {
         let mut stmt = self
             .conn
-            .prepare("select session_id from session_pr_suppressions")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok(result)
+            .prepare("select session_id, sort_mode, hide_created_before from session_pr_prefs")?;
+        let rows = stmt.query_map([], |row| {
+            let mode: String = row.get(1)?;
+            let cutoff: Option<String> = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                crate::model::PrPrefs {
+                    sort_mode: crate::pr_list::PrSortMode::from_stored(&mode),
+                    hide_created_before: cutoff.as_deref().and_then(parse_time),
+                },
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
+            .context("failed to read the pull-request preferences")
     }
 
     /// Record that an explicit rename moved the branch dux minted for a session
@@ -3223,10 +3426,17 @@ impl SessionStore {
             "delete from session_minted_branch_renames where session_id = ?1",
             params![id],
         )?;
-        tx.execute(
-            "delete from session_branch_history where session_id = ?1",
-            params![id],
-        )?;
+        for table in [
+            "session_branch_history",
+            "session_pull_requests",
+            "session_pr_prefs",
+            "session_branch_former_names",
+        ] {
+            tx.execute(
+                &format!("delete from {table} where session_id = ?1"),
+                params![id],
+            )?;
+        }
         // Drop the per-session changed-files revision counter too, so a deleted
         // session leaves no housekeeping rows behind.
         tx.execute("delete from changes_rev where session_id = ?1", params![id])?;
@@ -3315,22 +3525,146 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Test-only fault injection: drops the `session_pr_suppressions` table so
-    /// the next suppression read or write returns an error.
+    /// Test builds only: store `pr` as a pull request the sync found for its
+    /// session, or as one attached to it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the state is not one dux stores, or the write fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_pr_for_tests(&self, pr: &StoredPr, how: SeededPr) {
+        let info = crate::gh::reconstruct_pr_from_stored(pr).expect("a state dux stores");
+        let key = crate::model::PrKey::new(pr.host.clone(), pr.owner_repo.clone(), pr.pr_number);
+        let mut row = self
+            .load_agent_prs()
+            .expect("read the pull requests")
+            .remove(&pr.session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|row| row.is(&key))
+            .unwrap_or_else(|| {
+                let mut row = crate::model::AgentPr::found(&info, Utc::now());
+                row.found = false;
+                row
+            });
+        row.refresh_from(&info);
+        match how {
+            SeededPr::Found => row.found = true,
+            SeededPr::Attached => row.attached = true,
+        }
+        self.upsert_agent_pr(&pr.session_id, &row)
+            .expect("store the pull request");
+    }
+
+    /// Test builds only: every pull request attached to an agent, in the
+    /// shape the sync reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the read fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attached_prs_for_tests(&self) -> Vec<StoredPr> {
+        let mut attached: Vec<StoredPr> = self
+            .load_agent_prs()
+            .expect("read the pull requests")
+            .into_iter()
+            .flat_map(|(id, rows)| {
+                rows.into_iter()
+                    .filter(|row| row.attached)
+                    .map(move |row| row.to_stored(&id))
+            })
+            .collect();
+        attached.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        attached
+    }
+
+    /// Test builds only: each agent's highest-numbered found pull request, in
+    /// the shape the sync reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the read fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn latest_found_prs_for_tests(&self) -> Vec<StoredPr> {
+        let mut latest: Vec<StoredPr> = self
+            .load_agent_prs()
+            .expect("read the pull requests")
+            .into_iter()
+            .filter_map(|(id, rows)| {
+                rows.into_iter()
+                    .filter(|row| row.found)
+                    .max_by_key(|row| row.number)
+                    .map(|row| row.to_stored(&id))
+            })
+            .collect();
+        latest.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        latest
+    }
+
+    /// Test builds only: switch an agent's pull-request detection off the way
+    /// a detach does, its found pull requests put out of sight.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a read or the write fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_detached_for_tests(&self, session_id: &str) {
+        let rows: Vec<crate::model::AgentPr> = self
+            .load_agent_prs()
+            .expect("read the pull requests")
+            .remove(session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut row| {
+                row.hidden = row.found;
+                row
+            })
+            .collect();
+        let mut prefs = self
+            .load_pr_prefs()
+            .expect("read the preferences")
+            .remove(session_id)
+            .unwrap_or_default();
+        prefs.hide_created_before = Some(Utc::now());
+        self.replace_agent_prs(session_id, &rows, &prefs)
+            .expect("store the detach");
+    }
+
+    /// Test builds only: the agents whose pull-request detection is switched
+    /// off.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the read fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn detached_sessions_for_tests(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .load_pr_prefs()
+            .expect("read the preferences")
+            .into_iter()
+            .filter(|(_, prefs)| prefs.hide_created_before.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Test-only fault injection: drops the `session_pr_prefs` table so the
+    /// next preferences read or write returns an error.
     #[cfg(test)]
-    pub(crate) fn break_pr_suppressions_table_for_test(&self) -> Result<()> {
+    pub(crate) fn break_pr_prefs_table_for_test(&self) -> Result<()> {
         self.conn
-            .execute_batch("drop table if exists session_pr_suppressions;")?;
+            .execute_batch("drop table if exists session_pr_prefs;")?;
         Ok(())
     }
 
-    /// Test-only: puts back the table [`Self::break_pr_suppressions_table_for_test`]
+    /// Test-only: puts back the table [`Self::break_pr_prefs_table_for_test`]
     /// dropped, empty.
     #[cfg(test)]
-    pub(crate) fn restore_pr_suppressions_table_for_test(&self) -> Result<()> {
+    pub(crate) fn restore_pr_prefs_table_for_test(&self) -> Result<()> {
         self.conn.execute_batch(
-            "create table if not exists session_pr_suppressions \
-             (session_id text primary key references agent_sessions(id) on delete cascade);",
+            "create table if not exists session_pr_prefs (session_id text primary key, \
+             sort_mode text not null default 'automatic', hide_created_before text);",
         )?;
         Ok(())
     }
@@ -3548,6 +3882,39 @@ mod tests {
         assert_eq!(history[0].name, "branch-new");
         assert!(history[0].born_here);
         assert_eq!(history[0].identity.as_ref(), Some(&identity));
+        assert!(history[0].first_seen_at.is_some(), "{history:?}");
+        assert_eq!(history[0].former_names, vec!["branch-s1".to_string()]);
+        // A second rename keeps both earlier names, and a drift onto another
+        // branch gives that branch none.
+        store
+            .rename_history_branch("s1", "branch-new", "branch-c")
+            .unwrap();
+        store
+            .record_branches_seen(
+                "s1",
+                &[crate::branch_history::SeenBranch {
+                    name: "drifted".to_string(),
+                    identity: None,
+                    tip: None,
+                }],
+            )
+            .unwrap();
+        let history = store.load_branch_history("s1").unwrap();
+        let former = |name: &str| {
+            let mut names = history
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .former_names
+                .clone();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            former("branch-c"),
+            vec!["branch-new".to_string(), "branch-s1".to_string()]
+        );
+        assert_eq!(former("drifted"), Vec::<String>::new());
         store.delete_session("s1").unwrap();
         assert_eq!(store.load_branch_history("s1").unwrap(), Vec::new());
     }
@@ -4105,8 +4472,13 @@ mod tests {
             .upsert_session(&standalone_session("sa1", "/home/someone/notes"))
             .unwrap();
         store.set_minted_branch_rename("sa1", "kept").unwrap();
+        seed_every_pr_table(&store, "sa1");
 
         store.remove_project_records("").unwrap();
+
+        for table in PR_TABLES {
+            assert_eq!(rows_for(&store, table, "sa1"), 1, "{table}");
+        }
 
         let loaded = store.load_sessions().unwrap();
         assert!(
@@ -5042,17 +5414,69 @@ mod tests {
         assert_eq!(store.app_state("k").unwrap(), Some("v".to_string()));
     }
 
-    fn stored_pr(session_id: &str, pr_number: u64) -> StoredPr {
-        StoredPr {
-            session_id: session_id.to_string(),
-            pr_number,
-            host: "github.com".to_string(),
-            owner_repo: "o/r".to_string(),
-            state: "OPEN".to_string(),
-            title: "t".to_string(),
-            url: "u".to_string(),
-        }
+    /// An agent's pull request as the sync would first record it.
+    fn agent_pr(owner_repo: &str, number: u64) -> crate::model::AgentPr {
+        crate::model::AgentPr::found(
+            &crate::model::PrInfo {
+                number,
+                title: format!("PR {number}"),
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+                url: format!("https://github.com/{owner_repo}/pull/{number}"),
+                ..crate::model::PrInfo::default()
+            },
+            Utc::now(),
+        )
     }
+
+    /// How many rows `table` holds for `session_id`.
+    fn rows_for(store: &SessionStore, table: &str, session_id: &str) -> i64 {
+        store
+            .conn
+            .query_row(
+                &format!("select count(*) from {table} where session_id = ?1"),
+                params![session_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Give `session_id` a row in every table that holds pull-request state,
+    /// the one-pull-request tables an older dux wrote included.
+    fn seed_every_pr_table(store: &SessionStore, session_id: &str) {
+        store
+            .replace_agent_prs(
+                session_id,
+                &[agent_pr("o/r", 7)],
+                &crate::model::PrPrefs {
+                    sort_mode: crate::pr_list::PrSortMode::Manual,
+                    hide_created_before: None,
+                },
+            )
+            .unwrap();
+        store
+            .conn
+            .execute_batch(&format!(
+                "insert into session_prs (session_id, pr_number, owner_repo) \
+                 values ('{session_id}', 7, 'o/r'); \
+                 insert into session_pr_overrides (session_id, host, owner_repo, pr_number) \
+                 values ('{session_id}', 'github.com', 'o/r', 7); \
+                 insert into session_pr_suppressions (session_id) values ('{session_id}'); \
+                 insert into session_branch_former_names \
+                 (session_id, branch_name, former_name, renamed_at) \
+                 values ('{session_id}', 'now', 'before', '2026-01-01T00:00:00Z');"
+            ))
+            .unwrap();
+    }
+
+    const PR_TABLES: [&str; 6] = [
+        "session_pull_requests",
+        "session_pr_prefs",
+        "session_branch_former_names",
+        "session_prs",
+        "session_pr_overrides",
+        "session_pr_suppressions",
+    ];
 
     #[test]
     fn next_changes_rev_increments_and_persists_across_reopen() {
@@ -5095,81 +5519,28 @@ mod tests {
     }
 
     #[test]
-    fn delete_session_also_removes_its_pr_rows() {
+    fn delete_session_also_removes_its_pull_request_rows() {
         let store = test_store();
         let now = Utc::now();
         store.upsert_session(&test_session("s1", now, now)).unwrap();
-        store.upsert_pr(&stored_pr("s1", 7)).unwrap();
-        assert_eq!(store.load_all_latest_prs().unwrap().len(), 1);
+        store.upsert_session(&test_session("s2", now, now)).unwrap();
+        seed_every_pr_table(&store, "s1");
+        seed_every_pr_table(&store, "s2");
+        store.set_minted_branch_rename("s1", "renamed").unwrap();
 
         store.delete_session("s1").unwrap();
 
-        assert!(store.load_sessions().unwrap().is_empty());
-        // The ON DELETE CASCADE FK is unenforced (PRAGMA foreign_keys is off), so
-        // the explicit session_prs delete is what keeps the PR row from leaking.
-        assert_eq!(store.load_all_latest_prs().unwrap(), Vec::<StoredPr>::new());
-    }
-
-    #[test]
-    fn pr_override_round_trips_and_survives_reopen() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("sessions.sqlite3");
-        let now = Utc::now();
-        {
-            let store = SessionStore::open(&db).unwrap();
-            store.upsert_session(&test_session("s1", now, now)).unwrap();
-            store.upsert_pr_override(&stored_pr("s1", 9)).unwrap();
-            let loaded = store.load_pr_overrides().unwrap();
-            assert_eq!(loaded, vec![stored_pr("s1", 9)]);
-            // One row per session: a second attach REPLACES the first rather
-            // than accumulating (the primary key is the session id alone).
-            store.upsert_pr_override(&stored_pr("s1", 12)).unwrap();
-            let loaded = store.load_pr_overrides().unwrap();
-            assert_eq!(loaded, vec![stored_pr("s1", 12)]);
+        // The declared FK cascades never fire (PRAGMA foreign_keys is off), so
+        // the explicit deletes are what keep a later session reusing the id
+        // from inheriting pull requests, a detach or names it never had.
+        for table in PR_TABLES {
+            assert_eq!(rows_for(&store, table, "s1"), 0, "{table}");
+            assert_eq!(rows_for(&store, table, "s2"), 1, "{table} of another agent");
         }
-        // The cached state/title/url are what make a restart render the pin
-        // instantly, so the row must survive a reopen intact.
-        let store = SessionStore::open(&db).unwrap();
         assert_eq!(
-            store.load_pr_overrides().unwrap(),
-            vec![stored_pr("s1", 12)]
+            store.load_minted_branch_renames().unwrap(),
+            Vec::<(String, String)>::new()
         );
-        store.delete_pr_override("s1").unwrap();
-        assert_eq!(store.load_pr_overrides().unwrap(), Vec::<StoredPr>::new());
-        // Deleting an absent override is a harmless no-op.
-        store.delete_pr_override("s1").unwrap();
-    }
-
-    /// A detach must outlive the process: dux restarting is not the user
-    /// changing their mind, so the suppression row round-trips a reopen.
-    #[test]
-    fn pr_suppression_round_trips_and_survives_reopen() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("sessions.sqlite3");
-        let now = Utc::now();
-        {
-            let store = SessionStore::open(&db).unwrap();
-            store.upsert_session(&test_session("s1", now, now)).unwrap();
-            store.upsert_session(&test_session("s2", now, now)).unwrap();
-            assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
-            store.set_pr_suppressed("s1").unwrap();
-            // Suppressing twice is the same single row: presence is the whole
-            // meaning, so the write is idempotent.
-            store.set_pr_suppressed("s1").unwrap();
-            assert_eq!(
-                store.load_pr_suppressions().unwrap(),
-                vec!["s1".to_string()]
-            );
-        }
-        let store = SessionStore::open(&db).unwrap();
-        assert_eq!(
-            store.load_pr_suppressions().unwrap(),
-            vec!["s1".to_string()]
-        );
-        store.delete_pr_suppression("s1").unwrap();
-        assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
-        // Clearing an absent suppression is a harmless no-op.
-        store.delete_pr_suppression("s1").unwrap();
     }
 
     #[test]
@@ -5186,41 +5557,6 @@ mod tests {
             Some("renamed-2")
         );
         assert_eq!(store.load_minted_branch_rename("s3").unwrap(), None);
-    }
-
-    #[test]
-    fn delete_session_also_removes_its_pr_suppression_row() {
-        let store = test_store();
-        let now = Utc::now();
-        store.upsert_session(&test_session("s1", now, now)).unwrap();
-        store.set_pr_suppressed("s1").unwrap();
-        store.set_minted_branch_rename("s1", "renamed").unwrap();
-
-        store.delete_session("s1").unwrap();
-
-        // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
-        // the explicit delete is what keeps a later session reusing the id from
-        // inheriting a detach it never asked for.
-        assert_eq!(store.load_pr_suppressions().unwrap(), Vec::<String>::new());
-        assert_eq!(
-            store.load_minted_branch_renames().unwrap(),
-            Vec::<(String, String)>::new()
-        );
-    }
-
-    #[test]
-    fn delete_session_also_removes_its_pr_override_row() {
-        let store = test_store();
-        let now = Utc::now();
-        store.upsert_session(&test_session("s1", now, now)).unwrap();
-        store.upsert_pr_override(&stored_pr("s1", 7)).unwrap();
-
-        store.delete_session("s1").unwrap();
-
-        // The declared FK cascade never fires (PRAGMA foreign_keys is off), so
-        // the explicit delete is what keeps the override row from leaking to a
-        // later session that reuses the id.
-        assert_eq!(store.load_pr_overrides().unwrap(), Vec::<StoredPr>::new());
     }
 
     #[test]
@@ -5258,15 +5594,10 @@ mod tests {
         store
             .upsert_session(&test_session_in("c", "p2", now, now))
             .unwrap();
-        store.upsert_pr(&stored_pr("a", 1)).unwrap();
-        // A pinned PR for one of p1's sessions and one for p2's, so the removal
-        // is proven to drop exactly its own project's override rows.
-        store.upsert_pr_override(&stored_pr("a", 1)).unwrap();
-        store.upsert_pr_override(&stored_pr("c", 3)).unwrap();
-        // One suppressed session per project, so the removal is proven to drop
-        // exactly its own project's suppression rows.
-        store.set_pr_suppressed("b").unwrap();
-        store.set_pr_suppressed("c").unwrap();
+        // Pull-request state for one of p1's sessions and for p2's, so the
+        // removal is proven to drop exactly its own project's rows.
+        seed_every_pr_table(&store, "a");
+        seed_every_pr_table(&store, "c");
         store.set_minted_branch_rename("b", "renamed-b").unwrap();
         store.set_minted_branch_rename("c", "renamed-c").unwrap();
         // Advance a changed-files rev for one of p1's sessions so there is a
@@ -5287,11 +5618,14 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(remaining, vec!["c".to_string()]);
-        assert_eq!(store.load_all_latest_prs().unwrap(), Vec::<StoredPr>::new());
-        // p1's override row went with its sessions; p2's survives untouched.
-        assert_eq!(store.load_pr_overrides().unwrap(), vec![stored_pr("c", 3)]);
-        // Same for the suppression rows: p1's went, p2's stayed.
-        assert_eq!(store.load_pr_suppressions().unwrap(), vec!["c".to_string()]);
+        for table in PR_TABLES {
+            assert_eq!(rows_for(&store, table, "a"), 0, "{table}");
+            assert_eq!(
+                rows_for(&store, table, "c"),
+                1,
+                "{table} of the other project"
+            );
+        }
         assert_eq!(
             store.load_minted_branch_renames().unwrap(),
             vec![("c".to_string(), "renamed-c".to_string())]
@@ -6335,164 +6669,156 @@ mod tests {
 #[cfg(test)]
 mod pr_tests {
     use super::*;
-    use chrono::Duration;
+    use crate::model::{AgentPr, PrInfo, PrPrefs, PrState};
 
-    fn spr(sid: &str, num: u64, host: &str, repo: &str, state: &str, title: &str) -> StoredPr {
-        StoredPr {
-            session_id: sid.to_string(),
-            pr_number: num,
-            host: host.to_string(),
-            owner_repo: repo.to_string(),
-            state: state.to_string(),
-            title: title.to_string(),
-            url: fallback_pr_url(host, repo, num),
+    fn found(owner_repo: &str, number: u64, state: PrState) -> AgentPr {
+        AgentPr::found(
+            &PrInfo {
+                number,
+                state,
+                title: format!("PR {number}"),
+                host: "github.com".to_string(),
+                owner_repo: owner_repo.to_string(),
+                url: format!("https://github.com/{owner_repo}/pull/{number}"),
+                ..PrInfo::default()
+            },
+            Utc::now(),
+        )
+    }
+
+    #[test]
+    fn an_agents_pull_requests_and_preferences_round_trip_a_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let now = Utc::now();
+        let mut draft = found("ada/widget", 77, PrState::Draft);
+        draft.head_branch = Some("feature".to_string());
+        draft.manual_slot = Some(2);
+        draft.gh_created_at = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+            .ok()
+            .map(|at| at.with_timezone(&Utc));
+        let mut other_repo = found("bob/gadget", 77, PrState::Merged);
+        other_repo.attached = true;
+        other_repo.found = false;
+        let prefs = PrPrefs {
+            sort_mode: crate::pr_list::PrSortMode::Manual,
+            hide_created_before: None,
+        };
+        {
+            let store = SessionStore::open(&db).unwrap();
+            store.upsert_session(&test_session("s1", now, now)).unwrap();
+            store
+                .replace_agent_prs("s1", &[draft.clone(), other_repo.clone()], &prefs)
+                .unwrap();
+            // The same pull request spelled in another case is the same row.
+            let mut refreshed = draft.clone();
+            refreshed.owner_repo = "Ada/Widget".to_string();
+            refreshed.title = "Renamed".to_string();
+            store.upsert_agent_pr("s1", &refreshed).unwrap();
         }
+        let store = SessionStore::open(&db).unwrap();
+        let mut rows = store.load_agent_prs().unwrap().remove("s1").unwrap();
+        rows.sort_by_key(|row| row.owner_repo.to_ascii_lowercase());
+        assert_eq!(
+            rows.len(),
+            2,
+            "two #77 from different repositories: {rows:?}"
+        );
+        assert_eq!(rows[0].state, PrState::Draft);
+        assert_eq!(rows[0].owner_repo, "Ada/Widget");
+        assert_eq!(rows[0].title, "Renamed");
+        assert_eq!(rows[0].head_branch.as_deref(), Some("feature"));
+        assert_eq!(rows[0].manual_slot, Some(2));
+        assert_eq!(rows[0].gh_created_at, draft.gh_created_at);
+        assert_eq!(rows[1].state, PrState::Merged);
+        assert!(rows[1].attached && !rows[1].found);
+        assert_eq!(store.load_pr_prefs().unwrap().get("s1"), Some(&prefs));
+    }
+
+    /// The database as an older dux left it: the new tables are not there yet
+    /// and the one-pull-request tables hold `s1`'s two pull requests (one on a
+    /// branch whose remote ref is gone, which only this import still knows)
+    /// and a pin, and `s2`'s detach.
+    fn pre_upgrade_database() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("sessions.sqlite3");
+        let now = Utc::now();
+        let store = SessionStore::open(&db).unwrap();
+        store.upsert_session(&test_session("s1", now, now)).unwrap();
+        store.upsert_session(&test_session("s2", now, now)).unwrap();
+        store.run_sql_for_tests(
+            "drop table session_pull_requests; drop table session_pr_prefs; \
+             drop table session_branch_former_names; \
+             insert into session_prs (session_id, pr_number, host, owner_repo, state, title, url) \
+             values ('s1', 10, 'github.com', 'ada/widget', 'MERGED', 'Gone branch', 'u10'), \
+                    ('s1', 12, 'github.com', 'ada/widget', 'OPEN', 'Current', 'u12'), \
+                    ('s2', 5, 'github.com', 'ada/widget', 'OPEN', 'Detached', 'u5'); \
+             insert into session_pr_overrides \
+             (session_id, host, owner_repo, pr_number, state, title, url) \
+             values ('s1', 'github.com', 'Ada/Widget', 12, 'OPEN', 'Pinned', 'u12'); \
+             insert into session_pr_suppressions (session_id) values ('s2');",
+        );
+        drop(store);
+        (tmp, db)
+    }
+
+    fn summary(store: &SessionStore, id: &str) -> Vec<(u64, bool, bool, bool)> {
+        let mut rows: Vec<_> = store
+            .load_agent_prs()
+            .unwrap()
+            .remove(id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.number, row.found, row.attached, row.hidden))
+            .collect();
+        rows.sort_unstable();
+        rows
     }
 
     #[test]
-    fn upsert_and_load_prs() {
-        let store = test_store();
-        let now = Utc::now();
-        let s = test_session("s1", now, now);
-        store.upsert_session(&s).unwrap();
-
-        store
-            .upsert_pr(&spr(
-                "s1",
-                10,
-                "github.com",
-                "owner/repo",
-                "OPEN",
-                "First PR",
-            ))
-            .unwrap();
-        store
-            .upsert_pr(&spr(
-                "s1",
-                20,
-                "github.com",
-                "owner/repo",
-                "OPEN",
-                "Second PR",
-            ))
-            .unwrap();
-        store
-            .upsert_pr(&spr(
-                "s1",
-                15,
-                "github.com",
-                "owner/repo",
-                "MERGED",
-                "Middle PR",
-            ))
-            .unwrap();
-
-        let prs = store.load_prs("s1").unwrap();
-        assert_eq!(prs.len(), 3);
+    fn the_one_pull_request_tables_are_imported_once_and_left_as_they_were() {
+        let (_tmp, db) = pre_upgrade_database();
+        let store = SessionStore::open(&db).unwrap();
+        // Both found rows, the pin merged into the one it names, and the
+        // detached agent's rows hidden with its cutoff set.
         assert_eq!(
-            prs[0],
-            spr("s1", 20, "github.com", "owner/repo", "OPEN", "Second PR")
+            summary(&store, "s1"),
+            vec![(10, true, false, false), (12, true, true, false)]
         );
-        assert_eq!(
-            prs[1],
-            spr("s1", 15, "github.com", "owner/repo", "MERGED", "Middle PR")
+        assert_eq!(summary(&store, "s2"), vec![(5, true, false, true)]);
+        let prefs = store.load_pr_prefs().unwrap();
+        assert!(prefs.get("s2").unwrap().hide_created_before.is_some());
+        assert!(!prefs.contains_key("s1"));
+        let migrated = store.load_agent_prs().unwrap();
+        let rows_before = summary(&store, "s1");
+
+        // A second open is a no-op.
+        drop(store);
+        let store = SessionStore::open(&db).unwrap();
+        assert_eq!(store.load_agent_prs().unwrap(), migrated);
+
+        // Changes made here, then what an older dux would write after a
+        // downgrade: reopening imports none of the latter.
+        let mut rows = migrated.get("s1").unwrap().clone();
+        rows.retain(|row| row.number == 12);
+        store
+            .replace_agent_prs("s1", &rows, &PrPrefs::default())
+            .unwrap();
+        store.run_sql_for_tests(
+            "insert into session_prs (session_id, pr_number, owner_repo) \
+             values ('s1', 99, 'ada/widget'); \
+             delete from session_pr_suppressions;",
         );
-        assert_eq!(
-            prs[2],
-            spr("s1", 10, "github.com", "owner/repo", "OPEN", "First PR")
-        );
-    }
-
-    #[test]
-    fn upsert_pr_updates_state_and_title() {
-        let store = test_store();
-        let now = Utc::now();
-        let s = test_session("s1", now, now);
-        store.upsert_session(&s).unwrap();
-
-        store
-            .upsert_pr(&spr("s1", 42, "github.com", "owner/repo", "OPEN", "My PR"))
+        drop(store);
+        let store = SessionStore::open(&db).unwrap();
+        assert_eq!(summary(&store, "s1"), vec![(12, true, true, false)]);
+        assert_ne!(summary(&store, "s1"), rows_before);
+        assert_eq!(summary(&store, "s2"), vec![(5, true, false, true)]);
+        let old_rows: i64 = store
+            .conn
+            .query_row("select count(*) from session_prs", [], |row| row.get(0))
             .unwrap();
-        store
-            .upsert_pr(&StoredPr {
-                url: "https://github.com/owner/repo/pull/42".to_string(),
-                ..spr(
-                    "s1",
-                    42,
-                    "github.example.com",
-                    "owner/repo",
-                    "MERGED",
-                    "My PR (updated)",
-                )
-            })
-            .unwrap();
-
-        let prs = store.load_prs("s1").unwrap();
-        assert_eq!(prs.len(), 1);
-        assert_eq!(prs[0].host, "github.example.com");
-        assert_eq!(prs[0].state, "MERGED");
-        assert_eq!(prs[0].title, "My PR (updated)");
-        assert_eq!(prs[0].url, "https://github.com/owner/repo/pull/42");
-    }
-
-    #[test]
-    fn load_all_latest_prs() {
-        let store = test_store();
-        let now = Utc::now();
-        let s1 = test_session("s1", now, now);
-        let s2 = test_session("s2", now - Duration::hours(1), now - Duration::hours(1));
-        store.upsert_session(&s1).unwrap();
-        store.upsert_session(&s2).unwrap();
-
-        store
-            .upsert_pr(&spr(
-                "s1",
-                10,
-                "github.com",
-                "owner/repo",
-                "CLOSED",
-                "Old PR",
-            ))
-            .unwrap();
-        store
-            .upsert_pr(&spr(
-                "s1",
-                20,
-                "github.com",
-                "owner/repo",
-                "MERGED",
-                "Latest PR",
-            ))
-            .unwrap();
-        store
-            .upsert_pr(&spr(
-                "s2",
-                5,
-                "github.com",
-                "other/repo",
-                "OPEN",
-                "Other PR",
-            ))
-            .unwrap();
-
-        let latest = store.load_all_latest_prs().unwrap();
-        assert_eq!(latest.len(), 2);
-        assert!(latest.contains(&spr(
-            "s1",
-            20,
-            "github.com",
-            "owner/repo",
-            "MERGED",
-            "Latest PR"
-        )));
-        assert!(latest.contains(&spr(
-            "s2",
-            5,
-            "github.com",
-            "other/repo",
-            "OPEN",
-            "Other PR"
-        )));
+        assert_eq!(old_rows, 4, "the old table is left as it was written");
     }
 }
 

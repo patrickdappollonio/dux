@@ -42,9 +42,11 @@
 
 use chrono::Utc;
 use dux_core::model::{
-    AgentSession, AgentTab, AgentWorkspace, FolderWorkspace, ProviderKind, SessionStatus,
+    AgentPr, AgentSession, AgentTab, AgentWorkspace, FolderWorkspace, PrInfo, PrPrefs,
+    ProviderKind, SessionStatus,
 };
-use dux_core::storage::{SessionStore, StoredPr};
+use dux_core::pr_list::PrSortMode;
+use dux_core::storage::SessionStore;
 use rusqlite::Connection;
 
 /// `sessions.sqlite3` exactly as the FIRST public dux created it (`ed917a4`,
@@ -323,10 +325,7 @@ fn a_first_release_database_with_no_projects_table_at_all_opens_and_keeps_its_se
     let tabs = store.load_agent_tabs().expect("tabs");
     assert_eq!(tabs.len(), store.load_sessions().expect("sessions").len());
     assert!(store.load_extra_agent_tabs().expect("extras").is_empty());
-    assert_eq!(
-        store.load_prs("sess-1").expect("prs"),
-        Vec::<StoredPr>::new()
-    );
+    assert!(store.load_agent_prs().expect("prs").is_empty());
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
 }
 
@@ -568,69 +567,37 @@ fn tables_added_since_are_created_empty_and_immediately_usable() {
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 1);
     assert_eq!(store.next_changes_rev("sess-1").expect("rev"), 2);
 
-    // `session_prs`: empty, and writable.
-    assert_eq!(
-        store.load_prs("sess-1").expect("load prs"),
-        Vec::<StoredPr>::new()
-    );
-    store
-        .upsert_pr(&StoredPr {
-            session_id: "sess-1".to_string(),
-            pr_number: 42,
+    // `session_pull_requests`: the projects-era `session_prs` table was empty,
+    // so nothing was imported, and it is writable.
+    assert!(store.load_agent_prs().expect("load prs").is_empty());
+    let found = AgentPr::found(
+        &PrInfo {
+            number: 42,
+            title: "Make it faster".to_string(),
             host: "github.com".to_string(),
             owner_repo: "ada/widget".to_string(),
-            state: "OPEN".to_string(),
-            title: "Make it faster".to_string(),
             url: "https://github.com/ada/widget/pull/42".to_string(),
-        })
-        .expect("upsert pr");
-    let prs = store.load_prs("sess-1").expect("load prs");
-    assert_eq!(prs.len(), 1);
-    assert_eq!(prs[0].pr_number, 42);
-    assert_eq!(prs[0].title, "Make it faster");
+            ..PrInfo::default()
+        },
+        Utc::now(),
+    );
+    store.upsert_agent_pr("sess-1", &found).expect("upsert pr");
+    let prs = store.load_agent_prs().expect("load prs");
+    assert_eq!(prs.get("sess-1").map(Vec::as_slice), Some(&[found][..]));
 
-    // `session_pr_overrides`: empty (nobody upgrading has a pin yet), and
-    // immediately usable for a manual attach.
-    assert_eq!(
-        store.load_pr_overrides().expect("load overrides"),
-        Vec::<StoredPr>::new()
-    );
+    // `session_pr_prefs`: empty, so an upgrading database has every agent's
+    // detection on, and immediately usable.
+    assert!(store.load_pr_prefs().expect("load prefs").is_empty());
+    let prefs = PrPrefs {
+        sort_mode: PrSortMode::Manual,
+        hide_created_before: None,
+    };
     store
-        .upsert_pr_override(&StoredPr {
-            session_id: "sess-1".to_string(),
-            pr_number: 7,
-            host: "github.com".to_string(),
-            owner_repo: "forker/widget".to_string(),
-            state: "OPEN".to_string(),
-            title: "Pinned by hand".to_string(),
-            url: "https://github.com/forker/widget/pull/7".to_string(),
-        })
-        .expect("upsert override");
-    let pins = store.load_pr_overrides().expect("load overrides");
-    assert_eq!(pins.len(), 1);
-    assert_eq!(pins[0].pr_number, 7);
-    assert_eq!(pins[0].owner_repo, "forker/widget");
-
-    // `session_pr_suppressions`: empty, so an upgrading database keeps every
-    // agent's autodetection on (nobody detached before the table existed), and
-    // immediately usable once someone does detach.
+        .replace_agent_prs("sess-1", &[], &prefs)
+        .expect("write prefs");
     assert_eq!(
-        store.load_pr_suppressions().expect("load suppressions"),
-        Vec::<String>::new()
-    );
-    store
-        .set_pr_suppressed("sess-1")
-        .expect("suppress autodetection");
-    assert_eq!(
-        store.load_pr_suppressions().expect("load suppressions"),
-        vec!["sess-1".to_string()]
-    );
-    store
-        .delete_pr_suppression("sess-1")
-        .expect("resume autodetection");
-    assert_eq!(
-        store.load_pr_suppressions().expect("load suppressions"),
-        Vec::<String>::new()
+        store.load_pr_prefs().expect("load prefs").get("sess-1"),
+        Some(&prefs)
     );
 }
 

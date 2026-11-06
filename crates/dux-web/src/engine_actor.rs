@@ -5718,17 +5718,20 @@ mod tests {
         before.ui.github_integration = true;
         engine.config.ui.github_integration = false;
         engine.github_integration_enabled = false;
-        engine.pr_statuses.insert(
+        engine.agent_prs.insert(
             "s1".to_string(),
-            dux_core::model::PrInfo {
-                number: 1,
-                state: dux_core::model::PrState::Open,
-                title: "x".into(),
-                host: "github.com".into(),
-                owner_repo: "o/r".into(),
-                url: "https://example".into(),
-                ..Default::default()
-            },
+            vec![dux_core::model::AgentPr::found(
+                &dux_core::model::PrInfo {
+                    number: 1,
+                    state: dux_core::model::PrState::Open,
+                    title: "x".into(),
+                    host: "github.com".into(),
+                    owner_repo: "o/r".into(),
+                    url: "https://example".into(),
+                    ..Default::default()
+                },
+                chrono::Utc::now(),
+            )],
         );
 
         let mut statuses = handle.subscribe_status();
@@ -5799,7 +5802,7 @@ mod tests {
             })
             .expect("the reload's outcome is said");
         assert!(said.message.contains("in force"), "{}", said.message);
-        assert!(engine.pr_statuses.is_empty(), "pull-request sync stopped");
+        assert!(engine.agent_prs.is_empty(), "pull-request sync stopped");
 
         assert_eq!(
             limits.allowed_hosts().snapshot(),

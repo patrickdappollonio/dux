@@ -4805,9 +4805,9 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn current_pr_info(&self) -> Option<&crate::model::PrInfo> {
+    pub(crate) fn current_pr_info(&self) -> Option<&crate::model::AgentPr> {
         self.selected_session()
-            .and_then(|session| self.engine.pr_statuses.get(&session.id))
+            .and_then(|session| self.engine.shown_pr(&session.id))
     }
 
     pub(crate) fn current_pr_url(&self) -> Option<&str> {
@@ -4849,8 +4849,8 @@ impl App {
             return;
         };
         // The body names the PR currently shown so overriding it is explicit.
-        let current_pr = self.engine.pr_statuses.get(&session.id).map(|pr| {
-            let overridden = self.engine.pr_overrides.contains_key(&session.id);
+        let current_pr = self.engine.shown_pr(&session.id).map(|pr| {
+            let overridden = self.engine.attached_pr(&session.id).is_some();
             format!(
                 "#{} ({}) {}{}",
                 pr.number,
@@ -5558,10 +5558,11 @@ mod tests {
             unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
-            pr_statuses: std::collections::HashMap::new(),
-            pr_overrides: std::collections::HashMap::new(),
-            pr_suppressions: std::collections::HashSet::new(),
-            pr_suppressions_retry_at: None,
+            agent_prs: std::collections::HashMap::new(),
+            pr_prefs: std::collections::HashMap::new(),
+            pr_prefs_retry_at: None,
+            branch_histories: std::collections::HashMap::new(),
+            pr_revision: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync: Arc::new(PrSyncControl::default()),
@@ -5981,10 +5982,11 @@ mod tests {
             unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
-            pr_statuses: std::collections::HashMap::new(),
-            pr_overrides: std::collections::HashMap::new(),
-            pr_suppressions: std::collections::HashSet::new(),
-            pr_suppressions_retry_at: None,
+            agent_prs: std::collections::HashMap::new(),
+            pr_prefs: std::collections::HashMap::new(),
+            pr_prefs_retry_at: None,
+            branch_histories: std::collections::HashMap::new(),
+            pr_revision: std::collections::HashMap::new(),
             branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync_sessions: Arc::new(Mutex::new(Vec::new())),
             pr_sync: Arc::new(PrSyncControl::default()),

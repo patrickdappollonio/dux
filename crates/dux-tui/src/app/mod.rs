@@ -1909,7 +1909,7 @@ pub(crate) fn agent_search_location(
 pub(crate) fn agent_info_lines(
     session: &AgentSession,
     project_default: Option<ProviderKind>,
-    pr: Option<(&crate::model::PrInfo, bool)>,
+    pr: Option<(&crate::model::AgentPr, bool)>,
     working_copy: WorkingCopy,
 ) -> Vec<(String, AgentInfoTone)> {
     let name = session.display_label();
@@ -5093,10 +5093,11 @@ impl App {
             unsaved_branch_drifts: std::collections::HashMap::new(),
             gh_status: crate::model::GhStatus::Unknown,
             gh_probe: GhProbeState::default(),
-            pr_statuses: HashMap::new(),
-            pr_overrides: HashMap::new(),
-            pr_suppressions: HashSet::new(),
-            pr_suppressions_retry_at: None,
+            agent_prs: std::collections::HashMap::new(),
+            pr_prefs: std::collections::HashMap::new(),
+            pr_prefs_retry_at: None,
+            branch_histories: std::collections::HashMap::new(),
+            pr_revision: std::collections::HashMap::new(),
             branch_sync_sessions,
             pr_sync_sessions,
             pr_sync,
@@ -5392,7 +5393,7 @@ impl App {
             // the user is still looking at the screen in another surface).
             app.begin_first_load();
         }
-        app.seed_pr_statuses_from_db();
+        app.seed_pull_requests_from_db();
         app.rebuild_left_items();
         app.reload_changed_files();
         app.engine.update_branch_sync_sessions();
@@ -5792,11 +5793,11 @@ impl App {
 
     /// Populate the in-memory PR status map from the database so the UI shows
     /// PR state immediately on startup, before the first background poll.
-    fn seed_pr_statuses_from_db(&mut self) {
+    fn seed_pull_requests_from_db(&mut self) {
         // The seed (including the shared "OPEN"/"MERGED"/"CLOSED" decode) is the
-        // core-owned `Engine::seed_pr_statuses_from_store`, shared with the web
+        // core-owned `Engine::seed_pull_requests_from_store`, shared with the web
         // server bootstrap so both surfaces show persisted PR badges on startup.
-        self.engine.seed_pr_statuses_from_store();
+        self.engine.seed_pull_requests_from_store();
     }
 
     /// Close the help overlay if it is open, reporting whether it was.
@@ -6305,8 +6306,8 @@ impl App {
             Action::DetachPullRequest => {
                 !self.pr_attach_pending_on_selection()
                     && self.selected_session().is_some_and(|s| {
-                        self.engine.pr_overrides.contains_key(&s.id)
-                            || self.engine.pr_statuses.contains_key(&s.id)
+                        self.engine.attached_pr(&s.id).is_some()
+                            || self.engine.shown_pr(&s.id).is_some()
                     })
             }
             // The way back, offered only where it means something: while the
@@ -6316,7 +6317,7 @@ impl App {
                 !self.pr_attach_pending_on_selection()
                     && self
                         .selected_session()
-                        .is_some_and(|s| self.engine.pr_suppressions.contains(&s.id))
+                        .is_some_and(|s| self.engine.pr_autodetect_suppressed(&s.id))
             }
             // Offered only in the one state it exists for, and hidden rather
             // than disabled: a command that exists only while something is
@@ -6762,7 +6763,7 @@ impl App {
             // work, exactly once.
             self.engine.spawn_gh_status_check();
         } else {
-            self.engine.pr_statuses.clear();
+            self.engine.clear_agent_prs();
             self.engine.disarm_pr_sync();
             self.rebuild_left_items();
         }
@@ -7920,9 +7921,8 @@ impl App {
             self.fullscreen_overlay = FullscreenOverlay::None;
             let pr = self
                 .engine
-                .pr_statuses
-                .get(&session.id)
-                .map(|pr| (pr, self.engine.pr_overrides.contains_key(&session.id)));
+                .shown_pr(&session.id)
+                .map(|pr| (pr, pr.attached));
             let directory_missing = if self.engine.folder_repo_status(&session.id)
                 == dux_core::git::FolderRepoStatus::Missing
             {
@@ -9468,6 +9468,7 @@ mod tests {
             url: "https://github.com/o/r/pull/42".to_string(),
             ..Default::default()
         };
+        let pr = crate::model::AgentPr::found(&pr, chrono::Utc::now());
 
         // No PR known: no line at all.
         let none = agent_info_lines(&s, None, None, WorkingCopy::Present);

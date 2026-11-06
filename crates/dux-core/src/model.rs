@@ -196,6 +196,16 @@ impl std::hash::Hash for PrKey {
     }
 }
 
+/// An agent's pull-request preferences.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrPrefs {
+    /// How its pull requests are ordered.
+    pub sort_mode: crate::pr_list::PrSortMode,
+    /// Set when the agent had pull-request detection switched off: a pull
+    /// request opened on GitHub before this moment is kept out of sight.
+    pub hide_created_before: Option<DateTime<Utc>>,
+}
+
 /// One pull request an agent has: found by the sync on one of its branches,
 /// attached by the user, or both. A row exists while either is true.
 #[derive(Clone, Debug, PartialEq, Eq)]
