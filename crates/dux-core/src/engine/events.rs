@@ -7878,6 +7878,15 @@ mod tests {
 
     // ── PrStatusReady ────────────────────────────────────────────────────
 
+    /// The repository `owner_repo` on github.com, as the sync reports an
+    /// agent's own.
+    fn own_repository(owner_repo: &str) -> crate::git::GitHubRemote {
+        crate::git::GitHubRemote {
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+        }
+    }
+
     /// A `PrStatusReady` in which discovery found each agent's pull request,
     /// or nothing for a `None`.
     fn pr_status_ready(results: Vec<(String, Option<PrInfo>)>) -> WorkerEvent {
@@ -8900,10 +8909,7 @@ mod tests {
                     )),
                 ],
                 asked: Vec::new(),
-                own_repo: Some(crate::git::GitHubRemote {
-                    host: "github.com".to_string(),
-                    owner_repo: "o/r".to_string(),
-                }),
+                own_repo: Some(own_repository("o/r")),
             },
         ]));
         let mut rows: Vec<(u64, Option<String>)> = engine.agent_prs["s2"]
@@ -9068,9 +9074,8 @@ mod tests {
         engine.process_worker_event(WorkerEvent::PrStatusReady(vec![
             crate::worker::PrStatusResult {
                 session_id: "live".to_string(),
-                answers: Vec::new(),
                 asked: vec![("spike".to_string(), record.clone())],
-                own_repo: None,
+                ..Default::default()
             },
         ]));
         let plan = engine.pr_sync_sessions.lock().unwrap().clone();

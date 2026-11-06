@@ -1297,7 +1297,7 @@ pub enum PrSyncAnswer {
 /// What one sync brought back for one agent. Every answer is about a named
 /// branch or a numbered pull request, so it stays true whatever the agent has
 /// done since it was asked.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PrStatusResult {
     pub(crate) session_id: String,
     pub(crate) answers: Vec<PrSyncAnswer>,
