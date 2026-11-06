@@ -130,7 +130,14 @@ function shot() {
   const f = flap()
   const p = pill()
   return {
-    flap: f === null ? "gone" : f.className.includes("invisible") ? "hidden" : "shown",
+    // Hidden on its own box: an inherited `visibility` is eased by the
+    // cluster's `transition-all` buttons, which keeps them painted.
+    flap:
+      f === null
+        ? "gone"
+        : f.style.opacity === "0" && f.hasAttribute("inert")
+          ? "hidden"
+          : "shown",
     pill:
       p === null
         ? "gone"
