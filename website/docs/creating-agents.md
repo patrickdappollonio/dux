@@ -637,8 +637,8 @@ for a different reason or under a different name, dux asks again instead of goin
 
 ### How PR status stays fresh
 
-With `github_integration` on, dux shows a PR status pill on each agent branch. These
-refresh it right away:
+With `github_integration` on, dux shows a PR status pill on each agent. These refresh it
+right away:
 
 - bringing the agent to the foreground,
 - creating the agent,
@@ -704,14 +704,22 @@ it recovers and tells you: a status line in the terminal UI, a toast in the brow
 > GitHub Enterprise only. On a GitLab or Bitbucket project the agent works as usual and
 > simply has no pill.
 
-Above or below the agent's terminal, a one-line banner carries the pull request's number,
-its state and its title, on both surfaces.
+Above or below the agent's terminal, a one-line banner carries a pull request's number,
+its state and its title, on both surfaces. An agent with several pull requests shows one at
+a time, the first in its order, with a count of how many it has.
 
-- **Click it:** clicking the banner opens that pull request in your browser, wherever you
-  click it.
-- **From the keyboard:** in the terminal UI the `open-current-pr` command does the same. It
-  is the way in while an agent pane is maximized, since the maximized surface covers the
-  banner (the banner also steps aside while you are typing into the pane).
+- **Click it:** clicking the banner opens the pull request it shows in your browser. In the
+  browser the counter, the arrows and the list at its right end are separate controls; see
+  [The PR banner](/docs/web-git#the-pr-banner).
+- **Step through them:** the arrows in the browser, and Ctrl-n in the terminal UI while the
+  agent pane is not taking your typing (while it is, Ctrl-n reaches the agent).
+- **From the keyboard:** in the terminal UI the `open-current-pr` command opens the one the
+  banner shows. It is the way in while an agent pane is maximized, since the maximized
+  surface covers the banner (the banner also steps aside while you are typing into the
+  pane).
+- **All of them:** the `pull-requests` palette command in the terminal UI, and **Pull
+  requests…** in the agent's ⋯ menu in the browser, list every one with ways to attach, hide,
+  detach and reorder them.
 - **Which side:** `pr_banner_position` under `[ui]` is `"top"` or `"bottom"`, and the
   default is `"bottom"`. Anything else falls back to the default.
 

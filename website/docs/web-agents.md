@@ -272,11 +272,10 @@ These entries are about a branch dux manages, so a standalone agent does not get
 - **Fork agent…**.
 - The project's environment, [startup command](/docs/startup-commands), **Rerun startup
   command** and **Startup command logs…**.
-- **Attach pull request…** (or **Change attached pull request…**), which needs the `gh` CLI.
-- **Detach pull request**, when the agent has one, and **Resume PR autodetection**, which
-  only appears after you have detached one.
+- **Pull requests…**, which lists the agent's pull requests and lets you attach, hide,
+  detach and reorder them; see [the Pull requests dialog](/docs/web-git#the-pull-requests-dialog).
 
-![An agent's menu open beside its sidebar row: an Input group with Attach a file and Use virtual input at the top, then force recreate, detach and auto-reopen, then rename, fork, change provider, editor and delete actions.](/screens/agent-session-menu.png)
+![An agent's menu open beside its sidebar row, whose badge counts three pull requests: an Input group with Attach a file and Use virtual input at the top, then new tab and project entries, force recreate, detach and auto-reopen, then rename, fork, change provider, Pull requests… and agent info, the startup command and editor entries, and delete.](/screens/agent-session-menu.png)
 
 **Change provider** and **Force recreate** are the two knobs around resume:
 

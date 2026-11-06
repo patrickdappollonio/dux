@@ -1,6 +1,6 @@
 ---
 title: Git without leaving the browser
-description: The Changes pane in server mode, with staged and unstaged groups, stage, unstage, discard, commit, push, pull, the PR banner, and how the pane stays in sync.
+description: The Changes pane in server mode, with staged and unstaged groups, stage, unstage, discard, commit, push, pull, the PR banner and an agent's pull requests, and how the pane stays in sync.
 group: Web UI
 order: 63
 ---
@@ -155,45 +155,137 @@ The changes pane's header carries two controls: an **Open editor** button that t
 > GitHub and GitHub Enterprise hosts `gh` is signed in to. Commit, push and pull work with any
 > host git can reach.
 
-When a session is tied to a GitHub pull request, a one-line strip shows the PR number, its
-state, and its title, color-coded (open is green, merged is purple, closed is red).
-Clicking it opens the PR in a new tab. You can move the banner above or below the terminal
-in **Preferences** (the cog menu).
+An agent can have several pull requests: the ones dux finds on every branch its worktree
+has been on, plus any you attach yourself. The banner is a one-line strip that shows one of them at a
+time: its number, its state and its title, color-coded (open is green, draft is gray,
+merged is purple, closed is red). Clicking the strip opens that pull request in a new tab.
+You can move the banner above or below the terminal in **Preferences** (the cog menu).
 
-![A green strip under the terminal showing pull request 123, its open state and its title.](/screens/pr-banner.png)
+![A green strip under the terminal showing pull request 123, its open state and its title, with "1 of 3", two arrows and a ⋯ button at its right end.](/screens/pr-banner.png)
+
+The right end of the strip holds its controls, which are not part of the link:
+
+- **"1 of 3" and the ‹ › arrows**, once the agent has two or more. They step through the
+  agent's pull requests in its [order](#ordering) and wrap around at either end. Stepping
+  only changes what this banner shows; it changes nothing on the agent.
+- **The `⋯` button**, always there. It lists every pull request the agent shows, each with
+  its state and the branch it was found on (or "attached by you"), and a click on one opens
+  it. **Pull requests…** at the bottom opens the dialog below.
+
+![The banner's ⋯ list open over the terminal: three pull requests, the open one on fix-login-redirect, a draft attached from acme/infra and a merged one on an earlier branch, with Pull requests… underneath.](/screens/pr-banner-list.png)
+
+On a phone the terminal screen's top bar carries a chip, such as **#123 +2**: the pull
+request the banner shows, and how many more the agent has. With more than one, a tap on the
+chip opens the same list as a sheet; with one, it opens that pull request.
+
+In the sidebar, an agent with more than one pull request wears a count beside the
+pull-request icon, colored by the one its banner shows first. Clicking the badge opens that
+one, and its tooltip says how many more there are.
 
 > [!NOTE]
-> There is no "create a PR" button in the web UI. The banner surfaces an **existing** PR;
+> There is no "create a PR" button in the web UI. The banner surfaces **existing** PRs;
 > agents open PRs themselves as part of their work. Pulling a PR's branch into a fresh
 > agent is covered in [Agents from the browser](/docs/web-agents).
 
+### The Pull requests dialog
+
+**Pull requests…** in the agent's ⋯ menu (or at the bottom of the banner's list) opens one
+dialog for everything about an agent's pull requests. Its **Pull requests** view lists the
+ones the agent shows, in its order, the first being the one the banner shows. Each row's ⋯
+has:
+
+- **Open on GitHub**.
+- **Move to top**, **Move up** and **Move down**.
+- **Hide**, for a pull request dux found, or **Detach**, for one you attached. Neither asks
+  for confirmation, because neither loses anything: see [Hiding and
+  detaching](#hiding-and-detaching).
+
+![The Pull requests dialog: three pull requests with their states and branches, a grip on each row for dragging, the Sort control beside the Pull requests and Branches tabs, and Attach pull request… at the bottom.](/screens/pull-requests-dialog.png)
+
+On a phone the dialog is a sheet, and the second line of each row keeps the state and the
+branch so the title has the room.
+
+![The Pull requests sheet on a phone, listing the same three pull requests with a grip and a ⋯ on each row.](/screens/phone-pull-requests-sheet.png)
+
+In the terminal UI the same list is the `pull-requests` palette command. It opens a picker
+where Enter opens the selected pull request, and the picker names the keys for everything
+else (attach, hide or detach, show the hidden ones, the branches, the order, the moves),
+each of which can be rebound like any other key. The terminal UI's banner is a band above or
+below the agent's terminal that shows one pull request with a count such as "1/3", and Ctrl-n
+steps it to the next one while the agent pane is not taking your typing; while it is,
+Ctrl-n goes to the agent, where shells and most CLIs use it for their history.
+
+![The terminal UI with its pull-request band under the agent's terminal, showing pull request 123, its title, 1/3 and Ctrl-n next.](/screens/tui-pr-band.png)
+
+![The terminal UI's Pull Requests picker: the open pull request and the attached draft under Open, newest first, the merged one under Merged and closed, and the keys for each action along its top.](/screens/tui-pull-requests-modal.png)
+
 ### Attaching a PR by hand
 
-dux normally finds the PR itself by matching the agent's branch name against the repository
-on GitHub. When that misses (the PR lives on a fork, or under a head branch that no longer
-matches), attach one by hand: **Attach pull request…** in the agent's ⋯ menu, or the
-`attach-pull-request` command in the terminal UI's command palette. The field takes a full
-PR URL, `owner/repo#123`, or a bare number resolved against the project's remote.
+dux finds the pull requests on the agent's branches itself. When one lives somewhere it
+does not look (a fork, another repository entirely, or a head branch that no longer
+matches), attach it: **Attach pull request…** at the bottom of the Pull requests dialog, or
+the attach key in the terminal UI's picker. The field takes a full PR URL, `owner/repo#123`,
+or a bare number resolved against the project's remote.
 
-A manually attached PR is pinned: its state still refreshes, autodetection stops
-second-guessing it, and the Agent Info dialog says "manually attached".
+Attaching **adds** to the agent's list; it never replaces a pull request it already has,
+and autodetection keeps running beside it. A pull request from another repository works
+too, and the list names it with its repository (`acme/infra#77`) so it is never confused
+with one of the agent's own. The Agent Info dialog lists every pull request the agent has.
 
-### Detaching, and getting detection back
+### Hiding and detaching
 
-**Detach pull request** (same menu, or `detach-pull-request` in the palette) means this agent has no pull request.
+Every pull request in the list can be taken out of it, one at a time:
 
-- The badge goes immediately, a pin is dropped if there was one, and dux stops looking for a PR on the agent's branch.
-- It works on an autodetected PR too, not only on a pin.
-- The detach is remembered across restarts.
+- **Hide** is for a pull request dux found. It leaves the banner and the list for a
+  **Hidden** section at the bottom of the dialog, and dux never brings it back by itself.
+  **Show again** there puts it back in the place it had.
+- **Detach** is for one you attached. It goes from the agent entirely; attach it again
+  whenever you like.
 
-Two things bring detection back:
+A pull request dux has found is never dropped by dux itself: a branch nobody pushes to any
+more keeps its pull request until you hide it.
 
-- **Attaching a PR by hand.**
-- **Resume PR autodetection**, which appears in the agent's ⋯ menu (and as `resume-pull-request-autodetection` in the palette) only while detection is turned off, which is what detaching its pull request does. It checks GitHub straight away.
+Attaching needs GitHub integration and a signed-in `gh`; hiding, showing again and
+detaching do not, so an association never outlives your ability to remove it. With GitHub
+integration off entirely, the banner and the badge are hidden until you switch it back on.
 
-Neither detaching nor resuming is destructive, so neither asks for confirmation.
+### Ordering
 
-Attaching needs GitHub integration and a signed-in `gh`; detaching and resuming do not, so an association never outlives your ability to remove it. With GitHub integration off entirely, the pin is hidden and not removable until you switch it back on, at which point the badge comes back.
+The **Sort** control beside the dialog's two views has two settings:
+
+- **Automatic**, the default: open first, then drafts, then merged, then closed, the
+  newest first within each.
+- **Manual**: your own order, with the pull requests dux finds later going after the ones
+  you placed, in automatic order among themselves.
+
+Dragging a row by its grip, or **Move to top**, **Move up** or **Move down** in its ⋯,
+switches to Manual. A move made while the order is Automatic starts from the order on
+screen and replaces any manual order you had saved before; the toast says so. Choosing
+Automatic goes back without forgetting your order, and choosing Manual again brings it back
+as you left it. A hidden pull request keeps its slot and returns to it when shown again.
+
+### Branches
+
+The dialog's **Branches** view lists every branch the agent's worktree has had checked
+out, the current one first and the rest newest first, each with when dux first saw it, the
+names it had before a rename, and the pull requests found on it. Attached pull requests that
+belong to none of them get a heading of their own.
+
+![The Branches view: fix-login-redirect marked Current with pull request 123, an earlier branch with its merged pull request, and the attached acme/infra#77 under its own heading.](/screens/pull-requests-branches.png)
+
+- **What is tracked:** every branch in that list. The current branch is asked about on
+  every poll and the earlier ones take turns; see
+  [How PR status stays fresh](/docs/creating-agents#how-pr-status-stays-fresh).
+- **When history starts:** when dux first saw the worktree on a branch. A branch it was on
+  before dux was watching is not in the list.
+- **The project's default branch** (usually `main`) is never tracked, because its pull
+  requests are everybody's, not the agent's.
+
+> [!NOTE]
+> The first start of this version moves every agent's pull request into the new list. If
+> you go back to an older release afterwards, it shows the pull requests as they were at
+> that moment, and changes you make while running the older release are not carried
+> forward when you upgrade again.
 
 ## Staying in sync
 
