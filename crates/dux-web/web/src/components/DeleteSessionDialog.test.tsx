@@ -225,9 +225,11 @@ describe("DeleteSessionDialog", () => {
       await act(async () => {})
       tickWorktree()
       act(() => vi.advanceTimersByTime(5000))
-      expect(screen.getByRole("status").textContent).toBe(
+      const pill = screen.getByRole("status")
+      expect(pill.textContent).toBe(
         "dux could not check the branches (git could not be run), so they will be kept.",
       )
+      expect(chipsIn(pill)).toEqual([])
       expect(currentBox().getAttribute("aria-disabled")).toBe("true")
       expect(currentBox().getAttribute("aria-checked")).toBe("false")
     } finally {
@@ -253,12 +255,12 @@ describe("DeleteSessionDialog", () => {
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
     tickWorktree()
-    expect(
-      await screen.findByText(
-        "dux could not check the branches (git could not read the branch), so they will be kept.",
-      ),
-    ).toBeTruthy()
     await waitFor(() => expect(othersBox()?.getAttribute("aria-checked")).toBe("true"))
+    const pill = screen.getByRole("status")
+    expect(pill.textContent).toBe(
+      "dux could not check dux/s1 (git could not read the branch), so it will be kept.",
+    )
+    expect(chipsIn(pill)).toEqual(["dux/s1"])
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     expect(deleteSession).toHaveBeenCalledWith(
       "s1",
@@ -287,17 +289,53 @@ describe("DeleteSessionDialog", () => {
       tickWorktree()
       await act(async () => answer(offer(null)))
       const reason =
-        "dux could not check the branches (git could not read the branch), so they will be kept."
+        "dux could not check dux/s1 (git could not read the branch), so it will be kept."
       expect(screen.getByRole("status").textContent).toBe(reason)
       act(() => vi.advanceTimersByTime(5000))
       expect(screen.getByRole("status").textContent).toBe(reason)
       expect(screen.queryByText("Branches checked")).toBeNull()
-      expect(screen.getAllByText(/could not check the branches/)).toHaveLength(1)
+      expect(screen.getAllByText(/could not check/)).toHaveLength(1)
       expect(currentBox().getAttribute("aria-disabled")).toBe("true")
       expect(currentBox().getAttribute("aria-checked")).toBe("false")
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // The pill already separates the boxes from the buttons, so the dialog's
+  // misclick spacing is taken out while it is up and grows back as it leaves:
+  // the pill sits one ordinary gap above the footer.
+  it("drops the spacing above the footer while the pill is up", async () => {
+    vi.useFakeTimers()
+    try {
+      seed("s1", [session1])
+      render(<DeleteSessionDialog />)
+      tickWorktree()
+      const spacing = screen.getByTestId("delete-footer-spacing")
+      expect(spacing.className).toContain("h-0")
+      await act(async () => {})
+      expect(screen.getByRole("status").textContent).toBe("Branches checked")
+      expect(spacing.className).toContain("h-0")
+      act(() => vi.advanceTimersByTime(5000))
+      expect(spacing.className).toContain("h-6")
+      expect(spacing.className).not.toContain("h-0")
+      expect(document.querySelector('[data-slot="dialog-content"] > .h-2')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A box with nothing it can answer is drawn disabled, and so is its label.
+  it("draws the first box and its label disabled while it cannot be answered", () => {
+    branchUnpushed.mockReturnValue(new Promise(() => {}))
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    const box = currentBox()
+    expect(box.hasAttribute("data-disabled")).toBe(true)
+    expect(box.className).toContain("data-disabled:opacity-50")
+    const label = document.querySelector('label[for="delete-branch"]') as HTMLElement
+    expect(label.className).toContain("peer-data-disabled:opacity-50")
   })
 
   // The pill's own height follows what it measures, so a one-line pill turning

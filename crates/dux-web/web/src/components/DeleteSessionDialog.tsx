@@ -25,6 +25,7 @@ import {
 import {
   branchesCheckFailedProse,
   branchesCheckedProse,
+  currentBranchCheckFailedProse,
   branchesCheckingProse,
   currentBranchLabelProse,
   branchLossProse,
@@ -64,16 +65,24 @@ function currentBranchFailed(offer: BranchOffer): boolean {
 }
 
 // What the check says as a whole. A ready offer whose current branch could not
-// be read is a failed check, so the pill and the first box never disagree.
+// be read is a failed check, so the pill and the first box never disagree;
+// `branch` names that one branch, since every other branch was checked, and is
+// `null` when git could not be asked at all.
 type BranchCheck =
   | { state: "pending" }
   | { state: "checked" }
-  | { state: "failed"; reason: string }
+  | { state: "failed"; reason: string; branch: string | null }
 
 function branchCheck(offer: OfferState): BranchCheck {
-  if (offer.state !== "ready") return offer
+  if (offer.state === "pending") return offer
+  if (offer.state === "failed")
+    return { state: "failed", reason: offer.reason, branch: null }
   return currentBranchFailed(offer.offer)
-    ? { state: "failed", reason: "git could not read the branch" }
+    ? {
+        state: "failed",
+        reason: "git could not read the branch",
+        branch: offer.offer.current_name,
+      }
     : { state: "checked" }
 }
 
@@ -264,7 +273,9 @@ function BranchCheckPill({ check }: { check: BranchCheck }) {
           ]
         : [
             <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-dux-warning" />,
-            branchesCheckFailedProse(check.reason),
+            check.branch === null
+              ? branchesCheckFailedProse(check.reason)
+              : currentBranchCheckFailedProse(check.branch, check.reason),
             "border-dux-warning/40 bg-dux-warning/10",
           ]
   return (
@@ -450,7 +461,10 @@ export function DeleteSessionDialog() {
                     disabled={current === null}
                     onCheckedChange={setCurrentAnswer}
                   />
-                  <label htmlFor="delete-branch" className="min-w-0 text-sm">
+                  <label
+                    htmlFor="delete-branch"
+                    className="min-w-0 text-sm peer-data-disabled:cursor-not-allowed peer-data-disabled:opacity-50"
+                  >
                     {renderProse(
                       currentBranchLabelProse(
                         current?.name ?? ready?.current_name ?? managed.branch_name,
@@ -500,11 +514,23 @@ export function DeleteSessionDialog() {
                 <BranchCheckPill check={check} />
               </AnimatedHeight>
             </Collapse>
+            {/* Misclick-safe spacing between the checkboxes and the buttons,
+                one grid gap plus the h-2 every other dialog puts there. The
+                pill already stands between them, so while it is up the
+                spacing goes, and it grows back as the pill leaves rather than
+                popping in after it. */}
+            <div
+              data-testid="delete-footer-spacing"
+              className={cn(
+                "shrink-0 transition-[height] duration-200 ease-out motion-reduce:transition-none",
+                pillShown ? "h-0" : "h-6",
+              )}
+            />
           </div>
         )}
         <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the checkboxes and the buttons. */}
-        <div className="h-2" />
+        {/* Misclick-safe spacing; a managed agent's rides with its pill. */}
+        {!managed && <div className="h-2" />}
         <DialogFooter>
           <Button
             ref={cancelRef}

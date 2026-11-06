@@ -1282,6 +1282,22 @@
       ]
     },
     {
+      "what": "the branch boxes when git could not read the branch the worktree is on",
+      "sentence": "delete_current_branch_check_failed",
+      "args": {
+        "branch": "refactor-cache",
+        "reason": "git could not read the branch"
+      },
+      "segments": [
+        "dux could not check ",
+        {
+          "name": "refactor-cache",
+          "quoted": false
+        },
+        " (git could not read the branch), so it will be kept."
+      ]
+    },
+    {
       "what": "the delete dialog naming the project's own branch the agent was on",
       "sentence": "delete_protected_branches",
       "args": {

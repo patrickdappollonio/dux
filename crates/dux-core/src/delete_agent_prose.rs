@@ -207,6 +207,15 @@ pub fn branches_check_failed_prose(reason: &str) -> Prose {
     ))
 }
 
+/// What the branch boxes say when git answered about every branch but the one
+/// the worktree is on, which is the only one kept on that account.
+pub fn current_branch_check_failed_prose(branch: &str, reason: &str) -> Prose {
+    Prose::new()
+        .text("dux could not check ")
+        .name(branch)
+        .text(format!(" ({reason}), so it will be kept."))
+}
+
 /// The line naming branches the agent was on that are the project's own,
 /// which no box offers and dux never deletes.
 pub fn protected_branches_prose(branches: &[&str]) -> Prose {

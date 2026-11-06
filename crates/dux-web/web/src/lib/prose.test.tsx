@@ -17,6 +17,7 @@ import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import {
   type BranchOrigin,
   branchesCheckFailedProse,
+  currentBranchCheckFailedProse,
   branchesCheckingProse,
   currentBranchLabelProse,
   currentBranchWarningProse,
@@ -222,6 +223,11 @@ describe("the sentences both surfaces print", () => {
         return branchesCheckingProse()
       case "delete_branches_check_failed":
         return branchesCheckFailedProse(args.reason as string)
+      case "delete_current_branch_check_failed":
+        return currentBranchCheckFailedProse(
+          args.branch as string,
+          args.reason as string,
+        )
       case "delete_protected_branches":
         return protectedBranchesProse(args.branches as string[])
       case "attached_lead":

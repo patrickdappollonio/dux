@@ -12724,7 +12724,10 @@ impl App {
                 let current_protected = offer.protected.contains(&offer.current_name);
                 if offer.current.is_none() && !current_protected {
                     lines.extend(self.indented_prose_lines(
-                        &copy::branches_check_failed_prose("git could not read the branch"),
+                        &copy::current_branch_check_failed_prose(
+                            &offer.current_name,
+                            "git could not read the branch",
+                        ),
                         warning,
                         inner_width,
                     ));
@@ -28173,6 +28176,39 @@ mod tests {
         let screen = rendered_screen(&mut app);
         assert!(screen.contains("so they will be kept"), "{screen}");
         assert!(!screen.contains("Also delete the branch"), "{screen}");
+    }
+
+    /// When git read every branch but the one the worktree is on, the dialog
+    /// names that branch as the one kept rather than saying every branch is.
+    #[test]
+    fn an_unreadable_current_branch_is_named_as_the_one_kept() {
+        let none_unpushed = dux_core::git::UnpushedCommits {
+            count: 0,
+            has_remote_refs: true,
+        };
+        let mut app = test_app(default_bindings());
+        app.prompt = delete_agent_prompt_with(
+            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+                current_name: "refactor-cache".to_string(),
+                current: None,
+                current_unpushed: Ok(none_unpushed),
+                others: vec![dux_core::branch_history::OfferedBranch {
+                    name: "spike".to_string(),
+                    oid: "b".repeat(40),
+                    origin: dux_core::branch_history::BranchOrigin::Dux,
+                }],
+                others_unpushed: Ok(none_unpushed),
+                both_unpushed: Ok(none_unpushed),
+                newly_seen: Vec::new(),
+                protected: Vec::new(),
+            }),
+            dux_core::engine::WorktreeOnDelete::Remove,
+        );
+        let screen = rendered_screen(&mut app);
+        assert!(screen.contains("dux could not check"), "{screen}");
+        assert!(screen.contains("refactor-cache"), "{screen}");
+        assert!(screen.contains("so it will be kept"), "{screen}");
+        assert!(!screen.contains("check the branches"), "{screen}");
     }
 
     /// A branch dux cannot vouch for is still offered, with the sentence that

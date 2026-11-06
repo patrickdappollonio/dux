@@ -209,6 +209,17 @@ export function branchesCheckFailedProse(reason: string): Prose {
 }
 
 /**
+ * What the branch boxes say when git answered about every branch but the one
+ * the worktree is on, which is the only one kept on that account.
+ */
+export function currentBranchCheckFailedProse(
+  branch: string,
+  reason: string,
+): Prose {
+  return ["dux could not check ", chip(branch), ` (${reason}), so it will be kept.`]
+}
+
+/**
  * The line naming branches the agent was on that are the project's own, which
  * no box offers and dux never deletes. Mirrors dux-core's
  * `protected_branches_prose`, pinned by the shared prose fixture.

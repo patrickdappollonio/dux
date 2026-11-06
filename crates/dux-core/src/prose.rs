@@ -390,6 +390,7 @@ mod tests {
         "delete_other_branches_warning",
         "delete_branches_checking",
         "delete_branches_check_failed",
+        "delete_current_branch_check_failed",
         "unpushed_count_failure",
         "delete_protected_branches",
         "delete_branch_loss",
@@ -446,6 +447,12 @@ mod tests {
             "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
             "delete_branches_check_failed" => {
                 crate::delete_agent_prose::branches_check_failed_prose(&s("reason"))
+            }
+            "delete_current_branch_check_failed" => {
+                crate::delete_agent_prose::current_branch_check_failed_prose(
+                    &s("branch"),
+                    &s("reason"),
+                )
             }
             "unpushed_count_failure" => {
                 let branches = strings(&args["branches"]);
