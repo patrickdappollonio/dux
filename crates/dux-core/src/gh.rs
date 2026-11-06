@@ -326,17 +326,21 @@ fn merged_only(known: &[crate::model::AgentPr], branch: &PrSyncBranch) -> bool {
 /// The earlier branches this cycle asks about: the least recently asked first
 /// (one never asked before all of them), at most the configured number, and a
 /// branch whose pull requests are all merged only once the settled recheck has
-/// passed since it was last asked. Every branch that is eligible is therefore
-/// asked within `ceil(eligible / per_cycle)` cycles.
+/// passed since it was last asked. An exited agent's earlier branches all wait
+/// for that recheck, except on a deliberate trigger: a sidebar of dormant
+/// agents must not cost a cycle's worth of questions each. Every branch that
+/// is eligible is therefore asked within `ceil(eligible / per_cycle)` cycles.
 fn due_history_branches(
     entry: &PrSyncEntry,
+    trigger: SyncTrigger,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<&PrSyncBranch> {
+    let dormant = entry.agent_exited && trigger != SyncTrigger::OneShot;
     let mut due: Vec<&PrSyncBranch> = entry
         .history
         .iter()
         .filter(|branch| {
-            !merged_only(&entry.known, branch)
+            (!dormant && !merged_only(&entry.known, branch))
                 || branch
                     .last_ask
                     .as_ref()
@@ -648,7 +652,7 @@ fn plan_entry(
             });
             discovered.push(current);
         }
-        for branch in due_history_branches(entry, now) {
+        for branch in due_history_branches(entry, trigger, now) {
             let gone = branch.last_ask.as_ref().is_some_and(|ask| ask.ref_gone);
             ask(branch, branch.identity_at, &|| {
                 gone.then(|| HeadEvidence {
@@ -4684,7 +4688,7 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
         let mut now = at(NOON);
         let mut asked: Vec<String> = Vec::new();
         for cycle in 1..=5 {
-            let due: Vec<String> = due_history_branches(&entry, now)
+            let due: Vec<String> = due_history_branches(&entry, SyncTrigger::BlindPoll, now)
                 .into_iter()
                 .map(|b| b.name.clone())
                 .collect();
@@ -4734,7 +4738,7 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             known_row(5, PrState::Closed, "octocat/Hello-World", Some("busy")),
         ];
         let due = |now: &str| -> Vec<String> {
-            due_history_branches(&entry, at(now))
+            due_history_branches(&entry, SyncTrigger::BlindPoll, at(now))
                 .into_iter()
                 .map(|b| b.name.clone())
                 .collect()
@@ -4923,16 +4927,35 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
             "octocat/Hello-World",
             Some("feat/x"),
         )];
+        // An earlier branch asked an hour ago: an exited agent's earlier
+        // branches wait for the settled recheck like its finished one does.
+        let mut spike = sync_branch("spike");
+        spike.last_ask = Some(asked_at("2026-11-06T11:00:00Z"));
+        entry.history = vec![spike];
         for trigger in [SyncTrigger::BlindPoll, SyncTrigger::Focus] {
             assert_eq!(
                 plan_one(&entry, &ours, &legacy_policy(), trigger, NOON),
                 Vec::<String>::new(),
                 "{trigger:?} costs nothing"
             );
+            assert_eq!(
+                plan_one(
+                    &entry,
+                    &ours,
+                    &legacy_policy(),
+                    trigger,
+                    "2026-11-07T00:00:00Z"
+                ),
+                vec!["github.com octocat/Hello-World spike as spike"],
+                "{trigger:?} asks again once the settled recheck has passed"
+            );
         }
         assert_eq!(
             plan_one(&entry, &ours, &legacy_policy(), SyncTrigger::OneShot, NOON),
-            vec!["github.com octocat/Hello-World feat/x as feat/x +head"],
+            vec![
+                "github.com octocat/Hello-World feat/x as feat/x +head",
+                "github.com octocat/Hello-World spike as spike",
+            ],
             "a reused branch name can carry a new pull request"
         );
         entry.agent_exited = false;
@@ -4944,7 +4967,10 @@ headRefOid repository { nameWithOwner } headRepository { nameWithOwner } } }"
                 SyncTrigger::BlindPoll,
                 NOON
             ),
-            vec!["github.com octocat/Hello-World feat/x as feat/x +head"]
+            vec![
+                "github.com octocat/Hello-World feat/x as feat/x +head",
+                "github.com octocat/Hello-World spike as spike",
+            ]
         );
     }
 
