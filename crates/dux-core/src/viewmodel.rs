@@ -2310,18 +2310,39 @@ mod tests {
         let vm = engine.spine();
         assert_eq!(vm.sessions[0].prs_hidden[0].state, "merged");
         assert_ne!(vm.sessions[0].pr_revision, before);
+    }
 
-        // Before any answer has named the agent's own repository, a found
-        // pull request is still its own, and an attached-only one is not.
-        engine.pr_own_repos.remove("s1");
+    /// Before any answer has named the agent's own repository, a found pull
+    /// request is still its own, and an attached-only one is not.
+    #[test]
+    fn a_found_pull_request_projects_as_own_before_the_repository_is_known() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        engine.sessions.push(sample_session("s1", "p1", "feature"));
+        let info = |number, owner_repo: &str| crate::model::PrInfo {
+            number,
+            state: PrState::Open,
+            host: "github.com".to_string(),
+            owner_repo: owner_repo.to_string(),
+            ..Default::default()
+        };
+        let found = crate::model::AgentPr::found(&info(42, "owner/repo"), chrono::Utc::now());
+        let mut attached = crate::model::AgentPr::found(&info(7, "acme/infra"), chrono::Utc::now());
+        attached.found = false;
+        attached.attached = true;
+        engine
+            .agent_prs
+            .insert("s1".to_string(), vec![found, attached]);
+
         let vm = engine.spine();
-        let shown: Vec<(u64, bool)> = vm.sessions[0]
+
+        let mut own: Vec<(u64, bool)> = vm.sessions[0]
             .prs
             .iter()
             .map(|pr| (pr.number, pr.own_repo))
             .collect();
-        assert_eq!(shown, vec![(43, true), (42, true)]);
-        assert!(!vm.sessions[0].prs_hidden[0].own_repo);
+        own.sort_unstable();
+        assert_eq!(own, vec![(7, false), (42, true)]);
     }
 
     #[test]

@@ -12915,10 +12915,14 @@ mod tests {
 
         let (engine, _tmp) = engine_with_prs(&[unknown_head]);
         assert_eq!(engine.rename_open_pull_request("s1"), Some(8));
+    }
 
-        // Before any answer has named the agent's own repository, a found
-        // pull request sits under its branch and is named by number alone;
-        // an attached-only one stays apart under its repository's name.
+    /// Before any answer has named the agent's own repository, a found pull
+    /// request sits under its branch and is named by number alone, and the
+    /// rename warning sees it; an attached-only one stays apart under its
+    /// repository's name.
+    #[test]
+    fn a_found_pull_request_is_the_agents_own_before_its_repository_is_known() {
         let on_feat = found_pr(12, 3, "feat");
         let attached_on_feat = attached_only_pr(77, "acme/infra", "feat");
         let (mut engine, _tmp) = engine_with_prs(&[on_feat.clone(), attached_on_feat.clone()]);
