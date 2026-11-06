@@ -15,14 +15,12 @@ import { Input } from "@/components/ui/input"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
-import { renameWarningPr, sessionPrs } from "@/lib/pr"
 import { renderProse } from "@/lib/prose"
 import {
   renameBlockedReason,
   renameBranchNoteProse,
 } from "@/lib/renameAgent"
 import { sessionsApi } from "@/lib/sessionsApi"
-import type { PrKeyView } from "@/lib/types"
 import {
   closeRename,
   setRenameBranch,
@@ -54,21 +52,9 @@ export function RenameSessionDialog() {
       })
     : ""
   const branchNamed = branch !== null
-  // The branch read's pull requests for the branch being renamed, which
-  // counts the names it had before, tagged with the agent it was asked about.
-  const [branchPrs, setBranchPrs] = useState<{
-    id: string
-    prs: PrKeyView[]
-  } | null>(null)
-  const openPr =
-    session && branch !== null
-      ? renameWarningPr({
-          visible: sessionPrs(session),
-          hidden: session.prs_hidden ?? [],
-          branch,
-          onBranch: branchPrs?.id === renameTarget ? branchPrs.prs : null,
-        })
-      : null
+  // The open or draft pull request that keeps the old name, as the engine
+  // answers it for every surface.
+  const openPr = branch !== null ? (session?.rename_warning_pr ?? null) : null
 
   // Whether the branch has a pushed copy, tagged with the agent it was asked
   // about so an answer that lands after the dialog moved on is ignored.
@@ -94,14 +80,6 @@ export function RenameSessionDialog() {
         if (live) setPushedAnswer({ id, pushed: answer.pushed === true })
       })
       // No answer is no warning: the box still says what it does.
-      .catch(() => {})
-    sessionsApi
-      .pullRequestBranches(id)
-      .then((answer) => {
-        const current = answer.branches.find((b) => b.current)
-        if (live) setBranchPrs({ id, prs: current?.prs ?? [] })
-      })
-      // Without the branch read, the branch's name now is still matched.
       .catch(() => {})
     return () => {
       live = false

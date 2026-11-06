@@ -214,6 +214,9 @@ export interface SessionView {
   prs?: PrView[]
   /** The pull requests the user hid. Absent when none. */
   prs_hidden?: PrView[]
+  /** The open or draft pull request that would keep the branch's old name if
+   * the branch were renamed. Absent when none. */
+  rename_warning_pr?: number
   /** How the pull requests are ordered. */
   pr_sort?: "automatic" | "manual"
   /** Moves whenever the agent's pull requests, their order or its branch list

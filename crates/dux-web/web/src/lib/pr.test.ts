@@ -9,7 +9,6 @@ import {
   prName,
   prOrigin,
   prRowAction,
-  renameWarningPr,
   stepPrIndex,
   prIconClass,
   prIconHoverClass,
@@ -220,32 +219,5 @@ describe("prBadgeTooltip", () => {
     expect(prBadgeTooltip([view({ state: "draft" }), view({ number: 77 })])).toBe(
       "#418 draft · Store every tab as a row with a stable id. 1 more pull request; the banner steps through them.",
     )
-  })
-})
-
-describe("renameWarningPr", () => {
-  const key = (number: number) => ({ host: "github.com", owner_repo: "acme/api", number })
-
-  it("names an open or draft pull request on the branch the branch read puts on it", () => {
-    const draft = view({ number: 9, state: "draft", head_branch: "feat/old" })
-    expect(
-      renameWarningPr({ visible: [view({ state: "merged" }), draft], hidden: [], branch: "feat/new", onBranch: [key(9)] }),
-    ).toBe(9)
-  })
-
-  it("names none when the only open one is on another branch", () => {
-    const elsewhere = view({ number: 5, head_branch: "other" })
-    expect(renameWarningPr({ visible: [elsewhere], hidden: [], branch: "feat", onBranch: [] })).toBeNull()
-    expect(renameWarningPr({ visible: [elsewhere], hidden: [], branch: "feat", onBranch: null })).toBeNull()
-  })
-
-  it("matches the branch's own name before the branch read has answered", () => {
-    const hidden = view({ number: 6, head_branch: "feat" })
-    expect(renameWarningPr({ visible: [], hidden: [hidden], branch: "feat", onBranch: null })).toBe(6)
-  })
-
-  it("falls back to the shown open one while no pull request names its branch", () => {
-    const shown = view({ number: 7, head_branch: undefined })
-    expect(renameWarningPr({ visible: [shown], hidden: [], branch: "feat", onBranch: [] })).toBe(7)
   })
 })

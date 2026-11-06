@@ -177,35 +177,3 @@ export function prBadgeTooltip(prs: readonly PrView[]): string {
   const noun = more === 1 ? "pull request" : "pull requests"
   return `${prName(shown)} ${prStateLabel(shown.state)} · ${shown.title}. ${more} more ${noun}; the banner steps through them.`
 }
-
-// The pull request the rename dialog warns about: an open or draft one on the
-// branch being renamed, which keeps its old name on GitHub. `onBranch` is the
-// branch read's answer for that branch, which also counts the names it had
-// before a rename; until it answers, the branch's name now is matched. While no
-// pull request names its branch yet, the shown one stands in if it is open,
-// unless it is attached from another repository. Mirrors the engine's
-// `rename_open_pull_request`.
-export function renameWarningPr(input: {
-  visible: readonly PrView[]
-  hidden: readonly PrView[]
-  branch: string
-  onBranch: readonly PrKeyView[] | null
-}): number | null {
-  const open = (pr: PrView) => pr.state === "open" || pr.state === "draft"
-  const onBranch = (pr: PrView) => {
-    if (input.onBranch === null) return pr.own_repo !== false && pr.head_branch === input.branch
-    const key = prKeyOf(pr)
-    return key !== null && input.onBranch.some((k) => samePrKey(k, key))
-  }
-  const hit = [...input.visible, ...input.hidden].find((pr) => open(pr) && onBranch(pr))
-  if (hit) return hit.number
-  const shown = input.visible[0]
-  if (
-    shown &&
-    open(shown) &&
-    !shown.head_branch &&
-    (shown.own_repo !== false || shown.found === true)
-  )
-    return shown.number
-  return null
-}

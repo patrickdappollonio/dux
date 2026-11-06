@@ -27,7 +27,6 @@ vi.mock("@/lib/sessionsApi", async (importOriginal) => {
     sessionsApi: {
       ...actual.sessionsApi,
       branchPushed: vi.fn(),
-      pullRequestBranches: vi.fn(),
       patch: vi.fn(),
     },
   }
@@ -57,7 +56,6 @@ const submitRename = vi.mocked(store.submitRename)
 const setRenameDraft = vi.mocked(store.setRenameDraft)
 const setRenameBranch = vi.mocked(store.setRenameBranch)
 const branchPushed = vi.mocked(api.sessionsApi.branchPushed)
-const pullRequestBranches = vi.mocked(api.sessionsApi.pullRequestBranches)
 const patch = vi.mocked(api.sessionsApi.patch)
 
 const managedSession = {
@@ -126,8 +124,6 @@ beforeEach(() => {
   patch.mockResolvedValue({})
   branchPushed.mockReset()
   branchPushed.mockResolvedValue({ pushed: false })
-  pullRequestBranches.mockReset()
-  pullRequestBranches.mockRejectedValue(new Error("offline test"))
 })
 
 afterEach(() => {
@@ -220,38 +216,10 @@ describe("RenameSessionDialog", () => {
     ])
   })
 
-  const key = { host: "github.com", owner_repo: "o/r", number: 42 }
-  it.each([
-    [
-      "the open pull request the agent shows",
-      { number: 42, state: "open", title: "Login", url: "u", overridden: false },
-      null,
-    ],
-    [
-      "a draft pull request on a name the branch had before",
-      {
-        number: 42,
-        state: "draft",
-        title: "Login",
-        url: "u",
-        overridden: false,
-        host: "github.com",
-        owner_repo: "o/r",
-        own_repo: true,
-        found: true,
-        head_branch: "feat/old-login",
-      },
-      {
-        branches: [
-          { name: "feat/login", former_names: ["feat/old-login"], current: true, prs: [key] },
-        ],
-        attached_on_no_branch: [],
-      },
-    ],
-  ])("warns that %s and the pushed branch keep the old name", async (_, pr, branches) => {
+  it("warns that the pull request the server names and the pushed branch keep the old name", async () => {
     branchPushed.mockResolvedValue({ pushed: true })
-    if (branches) pullRequestBranches.mockResolvedValue(branches)
-    seed("s1", { ...managedSession, pr, prs: [pr] })
+    const pr = { number: 42, state: "draft", title: "Login", url: "u", overridden: false }
+    seed("s1", { ...managedSession, pr, prs: [pr], rename_warning_pr: 42 })
     renderDialog()
     await waitFor(() =>
       expect(note().textContent).toBe(
@@ -263,10 +231,10 @@ describe("RenameSessionDialog", () => {
 
   it("warns about a pushed branch with no pull request", async () => {
     branchPushed.mockResolvedValue({ pushed: true })
-    seed("s1", {
-      ...managedSession,
-      pr: { number: 7, state: "merged", title: "Old", url: "u", overridden: false },
-    })
+    // An open one the server does not name (its repository unknown) is no
+    // warning.
+    const pr = { number: 7, state: "open", title: "Old", url: "u", overridden: false }
+    seed("s1", { ...managedSession, pr, prs: [pr] })
     renderDialog()
     await waitFor(() =>
       expect(note().textContent).toBe(
