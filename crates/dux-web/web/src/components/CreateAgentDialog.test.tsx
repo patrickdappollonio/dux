@@ -24,6 +24,11 @@ function installBootStubs() {
   )
 }
 installBootStubs()
+// Loaded at collection, where no test timeout applies: the first load of the
+// dialog and the store behind it is the slowest step in the file, and inside
+// a test it is charged to whichever case happens to run first.
+const { CreateAgentDialog } = await import("./CreateAgentDialog")
+const { getSnapshot } = await import("@/lib/store")
 
 const project = { id: "p1", name: "acme" }
 const session = {
@@ -72,7 +77,6 @@ afterEach(() => {
 describe("CreateAgentDialog", () => {
   it("renders new-agent controls for a project", async () => {
     seed({ kind: "new", projectId: "p1" })
-    const { CreateAgentDialog } = await import("./CreateAgentDialog")
     render(<CreateAgentDialog />)
 
     expect(screen.getByRole("heading").textContent).toBe("New agent in acme")
@@ -87,13 +91,11 @@ describe("CreateAgentDialog", () => {
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "my agent" },
     })
-    const { getSnapshot } = await import("@/lib/store")
     expect(getSnapshot().createAgentDraft).toBe("my-agent")
   })
 
   it("requires a branch name when forking", async () => {
     seed({ kind: "fork", sessionId: "s1" })
-    const { CreateAgentDialog } = await import("./CreateAgentDialog")
     render(<CreateAgentDialog />)
 
     expect(screen.getByRole("heading").textContent).toBe("Fork quacky-mallard")
@@ -112,7 +114,6 @@ describe("CreateAgentDialog", () => {
       { kind: "pr", projectId: null },
       { createAgentPrError: "That repository is not open." },
     )
-    const { CreateAgentDialog } = await import("./CreateAgentDialog")
     render(<CreateAgentDialog />)
 
     expect(screen.getByText("New agent from PR")).toBeTruthy()
@@ -133,7 +134,6 @@ describe("CreateAgentDialog", () => {
       { kind: "pr", projectId: "p1" },
       { createAgentPrInput: "#42", createAgentReviewCopy: reviewCopy },
     )
-    const { CreateAgentDialog } = await import("./CreateAgentDialog")
     const { rerender } = render(<CreateAgentDialog />)
 
     expect(screen.getByText("pr-head-review", { selector: "code" })).toBeTruthy()
