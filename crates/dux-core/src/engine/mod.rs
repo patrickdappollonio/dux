@@ -590,6 +590,11 @@ pub struct Engine {
     /// off before pull requests were kept per row; one the sync finds that
     /// GitHub opened before then is recorded out of sight.
     pub pr_prefs: HashMap<String, crate::model::PrPrefs>,
+    /// The agents whose last pull-request change holds in memory because its
+    /// save failed. A re-read of the store leaves their rows and preferences
+    /// alone, since the store still has what that change replaced; the next
+    /// change that saves takes them off.
+    pub pr_unsaved: std::collections::HashSet<String>,
     /// `Some` while the preferences behind `pr_prefs` could not be read,
     /// holding when to try the read again. Until a read succeeds the sync adds
     /// no pull request to any agent, since whether a new one belongs out of
@@ -5028,7 +5033,13 @@ impl Engine {
     /// succeeded.
     fn read_pr_prefs(&mut self) -> bool {
         match self.session_store.load_pr_prefs() {
-            Ok(prefs) => {
+            Ok(mut prefs) => {
+                for id in &self.pr_unsaved {
+                    match self.pr_prefs.get(id) {
+                        Some(held) => prefs.insert(id.clone(), held.clone()),
+                        None => prefs.remove(id),
+                    };
+                }
                 for id in self.pr_prefs.keys().chain(prefs.keys()) {
                     if self.pr_prefs.get(id) != prefs.get(id) {
                         *self.pr_revision.entry(id.clone()).or_default() += 1;
@@ -5106,6 +5117,8 @@ impl Engine {
     /// Forget every agent's pull requests in memory, as switching the GitHub
     /// integration off does. The rows stay in the session database.
     pub fn clear_agent_prs(&mut self) {
+        // What memory held is gone with it, so the store is the truth again.
+        self.pr_unsaved.clear();
         for (id, rows) in self.agent_prs.drain() {
             if !rows.is_empty() {
                 *self.pr_revision.entry(id).or_default() += 1;
@@ -5188,6 +5201,7 @@ impl Engine {
             .agent_prs
             .keys()
             .chain(stored.keys())
+            .filter(|id| !self.pr_unsaved.contains(*id))
             .cloned()
             .collect();
         for id in ids {
@@ -12598,6 +12612,25 @@ mod tests {
             "the detached pull request came back: {:?}",
             engine.agent_prs.get("s2")
         );
+
+        // A due retry of the preferences re-reads the store, which still
+        // holds what the failed saves could not replace.
+        engine.pr_prefs_retry_at = Some(Instant::now());
+        engine.retry_unread_pr_prefs();
+        assert!(
+            engine.agent_prs.get("s2").is_none_or(Vec::is_empty),
+            "the re-read brought the detached pull request back: {:?}",
+            engine.agent_prs.get("s2")
+        );
+        assert_eq!(
+            engine.pr_prefs["s2"].sort_mode,
+            crate::pr_list::PrSortMode::Manual
+        );
+        let hidden: Vec<(u64, bool)> = engine.agent_prs["s1"]
+            .iter()
+            .map(|row| (row.number, row.hidden))
+            .collect();
+        assert_eq!(hidden, vec![(1, true), (2, true)]);
     }
 
     /// With the preferences unreadable no sync result is applied for an agent

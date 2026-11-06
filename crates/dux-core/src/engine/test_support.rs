@@ -105,6 +105,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         agent_prs: std::collections::HashMap::new(),
         pr_prefs: std::collections::HashMap::new(),
         pr_prefs_retry_at: None,
+        pr_unsaved: std::collections::HashSet::new(),
         branch_histories: std::collections::HashMap::new(),
         pr_revision: std::collections::HashMap::new(),
         branch_sync_sessions: Arc::new(Mutex::new(Vec::new())),

@@ -258,6 +258,11 @@ impl Engine {
             self.set_pr_prefs(session_id, prefs);
             self.set_agent_prs(session_id, rows);
             self.update_pr_sync_sessions();
+            if saved.is_ok() {
+                self.pr_unsaved.remove(session_id);
+            } else {
+                self.pr_unsaved.insert(session_id.to_string());
+            }
         }
         saved.map_err(|err| {
             let tail = if mirrored {

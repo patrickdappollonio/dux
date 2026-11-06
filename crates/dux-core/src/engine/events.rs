@@ -2690,6 +2690,7 @@ impl Engine {
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_prefs.remove(&session.id);
+        self.pr_unsaved.remove(&session.id);
         self.pr_branch_asks.remove(&session.id);
         self.pr_branch_checks_owed.remove(&session.id);
         // Re-derive the PR-sync plan from the surviving sessions. The periodic
