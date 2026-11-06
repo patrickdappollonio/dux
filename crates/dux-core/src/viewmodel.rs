@@ -1369,7 +1369,8 @@ impl PrView {
             overridden: pr.attached,
             number: pr.number,
             state: pr.state.word().to_string(),
-            title: pr.title.clone(),
+            // Stored rows may predate the stripping at the gh boundary.
+            title: crate::bidi::strip_bidi_controls(&pr.title),
             url: pr.url.clone(),
             host: pr.host.clone(),
             owner_repo: pr.owner_repo.clone(),
@@ -2253,6 +2254,8 @@ mod tests {
         other.found = false;
         other.attached = true;
         other.hidden = true;
+        // A row stored before titles were cleaned where they enter.
+        other.title = "Infra \u{202E}fix\u{202C}".to_string();
         rows.push(draft);
         rows.push(other);
         let vm = engine.spine();
@@ -2275,6 +2278,7 @@ mod tests {
             ),
             (7, false, true, true)
         );
+        assert_eq!(hidden.title, "Infra fix");
         assert_eq!(view.pr_sort, "automatic");
         let before = view.pr_revision;
 
