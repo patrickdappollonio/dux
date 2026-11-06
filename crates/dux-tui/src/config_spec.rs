@@ -24,6 +24,17 @@ pub(crate) fn config_flags(subcommand: &str) -> &'static [&'static str] {
         .map_or(&[], |(_, flags)| flags)
 }
 
+/// Whether `args` carry `flag`, one of the flags `subcommand` takes in
+/// [`CONFIG_FLAGS`]. Reading every boolean flag through the table means a flag
+/// renamed there cannot leave a literal in the parser that never matches.
+pub(crate) fn has_flag(subcommand: &str, args: &[String], flag: &str) -> bool {
+    assert!(
+        config_flags(subcommand).contains(&flag),
+        "{flag} is not a flag of dux config {subcommand}; the parser and CONFIG_FLAGS disagree"
+    );
+    args.iter().any(|arg| arg == flag)
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "config",
@@ -122,6 +133,19 @@ pub fn config_command() -> clap::Command {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_flag_is_read_through_the_table() {
+        let args = vec!["--yes".to_string()];
+        assert!(has_flag("regenerate", &args, "--yes"));
+        assert!(!has_flag("regenerate", &args, "--show"));
+    }
+
+    #[test]
+    #[should_panic(expected = "disagree")]
+    fn a_flag_the_table_lacks_is_refused() {
+        has_flag("diff", &[], "--yes");
+    }
 
     #[test]
     fn the_flag_table_names_the_subcommands_and_flags_the_description_does() {

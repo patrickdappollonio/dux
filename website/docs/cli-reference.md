@@ -6,7 +6,7 @@ order: 90
 editSource: crates/dux/src/commands.rs
 ---
 
-<!-- Generated from the dux command line's own definitions; do not edit by hand. -->
+<!-- Generated from the dux command line's own definitions; do not edit by hand. The help of the `dux config` subcommands is defined in crates/dux-tui/src/config_spec.rs. -->
 
 Every command dux has, with the same text `dux <command> --help` prints. For how the
 commands fit together, and examples, see [The command line](/docs/command-line).
@@ -19,6 +19,8 @@ commands fit together, and examples, see [The command line](/docs/command-line).
 | `--local` |  | Talk to the dux on this machine, whatever a saved default says. |
 | `-h`, `--help` | | Print the help for the command. |
 | `-V`, `--version` | | Print the version; `dux` alone takes it. |
+
+`dux config` is the exception: it reads `--local` only before the word `config`, and it refuses `--remote` (and any selected remote) unless `--local` is given, because it always edits this machine's file.
 
 ## Environment variables
 
@@ -47,24 +49,24 @@ Terminal and web UI for AI worktree sessions, and a command line for their state
 dux [OPTIONS] [COMMAND]
 ```
 
-- [`dux server`](#dux-server): Serve the web UI over the headless engine, or inspect a running server
-- [`dux config`](#dux-config): Manage the dux configuration file
-- [`dux projects`](#dux-projects): Projects dux knows about
-- [`dux agents`](#dux-agents): Agents, their tabs and their worktrees
-- [`dux terminals`](#dux-terminals): Terminals, project-owned, agent-owned and standalone
-- [`dux macros`](#dux-macros): Macros from config.toml
-- [`dux providers`](#dux-providers): Providers from config.toml
-- [`dux keys`](#dux-keys): Keybindings from config.toml
-- [`dux themes`](#dux-themes): Themes dux can load
-- [`dux env`](#dux-env): The global environment from config.toml
-- [`dux remote`](#dux-remote): Saved remote duxes and the sign-ins for them
-- [`dux operations`](#dux-operations): Look up a change that was started earlier
+- [`dux server`](#dux-server): Serve the web UI without the terminal UI, or inspect a running server.
+- [`dux config`](#dux-config): Manage the configuration file on this machine.
+- [`dux projects`](#dux-projects): Projects dux knows about.
+- [`dux agents`](#dux-agents): Agents, their tabs and their worktrees.
+- [`dux terminals`](#dux-terminals): Terminals, project-owned, agent-owned and standalone.
+- [`dux macros`](#dux-macros): Macros from config.toml.
+- [`dux providers`](#dux-providers): Providers from config.toml.
+- [`dux keys`](#dux-keys): Keybindings from config.toml.
+- [`dux themes`](#dux-themes): Themes dux can load.
+- [`dux env`](#dux-env): The global environment from config.toml.
+- [`dux remote`](#dux-remote): Saved remote duxes and the sign-ins for them.
+- [`dux operations`](#dux-operations): Look up a change that was started earlier.
 
 ## `dux server`
 
-Serve the web UI over the headless engine, or inspect a running server.
+Serve the web UI without the terminal UI, or inspect a running server.
 
-Run the dux web UI over the headless engine. The web UI has one optional
+Run the dux web UI without the terminal UI. The web UI has one optional
 password for one owner, and everyone who gets in shares the one workspace. Set
 it with `dux config set server.auth.password`; [server.auth] require decides
 who is asked for it (by default everyone but this machine and your tailnet).
@@ -77,12 +79,12 @@ dux server [OPTIONS] [COMMAND]
 
 | Flag | Value | Description |
 |---|---|---|
-| `--bind` | `<ADDR:PORT>` | Bind this exact address, overriding [server] host and port. An IP:port socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890. |
+| `--bind` | `<ADDR:PORT>` | Bind this exact address, overriding [server] host and port. An IP:port address (hostnames are NOT resolved), e.g. 0.0.0.0:3890. |
 | `--port` | `<PORT>` | Override [server] port only (ignored when `--bind` is set). dux binds host:port, and the machine's Tailscale address unless disabled. |
 | `--no-tailscale` |  | Skip Tailscale detection this run (serve the configured host only). |
 
-- [`dux server logs`](#dux-server-logs): Show the server's log: the last lines of server.log, read from the file when dux is not running
-- [`dux server connections`](#dux-server-connections): The connections attached to the server
+- [`dux server logs`](#dux-server-logs): Show the server's log: the last lines of server.log, read from the file when dux is not running.
+- [`dux server connections`](#dux-server-connections): The connections attached to the server.
 
 ### `dux server logs`
 
@@ -105,7 +107,7 @@ The connections attached to the server.
 dux server connections [OPTIONS] <COMMAND>
 ```
 
-- [`dux server connections ls`](#dux-server-connections-ls): List the connections
+- [`dux server connections ls`](#dux-server-connections-ls): List the connections.
 
 ### `dux server connections ls`
 
@@ -130,13 +132,13 @@ Manage the dux configuration file.
 dux config <COMMAND>
 ```
 
-- [`dux config path`](#dux-config-path): Print the config file path
-- [`dux config get`](#dux-config-get): Print one setting's value, for example `dux config get server.port`
-- [`dux config set`](#dux-config-set): Change one setting, keeping the file's comments, and have a running dux reload, saying whether it worked (exit 1 if it refused or half applied, 6 if it gave no answer in time)
-- [`dux config diff`](#dux-config-diff): Show settings that differ from defaults (summary; [env] and project details are summarized, never printed, so it is safe to paste into a bug report)
-- [`dux config reset`](#dux-config-reset): Remove config, logs and saved remotes (keeps agents and worktrees)
-- [`dux config regenerate`](#dux-config-regenerate): Preview a fresh default config (shows diff; [env] and other sensitive values are hidden unless you add `--show`)
-- [`dux config restore-docs`](#dux-config-restore-docs): Preview re-adding the explanatory comments to your config, keeping every value you have set (hides values like regenerate; `--show` reveals them)
+- [`dux config path`](#dux-config-path): Print the config file path.
+- [`dux config get`](#dux-config-get): Print one setting's value, for example `dux config get server.port`.
+- [`dux config set`](#dux-config-set): Change one setting, keeping the file's comments, and have a running dux reload, saying whether it worked (exit 1 if it refused or half applied, 6 if it gave no answer in time).
+- [`dux config diff`](#dux-config-diff): Show settings that differ from defaults (summary; [env] and project details are summarized, never printed, so it is safe to paste into a bug report).
+- [`dux config reset`](#dux-config-reset): Remove config, logs and saved remotes (keeps agents and worktrees).
+- [`dux config regenerate`](#dux-config-regenerate): Preview a fresh default config (shows diff; [env] and other sensitive values are hidden unless you add `--show`).
+- [`dux config restore-docs`](#dux-config-restore-docs): Preview re-adding the explanatory comments to your config, keeping every value you have set (hides values like regenerate; `--show` reveals them).
 
 ### `dux config path`
 
@@ -164,7 +166,7 @@ dux config get [OPTIONS] <SETTING>
 
 ### `dux config set`
 
-Change one setting, keeping the file's comments, and have a running dux reload, saying whether it worked (exit 1 if it refused or half applied, 6 if it gave no answer in time)
+Change one setting, keeping the file's comments, and have a running dux reload, saying whether it worked (exit 1 if it refused or half applied, 6 if it gave no answer in time).
 
 `dux config set server.auth.password` sets the web UI password: asked for twice without echo, with a strength meter. Never a command-line argument; add `--stdin` to pipe it in instead. env.\<NAME\> values are asked for the same way.
 
@@ -239,11 +241,11 @@ Projects dux knows about.
 dux projects [OPTIONS] <COMMAND>
 ```
 
-- [`dux projects ls`](#dux-projects-ls): List projects
-- [`dux projects show`](#dux-projects-show): Show one project
-- [`dux projects add`](#dux-projects-add): Add a project from a path and print its id last
-- [`dux projects rm`](#dux-projects-rm): Remove a project. Its agents' worktrees stay on disk unless `--delete-worktrees` is given
-- [`dux projects worktrees`](#dux-projects-worktrees): The worktrees of a project
+- [`dux projects ls`](#dux-projects-ls): List projects.
+- [`dux projects show`](#dux-projects-show): Show one project.
+- [`dux projects add`](#dux-projects-add): Add a project from a path and print its id last.
+- [`dux projects rm`](#dux-projects-rm): Remove a project. Its agents' worktrees stay on disk unless `--delete-worktrees` is given.
+- [`dux projects worktrees`](#dux-projects-worktrees): The worktrees of a project.
 
 ### `dux projects ls`
 
@@ -323,7 +325,7 @@ The worktrees of a project.
 dux projects worktrees [OPTIONS] <COMMAND>
 ```
 
-- [`dux projects worktrees ls`](#dux-projects-worktrees-ls): List a project's worktrees
+- [`dux projects worktrees ls`](#dux-projects-worktrees-ls): List a project's worktrees.
 
 ### `dux projects worktrees ls`
 
@@ -352,13 +354,13 @@ Agents, their tabs and their worktrees.
 dux agents [OPTIONS] <COMMAND>
 ```
 
-- [`dux agents ls`](#dux-agents-ls): List agents
-- [`dux agents show`](#dux-agents-show): Show one agent
-- [`dux agents add`](#dux-agents-add): Create an agent and print its id last
-- [`dux agents rm`](#dux-agents-rm): Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept
-- [`dux agents stop`](#dux-agents-stop): Stop everything an agent runs
-- [`dux agents start`](#dux-agents-start): Start an agent
-- [`dux agents tabs`](#dux-agents-tabs): An agent's provider tabs
+- [`dux agents ls`](#dux-agents-ls): List agents.
+- [`dux agents show`](#dux-agents-show): Show one agent.
+- [`dux agents add`](#dux-agents-add): Create an agent and print its id last.
+- [`dux agents rm`](#dux-agents-rm): Delete an agent. With no branch flag, only the branch dux made for the agent goes with the worktree, and only while dux can prove it is still that branch; every other branch is kept.
+- [`dux agents stop`](#dux-agents-stop): Stop everything an agent runs.
+- [`dux agents start`](#dux-agents-start): Start an agent.
+- [`dux agents tabs`](#dux-agents-tabs): An agent's provider tabs.
 
 ### `dux agents ls`
 
@@ -485,11 +487,11 @@ An agent's provider tabs.
 dux agents tabs [OPTIONS] <COMMAND>
 ```
 
-- [`dux agents tabs ls`](#dux-agents-tabs-ls): List an agent's tabs
-- [`dux agents tabs add`](#dux-agents-tabs-add): Add a tab to an agent
-- [`dux agents tabs rm`](#dux-agents-tabs-rm): Close a tab
-- [`dux agents tabs start`](#dux-agents-tabs-start): Start a tab
-- [`dux agents tabs stop`](#dux-agents-tabs-stop): Stop a tab
+- [`dux agents tabs ls`](#dux-agents-tabs-ls): List an agent's tabs.
+- [`dux agents tabs add`](#dux-agents-tabs-add): Add a tab to an agent.
+- [`dux agents tabs rm`](#dux-agents-tabs-rm): Close a tab.
+- [`dux agents tabs start`](#dux-agents-tabs-start): Start a tab.
+- [`dux agents tabs stop`](#dux-agents-tabs-stop): Stop a tab.
 
 ### `dux agents tabs ls`
 
@@ -598,9 +600,9 @@ Terminals, project-owned, agent-owned and standalone.
 dux terminals [OPTIONS] <COMMAND>
 ```
 
-- [`dux terminals ls`](#dux-terminals-ls): List terminals
-- [`dux terminals add`](#dux-terminals-add): Open a terminal and print its id last
-- [`dux terminals rm`](#dux-terminals-rm): Close a terminal
+- [`dux terminals ls`](#dux-terminals-ls): List terminals.
+- [`dux terminals add`](#dux-terminals-add): Open a terminal and print its id last.
+- [`dux terminals rm`](#dux-terminals-rm): Close a terminal.
 
 ### `dux terminals ls`
 
@@ -662,10 +664,10 @@ Macros from config.toml.
 dux macros [OPTIONS] <COMMAND>
 ```
 
-- [`dux macros ls`](#dux-macros-ls): List the macros
-- [`dux macros show`](#dux-macros-show): Show one macro by name
-- [`dux macros add`](#dux-macros-add): Add a macro, or replace the one with that name
-- [`dux macros rm`](#dux-macros-rm): Remove a macro
+- [`dux macros ls`](#dux-macros-ls): List the macros.
+- [`dux macros show`](#dux-macros-show): Show one macro by name.
+- [`dux macros add`](#dux-macros-add): Add a macro, or replace the one with that name.
+- [`dux macros rm`](#dux-macros-rm): Remove a macro.
 
 ### `dux macros ls`
 
@@ -742,8 +744,8 @@ Providers from config.toml.
 dux providers [OPTIONS] <COMMAND>
 ```
 
-- [`dux providers ls`](#dux-providers-ls): List the providers, built-in and your own
-- [`dux providers show`](#dux-providers-show): Show one provider and the command it runs
+- [`dux providers ls`](#dux-providers-ls): List the providers, built-in and your own.
+- [`dux providers show`](#dux-providers-show): Show one provider and the command it runs.
 
 ### `dux providers ls`
 
@@ -780,7 +782,7 @@ Keybindings from config.toml.
 dux keys [OPTIONS] <COMMAND>
 ```
 
-- [`dux keys ls`](#dux-keys-ls): List every action the terminal UI binds and the keys it uses, yours or the default
+- [`dux keys ls`](#dux-keys-ls): List every action the terminal UI binds and the keys it uses, yours or the default.
 
 ### `dux keys ls`
 
@@ -805,7 +807,7 @@ Themes dux can load.
 dux themes [OPTIONS] <COMMAND>
 ```
 
-- [`dux themes ls`](#dux-themes-ls): List the themes dux can load, marking the one ui.theme names
+- [`dux themes ls`](#dux-themes-ls): List the themes dux can load, marking the one ui.theme names.
 
 ### `dux themes ls`
 
@@ -830,9 +832,9 @@ The global environment from config.toml.
 dux env [OPTIONS] <COMMAND>
 ```
 
-- [`dux env ls`](#dux-env-ls): List the variables
-- [`dux env set`](#dux-env-set): Set a variable; the value is asked for, or read from stdin
-- [`dux env rm`](#dux-env-rm): Remove a variable
+- [`dux env ls`](#dux-env-ls): List the variables.
+- [`dux env set`](#dux-env-set): Set a variable; the value is asked for, or read from stdin.
+- [`dux env rm`](#dux-env-rm): Remove a variable.
 
 ### `dux env ls`
 
@@ -897,12 +899,12 @@ Saved remote duxes and the sign-ins for them.
 dux remote [OPTIONS] <COMMAND>
 ```
 
-- [`dux remote add`](#dux-remote-add): Save a remote under a name
-- [`dux remote ls`](#dux-remote-ls): List saved remotes
-- [`dux remote rm`](#dux-remote-rm): Forget a saved remote
-- [`dux remote default`](#dux-remote-default): Choose, or with `--unset` clear, the remote used when none is named
-- [`dux remote login`](#dux-remote-login): Sign in to a remote (the selected one when no name is given)
-- [`dux remote logout`](#dux-remote-logout): Sign out of a remote (the selected one when no name is given)
+- [`dux remote add`](#dux-remote-add): Save a remote under a name.
+- [`dux remote ls`](#dux-remote-ls): List saved remotes.
+- [`dux remote rm`](#dux-remote-rm): Forget a saved remote.
+- [`dux remote default`](#dux-remote-default): Choose, or with `--unset` clear, the remote used when none is named.
+- [`dux remote login`](#dux-remote-login): Sign in to a remote (the selected one when no name is given).
+- [`dux remote logout`](#dux-remote-logout): Sign out of a remote (the selected one when no name is given).
 
 ### `dux remote add`
 
@@ -1002,7 +1004,7 @@ Look up a change that was started earlier.
 dux operations [OPTIONS] <COMMAND>
 ```
 
-- [`dux operations show`](#dux-operations-show): Show where a change stands
+- [`dux operations show`](#dux-operations-show): Show where a change stands.
 
 ### `dux operations show`
 

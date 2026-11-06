@@ -22,7 +22,7 @@ order: 90
 editSource: crates/dux/src/commands.rs
 ---
 
-<!-- Generated from the dux command line's own definitions; do not edit by hand. -->
+<!-- Generated from the dux command line's own definitions; do not edit by hand. The help of the `dux config` subcommands is defined in crates/dux-tui/src/config_spec.rs. -->
 
 Every command dux has, with the same text `dux <command> --help` prints. For how the
 commands fit together, and examples, see [The command line](/docs/command-line).
@@ -48,6 +48,11 @@ fn common_flags(page: &mut String, root: &Command) {
     }
     page.push_str("| `-h`, `--help` | | Print the help for the command. |\n");
     page.push_str("| `-V`, `--version` | | Print the version; `dux` alone takes it. |\n");
+    page.push_str(
+        "\n`dux config` is the exception: it reads `--local` only before the word `config`, and \
+         it refuses `--remote` (and any selected remote) unless `--local` is given, because it \
+         always edits this machine's file.\n",
+    );
 }
 
 fn environment(page: &mut String) {
@@ -122,7 +127,11 @@ fn section(
         .or_else(|| command.get_before_help())
         .map(ToString::to_string);
     for text in [about, before].into_iter().flatten() {
-        let _ = writeln!(page, "{}\n", sentence(prose(&text)));
+        let paragraphs: Vec<String> = text
+            .split("\n\n")
+            .map(|paragraph| sentence(prose(paragraph)))
+            .collect();
+        let _ = writeln!(page, "{}\n", paragraphs.join("\n\n"));
     }
     let usage = command.clone().render_usage().to_string();
     let usage: Vec<&str> = usage
@@ -148,28 +157,33 @@ fn section(
             option_row(page, arg);
         }
     }
-    let subcommands: Vec<(&Command, String)> = shown_subcommands(command)
-        .map(|sub| {
-            let sub = match config {
-                Some(config) if sub.get_name() == config.get_name() => config,
-                _ => sub,
+    // The bullet shows what this command's own `--help` lists; the section
+    // below it is the grafted `config` command's.
+    let subcommands: Vec<(&Command, &Command, String)> = shown_subcommands(command)
+        .map(|listed| {
+            let described = match config {
+                Some(config) if listed.get_name() == config.get_name() => config,
+                _ => listed,
             };
-            (sub, format!("{path} {}", sub.get_name()))
+            (listed, described, format!("{path} {}", listed.get_name()))
         })
         .collect();
     if !subcommands.is_empty() {
         page.push('\n');
-        for (sub, sub_path) in &subcommands {
-            let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
+        for (listed, _, sub_path) in &subcommands {
+            let about = listed
+                .get_about()
+                .map(ToString::to_string)
+                .unwrap_or_default();
             let _ = writeln!(
                 page,
                 "- [`{sub_path}`](#{}): {}",
                 anchor(sub_path),
-                cell(&about)
+                sentence(cell(&about))
             );
         }
     }
-    for (sub, sub_path) in &subcommands {
+    for (_, sub, sub_path) in &subcommands {
         // The root and its nouns are h2, everything under a noun h3: the
         // docs table of contents lists those two levels.
         let sub_level = if path.contains(' ') { 3 } else { 2 };

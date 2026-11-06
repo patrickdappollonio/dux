@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 
 use crate::config::{self, Config, DuxPaths};
-use crate::config_spec::config_flags;
+use crate::config_spec::{config_flags, has_flag};
 use crate::git;
 use crate::keybindings::RuntimeBindings;
 use crate::logger;
@@ -120,7 +120,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
     let sub = args.first().map_or("", std::string::String::as_str);
     match sub {
         "reset" => {
-            let all = args[1..].iter().any(|a| a == "--all");
+            let all = has_flag("reset", &args[1..], "--all");
             reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_reset(
                 paths,
@@ -133,7 +133,7 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             )
         }
         "diff" => {
-            let raw = args[1..].iter().any(|a| a == "--raw");
+            let raw = has_flag("diff", &args[1..], "--raw");
             reject_unknown_flags(&args[1..], config_flags(sub))?;
             run_diff(
                 paths,
@@ -146,8 +146,8 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             )
         }
         "regenerate" => {
-            let yes = args[1..].iter().any(|a| a == "--yes");
-            let held_back = if args[1..].iter().any(|a| a == "--show") {
+            let yes = has_flag("regenerate", &args[1..], "--yes");
+            let held_back = if has_flag("regenerate", &args[1..], "--show") {
                 dux_core::config_keys::HeldBack::Shown
             } else {
                 dux_core::config_keys::HeldBack::Masked
@@ -165,8 +165,8 @@ pub(crate) fn run(args: &[String], paths: &DuxPaths) -> Result<()> {
             )
         }
         "restore-docs" => {
-            let yes = args[1..].iter().any(|a| a == "--yes");
-            let held_back = if args[1..].iter().any(|a| a == "--show") {
+            let yes = has_flag("restore-docs", &args[1..], "--yes");
+            let held_back = if has_flag("restore-docs", &args[1..], "--show") {
                 dux_core::config_keys::HeldBack::Shown
             } else {
                 dux_core::config_keys::HeldBack::Masked

@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use dux_core::client::connect::LocalFlag;
 
 const SERVER_ABOUT: &str = "\
-Run the dux web UI over the headless engine. The web UI has one optional
+Run the dux web UI without the terminal UI. The web UI has one optional
 password for one owner, and everyone who gets in shares the one workspace. Set
 it with `dux config set server.auth.password`; [server.auth] require decides
 who is asked for it (by default everyone but this machine and your tailnet).
@@ -124,9 +124,10 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
-    /// Serve the web UI over the headless engine, or inspect a running server.
+    /// Serve the web UI without the terminal UI, or inspect a running server.
     Server(ServerCmd),
     /// Manage the configuration file on this machine.
+    // The help of its subcommands lives in crates/dux-tui/src/config_spec.rs.
     #[command(disable_help_flag = true)]
     Config(ConfigCmd),
     /// Projects dux knows about.
@@ -159,7 +160,7 @@ pub(crate) enum Command {
 #[command(before_help = SERVER_ABOUT)]
 pub(crate) struct ServerCmd {
     /// Bind this exact address, overriding [server] host and port. An IP:port
-    /// socket address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
+    /// address (hostnames are NOT resolved), e.g. 0.0.0.0:3890.
     #[arg(long, value_name = "ADDR:PORT")]
     pub bind: Option<String>,
 
