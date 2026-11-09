@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::config::ProjectConfig;
+use crate::diff::DiffSide;
 use crate::model::{AgentSession, SessionStatus};
 
 /// A stored PR association loaded from the database.
@@ -21,6 +22,18 @@ pub struct StoredPr {
 
 pub struct SessionStore {
     conn: Connection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredDiffComment {
+    pub session_id: String,
+    pub rel_path: String,
+    pub side: DiffSide,
+    pub line_number: usize,
+    pub line_content: String,
+    pub comment_text: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 impl SessionStore {
@@ -120,6 +133,22 @@ impl SessionStore {
                 owner_repo text not null,
                 state text not null default 'OPEN',
                 primary key (session_id, pr_number),
+                foreign key (session_id) references agent_sessions(id) on delete cascade
+            );
+            "#,
+        )?;
+        self.conn.execute_batch(
+            r#"
+            create table if not exists session_diff_comments (
+                session_id text not null,
+                rel_path text not null,
+                side text not null,
+                line_number integer not null,
+                line_content text not null,
+                comment_text text not null,
+                created_at text not null,
+                updated_at text not null,
+                primary key (session_id, rel_path, side, line_number, line_content),
                 foreign key (session_id) references agent_sessions(id) on delete cascade
             );
             "#,
@@ -335,6 +364,103 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn upsert_diff_comment(
+        &self,
+        session_id: &str,
+        rel_path: &str,
+        side: DiffSide,
+        line_number: usize,
+        line_content: &str,
+        comment_text: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            insert into session_diff_comments
+                (session_id, rel_path, side, line_number, line_content, comment_text, created_at, updated_at)
+            values
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            on conflict(session_id, rel_path, side, line_number, line_content) do update set
+                comment_text=excluded.comment_text,
+                updated_at=excluded.updated_at
+            "#,
+            params![
+                session_id,
+                rel_path,
+                side_to_str(side),
+                line_number as i64,
+                line_content,
+                comment_text,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_diff_comment(
+        &self,
+        session_id: &str,
+        rel_path: &str,
+        side: DiffSide,
+        line_number: usize,
+        line_content: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            delete from session_diff_comments
+            where session_id = ?1
+              and rel_path = ?2
+              and side = ?3
+              and line_number = ?4
+              and line_content = ?5
+            "#,
+            params![
+                session_id,
+                rel_path,
+                side_to_str(side),
+                line_number as i64,
+                line_content,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_diff_comments_for_session(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "delete from session_diff_comments where session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_diff_comments(&self) -> Result<Vec<StoredDiffComment>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            select session_id, rel_path, side, line_number, line_content, comment_text, created_at, updated_at
+            from session_diff_comments
+            order by session_id, rel_path, line_number, side, line_content
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let side_text: String = row.get(2)?;
+            Ok(StoredDiffComment {
+                session_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                side: str_to_side(&side_text),
+                line_number: row.get::<_, i64>(3)?.max(0) as usize,
+                line_content: row.get(4)?,
+                comment_text: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        let mut comments = Vec::new();
+        for row in rows {
+            comments.push(row?);
+        }
+        Ok(comments)
+    }
+
     /// Insert a PR association or update its state and title if it already exists.
     pub fn upsert_pr(&self, pr: &StoredPr) -> Result<()> {
         self.conn.execute(
@@ -503,6 +629,7 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.delete_diff_comments_for_session(id)?;
         self.conn
             .execute("delete from agent_sessions where id = ?1", params![id])?;
         Ok(())
@@ -522,6 +649,20 @@ impl SessionStore {
             params![id, enabled, Utc::now().to_rfc3339()],
         )?;
         Ok(())
+    }
+}
+
+fn side_to_str(side: DiffSide) -> &'static str {
+    match side {
+        DiffSide::Old => "old",
+        DiffSide::New => "new",
+    }
+}
+
+fn str_to_side(value: &str) -> DiffSide {
+    match value {
+        "old" => DiffSide::Old,
+        _ => DiffSide::New,
     }
 }
 
@@ -780,6 +921,76 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(!loaded[0].desired_running);
         assert!(loaded[0].auto_reopen_enabled);
+    }
+
+    #[test]
+    fn diff_comments_round_trip_and_update() {
+        let store = test_store();
+        let now = Utc::now();
+        let session = test_session("s1", now, now);
+        store.upsert_session(&session).unwrap();
+
+        store
+            .upsert_diff_comment(
+                "s1",
+                "README.md",
+                DiffSide::New,
+                45,
+                "## title",
+                "Use an h4 instead",
+            )
+            .unwrap();
+        store
+            .upsert_diff_comment(
+                "s1",
+                "README.md",
+                DiffSide::New,
+                45,
+                "## title",
+                "Use h4 here",
+            )
+            .unwrap();
+
+        let comments = store.load_diff_comments().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].session_id, "s1");
+        assert_eq!(comments[0].rel_path, "README.md");
+        assert_eq!(comments[0].side, DiffSide::New);
+        assert_eq!(comments[0].line_number, 45);
+        assert_eq!(comments[0].line_content, "## title");
+        assert_eq!(comments[0].comment_text, "Use h4 here");
+    }
+
+    #[test]
+    fn diff_comments_delete_one_and_delete_session_queue() {
+        let store = test_store();
+        let now = Utc::now();
+        let s1 = test_session("s1", now, now);
+        let s2 = test_session("s2", now, now);
+        store.upsert_session(&s1).unwrap();
+        store.upsert_session(&s2).unwrap();
+
+        store
+            .upsert_diff_comment("s1", "a.txt", DiffSide::New, 1, "a", "comment a")
+            .unwrap();
+        store
+            .upsert_diff_comment("s1", "b.txt", DiffSide::Old, 2, "b", "comment b")
+            .unwrap();
+        store
+            .upsert_diff_comment("s2", "c.txt", DiffSide::New, 3, "c", "comment c")
+            .unwrap();
+
+        store
+            .delete_diff_comment("s1", "a.txt", DiffSide::New, 1, "a")
+            .unwrap();
+        let comments = store.load_diff_comments().unwrap();
+        assert_eq!(comments.len(), 2);
+        assert!(comments.iter().all(|comment| comment.rel_path != "a.txt"));
+
+        store.delete_session("s1").unwrap();
+        let comments = store.load_diff_comments().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].session_id, "s2");
     }
 }
 

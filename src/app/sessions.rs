@@ -962,6 +962,8 @@ impl App {
         self.running_provider_pins.remove(&session.id);
         self.last_pty_activity.remove(&session.id);
         self.resume_fallback_candidates.remove(&session.id);
+        self.diff_comments
+            .retain(|key, _| key.session_id != session.id);
         self.clear_companion_terminals_for_session(&session.id);
         self.sessions.retain(|candidate| candidate.id != session.id);
         self.update_branch_sync_sessions();
@@ -2138,12 +2140,16 @@ impl App {
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
+            selected_row: output.rows.iter().position(|row| row.anchor.is_some()),
+            rows: Arc::new(output.rows),
             scroll: 0,
             gutter_width: output.gutter_width,
             worktree_path,
             rel_path,
         };
+        self.prune_visible_diff_comments();
         self.focus = FocusPane::Center;
+        self.fullscreen_overlay = FullscreenOverlay::Diff;
         Ok(())
     }
 
@@ -2168,12 +2174,30 @@ impl App {
         )?;
         self.center_mode = CenterMode::Diff {
             lines: Arc::new(output.lines),
+            selected_row: output.rows.iter().position(|row| row.anchor.is_some()),
+            rows: Arc::new(output.rows),
             scroll,
             gutter_width: output.gutter_width,
             worktree_path,
             rel_path,
         };
+        self.prune_visible_diff_comments();
         Ok(())
+    }
+
+    fn prune_visible_diff_comments(&mut self) {
+        match self.prune_current_diff_orphaned_comments() {
+            Ok(0) => {}
+            Ok(count) => {
+                self.set_info(format!(
+                    "Removed {count} stale diff comment{}.",
+                    if count == 1 { "" } else { "s" }
+                ));
+            }
+            Err(err) => {
+                self.set_warning(format!("Couldn't remove stale diff comments: {err:#}"));
+            }
+        }
     }
 
     pub(crate) fn copy_selected_path(&mut self) -> Result<()> {
@@ -2766,6 +2790,9 @@ mod tests {
             prev_scrollback_offset: 0,
             last_diff_height: 0,
             last_diff_visual_lines: 0,
+            last_diff_visual_rows: Vec::new(),
+            diff_comments: std::collections::HashMap::new(),
+            diff_comment_editor: None,
             theme: Theme::default_dark(),
             tick_count: 0,
             start_time: std::time::Instant::now(),
