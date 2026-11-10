@@ -42,6 +42,7 @@ import {
 } from "@/lib/agentWorkspace"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { agentIsDetachable } from "@/lib/detachAgent"
+import { AGENT_MENU_GROUP_LABELS } from "@/lib/agentMenuGroups"
 import { canRecreateWorkingCopy } from "@/lib/recreateWorkingCopy"
 import { agentRoot } from "@/lib/editorRoot"
 import { clipboardWorktree } from "@/lib/flatClipboard"
@@ -107,136 +108,157 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   const copyMissing = canRecreateWorkingCopy(session.workspace)
 
   return (
-    <DropdownMenuGroup>
+    <>
       {activeElsewhere ? (
-        <>
+        <DropdownMenuGroup>
           <DropdownMenuLabel className="max-w-60 whitespace-normal">
             This agent is active on another device, so actions that modify it
             are disabled. Take over in its terminal to use them here.
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
-        </>
+        </DropdownMenuGroup>
       ) : null}
       {/* The changed-file row and the shared input-menu items belong to
         * `PaneMenu`, the one menu every surface opens, which renders this body
         * as its agent group with the pane's input group above it. */}
-      <AgentTabSubmenu
-        sessionId={session.id}
-        providers={providers}
-        defaultProvider={defaultProvider}
-        atTabCap={atTabCap}
-        addingTab={addingTab}
-        activeElsewhere={activeElsewhere}
-      />
-      <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.tabsAndProject}</DropdownMenuLabel>
+        <AgentTabSubmenu
+          sessionId={session.id}
+          providers={providers}
+          defaultProvider={defaultProvider}
+          atTabCap={atTabCap}
+          addingTab={addingTab}
+          activeElsewhere={activeElsewhere}
+        />
+        <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
+      </DropdownMenuGroup>
       <DropdownMenuSeparator />
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openForceReconnect(session.id)}
-      >
-        <RotateCcw />
-        Force recreate agent…
-      </DropdownMenuItem>
-      {/* Absent unless the working copy is actually gone: there is nothing to
-        * put back otherwise, and this is the one control that exists only in
-        * that state, because it IS the way out of it. A standalone agent never
-        * gets it: dux does not create, move or remove the user's own folder. */}
-      {copyMissing ? (
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.running}</DropdownMenuLabel>
         <DropdownMenuItem
           disabled={activeElsewhere}
-          onClick={() => openRecreateWorkingCopy(session.id)}
+          onClick={() => openForceReconnect(session.id)}
         >
-          <FolderSync />
-          Recreate working copy…
+          <RotateCcw />
+          Force recreate agent…
         </DropdownMenuItem>
-      ) : null}
-      {/* Absent, not disabled, with nothing running: a detach asks a process to
-        * go, so with none there is nothing to ask, and a disabled row would
-        * promise an action that is not waiting on the user. Neutral colour like
-        * every other destructive item here; the dialog is the danger signal. */}
-      {liveProcess ? (
+        {/* Absent unless the working copy is actually gone: there is nothing to
+          * put back otherwise, and this is the one control that exists only in
+          * that state, because it IS the way out of it. A standalone agent never
+          * gets it: dux does not create, move or remove the user's own folder. */}
+        {copyMissing ? (
+          <DropdownMenuItem
+            disabled={activeElsewhere}
+            onClick={() => openRecreateWorkingCopy(session.id)}
+          >
+            <FolderSync />
+            Recreate working copy…
+          </DropdownMenuItem>
+        ) : null}
+        {/* Absent, not disabled, with nothing running: a detach asks a process to
+          * go, so with none there is nothing to ask, and a disabled row would
+          * promise an action that is not waiting on the user. Neutral colour like
+          * every other destructive item here; the dialog is the danger signal. */}
+        {liveProcess ? (
+          <DropdownMenuItem
+            disabled={activeElsewhere}
+            onClick={() => openStopAgent(session.id)}
+          >
+            <Unplug />
+            Detach agent…
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem
           disabled={activeElsewhere}
-          onClick={() => openStopAgent(session.id)}
+          onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
         >
-          <Unplug />
-          Detach agent…
+          <RefreshCw />
+          {session.auto_reopen_enabled
+            ? "Disable agent auto-reopen"
+            : "Enable agent auto-reopen"}
         </DropdownMenuItem>
+      </DropdownMenuGroup>
+      <DropdownMenuSeparator />
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.agent}</DropdownMenuLabel>
+        <DropdownMenuItem
+          disabled={activeElsewhere}
+          onClick={() => openRename(session.id)}
+        >
+          <Pencil />
+          Rename agent…
+        </DropdownMenuItem>
+        <AgentIdentityItems
+          sessionId={session.id}
+          branchGit={branchGit}
+          activeElsewhere={activeElsewhere}
+        />
+      </DropdownMenuGroup>
+      {branchGit ? (
+        <>
+          <DropdownMenuSeparator />
+          <AgentStartupItems sessionId={session.id} />
+        </>
       ) : null}
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
-      >
-        <RefreshCw />
-        {session.auto_reopen_enabled
-          ? "Disable agent auto-reopen"
-          : "Enable agent auto-reopen"}
-      </DropdownMenuItem>
       <DropdownMenuSeparator />
-      <DropdownMenuItem
-        disabled={activeElsewhere}
-        onClick={() => openRename(session.id)}
-      >
-        <Pencil />
-        Rename agent…
-      </DropdownMenuItem>
-      <AgentIdentityAndSetupItems
-        sessionId={session.id}
-        branchGit={branchGit}
-        activeElsewhere={activeElsewhere}
-      />
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.worktree}</DropdownMenuLabel>
+        {/* Two editor entries, named for their surfaces. The in-app overlay
+          * cannot open on a phone, so its item is CSS-hidden there rather than
+          * left a dead no-op, and the new-tab item is the only one on phones. */}
+        <DropdownMenuItem
+          className="max-md:hidden"
+          onClick={() => openEditor(agentRoot(session.id))}
+        >
+          <FileCode2 />
+          Open editor here
+        </DropdownMenuItem>
+        {/* A real anchor, matching the editor header's affordance: middle-click
+            and ctrl/cmd-click keep their native new-tab semantics, which a
+            window.open handler would flatten. */}
+        <DropdownMenuItem
+          render={
+            <a
+              href={standaloneEditorHash(agentRoot(session.id))}
+              target="_blank"
+              rel="noopener"
+            />
+          }
+        >
+          <ExternalLink />
+          Open editor in new tab
+        </DropdownMenuItem>
+        {/* The label names where the shell opens, and is workspace-derived rather
+          * than fixed: this menu also serves a standalone agent, which has a
+          * folder and no worktree. */}
+        <DropdownMenuItem onClick={() => createTerminal(session.id)}>
+          <SquareTerminal />
+          {newTerminalLabel(session.workspace)}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => clipboardWorktree(workspaceDirectory(session.workspace))}
+        >
+          <ClipboardCopy />
+          Copy local path
+        </DropdownMenuItem>
+      </DropdownMenuGroup>
       <DropdownMenuSeparator />
-      {/* Two editor entries, named for their surfaces. The in-app overlay
-        * cannot open on a phone, so its item is CSS-hidden there rather than
-        * left a dead no-op, and the new-tab item is the only one on phones. */}
-      <DropdownMenuItem
-        className="max-md:hidden"
-        onClick={() => openEditor(agentRoot(session.id))}
-      >
-        <FileCode2 />
-        Open editor here
-      </DropdownMenuItem>
-      {/* A real anchor, matching the editor header's affordance: middle-click
-          and ctrl/cmd-click keep their native new-tab semantics, which a
-          window.open handler would flatten. */}
-      <DropdownMenuItem
-        render={
-          <a
-            href={standaloneEditorHash(agentRoot(session.id))}
-            target="_blank"
-            rel="noopener"
-          />
-        }
-      >
-        <ExternalLink />
-        Open editor in new tab
-      </DropdownMenuItem>
-      {/* The label names where the shell opens, and is workspace-derived rather
-        * than fixed: this menu also serves a standalone agent, which has a
-        * folder and no worktree. */}
-      <DropdownMenuItem onClick={() => createTerminal(session.id)}>
-        <SquareTerminal />
-        {newTerminalLabel(session.workspace)}
-      </DropdownMenuItem>
-      <DropdownMenuItem
-        onClick={() => clipboardWorktree(workspaceDirectory(session.workspace))}
-      >
-        <ClipboardCopy />
-        Copy local path
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
-          on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
-      <DropdownMenuItem
-        variant="destructive"
-        className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
-        disabled={activeElsewhere}
-        onClick={() => openDelete(session.id)}
-      >
-        <Trash2 />
-        Delete agent…
-      </DropdownMenuItem>
-    </DropdownMenuGroup>
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.remove}</DropdownMenuLabel>
+        {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
+            on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
+        <DropdownMenuItem
+          variant="destructive"
+          className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
+          disabled={activeElsewhere}
+          onClick={() => openDelete(session.id)}
+        >
+          <Trash2 />
+          Delete agent…
+        </DropdownMenuItem>
+      </DropdownMenuGroup>
+    </>
   )
 }
 
@@ -309,7 +331,7 @@ function AgentProjectSubmenu({
   )
 }
 
-function AgentIdentityAndSetupItems({
+function AgentIdentityItems({
   sessionId,
   branchGit,
   activeElsewhere,
@@ -347,27 +369,32 @@ function AgentIdentityAndSetupItems({
         <Info />
         Agent info…
       </DropdownMenuItem>
-      {branchGit ? (
-        <>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
-            <SquareChevronRight />
-            Configure startup command…
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
-            <Variable />
-            Configure environment variables…
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
-            <Play />
-            Rerun startup command
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
-            <ScrollText />
-            Startup command logs…
-          </DropdownMenuItem>
-        </>
-      ) : null}
     </>
   )
 }
+
+// Startup is its own group so its heading can be dropped with it: a standalone
+// agent has no startup command, and a heading over nothing says nothing.
+function AgentStartupItems({ sessionId }: { sessionId: string }) {
+  return (
+    <DropdownMenuGroup>
+      <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.startup}</DropdownMenuLabel>
+        <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
+          <SquareChevronRight />
+          Configure startup command…
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
+          <Variable />
+          Configure environment variables…
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
+          <Play />
+          Rerun startup command
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
+          <ScrollText />
+          Startup command logs…
+        </DropdownMenuItem>
+      </DropdownMenuGroup>
+    )
+  }

@@ -499,19 +499,6 @@ vi.mock("@/lib/ptySocket", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ptySocket")>()
   return { ...actual, PtySocket: FakePtySocket }
 })
-// The one-time way-back hint, spied at its raiser: what the pane is answerable
-// for is the QUESTION it hands down (would this flip leave anything under the
-// terminal), and the answer is a toast nothing else here has any business
-// raising. Everything else in the module stays real, the setter included.
-const hideTerminalKeysHint = vi.fn()
-vi.mock("@/lib/typingSurface", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/typingSurface")>()
-  return {
-    ...actual,
-    hideTerminalKeysHint: (...a: unknown[]) => hideTerminalKeysHint(...a),
-  }
-})
-
 let mockState: DuxState
 // The pane's theater seam, spied so the ownership-transition rule can be
 // observed without a store and a localStorage behind it.
@@ -2502,12 +2489,10 @@ describe("TerminalPane mobile accessory-bar preference", () => {
   })
 })
 
-// THE INPUT ⋯ MENU AND ITS THREE ANCHORS. It replaced a button that existed
-// only while something was hidden, which is why the hidden-bars dead end kept
-// coming back: a way back is not the same as a way there. The menu renders in
-// EVERY bar state, at the leading edge of the bottom-most input row that
-// exists, and exactly one instance of it is ever on screen.
-describe("TerminalPane input menu anchors", () => {
+// NOTHING HANGS OFF THE INPUT ROWS. The input's controls live in the top menu's
+// Input group and, on a phone, in the action cluster, so the rows under the
+// terminal carry the message box and the terminal keys and nothing else.
+describe("TerminalPane has no menu under the terminal", () => {
   const desktopWidth = window.innerWidth
   // `goMobile` means "the phone SHELL is up AND touch is the primary pointer".
   // Those are two different signals since the compose bar moved off the width
@@ -2534,22 +2519,17 @@ describe("TerminalPane input menu anchors", () => {
     mod.setTypingSurface(null)
   })
 
-  const triggers = () => screen.queryAllByRole("button", { name: "Input options" })
-  const openMenu = () => fireEvent.click(triggers()[0]!)
+  const noMenu = () => screen.queryByRole("button", { name: "Input options" })
 
-  it("renders in the compose row while both bars are visible", () => {
-    // The old restore button was ABSENT in this state, which is the whole bug:
-    // nothing on screen led to the hide/show controls from the terminal.
+  it("leaves the compose row to the box and Send", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(triggers()).toHaveLength(1)
-    // In the compose row, opposite Send, not in the key rows above it.
-    expect(
-      triggers()[0]!.closest("div")!.querySelector('[aria-label="Send"]'),
-    ).toBeTruthy()
+    expect(noMenu()).toBeNull()
+    const row = screen.getByRole("button", { name: "Send" }).parentElement!
+    expect(row.querySelectorAll("button")).toHaveLength(1)
   })
 
-  it("renders in the accessory bar's key row when the message box is off", () => {
+  it("leaves the key row to the keys when the message box is off", () => {
     goMobile()
     const state = makeState()
     ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
@@ -2557,33 +2537,15 @@ describe("TerminalPane input menu anchors", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(triggers()).toHaveLength(1)
-    // Beside the keys, in row one: Esc is its neighbour.
-    const row = triggers()[0]!.closest("div")!.parentElement!
-    expect(row.querySelector('[aria-label="Esc"]')).toBeTruthy()
+    expect(noMenu()).toBeNull()
+    const row = screen.getByRole("button", { name: "Esc" }).parentElement!
+    expect(
+      Array.from(row.querySelectorAll("button")).map((b) =>
+        b.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Esc", "Tab", "Ctrl", "Alt", "Insert newline"])
   })
 
-  // THE DUPLICATE STATE. The keys are up and the message box is off. The old
-  // fallback row's condition ("compose off AND something hidden") was true here
-  // at the same time as the accessory anchor, so this exact state would have
-  // shipped TWO menus.
-  it("renders exactly one menu with the keys up and the box off", () => {
-    goMobile()
-    const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "never"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(triggers()).toHaveLength(1)
-    // And it is the accessory bar's, not a second minimal row's.
-    const row = triggers()[0]!.closest("div")!.parentElement!
-    expect(row.querySelector('[aria-label="Esc"]')).toBeTruthy()
-  })
-
-  // NO MINIMAL ROW ANY MORE. It existed so the menu could be reached in every
-  // bar state; that guarantee belongs to the top menu now, which is on screen
-  // whatever the pane is doing, and a bordered strip under a terminal nobody is
-  // typing into was chrome for its own sake.
   it("renders nothing at all when neither bar is up", () => {
     goMobile()
     const state = makeState()
@@ -2596,46 +2558,7 @@ describe("TerminalPane input menu anchors", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(triggers()).toHaveLength(0)
-  })
-
-  it("carries the keys Show item, writing that one field", () => {
-    goMobile()
-    const state = makeState()
-    ;(
-      state.bootstrap as unknown as { mobile_accessory_bar?: boolean }
-    ).mobile_accessory_bar = false
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    openMenu()
-    // The menu names what the item does, in the direction it will move the
-    // bar. It is the only bar this menu can move: theater mode owns the
-    // phone's chrome, so there is nothing here for the top bar.
-    expect(screen.queryByText(/top bar/i)).toBeNull()
-    fireEvent.click(screen.getByText("Show terminal keys"))
-    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/config/settings",
-      expect.objectContaining({
-        method: "PATCH",
-        // `quiet: true` asks the server to skip its "Settings updated."
-        // status: the keys visibly returning is the feedback.
-        body: JSON.stringify({
-          ui: { mobile_accessory_bar: true },
-          quiet: true,
-        }),
-      }),
-    )
-  })
-
-  it("offers the typing-surface switch as the action it performs", () => {
-    goMobile()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    openMenu()
-    // The message box is up, so the switch is the way OUT of it. It writes
-    // through the one `switchTypingSurface` every entry point shares.
-    fireEvent.click(screen.getByText("Type directly in the terminal"))
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(noMenu()).toBeNull()
   })
 })
 
@@ -3613,12 +3536,11 @@ describe("TerminalPane inactive cursor style", () => {
     expect(term.options.cursorInactiveStyle).toBe("block")
 
     // Direct typing: xterm gets focus again, so the convention comes back.
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    const surface = await import("@/lib/typingSurface")
+    act(() => surface.switchTypingSurface("direct"))
     expect(TermStub.instances.at(-1)).toBe(term)
     expect(term.options.cursorInactiveStyle).toBe("outline")
 
-    const surface = await import("@/lib/typingSurface")
     act(() => surface.setTypingSurface("compose"))
     expect(term.options.cursorInactiveStyle).toBe("block")
     surface.setTypingSurface(null)
@@ -3669,27 +3591,20 @@ describe("TerminalPane compose placeholder follows the surface", () => {
   })
 })
 
-// THE WAY BACK TRAVELS WITH THE KEYS. `ui.mobile_accessory_bar` is a
-// SERVER-SIDE preference, so hiding it from a phone hides the keys on the
-// tablet too; if the way back stayed gated on the mobile LAYOUT, that tablet
-// got the desktop shell with no keys and no way to ask for them back. The input
-// ⋯ therefore follows the same predicate that mounts the bars.
-describe("TerminalPane input menu follows the touch surfaces", () => {
+// WHAT THE PANE PUBLISHES for the top menu's Input group, which is the one home
+// of the surface switch and (on a computer) the keys row. The pointer is a
+// DEFAULT, not a gate: the switch is on offer wherever `compose_bar` is `auto`,
+// and the keys wherever a key row belongs on this device, shown or hidden.
+describe("TerminalPane publishes its input group", () => {
   let pointerStub: MatchMediaStub | null = null
 
-  const setWidth = (value: number) =>
-    Object.defineProperty(window, "innerWidth", { value, configurable: true })
-
   beforeEach(async () => {
-    setWidth(1200)
-    // A stored choice would offer the surface switch on its own (that is the
-    // point of the wider gate, and there is a case for it below); start every
-    // case here with the decision back in the pointer's hands.
+    // A stored choice would decide the surface on its own; start every case with
+    // the decision back in the pointer's hands.
     const mod = await import("@/lib/typingSurface")
     mod.setTypingSurface(null)
   })
   afterEach(async () => {
-    setWidth(1200)
     pointerStub?.restore()
     pointerStub = null
     const mod = await import("@/lib/typingSurface")
@@ -3703,62 +3618,52 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     ).mobile_accessory_bar = false
     return state
   }
-  const trigger = () => screen.queryByRole("button", { name: "Input options" })
 
-  it("offers the menu in the DESKTOP shell on a coarse pointer", () => {
-    pointerStub = stubCoarsePointer(true)
-    mockState = hideAccessoryBar()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    // The dead end: keys gone, desktop layout, and before this no way back.
-    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(trigger()).toBeTruthy()
-  })
+  // One table: pointer x `compose_bar` mode x the device's choice x the keys
+  // preference. Each expectation is worked out from what the surfaces ARE (the
+  // box is up under `always`, never under `never`, the pointer's default under
+  // `auto`; a finger always has keys on offer, a laptop only beside the box),
+  // not from the code under test.
+  const cases = [
+    { name: "a finger, auto, nothing chosen", coarse: true, mode: "auto", choice: null, keysOn: true, want: { surfaceSwitch: true, composeSurface: true, keysToggle: true } },
+    { name: "a finger, keys hidden", coarse: true, mode: "auto", choice: null, keysOn: false, want: { surfaceSwitch: true, composeSurface: true, keysToggle: true } },
+    { name: "a finger typing directly", coarse: true, mode: "auto", choice: "direct", keysOn: true, want: { surfaceSwitch: true, composeSurface: false, keysToggle: true } },
+    { name: "a mouse, nothing chosen", coarse: false, mode: "auto", choice: null, keysOn: true, want: { surfaceSwitch: true, composeSurface: false, keysToggle: false } },
+    { name: "a mouse that asked for the box", coarse: false, mode: "auto", choice: "compose", keysOn: true, want: { surfaceSwitch: true, composeSurface: true, keysToggle: true } },
+    { name: "a finger, never", coarse: true, mode: "never", choice: null, keysOn: true, want: { surfaceSwitch: false, composeSurface: false, keysToggle: true } },
+    { name: "a mouse, never", coarse: false, mode: "never", choice: null, keysOn: true, want: { surfaceSwitch: false, composeSurface: false, keysToggle: false } },
+    { name: "a mouse, always", coarse: false, mode: "always", choice: null, keysOn: true, want: { surfaceSwitch: false, composeSurface: true, keysToggle: true } },
+    { name: "a finger, always", coarse: true, mode: "always", choice: "direct", keysOn: false, want: { surfaceSwitch: false, composeSurface: true, keysToggle: true } },
+  ] as const
+  for (const c of cases) {
+    it(`publishes ${JSON.stringify(c.want)} for ${c.name}`, async () => {
+      const surface = await import("@/lib/typingSurface")
+      const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
+      pointerStub = stubCoarsePointer(c.coarse)
+      surface.setTypingSurface(c.choice)
+      const state = c.keysOn ? makeState() : hideAccessoryBar()
+      ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
+        c.mode
+      mockState = state
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      expect(paneInputGroupFor(["s1"])).toEqual(c.want)
+      // And nothing under the terminal carries a menu of its own.
+      expect(
+        screen.queryByRole("button", { name: "Input options" }),
+      ).toBeNull()
+    })
+  }
 
-  it("brings the keys back from the menu, writing only that preference", () => {
-    pointerStub = stubCoarsePointer(true)
-    mockState = hideAccessoryBar()
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(trigger()!)
-    fireEvent.click(screen.getByText("Show terminal keys"))
-    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "/api/v1/config/settings",
-      expect.objectContaining({
-        method: "PATCH",
-        body: JSON.stringify({
-          ui: { mobile_accessory_bar: true },
-          quiet: true,
-        }),
-      }),
-    )
-  })
-
-  // With the message box off too there is no bar left, so there is no menu
-  // under the terminal either: "Show terminal keys" is published to the top
-  // menu for exactly this state, which is what keeps it from being a dead end.
-  it("leaves nothing under the terminal when the message box is off too", () => {
-    pointerStub = stubCoarsePointer(true)
-    const state = hideAccessoryBar()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "never"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(trigger()).toBeNull()
-  })
-
-  // THE POINTER IS A DEFAULT, NOT A GATE. A fine-pointer desktop starts with
-  // neither bar, and the way in is PUBLISHED to the top menu: the switch is
-  // offered on every device under `auto`, because gating it on the surfaces it
-  // turns on left a laptop user no way to ask for them at all.
-  it("publishes the way in on a fine pointer that has chosen nothing", async () => {
+  // The dead end this must never recreate: keys hidden, desktop layout, and
+  // the keys' own toggle still published, because hiding must not take away
+  // the way to show them again.
+  it("keeps the keys toggle on offer while the keys are hidden", async () => {
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
-    pointerStub = stubCoarsePointer(false)
+    pointerStub = stubCoarsePointer(true)
+    mockState = hideAccessoryBar()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(trigger()).toBeNull()
-    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)
+    expect(paneInputGroupFor(["s1"])?.keysToggle).toBe(true)
   })
 
   // THE DEFECT THIS FIXES: the press used to change nothing on a fine pointer.
@@ -3768,22 +3673,23 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     const surface = await import("@/lib/typingSurface")
     pointerStub = stubCoarsePointer(false)
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
     // What the top menu's "Use virtual input" item writes.
     act(() => surface.switchTypingSurface("compose"))
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
   })
 
-  // AND BACK OUT AGAIN, from the same menu, whose label follows the resolved
-  // state rather than the pointer.
+  // AND BACK OUT AGAIN, whose row label follows the resolved state rather than
+  // the pointer.
   it("switches a fine pointer back to typing straight into the terminal", async () => {
     const mod = await import("@/lib/typingSurface")
     mod.setTypingSurface("compose")
     pointerStub = stubCoarsePointer(false)
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
-    fireEvent.click(trigger()!)
-    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    act(() => mod.switchTypingSurface("direct"))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
 
@@ -3801,54 +3707,10 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   })
 
-  // THE SETTING STILL WINS. `never` is configuration, and the per-device switch
-  // is not offered where it could not take effect.
-  it("offers no switch under a hard never, on either pointer", () => {
-    pointerStub = stubCoarsePointer(false)
-    const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "never"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    // Nothing else belongs in the menu in this state (uploads are off here and
-    // the keys cannot apply), so the never-renders-empty rule leaves no trigger
-    // at all. The switch's absence is the point either way.
-    expect(trigger()).toBeNull()
-  })
-
-  // The other pointer, where the menu really does exist: `never` keeps the
-  // accessory keys (a soft keyboard still cannot produce a Ctrl chord), so the
-  // trigger is there and what it opens is everything BUT the switch.
-  it("offers no switch under a hard never on a coarse pointer either", () => {
-    pointerStub = stubCoarsePointer(true)
-    const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "never"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    fireEvent.click(trigger()!)
-    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
-    expect(screen.queryByText("Use virtual input")).toBeNull()
-  })
-
-  it("offers no switch under a hard always, whose box is up regardless", () => {
-    pointerStub = stubCoarsePointer(false)
-    const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "always"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
-    fireEvent.click(trigger()!)
-    expect(screen.queryByText("Type directly in the terminal")).toBeNull()
-  })
-
   // A CONFIG STILL CARRYING THE RETIRED `ui.mobile_top_bar` MUST CHANGE
   // NOTHING. It hid the phone's chrome once; theater mode does that now, and a
   // value left in a config file (or published by an older server) must not put
-  // an unexplained extra row under a terminal or an item back in the menu.
+  // an unexplained extra row under a terminal.
   it("ignores a stored top-bar preference entirely", () => {
     pointerStub = stubCoarsePointer(true)
     const state = makeState()
@@ -3858,11 +3720,7 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
-    expect(
-      screen.queryAllByRole("button", { name: "Input options" }),
-    ).toHaveLength(1)
-    fireEvent.click(trigger()!)
-    expect(screen.queryByText(/top bar/i)).toBeNull()
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 })
 
@@ -3871,7 +3729,7 @@ describe("TerminalPane input menu follows the touch surfaces", () => {
 // the flap are on screen outside theater, and in theater the floating pill
 // carries the items. The row it used to get existed only for the retired
 // top-bar preference, which was the one thing a viewer could still act on.
-describe("TerminalPane input menu for a non-owner", () => {
+describe("TerminalPane input group for a non-owner", () => {
   const desktopWidth = window.innerWidth
   let pointerStub: MatchMediaStub | null = null
 
@@ -3912,8 +3770,10 @@ describe("TerminalPane input menu for a non-owner", () => {
     })
   }
 
-  it("gets no typing surfaces and no input row", () => {
+  it("gets no typing surfaces, no input row and publishes no input group", async () => {
+    const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     renderViewer(makeState())
+    expect(paneInputGroupFor(["s1"])).toBeNull()
     // No typing surfaces for a viewer, per the tenet.
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
@@ -3949,57 +3809,43 @@ describe("TerminalPane typing-surface toggle", () => {
 
   const composeUp = () =>
     screen.queryByRole("textbox", { name: "Message" }) !== null
-  // THE SWITCH LIVES IN THE INPUT `⋯`, and nowhere else on these rows: the key
-  // row carries terminal keys only. A menu row is a sentence, so the item names
-  // the direction rather than the state it is in.
-  const flipSurface = () => {
-    const label = composeUp()
-      ? "Type directly in the terminal"
-      : "Use virtual input"
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    fireEvent.click(screen.getByText(label))
+  // THE SWITCH LIVES IN THE TOP MENU'S INPUT GROUP, and nowhere on these rows:
+  // the key row carries terminal keys only. This writes what that row writes.
+  const flipSurface = async () => {
+    const surface = await import("@/lib/typingSurface")
+    act(() => surface.switchTypingSurface(composeUp() ? "direct" : "compose"))
   }
 
-  it("flips the surface from the input menu, both ways", () => {
+  it("flips the surface through the one helper, both ways", async () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(composeUp()).toBe(true)
-    flipSurface()
+    await flipSurface()
     expect(composeUp()).toBe(false)
-    flipSurface()
+    await flipSurface()
     expect(composeUp()).toBe(true)
   })
 
   // THE BOX GOES, THE KEYS STAY. They are independent surfaces answering
   // different questions, and keys with no box is a real way to work: the finger
-  // holds the virtual Ctrl and the physical keyboard types the letter. The
-  // bottom `⋯` hangs off whichever row is left, so the way back stays down
-  // there and the top menu does not offer a second copy of it.
+  // holds the virtual Ctrl and the physical keyboard types the letter.
   it("keeps the terminal keys when the message box goes", async () => {
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    flipSurface()
+    await flipSurface()
     expect(composeUp()).toBe(false)
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.getByText("Use virtual input")).toBeTruthy()
-    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(false)
+    // The way back is published whatever is left under the terminal.
+    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)
   })
 
   // AND ALL FOUR STATES ARE REACHABLE, through the two independent switches:
-  // the typing-surface choice and the terminal-keys preference.
-  //
-  // EVERY ONE OF THEM HAS A WAY BACK, and exactly ONE home for it. The rows are
-  // what can go away; the switch that brings them back cannot, so it lives in
-  // the bottom `⋯` while any row is up and in the surface's top menu once the
-  // last one goes. A state with neither home is a dead end and a state with
-  // both is two menus that can disagree, so the pair is pinned state by state
-  // rather than only at the extremes.
-  it("reaches every combination of the two rows, each with one way back", async () => {
+  // the typing-surface choice and the terminal-keys preference. EVERY ONE OF
+  // THEM HAS ITS WAY BACK in the top menu's group, because the rows are what
+  // can go away and the switches that bring them back cannot go with them.
+  it("reaches every combination of the two rows, each with its way back", async () => {
     const surface = await import("@/lib/typingSurface")
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
     const keysUp = () => screen.queryByRole("button", { name: "Esc" }) !== null
-    const bottomMenu = () =>
-      screen.queryByRole("button", { name: "Input options" }) !== null
     const show = (composeChoice: "compose" | "direct", keys: boolean) => {
       cleanup()
       surface.setTypingSurface(composeChoice)
@@ -4009,73 +3855,28 @@ describe("TerminalPane typing-surface toggle", () => {
       ).mobile_accessory_bar = keys
       mockState = state
       render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const published = paneInputGroupFor(["s1"])
       return {
         box: composeUp(),
         keys: keysUp(),
-        bottom: bottomMenu(),
-        top: paneInputGroupFor(["s1"])?.surfaceSwitch ?? false,
+        switchBack: published?.surfaceSwitch ?? false,
+        keysBack: published?.keysToggle ?? false,
       }
     }
-    expect(show("compose", true)).toEqual({
-      box: true,
-      keys: true,
-      bottom: true,
-      top: false,
-    })
-    expect(show("compose", false)).toEqual({
-      box: true,
-      keys: false,
-      bottom: true,
-      top: false,
-    })
+    const back = { switchBack: true, keysBack: true }
+    expect(show("compose", true)).toEqual({ box: true, keys: true, ...back })
+    expect(show("compose", false)).toEqual({ box: true, keys: false, ...back })
     // KEYS WITHOUT THE BOX: a finger holds the virtual Ctrl while a physical
     // keyboard types the letter, which is exactly what direct typing is for.
-    // The key row is the whole bottom bar here, and it carries the `⋯`.
-    expect(show("direct", true)).toEqual({
-      box: false,
-      keys: true,
-      bottom: true,
-      top: false,
-    })
-    // Nothing under the terminal at all, so the way back is the top menu's.
-    expect(show("direct", false)).toEqual({
-      box: false,
-      keys: false,
-      bottom: false,
-      top: true,
-    })
-  })
-
-  // THE OTHER DOOR OUT OF THE VIRTUAL INPUT, and the pane's answer about it.
-  // From direct typing the key row IS the bottom bar, so hiding it takes the
-  // last row and the `⋯` on it: the same dead end the surface switch hints
-  // about, reached by a different tap. With the message box still up, hiding
-  // the keys leaves the compose row and its `⋯`, so there is nothing to say.
-  it("says what hiding the keys would leave behind", async () => {
-    const surface = await import("@/lib/typingSurface")
-    const hideKeys = () => {
-      fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-      fireEvent.click(screen.getByText("Hide terminal keys"))
-    }
-    surface.setTypingSurface("direct")
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(composeUp()).toBe(false)
-    hideKeys()
-    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(true)
-
-    cleanup()
-    hideTerminalKeysHint.mockClear()
-    surface.setTypingSurface("compose")
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(composeUp()).toBe(true)
-    hideKeys()
-    expect(hideTerminalKeysHint).toHaveBeenCalledExactlyOnceWith(false)
+    expect(show("direct", true)).toEqual({ box: false, keys: true, ...back })
+    // Nothing under the terminal at all, and the way back is still published.
+    expect(show("direct", false)).toEqual({ box: false, keys: false, ...back })
   })
 
   it("writes the choice to localStorage, so a reload does not snap back", async () => {
     const mod = await import("@/lib/typingSurface")
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    flipSurface()
+    await flipSurface()
     expect(composeUp()).toBe(false)
     // THE STORAGE, not the module's own memory: a live module variable would
     // satisfy a remount in this file and still lose the choice on a real
@@ -4087,27 +3888,15 @@ describe("TerminalPane typing-surface toggle", () => {
     expect(composeUp()).toBe(false)
   })
 
-  it("does not write the ui.compose_bar setting", () => {
+  it("does not write the ui.compose_bar setting", async () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const calls = () =>
       (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
     const before = calls().length
-    flipSurface()
+    await flipSurface()
     for (const call of calls().slice(before)) {
       expect(String(call[0])).not.toContain("/settings")
     }
-  })
-
-  // Under always/never the SETTING decides, so an item that changed nothing
-  // must not be there at all.
-  it("is absent when the setting has already decided", () => {
-    const state = makeState()
-    ;(state.bootstrap as unknown as { compose_bar?: string }).compose_bar =
-      "always"
-    mockState = state
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.queryByText("Type directly in the terminal")).toBeNull()
   })
 
   // AND THE KEY ROW CARRIES NONE OF THIS. It is terminal keys and the `⋯`,
@@ -5122,32 +4911,14 @@ describe("TerminalPane and theater mode", () => {
     expect(theaterOwnershipLost).toHaveBeenCalledWith("agent", "s1")
   })
 
-  // THE BOTTOM `⋯` IS INPUT-LOCAL, and that is the whole of it. It lives inside
-  // the virtual input and disappears with it, so it cannot be anybody's
-  // guaranteed way out of a mode: the exit is on the pill and in the top menu,
-  // which are on screen whatever the input is doing.
-  it("carries nothing about theater and nothing about the top bar", () => {
-    goMobile()
-    mockState = { ...makeState(), theater: true } as DuxState
-    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    expect(screen.queryByText(/top bar/i)).toBeNull()
-    expect(screen.queryByText("Leave theater mode")).toBeNull()
-    expect(screen.queryByText("Attach a file…")).toBeNull()
-    expect(screen.getByText("Type directly in the terminal")).toBeTruthy()
-    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
-  })
-
   // Theater takes the chrome away, not the typing surface: the way OUT of the
-  // virtual input still works inside the mode. The way back is the top menu's,
-  // which the pill carries here (see the input-group suite below).
+  // virtual input still works inside the mode. The switch is the pill menu's.
   it("keeps the typing-surface switch working in theater", async () => {
     const surface = await import("@/lib/typingSurface")
     goMobile()
     mockState = { ...makeState(), theater: true } as DuxState
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
-    fireEvent.click(screen.getByText("Type directly in the terminal"))
+    act(() => surface.switchTypingSurface("direct"))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     // The choice is device-local and persistent by design, so hand the decision
     // back to the pointer rather than leaking it into the suites below.
@@ -5156,8 +4927,7 @@ describe("TerminalPane and theater mode", () => {
 
   // THEATER PLUS DIRECT ON A PHONE: the message box goes and the terminal keys
   // stay, because a mode about looking at the terminal must not take away the
-  // keys a soft keyboard cannot produce. The bottom `⋯` rides the surviving
-  // row, so the way back is there rather than in the pill's menu.
+  // keys a soft keyboard cannot produce.
   it("keeps the terminal keys in theater once typing goes direct", async () => {
     const surface = await import("@/lib/typingSurface")
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
@@ -5168,13 +4938,12 @@ describe("TerminalPane and theater mode", () => {
 
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
-    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(false)
+    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)
     surface.setTypingSurface(null)
   })
 
   // AND WITH THE KEYS HIDDEN TOO there really is nothing under the terminal,
-  // which is the state the pill's own menu carries the way back for.
+  // which the pill's cluster and menu still carry the way back for.
   it("leaves no bottom bar in theater with the keys hidden as well", async () => {
     const surface = await import("@/lib/typingSurface")
     const { paneInputGroupFor } = await import("@/lib/paneInputGroup")
@@ -5188,8 +4957,10 @@ describe("TerminalPane and theater mode", () => {
     act(() => surface.setTypingSurface("direct"))
 
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
-    expect(paneInputGroupFor(["s1"])?.surfaceSwitch).toBe(true)
+    expect(paneInputGroupFor(["s1"])).toMatchObject({
+      surfaceSwitch: true,
+      keysToggle: true,
+    })
     surface.setTypingSurface(null)
   })
 
@@ -5425,9 +5196,7 @@ describe("TerminalPane publishes its cover verdict", () => {
 // WHAT THE PANE TELLS THE TOP MENU. Every surface has a menu for the pane that
 // is always reachable (the flap on a phone, the pane's own sidebar row `⋯` on a
 // computer, the floating pill in theater), and the pane publishes the INPUT
-// group for it. The rule
-// pinned here is that a control is in exactly ONE of the two menus: the bottom
-// `⋯` while the virtual input is up, the top menu once it is gone.
+// group for it, whatever is up under the terminal.
 describe("TerminalPane input group for the top menu", () => {
   let pointerStub: MatchMediaStub | null = null
   afterEach(() => {
@@ -5464,12 +5233,12 @@ describe("TerminalPane input group for the top menu", () => {
     expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 
-  it("keeps the switch out of the top menu while a bar is carrying it", () => {
+  it("publishes the switch while a bar is up too", () => {
     pointerStub = stubCoarsePointer(true)
     paneWithProbe()
 
-    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
-    expect(screen.getByTestId("published").textContent).toBe("quiet")
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
+    expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 
   // THE PANE HAS ONE SHAPE, WHATEVER IS UNDER THE TERMINAL. The rows come and
@@ -5497,17 +5266,14 @@ describe("TerminalPane input group for the top menu", () => {
     surface.setTypingSurface(null)
   })
 
-  // A bar is an anchor, so the `⋯` stays in the compose row and the top menu
-  // offers no switch: two menus offering the same row is the thing being
-  // avoided.
-  it("keeps the menu in the compose row when the box is up in theater", () => {
+  it("carries no menu in the compose row when the box is up in theater", () => {
     pointerStub = stubCoarsePointer(true)
     mockState = { ...makeState(), theater: true } as DuxState
     paneWithProbe()
 
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Input options" })).toBeTruthy()
-    expect(screen.getByTestId("published").textContent).toBe("quiet")
+    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
+    expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 })
 

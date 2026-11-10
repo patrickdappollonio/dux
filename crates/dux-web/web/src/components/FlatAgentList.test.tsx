@@ -960,10 +960,9 @@ describe("FlatAgentList attach-a-file entries", () => {
 })
 
 // THE ROW MENU IS THE COMPUTER'S HOME FOR THE PANE'S INPUT GROUP. Typing
-// directly in the terminal takes the whole bottom bar away, the input `⋯` with
-// it, so the way back has to live in a menu that is always reachable. On this
-// surface that is the pane's own row menu, and these pin that the desktop half
-// is really there: the group's home was previously asserted only on the phone.
+// directly in the terminal takes the whole bottom bar away, so the controls
+// have to live in a menu that is always reachable. On this surface that is the
+// pane's own row menu, and these pin that the desktop half is really there.
 describe("FlatAgentList input group in the row menus", () => {
   const label = () => screen.queryByText("Input")
   const wayBack = () => screen.queryByText("Use virtual input")
@@ -1015,10 +1014,9 @@ describe("FlatAgentList input group in the row menus", () => {
     expect(wayBack()).toBeTruthy()
   })
 
-  // ABSENT, NEVER DISABLED: the bottom `⋯` owns the other direction while the
-  // virtual input is up, and a row offered in both menus at once is the drift
-  // the single publisher exists to prevent.
-  it("leaves the way back out while the pane says the bottom bar has it", async () => {
+  // ABSENT, NEVER DISABLED: a switch the setting has decided is not offered at
+  // all, since a press could not take effect.
+  it("leaves the switch out while the pane does not offer it", async () => {
     const mod = await import("@/lib/paneInputGroup")
     mod.registerPaneInputGroup("alpha", {
       surfaceSwitch: false,

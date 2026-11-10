@@ -65,7 +65,8 @@ const { layoutGestureDepth, registerLayoutGestureHolder } = await import(
   "@/lib/layoutGesture"
 )
 const { THEATER_TRANSITION_MS } = await import("@/lib/theater")
-const { InputMenu } = await import("@/components/InputMenu")
+const { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } =
+  await import("@/components/ui/dropdown-menu")
 
 function state(theater: boolean): DuxState {
   return { theater } as unknown as DuxState
@@ -304,12 +305,16 @@ describe("Escape in theater", () => {
     render(
       <>
         <Escape />
-        {/* Any real row will do; this menu carries no theater exit of its own,
-            because it lives inside the virtual input and dies with it. */}
-        <InputMenu gates={{ surfaceSwitch: false, keysToggle: true }} />
+        {/* Any real row will do; this menu carries no theater exit of its own. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger>Options</DropdownMenuTrigger>
+          <DropdownMenuContent>
+            <DropdownMenuItem>Hide terminal keys</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </>,
     )
-    fireEvent.click(screen.getByRole("button", { name: "Input options" }))
+    fireEvent.click(screen.getByRole("button", { name: "Options" }))
     const item = screen.getByText("Hide terminal keys")
     pressEscape(item)
     expect(screen.queryByText("Hide terminal keys")).toBeNull()

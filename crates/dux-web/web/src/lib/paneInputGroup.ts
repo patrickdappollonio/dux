@@ -5,7 +5,7 @@ import { createKeyedRegistry } from "./keyedRegistry"
 // must offer them sits outside the pane, so the pane publishes and menus read.
 //
 // A pane publishes only while it owns the input, so a mounted viewer pane cannot
-// shadow a mounted owner pane's answers, and an empty group renders no label and
+// shadow a mounted owner pane's answers, and an empty group renders no heading and
 // no separator.
 //
 // Keyed rather than a single slot, on the `attachRegistry` precedent: several
@@ -20,14 +20,22 @@ import { createKeyedRegistry } from "./keyedRegistry"
 /// under the same pty id on the same condition, and two registries answering
 /// one question would eventually disagree.
 export interface PaneInputGroupGates {
-  /// "Use virtual input", the way back from typing straight into the terminal.
-  /// Present only while the virtual input is down, and absent rather than
-  /// disabled otherwise, because the bottom `⋯` owns the other direction.
+  /// The typing-surface switch, in whichever direction applies. Present only
+  /// where `compose_bar` is `auto`, which is where a press can take effect.
   surfaceSwitch: boolean
-  /// "Show terminal keys". Same shape as `surfaceSwitch`: the top menu carries
-  /// the keys item only while there is no bottom bar to carry it, so the two
-  /// menus can never offer the same row.
+  /// Whether the message box is the live surface, which decides the direction
+  /// the switch row offers.
+  composeSurface: boolean
+  /// The terminal-keys show/hide toggle, wherever a key row is on offer for
+  /// this device, shown or hidden. A computer renders it as a row of the group;
+  /// a phone renders it as a button in the action cluster instead.
   keysToggle: boolean
+}
+
+/// The terminal-keys toggle, named for what a press does. One definition so the
+/// menu row and the phone cluster's button cannot disagree about the words.
+export function keysToggleLabel(visible: boolean): string {
+  return visible ? "Hide terminal keys" : "Show terminal keys"
 }
 
 const groups = createKeyedRegistry<PaneInputGroupGates>()
@@ -65,17 +73,6 @@ export function paneInputGroupFor(
     if (gates) return gates
   }
   return null
-}
-
-/**
- * Does this group have anything of its own to render? The attach item is the
- * caller's, so the caller ORs it in.
- */
-export function paneInputGroupHasItems(
-  gates: PaneInputGroupGates | null,
-): boolean {
-  if (!gates) return false
-  return gates.surfaceSwitch || gates.keysToggle
 }
 
 /** Test-only: forget every registration between cases. */

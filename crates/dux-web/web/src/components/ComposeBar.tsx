@@ -54,10 +54,6 @@ interface ComposeBarProps {
   // parent routes it through that key's own write helper, which owns the
   // ownership gate. Without it every keystroke keeps native textarea behavior.
   onForwardKey?: (seq: string) => void
-  // The control in the row's leading slot, opposite Send: a node rather than a
-  // named menu, because which input row carries the `⋯` is the parent's
-  // decision. Absent where the menu would render empty.
-  leading?: React.ReactNode
 }
 
 // What one line measures when the computed line-height is not a parseable
@@ -109,7 +105,6 @@ export function ComposeBar({
   inputRef,
   onForwardKey,
   placeholder = TERMINAL_PLACEHOLDER,
-  leading,
 }: ComposeBarProps) {
   // The textarea handle used for the autosize re-measure: the parent's ref
   // when provided (so the parent and this component share ONE handle rather
@@ -184,13 +179,6 @@ export function ComposeBar({
 
   return (
     <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
-      {/* The input ⋯ menu, in the leading slot: its placement idiom mirrors
-          Send's on the opposite edge (bottom-aligned beside a grown multi-row
-          textarea, `size-10 shrink-0 self-end`, which also keeps the 40px
-          touch-target floor). It is always here while this bar is up, not only
-          while something is hidden, which is what makes the hidden-bars dead
-          end unreachable. */}
-      {leading}
       {/* The frame around the box, carrying the border, the rounding, the
           height floor and the focus ring. It also carries the VERTICAL
           padding, which cannot live on the textarea: a textarea scrolls its

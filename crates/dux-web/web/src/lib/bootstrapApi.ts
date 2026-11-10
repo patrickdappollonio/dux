@@ -64,8 +64,8 @@ export interface Bootstrap {
    * "never"; an absent or unrecognized value reads as "auto" via `composeBarMode`. */
   compose_bar?: string
   /** Mirrors `config.ui.mobile_accessory_bar`: whether the touch terminal screens
-   * show the accessory key bar. A pure render gate, restored from the input menu or
-   * Preferences; falls back to true. */
+   * show the accessory key bar. A pure render gate, restored from the top menu, the phone's action
+   * cluster or Preferences; falls back to true. */
   mobile_accessory_bar?: boolean
   /** Mirrors `config.ui.upload_write_gitignore`: whether the agent upload directory
    * keeps a `.gitignore` of `*`, so a dropped file stays invisible to git. Falls

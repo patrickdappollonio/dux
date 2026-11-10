@@ -968,12 +968,14 @@ describe("the input items the pill folds in", () => {
     expect(attach).toHaveBeenCalledTimes(1)
   })
 
-  // THE WAY BACK ONLY. The other direction lives in the bottom `⋯`, which
-  // exists exactly while the virtual input does, so the pane publishes the
-  // switch only once its own rows are gone and this menu never has to guess
-  // which surface is live.
-  it("offers the way back rather than both directions", async () => {
-    registerPaneInputGroup("tm1", { surfaceSwitch: true, keysToggle: false })
+  // BOTH DIRECTIONS, by what the pane says is live: the way to the box while
+  // it is not up, the way out of it while it is.
+  it("offers the switch in the direction the pane's live surface implies", async () => {
+    registerPaneInputGroup("tm1", {
+      surfaceSwitch: true,
+      composeSurface: false,
+      keysToggle: false,
+    })
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     await openMenu()
 
@@ -981,6 +983,18 @@ describe("the input items the pill folds in", () => {
     expect(
       items().some((t) => t?.includes("Type directly in the terminal")),
     ).toBe(false)
+    cleanup()
+    registerPaneInputGroup("tm1", {
+      surfaceSwitch: true,
+      composeSurface: true,
+      keysToggle: false,
+    })
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    await openMenu()
+    expect(
+      items().some((t) => t?.includes("Type directly in the terminal")),
+    ).toBe(true)
+    expect(items().some((t) => t?.includes("Use virtual input"))).toBe(false)
   })
 
   // An attach no mounted owner pane can perform is not an item: it would open

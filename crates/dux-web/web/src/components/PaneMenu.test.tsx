@@ -48,8 +48,14 @@ function installStubs() {
 installStubs()
 const { MobileActionFlap } = await import("./MobileActionFlap")
 const { TheaterPill } = await import("./TheaterPill")
-const { PaneMenu, PANE_MENU_AGENT_LABEL, PANE_MENU_TERMINAL_GROUP_LABEL } =
-  await import("./PaneMenu")
+const { PaneMenu, PaneMenuBody, PANE_MENU_AGENT_LABEL } = await import(
+  "./PaneMenu"
+)
+const { TERMINAL_MENU_GROUP_LABEL: PANE_MENU_TERMINAL_GROUP_LABEL } =
+  await import("./TerminalActionsMenu")
+const { AGENT_MENU_GROUP_LABELS } = await import("@/lib/agentMenuGroups")
+const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
+  await import("./ui/dropdown-menu")
 const { PANE_INPUT_GROUP_LABEL } = await import("./PaneInputGroup")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
@@ -210,7 +216,7 @@ describe("the phone's one pane menu", () => {
     const items = labels()
     expect(items[0]).toContain("Attach a file…")
     expect(items[1]).toContain("Use virtual input")
-    // The label stays even with one item, and it is above the agent's actions.
+    // The heading is above the agent's actions.
     const group = screen.getByText(PANE_INPUT_GROUP_LABEL)
     const rename = screen
       .getAllByRole("menuitem")
@@ -225,9 +231,6 @@ describe("the phone's one pane menu", () => {
     expect(items.some((t) => t?.includes("top bar"))).toBe(false)
   })
 
-  // The way BACK only. While the virtual input is up, the bottom `⋯` inside it
-  // owns the other direction, and offering both here is how the two would
-  // eventually disagree about which surface is live.
   it("has no INPUT group at all when the pane publishes nothing", async () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
@@ -292,7 +295,7 @@ describe("an agent's menu over one of its companion terminals", () => {
     expect(labels().some((t) => t?.includes("Close…"))).toBe(false)
   })
 
-  it("keeps a terminal's own menu unlabelled, where every row is already the terminal's", async () => {
+  it("heads a terminal's own menu with the same word as the group in an agent's", async () => {
     render(
       <PaneMenu
         subject={{
@@ -311,7 +314,219 @@ describe("an agent's menu over one of its companion terminals", () => {
     )
     await openFrom(screen.getByLabelText("Terminal actions"))
     expect(labels().some((t) => t?.includes("Close…"))).toBe(true)
-    expect(screen.queryByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeNull()
+    expect(screen.getByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeTruthy()
+  })
+})
+
+// EVERY GROUP HAS A HEADING. The agent's body is seven groups and each says what
+// it is about, in menu order; a group that renders nothing renders no heading.
+describe("the headings of the agent's menu", () => {
+  const ORDER = [
+    PANE_INPUT_GROUP_LABEL,
+    AGENT_MENU_GROUP_LABELS.tabsAndProject,
+    AGENT_MENU_GROUP_LABELS.running,
+    AGENT_MENU_GROUP_LABELS.agent,
+    AGENT_MENU_GROUP_LABELS.startup,
+    AGENT_MENU_GROUP_LABELS.worktree,
+    AGENT_MENU_GROUP_LABELS.remove,
+  ]
+
+  // The group labels, in document order, as the primitive paints them.
+  function headings() {
+    return Array.from(
+      document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
+    ).map((el) => el.textContent)
+  }
+
+  function standaloneSession(): SessionView {
+    return {
+      ...session(),
+      workspace: {
+        kind: "folder",
+        folder_path: "/home/u/notes",
+        folder_label: "~/notes",
+        repo_status: { kind: "not_a_repository" },
+      },
+    } as unknown as SessionView
+  }
+
+  it("heads every group, in order", async () => {
+    registerPaneInputGroup("s1", {
+      surfaceSwitch: true,
+      composeSurface: false,
+      keysToggle: false,
+    })
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={target}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(headings()).toEqual(ORDER)
+  })
+
+  it("drops the heading of a group that renders nothing", async () => {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: standaloneSession() }}
+        pane={target}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    // No input published and a folder has no startup command: neither heading.
+    expect(headings()).toEqual(
+      ORDER.filter(
+        (h) => h !== PANE_INPUT_GROUP_LABEL && h !== AGENT_MENU_GROUP_LABELS.startup,
+      ),
+    )
+  })
+
+  // The sidebar row is a fourth anchor on the SAME body, so it cannot drift into
+  // a smaller menu than the header's.
+  it("is item for item the menu the sidebar row opens", async () => {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={target}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    const header = { items: labels(), headings: headings() }
+    cleanup()
+    render(
+      <DropdownMenu>
+        <DropdownMenuTrigger>row</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <PaneMenuBody
+            subject={{ kind: "agent", session: session() }}
+            settingsDrill={false}
+          />
+        </DropdownMenuContent>
+      </DropdownMenu>,
+    )
+    await openFrom(screen.getByText("row"))
+    expect({ items: labels(), headings: headings() }).toEqual(header)
+  })
+})
+
+// THE INPUT GROUP'S ROWS. The pane's answer decides them; the width decides only
+// where the terminal-keys toggle is drawn, so it is in exactly one place.
+describe("the input group's rows", () => {
+  const pane = (over: Partial<Parameters<typeof registerPaneInputGroup>[1]>) =>
+    registerPaneInputGroup("s1", {
+      surfaceSwitch: true,
+      composeSurface: false,
+      keysToggle: true,
+      ...over,
+    })
+
+  async function openHeader() {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={target}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+  }
+
+  it("offers the way to direct typing while the box is up, and the way back while it is not", async () => {
+    pane({ composeSurface: true })
+    await openHeader()
+    expect(labels()).toContain("Type directly in the terminal")
+    expect(labels()).not.toContain("Use virtual input")
+    cleanup()
+    pane({ composeSurface: false })
+    await openHeader()
+    expect(labels()).toContain("Use virtual input")
+    expect(labels()).not.toContain("Type directly in the terminal")
+  })
+
+  it("carries no switch where the setting has decided", async () => {
+    pane({ surfaceSwitch: false })
+    await openHeader()
+    expect(labels()).not.toContain("Use virtual input")
+    expect(labels()).not.toContain("Type directly in the terminal")
+  })
+
+  it("carries the keys row on a computer, reading Show or Hide by state", async () => {
+    pane({})
+    await openHeader()
+    expect(labels()).toContain("Hide terminal keys")
+    cleanup()
+    mockState = {
+      ...makeState(false),
+      bootstrap: { ...makeState(false).bootstrap, mobile_accessory_bar: false },
+    } as unknown as DuxState
+    await openHeader()
+    expect(labels()).toContain("Show terminal keys")
+  })
+
+  it("leaves the keys row to the action cluster on a phone", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+    pane({})
+    await openHeader()
+    expect(labels()).not.toContain("Show terminal keys")
+    expect(labels()).not.toContain("Hide terminal keys")
+    expect(labels()).toContain("Use virtual input")
+  })
+
+  // A companion terminal's pane publishes under the TERMINAL's id while the
+  // menu over it is the agent's, so the group is read from the pane on screen
+  // and a sibling pane's answer says nothing about it.
+  it("reads the pane on screen over a companion terminal, not a sibling's", async () => {
+    pane({}) // the agent's own tab, "s1": not the pane on screen
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t7",
+          owner: { kind: "session", sessionId: "s1" },
+        }}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(labels()).not.toContain("Use virtual input")
+    cleanup()
+    registerPaneInputGroup("t7", {
+      surfaceSwitch: true,
+      composeSurface: false,
+      keysToggle: false,
+    })
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t7",
+          owner: { kind: "session", sessionId: "s1" },
+        }}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(labels()).toContain("Use virtual input")
+  })
+
+  it("renders nothing for a pane that published nothing, as a non-owner does", async () => {
+    await openHeader()
+    expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
   })
 })
 

@@ -154,23 +154,28 @@ describe("the silhouette, read back as geometry", () => {
     expect(Math.max(...ys)).toBeLessThan(shape?.height ?? 0)
   })
 
-  it("lays its own fill under every stroke pixel on the band's hairline", () => {
-    // The stroke and the band's hairline are both the translucent border
-    // colour, so wherever the stroke runs over a bare hairline the two stack
-    // into a brighter line. The hairline is the 1px row the flap's top sits on
-    // (`-top-px`), which in SVG units starts FLAP_BLEED down.
-    const shape = buildFlapShape({ width: 180, height: 50 })
-    const fill = shape?.fill ?? ""
-    const width = shape?.width ?? 0
-    const inHairline = FLAP_BLEED + 0.75
-    const belowHairline = FLAP_BLEED + 1.25
-    // The overhangs, where the stroke lies flat along the hairline.
-    expect(filled(fill, 1, inHairline)).toBe(true)
-    expect(filled(fill, width - 1, inHairline)).toBe(true)
-    // Never past it: below the hairline is the terminal.
-    expect(filled(fill, 1, belowHairline)).toBe(false)
-    expect(filled(fill, width - 1, belowHairline)).toBe(false)
-  })
+  // The cluster's width is whatever its controls add up to, so the seam fix has
+  // to hold at the widths a keys button and a wider count produce, fractional
+  // ones included (a device pixel ratio that does not divide the layout).
+  for (const bodyWidth of [180, 222, 222.5]) {
+    it(`lays its own fill under every stroke pixel on the band's hairline at ${bodyWidth}px`, () => {
+      // The stroke and the band's hairline are both the translucent border
+      // colour, so wherever the stroke runs over a bare hairline the two stack
+      // into a brighter line. The hairline is the 1px row the flap's top sits on
+      // (`-top-px`), which in SVG units starts FLAP_BLEED down.
+      const shape = buildFlapShape({ width: bodyWidth, height: 50 })
+      const fill = shape?.fill ?? ""
+      const width = shape?.width ?? 0
+      const inHairline = FLAP_BLEED + 0.75
+      const belowHairline = FLAP_BLEED + 1.25
+      // The overhangs, where the stroke lies flat along the hairline.
+      expect(filled(fill, 1, inHairline)).toBe(true)
+      expect(filled(fill, width - 1, inHairline)).toBe(true)
+      // Never past it: below the hairline is the terminal.
+      expect(filled(fill, 1, belowHairline)).toBe(false)
+      expect(filled(fill, width - 1, belowHairline)).toBe(false)
+    })
+  }
 
   it("strokes its sides where the pill's CSS border draws them", () => {
     // The capsule that lands on this shape is outlined by a 1px CSS border,

@@ -189,8 +189,9 @@ describe("terminal-keys bar visibility", () => {
     )
   })
 
-  // Restoring is the same write as hiding: the input ⋯ menu's item names the
-  // direction it will move the bar in and writes the same field either way.
+  // Restoring is the same write as hiding: the top menu's row and the phone's
+  // cluster button name the direction they will move the bar in and write the
+  // same field either way.
   it("restores the bar through the same write that hid it", async () => {
     const mod = await loadStore()
     await mod.setAccessoryBarVisibility(false)

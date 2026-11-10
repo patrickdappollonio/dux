@@ -355,32 +355,3 @@ describe("ComposeBar hardware key forwarding", () => {
     expect(notPrevented).toBe(true)
   })
 })
-
-describe("ComposeBar leading slot", () => {
-  it("renders nothing there unless the parent supplies it", () => {
-    render(<Harness />)
-    expect(screen.queryByTestId("leading")).toBeNull()
-  })
-
-  // The bar is presentational: it does not know what the leading control IS
-  // (in production it is the input ⋯ menu, always present rather than
-  // conditional), only where it goes and that activating it must not send.
-  it("renders the parent's control opposite Send, and a tap on it does not send", () => {
-    const onLeading = vi.fn()
-    render(
-      <ComposeBar
-        value=""
-        onChange={() => {}}
-        onSend={onSend}
-        leading={
-          <button type="button" data-testid="leading" onClick={onLeading}>
-            menu
-          </button>
-        }
-      />,
-    )
-    fireEvent.click(screen.getByTestId("leading"))
-    expect(onLeading).toHaveBeenCalledTimes(1)
-    expect(onSend).not.toHaveBeenCalled()
-  })
-})

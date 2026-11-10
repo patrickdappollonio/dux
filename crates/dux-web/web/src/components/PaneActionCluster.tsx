@@ -1,4 +1,4 @@
-import { Diff, Maximize2, Minimize2 } from "lucide-react"
+import { Diff, Keyboard, KeyboardOff, Maximize2, Minimize2 } from "lucide-react"
 import type * as React from "react"
 import { useLayoutEffect, useRef, type ReactNode } from "react"
 
@@ -6,16 +6,25 @@ import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { keysToggleLabel, usePaneInputGroup } from "@/lib/paneInputGroup"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { armTheaterToggleFocus } from "@/hooks/use-theater"
-import { openChangedFiles, toggleTheater, useDux } from "@/lib/store"
+import {
+  mobileAccessoryBarVisible,
+  openChangedFiles,
+  setAccessoryBarVisibility,
+  toggleTheater,
+  useDux,
+} from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 import { swapTheaterGlyphs } from "./theaterFlightParts"
 
 // The pane's one action cluster, wherever it is painted: the theater toggle,
-// Macros, the changed-file count where an agent has one, and the surface `⋯`.
+// Macros, the changed-file count where an agent has one, the terminal-keys
+// toggle where the pane has a key row on offer, and the surface `⋯`.
 // The phone's docked flap renders it, and so does the floating theater pill on
 // both form factors, because the detach animation flies one into the other as a
 // single object.
@@ -57,6 +66,7 @@ export function PaneActionCluster({
       <TheaterMorphButton buttonRef={theaterRef} />
       <MacroPopover variant="pill" target={target} />
       <ChangesCountButton sessionId={sessionId} />
+      <KeysToggleButton target={target} />
       {ellipsis}
     </>
   )
@@ -158,6 +168,37 @@ function ChangesCountButton({ sessionId }: { sessionId: string | undefined }) {
       >
         <Diff />
         <span className="text-sm">{summary.count}</span>
+      </Button>
+    </SimpleTooltip>
+  )
+}
+
+// The terminal-keys show/hide toggle, on a phone only: a computer carries the
+// same toggle as a row of the top menu's Input group, so each width has it in
+// exactly one place. It stays on offer while the keys are hidden, because
+// hiding them must never take away the way to show them again. Present exactly
+// while the pane under this cluster publishes a key row for this device, which
+// it does only for the input's owner.
+function KeysToggleButton({ target }: { target: SelectedTarget }) {
+  const isMobile = useIsMobile()
+  const duxState = useDux()
+  const group = usePaneInputGroup([
+    target.kind === "agent" ? target.tabId : target.terminalId,
+  ])
+  if (!isMobile || !group?.keysToggle) return null
+  const visible = mobileAccessoryBarVisible(duxState)
+  const label = keysToggleLabel(visible)
+  return (
+    <SimpleTooltip content={label}>
+      <Button
+        variant="ghost"
+        size="icon"
+        data-testid="pane-keys-toggle"
+        className={CLUSTER_BUTTON}
+        aria-label={label}
+        onClick={() => void setAccessoryBarVisibility(!visible)}
+      >
+        {visible ? <KeyboardOff /> : <Keyboard />}
       </Button>
     </SimpleTooltip>
   )

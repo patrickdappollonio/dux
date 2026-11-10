@@ -1116,28 +1116,28 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     } as unknown as Partial<DuxState>)
   }
 
-  it("offers Hide terminal keys on the terminal screen, and nothing for the top bar", () => {
+  it("offers Hide terminal keys as a button in the flap, never as a menu row, and nothing for the top bar", () => {
     mockState = terminalState()
     registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
+    expect(screen.getByLabelText("Hide terminal keys")).toBeTruthy()
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
+    expect(screen.queryByText("Hide terminal keys")).toBeNull()
     // Theater mode is the one way to hide the phone's chrome, so this menu
     // carries no second flow for it.
     expect(screen.queryByText("Hide top bar")).toBeNull()
   })
 
-  // NEVER INERT, and never DOUBLED: the pane publishes the keys row only while
-  // it has no bottom bar of its own carrying it, so a menu whose pane says
-  // nothing offers nothing. The item used to render on a fine-pointer laptop
-  // and do nothing at all when pressed.
+  // NEVER INERT: the pane publishes the keys row only where a key row is on
+  // offer for this device, so a flap whose pane says nothing has no button. The
+  // control used to render on a fine-pointer laptop and do nothing when pressed.
   it("drops the keys toggle when the pane does not offer it", () => {
     media.set(COARSE_POINTER_QUERY, false)
     mockState = terminalState()
     registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: false })
     render(<MobileShell />)
+    expect(screen.queryByLabelText("Hide terminal keys")).toBeNull()
     fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.queryByText("Hide terminal keys")).toBeNull()
     // The rest of the menu is still there, so this is a dropped ITEM rather
     // than a menu that failed to open.
     expect(screen.getByText("New agent tab…")).toBeTruthy()
@@ -1154,16 +1154,14 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     })
     registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
-    fireEvent.click(screen.getByLabelText("Session actions"))
-    expect(screen.getByText("Show terminal keys")).toBeTruthy()
+    expect(screen.getByLabelText("Show terminal keys")).toBeTruthy()
   })
 
   it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = terminalState()
     registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
-    fireEvent.click(screen.getByLabelText("Session actions"))
-    fireEvent.click(screen.getByText("Hide terminal keys"))
+    fireEvent.click(screen.getByLabelText("Hide terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/config/settings",
@@ -1201,11 +1199,11 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
     // than every sibling item in the same open menu. Measured against a bar
     // toggle, which is a plain shared item and therefore the reference height.
     mockState = terminalState()
-    registerPaneInputGroup("s1", { surfaceSwitch: false, keysToggle: true })
+    registerPaneInputGroup("s1", { surfaceSwitch: true, keysToggle: false })
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     const item = screen
-      .getByText("Hide terminal keys")
+      .getByText("Use virtual input")
       .closest('[role="menuitem"]')!
     const subTriggers = [
       screen.getByText("New agent tab…").closest('[role="menuitem"]')!,
@@ -1344,29 +1342,42 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
     expect(screen.getByLabelText("Terminal actions")).toBeTruthy()
   })
 
-  it("offers the keys quick toggle, exactly as the agent screen words it", () => {
+  it("offers the keys toggle in the flap, exactly as the agent screen words it", () => {
     mockState = projectTerminalState()
     registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
+    expect(screen.getByLabelText("Hide terminal keys")).toBeTruthy()
     fireEvent.click(screen.getByLabelText("Terminal actions"))
-    expect(screen.getByText("Hide terminal keys")).toBeTruthy()
     expect(screen.queryByText("Hide top bar")).toBeNull()
+  })
+
+  // The bottom `⋯` is gone, so the switch has no home but the terminal's own
+  // flap menu, and it is there on a terminal screen as on an agent's.
+  it("carries the typing-surface switch in the terminal's own flap menu", () => {
+    mockState = projectTerminalState()
+    registerPaneInputGroup("pt-1", {
+      surfaceSwitch: true,
+      composeSurface: true,
+      keysToggle: false,
+    })
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Terminal actions"))
+    expect(screen.getByText("Type directly in the terminal")).toBeTruthy()
+    expect(screen.queryByLabelText("Input options")).toBeNull()
   })
 
   it("labels flip to Show when the keys bar is already hidden", () => {
     mockState = projectTerminalState({ mobile_accessory_bar: false })
     registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
-    fireEvent.click(screen.getByLabelText("Terminal actions"))
-    expect(screen.getByText("Show terminal keys")).toBeTruthy()
+    expect(screen.getByLabelText("Show terminal keys")).toBeTruthy()
   })
 
   it("tapping Hide terminal keys persists through the generic settings PATCH", () => {
     mockState = projectTerminalState()
     registerPaneInputGroup("pt-1", { surfaceSwitch: false, keysToggle: true })
     render(<MobileShell />)
-    fireEvent.click(screen.getByLabelText("Terminal actions"))
-    fireEvent.click(screen.getByText("Hide terminal keys"))
+    fireEvent.click(screen.getByLabelText("Hide terminal keys"))
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     expect(fetchSpy).toHaveBeenCalledWith(
       "/api/v1/config/settings",

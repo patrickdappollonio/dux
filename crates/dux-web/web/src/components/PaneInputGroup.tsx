@@ -5,10 +5,8 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
 import { useAttachCapability } from "@/lib/attachRegistry"
-import {
-  paneInputGroupHasItems,
-  usePaneInputGroup,
-} from "@/lib/paneInputGroup"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { usePaneInputGroup } from "@/lib/paneInputGroup"
 
 /// The label every surface prints over the group. One constant so the phone
 /// sheet, the desktop pane menu and the floating pill cannot name it three
@@ -19,20 +17,17 @@ export const PANE_INPUT_GROUP_LABEL = "Input"
 // flap's `⋯` on a phone, the pane header's on a computer, the floating pill's in
 // theater, the sidebar row's as a fourth anchor on the same body.
 //
-// "Type directly in the terminal" removes the whole bottom bar and the input `⋯`
-// with it, so the way back cannot live down there; "Attach a file…" joins it
-// because an upload is an input act with no other permanent home. A computer
-// puts this on the pane header rather than the cog beside it, because the cog's
-// menu is the app's and none of these rows is about the app.
-//
-// The group label stays even with one item in it: these rows are about the
-// pane's typing surface, and unlabelled at the top of an agent's actions they
-// read as two more agent actions.
+// It is the one permanent home of the virtual input's controls: the typing
+// surface switch in both directions, and on a computer the terminal-keys
+// toggle (a phone has that as a button in the action cluster). "Attach a file…"
+// joins it because an upload is an input act with no other permanent home. A
+// computer puts this on the pane header rather than the cog beside it, because
+// the cog's menu is the app's and none of these rows is about the app.
 //
 // What is in it is the pane's answer, published through `paneInputGroup`: only
-// the pane knows whether it owns the input and which surfaces are up. The attach
-// act is borrowed from that same pane's capability, so the file travels through
-// its already-gated socket; both halves have to be there.
+// the pane knows whether it owns the input and which surfaces are on offer. The
+// attach act is borrowed from that same pane's capability, so the file travels
+// through its already-gated socket; both halves have to be there.
 export function PaneInputGroup({
   ptyIds,
   /// A separator AFTER the group, for a menu that continues below it. Every
@@ -47,9 +42,14 @@ export function PaneInputGroup({
   trailingSeparator?: boolean
 }) {
   const gates = usePaneInputGroup(ptyIds)
+  const isMobile = useIsMobile()
   const attachToPane = useAttachCapability(ptyIds)
   const attach = attachToPane !== null
-  if (!attach && !paneInputGroupHasItems(gates)) return null
+  // A phone's keys toggle is a button in the action cluster, so the row would be
+  // the same control in two places.
+  const keysToggle = (gates?.keysToggle ?? false) && !isMobile
+  const surfaceSwitch = gates?.surfaceSwitch ?? false
+  if (!attach && !surfaceSwitch && !keysToggle) return null
   return (
     <>
       {/* A REAL GROUP, not a label with rows under it: the primitive's label
@@ -59,14 +59,9 @@ export function PaneInputGroup({
         <DropdownMenuLabel>{PANE_INPUT_GROUP_LABEL}</DropdownMenuLabel>
         <InputMenuItems
           attach={attach}
-          gates={{
-            surfaceSwitch: gates?.surfaceSwitch ?? false,
-            keysToggle: gates?.keysToggle ?? false,
-          }}
-          // The top menu only ever offers the way BACK to the virtual input:
-          // the other direction is the bottom `⋯`, which exists while ANY row
-          // under the terminal does and leaves with the last of them.
-          composeSurface={false}
+          surfaceSwitch={surfaceSwitch}
+          composeSurface={gates?.composeSurface ?? false}
+          keysToggle={keysToggle}
           onAttach={() => attachToPane?.()}
         />
       </DropdownMenuGroup>

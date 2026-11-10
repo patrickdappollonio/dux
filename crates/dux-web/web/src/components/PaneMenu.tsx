@@ -26,10 +26,6 @@ import type { SessionView } from "@/lib/types"
 export const PANE_MENU_AGENT_LABEL = "Session actions"
 export const PANE_MENU_TERMINAL_LABEL = "Terminal actions"
 
-/// What the terminal-scoped group is called inside an agent's menu, when the
-/// pane on screen is one of that agent's companion terminals.
-export const PANE_MENU_TERMINAL_GROUP_LABEL = "Terminal"
-
 /// The pty ids the INPUT group is read under. A surface over a pane asks for that
 /// pane's pty; a sidebar row falls back to every pty its subject could be mounted as.
 function paneInputPtyIds(
@@ -154,7 +150,6 @@ export function PaneMenuBody({
         <TerminalActionsMenu
           terminalId={pane.terminalId}
           owner={pane.owner}
-          label={PANE_MENU_TERMINAL_GROUP_LABEL}
         />
       </>
     ) : null

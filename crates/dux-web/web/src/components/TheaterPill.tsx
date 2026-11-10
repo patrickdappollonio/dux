@@ -95,7 +95,7 @@ export function TheaterPill({
   usePillHint()
   const sessionId = session?.id
   // The PTY behind the pane this pill is painted over, keyed the way the shells
-  // key the pane, so the input menu read is that pane's and not the last registered.
+  // key the pane, so the input group read is that pane's and not the last registered.
   const paneId = target.kind === "agent" ? target.tabId : target.terminalId
   // What the `⋯` is about, resolved as the docked flap resolves it: the agent
   // when there is one, otherwise the terminal on screen.

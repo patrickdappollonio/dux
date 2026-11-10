@@ -10,7 +10,6 @@ import {
   composeBarShown,
   insertIntoComposeDraft,
   inactiveCursorStyle,
-  bottomBarSurvivesDirect,
   terminalKeysApply,
   inputMenuSurfaceSwitchOffered,
   composeBoxHeight,
@@ -363,23 +362,6 @@ describe("terminalKeysApply", () => {
     expect(state("compose", false)).toEqual({ box: true, keys: false })
     expect(state("direct", true)).toEqual({ box: false, keys: false })
     expect(state(null, true)).toEqual({ box: false, keys: false })
-  })
-})
-
-describe("bottomBarSurvivesDirect", () => {
-  // What decides whether the one-time way-back hint has anything to say: with a
-  // key row still under the terminal, the bottom `⋯` is visibly carrying the
-  // way back and a toast pointing at another menu is noise.
-  it("survives on a phone whose keys are on", () => {
-    expect(bottomBarSurvivesDirect("auto", true, true)).toBe(true)
-  })
-
-  it("does not survive once the keys are hidden by preference", () => {
-    expect(bottomBarSurvivesDirect("auto", true, false)).toBe(false)
-  })
-
-  it("does not survive on a fine pointer, whose keys go with the box", () => {
-    expect(bottomBarSurvivesDirect("auto", false, true)).toBe(false)
   })
 })
 

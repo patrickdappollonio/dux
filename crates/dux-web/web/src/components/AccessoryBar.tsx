@@ -31,9 +31,6 @@ interface AccessoryBarProps {
   alt: boolean
   onToggleCtrl: () => void
   onToggleAlt: () => void
-  // The input ⋯ menu, when THIS bar is the bottom-most input row. The parent owns
-  // the anchor matrix and hands over a node, absent when another row carries it.
-  inputMenu?: React.ReactNode
 }
 
 // Every bar button preventDefaults on pointerdown, so the press never shifts focus
@@ -125,7 +122,6 @@ export function AccessoryBar({
   alt,
   onToggleCtrl,
   onToggleAlt,
-  inputMenu,
 }: AccessoryBarProps) {
   // Two stacked rows, gapped so a fat-finger tap on one does not catch the other.
   // Safe-area insets are NOT applied here: the mobile root pads its own bottom.
@@ -148,30 +144,6 @@ export function AccessoryBar({
         <KeyButton ariaLabel="Insert newline" onActivate={onNewline}>
           <ShiftEnterIcon />
         </KeyButton>
-        {/* THE INPUT ⋯, when this row is the bottom-most input row. It sits
-            behind its own divider on the misclick-safe-spacing rule: opening a
-            menu out from under a thumb aiming for ⇧↵ is a different kind of
-            surprise from a mistyped key, and the divider's own margins are the
-            clear space that makes the two cells hard to confuse.
-
-            TOUCH FLOOR, per axis: the trigger keeps `size-10` on BOTH axes
-            (40px square), so nothing here is an exemption. Nothing in the row
-            carries a min-width floor any more: the only cell that ever needed
-            one was the "Box"/"Direct" typing-surface cap, whose label did not
-            fit an even flex split, and that control is gone from the row (the
-            same switch lives in this very menu, which says what it does). The
-            five keys that remain are short mono labels and icons sharing what
-            the trigger leaves, floored at the 40px touch target by `h-10` on
-            the cross axis. */}
-        {inputMenu ? (
-          <>
-            <div
-              aria-hidden="true"
-              className="mx-1.5 w-px shrink-0 self-stretch bg-border"
-            />
-            {inputMenu}
-          </>
-        ) : null}
       </div>
       {/* Row two: navigation. The four cursor arrows (sent to the program, keep
           focus) and PgUp/PgDn (scroll the xterm viewport, blur to dismiss the

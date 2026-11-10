@@ -435,6 +435,42 @@ describe("the cluster the pill carries on a phone", () => {
     expect(toggle.getAttribute("aria-pressed")).toBe("true")
   })
 
+  // The flight is a pure translation only while both ends are the same object,
+  // so the keys button has to be in the same slot on the pill as on the flap.
+  it("carries the keys toggle between the count and the menu, as the flap does", async () => {
+    const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+      "@/lib/paneInputGroup"
+    )
+    resetPaneInputGroups()
+    registerPaneInputGroup("s1", {
+      surfaceSwitch: false,
+      composeSurface: false,
+      keysToggle: true,
+    })
+    const wide = window.innerWidth
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+    mockState = makeState(true)
+    render(<MobileShell />)
+    Object.defineProperty(window, "innerWidth", {
+      value: wide,
+      configurable: true,
+    })
+    const keys = screen.getByTestId("pane-keys-toggle")
+    const before = screen.getByLabelText(/changed files$/)
+    const after = screen.getByLabelText("Session actions")
+    expect(
+      before.compareDocumentPosition(keys) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      keys.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(screen.getByTestId("theater-pill").contains(keys)).toBe(true)
+    resetPaneInputGroups()
+  })
+
   it("keeps the grip, at the width the flight grows it from nothing", () => {
     mockState = makeState(true)
     render(<MobileShell />)

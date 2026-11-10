@@ -16,6 +16,7 @@ import type { AgentTabView, SessionView } from "@/lib/types"
 let mockState: DuxState
 const toggleTheaterMock = vi.fn()
 const openChangedFilesMock = vi.fn()
+const setAccessoryBarVisibilityMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -23,6 +24,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     toggleTheater: (...a: unknown[]) => toggleTheaterMock(...a),
     openChangedFiles: (...a: unknown[]) => openChangedFilesMock(...a),
+    setAccessoryBarVisibility: (...a: unknown[]) =>
+      setAccessoryBarVisibilityMock(...a),
   }
 })
 
@@ -56,6 +59,9 @@ function installBootStubs() {
 }
 installBootStubs()
 const { MobileActionFlap } = await import("./MobileActionFlap")
+const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+  "@/lib/paneInputGroup"
+)
 
 function session(): SessionView {
   return {
@@ -136,6 +142,8 @@ beforeEach(() => {
   installBootStubs()
   toggleTheaterMock.mockReset()
   openChangedFilesMock.mockReset()
+  setAccessoryBarVisibilityMock.mockReset()
+  resetPaneInputGroups()
   mockState = makeState()
 })
 
@@ -338,6 +346,122 @@ describe("the docked action flap over a terminal", () => {
     // gets: the shape follows the cluster, which is the whole reason it is
     // generated rather than drawn once.
     expect(svg?.getAttribute("viewBox")).toBe("0 0 180 53")
+  })
+})
+
+// THE TERMINAL-KEYS TOGGLE, a phone's home for it (a computer has a row in the
+// top menu's Input group instead). It is there exactly while the pane under the
+// flap publishes a key row on offer, which only the input's owner does, and it
+// stays while the keys are hidden because that is the way to show them again.
+describe("the keys toggle in the docked flap", () => {
+  const desktopWidth = window.innerWidth
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+
+  const phone = () =>
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  const publish = (keysToggle: boolean, id = "s1") =>
+    registerPaneInputGroup(id, {
+      surfaceSwitch: false,
+      composeSurface: false,
+      keysToggle,
+    })
+  const flap = () =>
+    render(
+      <MobileActionFlap
+        target={target}
+        subject={{ kind: "agent", session: session() }}
+        band="strip"
+      />,
+    )
+
+  const cases = [
+    { published: true, barVisible: true, label: "Hide terminal keys" },
+    { published: true, barVisible: false, label: "Show terminal keys" },
+    { published: false, barVisible: true, label: null },
+    { published: false, barVisible: false, label: null },
+  ]
+  for (const { published, barVisible, label } of cases) {
+    it(`${label ?? "is absent"} when ${published ? "offered" : "not offered"} and the bar is ${barVisible ? "up" : "hidden"}`, () => {
+      phone()
+      mockState = makeState({
+        bootstrap: {
+          title: "dux",
+          mobile_accessory_bar: barVisible,
+        } as DuxState["bootstrap"],
+      })
+      publish(published)
+      flap()
+      const button = screen.queryByTestId("pane-keys-toggle")
+      if (label === null) {
+        expect(button).toBeNull()
+        return
+      }
+      expect(button?.getAttribute("aria-label")).toBe(label)
+      // On the same 40px floor as its neighbours.
+      expect(button?.className).toContain("size-10")
+    })
+  }
+
+  it("is on a computer's top menu instead, never here", () => {
+    publish(true)
+    flap()
+    expect(screen.queryByTestId("pane-keys-toggle")).toBeNull()
+  })
+
+  it("sits after the changes count and before the menu", () => {
+    phone()
+    publish(true)
+    flap()
+    const order = [
+      screen.getByTestId("pane-changes-count"),
+      screen.getByTestId("pane-keys-toggle"),
+      screen.getByLabelText("Session actions"),
+    ]
+    expect(
+      order[0].compareDocumentPosition(order[1]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(
+      order[1].compareDocumentPosition(order[2]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("writes the preference through the one setter, flipping it", () => {
+    phone()
+    publish(true)
+    flap()
+    fireEvent.click(screen.getByTestId("pane-keys-toggle"))
+    expect(setAccessoryBarVisibilityMock).toHaveBeenCalledExactlyOnceWith(false)
+  })
+
+  it("reads the pane's answer under the terminal's own id over a terminal", () => {
+    phone()
+    publish(true, "t1")
+    render(
+      <MobileActionFlap
+        target={{
+          kind: "terminal",
+          terminalId: "t1",
+          owner: { kind: "standalone" },
+        }}
+        subject={{
+          kind: "terminal",
+          terminalId: "t1",
+          owner: { kind: "standalone" },
+        }}
+        band="plain"
+      />,
+    )
+    expect(screen.getByTestId("pane-keys-toggle")).toBeTruthy()
   })
 })
 

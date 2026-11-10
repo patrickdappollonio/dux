@@ -218,8 +218,8 @@ export function useTheaterToggleFocusWhen(
  * also what retires the token, which would otherwise stay armed for the whole
  * theater session and pull focus onto a later, unrelated flap.
  *
- * Unarmed, it takes focus only when nothing else holds it, so entering from the
- * input menu or from a shared link must not pull focus out of a terminal the
+ * Unarmed, it takes focus only when nothing else holds it, so entering from a
+ * menu or from a shared link must not pull focus out of a terminal the
  * user is about to type into.
  */
 export function useTheaterPillFocus(

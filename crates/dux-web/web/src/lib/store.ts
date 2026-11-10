@@ -880,8 +880,8 @@ export interface DuxState {
   // Runtime-only and not persisted: this reports the split, never decides it.
   changesPanePercent: number
   // Optimistic override for the touch terminal-keys bar. `null` follows the
-  // persisted config (`bootstrap.mobile_accessory_bar`); the input ⋯ menu's
-  // quick toggle sets an explicit bool for instant feedback. Reconciled
+  // persisted config (`bootstrap.mobile_accessory_bar`); the top menu's and the
+  // action cluster's keys toggle set an explicit bool for instant feedback. Reconciled
   // against the next bootstrap exactly like `changesPaneOverride` above, and
   // rolled back (with a toast) when the settings PATCH fails.
   mobileAccessoryBarOverride: boolean | null

@@ -216,7 +216,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // the copy says touch: the keys follow the pointer, not the layout.
         label: "Touch terminal keys",
         description:
-          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the input ⋯ menu beside the message box, from the terminal's own ⋯ menu when there is no typing bar left to hold one, or from this Preferences dialog.",
+          "On a touch device, shows the terminal-keys bar (Esc, Tab, Ctrl, Alt and the arrows) above the compose box, in the wide layout as well as on a phone. Hide it to give those rows to the terminal; bring it back from the keys button in a phone's action cluster, from the Input group of the pane's ⋯ menu on a computer, or from this Preferences dialog.",
         surface: "web",
         control: { kind: "bool" },
         default: true,

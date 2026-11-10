@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import {
   paneInputGroupFor,
-  paneInputGroupHasItems,
   registerPaneInputGroup,
   resetPaneInputGroups,
 } from "./paneInputGroup"
@@ -12,26 +11,10 @@ import {
 
 afterEach(() => resetPaneInputGroups())
 
-describe("paneInputGroupHasItems", () => {
-  // The caller ORs its own attach in, so a group with neither of the pane's own
-  // rows is nothing to put a label over.
-  it("is false for an absent group and for one with no rows", () => {
-    expect(paneInputGroupHasItems(null)).toBe(false)
-    expect(
-      paneInputGroupHasItems({ surfaceSwitch: false, keysToggle: false }),
-    ).toBe(false)
-    expect(
-      paneInputGroupHasItems({ surfaceSwitch: true, keysToggle: false }),
-    ).toBe(true)
-    expect(
-      paneInputGroupHasItems({ surfaceSwitch: false, keysToggle: true }),
-    ).toBe(true)
-  })
-})
-
 describe("the pane input-group registry", () => {
   const gates = (surfaceSwitch: boolean) => ({
     surfaceSwitch,
+    composeSurface: false,
     keysToggle: false,
   })
 

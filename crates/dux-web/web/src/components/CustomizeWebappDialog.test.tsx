@@ -300,7 +300,7 @@ describe("CustomizeWebappDialog", () => {
   })
 
   // The terminal-keys row rides the GENERIC settings PATCH but still carries a
-  // store-side optimistic override (the input ⋯ menu's quick toggle), so like
+  // store-side optimistic override (the keys toggle in the top menu and the phone's action cluster), so like
   // the Changes-pane row its baseline must be the override-aware selector.
   // Read from the raw bootstrap, the switch would show a stale value AND
   // `buildWrites` would treat a toggle back to that stale value as a no-op and

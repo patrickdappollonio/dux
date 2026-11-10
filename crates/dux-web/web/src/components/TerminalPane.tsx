@@ -16,9 +16,7 @@ import {
   ComposeBar,
   TERMINAL_PLACEHOLDER,
 } from "@/components/ComposeBar"
-import { InputMenu } from "@/components/InputMenu"
 import {
-  bottomBarSurvivesDirect,
   composeBarMode,
   composeBarShown,
   inactiveCursorStyle,
@@ -38,7 +36,6 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { useFilePicker } from "@/hooks/use-file-picker"
-import { inputMenuHasItems, type InputMenuGates } from "@/lib/inputMenu"
 import { ESC, TAB } from "@/lib/termkeys"
 import {
   mobileAccessoryBarVisible,
@@ -131,7 +128,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeMode,
     composeBarEnabled,
     keysApply,
-    directLeavesNothingBelow,
     accessoryBarVisible,
     session,
     hasOutput,
@@ -358,8 +354,6 @@ export function TerminalPane(props: TerminalPaneProps) {
   const {
     accessoryBarShown,
     composeBarShown: composeBarShownHere,
-    inputMenuGates,
-    menuHasItems,
     topInputGates,
   } = terminalInputLayout({
     isOwner,
@@ -467,14 +461,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   const {
     surfaceSwitch: topSurfaceSwitch,
     keysToggle: topKeysToggle,
+    composeSurface: topComposeSurface,
   } = topInputGates
   useEffect(() => {
     if (!isOwner) return
     return registerPaneInputGroup(id, {
       surfaceSwitch: topSurfaceSwitch,
       keysToggle: topKeysToggle,
+      composeSurface: topComposeSurface,
     })
-  }, [id, isOwner, topSurfaceSwitch, topKeysToggle])
+  }, [id, isOwner, topSurfaceSwitch, topKeysToggle, topComposeSurface])
 
   // Report the slot tab stopping cleanly with the whole agent leaving `active`:
   // the user stays on the agent and the tab rests on its idle screen. A badly
@@ -579,10 +575,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       isOwner={isOwner}
       accessoryBarShown={accessoryBarShown}
       composeBarShown={composeBarShownHere}
-      inputMenuGates={inputMenuGates}
-      menuHasItems={menuHasItems}
-      composeBarEnabled={composeBarEnabled}
-      directLeavesNothingBelow={directLeavesNothingBelow}
       input={input}
       composeInputRef={composeInputRef}
       kind={kind}
@@ -756,11 +748,6 @@ function terminalTouchSettings(
       isCoarsePointer,
       typingSurface,
     ),
-    directLeavesNothingBelow: !bottomBarSurvivesDirect(
-      composeMode,
-      isCoarsePointer,
-      mobileAccessoryBarVisible(duxState),
-    ),
     accessoryBarVisible: mobileAccessoryBarVisible(duxState),
   }
 }
@@ -781,31 +768,17 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   const accessoryBarShown =
     input.isOwner && input.keysApply && input.accessoryBarVisible
   const composeBarShown = input.isOwner && input.composeBarEnabled
-  // The bottom `⋯` lives inside the virtual input, so it carries only what is
-  // local to those rows and exists exactly while any bottom row does.
-  const bottomBarShown = accessoryBarShown || composeBarShown
-  const inputMenuGates = {
-    surfaceSwitch:
-      input.isOwner &&
-      inputMenuSurfaceSwitchOffered(input.composeMode) &&
-      bottomBarShown,
-    keysToggle: input.isOwner && input.keysApply && bottomBarShown,
-  }
-  const menuHasItems = inputMenuHasItems(inputMenuGates)
-  // The top menu's INPUT group carries a control exactly while the bottom `⋯`
-  // does not, so the same row is never in two menus at once.
+  // What the top menu's INPUT group carries for this pane. Always on offer to
+  // the owner whatever is up under the terminal, because the way back from direct
+  // typing and from hidden keys must not depend on a row that is itself gone.
   const topInputGates = {
-    surfaceSwitch:
-      input.isOwner &&
-      inputMenuSurfaceSwitchOffered(input.composeMode) &&
-      !bottomBarShown,
-    keysToggle: input.isOwner && input.keysApply && !bottomBarShown,
+    surfaceSwitch: input.isOwner && inputMenuSurfaceSwitchOffered(input.composeMode),
+    keysToggle: input.isOwner && input.keysApply,
+    composeSurface: composeBarShown,
   }
   return {
     accessoryBarShown,
     composeBarShown,
-    inputMenuGates,
-    menuHasItems,
     topInputGates,
   }
 }
@@ -1202,10 +1175,6 @@ type TerminalPaneLayoutProps = {
   isOwner: boolean
   accessoryBarShown: boolean
   composeBarShown: boolean
-  inputMenuGates: InputMenuGates
-  menuHasItems: boolean
-  composeBarEnabled: boolean
-  directLeavesNothingBelow: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
   kind: TerminalPaneProps["kind"]
@@ -1216,25 +1185,10 @@ function TerminalPaneLayout({
   isOwner,
   accessoryBarShown,
   composeBarShown,
-  inputMenuGates,
-  menuHasItems,
-  composeBarEnabled,
-  directLeavesNothingBelow,
   input,
   composeInputRef,
   kind,
 }: TerminalPaneLayoutProps) {
-  const inputMenu = (
-    <InputMenu
-      gates={inputMenuGates}
-      composeSurface={composeBarEnabled}
-      directLeavesNothingBelow={directLeavesNothingBelow}
-      // The message box is the only other row, so hiding the keys leaves nothing
-      // below exactly when the box is not up.
-      keysHideLeavesNothingBelow={!composeBarShown}
-    />
-  )
-
   return (
     <div className="flex h-full w-full flex-col bg-background">
       {pane}
@@ -1242,11 +1196,9 @@ function TerminalPaneLayout({
         <TerminalInputRows
           accessoryBarShown={accessoryBarShown}
           composeBarShown={composeBarShown}
-          menuHasItems={menuHasItems}
           input={input}
           composeInputRef={composeInputRef}
           kind={kind}
-          inputMenu={inputMenu}
         />
       ) : null}
     </div>
@@ -1256,21 +1208,17 @@ function TerminalPaneLayout({
 type TerminalInputRowsProps = {
   accessoryBarShown: boolean
   composeBarShown: boolean
-  menuHasItems: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
   kind: TerminalPaneProps["kind"]
-  inputMenu: ReactNode
 }
 
 function TerminalInputRows({
   accessoryBarShown,
   composeBarShown,
-  menuHasItems,
   input,
   composeInputRef,
   kind,
-  inputMenu,
 }: TerminalInputRowsProps) {
   return (
     <>
@@ -1285,7 +1233,6 @@ function TerminalInputRows({
           alt={input.alt}
           onToggleCtrl={input.toggleCtrl}
           onToggleAlt={input.toggleAlt}
-          inputMenu={!composeBarShown && menuHasItems ? inputMenu : undefined}
         />
       ) : null}
       {composeBarShown ? (
@@ -1298,7 +1245,6 @@ function TerminalInputRows({
           placeholder={
             kind === "agent" ? AGENT_PLACEHOLDER : TERMINAL_PLACEHOLDER
           }
-          leading={menuHasItems ? inputMenu : undefined}
         />
       ) : null}
     </>
