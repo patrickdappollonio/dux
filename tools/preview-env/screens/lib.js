@@ -208,6 +208,16 @@ async function dockTerminals(sessionId, count) {
   }
 }
 
+// A phone reopens an agent on the part this browser last left it on, so a
+// scene that showed one of its terminals earlier leaves the next scene on it.
+// Puts the screen back on the agent through its own switch.
+async function showAgent(page) {
+  await page.evaluate(() => {
+    const toggle = document.querySelector('[data-testid="pane-part-switch"]')
+    if (toggle && /^Show the agent/.test(toggle.getAttribute("aria-label") || "")) toggle.click()
+  })
+}
+
 // A capture opens a real connection to the PTY, so it arrives as a watcher and
 // the full-pane card covers the terminal until this presses its button.
 async function takeOver(page) {
@@ -1057,6 +1067,7 @@ module.exports = {
   setCaptureClip,
   setFixture,
   setSceneName,
+  showAgent,
   sleep,
   takeOver,
 }

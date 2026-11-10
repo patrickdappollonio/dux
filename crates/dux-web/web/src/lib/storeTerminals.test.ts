@@ -58,6 +58,8 @@ let reorderFail = false
 // A terminal DELETE to this exact URL is refused because somebody else is
 // attached to it.
 let attachedUrl: string | null = null
+// When set, a terminal create waits for it before answering.
+let createGate: Promise<void> | null = null
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
@@ -90,6 +92,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   }
   if (u.endsWith("/terminals")) {
     // POST create.
+    if (createGate) await createGate
     return {
       ok: true,
       status: 201,
@@ -220,6 +223,35 @@ describe("store companion-terminal lifecycle", () => {
     )
     expect(post).toBeDefined()
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+  })
+
+  it("does not open a new terminal the workspace saw end before the create answered", async () => {
+    const mod = await loadStore()
+    let release!: () => void
+    createGate = new Promise<void>((r) => {
+      release = r
+    })
+    const before = mod.getSnapshot().selectedTarget
+    try {
+      mod.createTerminal("s1")
+      // A workspace lands mid-create without the new terminal, and the server
+      // still does not list it when asked again: its shell has gone.
+      const fetchesBefore = calls.filter(([u]) => u.includes("/api/v1/workspace")).length
+      mod.eventsSocket.onEvent({ event: "sessions.changed" })
+      await vi.waitFor(() =>
+        expect(calls.filter(([u]) => u.includes("/api/v1/workspace")).length).toBe(fetchesBefore + 1),
+      )
+      await tick()
+      release()
+      await vi.waitFor(() =>
+        expect(calls.filter(([u]) => u.includes("/api/v1/workspace")).length).toBe(fetchesBefore + 2),
+      )
+      await tick()
+      await tick()
+      expect(mod.getSnapshot().selectedTarget).toEqual(before)
+    } finally {
+      createGate = null
+    }
   })
 
   it("deleteTerminal resolves the owning session and DELETEs the nested endpoint", async () => {

@@ -5854,3 +5854,172 @@ describe("the stack's overlay layer over a lone terminal", () => {
     expect(screen.queryByTestId("pane-overlay-layer")).toBeNull()
   })
 })
+
+const { PhoneAgentStack } = await import("./PhoneAgentStack")
+const { agentStackModel } = await import("./agentStackModel")
+
+// THE PHONE'S PILL rides the stack's one overlay layer over whichever part is
+// on screen, clipped to the stack's box plus the band's hairline above it,
+// withheld whole under a row-wide take-over card, and still there over a
+// dormant tab's card, which has no pane of its own.
+describe("the phone stack's overlay layer", () => {
+  const overlay = <div data-testid="pane-overlay" />
+  function phoneModel(over: { live?: boolean; terminals?: string[]; target?: "agent" | "dock" }) {
+    const session = {
+      id: "s1",
+      slot_tab_id: "s1",
+      provider: "claude",
+      status: over.live === false ? "detached" : "active",
+      // A dormant first tab whose last run failed keeps its card on sight.
+      tabs: [
+        {
+          id: "s1",
+          provider: "claude",
+          order: 0,
+          has_live_process: over.live !== false,
+          last_run_failed: over.live === false,
+        },
+      ],
+    } as unknown as Parameters<typeof agentStackModel>[0]["session"]
+    const terminals = (over.terminals ?? ["t1"]).map((id, i) => ({
+      id,
+      owner: { kind: "session", session_id: "s1" },
+      label: id,
+      working: false,
+      typing: false,
+      sort_order: i,
+    })) as unknown as Parameters<typeof agentStackModel>[0]["terminals"]
+    return agentStackModel({
+      target:
+        over.target === "dock"
+          ? { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } }
+          : { kind: "agent", sessionId: "s1", tabId: "s1" },
+      session,
+      terminals,
+      stackLayouts: {},
+      stackTerminals: {},
+      stackTabs: {},
+      memory: { layout: null, view: null, terminal: null, tab: null },
+      startedDormantTabs: [],
+      pendingSlotTab: {},
+      endedInViewTab: null,
+      pendingTerminalOrder: null,
+      alwaysShowTabStrip: false,
+      theater: true,
+      surface: "phone",
+    })
+  }
+  const stack = (model: ReturnType<typeof phoneModel>) => (
+    <PhoneAgentStack model={model} terminalEpoch={0} overlay={overlay} />
+  )
+
+  it("covers the stack's box, clipped to it and the row above, over the part on screen", async () => {
+    render(stack(phoneModel({ target: "dock" })))
+    await act(async () => {})
+    const layer = screen.getByTestId("pane-overlay-layer")
+    expect(layer.contains(screen.getByTestId("pane-overlay"))).toBe(true)
+    expect(layer.className).toContain("[clip-path:polygon(0_-1px,100%_-1px,100%_100%,0_100%)]")
+    // The layer's box is the stack's, holding both parts' boxes, the one off
+    // screen clipped below its edge.
+    const box = layer.parentElement!
+    expect(box.contains(screen.getByTestId("stack-agent-box"))).toBe(true)
+    expect(screen.getByTestId("stack-dock-box").dataset.onScreen).toBe("true")
+  })
+
+  it("is withheld whole under the take-over card a watcher gets", async () => {
+    render(stack(phoneModel({ target: "dock" })))
+    await act(async () => {})
+    for (const pty of FakePtySocket.instances) {
+      act(() => pty.onConnected("conn-self", "conn-other"))
+    }
+    expect(screen.getAllByText("Take over")).toHaveLength(1)
+    expect(screen.queryByTestId("pane-overlay-layer")).toBeNull()
+  })
+
+  it("floats over a dormant tab's card with no pane under it", async () => {
+    render(stack(phoneModel({ live: false, terminals: [] })))
+    await act(async () => {})
+    expect(screen.getByText("Start session")).toBeTruthy()
+    const layer = screen.getByTestId("pane-overlay-layer")
+    expect(layer.contains(screen.getByTestId("pane-overlay"))).toBe(true)
+    expect(layer.parentElement!.contains(screen.getByText("Start session"))).toBe(true)
+  })
+})
+
+// THE SOFT KEYBOARD on a phone shrinks the viewport in a burst of resizes as it
+// slides up. The part on screen refits once, at the size the keyboard leaves,
+// and tells its program that size once; the part off screen keeps its own box.
+describe("a phone stack under the soft keyboard", () => {
+  let observed: (() => void)[] = []
+  beforeEach(() => {
+    vi.useFakeTimers()
+    observed = []
+    const cbs = observed
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          cbs.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it("refits the part on screen once, at the final size", () => {
+    render(
+      <TerminalStack
+        parts={[
+          { kind: "agent", id: "s1", sessionId: "s1" },
+          {
+            kind: "terminal",
+            id: "t1",
+            owner: { kind: "session", sessionId: "s1" },
+            onScreen: false,
+          },
+        ]}
+      />,
+    )
+    const [agentPty] = FakePtySocket.instances
+    for (const pty of FakePtySocket.instances) {
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("seat-1", "seat-1")
+      })
+    }
+    act(() => {
+      vi.advanceTimersByTime(500)
+    })
+    agentPty.sendResize.mockClear()
+    const agentTerm = TermStub.instances[0]
+    const fitted: TermStub[] = []
+    const fit = vi.spyOn(FitStub.prototype, "fit").mockImplementation(function (this: FitStub) {
+      if (this.term) fitted.push(this.term)
+    })
+    // The keyboard sliding up: a resize every frame for a quarter second.
+    for (let i = 0; i < 15; i++) {
+      act(() => {
+        for (const cb of observed) cb()
+        vi.advanceTimersByTime(16)
+      })
+    }
+    expect(agentPty.sendResize).not.toHaveBeenCalled()
+    // Where it came to rest.
+    fit.mockImplementation(function (this: FitStub) {
+      if (!this.term) return
+      fitted.push(this.term)
+      this.term.resize(80, 18)
+    })
+    act(() => {
+      vi.advanceTimersByTime(600)
+    })
+    expect(fitted.filter((t) => t === agentTerm)).toHaveLength(1)
+    expect(agentPty.sendResize).toHaveBeenCalledTimes(1)
+    expect(agentPty.sendResize).toHaveBeenCalledWith(18, 80)
+  })
+})

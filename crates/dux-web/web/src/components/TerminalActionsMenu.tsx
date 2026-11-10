@@ -7,7 +7,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { editorRootForTarget } from "@/lib/editorRoot"
-import { openDeleteTerminal, openEditor, standaloneEditorHash } from "@/lib/store"
+import { openDeleteTerminal, openEditor, standaloneEditorHash, useDux } from "@/lib/store"
+import { spineListsTerminal } from "@/lib/terminals"
 import type { TerminalOwnerRef } from "@/lib/store"
 
 // The terminal's own actions, the twin of `AgentActionsMenu`. Never rendered on
@@ -33,6 +34,9 @@ export function TerminalActionsMenu({
   // worktree, and the agent's editor is the one with the git surface.
   // `editorRootForTarget` is what decides that.
   const editorRoot = editorRootForTarget({ kind: "terminal", terminalId, owner })
+  // A terminal just created is on screen before the workspace lists it, and
+  // its close confirm has nothing to confirm until then, so Close… waits.
+  const listed = spineListsTerminal(useDux().spine?.terminals, terminalId)
   return (
     <DropdownMenuGroup>
       {/* Inside the group rather than above it: the primitive's label part reads
@@ -65,10 +69,12 @@ export function TerminalActionsMenu({
       </DropdownMenuItem>
       {/* Neutral color per the destructive convention: the `…` plus
           ConfirmDeleteTerminalDialog are the danger signal. */}
-      <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
-        <X />
-        Close…
-      </DropdownMenuItem>
+      {listed ? (
+        <DropdownMenuItem onClick={() => openDeleteTerminal(terminalId)}>
+          <X />
+          Close…
+        </DropdownMenuItem>
+      ) : null}
     </DropdownMenuGroup>
   )
 }

@@ -1,5 +1,5 @@
 import { ChevronLeft, GitPullRequest, Settings } from "lucide-react"
-import { Suspense, useState, type ReactElement, type ReactNode } from "react"
+import { Suspense, useState, type ReactElement } from "react"
 
 import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { LauncherCorner } from "@/components/LauncherCorner"
@@ -9,10 +9,12 @@ import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { LazyTerminalPane } from "@/components/LazyTerminalPane"
 import { ConnDot } from "@/components/ConnDot"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
-import { DormantTabSurface } from "@/components/DormantTabSurface"
+import { DockStrip } from "@/components/DockStrip"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import { MobileActionFlap } from "@/components/MobileActionFlap"
+import { PhoneAgentStack } from "@/components/PhoneAgentStack"
+import { agentStackModel } from "@/components/agentStackModel"
 import { PrListMenuItems } from "@/components/PrListMenu"
 import type { PaneMenuSubject } from "@/components/PaneMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -29,11 +31,7 @@ import { useChromeGesture } from "@/hooks/use-theater"
 import { usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
 import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
-import {
-  dormantTabNeedsCard,
-  shouldShowTabStrip,
-  slotTabIdOf,
-} from "@/lib/agentTabs"
+import { readStackMemory } from "@/lib/stackMemory"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import {
@@ -434,69 +432,6 @@ function HeaderPrChip({ session }: { session: SessionView }) {
   )
 }
 
-interface TerminalViewportProps {
-  target: SelectedTarget
-  focusedTab: AgentTabView | undefined
-  dormant: boolean
-  paneKey: string
-  targetId: string
-  slotTabId: string | undefined
-  overlay: ReactNode
-}
-
-function TerminalViewport({
-  target,
-  focusedTab,
-  dormant,
-  paneKey,
-  targetId,
-  slotTabId,
-  overlay,
-}: TerminalViewportProps) {
-  // Over a live terminal the overlay belongs inside the pane's own positioned
-  // box, because the compose row and the terminal keys sit under the terminal in
-  // this column. A dormant card has no input rows, so there it rides the column.
-  if (dormant && focusedTab && target.kind === "agent") {
-    return (
-      <>
-        <DormantTabSurface
-          sessionId={target.sessionId}
-          tabId={focusedTab.id}
-          provider={focusedTab.provider}
-          lastRunFailed={focusedTab.last_run_failed === true}
-          lastRunVerdict={focusedTab.last_run_verdict}
-        />
-        {overlay}
-      </>
-    )
-  }
-
-  return (
-    <ChunkBoundary>
-      <Suspense fallback={null}>
-        {target.kind === "agent" ? (
-          <LazyTerminalPane
-            key={paneKey}
-            kind="agent"
-            id={targetId}
-            sessionId={target.sessionId}
-            slotTabId={slotTabId}
-            overlay={overlay}
-          />
-        ) : (
-          <LazyTerminalPane
-            key={paneKey}
-            kind="terminal"
-            id={targetId}
-            owner={target.owner}
-            overlay={overlay}
-          />
-        )}
-      </Suspense>
-    </ChunkBoundary>
-  )
-}
-
 // Which pane screen is on, and nothing else: a router with no state of its own.
 // The flight machine belongs to the screen, and a router holding one too would
 // step timers and re-render this tree for a flight it is not showing.
@@ -510,8 +445,10 @@ function TerminalScreen() {
   return <AgentTerminalScreen session={session} target={selectedTarget} />
 }
 
-// The agent spoke: the agent's chrome stack over its pane, with the flap and
-// the pill rendered from the ONE flight phase this screen owns.
+// The agent spoke: the agent's chrome stack over its stack, with the flap and
+// the pill rendered from the ONE flight phase this screen owns. A phone shows
+// the agent or its terminals, never both: the part the selection names, with
+// that part's strip, and the switch in the flap moves between them.
 function AgentTerminalScreen({
   session,
   target: selectedTarget,
@@ -520,97 +457,88 @@ function AgentTerminalScreen({
   target: SelectedTarget
 }) {
   const duxState = useDux()
-  const {
-    spine,
-    bootstrap,
-    terminalEpoch,
-    startedDormantTabs,
-    pendingSlotTab,
-    endedInViewTab,
-  } = duxState
+  const { spine, bootstrap, terminalEpoch } = duxState
 
-  const targetId =
-    selectedTarget.kind === "terminal"
-      ? selectedTarget.terminalId
-      : selectedTarget.tabId
+  const model = agentStackModel({
+    target: selectedTarget,
+    session,
+    terminals: spine?.terminals ?? [],
+    stackLayouts: duxState.stackLayouts,
+    stackTerminals: duxState.stackTerminals,
+    stackTabs: duxState.stackTabs,
+    memory: readStackMemory(session.id),
+    startedDormantTabs: duxState.startedDormantTabs,
+    pendingSlotTab: duxState.pendingSlotTab,
+    endedInViewTab: duxState.endedInViewTab,
+    pendingTerminalOrder: duxState.pendingTerminalOrder,
+    alwaysShowTabStrip: bootstrap?.always_show_tab_strip ?? false,
+    theater: duxState.theater,
+    surface: "phone",
+  })
+  const shownId =
+    model.view === "terminals" && model.activeTerminal !== null
+      ? model.activeTerminal
+      : model.tabId
   // Theater's one exception, phone only (desktop has Escape): a full-pane cover
   // withholds the pill, so the header is the only way back and comes back with
   // it. Nothing writes the mode; the chrome leaves again once the cover goes.
-  const coverOwnsPane = usePaneCoverOwned(targetId)
+  const coverOwnsPane = usePaneCoverOwned(shownId)
   const chromeHidden = topChromeHidden({
     theater: duxState.theater,
     coverOwnsPane,
   })
   // See the sibling screen: the pane's first verdict is initial state, because
   // this screen is on screen before the lazy pane it reads has resolved.
-  useChromeGesture(chromeHidden, usePaneCoverKnown(targetId))
+  useChromeGesture(chromeHidden, usePaneCoverKnown(shownId))
   const flight = useTheaterFlight(coverOwnsPane)
-  const paneKey =
-    selectedTarget.kind === "agent" ? `${targetId}:${terminalEpoch}` : targetId
-  const tabs = session.tabs ?? []
-  const focusedTab =
-    selectedTarget.kind === "agent"
-      ? tabs.find((tab) => tab.id === selectedTarget.tabId)
-      : undefined
-  const slotTabId = slotTabIdOf(session.id, session, pendingSlotTab)
   const projectName = spine?.projects.find(
     (project) => project.id === workspaceProjectId(session.workspace),
   )?.name
-  const stripShown =
-    selectedTarget.kind === "agent" &&
-    shouldShowTabStrip(tabs, bootstrap?.always_show_tab_strip ?? false)
+  // Both strips show or neither, and only the shown part's is on screen.
+  const strip = !model.stripsShown ? null : model.view === "agent" ? (
+    <AgentTabsStrip
+      session={session}
+      activeTabId={model.tabId}
+      maxTabs={bootstrap?.agent_tabs_max}
+    />
+  ) : (
+    <DockStrip
+      sessionId={session.id}
+      terminals={model.dock}
+      activeTerminal={model.activeTerminal}
+      unlisted={model.unlistedTerminal}
+    />
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* The phone shell's chrome stack: the header and the tab strip, which
-        * leave together on the one flag. The actions beside them are in the flap
-        * below, which detaches into the floating pill rather than leaving.
-        * Theater is the only thing that hides them. */}
+      {/* The phone shell's chrome stack: the header and the shown part's strip,
+        * which leave together on the one flag. The actions beside them are in
+        * the flap below, which detaches into the floating pill rather than
+        * leaving. Theater is the only thing that hides them. */}
       <TheaterChrome hidden={chromeHidden}>
         <TerminalHeader
           session={session}
-          focusedTab={focusedTab}
+          focusedTab={model.tab}
           projectName={projectName}
         />
-        {stripShown ? (
-          <AgentTabsStrip
-            session={session}
-            activeTabId={selectedTarget.tabId}
-            maxTabs={bootstrap?.agent_tabs_max}
-          />
-        ) : null}
+        {strip}
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
-        {/* The flap is a sibling of the pane, not part of its overlay, which is
+        {/* The flap is a sibling of the stack, not part of its overlay, which is
           * withheld while a full-pane cover owns the terminal; under such a
           * cover it rides the returned chrome, docked rather than half flown. */}
         {flapMounted(flight) ? (
           <MobileActionFlap
             target={selectedTarget}
             subject={{ kind: "agent", session }}
-            band={stripShown ? "strip" : "plain"}
+            band={strip !== null ? "strip" : "plain"}
             hidden={!flapVisible(flight)}
           />
         ) : null}
-        <TerminalViewport
-          target={selectedTarget}
-          focusedTab={focusedTab}
-          dormant={dormantTabNeedsCard(
-            selectedTarget,
-            session,
-            focusedTab,
-            startedDormantTabs,
-            slotTabId,
-            endedInViewTab,
-            // An agent stopped with a terminal of its own still running was
-            // stopped on purpose: opening it must not start it.
-            (spine?.terminals ?? []).some(
-              (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
-            ),
-          )}
-          paneKey={paneKey}
-          targetId={targetId}
-          slotTabId={slotTabId}
+        <PhoneAgentStack
+          model={model}
+          terminalEpoch={terminalEpoch}
           overlay={
             pillMounted(flight) ? (
               <TheaterPill

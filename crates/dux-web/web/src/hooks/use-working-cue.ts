@@ -91,6 +91,7 @@ export function useWorkingPulseAnchor(
  */
 export function useWorkingCue<B extends Element, G extends Element>(
   working: boolean,
+  { bounce: bounces = true }: { bounce?: boolean } = {},
 ): {
   bouncing: boolean
   pulsing: boolean
@@ -99,7 +100,9 @@ export function useWorkingCue<B extends Element, G extends Element>(
   attachPulse: (el: G | null) => void
   handlers: SettlingAnimationHandlers
 } {
-  const bounce = useSettlingAnimation<B>(working, WORKING_BOUNCE_NAME)
+  // A glyph that never bounces has no bounce to finish: its landing is the
+  // opacity ease alone.
+  const bounce = useSettlingAnimation<B>(working && bounces, WORKING_BOUNCE_NAME)
   const [frame, setFrame] = React.useState<B | null>(null)
   const [glyph, setGlyph] = React.useState<G | null>(null)
   const fade = React.useRef<Animation | null>(null)
@@ -192,5 +195,88 @@ export function useWorkingCue<B extends Element, G extends Element>(
     attachBounce,
     attachPulse: setGlyph,
     handlers: bounce.handlers,
+  }
+}
+
+// When each keyed cue's animations began their active time, by key and
+// animation name, so a glyph remounted elsewhere picks the cue up where its
+// other instance had it rather than restarting it. A clock belongs to one
+// episode of the cue: it lives only while a glyph with its key is mounted (and
+// through the commit that swaps one instance for another), so the map holds no
+// more keys than there are glyphs on screen, and a cue that starts again later
+// starts afresh.
+const cueClocks = new Map<string, number>()
+const cueHolders = new Map<string, number>()
+
+function forgetKey(key: string): void {
+  for (const slot of [...cueClocks.keys()]) {
+    if (slot.startsWith(`${key}|`)) cueClocks.delete(slot)
+  }
+}
+
+/**
+ * Registers a mounted glyph showing `key`'s cue, and returns its release. When
+ * the last one goes, the key's clocks are forgotten once the commit is over,
+ * so an instance mounted in the same commit (the flap swapped for the pill)
+ * still finds them.
+ */
+export function holdCueClock(key: string): () => void {
+  cueHolders.set(key, (cueHolders.get(key) ?? 0) + 1)
+  return () => {
+    const left = (cueHolders.get(key) ?? 1) - 1
+    if (left > 0) {
+      cueHolders.set(key, left)
+      return
+    }
+    cueHolders.delete(key)
+    queueMicrotask(() => {
+      if (!cueHolders.has(key)) forgetKey(key)
+    })
+  }
+}
+
+/**
+ * Carries a keyed cue's clock across remounts, the way the tab strips keep
+ * their pills' clocks across a reorder. A cue that starts under a mounted glyph
+ * starts as the list's does, at once, and its clock is recorded; a glyph that
+ * mounts with the cue already running in another instance (the phone's flap
+ * flying into the floating pill) takes the recorded clock, so the two show the
+ * same frame at the hand-over. Times are kept as the start of the active
+ * phase, because the look a glyph lands into carries a delay and the same look
+ * mounted afresh does not. Only CSS animations are carried: a colour
+ * transition has no clock to keep.
+ */
+export function carryCueClock(el: Element | null, key: string, carry: boolean): void {
+  if (!el || typeof el.getAnimations !== "function") return
+  for (const animation of el.getAnimations()) {
+    const name = (animation as CSSAnimation).animationName
+    if (typeof name !== "string" || name === WORKING_BOUNCE_NAME) continue
+    const slot = `${key}|${name}`
+    const delay = Number(animation.effect?.getComputedTiming().delay ?? 0)
+    const recorded = cueClocks.get(slot)
+    if (carry && recorded !== undefined) {
+      const start = recorded - delay
+      if (animation.startTime !== start) animation.startTime = start
+    }
+    const record = () => {
+      if (animation.startTime !== null && cueHolders.has(key)) {
+        cueClocks.set(slot, Number(animation.startTime) + delay)
+      }
+    }
+    if (animation.startTime !== null) record()
+    else animation.ready?.then(record, () => {})
+  }
+}
+
+/** Forgets a keyed cue's clocks once that cue has stopped or changed, so a
+ * later start is new: the one named, or with no name every one but the
+ * pulse's (the look's, which change together). */
+export function forgetCueClock(key: string, name?: string): void {
+  if (name !== undefined) {
+    cueClocks.delete(`${key}|${name}`)
+    return
+  }
+  for (const slot of [...cueClocks.keys()]) {
+    if (slot.startsWith(`${key}|`) && slot !== `${key}|${WORKING_PULSE_NAME}`) cueClocks.delete(slot)
   }
 }

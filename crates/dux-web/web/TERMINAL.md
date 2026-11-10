@@ -2055,6 +2055,27 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     good. Pinned: `components/TerminalArea.test.tsx` "shows … typing goes to alone
     in theater, with no strip, and puts the split back on leaving".
 
+35. **On a phone the view IS the selection, and both parts stay mounted.** Trap: a
+    phone shows the agent or its terminals, never both, and the address names the
+    part on screen. Deciding the view in the screen (from the remembered view, or a
+    stopped agent's running terminal) would leave the selection, the address, the
+    typing target and the flap's Input group naming the agent while a terminal is on
+    screen. So the view is read off the selection, and the store resolves an opening
+    to the right part before anything renders, and only for a request that
+    names no part (`phoneOpeningTerminal` in `selectSession`, a row of the list):
+    an address is a position, so a reload or link opens the part it names, a
+    bare agent address the agent; the switch is a selection too
+    (`switchPhonePart`), which is what makes it a Back step. The screen mounts the
+    agent and the dock's active terminal as one stack, the part off screen in a box
+    the size of the stack's just below its edge, clipped, so flipping never
+    remounts either part, and the `onScreen` flip is what sends `shown`. A stopped
+    agent beside its terminals gets no agent part while its terminals show (trap
+    31), and its full card, never the short one, when its own view is on screen.
+    Fix: `PhoneAgentStack.tsx`, `agentStackModel`'s `surface: "phone"`. Pinned:
+    `components/MobileShell.test.tsx` "flips to the terminal without remounting
+    either part …"; `src/lib/storeRouting.test.ts` "a phone shows one part of an
+    agent at a time".
+
 ## I. Viewer suppression and notifications
 
 1. **The browser xterm is a VIEWER; dux-core's alacritty_terminal is the authoritative

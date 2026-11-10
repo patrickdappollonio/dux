@@ -155,9 +155,10 @@ describe("the silhouette, read back as geometry", () => {
   })
 
   // The cluster's width is whatever its controls add up to, so the seam fix has
-  // to hold at the widths a keys button and a wider count produce, fractional
-  // ones included (a device pixel ratio that does not divide the layout).
-  for (const bodyWidth of [180, 222, 222.5]) {
+  // to hold at the widths a keys button, a wider count and the agent/terminals
+  // switch (a bare icon, or an icon and a count) produce, fractional ones
+  // included (a device pixel ratio that does not divide the layout).
+  for (const bodyWidth of [180, 222, 222.5, 264, 278.5]) {
     it(`lays its own fill under every stroke pixel on the band's hairline at ${bodyWidth}px`, () => {
       // The stroke and the band's hairline are both the translucent border
       // colour, so wherever the stroke runs over a bare hairline the two stack

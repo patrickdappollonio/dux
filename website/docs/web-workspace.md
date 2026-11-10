@@ -241,7 +241,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 **Where the button is.**
 
 - **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`.
-- **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the tab strip when the agent has more than one tab and the header itself when it does not, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
+- **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the strip of the part on screen when the agent has two or more tabs or two or more terminals (its tab strip over the agent, the dock strip over a terminal) and the header itself otherwise, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
 
 **What happens when you go in.**
 
@@ -249,7 +249,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 - On a computer both side panels leave too, the agent list and the changes list. They come back as you had them: open, collapsed to the rail, hidden, and at the widths you dragged them to.
 - Open a link that goes straight into theater and there was no layout on screen to remember, so leaving lands on your saved preferences instead.
 - Theater is the only thing that takes the top bar away, and it all comes back when you leave.
-- On an agent with terminals, theater shows only the part you are typing into, the agent or the terminal in front of its dock, with no tab strip and no dock strip. The link says which, so a reload or Back in theater shows the same part. On a computer nothing inside theater switches to the other part: leave theater, pick it, and go back in. Leaving puts the split, or whichever layout you had, back.
+- On an agent with terminals, theater shows only the part you are typing into, the agent or the terminal in front of its dock, with no tab strip and no dock strip. The link says which, so a reload or Back in theater shows the same part. On a phone the agent/terminals switch rides in the pill, so you can flip between the agent and the terminal you used last without leaving. On a computer nothing inside theater switches to the other part: leave theater, pick it, and go back in. Leaving puts the split, or whichever layout you had, back.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
@@ -263,7 +263,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 A small floating pill in the bottom-right corner is the only thing left over the terminal.
 
 - **On a computer** it holds the way out, the macro picker, the changed-file count where there is one, and the pane's own `⋯`, so nothing you could reach before you went full screen has gone anywhere. The count leaves theater there and brings the changes list back, showing it even if you had hidden it.
-- **On a phone** it is the flap that flew there: the theater button (now showing the way out), the macro picker, the changed-file count where there is one, the terminal-keys button, and the same `⋯`, opening the same menu it opened on the band. The changed-file count and the keys button are buttons beside the menu rather than rows in it.
+- **On a phone** it is the flap that flew there: the theater button (now showing the way out), the macro picker, the changed-file count where there is one, the terminal-keys button, the agent/terminals switch on an agent with terminals, and the same `⋯`, opening the same menu it opened on the band. The changed-file count, the keys button and the switch are buttons beside the menu rather than rows in it.
 
 The pill's `⋯` menu holds, in order, each group under its own heading (the way out of theater under **Theater**, the drill under **App**):
 
@@ -440,7 +440,11 @@ When an agent has a terminal of its own, the center pane splits: the agent and i
 
 ![The same agent with the strips hidden: a thin grip band between the agent and its terminal, and the floating pill at the band's right end.](/screens/web-terminal-dock-hidden-strips.png#full)
 
-**An agent you stopped while its terminals keep running** opens on its terminal, maximized, and nothing starts it behind your back. A band in place of its tab strip says it is not running and carries **Start**, which starts its first tab and puts the layout back the way you had it. If its last run ended badly, the band says how, with its last output a click away. While the agent shares the screen with its dock, its card is a short one: a line and **Start**. Such an agent stays in the main list until its last terminal ends, and if you are looking at it when that happens it stays stopped, on its idle screen with **Start session**.
+**On a phone** there is no room for both, so an agent's screen shows the agent or its terminals, never both, with only that part's strip. The **agent/terminals switch** in the action flap moves between them (see [The action flap](#the-action-flap)), and Back moves back. Tapping an agent in the list reopens it on whichever part you last left it on in that browser, and on the agent the first time; a reload, a bookmark or a link opens the part its address names. The part on screen shows its own strip (the tab strip over the agent, the dock strip over a terminal) once the agent has two or more tabs or two or more terminals, or while **Always show tab strip** is on. A lone tab beside a lone terminal shows no strip at all; make a second one from the flap's `⋯` with **New agent tab…** or **New terminal in the worktree** (**New terminal in the folder** for a standalone agent).
+
+![An agent's terminal on a phone: the dock strip with two terminal pills under the slim header, and the action flap carrying the agent switch beside the menu.](/screens/phone-terminal-view.png)
+
+**An agent you stopped while its terminals keep running** opens on its terminal, maximized, and nothing starts it behind your back. A band in place of its tab strip says it is not running and carries **Start**, which starts its first tab and puts the layout back the way you had it. If its last run ended badly, the band says how, with its last output a click away. While the agent shares the screen with its dock, its card is a short one: a line and **Start**. On a phone, tapping it in the list opens it on its terminals, and the switch takes you to its card; a link to the agent itself opens on that card. Such an agent stays in the main list until its last terminal ends, and if you are looking at it when that happens it stays stopped, on its idle screen with **Start session**.
 
 Every terminal row's `⋯` menu also carries **Open editor here** and **Open editor in new
 tab**, rooted at the directory that terminal opened in. A terminal that belongs to an
@@ -516,8 +520,8 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 ![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
 - **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New agent…** launcher along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's **▾** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
-- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip) and the tab strip when the agent has more than one tab.
-- **An agent's own terminal** keeps the agent's screen and the agent's menu, because the header and the count around it are that agent's, and adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**.
+- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip), with the strip of the part on screen under it when the agent has two or more tabs or two or more terminals: the tab strip over the agent, the dock strip over a terminal.
+- **An agent's own terminals** are on the same screen, one part at a time: the agent/terminals switch in the flap shows them in place of the agent, with the dock strip when there are two or more. The header, the menu and the count stay the agent's, and the menu adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**. The message box says what it is talking to: "Write a message to the agent…" over the agent, "Type a command…" over a terminal.
 - **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, then a **Terminal** group holding **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - **The changes screen** is the full Changes pane. Tapping a file opens its diff in the standalone editor in the same browser tab, and Back comes back to the Changes screen.
 
@@ -525,7 +529,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 
 The actions hang off the band on the right, in a small tab-shaped flap over the terminal. It is the whole reason the header can stay as quiet as it is.
 
-![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count, the terminal-keys button and the pane's menu.](/screens/phone-terminal-flap.png)
+![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count, the terminal-keys button, the terminals switch with its count and the pane's menu.](/screens/phone-terminal-flap.png)
 
 It holds:
 
@@ -533,7 +537,8 @@ It holds:
 - the macro picker
 - the changed-file count (agents only)
 - the terminal-keys button, which hides and shows the key row, while this device is typing into the terminal
-- the session's `⋯` menu, which carries the **Input** group, the agent's actions and a **Settings** drill into the app menu
+- the **agent/terminals switch**, on an agent with at least one terminal. Over the agent it shows the terminal icon and how many terminals there are; over a terminal, the agent icon. The icon tells you what the other part is doing: green and pulsing while it works, cyan and blinking when the agent needs you (needs-you wins), plain otherwise. Tap it to show that part and type into it.
+- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
 

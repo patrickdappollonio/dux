@@ -6,7 +6,7 @@ import { Bot } from "lucide-react"
 import { useRef } from "react"
 
 import { WorkingGlyph } from "@/components/WorkingGlyph"
-import { fireAnimationStart, stubGlyphEase } from "@/test/animationEvents"
+import { expectLookEasesIn, fireAnimationStart, stubGlyphEase } from "@/test/animationEvents"
 
 import {
   useWorkingCue,
@@ -295,5 +295,184 @@ describe("WorkingGlyph's held look", () => {
       document.dispatchEvent(new Event("visibilitychange"))
     })
     expect(frame().className).toContain("needs-you")
+  })
+})
+
+// A glyph that reports a part rather than names it (the phone's agent/terminals
+// switch, the computer's layout pill dot) pulses and lands like any working
+// glyph but never bounces, and carries its cue's clock by key so a copy of it
+// remounted elsewhere carries on in step.
+describe("a working glyph without the bounce", () => {
+  const ATTENTION =
+    "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+  afterEach(() => {
+    cleanup()
+    setHidden(false)
+    vi.unstubAllGlobals()
+  })
+
+  it("pulses, and never puts the bounce on its frame", () => {
+    const { container, rerender } = render(<WorkingGlyph icon={Bot} working bounce={false} />)
+    const frame = container.querySelector("[data-slot='working-glyph']")!
+    expect(container.querySelector("svg")!.getAttribute("class")).toContain(WORKING_PULSE_ANIMATION)
+    expect(frame.className).not.toContain("bounce")
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} />)
+    expect(frame.className).not.toContain("bounce")
+  })
+
+  it("lets the pulse land before the attention look eases in, then blinks", async () => {
+    const { container, rerender } = render(
+      <WorkingGlyph icon={Bot} working bounce={false} look="text-dux-working" />,
+    )
+    const frame = () => container.querySelector("[data-slot='working-glyph']")!
+    const ease = stubGlyphEase(container.querySelector("svg")!)
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} />)
+    // The pulse yields at once and the glyph eases back from where it was.
+    expect(container.querySelector("svg")!.getAttribute("class")).not.toContain("animate-working-pulse")
+    expect(ease.animate).toHaveBeenCalledTimes(1)
+    expect(frame().className).not.toContain("text-cyan-100")
+    await ease.eased()
+    expect(frame().className).toContain("text-cyan-100")
+    expectLookEasesIn(frame().className, "the attention look after the landing")
+  })
+
+  it("snaps to the new look under reduced motion", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query.includes("prefers-reduced-motion"),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    )
+    const { container, rerender } = render(
+      <WorkingGlyph icon={Bot} working bounce={false} look="text-dux-working" />,
+    )
+    stubGlyphEase(container.querySelector("svg")!)
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} />)
+    const frame = container.querySelector("[data-slot='working-glyph']")!
+    expect(frame.className).toContain("text-cyan-100")
+    expect(frame.className).not.toContain("duration-200")
+  })
+
+  // jsdom has no Web Animations: each element reports the cue animations its
+  // classes would run, with a clock of its own that the glyph may move.
+  function fakeCueClocks(initial: (el: Element, name: string) => number) {
+    const clocks = new Map<string, { startTime: number | null }>()
+    const ids = new WeakMap<Element, number>()
+    let next = 0
+    const original = Element.prototype.getAnimations
+    Element.prototype.getAnimations = function (this: Element) {
+      const cls = this.getAttribute("class") ?? ""
+      if (!ids.has(this)) ids.set(this, next++)
+      const names = ["working-pulse", "attention-pulse"].filter((n) => cls.includes(`animate-${n}`))
+      return names.map((name) => {
+        const key = `${ids.get(this)}|${name}`
+        if (!clocks.has(key)) clocks.set(key, { startTime: initial(this, name) })
+        const delay = cls.includes("[animation-delay:200ms]") ? 200 : 0
+        return Object.assign(clocks.get(key)!, {
+          animationName: name,
+          effect: { getComputedTiming: () => ({ duration: 1600, delay }) },
+        })
+      }) as unknown as Animation[]
+    }
+    return {
+      start: (el: Element, name: string) => clocks.get(`${ids.get(el)}|${name}`)?.startTime,
+      restore: () => {
+        Element.prototype.getAnimations = original
+      },
+    }
+  }
+
+  it("carries a running cue's clock to a remounted glyph, the look's delay accounted for", async () => {
+    let t = 1000
+    const clocks = fakeCueClocks(() => (t += 1111))
+    try {
+      const flap = render(<WorkingGlyph icon={Bot} working bounce={false} cueKey="k1" />)
+      const flapPulse = clocks.start(flap.container.querySelector("svg")!, "working-pulse")
+      const pill = render(<WorkingGlyph icon={Bot} working bounce={false} cueKey="k1" />)
+      expect(clocks.start(pill.container.querySelector("svg")!, "working-pulse")).toBe(flapPulse)
+      flap.unmount()
+      pill.unmount()
+
+      // A blink that landed with its delay, and the same blink mounted afresh
+      // without one, show the same frame.
+      const ATTENTION = "text-cyan-100 motion-safe:animate-attention-pulse"
+      const landed = render(<WorkingGlyph icon={Bot} working bounce={false} look="x" cueKey="k2" />)
+      const ease = stubGlyphEase(landed.container.querySelector("svg")!)
+      landed.rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} cueKey="k2" />)
+      await ease.eased()
+      const landedFrame = landed.container.querySelector("[data-slot='working-glyph']")!
+      expect(landedFrame.className).toContain("[animation-delay:200ms]")
+      const landedStart = clocks.start(landedFrame, "attention-pulse")!
+      const again = render(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} cueKey="k2" />)
+      const againFrame = again.container.querySelector("[data-slot='working-glyph']")!
+      expect(clocks.start(againFrame, "attention-pulse")).toBe(landedStart + 200)
+    } finally {
+      clocks.restore()
+    }
+  })
+
+  // The layout pill's dot is gone while the agent is idle, so each working or
+  // needs-you spell mounts a new glyph: it must start that spell afresh, as the
+  // list's glyph does, never on the clock of a spell that already ended.
+  it.each([
+    ["a pulse", { working: true, look: undefined }, "working-pulse", "svg"],
+    [
+      "a needs-you blink",
+      { working: false, look: "text-cyan-100 motion-safe:animate-attention-pulse" },
+      "attention-pulse",
+      "[data-slot='working-glyph']",
+    ],
+  ] as const)("starts %s afresh after the glyph was gone between two spells", async (_what, props, name, part) => {
+    let t = 1000
+    const clocks = fakeCueClocks(() => (t += 1111))
+    try {
+      const first = render(<WorkingGlyph icon={Bot} bounce={false} cueKey="dot" {...props} />)
+      const firstStart = clocks.start(first.container.querySelector(part)!, name)
+      first.unmount()
+      await act(async () => {})
+      const second = render(<WorkingGlyph icon={Bot} bounce={false} cueKey="dot" {...props} />)
+      const own = t
+      const secondStart = clocks.start(second.container.querySelector(part)!, name)
+      expect(secondStart).toBe(own)
+      expect(secondStart).not.toBe(firstStart)
+    } finally {
+      clocks.restore()
+    }
+  })
+
+  it("starts a new cue at once, as the list does, never waiting for another clock", async () => {
+    let t = 1000
+    const clocks = fakeCueClocks(() => (t += 1111))
+    try {
+      // Another instance's clock is on record.
+      render(<WorkingGlyph icon={Bot} working bounce={false} cueKey="k3" />)
+      const idle = render(<WorkingGlyph icon={Bot} working={false} bounce={false} look="x" cueKey="k3" />)
+      idle.rerender(<WorkingGlyph icon={Bot} working bounce={false} look="x" cueKey="k3" />)
+      const svg = idle.container.querySelector("svg")!
+      const own = t
+      expect(clocks.start(svg, "working-pulse")).toBe(own)
+
+      // A hand-over: the blink lands on the list's schedule, the colour easing
+      // in over 200ms and the blink 200ms behind it, its clock untouched.
+      const ease = stubGlyphEase(svg)
+      idle.rerender(
+        <WorkingGlyph
+          icon={Bot}
+          working={false}
+          bounce={false}
+          look="text-cyan-100 motion-safe:animate-attention-pulse"
+          cueKey="k3"
+        />,
+      )
+      await ease.eased()
+      const frame = idle.container.querySelector("[data-slot='working-glyph']")!
+      expectLookEasesIn(frame.className, "the switch's blink after the landing")
+      expect(clocks.start(frame, "attention-pulse")).toBe(t)
+    } finally {
+      clocks.restore()
+    }
   })
 })

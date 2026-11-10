@@ -228,7 +228,17 @@ beforeEach(() => {
   // THE PILL ONLY EXISTS IN THEATER, so the state it is rendered against says
   // so: its menu's way out is the shared item, which is present exactly while
   // the mode is on.
-  mockState = { bootstrap: null, theater: true } as unknown as DuxState
+  // The terminal it floats over is listed, so its Close… has something to
+  // confirm.
+  mockState = {
+    bootstrap: null,
+    theater: true,
+    spine: {
+      projects: [],
+      sessions: [],
+      terminals: [{ id: "tm1", owner: { kind: "standalone" } }],
+    },
+  } as unknown as DuxState
 })
 
 afterEach(() => {

@@ -1,8 +1,12 @@
 import type { LucideIcon } from "lucide-react"
-import { type RefObject, useCallback, useState } from "react"
+import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from "react"
 
 import {
+  carryCueClock,
+  forgetCueClock,
+  holdCueClock,
   useWorkingCue,
+  WORKING_PULSE_NAME,
   WORKING_BOUNCE_ANIMATION,
   WORKING_PULSE_ANIMATION,
 } from "@/hooks/use-working-cue"
@@ -42,6 +46,8 @@ export function WorkingGlyph({
   className,
   frameClassName,
   frameRef,
+  bounce = true,
+  cueKey,
 }: {
   icon: LucideIcon
   working: boolean
@@ -49,15 +55,31 @@ export function WorkingGlyph({
   className?: string
   frameClassName?: string
   frameRef?: RefObject<HTMLSpanElement | null>
+  /** False for a glyph that reports a part rather than names it, which pulses
+   * and lands but never bounces. */
+  bounce?: boolean
+  /** Names the cue this glyph shows, so another instance of it mounted
+   * elsewhere carries on from the same frame (see `carryCueClock`). */
+  cueKey?: string
 }) {
   const { bouncing, pulsing, landing, attachBounce, attachPulse, handlers } =
-    useWorkingCue<HTMLSpanElement, SVGSVGElement>(working)
+    useWorkingCue<HTMLSpanElement, SVGSVGElement>(working, { bounce })
+  const [frame, setFrame] = useState<HTMLSpanElement | null>(null)
+  const [icon, setIcon] = useState<SVGSVGElement | null>(null)
   const attachFrame = useCallback(
     (el: HTMLSpanElement | null) => {
       attachBounce(el)
+      setFrame(el)
       if (frameRef) frameRef.current = el
     },
     [attachBounce, frameRef],
+  )
+  const attachIcon = useCallback(
+    (el: SVGSVGElement | null) => {
+      attachPulse(el)
+      setIcon(el)
+    },
+    [attachPulse],
   )
 
   const [shown, setShown] = useState(look)
@@ -79,6 +101,33 @@ export function WorkingGlyph({
     setHeld(false)
   }
 
+  // Held before the effects below read it, so an instance mounted in the same
+  // commit as the one it replaces still finds that one's clock.
+  useLayoutEffect(() => (cueKey === undefined ? undefined : holdCueClock(cueKey)), [cueKey])
+  // A cue running when the glyph mounts carries on from its other instance's
+  // clock; one that starts under a mounted glyph (seen at rest since it
+  // mounted) is a new one and starts at once, as the list's.
+  const pulseFresh = useRef(false)
+  useLayoutEffect(() => {
+    if (cueKey === undefined) return
+    if (!pulsing) {
+      if (!pulseFresh.current) forgetCueClock(cueKey, WORKING_PULSE_NAME)
+      pulseFresh.current = true
+      return
+    }
+    if (icon === null) return
+    carryCueClock(icon, cueKey, !pulseFresh.current)
+    pulseFresh.current = false
+  }, [cueKey, pulsing, icon])
+  const lookMounted = useRef(false)
+  useLayoutEffect(() => {
+    if (cueKey === undefined || frame === null) return
+    // A look that changes under a mounted glyph is a new episode of it.
+    if (lookMounted.current) forgetCueClock(cueKey)
+    carryCueClock(frame, cueKey, !lookMounted.current)
+    lookMounted.current = true
+  }, [cueKey, shownNow, easedNow, frame])
+
   return (
     <span
       ref={attachFrame}
@@ -93,7 +142,7 @@ export function WorkingGlyph({
       )}
     >
       <Icon
-        ref={attachPulse}
+        ref={attachIcon}
         className={cn("shrink-0", className, pulsing && WORKING_PULSE_ANIMATION)}
       />
     </span>

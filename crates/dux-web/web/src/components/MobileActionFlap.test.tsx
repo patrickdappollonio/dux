@@ -17,6 +17,7 @@ let mockState: DuxState
 const toggleTheaterMock = vi.fn()
 const openChangedFilesMock = vi.fn()
 const setAccessoryBarVisibilityMock = vi.fn()
+const switchPhonePartMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -26,6 +27,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openChangedFiles: (...a: unknown[]) => openChangedFilesMock(...a),
     setAccessoryBarVisibility: (...a: unknown[]) =>
       setAccessoryBarVisibilityMock(...a),
+    switchPhonePart: (...a: unknown[]) => switchPhonePartMock(...a),
   }
 })
 
@@ -143,6 +145,7 @@ beforeEach(() => {
   toggleTheaterMock.mockReset()
   openChangedFilesMock.mockReset()
   setAccessoryBarVisibilityMock.mockReset()
+  switchPhonePartMock.mockReset()
   resetPaneInputGroups()
   mockState = makeState()
 })
@@ -469,6 +472,148 @@ describe("the keys toggle in the docked flap", () => {
       />,
     )
     expect(screen.getByTestId("pane-keys-toggle")).toBeTruthy()
+  })
+})
+
+// THE SWITCH BETWEEN AN AGENT AND ITS TERMINALS, a phone's only way between
+// the two parts, since it shows one at a time. It points at the part that is
+// not on screen and its icon carries that part's state, with no dot and no
+// bounce.
+describe("the agent/terminals switch in the docked flap", () => {
+  const desktopWidth = window.innerWidth
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", {
+      value: desktopWidth,
+      configurable: true,
+    })
+  })
+  const phone = () =>
+    Object.defineProperty(window, "innerWidth", {
+      value: 500,
+      configurable: true,
+    })
+  const term = (id: string, working = false) => ({
+    id,
+    owner: { kind: "session", session_id: "s1" },
+    label: id,
+    working,
+    typing: false,
+    sort_order: 0,
+  })
+  const withTerminals = (
+    terminals: ReturnType<typeof term>[],
+    agent: Partial<SessionView> = {},
+  ) =>
+    makeState({
+      spine: {
+        projects: [{ id: "p1", name: "dux" }],
+        sessions: [{ ...session(), status: "active", ...agent }],
+        terminals,
+        sidebar: { groups: [], agentless_start: null },
+      } as unknown as DuxState["spine"],
+    })
+  const dockTarget: SelectedTarget = {
+    kind: "terminal",
+    terminalId: "t1",
+    owner: { kind: "session", sessionId: "s1" },
+  }
+  const flap = (on: SelectedTarget = target) =>
+    render(
+      <MobileActionFlap
+        target={on}
+        subject={{ kind: "agent", session: session() }}
+        band="plain"
+      />,
+    )
+  // The look rides the glyph's frame and the pulse its icon, as on every
+  // working glyph.
+  const look = () =>
+    screen.getByTestId("pane-part-switch").querySelector("[data-slot='working-glyph']")!.className
+  const icon = () => screen.getByTestId("pane-part-switch").querySelector("svg")!
+
+  it("sits after the keys toggle and before the menu", () => {
+    phone()
+    registerPaneInputGroup("s1", { surfaceSwitch: false, composeSurface: false, keysToggle: true })
+    mockState = withTerminals([term("t1")])
+    flap()
+    const keys = screen.getByTestId("pane-keys-toggle")
+    const toggle = screen.getByTestId("pane-part-switch")
+    const menu = screen.getByLabelText("Session actions")
+    expect(keys.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(toggle.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(toggle.className).toContain("h-10")
+  })
+
+  it("is absent on an agent with no terminal, and on a computer", () => {
+    phone()
+    flap()
+    expect(screen.queryByTestId("pane-part-switch")).toBeNull()
+    cleanup()
+    Object.defineProperty(window, "innerWidth", { value: desktopWidth, configurable: true })
+    mockState = withTerminals([term("t1")])
+    flap()
+    expect(screen.queryByTestId("pane-part-switch")).toBeNull()
+  })
+
+  it("shows the terminals' icon and count over the agent, pulsing busy while one runs", () => {
+    phone()
+    mockState = withTerminals([term("t1"), term("t2", true)])
+    flap()
+    const toggle = screen.getByTestId("pane-part-switch")
+    expect(toggle.textContent).toBe("2")
+    expect(toggle.getAttribute("aria-label")).toBe("Show terminals (2), working")
+    expect(icon().getAttribute("class")).toContain("lucide-square-terminal")
+    expect(look()).toContain("text-dux-working")
+    expect(icon().getAttribute("class")).toContain("motion-safe:animate-working-pulse")
+  })
+
+  it("is plain over the agent while no terminal runs", () => {
+    phone()
+    mockState = withTerminals([term("t1")])
+    flap()
+    expect(screen.getByTestId("pane-part-switch").getAttribute("aria-label")).toBe(
+      "Show terminals (1)",
+    )
+    expect(icon().getAttribute("class")).not.toContain("animate-")
+    expect(look()).not.toMatch(/animate-|text-dux-working|text-cyan/)
+  })
+
+  it("shows the agent's icon over its terminals, needs-you over working", () => {
+    phone()
+    mockState = withTerminals([term("t1")], { needs_attention: true, working: true })
+    flap(dockTarget)
+    const toggle = screen.getByTestId("pane-part-switch")
+    expect(toggle.getAttribute("aria-label")).toBe("Show the agent, needs you")
+    expect(icon().getAttribute("class")).toContain("lucide-bot")
+    expect(look()).toContain("text-cyan-100")
+    expect(look()).toContain("motion-safe:animate-attention-pulse")
+    // Needs-you wins: no pulse inside the blink.
+    expect(icon().getAttribute("class")).not.toContain("working-pulse")
+  })
+
+  it("carries no dot, never bounces, and holds still for less motion", () => {
+    phone()
+    mockState = withTerminals([term("t1")], { working: true })
+    flap(dockTarget)
+    const toggle = screen.getByTestId("pane-part-switch")
+    // One graphic: the icon itself, with no dot or other mark beside it.
+    expect(toggle.querySelectorAll("svg")).toHaveLength(1)
+    expect(toggle.querySelector("[aria-label='Needs attention']")).toBeNull()
+    expect(toggle.innerHTML).not.toContain("bounce")
+    // Every animation it has runs only where motion is welcome.
+    for (const cls of [icon().getAttribute("class") ?? "", look()]) {
+      for (const anim of cls.match(/\S*animate-\S+/g) ?? []) {
+        expect(anim).toMatch(/^motion-(safe|reduce):/)
+      }
+    }
+  })
+
+  it("asks the store to flip the view", () => {
+    phone()
+    mockState = withTerminals([term("t1")])
+    flap()
+    fireEvent.click(screen.getByTestId("pane-part-switch"))
+    expect(switchPhonePartMock).toHaveBeenCalledExactlyOnceWith("s1")
   })
 })
 

@@ -33,20 +33,26 @@ const STRIP_ICON_BUTTON =
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
 // pulses and bounces while its terminal runs, a click brings that terminal to
 // the front, a drag along the strip reorders the dock, and its ⋯ holds that
-// terminal's own actions. The + opens another terminal, and the strip's right
-// end carries the layout controls.
+// terminal's own actions. The + opens another terminal, and on a computer the
+// strip's right end carries the layout controls; a phone shows one part at a
+// time and has none.
 export function DockStrip({
   sessionId,
   terminals,
   activeTerminal,
   layout,
   onLayoutAction,
+  unlisted = null,
 }: {
   sessionId: string
   terminals: TerminalView[]
   activeTerminal: string | null
-  layout: ComputerLayout
-  onLayoutAction: (action: LayoutAction) => void
+  /** A terminal just created that the workspace does not list yet: its pill
+   * has no menu until it does, because its close confirm has nothing to show. */
+  unlisted?: string | null
+  /** Absent on a phone, which has no layout to change. */
+  layout?: ComputerLayout
+  onLayoutAction?: (action: LayoutAction) => void
 }) {
   const ids = terminals.map((t) => t.id)
   const attachStrip = useKeepCueClocks(ids.join("\n"))
@@ -64,6 +70,7 @@ export function DockStrip({
             terminal={terminal}
             label={terminalTitle(terminal, terminals)}
             active={terminal.id === activeTerminal}
+            withMenu={terminal.id !== unlisted}
           />
         ))}
       </SortableStrip>
@@ -80,20 +87,22 @@ export function DockStrip({
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
           other. */}
-      <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">
-        {layoutControls(layout).map((control) => (
-          <SimpleTooltip key={control.action} content={control.label}>
-            <button
-              type="button"
-              aria-label={control.label}
-              onClick={() => onLayoutAction(control.action)}
-              className={STRIP_ICON_BUTTON}
-            >
-              <control.icon className="size-3.5" />
-            </button>
-          </SimpleTooltip>
-        ))}
-      </div>
+      {layout !== undefined && onLayoutAction !== undefined ? (
+        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">
+          {layoutControls(layout).map((control) => (
+            <SimpleTooltip key={control.action} content={control.label}>
+              <button
+                type="button"
+                aria-label={control.label}
+                onClick={() => onLayoutAction(control.action)}
+                className={STRIP_ICON_BUTTON}
+              >
+                <control.icon className="size-3.5" />
+              </button>
+            </SimpleTooltip>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -103,11 +112,13 @@ function DockPill({
   terminal,
   label,
   active,
+  withMenu,
 }: {
   sessionId: string
   terminal: TerminalView
   label: string
   active: boolean
+  withMenu: boolean
 }) {
   const { setNodeRef, style, listeners, isDragging } = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
@@ -147,38 +158,40 @@ function DockPill({
       />
       <span className="max-w-40 truncate">{label}</span>
       {/* Consumes no layout space at rest, like the tab pill's. */}
-      <div
-        className={cn(
-          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100",
-          ALWAYS_REVEALED_ON_TOUCH,
-        )}
-      >
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button
-                type="button"
-                aria-label="Terminal actions"
-                onClick={(e) => e.stopPropagation()}
-                // The touch floor under a finger: its neighbours are the next
-                // pill and its own pill's select.
-                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground pointer-coarse:size-10"
-              />
-            }
-          >
-            <Ellipsis className="size-3.5" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-            {/* This terminal's own actions only: the input rows and the editor
-                live in the pane's top menu. Neutral, like every destructive
-                item; the confirm is the danger signal. */}
-            <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
-              <X />
-              Close terminal…
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+      {withMenu ? (
+        <div
+          className={cn(
+            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100",
+            ALWAYS_REVEALED_ON_TOUCH,
+          )}
+        >
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Terminal actions"
+                  onClick={(e) => e.stopPropagation()}
+                  // The touch floor under a finger: its neighbours are the next
+                  // pill and its own pill's select.
+                  className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground pointer-coarse:size-10"
+                />
+              }
+            >
+              <Ellipsis className="size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+              {/* This terminal's own actions only: the input rows and the editor
+                  live in the pane's top menu. Neutral, like every destructive
+                  item; the confirm is the danger signal. */}
+              <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
+                <X />
+                Close terminal…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      ) : null}
     </div>
   )
 }

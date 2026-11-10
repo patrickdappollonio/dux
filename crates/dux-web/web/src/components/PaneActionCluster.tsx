@@ -1,11 +1,21 @@
-import { Diff, Keyboard, KeyboardOff, Maximize2, Minimize2 } from "lucide-react"
+import {
+  Bot,
+  Diff,
+  Keyboard,
+  KeyboardOff,
+  Maximize2,
+  Minimize2,
+  SquareTerminal,
+} from "lucide-react"
 import type * as React from "react"
 import { useLayoutEffect, useRef, type ReactNode } from "react"
 
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
+import { phoneSwitch, type PartCue, type PhoneView } from "@/lib/layoutModel"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { keysToggleLabel, usePaneInputGroup } from "@/lib/paneInputGroup"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
@@ -14,6 +24,7 @@ import {
   mobileAccessoryBarVisible,
   openChangedFiles,
   setAccessoryBarVisibility,
+  switchPhonePart,
   toggleTheater,
   useDux,
 } from "@/lib/store"
@@ -24,7 +35,8 @@ import { swapTheaterGlyphs } from "./theaterFlightParts"
 
 // The pane's one action cluster, wherever it is painted: the theater toggle,
 // Macros, the changed-file count where an agent has one, the terminal-keys
-// toggle where the pane has a key row on offer, and the surface `⋯`.
+// toggle where the pane has a key row on offer, on a phone the switch between
+// an agent and its terminals, and the surface `⋯`.
 // The phone's docked flap renders it, and so does the floating theater pill on
 // both form factors, because the detach animation flies one into the other as a
 // single object.
@@ -67,6 +79,7 @@ export function PaneActionCluster({
       <MacroPopover variant="pill" target={target} />
       <ChangesCountButton sessionId={sessionId} />
       <KeysToggleButton target={target} />
+      <PartSwitchButton target={target} sessionId={sessionId} />
       {ellipsis}
     </>
   )
@@ -199,6 +212,79 @@ function KeysToggleButton({ target }: { target: SelectedTarget }) {
         onClick={() => void setAccessoryBarVisibility(!visible)}
       >
         {visible ? <KeyboardOff /> : <Keyboard />}
+      </Button>
+    </SimpleTooltip>
+  )
+}
+
+// The look the switch's icon takes for the part it points to: the busy colour
+// while it works (the pulse itself is the glyph's), and the shared attention
+// colour and blink when it needs you. The icon carries it with no dot beside
+// it, and it never bounces: one bouncing icon among still ones would pull the
+// eye all the time.
+const PART_CUE_LOOK: Record<PartCue, string | undefined> = {
+  attention: "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none",
+  working: "text-dux-working",
+  plain: undefined,
+}
+
+const PART_CUE_WORDS: Record<PartCue, string> = {
+  attention: ", needs you",
+  working: ", working",
+  plain: "",
+}
+
+// A phone shows an agent or its terminals, never both, and this is how it moves
+// between them: the other part's icon, with the terminal count over the agent.
+// A computer lays the two out together and has no switch. Present only on an
+// agent with a terminal to switch to.
+function PartSwitchButton({
+  target,
+  sessionId,
+}: {
+  target: SelectedTarget
+  sessionId: string | undefined
+}) {
+  const isMobile = useIsMobile()
+  const { spine } = useDux()
+  const session = spine?.sessions.find((s) => s.id === sessionId)
+  if (!isMobile || session === undefined) return null
+  const terminals = (spine?.terminals ?? []).filter(
+    (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
+  )
+  const view: PhoneView = target.kind === "terminal" ? "terminals" : "agent"
+  const shown = phoneSwitch(view, session, terminals)
+  if (shown === null) return null
+  const toTerminals = shown.shows === "terminals"
+  const label = `${toTerminals ? `Show terminals (${shown.count})` : "Show the agent"}${PART_CUE_WORDS[shown.cue]}`
+  const Icon = toTerminals ? SquareTerminal : Bot
+  return (
+    <SimpleTooltip content={label}>
+      <Button
+        variant="ghost"
+        size="icon"
+        data-testid="pane-part-switch"
+        data-cue={shown.cue}
+        // Content-sized like the changes count over the agent, because the
+        // count beside the icon is data.
+        className={
+          toTerminals ? "h-10 w-auto shrink-0 gap-1.5 rounded-full px-3" : CLUSTER_BUTTON
+        }
+        aria-label={label}
+        onClick={() => switchPhonePart(session.id)}
+      >
+        {/* The working glyph without its bounce: a hand-over to needs-you
+          * lets the pulse land before the attention look eases in, as on the
+          * list, and the flap and the pill it flies into share one clock, so
+          * they pulse as one. */}
+        <WorkingGlyph
+          icon={Icon}
+          working={shown.cue === "working"}
+          look={PART_CUE_LOOK[shown.cue]}
+          bounce={false}
+          cueKey={`part-switch:${session.id}`}
+        />
+        {toTerminals ? <span className="text-sm">{shown.count}</span> : null}
       </Button>
     </SimpleTooltip>
   )

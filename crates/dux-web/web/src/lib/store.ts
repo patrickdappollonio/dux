@@ -166,11 +166,13 @@ import {
   ownerSessionId,
   type TerminalOwnerRef,
 } from "./terminalOwner"
-import { ownerHasTerminal } from "./terminals"
+import { ownerHasTerminal, spineListsTerminal } from "./terminals"
 import {
   layoutOnStart,
+  resolvePhoneView,
   resolveStackOpening,
   type ComputerLayout,
+  type PhoneView,
 } from "./layoutModel"
 import { readStackMemory, writeStackMemory } from "./stackMemory"
 import { agentStackModel } from "@/components/agentStackModel"
@@ -1335,11 +1337,21 @@ function setState(patch: Partial<DuxState>): void {
       next.stackTabs = { ...next.stackTabs, [target.sessionId]: target.tabId }
       writeStackMemory(target.sessionId, { tab: target.tabId })
     }
+    // A phone shows the part the selection names, so whatever it lands on is the
+    // view this device left the agent in, however it got there.
+    if (target != null && isMobileViewport()) rememberPhoneView(target)
   }
   const held = heldFirstTab(next)
   if (held !== null && next.endedInViewTab !== held) next.endedInViewTab = held
   state = next
   emit()
+}
+
+function rememberPhoneView(target: SelectedTarget): void {
+  const sessionId = target.kind === "agent" ? target.sessionId : ownerSessionId(target.owner)
+  if (sessionId === null) return
+  const view: PhoneView = target.kind === "agent" ? "agent" : "terminals"
+  if (readStackMemory(sessionId).view !== view) writeStackMemory(sessionId, { view })
 }
 
 // The one rule that keeps a dormant first tab from starting on sight once the
@@ -2164,6 +2176,10 @@ function refreshAttentionChrome(): void {
 // by the server's `rev` below, since only the server knows which is later.
 let loadWorkspaceSeq = 0
 
+// How many workspace documents have been applied, so an operation can tell
+// whether one landed while it was in flight.
+let workspaceApplies = 0
+
 // Whether this server pushes the workspace document. Set by the first pushed
 // frame this client could actually process, never unset: until then (an older
 // server, or a server whose frames dux cannot read) the coarse pings keep
@@ -2247,6 +2263,7 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.
   const spine = rawSpine
+  workspaceApplies += 1
   // The outgoing session list, captured before `setState` swaps the spine. A
   // vanished agent picks its replacement from this ordering (see
   // `navigateAfterVanish`), since the new list no longer holds its position.
@@ -5240,6 +5257,15 @@ function restoreSessionScopedReconnect(
 // agent already in view is how the user asks for it to start again.
 export function selectSession(id: string | null): void {
   const extra = id === null ? undefined : { endedInViewTab: null }
+  // Asking for an agent names no part of it, so a phone opens it on the part
+  // this device left it on. An address that names the agent is a position and
+  // never comes through here.
+  const session = id === null ? undefined : state.spine?.sessions.find((s) => s.id === id)
+  const phoneTerminal = session === undefined ? null : phoneOpeningTerminal(session)
+  if (id !== null && phoneTerminal !== null) {
+    selectTerminal(phoneTerminal, { kind: "session", sessionId: id }, { extra })
+    return
+  }
   selectSessionRoute(id, undefined, undefined, extra)
 }
 
@@ -5320,6 +5346,54 @@ function selectSessionRoute(
   switchChangesSubscription(prev, id)
   syncUrl(urlMode)
   if (prev !== id) void restartChanges(id)
+}
+
+// The terminal a phone opens an agent on when the request names no part of it
+// (a row of the list), or null when it opens on the agent: the view this
+// device last left the agent in, or its terminals when the agent is stopped
+// while one of them runs, because that is the only part with anything live in
+// it. Opening it never starts the agent.
+function phoneOpeningTerminal(session: SessionView): string | null {
+  if (!isMobileViewport()) return null
+  const dock = dockTerminalIds(session.id)
+  const memory = readStackMemory(session.id)
+  const agentStopped = session.status !== "active"
+  const view = resolvePhoneView({
+    terminalCount: dock.length,
+    addressNamesTerminal: false,
+    agentStopped,
+    anyTerminalRunning: dock.length > 0,
+    remembered: memory.view,
+  })
+  if (view !== "terminals") return null
+  return lastShownTerminal(session.id, dock)
+}
+
+// The agent's terminal shown last on this device while it is still running,
+// else the first in its dock.
+function lastShownTerminal(sessionId: string, dock: string[]): string | null {
+  return resolveStackOpening({
+    addressTerminal: null,
+    rememberedTerminal: state.stackTerminals[sessionId] ?? readStackMemory(sessionId).terminal,
+    rememberedLayout: null,
+    dockTerminals: dock,
+    agentStopped: false,
+    anyTerminalRunning: dock.length > 0,
+  }).activeTerminal
+}
+
+// The phone's agent/terminals switch: show the part that is not on screen, the
+// agent's tab this page showed last or the terminal used last. Another part is
+// another position, so it pushes and Back flips back.
+export function switchPhonePart(sessionId: string): void {
+  const target = state.selectedTarget
+  if (target?.kind === "terminal" && target.owner.kind === "session") {
+    selectTab(sessionId, shownStackTab(sessionId), { persist: false })
+    return
+  }
+  const terminal = lastShownTerminal(sessionId, dockTerminalIds(sessionId))
+  if (terminal === null) return
+  selectTerminal(terminal, { kind: "session", sessionId })
 }
 
 // Drop the focused target and land on home. The target is cleared FIRST so any
@@ -5708,11 +5782,26 @@ function showAgentAfterDock(spine: Spine, sessionId: string): void {
 // fills in its label/status; focusing first is safe because the PTY socket only
 // needs the ids the create returned. A failure surfaces as a toast.
 export function createTerminal(sessionId: string): void {
+  const appliedAtStart = workspaceApplies
   terminalsApi
     .create(sessionId)
-    .then((created) =>
-      selectTerminal(created.terminal_id, { kind: "session", sessionId }),
-    )
+    .then(async (created) => {
+      const id = created.terminal_id
+      // A workspace that landed while the create was in flight and does not
+      // list the new terminal may already have seen it end, and nothing would
+      // clear a selection of a terminal that is gone. Ask the server again
+      // before opening it; when it cannot answer, open it as usual.
+      if (workspaceApplies !== appliedAtStart && !spineListsTerminal(state.spine?.terminals, id)) {
+        const fresh = await fetchWorkspace().catch(() => null)
+        if (fresh !== null && !spineListsTerminal(fresh.terminals, id)) {
+          notifyWarning(
+            "The new terminal ended before it opened, so you are still where you were. Its shell may have exited at once; check the agent's environment and try again.",
+          )
+          return
+        }
+      }
+      selectTerminal(id, { kind: "session", sessionId })
+    })
     .catch((e) =>
       notifyError(
         e instanceof Error ? e.message : "Could not create the terminal.",
