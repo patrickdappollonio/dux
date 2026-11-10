@@ -9533,6 +9533,7 @@ mod tests {
                 client,
                 sort_order,
                 created_at,
+                list_after: None,
             },
         );
     }

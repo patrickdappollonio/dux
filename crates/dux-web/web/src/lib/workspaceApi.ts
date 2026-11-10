@@ -231,8 +231,9 @@ type RawTab = Omit<AgentTabView, "typing"> & { typing?: boolean }
 // the pure sort treats as epoch 0.
 type RawTerminal = Omit<
   TerminalView,
-  "working" | "typing" | "sort_order" | "created_at" | "updated_at"
+  "working" | "typing" | "sort_order" | "created_at" | "updated_at" | "list_after"
 > & {
+  list_after?: string | null
   working?: boolean
   typing?: boolean
   sort_order?: number
@@ -247,8 +248,8 @@ type LegacyTerminal = Omit<RawTerminal, "owner">
 // The flat, owner-bearing collection, from either shape the server may send. A
 // newer server sends `terminals` at the top level, each entry tagged with its
 // owner; an older one nests them inside the owning session or project, and those
-// are lifted and tagged here rather than discarded, which would show an empty
-// Terminals section while every terminal is still running.
+// are lifted and tagged here rather than discarded, which would list no terminal
+// while every terminal is still running.
 //
 // The flat field wins whenever it is present, even when empty: a server with no
 // terminals sends `[]` and means it.
@@ -297,5 +298,6 @@ function normalizeTerminal(t: RawTerminal): TerminalView {
     sort_order: t.sort_order ?? 0,
     created_at: t.created_at ?? "",
     updated_at: t.updated_at ?? "",
+    list_after: t.list_after ?? null,
   }
 }

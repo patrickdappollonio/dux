@@ -13884,6 +13884,7 @@ mod tests {
                     client,
                     sort_order: u64::try_from(index).expect("a test index fits in a u64"),
                     created_at: now,
+                    list_after: None,
                 },
             );
         }
@@ -14212,6 +14213,7 @@ mod tests {
                 client,
                 sort_order: 3,
                 created_at: Utc::now(),
+                list_after: None,
             },
         );
         let x = app.mouse_layout.terminal_list.x;
@@ -16999,6 +17001,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -17052,6 +17055,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -17879,6 +17883,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some("term-1".to_string());
@@ -21716,6 +21721,7 @@ not_a_real_action = ["x"]
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.session_surface = SessionSurface::Terminal;
@@ -21930,6 +21936,7 @@ not_a_real_action = ["x"]
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.session_surface = SessionSurface::Terminal;
@@ -24610,6 +24617,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         let with_terminal = app.filtered_palette_commands("terminal").len();
@@ -24839,6 +24847,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert_eq!(
@@ -24979,6 +24988,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert!(app.any_row_animating());
@@ -25345,6 +25355,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                     sort_order: ord,
                     created_at: chrono::Utc::now(),
+                    list_after: None,
                 },
             );
         }
@@ -25389,6 +25400,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert!(!app.filtered_palette_commands("move-terminal-up").is_empty());
@@ -27200,6 +27212,7 @@ cyan = "#00ffff"
                 client: term_client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -28528,6 +28541,7 @@ cyan = "#00ffff"
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -34341,6 +34355,7 @@ cyan = "#00ffff"
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some("term-1".to_string());

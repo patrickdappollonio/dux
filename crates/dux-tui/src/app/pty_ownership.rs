@@ -2881,6 +2881,7 @@ mod tests {
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -2966,6 +2967,7 @@ mod tests {
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         let browser = seat.owners.next_conn_id();
@@ -3424,6 +3426,7 @@ mod tests {
                 client: spawn_sleeper(),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
     }

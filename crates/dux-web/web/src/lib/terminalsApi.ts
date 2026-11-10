@@ -64,12 +64,20 @@ export const terminalsApi = {
       "DELETE",
       `/api/v1/terminals/${encodeURIComponent(terminalId)}` + forceConnectedQuery(accepted, true),
     ),
-  // Reorder the flat Terminals section as one global list. `terminalIds` must be the complete
+  // Reorder every terminal as one global list. `terminalIds` must be the complete
   // set of every current terminal id, whatever its owner, in the desired order; the server
   // validates it as a strict permutation and rejects a stale set. Terminal order is
   // runtime-only, so it resets to creation order on restart.
   reorder: (terminalIds: string[]) =>
     request<void>("POST", "/api/v1/terminals/reorder", {
       terminal_ids: terminalIds,
+    }),
+  // Place a project or standalone terminal's row in the agents list right after
+  // `afterAgent` in the stored agent order, or first when null. The server
+  // refuses an agent's own terminal, which is not a list row. Runtime-only.
+  place: (terminalId: string, afterAgent: string | null) =>
+    request<void>("POST", "/api/v1/terminals/place", {
+      terminal_id: terminalId,
+      after_agent: afterAgent,
     }),
 }

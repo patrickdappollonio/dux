@@ -324,6 +324,18 @@ pub enum Command {
         terminal_ids: Vec<String>,
     },
 
+    /// Put a project or standalone terminal's row right after `after_agent` in
+    /// the agents list's manual order, or first when `None`. Refused for an
+    /// unknown terminal and for an agent's own terminal, which is not a list
+    /// row. Runtime only, like the terminal. Silent success: the list moving is
+    /// the feedback.
+    PlaceTerminalInList {
+        /// The terminal whose row moves.
+        terminal_id: String,
+        /// The agent its row sits right after, `None` for the top.
+        after_agent: Option<String>,
+    },
+
     /// Persist a new left-to-right order for ONE agent's provider tabs, the slot
     /// tab included. `tab_ids` must be exactly the agent's current tabs; every
     /// tab's position is rewritten in one transaction. Which tab holds the slot
@@ -806,6 +818,13 @@ impl Engine {
 
             Command::ReorderTerminals { terminal_ids } => self
                 .reorder_terminals(&terminal_ids)
+                .map(|()| EventReaction::Nothing),
+
+            Command::PlaceTerminalInList {
+                terminal_id,
+                after_agent,
+            } => self
+                .checked_place_terminal_in_list(&terminal_id, after_agent)
                 .map(|()| EventReaction::Nothing),
 
             Command::ReorderAgentTabs {
@@ -2028,6 +2047,30 @@ impl Engine {
                     u64::try_from(index).expect("a terminal list index fits in u64");
             }
         }
+        Ok(())
+    }
+
+    /// [`Command::PlaceTerminalInList`]: refuse what is not a list row, then
+    /// place it.
+    fn checked_place_terminal_in_list(
+        &mut self,
+        terminal_id: &str,
+        after_agent: Option<String>,
+    ) -> anyhow::Result<()> {
+        let Some(terminal) = self.companion_terminals.get(terminal_id) else {
+            anyhow::bail!(
+                "Terminal {terminal_id} is no longer running, so it has no place in the list to move."
+            );
+        };
+        match terminal.owner.as_ref() {
+            crate::model::TerminalOwnerRef::Session(_) => anyhow::bail!(
+                "{} belongs to an agent and sits with that agent, not in the list, so it cannot be moved there.",
+                terminal.label
+            ),
+            crate::model::TerminalOwnerRef::Project(_)
+            | crate::model::TerminalOwnerRef::Standalone => {}
+        }
+        self.place_terminal_in_list(terminal_id, after_agent);
         Ok(())
     }
 
@@ -3890,6 +3933,7 @@ mod tests {
                 client: spawn_cat_v_pty(),
                 sort_order,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
     }
@@ -3934,6 +3978,52 @@ mod tests {
         // The rejected reorder left the stored order untouched.
         assert_eq!(engine.companion_terminals["term-1"].sort_order, 0);
         assert_eq!(engine.companion_terminals["term-2"].sort_order, 1);
+    }
+
+    #[test]
+    fn place_terminal_in_list_anchors_a_list_row_and_refuses_the_rest() {
+        let (mut engine, _tmp) = test_engine();
+        insert_terminal(&mut engine, "term-own", 0);
+        insert_terminal(&mut engine, "term-project", 1);
+        engine
+            .companion_terminals
+            .get_mut("term-project")
+            .expect("inserted")
+            .owner = crate::model::TerminalOwner::Project("p1".to_string());
+
+        engine
+            .apply(Command::PlaceTerminalInList {
+                terminal_id: "term-project".into(),
+                after_agent: Some("s1".into()),
+            })
+            .expect("a project terminal is a list row");
+        assert_eq!(
+            engine.companion_terminals["term-project"]
+                .list_after
+                .as_deref(),
+            Some("s1")
+        );
+
+        let err = engine
+            .apply(Command::PlaceTerminalInList {
+                terminal_id: "term-own".into(),
+                after_agent: None,
+            })
+            .map(|_| ())
+            .expect_err("an agent's own terminal is not a list row");
+        assert!(
+            err.to_string().contains("belongs to an agent"),
+            "err: {err}"
+        );
+
+        let err = engine
+            .apply(Command::PlaceTerminalInList {
+                terminal_id: "term-gone".into(),
+                after_agent: None,
+            })
+            .map(|_| ())
+            .expect_err("an unknown terminal is refused");
+        assert!(err.to_string().contains("no longer running"), "err: {err}");
     }
 
     // ── Command::UpdateMacros ───────────────────────────────────────────────

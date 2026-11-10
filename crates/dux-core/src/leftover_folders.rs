@@ -1724,6 +1724,7 @@ mod tests {
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert!(matches!(

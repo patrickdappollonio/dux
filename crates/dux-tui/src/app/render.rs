@@ -18168,6 +18168,7 @@ mod tests {
                     client,
                     sort_order: u64::try_from(i).expect("a test index fits in a u64"),
                     created_at: chrono::Utc::now(),
+                    list_after: None,
                 },
             );
         }
@@ -18208,6 +18209,7 @@ mod tests {
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.focus = FocusPane::Left;
@@ -18293,6 +18295,7 @@ mod tests {
                     client,
                     sort_order: 1,
                     created_at: chrono::Utc::now(),
+                    list_after: None,
                 },
             );
         }
@@ -18753,6 +18756,7 @@ mod tests {
                     client,
                     sort_order: u64::try_from(index).expect("a test index fits in a u64"),
                     created_at: now,
+                    list_after: None,
                 },
             );
         }
@@ -21908,6 +21912,7 @@ mod tests {
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some(terminal_id);

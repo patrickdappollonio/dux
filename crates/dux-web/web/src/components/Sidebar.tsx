@@ -26,12 +26,8 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { changesCountFor } from "@/lib/agentVitals"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
 import { partitionProjects } from "@/lib/projects"
-import { isQuietSession } from "@/lib/flatList"
-import {
-  overlaidFlatTerminals,
-  sortFlatTerminals,
-  type FlatTerminal,
-} from "@/lib/flatTerminals"
+import { orderFlatRows, overlaidListInputs } from "@/lib/flatList"
+import { assembleFlatTerminals, type FlatTerminal } from "@/lib/flatTerminals"
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import { workspaceProjectId } from "@/lib/agentWorkspace"
 import {
@@ -72,10 +68,9 @@ import {
 } from "@/hooks/use-reveal-selected-row"
 
 // The icon rail replaces the flat agent list at `collapsible="icon"` width: the
-// live work, flattened. Agents the expanded list shows in its main section come
-// first, in project-then-agent order, then the live terminals in the Terminals
-// section's order, all with the same cues and selection. The Inactive tail stays
-// off the rail, so a selected inactive agent has no icon here.
+// list's main rows, agents and project and standalone terminals, in the list's
+// order under the active sort, with the same cues and selection. The Inactive
+// tail stays off the rail, so a selected inactive agent has no icon here.
 //
 // A mouse resting on an icon floats the whole sidebar over the page instead of a
 // card, so the icons' cards open for keyboard focus alone.
@@ -208,47 +203,28 @@ function CollapsedTerminalIcon({
   )
 }
 
+// One icon of the rail: an agent with its tooltip's project line, or a
+// terminal decorated for its row.
+type RailEntry =
+  | { kind: "agent"; session: SessionView; projectLabel: string }
+  | { kind: "terminal"; entry: FlatTerminal }
+
 function CollapsedAgentRail({
-  projectIds,
-  grouped,
-  standalone,
-  projectName,
+  entries,
   changes,
   selectedTarget,
-  terminals,
   iconHover,
 }: {
-  projectIds: string[]
-  grouped: Map<string, SessionView[]>
-  /** The agents that belong to no project, in list order: grouping by project
-   * loses them, and the rail is the only way to reach an agent at icon width. */
-  standalone: SessionView[]
-  projectName: (id: string) => string
+  /** The list's main rows, in its order. */
+  entries: RailEntry[]
   changes: ChangesSlice
   selectedTarget: SelectedTarget | null
-  /** The live terminals, already in the Terminals section's order. */
-  terminals: FlatTerminal[]
   iconHover: RailIconHover
 }) {
   // The rail scrolls on its own, so it reveals a newly selected agent too.
   const railRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
-  const entries = [
-    ...projectIds.flatMap((projectId) =>
-      (grouped.get(projectId) ?? [])
-        .filter((session) => !isQuietSession(session))
-        .map((session) => ({
-        session,
-        // The tooltip's project line, empty for an agent with no project; the
-        // tooltip drops the separator with it and names the folder instead.
-        projectLabel: projectName(projectId),
-      })),
-    ),
-    ...standalone
-      .filter((session) => !isQuietSession(session))
-      .map((session) => ({ session, projectLabel: "" })),
-  ]
 
-  if (entries.length === 0 && terminals.length === 0) return null
+  if (entries.length === 0) return null
 
   return (
     <SidebarGroup
@@ -260,30 +236,31 @@ function CollapsedAgentRail({
     >
       <SidebarGroupContent>
         <SidebarMenu>
-          {entries.map(({ session, projectLabel }) => (
-            <CollapsedAgentIcon
-              key={session.id}
-              session={session}
-              projectName={projectLabel}
-              changesCount={changesCountFor(changes, session.id)}
-              hover={iconHover}
-              selected={
-                selectedTarget?.kind === "agent" &&
-                selectedTarget.sessionId === session.id
-              }
-            />
-          ))}
-          {terminals.map((entry) => (
-            <CollapsedTerminalIcon
-              key={entry.terminal.id}
-              entry={entry}
-              hover={iconHover}
-              selected={
-                selectedTarget?.kind === "terminal" &&
-                selectedTarget.terminalId === entry.terminal.id
-              }
-            />
-          ))}
+          {entries.map((row) =>
+            row.kind === "agent" ? (
+              <CollapsedAgentIcon
+                key={agentRowKey(row.session.id)}
+                session={row.session}
+                projectName={row.projectLabel}
+                changesCount={changesCountFor(changes, row.session.id)}
+                hover={iconHover}
+                selected={
+                  selectedTarget?.kind === "agent" &&
+                  selectedTarget.sessionId === row.session.id
+                }
+              />
+            ) : (
+              <CollapsedTerminalIcon
+                key={terminalRowKey(row.entry.terminal.id)}
+                entry={row.entry}
+                hover={iconHover}
+                selected={
+                  selectedTarget?.kind === "terminal" &&
+                  selectedTarget.terminalId === row.entry.terminal.id
+                }
+              />
+            ),
+          )}
         </SidebarMenu>
       </SidebarGroupContent>
     </SidebarGroup>
@@ -522,27 +499,42 @@ export function AppSidebar() {
   const { spine, bootstrap, selectedTarget, changes } = dux
   const sessions = spine?.sessions ?? []
   const projects = spine?.projects ?? []
-  const { grouped, withAgents, projectName } = partitionProjects(
-    spine?.sidebar,
-    projects,
+  const { projectName } = partitionProjects(spine?.sidebar, projects, sessions)
+  // The expanded list's main rows in its order, drags in flight included; the
+  // search box filters only that list, so the rail never inherits a half-typed
+  // query.
+  const listInputs = overlaidListInputs({
     sessions,
-  )
-  // The same order the expanded Terminals section lists; the search box filters
-  // only that list, so the rail never inherits a half-typed query.
-  const railTerminals = sortFlatTerminals(
-    overlaidFlatTerminals({
-      terminals: spine?.terminals ?? [],
-      sessions,
+    terminals: spine?.terminals ?? [],
+    pendingAgentOrder: dux.pendingAgentOrder,
+    pendingTerminalOrder: dux.pendingTerminalOrder,
+    pendingTerminalPlacement: dux.pendingTerminalPlacement,
+  })
+  const decorated = new Map(
+    assembleFlatTerminals(
+      listInputs.terminals,
+      listInputs.sessions,
       projects,
       projectName,
-      pendingOrder: dux.pendingTerminalOrder,
-    }),
+    ).map((entry) => [entry.terminal.id, entry]),
+  )
+  const railEntries: RailEntry[] = orderFlatRows(
+    listInputs.sessions,
+    listInputs.terminals,
     agentSortValue(dux),
-  )
-  // The agents `partitionProjects` groups under no project, kept in list order.
-  const standaloneSessions = sessions.filter(
-    (session) => workspaceProjectId(session.workspace) === null,
-  )
+  ).main.map((row): RailEntry => {
+    if (row.kind === "terminal") {
+      return { kind: "terminal", entry: decorated.get(row.terminal.id)! }
+    }
+    // The tooltip's project line, empty for an agent with no project; the
+    // tooltip drops the separator with it and names the folder instead.
+    const projectId = workspaceProjectId(row.session.workspace)
+    return {
+      kind: "agent",
+      session: row.session,
+      projectLabel: projectId === null ? "" : projectName(projectId),
+    }
+  })
 
   const instanceTitle = resolveInstanceTitle(bootstrap?.title)
 
@@ -626,13 +618,9 @@ export function AppSidebar() {
 
         {/* Icon rail: only visible at icon width, flattened to agents. */}
         <CollapsedAgentRail
-          projectIds={withAgents}
-          grouped={grouped}
-          standalone={standaloneSessions}
-          projectName={projectName}
+          entries={railEntries}
           changes={changes}
           selectedTarget={selectedTarget}
-          terminals={railTerminals}
           iconHover={iconHover}
         />
       </SidebarContent>

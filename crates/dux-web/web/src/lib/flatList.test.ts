@@ -1,17 +1,21 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 import {
-  activeFirstSessions,
-  displayedSessionOrder,
   FLAT_SORT_LABELS,
+  flatRowKey,
+  listDragBaseline,
   nextActiveSessionId,
-  partitionQuiet,
+  orderFlatRows,
+  planListDrop,
   quietTailForcedOpen,
-  sortMainSessions,
-  sortQuietTail,
   stateWord,
+  type FlatRow,
+  type FlatSortKey,
 } from "@/lib/flatList"
-import type { SessionView } from "@/lib/types"
+import type { SessionView, TerminalView } from "@/lib/types"
 
 function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   return {
@@ -41,165 +45,306 @@ function makeSession(over: Partial<SessionView> & { id: string }): SessionView {
   } as SessionView
 }
 
-describe("partitionQuiet", () => {
-  it("keeps active sessions in main and sinks detached/exited into quiet", () => {
+function makeTerminal(over: Partial<TerminalView> & { id: string }): TerminalView {
+  return {
+    owner: { kind: "project", project_id: "p1" },
+    label: over.id,
+    has_output: false,
+    working: false,
+    typing: false,
+    foreground_cmd: null,
+    sort_order: 0,
+    created_at: "2026-07-17T12:00:00Z",
+    updated_at: "2026-07-17T12:00:00Z",
+    list_after: null,
+    ...over,
+  }
+}
+
+// An agent's own terminal, which is never a row of the list.
+function ownTerminal(id: string, sessionId: string): TerminalView {
+  return makeTerminal({ id, owner: { kind: "session", session_id: sessionId } })
+}
+
+const ids = (rows: FlatRow[]) =>
+  rows.map((row) => (row.kind === "agent" ? row.session.id : row.terminal.id))
+
+// The other half of `the_shared_flat_list_fixture_holds` in dux-core's
+// `flat_list.rs`: the terminal UI and the browser order the list alike.
+const fixture = JSON.parse(
+  readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../../dux-core/tests/fixtures/flat_list_cross_language.json",
+    ),
+    "utf8",
+  ),
+) as {
+  cases: {
+    what: string
+    mode: string
+    agents: {
+      id: string
+      name: string
+      status: SessionView["status"]
+      created: string
+      updated: string
+      hot: boolean
+      running_terminal: boolean
+    }[]
+    terminals: {
+      id: string
+      name: string
+      created: string
+      updated: string
+      busy: boolean
+      after: string | null
+    }[]
+    main: string[]
+    inactive: string[]
+  }[]
+}
+
+// The config spells the two name modes the way the core does.
+const FIXTURE_MODES: Record<string, FlatSortKey> = {
+  active: "active",
+  updated: "updated",
+  created: "created",
+  name: "name",
+  name_desc: "name_desc",
+  manual: "manual",
+}
+
+describe("the shared flat list fixture", () => {
+  for (const c of fixture.cases) {
+    it(c.what, () => {
+      const sessions = c.agents.map((a) =>
+        makeSession({
+          id: a.id,
+          title: a.name,
+          status: a.status,
+          created_at: a.created,
+          updated_at: a.updated,
+          working: a.hot,
+        }),
+      )
+      const terminals = [
+        ...c.terminals.map((t) =>
+          makeTerminal({
+            id: t.id,
+            label: t.name,
+            created_at: t.created,
+            updated_at: t.updated,
+            working: t.busy,
+            list_after: t.after,
+          }),
+        ),
+        ...c.agents
+          .filter((a) => a.running_terminal)
+          .map((a) => ownTerminal(`own-${a.id}`, a.id)),
+      ]
+      const order = orderFlatRows(sessions, terminals, FIXTURE_MODES[c.mode])
+      expect(ids(order.main)).toEqual(c.main)
+      expect(order.inactive.map((s) => s.id)).toEqual(c.inactive)
+    })
+  }
+})
+
+describe("orderFlatRows", () => {
+  it("never lists an agent's own terminal", () => {
+    const order = orderFlatRows(
+      [makeSession({ id: "a" })],
+      [ownTerminal("own", "a"), makeTerminal({ id: "t", list_after: "a" })],
+      "manual",
+    )
+    expect(ids(order.main)).toEqual(["a", "t"])
+  })
+
+  it("floats a typed-into terminal with the hot rows", () => {
+    const order = orderFlatRows(
+      [makeSession({ id: "a" })],
+      [makeTerminal({ id: "t", typing: true, list_after: "a" })],
+      "active",
+    )
+    expect(ids(order.main)).toEqual(["t", "a"])
+  })
+
+  it("sorts a terminal by the name it was opened with, never its foreground app", () => {
+    const order = orderFlatRows(
+      [makeSession({ id: "m", title: "mike" })],
+      [makeTerminal({ id: "t", label: "zulu", foreground_cmd: "aaa", list_after: null })],
+      "name",
+    )
+    expect(ids(order.main)).toEqual(["m", "t"])
+  })
+
+  // SHARED VECTORS with dux-core `flat_list.rs`, agents alone.
+  it("floats hot agents and sorts the tail most recently active first", () => {
     const sessions = [
-      makeSession({ id: "a", status: "active" }),
-      makeSession({ id: "b", status: "detached" }),
-      makeSession({ id: "c", status: "exited" }),
-      makeSession({ id: "d", status: "active" }),
+      makeSession({ id: "zeta", updated_at: "2026-07-17T12:00:00Z" }),
+      makeSession({ id: "gone", status: "exited", updated_at: "2026-07-17T10:00:00Z" }),
+      makeSession({ id: "alpha", updated_at: "2026-07-17T12:00:00Z" }),
+      makeSession({ id: "hot", needs_attention: true }),
+      makeSession({ id: "parked", status: "detached", updated_at: "2026-07-17T14:00:00Z" }),
     ]
-    const { main, quiet } = partitionQuiet(sessions)
-    expect(main.map((s) => s.id)).toEqual(["a", "d"])
-    expect(quiet.map((s) => s.id)).toEqual(["b", "c"])
-  })
-})
-
-describe("activeFirstSessions", () => {
-  it("floats working and needs-attention agents above the rest, stably", () => {
-    const sessions = [
-      makeSession({ id: "idle1" }),
-      makeSession({ id: "working", working: true }),
-      makeSession({ id: "idle2" }),
-      makeSession({ id: "attn", needs_attention: true }),
-    ]
-    expect(activeFirstSessions(sessions).map((s) => s.id)).toEqual([
-      "working",
-      "attn",
-      "idle1",
-      "idle2",
-    ])
-  })
-
-  it("preserves core order when nothing is hot", () => {
-    const sessions = [makeSession({ id: "a" }), makeSession({ id: "b" })]
-    expect(activeFirstSessions(sessions).map((s) => s.id)).toEqual(["a", "b"])
-  })
-})
-
-describe("sortMainSessions", () => {
-  const sessions = [
-    makeSession({ id: "b", title: "Beta", created_at: "2026-07-17T10:00:00Z", updated_at: "2026-07-17T10:00:00Z" }),
-    makeSession({ id: "a", title: "Alpha", working: true, created_at: "2026-07-17T09:00:00Z", updated_at: "2026-07-17T11:00:00Z" }),
-  ]
-
-  it("floats hot agents for the active key", () => {
-    expect(sortMainSessions(sessions, "active").map((s) => s.id)).toEqual(["a", "b"])
-  })
-
-  it("returns the input order verbatim for manual", () => {
-    expect(sortMainSessions(sessions, "manual").map((s) => s.id)).toEqual(["b", "a"])
-  })
-
-  it("sorts by name case-insensitively", () => {
-    expect(sortMainSessions(sessions, "name").map((s) => s.id)).toEqual(["a", "b"])
-  })
-
-  it("sorts by most recently updated", () => {
-    expect(sortMainSessions(sessions, "updated").map((s) => s.id)).toEqual(["a", "b"])
-  })
-
-  it("sorts by name descending (Z to A) for a TUI-set name_desc", () => {
-    // The web does not offer name_desc in its picker but must DISPLAY it.
-    expect(sortMainSessions(sessions, "name_desc").map((s) => s.id)).toEqual(["b", "a"])
-  })
-
-  it("does not mutate the input array", () => {
-    const input = sessions.slice()
-    sortMainSessions(input, "name")
-    expect(input.map((s) => s.id)).toEqual(["b", "a"])
-  })
-})
-
-// The drag baseline for a drop made in a NON-manual sort mode: the complete
-// session list as the user sees it, totalized (sorted main list first, then the
-// quiet tail in base order), so the persisted manual order matches the screen.
-describe("displayedSessionOrder", () => {
-  const sessions = [
-    makeSession({ id: "zeta", title: "Zeta" }),
-    makeSession({ id: "gone", title: "Gone", status: "exited" }),
-    makeSession({ id: "alpha", title: "Alpha" }),
-    makeSession({ id: "hot", title: "Hot", working: true }),
-    makeSession({ id: "parked", title: "Parked", status: "detached" }),
-  ]
-
-  it("captures the name-sorted main list with the quiet tail appended, totally", () => {
-    // The tail rides at the END (it renders below the main list) in its own
-    // base relative order, and every session is present: the persisted order
-    // must be total, not just the visible subset.
-    expect(displayedSessionOrder(sessions, "name")).toEqual([
-      "alpha",
-      "hot",
-      "zeta",
-      "gone",
-      "parked",
-    ])
-  })
-
-  it("captures the active-first float for the active key", () => {
-    expect(displayedSessionOrder(sessions, "active")).toEqual([
-      "hot",
-      "zeta",
-      "alpha",
-      "gone",
-      "parked",
-    ])
-  })
-
-  it("returns the base order VERBATIM for manual (quiet stays interleaved)", () => {
-    // Manual drags behaved this way before drag-from-any-mode existed: the
-    // move applies over the raw base order, quiet sessions in place. Keeping
-    // that exact behavior is a requirement, so manual does not re-home the
-    // tail to the back.
-    expect(displayedSessionOrder(sessions, "manual")).toEqual([
-      "zeta",
-      "gone",
-      "alpha",
-      "hot",
-      "parked",
-    ])
-  })
-})
-
-// The quiet (inactive) tail is ordered MOST-RECENTLY-ACTIVE-FIRST
-// (Reverse(updated_at)) in the "active" sort mode, matching the TUI's
-// build_left_items; every other mode leaves the tail verbatim. SHARED VECTORS
-// with dux-core `flat_list.rs`.
-describe("sortQuietTail", () => {
-  const quiet = [
-    makeSession({
-      id: "old",
-      status: "detached",
-      updated_at: "2026-07-17T10:00:00Z",
-    }),
-    makeSession({
-      id: "newest",
-      status: "exited",
-      updated_at: "2026-07-17T14:00:00Z",
-    }),
-    makeSession({
-      id: "mid",
-      status: "detached",
-      updated_at: "2026-07-17T12:00:00Z",
-    }),
-  ]
-
-  it("orders the tail most-recently-active-first in active mode", () => {
-    expect(sortQuietTail(quiet, "active").map((s) => s.id)).toEqual([
-      "newest",
-      "mid",
-      "old",
-    ])
+    const order = orderFlatRows(sessions, [], "active")
+    expect(ids(order.main)).toEqual(["hot", "zeta", "alpha"])
+    expect(order.inactive.map((s) => s.id)).toEqual(["parked", "gone"])
   })
 
   it("leaves the tail verbatim in every non-active mode", () => {
+    const sessions = [
+      makeSession({ id: "old", status: "detached", updated_at: "2026-07-17T10:00:00Z" }),
+      makeSession({ id: "newest", status: "exited", updated_at: "2026-07-17T14:00:00Z" }),
+      makeSession({ id: "mid", status: "detached", updated_at: "2026-07-17T12:00:00Z" }),
+    ]
     for (const key of ["manual", "name", "updated", "created"] as const) {
-      expect(sortQuietTail(quiet, key).map((s) => s.id)).toEqual([
+      expect(orderFlatRows(sessions, [], key).inactive.map((s) => s.id)).toEqual([
         "old",
         "newest",
         "mid",
       ])
     }
+  })
+})
+
+// The baseline a drop is made against, and what the drop then asks for.
+describe("listDragBaseline and planListDrop", () => {
+  const sessions = [
+    makeSession({ id: "zeta", title: "Zeta" }),
+    makeSession({ id: "gone", title: "Gone", status: "exited" }),
+    makeSession({ id: "alpha", title: "Alpha" }),
+  ]
+  const terminals = [
+    ownTerminal("own", "zeta"),
+    makeTerminal({ id: "t", label: "Mid", list_after: "zeta" }),
+  ]
+  const key = (id: string) =>
+    flatRowKey(
+      listDragBaseline(sessions, terminals, "manual").find(
+        (row) => (row.kind === "agent" ? row.session.id : row.terminal.id) === id,
+      )!,
+    )
+
+  it("totalizes the displayed order under a computed sort, the tail last", () => {
+    expect(ids(listDragBaseline(sessions, terminals, "name"))).toEqual([
+      "alpha",
+      "t",
+      "zeta",
+      "gone",
+    ])
+  })
+
+  it("keeps the stored order under manual, tail agents in place", () => {
+    expect(ids(listDragBaseline(sessions, terminals, "manual"))).toEqual([
+      "zeta",
+      "t",
+      "gone",
+      "alpha",
+    ])
+  })
+
+  it("anchors a dropped terminal after the agent above it, and first at the top", () => {
+    const baseline = listDragBaseline(sessions, terminals, "manual")
+    expect(planListDrop(baseline, key("t"), key("alpha"), sessions, terminals)).toEqual({
+      agentOrder: null,
+      placements: { t: "alpha" },
+      terminalOrder: null,
+    })
+    expect(planListDrop(baseline, key("t"), key("zeta"), sessions, terminals)).toEqual({
+      agentOrder: null,
+      placements: { t: null },
+      terminalOrder: null,
+    })
+  })
+
+  it("reorders the agents alone when an agent is dropped, and nothing when it lands where it was", () => {
+    const baseline = listDragBaseline(sessions, terminals, "manual")
+    expect(planListDrop(baseline, key("alpha"), key("zeta"), sessions, terminals)).toEqual({
+      agentOrder: ["alpha", "zeta", "gone"],
+      placements: {},
+      terminalOrder: null,
+    })
+    expect(planListDrop(baseline, key("t"), key("t"), sessions, terminals)).toBeNull()
+  })
+
+  it("orders two terminals that share an anchor among themselves, leaving an agent's own alone", () => {
+    const two = [
+      ...terminals,
+      makeTerminal({ id: "u", label: "Other", list_after: "zeta" }),
+    ]
+    const baseline = listDragBaseline(sessions, two, "manual")
+    expect(ids(baseline)).toEqual(["zeta", "t", "u", "gone", "alpha"])
+    const uKey = flatRowKey(baseline[2])
+    const tKey = flatRowKey(baseline[1])
+    expect(planListDrop(baseline, uKey, tKey, sessions, two)).toEqual({
+      agentOrder: null,
+      placements: {},
+      terminalOrder: ["u", "t", "own"],
+    })
+  })
+})
+
+describe("nextActiveSessionId", () => {
+  const previous = [
+    makeSession({ id: "a" }),
+    makeSession({ id: "b" }),
+    makeSession({ id: "c" }),
+  ]
+
+  it("picks the row after the gone agent in the displayed order", () => {
+    const current = [previous[0], previous[2]]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("c")
+  })
+
+  it("wraps to the first row when the last agent goes", () => {
+    // A create and a delete landing in the SAME spine is what makes the wrap
+    // load-bearing: "d" is new and now heads the list, so the "every neighbour
+    // is gone too" fallback would answer "d". Only walking off the end of the
+    // old order and back round to the top reaches "a", the row that follows the
+    // last one. With `current` merely a subset of `previous`, both routes agree
+    // and the wrap can be deleted without a single test noticing.
+    const created = makeSession({ id: "d" })
+    const current = [created, previous[0], previous[1]]
+    expect(nextActiveSessionId(previous, current, "c", "manual")).toBe("a")
+  })
+
+  it("skips a detached neighbour and keeps walking", () => {
+    const detached = makeSession({ id: "c", status: "detached" })
+    const current = [previous[0], detached]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("a")
+  })
+
+  it("never lands on a stopped agent kept in the list by its own terminal", () => {
+    const detached = makeSession({ id: "c", status: "detached" })
+    const current = [previous[0], detached]
+    expect(
+      nextActiveSessionId(previous, current, "b", "manual", [ownTerminal("own", "c")]),
+    ).toBe("a")
+  })
+
+  it("returns null when nothing active is left", () => {
+    const current = [makeSession({ id: "c", status: "detached" })]
+    expect(nextActiveSessionId(previous, current, "b", "manual")).toBeNull()
+  })
+
+  it("follows the active-first order rather than the raw list order", () => {
+    // "active" floats working agents to the top, so the displayed order is
+    // c, a, b, d and losing c lands on a, the row that was directly under it.
+    const ordered = [
+      makeSession({ id: "a" }),
+      makeSession({ id: "b" }),
+      makeSession({ id: "c", working: true }),
+      makeSession({ id: "d" }),
+    ]
+    const current = [ordered[0], ordered[1], ordered[3]]
+    expect(nextActiveSessionId(ordered, current, "c", "active")).toBe("a")
+  })
+
+  it("takes the first row when the gone agent was not in the main bucket", () => {
+    const quiet = makeSession({ id: "z", status: "exited" })
+    const before = [...previous, quiet]
+    expect(nextActiveSessionId(before, previous, "z", "manual")).toBe("a")
   })
 })
 
@@ -262,60 +407,5 @@ describe("stateWord", () => {
       stateWord(makeSession({ id: "a", status: "exited", typing: true, working: true }))
         .label,
     ).toBe("Exited")
-  })
-})
-
-describe("nextActiveSessionId", () => {
-  const previous = [
-    makeSession({ id: "a" }),
-    makeSession({ id: "b" }),
-    makeSession({ id: "c" }),
-  ]
-
-  it("picks the row after the gone agent in the displayed order", () => {
-    const current = [previous[0], previous[2]]
-    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("c")
-  })
-
-  it("wraps to the first row when the last agent goes", () => {
-    // A create and a delete landing in the SAME spine is what makes the wrap
-    // load-bearing: "d" is new and now heads the list, so the "every neighbour
-    // is gone too" fallback would answer "d". Only walking off the end of the
-    // old order and back round to the top reaches "a", the row that follows the
-    // last one. With `current` merely a subset of `previous`, both routes agree
-    // and the wrap can be deleted without a single test noticing.
-    const created = makeSession({ id: "d" })
-    const current = [created, previous[0], previous[1]]
-    expect(nextActiveSessionId(previous, current, "c", "manual")).toBe("a")
-  })
-
-  it("skips a detached neighbour and keeps walking", () => {
-    const detached = makeSession({ id: "c", status: "detached" })
-    const current = [previous[0], detached]
-    expect(nextActiveSessionId(previous, current, "b", "manual")).toBe("a")
-  })
-
-  it("returns null when nothing active is left", () => {
-    const current = [makeSession({ id: "c", status: "detached" })]
-    expect(nextActiveSessionId(previous, current, "b", "manual")).toBeNull()
-  })
-
-  it("follows the active-first order rather than the raw list order", () => {
-    // "active" floats working agents to the top, so the displayed order is
-    // c, a, b, d and losing c lands on a, the row that was directly under it.
-    const ordered = [
-      makeSession({ id: "a" }),
-      makeSession({ id: "b" }),
-      makeSession({ id: "c", working: true }),
-      makeSession({ id: "d" }),
-    ]
-    const current = [ordered[0], ordered[1], ordered[3]]
-    expect(nextActiveSessionId(ordered, current, "c", "active")).toBe("a")
-  })
-
-  it("takes the first row when the gone agent was not in the active bucket", () => {
-    const quiet = makeSession({ id: "z", status: "exited" })
-    const before = [...previous, quiet]
-    expect(nextActiveSessionId(before, previous, "z", "manual")).toBe("a")
   })
 })

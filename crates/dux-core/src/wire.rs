@@ -619,14 +619,24 @@ pub enum WireCommand {
         /// Every project, in the new order.
         project_ids: Vec<String>,
     },
-    /// Persist a GLOBAL runtime order for every companion terminal (session- and
-    /// project-owned alike; the web renders one flat Terminals section).
+    /// Persist a GLOBAL runtime order for every companion terminal, whatever its
+    /// owner.
     /// `terminal_ids` must list exactly the current set of terminals, in the
     /// desired order (the engine validates strictly). Runtime-only: terminals
     /// have no SQLite row, so this order resets to creation order on restart.
     ReorderTerminals {
         /// Every terminal, in the new order.
         terminal_ids: Vec<String>,
+    },
+    /// Put a project or standalone terminal's row right after an agent in the
+    /// agents list's manual order, or first when `after_agent` is absent.
+    /// Runtime-only, like the terminal.
+    PlaceTerminalInList {
+        /// The terminal whose row moves.
+        terminal_id: String,
+        /// The agent its row sits right after; absent for the top.
+        #[serde(default)]
+        after_agent: Option<String>,
     },
     /// Persist a new left-to-right order for one agent's provider tabs, the slot
     /// tab included. `tab_ids` must list exactly the agent's tabs (the engine
@@ -5729,6 +5739,13 @@ impl Engine {
             WireCommand::ReorderTerminals { terminal_ids } => {
                 Command::ReorderTerminals { terminal_ids }
             }
+            WireCommand::PlaceTerminalInList {
+                terminal_id,
+                after_agent,
+            } => Command::PlaceTerminalInList {
+                terminal_id,
+                after_agent,
+            },
             WireCommand::ReorderAgentTabs {
                 session_id,
                 tab_ids,
@@ -5893,6 +5910,7 @@ impl Engine {
             | WireCommand::ReorderAgents { .. }
             | WireCommand::ReorderProjects { .. }
             | WireCommand::ReorderTerminals { .. }
+            | WireCommand::PlaceTerminalInList { .. }
             | WireCommand::ReorderAgentTabs { .. }
             | WireCommand::WatchChangedFiles { .. } => {
                 unreachable!(

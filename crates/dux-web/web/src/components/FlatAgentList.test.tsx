@@ -14,7 +14,7 @@ import type { SessionView, TerminalView } from "@/lib/types"
 
 // Drag-from-any-mode contract. dnd-kit cannot run a real drag under jsdom (it
 // measures rects), so DndContext is mocked to a passthrough that CAPTURES each
-// `onDragEnd` (mount order: agents first, terminals second) and the tests call
+// `onDragEnd` and the tests call
 // it with synthetic DragEndEvents. useSortable is a static stub; what these
 // tests pin about drag AVAILABILITY is therefore the component's own
 // `sortable ? dragProps : {}` gate (main rows carry the sortable attributes in
@@ -52,6 +52,7 @@ vi.mock("@dnd-kit/sortable", () => ({
 
 const reorderAgentsMock = vi.fn()
 const reorderTerminalsMock = vi.fn()
+const placeTerminalsInListMock = vi.fn()
 const setAgentSortMock = vi.fn()
 const openNewAgentPickerMock = vi.fn()
 const openAddProjectMock = vi.fn()
@@ -65,6 +66,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     useDux: () => mockState,
     reorderAgents: (...args: unknown[]) => reorderAgentsMock(...args),
     reorderTerminals: (...args: unknown[]) => reorderTerminalsMock(...args),
+    placeTerminalsInList: (...args: unknown[]) => placeTerminalsInListMock(...args),
     setAgentSort: (...args: unknown[]) => setAgentSortMock(...args),
     openNewAgentPicker: (...args: unknown[]) => openNewAgentPickerMock(...args),
     openAddProject: (...args: unknown[]) => openAddProjectMock(...args),
@@ -144,7 +146,7 @@ function makeSession(
 
 function makeTerminal(over: Partial<TerminalView> & { id: string }): TerminalView {
   return {
-    owner: { kind: "session", session_id: "zeta" },
+    owner: { kind: "project", project_id: "p1" },
     label: over.id,
     has_output: false,
     working: false,
@@ -164,8 +166,9 @@ function makeState(sort: string): DuxState {
   return {
     spine: {
       projects: [{ id: "p1", name: "Repo" }],
-      // Both terminals are owned by the Zeta agent, in one flat, owner-tagged
-      // collection ordered by `sort_order`.
+      // Two project terminals, rows of the list, in one flat, owner-tagged
+      // collection ordered by `sort_order`. With no anchor they lead the
+      // manual order.
       terminals: [
         makeTerminal({
           id: "t-z",
@@ -200,6 +203,7 @@ function makeState(sort: string): DuxState {
     agentSort: sort,
     pendingAgentOrder: null,
     pendingTerminalOrder: null,
+    pendingTerminalPlacement: {},
     changes: null,
     createTabInFlight: [],
   } as unknown as DuxState
@@ -214,6 +218,7 @@ beforeEach(() => {
   dragEndHandlers.length = 0
   reorderAgentsMock.mockClear()
   reorderTerminalsMock.mockClear()
+  placeTerminalsInListMock.mockClear()
   setAgentSortMock.mockClear()
   openNewAgentPickerMock.mockClear()
   openAddProjectMock.mockClear()
@@ -228,16 +233,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// Handler capture order: the agents DndContext mounts first, the Terminals
-// section's second.
-function agentsDragEnd(): (event: DragEndEvent) => void {
+// The one DndContext over the list's main rows.
+function listDragEnd(): (event: DragEndEvent) => void {
   const h = dragEndHandlers[0]
-  if (!h) throw new Error("agents DndContext not mounted")
-  return h
-}
-function terminalsDragEnd(): (event: DragEndEvent) => void {
-  const h = dragEndHandlers[1]
-  if (!h) throw new Error("terminals DndContext not mounted")
+  if (!h) throw new Error("the list's DndContext is not mounted")
   return h
 }
 
@@ -245,27 +244,49 @@ function drop(handler: (event: DragEndEvent) => void, active: string, over: stri
   handler({ active: { id: active }, over: { id: over } } as DragEndEvent)
 }
 
-describe("FlatAgentList section order", () => {
-  it("renders Terminals ABOVE the Inactive quiet tail", () => {
-    // Wanted order: main agents, then Terminals, then Inactive. Both section
-    // headers exist in this fixture (a quiet session and two terminals), so
-    // the DOM order of the two toggles pins the layout.
-    render(<FlatAgentList handlers={handlers} />)
-    const terminals = screen.getByText("Terminals")
+describe("FlatAgentList one list", () => {
+  it("sorts the project and standalone terminals among the agents, above the Inactive tail, with no Terminals divider", () => {
+    const state = makeState("name")
+    state.spine!.terminals = [
+      ...state.spine!.terminals,
+      // An agent's own terminal lives with its agent, never in the list.
+      makeTerminal({
+        id: "t-own",
+        label: "aaa-own",
+        owner: { kind: "session", session_id: "zeta" },
+      }),
+    ]
+    mockState = state
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+    const rows = [...container.querySelectorAll("[data-sidebar-row]")].map((row) =>
+      row.getAttribute("data-sidebar-row"),
+    )
+    // By name: alpha, bash (t-a), mike, zeta, zsh (t-z); the tail is collapsed.
+    expect(rows).toEqual([
+      "agent:alpha",
+      "terminal:t-a",
+      "agent:mike",
+      "agent:zeta",
+      "terminal:t-z",
+    ])
+    expect(screen.queryByText("Terminals")).toBeNull()
     const inactive = screen.getByText("Inactive")
-    const position = terminals.compareDocumentPosition(inactive)
-    // DOCUMENT_POSITION_FOLLOWING (4): `inactive` comes after `terminals`.
-    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBe(4)
+    expect(
+      container
+        .querySelector('[data-sidebar-row="terminal:t-z"]')!
+        .compareDocumentPosition(inactive) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
-  it("keeps the collapse defaults: Terminals open, Inactive closed while an agent is active", () => {
-    render(<FlatAgentList handlers={handlers} />)
-    expect(
-      screen.getByText("Terminals").closest("button")?.getAttribute("aria-expanded"),
-    ).toBe("true")
-    expect(
-      screen.getByText("Inactive").closest("button")?.getAttribute("aria-expanded"),
-    ).toBe("false")
+  it("keeps a stopped agent with a terminal of its own out of the Inactive tail", () => {
+    const state = makeState("name")
+    state.spine!.terminals = [
+      makeTerminal({ id: "t-own", owner: { kind: "session", session_id: "gone" } }),
+    ]
+    mockState = state
+    const { container } = render(<FlatAgentList handlers={handlers} />)
+    expect(container.querySelector('[data-sidebar-row="agent:gone"]')).toBeTruthy()
+    expect(screen.queryByText("Inactive")).toBeNull()
   })
 })
 
@@ -450,6 +471,8 @@ describe("FlatAgentList agent row branch", () => {
         },
       } as SessionView,
     ]
+    // The project terminals would name the project on their own rows.
+    state.spine!.terminals = []
     mockState = state
     render(<FlatAgentList handlers={handlers} />)
     expect(screen.getByText("notes")).toBeTruthy()
@@ -482,6 +505,7 @@ describe("FlatAgentList agent row branch", () => {
         },
       } as SessionView,
     ]
+    state.spine!.terminals = []
     mockState = state
     render(<FlatAgentList handlers={handlers} />)
     const tag = screen.getByText("notes").closest("span")?.parentElement
@@ -505,7 +529,7 @@ describe("FlatAgentList agent row branch", () => {
 
   // A STANDALONE terminal's owner tag is the same star in the same tone: one
   // indicator, learned once, meaning "this one lives in your folder, not in a
-  // dux-managed working copy". An OWNED terminal keeps the ↳ arrow, where it
+  // dux-managed working copy". A project terminal keeps the ↳ arrow, where it
   // means "owned by".
   it("marks a standalone terminal with the star and keeps the arrow on owned terminals", () => {
     const base = makeState("name")
@@ -517,7 +541,7 @@ describe("FlatAgentList agent row branch", () => {
           makeTerminal({
             id: "t-owned",
             label: "owned",
-            owner: { kind: "session", session_id: "zeta" },
+            owner: { kind: "project", project_id: "p2" },
           }),
           makeTerminal({
             id: "t-solo",
@@ -535,9 +559,7 @@ describe("FlatAgentList agent row branch", () => {
     expect(solo!.querySelector(".sr-only")?.textContent).toBe("standalone")
     expect(solo!.className).toContain("text-dux-standalone")
     // The owned terminal keeps the muted arrow and no star.
-    const owned = screen
-      .getByText("Zeta@Repo")
-      .closest("span")?.parentElement
+    const owned = screen.getByText("p2").closest("span")?.parentElement
     expect(owned).toBeTruthy()
     expect(owned!.textContent).toContain("↳")
     expect(owned!.textContent).not.toContain("✷")
@@ -615,17 +637,16 @@ describe("FlatAgentList search-match highlight", () => {
   })
 
   it("highlights an owner-label hit on the terminal row's second line", () => {
-    // "zeta@" only occurs in the companion terminal's owner label
-    // ("Zeta@Repo"), a searched field the row renders on line two.
-    mockState = withQuery("zeta@")
+    // "ckend" only occurs in a project terminal's owner label, the project's
+    // name, a searched field the row renders on line two.
+    mockState = withQuery("ckend")
+    mockState.spine!.terminals = [
+      makeTerminal({ id: "t-b", owner: { kind: "project", project_id: "Backend" } }),
+    ]
     render(<FlatAgentList handlers={handlers} />)
-    // Both of Zeta's terminals carry the owner label, so match all marks.
-    const marks = screen.getAllByText("Zeta@")
-    expect(marks.length).toBeGreaterThan(0)
-    for (const mark of marks) {
-      expect(mark.tagName).toBe("MARK")
-      expect(mark.parentElement?.textContent).toBe("Zeta@Repo")
-    }
+    const mark = screen.getByText("ckend")
+    expect(mark.tagName).toBe("MARK")
+    expect(mark.parentElement?.textContent).toBe("Backend")
   })
 
   it("highlights the matched terminal label too", () => {
@@ -655,48 +676,55 @@ describe("FlatAgentList drag from any sort mode", () => {
 
   it("a drop from name mode persists the DISPLAYED order with the move, totally, and flips to manual", () => {
     render(<FlatAgentList handlers={handlers} />)
-    // Displayed (name) = [alpha, mike, zeta] with [gone] appended as the tail.
-    // Dragging zeta onto alpha's slot within that view:
-    drop(agentsDragEnd(), "zeta", "alpha")
+    // Displayed (name) = [alpha, t-a, mike, zeta, t-z] with [gone] appended
+    // as the tail. Dragging zeta onto alpha's slot within that view keeps the
+    // whole screen as the user left it: the agents in that order, and each
+    // terminal after the agent it now follows.
+    drop(listDragEnd(), "agent:zeta", "agent:alpha")
     expect(setAgentSortMock).toHaveBeenCalledWith("manual")
-    expect(reorderAgentsMock).toHaveBeenCalledWith([
-      "zeta",
-      "alpha",
-      "mike",
-      "gone",
-    ])
+    expect(reorderAgentsMock).toHaveBeenCalledWith(["zeta", "alpha", "mike", "gone"])
+    expect(placeTerminalsInListMock).toHaveBeenCalledWith({ "t-a": "alpha", "t-z": "mike" })
+    expect(reorderTerminalsMock).toHaveBeenCalledWith(["t-a", "t-z"])
   })
 
   it("a drop in manual mode keeps the base-order move semantics and does not re-flip", () => {
     mockState = makeState("manual")
     render(<FlatAgentList handlers={handlers} />)
-    // Base = [zeta, gone, alpha, mike]; manual moves within it verbatim.
-    drop(agentsDragEnd(), "zeta", "alpha")
+    // Base = [t-z, t-a, zeta, gone, alpha, mike]; manual moves within it
+    // verbatim, and the terminals at the top stay there.
+    drop(listDragEnd(), "agent:zeta", "agent:alpha")
     expect(setAgentSortMock).not.toHaveBeenCalled()
-    expect(reorderAgentsMock).toHaveBeenCalledWith([
-      "gone",
-      "alpha",
-      "zeta",
-      "mike",
-    ])
+    expect(reorderAgentsMock).toHaveBeenCalledWith(["gone", "alpha", "zeta", "mike"])
+    expect(placeTerminalsInListMock).not.toHaveBeenCalled()
+    expect(reorderTerminalsMock).not.toHaveBeenCalled()
+  })
+
+  it("anchors a dropped terminal after the agent row above it", () => {
+    mockState = makeState("manual")
+    render(<FlatAgentList handlers={handlers} />)
+    drop(listDragEnd(), "terminal:t-a", "agent:mike")
+    expect(placeTerminalsInListMock).toHaveBeenCalledWith({ "t-a": "mike" })
+    expect(reorderAgentsMock).not.toHaveBeenCalled()
+    expect(setAgentSortMock).not.toHaveBeenCalled()
+  })
+
+  it("a terminal drop from name mode keeps the displayed order and flips to manual", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    // Dragging t-z onto t-a's displayed slot puts it right under alpha.
+    drop(listDragEnd(), "terminal:t-z", "terminal:t-a")
+    expect(setAgentSortMock).toHaveBeenCalledWith("manual")
+    expect(reorderAgentsMock).toHaveBeenCalledWith(["alpha", "mike", "zeta", "gone"])
+    expect(placeTerminalsInListMock).toHaveBeenCalledWith({ "t-z": "alpha", "t-a": "alpha" })
+    expect(reorderTerminalsMock).not.toHaveBeenCalled()
   })
 
   it("a no-op drop (same slot) neither reorders nor flips to manual", () => {
     render(<FlatAgentList handlers={handlers} />)
-    drop(agentsDragEnd(), "alpha", "alpha")
+    drop(listDragEnd(), "agent:alpha", "agent:alpha")
     expect(setAgentSortMock).not.toHaveBeenCalled()
     expect(reorderAgentsMock).not.toHaveBeenCalled()
   })
 
-  it("a terminal drop from name mode persists the displayed terminal order and flips to manual", () => {
-    render(<FlatAgentList handlers={handlers} />)
-    // Base by sort_order = [t-z (zsh), t-a (bash)]; name-displayed =
-    // [t-a (bash), t-z (zsh)]. Dragging t-z onto t-a's displayed slot keeps
-    // the on-screen arrangement the user produced: [t-z, t-a].
-    drop(terminalsDragEnd(), "t-z", "t-a")
-    expect(setAgentSortMock).toHaveBeenCalledWith("manual")
-    expect(reorderTerminalsMock).toHaveBeenCalledWith(["t-z", "t-a"])
-  })
 })
 
 // The PR chip is an anchor whose click handler ALSO calls window.open (the
@@ -839,21 +867,6 @@ describe("FlatAgentList terminal editor menu entries", () => {
     expect(tab!.getAttribute("target")).toBe("_blank")
     expect(tab!.getAttribute("rel")).toBe("noopener")
     expect(tab!.className).not.toContain("max-md:hidden")
-  })
-
-  it("sends a SESSION-owned terminal to its agent's editor, not to a terminal root", async () => {
-    // Both fixture terminals belong to the Zeta agent, so both rows point at
-    // the agent address: same worktree, same editor, no second one.
-    await openTerminalMenu()
-    const tab = screen
-      .getByText("Open editor in new tab")
-      .closest('[role="menuitem"]')
-    expect(tab!.getAttribute("href")).toBe("#/editor/agent/zeta")
-    fireEvent.click(screen.getByText("Open editor here"))
-    expect(openEditorMock).toHaveBeenCalledWith({
-      kind: "agent",
-      sessionId: "zeta",
-    })
   })
 
   it("gives a PROJECT terminal and a STANDALONE terminal their own rooted addresses", async () => {
@@ -1179,40 +1192,27 @@ describe("FlatAgentList sort control", () => {
 // One pill style for every section count, immediately after the section word.
 // Right edges carry controls only.
 describe("FlatAgentList section counters", () => {
-  it("renders the Agents, Terminals and Inactive counts in the same pill", () => {
+  it("counts every agent and every listed terminal in the header", () => {
     render(<FlatAgentList handlers={handlers} />)
-    for (const word of ["Agents", "Terminals", "Inactive"]) {
-      const pill = screen.getByText(word).nextElementSibling as HTMLElement
-      expect(pill, word).toBeTruthy()
-      expect(pill.className, word).toContain("rounded-full")
-      expect(pill.className, word).toContain("bg-muted")
-      // Not pushed to the right edge any more.
-      expect(pill.className, word).not.toContain("ml-auto")
-    }
-  })
-})
-
-describe("FlatAgentList Terminals divider", () => {
-  // The whole divider is the collapse toggle; creating a terminal lives behind
-  // the launcher corner.
-  it("collapses and expands, with no creation button beside it", () => {
-    render(<FlatAgentList handlers={handlers} />)
-    const toggle = () => screen.getByText("Terminals").closest("button")!
-    expect(toggle().parentElement!.querySelectorAll("button")).toHaveLength(1)
-    expect(toggle().getAttribute("aria-expanded")).toBe("true")
-    fireEvent.click(toggle())
-    expect(toggle().getAttribute("aria-expanded")).toBe("false")
-    fireEvent.click(toggle())
-    expect(toggle().getAttribute("aria-expanded")).toBe("true")
+    const count = screen.getByText("Agents & Terminals").nextElementSibling!
+    expect(count.textContent).toBe("(4 + 2)")
+    expect(count.getAttribute("aria-label")).toBe("4 agents and 2 terminals")
   })
 
-  it("is absent entirely when there is no terminal", () => {
-    mockState = {
-      ...makeState("name"),
-      spine: { ...makeState("name").spine, terminals: [] },
-    } as unknown as DuxState
+  it("says how many of each a search leaves", () => {
+    mockState = { ...makeState("name"), agentSearch: "z" } as DuxState
     render(<FlatAgentList handlers={handlers} />)
-    expect(screen.queryByText("Terminals")).toBeNull()
+    // "z" finds Zeta and the terminal running zsh.
+    expect(screen.getByText("Agents & Terminals").nextElementSibling!.textContent).toBe(
+      "(1/4 + 1/2)",
+    )
+  })
+
+  it("keeps the Inactive count in its pill", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const pill = screen.getByText("Inactive").nextElementSibling as HTMLElement
+    expect(pill.className).toContain("rounded-full")
+    expect(pill.className).not.toContain("ml-auto")
   })
 })
 
@@ -1498,6 +1498,8 @@ describe("FlatAgentList line two alignment", () => {
         },
       } as SessionView,
     ]
+    // The project terminals would name the project on their own rows.
+    state.spine!.terminals = []
     mockState = state
     render(<FlatAgentList handlers={handlers} />)
 
@@ -1534,7 +1536,7 @@ describe("FlatAgentList line two alignment", () => {
           makeTerminal({
             id: "t-owned",
             label: "owned",
-            owner: { kind: "session", session_id: "zeta" },
+            owner: { kind: "project", project_id: "p2" },
           }),
           makeTerminal({
             id: "t-solo",
@@ -1546,7 +1548,7 @@ describe("FlatAgentList line two alignment", () => {
     } as DuxState
     render(<FlatAgentList handlers={handlers} />)
 
-    const owned = screen.getByText("Zeta@Repo").closest("span")!.parentElement!
+    const owned = screen.getByText("p2").closest("span")!.parentElement!
     const solo = screen.getByText("play").closest("span")!.parentElement!
     for (const tag of [owned, solo]) {
       expect(tag.className).toContain("items-baseline")

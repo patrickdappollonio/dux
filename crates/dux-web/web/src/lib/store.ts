@@ -785,10 +785,15 @@ export interface DuxState {
   // Optimistic overlay for the flat model's GLOBAL agent order: the complete list
   // of session ids in the just-dragged order, cleared once the spine confirms it.
   pendingAgentOrder: string[] | null
-  // Optimistic overlay for the flat Terminals section's GLOBAL order: the complete
+  // Optimistic overlay for the terminals' GLOBAL order: the complete
   // list of terminal ids (any owner) in the just-dragged order, cleared once the
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
+  // Optimistic overlay for project and standalone terminals' places in the
+  // agents list, keyed by terminal id: the agent each row now sits after (null
+  // for the top), each dropped once the spine shows it (see
+  // `placeTerminalsInList`).
+  pendingTerminalPlacement: Record<string, string | null>
   // Optimistic overlay for an agent's tab strip, keyed by session id: the complete
   // list of its tab ids in the just-dragged order, cleared once the spine confirms
   // it (see `reorderTabs`).
@@ -1223,6 +1228,7 @@ let state: DuxState = {
   routeNotFound: null,
   pendingAgentOrder: null,
   pendingTerminalOrder: null,
+  pendingTerminalPlacement: {},
   pendingTabOrder: {},
   pendingSlotTab: {},
   pendingCreateFocus: null,
@@ -2196,6 +2202,10 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
     composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
+    pendingTerminalPlacement: reconcilePendingTerminalPlacement(
+      spine,
+      state.pendingTerminalPlacement,
+    ),
     pendingTabOrder: reconcilePendingTabOrder(spine, state.pendingTabOrder, {
       seq,
       pushed,
@@ -2301,7 +2311,7 @@ function reconcilePendingAgentOrder(
   return overlayShown(serverIds, pending) ? null : pending
 }
 
-// Mirror of `reconcilePendingAgentOrder` for the flat Terminals section. The
+// Mirror of `reconcilePendingAgentOrder` for the terminals' global order. The
 // spine carries EVERY terminal (any owner) in one flat collection, and the
 // authoritative flat order is that collection sorted by the global `sort_order`
 // (which a reorder restamps to the dragged order). The overlay clears once that
@@ -2317,6 +2327,22 @@ function reconcilePendingTerminalOrder(
     .sort((a, b) => a.sort_order - b.sort_order)
     .map((t) => t.id)
   return overlayShown(serverIds, pending) ? null : pending
+}
+
+// Drop each list-place overlay once the spine shows the terminal there, or the
+// terminal is gone. Kept as the same object when nothing changed, so an
+// unrelated spine does not re-render the list.
+function reconcilePendingTerminalPlacement(
+  spine: Spine,
+  pending: Record<string, string | null>,
+): Record<string, string | null> {
+  const entries = Object.entries(pending)
+  if (entries.length === 0) return pending
+  const kept = entries.filter(([terminalId, after]) => {
+    const terminal = spine.terminals.find((t) => t.id === terminalId)
+    return terminal !== undefined && (terminal.list_after ?? null) !== after
+  })
+  return kept.length === entries.length ? pending : Object.fromEntries(kept)
 }
 
 // Drop each tab-strip overlay once it has done its job: the spine's strip shows
@@ -2503,6 +2529,7 @@ function navigateAfterVanish(
     pending ? reorderById(spine.sessions, pending) : spine.sessions,
     goneSessionId,
     agentSortValue(state),
+    spine.terminals,
   )
   fallBackTo(() => selectSessionRoute(next, "replace"))
 }
@@ -2768,6 +2795,7 @@ function clearPendingOrders(): Partial<DuxState> {
   return {
     pendingAgentOrder: null,
     pendingTerminalOrder: null,
+    pendingTerminalPlacement: {},
     pendingTabOrder: {},
   }
 }
@@ -8034,6 +8062,27 @@ export function reorderTerminals(orderedIds: string[]): void {
     if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
     notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
   })
+}
+
+// Place project and standalone terminals' rows in the agents list, each right
+// after the agent it names (null for the top). Silent like the other reorders:
+// the list moving is the feedback. A refusal drops that terminal's overlay so
+// the row snaps back, then says why.
+export function placeTerminalsInList(placements: Record<string, string | null>): void {
+  setState({
+    pendingTerminalPlacement: { ...state.pendingTerminalPlacement, ...placements },
+  })
+  for (const [terminalId, afterAgent] of Object.entries(placements)) {
+    terminalsApi.place(terminalId, afterAgent).catch((e) => {
+      const current = state.pendingTerminalPlacement
+      if (terminalId in current && current[terminalId] === afterAgent) {
+        const rest = { ...current }
+        delete rest[terminalId]
+        setState({ pendingTerminalPlacement: rest })
+      }
+      notifyError(e instanceof Error ? e.message : "Could not move the terminal in the list.")
+    })
+  }
 }
 
 // One-shot reorder of every agent, distinct from `setAgentSort`, which sets the

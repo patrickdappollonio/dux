@@ -16,6 +16,9 @@
 //! `POST /api/v1/terminals/reorder` reorders every companion terminal, all three
 //! owners, as one flat global list, and its body is the complete set of ids in the
 //! desired order. Runtime-only, with no persistence.
+//!
+//! `POST /api/v1/terminals/place` moves one project or standalone terminal's row
+//! in the agents list's manual order: right after the agent it names, or first.
 
 use axum::{
     Json, Router,
@@ -60,8 +63,9 @@ pub fn routes() -> Router<AppState> {
         )
         // The literal `reorder` segment is registered BEFORE the `{tid}` delete
         // so a router without literal-over-parameter precedence cannot read a
-        // reorder as a terminal id.
+        // reorder or a place as a terminal id.
         .route("/api/v1/terminals/reorder", post(reorder_terminals))
+        .route("/api/v1/terminals/place", post(place_terminal_in_list))
         .route("/api/v1/terminals", post(create_standalone_terminal))
         .route(
             "/api/v1/terminals/{tid}",
@@ -262,6 +266,39 @@ async fn reorder_terminals(
         .apply_wire_scoped(
             WireCommand::ReorderTerminals {
                 terminal_ids: body.terminal_ids,
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// Body for placing one terminal's row in the agents list: the terminal and the
+/// agent it sits right after, absent or null for the top.
+#[derive(Deserialize)]
+struct PlaceTerminalBody {
+    terminal_id: String,
+    #[serde(default)]
+    after_agent: Option<String>,
+}
+
+/// `POST /api/v1/terminals/place`. The agents list's drag for a project or
+/// standalone terminal row: the engine refuses an unknown terminal and an
+/// agent's own, which is not a list row. Runtime-only, so no persistence.
+async fn place_terminal_in_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PlaceTerminalBody>,
+) -> Response {
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::PlaceTerminalInList {
+                terminal_id: body.terminal_id,
+                after_agent: body.after_agent,
             },
             scope_from_headers(&headers, &state.connections),
         )

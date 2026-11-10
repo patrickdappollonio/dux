@@ -15,7 +15,7 @@ function nameKey(s: SessionView): string {
 
 // Parse an RFC 3339 timestamp to epoch milliseconds. An unparseable value sorts as 0 rather
 // than poisoning the comparator with NaN.
-function epoch(iso: string): number {
+export function epoch(iso: string): number {
   const ms = Date.parse(iso)
   return Number.isNaN(ms) ? 0 : ms
 }
@@ -24,8 +24,14 @@ function epoch(iso: string): number {
 // an astral-plane char by its surrogate halves, flipping the order Rust's code-point `str::cmp`
 // produces, and the two surfaces would then disagree. Returns <0 / 0 / >0 ascending.
 function compareName(a: SessionView, b: SessionView): number {
-  const ka = [...nameKey(a)]
-  const kb = [...nameKey(b)]
+  return compareCodePoints(nameKey(a), nameKey(b))
+}
+
+// The code-point comparison behind every name sort, shared so the agents list,
+// which sorts terminals among agents by the same rule, cannot drift from it.
+export function compareCodePoints(a: string, b: string): number {
+  const ka = [...a]
+  const kb = [...b]
   const len = Math.min(ka.length, kb.length)
   for (let i = 0; i < len; i++) {
     const ca = ka[i].codePointAt(0) ?? 0
