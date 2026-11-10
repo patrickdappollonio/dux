@@ -494,8 +494,22 @@ pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
     pub(crate) selected_left: usize,
-    pub(crate) left_section: LeftSection,
-    pub(crate) selected_terminal_index: usize,
+    /// The terminal ids `LeftItem::Terminal` indexes into, built with the list.
+    pub(crate) left_terminals: Vec<String>,
+    /// Each agent's center layout, by agent id: the agent alone, the split, or
+    /// its terminal dock alone. RUNTIME ONLY, so a restart opens every agent in
+    /// the split again.
+    pub(crate) dock_layouts: HashMap<String, DockLayout>,
+    /// The terminal each agent's dock showed last, by agent id.
+    pub(crate) dock_active: HashMap<String, String>,
+    /// The dock strip as it was last drawn, in order, so a terminal that ends
+    /// on screen hands the dock to its neighbour in the strip the user saw.
+    pub(crate) last_dock_strip: Option<Vec<String>>,
+    /// The layout of a stopped agent that is on screen, while it stays
+    /// stopped. Such an agent opens on its terminal whatever was remembered;
+    /// changing the layout from there changes this, and starting the agent
+    /// drops it, returning to the remembered one.
+    pub(crate) stopped_layout: Option<(String, DockLayout)>,
     pub(crate) right_section: RightSection,
     pub(crate) files_index: usize,
     pub(crate) files_search: TextInput,
@@ -508,7 +522,7 @@ pub(crate) struct App {
     pub(crate) pending_commit: Option<(String, String)>,
     pub(crate) left_width_pct: u16,
     pub(crate) right_width_pct: u16,
-    pub(crate) terminal_pane_height_pct: u16,
+    pub(crate) terminal_dock_pct: u16,
     pub(crate) staged_pane_height_pct: u16,
     pub(crate) commit_pane_height_pct: u16,
     pub(crate) focus: FocusPane,
@@ -630,7 +644,6 @@ pub(crate) struct App {
     /// Kept out of `MouseLayoutState` (which is `Copy`); reset by the strip
     /// renderer, empty when the strip is hidden (< 2 tabs) or in fullscreen.
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
-    pub(crate) terminal_return_to_list: bool,
     /// The geometry last sent to each pty, keyed by pty id, so a frame that
     /// draws two parts resizes each child once and then leaves both alone.
     pub(crate) pty_sizes: HashMap<String, (u16, u16)>,
@@ -894,10 +907,6 @@ pub(crate) struct App {
     /// command line or a reloaded config has since done to the sessions the
     /// cached indexes point into. Every rebuild finds that row again by id.
     pub(crate) left_rows: Vec<LeftRow>,
-    /// The terminal row the terminal cursor is on, by id, with the index it was
-    /// on when this surface put it there. A rebuild follows the id; an index
-    /// set by hand since (it no longer matches) is taken as it is.
-    pub(crate) terminal_cursor: Option<(usize, String)>,
     /// Tabs whose last launch this surface started and that may still fall
     /// back to a fresh start: the engine re-launches such a tab itself, so the
     /// fallback carries this surface's claim to it only through this set.
@@ -1611,11 +1620,42 @@ pub(crate) enum OnDormant {
 /// One of the two terminals the center pane can draw at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum CenterPart {
-    /// The row's own terminal: the agent's focused tab, or a project or
-    /// standalone terminal shown for its row.
+    /// The agent: its focused tab.
     Main,
-    /// The agent's terminal dock, below the agent.
+    /// A terminal: the agent's dock terminal below it, or the terminal of a
+    /// project or standalone terminal row, which is drawn alone.
     Dock,
+}
+
+/// How the center pane shares itself between an agent and its terminal dock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockLayout {
+    /// The agent alone; the dock is not drawn.
+    Agent,
+    /// The agent on top and the dock below, at `[ui] terminal_dock_pct`.
+    Split,
+    /// The dock alone, filling the center.
+    Term,
+}
+
+impl DockLayout {
+    /// The next layout in the cycle: agent, split, terminal, agent.
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Agent => Self::Split,
+            Self::Split => Self::Term,
+            Self::Term => Self::Agent,
+        }
+    }
+
+    /// The word the layout control shows for it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Split => "split",
+            Self::Term => "term",
+        }
+    }
 }
 
 /// One center part's grid as last snapshotted, and what everything stamped
@@ -4338,12 +4378,6 @@ pub(crate) struct MouseLayoutState {
     /// longer maps 1:1 to an item; this is the reverse map (see
     /// `render::left_row_to_item`).
     pub(crate) left_row_to_item: Vec<usize>,
-    pub(crate) terminal_list: Rect,
-    /// Screen-row (relative to `terminal_list.y`) -> terminal-item index, rebuilt
-    /// each render. Terminal rows are now three lines tall (matching the agent
-    /// rows), so a click row no longer maps 1:1 to a terminal; this is the
-    /// reverse map (see `render::left_row_to_item`, reused for both lists).
-    pub(crate) terminal_row_to_item: Vec<usize>,
     /// The grid of the center part that has focus (the one drawn alone when a
     /// surface is maximized), which is what a press, a drag and a link test
     /// translate against.
@@ -4351,6 +4385,17 @@ pub(crate) struct MouseLayoutState {
     /// The grid of the other center part, when the center pane draws two. A
     /// press there moves focus to it first (see `App::focus_part_under`).
     pub(crate) other_term: Option<Rect>,
+    /// The divider row between an agent and its terminal dock, while the split
+    /// is drawn: dragged, it resizes the dock, and dragged to an edge, it shows
+    /// one part alone.
+    pub(crate) dock_divider: Option<Rect>,
+    /// The center pane between the header and the footer, as the dock divider
+    /// measures its share against.
+    pub(crate) center_stack: Option<Rect>,
+    /// The `agent | split | term` control's three words, where it is drawn.
+    pub(crate) layout_control: Vec<(DockLayout, Rect)>,
+    /// The dock strip's pills, where they are drawn: (terminal id, cell rect).
+    pub(crate) dock_pills: Vec<(String, Rect)>,
     /// The take-over card's button, when the card is on screen. Published by the
     /// render pass and cleared with the rest of this state every frame, so a
     /// click can only land on a button that is drawn right now: the card comes
@@ -4384,10 +4429,12 @@ impl MouseLayoutState {
         self.right = right;
         self.left_list = Rect::default();
         self.left_row_to_item.clear();
-        self.terminal_list = Rect::default();
-        self.terminal_row_to_item.clear();
         self.focused_term = None;
         self.other_term = None;
+        self.dock_divider = None;
+        self.center_stack = None;
+        self.layout_control.clear();
+        self.dock_pills.clear();
         self.takeover_button = None;
         self.dormant_tab_button = None;
         self.pr_banner = None;
@@ -4766,7 +4813,8 @@ pub(crate) enum OverlayMouseLayout {
 pub(crate) enum DraggedDivider {
     Left,
     Right,
-    Terminal,
+    /// Between an agent and its terminal dock in the split.
+    Dock,
     Staged,
     Commit,
 }
@@ -4782,16 +4830,6 @@ pub(crate) enum MouseClickTarget {
     MacroTextInput,
 }
 
-/// Which sidebar list a row drag belongs to. The two lists are separate orders
-/// with separate reorder commands, so a gesture that started in one never finds
-/// a drop target in the other: the same rule the web enforces by giving the
-/// agents and the terminals their own drag contexts with disjoint id sets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RowDragList {
-    Agents,
-    Terminals,
-}
-
 /// A drag-to-reorder gesture over a sidebar row, the TUI's twin of the web
 /// sidebar's drag ordering.
 ///
@@ -4803,8 +4841,6 @@ pub(crate) enum RowDragList {
 /// row is tracked in `hover`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RowDragState {
-    /// The list the press landed in. A drop is only ever computed within it.
-    pub(crate) list: RowDragList,
     /// The item index the press landed on: the row being moved.
     pub(crate) source: usize,
     /// WHAT the press landed on: the id of the agent or terminal in the source
@@ -4812,7 +4848,7 @@ pub(crate) struct RowDragState {
     /// in a list that is rebuilt whenever an agent attaches, exits or arrives, so
     /// the index alone is not an identity. The drop moves this id, and refuses
     /// outright when the source row no longer holds it.
-    pub(crate) source_id: String,
+    pub(crate) source_id: LeftRow,
     /// The reorderable row the pointer is over now, or `None` when it is over
     /// something that is not a drop target (the Inactive tail and its toggle, a
     /// pane's empty space, another pane) or back over the source row itself. A
@@ -4820,7 +4856,7 @@ pub(crate) struct RowDragState {
     pub(crate) hover: Option<usize>,
     /// The id in the hovered row, resolved as the pointer passes over it and kept
     /// beside the index for the same reason `source_id` is.
-    pub(crate) hover_id: Option<String>,
+    pub(crate) hover_id: Option<LeftRow>,
     /// Whether the pointer has left the source row, promoting the press from a
     /// click into a drag. An unpromoted gesture paints no marker and reorders
     /// nothing.
@@ -4836,11 +4872,20 @@ pub(crate) struct DrawnTabStrip {
     pub(crate) focused: String,
 }
 
+/// Which of an agent's two strips: its provider tabs, or its terminal dock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PillStrip {
+    Tabs,
+    Dock,
+}
+
 /// A drag-to-reorder gesture over a pill of a tab strip. It stays a plain click
 /// until the pointer reaches a different pill, so the press that focuses a tab
 /// is the same one that can pick it up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TabDragState {
+    /// Which of the agent's strips the press landed in.
+    pub(crate) strip: PillStrip,
     /// The agent whose strip the press landed in.
     pub(crate) session_id: String,
     /// The pill the press picked up.
@@ -4858,16 +4903,11 @@ pub(crate) struct RecentMouseClick {
     pub(crate) at: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LeftSection {
-    Projects,
-    Terminals,
-}
-
-/// What a row of the agent list is, by identity rather than by position.
+/// What a row of the agents list is, by identity rather than by position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LeftRow {
     Agent(String),
+    Terminal(String),
     InactiveToggle,
 }
 
@@ -4886,6 +4926,9 @@ pub(crate) enum LeftItem {
     /// An agent row (index into `engine.sessions`). The flat model shows the
     /// project inline on the row rather than under a header.
     Session(usize),
+    /// A project or standalone terminal's row (index into `App::left_terminals`).
+    /// An agent's own terminals are not rows: they live in its dock.
+    Terminal(usize),
     /// The collapsible "Inactive · N" toggle separating active agents (above) from
     /// detached/exited ones (below). Selectable; Enter/Space toggles the tail.
     InactiveToggle,
@@ -4893,7 +4936,9 @@ pub(crate) enum LeftItem {
 
 impl LeftItem {
     pub(crate) fn is_selectable(self) -> bool {
-        matches!(self, LeftItem::Session(_) | LeftItem::InactiveToggle)
+        match self {
+            LeftItem::Session(_) | LeftItem::Terminal(_) | LeftItem::InactiveToggle => true,
+        }
     }
 }
 
@@ -5025,42 +5070,47 @@ pub(crate) fn key_bindings_warning(bindings: &RuntimeBindings, config: &Config) 
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// Build the flat left-pane list: a single globally-ordered agent list with no
-/// project grouping. Active agents come first; detached/exited ("inactive") agents
-/// collapse under an `InactiveToggle` tail (default collapsed). Orphan
-/// (removed-project) sessions are plain `Session` rows here; the renderer marks
-/// them inline.
+/// Build the flat left-pane list: one globally-ordered list of agents and
+/// project and standalone terminals, with no project grouping. Active agents and
+/// the terminals come first; detached/exited ("inactive") agents with none of
+/// their own terminals running collapse under an `InactiveToggle` tail (default
+/// collapsed). Orphan (removed-project) sessions are plain `Session` rows here;
+/// the renderer marks them inline.
 ///
-/// The ordering is the core-owned `dux_core::flat_list::order_sessions` (the
+/// The ordering is the core-owned `dux_core::flat_list::order_rows` (the
 /// cross-language twin of the web's `flatList.ts`); this function only wraps the
-/// ordered indices into `LeftItem`s and inserts the collapsible toggle. Returned
+/// ordered rows into `LeftItem`s and inserts the collapsible toggle. Returned
 /// `LeftItem::Session(index)` values index into `sessions`, which is never
-/// mutated. See `flat_list.rs` for the per-mode rules.
-///
-/// `is_hot(index)` reports whether the session at that index is working or needs
-/// attention (used only by `Active`). `is_visible(index)` is a symmetric display
-/// filter: an index that fails it enters neither bucket, so the `InactiveToggle`
-/// tail appears only when a visible inactive row remains; callers with no active
-/// filter pass `&|_| true`.
+/// mutated, and `LeftItem::Terminal(index)` values into `terminals`. See
+/// `flat_list.rs` for the per-mode rules.
 pub(crate) fn build_left_items(
     sessions: &[AgentSession],
+    terminals: &[dux_core::flat_list::TerminalRowFacts<'_>],
     tail: InactiveTail,
     sort_mode: AgentSortMode,
-    is_hot: &dyn Fn(usize) -> bool,
-    is_visible: &dyn Fn(usize) -> bool,
+    facts: &dux_core::flat_list::AgentRowFacts<'_>,
+    terminal_visible: &dyn Fn(usize) -> bool,
 ) -> Vec<LeftItem> {
-    // The ORDERING (partition, bucket sort, and the Active-mode inactive-tail
-    // recency rule) is the core-owned `flat_list::order_sessions` (cross-language
-    // twin of the web's `flatList.ts`); this surface only wraps the ordered
-    // indices into `LeftItem`s and inserts the collapsible toggle.
-    let order = dux_core::flat_list::order_sessions(
+    // The ORDERING (partition, bucket sort, the tail rule and the Active-mode
+    // inactive-tail recency rule) is the core-owned `flat_list::order_rows`
+    // (cross-language twin of the web's `flatList.ts`); this surface only wraps
+    // the ordered rows into `LeftItem`s and inserts the collapsible toggle.
+    let order = dux_core::flat_list::order_rows(
         sessions,
+        terminals,
         sort_mode.to_flat_sort_mode(),
-        is_hot,
-        is_visible,
+        facts,
+        terminal_visible,
     );
 
-    let mut items: Vec<LeftItem> = order.active.into_iter().map(LeftItem::Session).collect();
+    let mut items: Vec<LeftItem> = order
+        .main
+        .into_iter()
+        .map(|row| match row {
+            dux_core::flat_list::FlatRow::Agent(index) => LeftItem::Session(index),
+            dux_core::flat_list::FlatRow::Terminal(index) => LeftItem::Terminal(index),
+        })
+        .collect();
     if !order.inactive.is_empty() {
         items.push(LeftItem::InactiveToggle);
         if tail == InactiveTail::Expanded {
@@ -5079,6 +5129,7 @@ pub(crate) use background_server::BackgroundServerStart;
 mod changes_tree;
 pub(crate) mod components;
 mod confirm_dialog;
+mod dock;
 mod first_load;
 mod input;
 pub(crate) mod modal;
@@ -5397,20 +5448,23 @@ impl App {
         let right_hidden = !engine.config.ui.show_changes_pane;
         let left_width_pct = engine.config.ui.left_width_pct;
         let right_width_pct = engine.config.ui.right_width_pct;
-        let terminal_pane_height_pct = engine.config.ui.terminal_pane_height_pct;
+        let terminal_dock_pct = engine.config.ui.terminal_dock_pct;
         let staged_pane_height_pct = engine.config.ui.staged_pane_height_pct;
         let commit_pane_height_pct = engine.config.ui.commit_pane_height_pct;
         let mut app = Self {
             left_width_pct,
             right_width_pct,
-            terminal_pane_height_pct,
+            terminal_dock_pct,
             staged_pane_height_pct,
             commit_pane_height_pct,
             bindings,
             engine,
             selected_left: 0,
-            left_section: LeftSection::Projects,
-            selected_terminal_index: 0,
+            left_terminals: Vec::new(),
+            dock_layouts: HashMap::new(),
+            dock_active: HashMap::new(),
+            stopped_layout: None,
+            last_dock_strip: None,
             right_section: RightSection::Unstaged,
             files_index: 0,
             files_search: TextInput::new(),
@@ -5458,7 +5512,6 @@ impl App {
             host_forward_carry: Vec::new(),
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
-            terminal_return_to_list: false,
             pty_sizes: HashMap::new(),
             part_targets: PartTargets::default(),
             tui_launched_ptys: HashSet::default(),
@@ -5520,7 +5573,6 @@ impl App {
             published_ptys: None,
             companion: None,
             left_rows: Vec::new(),
-            terminal_cursor: None,
             tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
@@ -6034,22 +6086,16 @@ impl App {
             return true;
         }
         if matches!(self.fullscreen_overlay, FullscreenOverlay::Terminal) {
-            let return_to_list = self.terminal_return_to_list;
             // Snap to the live edge while the surface still resolves the
             // terminal client. Scrolling back moves the display offset and
             // nothing else, and the terminal library holds that view still as
             // new lines arrive, so an offset left behind would bring the pane
             // back parked in history while the child prints below it.
             self.reset_pty_scrollback();
+            // Back to the center pane with focus kept on the terminal, the way
+            // leaving the agent's fullscreen keeps it on the agent.
             self.fullscreen_overlay = FullscreenOverlay::None;
-            self.session_surface = SessionSurface::Agent;
             self.input_target = InputTarget::None;
-            if return_to_list {
-                self.left_section = LeftSection::Terminals;
-                self.select_active_terminal_row();
-                self.clamp_terminal_cursor();
-                self.focus = FocusPane::Left;
-            }
             let key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
                 "Closed fullscreen terminal. Press {key} to reopen."
@@ -6418,7 +6464,7 @@ impl App {
                     let p = self.engine.projects.iter().find(|p| p.id == project_id)?;
                     p.path_missing.then(|| p.path.clone())
                 }
-                LeftItem::InactiveToggle => None,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => None,
             });
         if let Some(path) = missing_path {
             self.missing_project_warning_gen =
@@ -6637,17 +6683,42 @@ impl App {
                 self.open_change_agent_provider_prompt();
                 Ok(())
             }
+            // The tab commands act on the strip with focus: with the dock
+            // focused, its terminals are the tabs.
+            "new-agent-tab" if self.dock_has_focus() => {
+                self.show_companion_terminal();
+                Ok(())
+            }
             "new-agent-tab" => self.open_new_tab_provider_prompt(),
+            "close-tab" if self.dock_has_focus() => {
+                self.confirm_close_focused_terminal();
+                Ok(())
+            }
             "close-tab" => {
                 self.close_focused_tab_prompt();
+                Ok(())
+            }
+            "stop-agent-tab" if self.dock_has_focus() => {
+                self.set_error(
+                    "A terminal is closed rather than stopped: run close-tab to close it, or press \
+                     Ctrl-C in it to stop what is running there and keep the shell.",
+                );
                 Ok(())
             }
             "stop-agent-tab" => {
                 self.stop_focused_tab_prompt();
                 Ok(())
             }
+            "move-tab-left" if self.dock_has_focus() => {
+                self.move_dock_terminal(reorder::MoveDir::Up);
+                Ok(())
+            }
             "move-tab-left" => {
                 self.move_focused_tab(reorder::MoveDir::Up);
+                Ok(())
+            }
+            "move-tab-right" if self.dock_has_focus() => {
+                self.move_dock_terminal(reorder::MoveDir::Down);
                 Ok(())
             }
             "move-tab-right" => {
@@ -6755,8 +6826,12 @@ impl App {
                 self.move_selected_agent(reorder::MoveDir::Bottom);
                 Ok(())
             }
-            "delete-terminal" => {
-                self.delete_terminal_from_palette();
+            "close-terminal" => {
+                self.close_terminal_from_palette();
+                Ok(())
+            }
+            "cycle-terminal-layout" => {
+                self.cycle_terminal_layout();
                 Ok(())
             }
             "filter-agents" => {
@@ -7125,7 +7200,7 @@ impl App {
         self.view_prefs.show_diff_line_numbers = config.ui.show_diff_line_numbers;
         self.left_width_pct = config.ui.left_width_pct;
         self.right_width_pct = config.ui.right_width_pct;
-        self.terminal_pane_height_pct = config.ui.terminal_pane_height_pct;
+        self.terminal_dock_pct = config.ui.terminal_dock_pct;
         self.staged_pane_height_pct = config.ui.staged_pane_height_pct;
         self.commit_pane_height_pct = config.ui.commit_pane_height_pct;
         theme_warning
@@ -7340,14 +7415,40 @@ impl App {
         // (mirroring the hot mask above, and avoiding a second `self.engine` borrow).
         // An absent or whitespace-only query makes everything visible.
         let visible: Vec<bool> = self.agent_visibility_mask();
+        let has_terminal: Vec<bool> = self
+            .engine
+            .sessions
+            .iter()
+            .map(|s| self.session_terminal_count(&s.id) > 0)
+            .collect();
+        let terminal_ids = self.list_terminal_ids();
+        let terminal_facts = self.list_terminal_facts(&terminal_ids);
+        let query = self.active_filter_query();
+        let terminal_visible: Vec<bool> = terminal_ids
+            .iter()
+            .map(|id| {
+                query.as_deref().is_none_or(|query| {
+                    self.engine
+                        .companion_terminals
+                        .get(id)
+                        .is_some_and(|terminal| self.terminal_matches_filter(terminal, query))
+                })
+            })
+            .collect();
         let was_on = self.left_cursor_row();
         self.left_items_cache = build_left_items(
             &self.engine.sessions,
+            &terminal_facts,
             effective_collapsed,
             mode,
-            &|i| hot[i],
-            &|i| visible[i],
+            &dux_core::flat_list::AgentRowFacts {
+                is_hot: &|i| hot[i],
+                is_visible: &|i| visible[i],
+                has_running_terminal: &|i| has_terminal[i],
+            },
+            &|t| terminal_visible[t],
         );
+        self.left_terminals = terminal_ids;
         self.left_rows = self
             .left_items_cache
             .iter()
@@ -7359,16 +7460,46 @@ impl App {
                         .map(|session| session.id.clone())
                         .unwrap_or_default(),
                 ),
+                LeftItem::Terminal(index) => {
+                    LeftRow::Terminal(self.left_terminals.get(*index).cloned().unwrap_or_default())
+                }
                 LeftItem::InactiveToggle => LeftRow::InactiveToggle,
             })
             .collect();
         self.put_left_cursor_back(was_on);
         self.left_list.built = true;
         self.ensure_selectable_left_item();
-        // The same query prunes the terminal list (`terminal_items`), so the
-        // terminal cursor is repaired in the same breath as the agent one: this
-        // is the one path every filter edit goes through.
-        self.clamp_terminal_cursor();
+    }
+
+    /// What the list sorts each of `terminal_ids` by, in the same order.
+    pub(crate) fn list_terminal_facts<'a>(
+        &'a self,
+        terminal_ids: &[String],
+    ) -> Vec<dux_core::flat_list::TerminalRowFacts<'a>> {
+        terminal_ids
+            .iter()
+            .filter_map(|id| {
+                let (id, terminal) = self.engine.companion_terminals.get_key_value(id)?;
+                // Last output mapped onto wall clock, or when it was opened before
+                // any: the same instant the viewmodel reports as updated.
+                let updated_at =
+                    self.engine
+                        .pty_activity
+                        .get(id)
+                        .map_or(terminal.created_at, |last| {
+                            let ago =
+                                chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
+                            chrono::Utc::now() - ago
+                        });
+                Some(dux_core::flat_list::TerminalRowFacts {
+                    name: &terminal.label,
+                    created_at: terminal.created_at,
+                    updated_at,
+                    busy: self.engine.terminal_is_working(id) || self.engine.is_typing(id),
+                    after_agent: terminal.list_after.as_deref(),
+                })
+            })
+            .collect()
     }
 
     /// Build the per-session visibility mask for the current agent-list filter.
@@ -7419,9 +7550,11 @@ impl App {
             .enumerate()
             .filter(|(index, session)| {
                 mask.get(*index).copied().unwrap_or(false)
-                    && matches!(
-                        session.status,
-                        crate::model::SessionStatus::Detached | crate::model::SessionStatus::Exited
+                    && dux_core::flat_list::in_inactive_tail(
+                        session,
+                        dux_core::flat_list::OwnTerminals::from(
+                            self.session_terminal_count(&session.id) > 0,
+                        ),
                     )
             })
             .count()
@@ -7465,26 +7598,33 @@ impl App {
     pub(crate) fn filter_agents_from_palette(&mut self) {
         self.panes.left_collapsed = false;
         self.focus = FocusPane::Left;
-        self.left_section = LeftSection::Projects;
         self.open_agent_filter();
     }
 
-    /// The palette's way to delete a terminal. The key binding acts on the
-    /// highlighted terminal row, so the palette does too, and only while a
-    /// terminal row is the selection: the remembered terminal index outlives
-    /// the cursor moving back onto an agent, and deleting a terminal the
-    /// user is not looking at is not what they asked for.
-    pub(crate) fn delete_terminal_from_palette(&mut self) {
-        if self.left_section != LeftSection::Terminals {
+    /// The palette's way to close a terminal: the active terminal of the dock
+    /// when the dock has focus, or the terminal whose row is selected in the
+    /// agents list. Anywhere else there is no terminal the command could mean,
+    /// and closing one the user is not looking at is not what they asked for.
+    pub(crate) fn close_terminal_from_palette(&mut self) {
+        if self.focused_terminal_to_close().is_none() {
             self.set_error(
-                "Select a terminal in the agents pane first, then run delete-terminal again to \
-                 close it.",
+                "Focus an agent's terminal dock, or select a project or standalone terminal in \
+                 the agents list, then run close-terminal again to close it.",
             );
             return;
         }
-        {
-            self.confirm_delete_selected_terminal();
+        self.confirm_close_focused_terminal();
+    }
+
+    /// The terminal the close binding and `close-terminal` act on: the selected
+    /// terminal row's, or the dock's active one while the dock has focus.
+    pub(crate) fn focused_terminal_to_close(&self) -> Option<String> {
+        if let Some(row) = self.selected_terminal_row() {
+            return Some(row);
         }
+        (self.focus == FocusPane::Center && self.session_surface == SessionSurface::Terminal)
+            .then(|| self.selected_terminal_surface_id())
+            .flatten()
     }
 
     pub(crate) fn open_agent_filter(&mut self) {
@@ -7505,17 +7645,8 @@ impl App {
             .is_some_and(|item| item.is_selectable())
     }
 
-    /// The session id behind agent-list item `index`, or `None` when the item is
-    /// not an agent row (the Inactive toggle) or the index is out of range.
-    pub(crate) fn left_item_session_id(&self, index: usize) -> Option<String> {
-        match self.left_items().get(index) {
-            Some(LeftItem::Session(i)) => self.engine.sessions.get(*i).map(|s| s.id.clone()),
-            _ => None,
-        }
-    }
-
-    /// Whether the agent-list item at `index` may be dragged, and dropped onto,
-    /// by a mouse reorder: an agent row in the ACTIVE list.
+    /// Whether the list item at `index` may be dragged, and dropped onto, by a
+    /// mouse reorder: an agent or terminal row in the ACTIVE list.
     ///
     /// The Inactive tail and its toggle are deliberately not drop targets, as on
     /// the web: the tail is a derived bucket (a detached agent falls into it and
@@ -7524,7 +7655,10 @@ impl App {
     /// nothing.
     pub(crate) fn is_reorderable_left_item(&self, index: usize) -> bool {
         let items = self.left_items();
-        if !matches!(items.get(index), Some(LeftItem::Session(_))) {
+        if !matches!(
+            items.get(index),
+            Some(LeftItem::Session(_) | LeftItem::Terminal(_))
+        ) {
             return false;
         }
         match items
@@ -8312,25 +8446,191 @@ impl App {
         self.engine.companion_terminals.len()
     }
 
-    /// The terminals the sidebar is SHOWING: [`Self::sorted_terminal_items`] with
-    /// the live sidebar filter applied, so a query prunes the terminal list the
-    /// same way it prunes the agent list.
-    ///
-    /// This is the list every index-bearing caller works against (the rendered
-    /// rows, the pane count, the selection cursor, and the mouse row map), so
-    /// what a click lands on is what the user can see. The one caller that
-    /// deliberately wants the WHOLE list is the manual reorder, which resolves
-    /// the selection by id and then moves it within the unfiltered order, exactly
-    /// as the agent reorder does against `engine.sessions`.
-    pub(crate) fn terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
-        let items = self.sorted_terminal_items();
-        let Some(query) = self.active_filter_query() else {
-            return items;
+    /// The project and standalone terminals, which are rows of the agents list
+    /// (an agent's own terminals live in its dock instead), in no particular
+    /// order: the list orders them with the agents.
+    pub(crate) fn list_terminal_ids(&self) -> Vec<String> {
+        let mut ids: Vec<(&String, &CompanionTerminal)> = self
+            .engine
+            .companion_terminals
+            .iter()
+            // Exhaustive rather than a `matches!`: whether a terminal is a row of
+            // its own is an owner-presentation decision.
+            .filter(|(_, terminal)| match terminal.owner.as_ref() {
+                TerminalOwnerRef::Session(_) => false,
+                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => true,
+            })
+            .collect();
+        ids.sort_by_key(|(_, terminal)| terminal.sort_order);
+        ids.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The terminal whose row the cursor is on, when it is on one.
+    pub(crate) fn selected_terminal_row(&self) -> Option<String> {
+        match self.left_items().get(self.selected_left) {
+            Some(LeftItem::Terminal(index)) => self
+                .left_terminals
+                .get(*index)
+                .filter(|id| self.engine.companion_terminals.contains_key(id.as_str()))
+                .cloned(),
+            _ => None,
+        }
+    }
+
+    /// The terminal ids in `session_id`'s dock, in dock order.
+    pub(crate) fn dock_terminal_ids(&self, session_id: &str) -> Vec<String> {
+        let mut ids: Vec<(&String, &CompanionTerminal)> = self
+            .engine
+            .companion_terminals
+            .iter()
+            .filter(|(_, terminal)| match terminal.owner.as_ref() {
+                TerminalOwnerRef::Session(owner) => owner == session_id,
+                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => false,
+            })
+            .collect();
+        ids.sort_by_key(|(_, terminal)| terminal.sort_order);
+        ids.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The selected agent's dock terminals, or none when no agent is selected.
+    pub(crate) fn selected_dock_terminal_ids(&self) -> Vec<String> {
+        self.selected_session()
+            .map(|session| self.dock_terminal_ids(&session.id))
+            .unwrap_or_default()
+    }
+
+    /// Whether the selected agent's first tab has a live process.
+    pub(crate) fn selected_agent_running(&self) -> bool {
+        self.selected_session().is_some_and(|session| {
+            self.session_tab_ids(&session.id)
+                .iter()
+                .any(|tab| self.engine.providers.contains_key(TabIdRef::new(tab)))
+        })
+    }
+
+    /// The selected agent's center layout. An agent with no terminals has no
+    /// dock, so it is always the agent alone; one that is stopped while its
+    /// terminals run opens on its terminal, whatever was remembered, because
+    /// nothing that opens it starts it.
+    pub(crate) fn selected_dock_layout(&self) -> DockLayout {
+        let Some(session) = self.selected_session() else {
+            return DockLayout::Agent;
         };
-        items
-            .into_iter()
-            .filter(|(_, t)| self.terminal_matches_filter(t, &query))
-            .collect()
+        if self.dock_terminal_ids(&session.id).is_empty() {
+            return DockLayout::Agent;
+        }
+        if !self.selected_agent_running() {
+            return match &self.stopped_layout {
+                Some((id, layout)) if *id == session.id => *layout,
+                _ => DockLayout::Term,
+            };
+        }
+        self.dock_layouts
+            .get(&session.id)
+            .copied()
+            .unwrap_or(DockLayout::Split)
+    }
+
+    /// The center parts the selected row's layout draws, top to bottom: a
+    /// terminal row draws its terminal alone, an agent its layout's parts.
+    pub(crate) fn layout_parts(&self) -> Vec<CenterPart> {
+        if self.selected_terminal_row().is_some() {
+            return vec![CenterPart::Dock];
+        }
+        match self.selected_dock_layout() {
+            DockLayout::Agent => vec![CenterPart::Main],
+            DockLayout::Split => vec![CenterPart::Main, CenterPart::Dock],
+            DockLayout::Term => vec![CenterPart::Dock],
+        }
+    }
+
+    /// The terminal on screen in the dock ended: show its neighbour in the
+    /// strip, the one to its right or, when it was the last, to its left, the
+    /// way a browser lands beside a closed tab. With none left the dock goes and
+    /// the agent shows alone.
+    pub(crate) fn land_beside_a_closed_terminal(&mut self, closed: &str) {
+        let alive = |id: &str| self.engine.companion_terminals.contains_key(id);
+        let neighbour = self.last_dock_strip.as_ref().and_then(|strip| {
+            dux_core::agent_tabs::tab_after_close(strip, closed)
+                .filter(|id| alive(id))
+                .map(str::to_string)
+                .or_else(|| strip.iter().find(|id| alive(id)).cloned())
+        });
+        self.active_terminal_id = neighbour;
+        if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
+            if let Some(id) = self.active_terminal_id.clone() {
+                self.dock_active.insert(session_id, id);
+            } else {
+                self.dock_active.remove(&session_id);
+                self.session_surface = SessionSurface::Agent;
+            }
+        }
+        self.part_snapshots.dock.last_id = None;
+        self.reconcile_center_target();
+    }
+
+    /// Point the center pane at the row under the cursor: a terminal row shows
+    /// its terminal, and an agent row shows its dock terminal (the one it showed
+    /// last, or its first) with focus on a part that is drawn. Run on every
+    /// selection change and before every frame, so a terminal that ended or a
+    /// row that moved can never leave the center aimed at something gone.
+    pub(crate) fn reconcile_center_target(&mut self) {
+        if let Some(terminal_id) = self.selected_terminal_row() {
+            if self.active_terminal_id.as_deref() != Some(terminal_id.as_str()) {
+                self.active_terminal_id = Some(terminal_id);
+                self.part_snapshots.dock.last_id = None;
+            }
+            if self.session_surface != SessionSurface::Terminal {
+                self.session_surface = SessionSurface::Terminal;
+            }
+            return;
+        }
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            if self.session_surface == SessionSurface::Terminal
+                && self
+                    .active_terminal_id
+                    .as_ref()
+                    .is_none_or(|id| !self.engine.companion_terminals.contains_key(id))
+            {
+                self.session_surface = SessionSurface::Agent;
+            }
+            return;
+        };
+        if self
+            .stopped_layout
+            .as_ref()
+            .is_some_and(|(id, _)| *id != session_id)
+            || self.selected_agent_running()
+        {
+            self.stopped_layout = None;
+        }
+        let dock = self.dock_terminal_ids(&session_id);
+        let current_is_ours = self
+            .active_terminal_id
+            .as_ref()
+            .is_some_and(|id| dock.contains(id));
+        if !current_is_ours {
+            let remembered = self
+                .dock_active
+                .get(&session_id)
+                .filter(|id| dock.contains(id))
+                .cloned();
+            self.active_terminal_id = remembered.or_else(|| dock.first().cloned());
+            // Another agent's terminal was on screen, so focus starts on this
+            // agent, unless its agent part is not drawn at all.
+            self.session_surface = SessionSurface::Agent;
+        }
+        if let Some(active) = self.active_terminal_id.clone() {
+            self.dock_active.insert(session_id, active);
+        }
+        let surface = match self.selected_dock_layout() {
+            DockLayout::Agent => SessionSurface::Agent,
+            DockLayout::Term => SessionSurface::Terminal,
+            DockLayout::Split => self.session_surface,
+        };
+        if self.session_surface != surface {
+            self.session_surface = surface;
+        }
     }
 
     /// Whether `terminal` passes a live sidebar query, through the shared core
@@ -8425,155 +8725,6 @@ impl App {
             .find(|p| p.id == project_id)
             .map(|p| p.name.clone())
             .unwrap_or_default()
-    }
-
-    /// Returns all running companion terminals as (`terminal_id`, terminal) pairs,
-    /// ordered by the shared active sort mode (`config.ui.agent_sort`), mirroring
-    /// the agent comparators in [`build_left_items`]. Unfiltered: the sidebar's
-    /// visible list is [`Self::terminal_items`].
-    ///
-    /// The comparators are kept in lockstep with the web surface's
-    /// `sortFlatTerminals` (`crates/dux-web/web/src/lib/flatTerminals.ts`), so any
-    /// change here must change there too:
-    /// - `Manual`: base order (by `sort_order` ascending, i.e. creation order).
-    /// - `Created`: newest first (`Reverse(created_at)`).
-    /// - `Updated`: newest first, by the same PTY-activity-derived timestamp the
-    ///   viewmodel exposes as `TerminalView::updated_at` (last activity, else spawn).
-    /// - `NameAsc` / `NameDesc`: by the terminal's displayed primary label
-    ///   (`foreground_cmd` when present and non-empty, else `label`), lowercased, so
-    ///   name-sort matches what is on screen.
-    /// - `Active` (default): working-or-typing terminals float to the top (a stable
-    ///   float keeping base order within each group); terminals have no attention.
-    ///
-    /// The base sort by `sort_order` runs first in every mode: `sort_by_key` is
-    /// stable, so equal keys and the `Active` float keep the manual base order.
-    pub(crate) fn sorted_terminal_items(&self) -> Vec<(&String, &CompanionTerminal)> {
-        let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
-        let mut items: Vec<_> = self.engine.companion_terminals.iter().collect();
-        // Base order: manual `sort_order` ascending (creation order). Every mode
-        // builds on top of this stable base.
-        items.sort_by_key(|(_, t)| t.sort_order);
-
-        // Displayed primary label, lowercased: the WYSIWYG name-sort key.
-        let name_key = |t: &CompanionTerminal| -> String {
-            t.foreground_cmd
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&t.label)
-                .to_lowercase()
-        };
-        // The updated-at instant the viewmodel projects: last PTY activity mapped
-        // onto wall clock, falling back to spawn time when there is none yet.
-        let updated_at = |id: &str, t: &CompanionTerminal| -> chrono::DateTime<chrono::Utc> {
-            self.engine
-                .pty_activity
-                .get(id)
-                .map_or(t.created_at, |last| {
-                    let ago = chrono::Duration::from_std(last.elapsed()).unwrap_or_default();
-                    chrono::Utc::now() - ago
-                })
-        };
-
-        match mode {
-            // Base order already applied.
-            AgentSortMode::Manual => {}
-            AgentSortMode::Created => items.sort_by_key(|(_, t)| std::cmp::Reverse(t.created_at)),
-            AgentSortMode::Updated => {
-                items.sort_by_key(|(id, t)| std::cmp::Reverse(updated_at(id, t)));
-            }
-            AgentSortMode::NameAsc => items.sort_by_key(|(_, t)| name_key(t)),
-            AgentSortMode::NameDesc => items.sort_by_key(|(_, t)| std::cmp::Reverse(name_key(t))),
-            AgentSortMode::Active => {
-                // Stable float: working-or-typing terminals rise above the rest,
-                // each group keeping base order. Matches the web `activeFirst`.
-                let (hot, rest): (Vec<_>, Vec<_>) = items.into_iter().partition(|(id, _)| {
-                    self.engine.is_agent_streaming(id) || self.engine.is_typing(id)
-                });
-                items = hot;
-                items.extend(rest);
-            }
-        }
-        items
-    }
-
-    /// Whether the terminals section has anything in it RIGHT NOW. Filter-aware,
-    /// because it gates the navigation that jumps into that section: a query that
-    /// hides every terminal hides the section too, and stepping into an empty
-    /// section would strand the cursor there.
-    pub(crate) fn has_terminal_items(&self) -> bool {
-        !self.terminal_items().is_empty()
-    }
-
-    /// Put the terminal cursor on the terminal that was just on screen, so the
-    /// list, which scrolls to its cursor, shows that row. Resolved when the list
-    /// is returned to rather than at launch, because a sort such as `active`
-    /// can reorder the terminals in between. A filter that hides the terminal
-    /// leaves the cursor where it was.
-    pub(crate) fn select_active_terminal_row(&mut self) {
-        let Some(active) = self.active_terminal_id.as_deref() else {
-            return;
-        };
-        if let Some(pos) = self
-            .terminal_items()
-            .iter()
-            .position(|(id, _)| id.as_str() == active)
-        {
-            self.select_terminal_row(pos);
-        }
-    }
-
-    /// Keep the terminal cursor inside the VISIBLE list. It repairs two things:
-    /// a terminal that went away, and a terminal the live filter just hid (the
-    /// query is part of what "visible" means, so a filter that prunes the row
-    /// under the cursor has to move the cursor, and a filter that empties the
-    /// section sends focus back to the agents).
-    pub(crate) fn clamp_terminal_cursor(&mut self) {
-        self.follow_terminal_cursor();
-        self.clamp_terminal_index();
-        self.note_terminal_cursor();
-    }
-
-    /// Put the terminal cursor back on the terminal it was on, wherever the
-    /// list's order (which a sort by activity changes as output arrives) has
-    /// put it now, unless the index was set by hand since. Run wherever the
-    /// order is read: a rebuild, a frame, and a key or mouse event.
-    pub(crate) fn follow_terminal_cursor(&mut self) {
-        if let Some((at, id)) = self.terminal_cursor.clone()
-            && at == self.selected_terminal_index
-            && let Some(pos) = self
-                .terminal_items()
-                .iter()
-                .position(|(candidate, _)| **candidate == id)
-        {
-            self.selected_terminal_index = pos;
-            self.terminal_cursor = Some((pos, id));
-        }
-    }
-
-    /// Put the terminal cursor on row `index` of the visible terminal list.
-    pub(crate) fn select_terminal_row(&mut self, index: usize) {
-        self.selected_terminal_index = index;
-        self.note_terminal_cursor();
-    }
-
-    /// Remember which terminal the terminal cursor is on.
-    fn note_terminal_cursor(&mut self) {
-        self.terminal_cursor = self
-            .terminal_items()
-            .get(self.selected_terminal_index)
-            .map(|(id, _)| (self.selected_terminal_index, (*id).clone()));
-    }
-
-    fn clamp_terminal_index(&mut self) {
-        let count = self.terminal_items().len();
-        if count == 0 {
-            self.selected_terminal_index = 0;
-            if self.left_section == LeftSection::Terminals {
-                self.left_section = LeftSection::Projects;
-            }
-        } else if self.selected_terminal_index >= count {
-            self.selected_terminal_index = count.saturating_sub(1);
-        }
     }
 
     /// Returns the number of running companion terminals for a given session.
@@ -9402,35 +9553,52 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_asks_before_deleting_the_selected_terminal() {
+    fn the_palette_asks_before_closing_the_terminal_in_a_focused_dock() {
         let mut app = test_support::test_app(test_support::default_bindings());
         app.show_companion_terminal();
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
 
-        app.execute_command("delete-terminal").unwrap();
+        app.execute_command("close-terminal").unwrap();
 
         assert!(
             matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
-            "expected the delete-terminal confirmation, got {:?}",
+            "expected the close-terminal confirmation, got {:?}",
             app.prompt
         );
     }
 
     #[test]
-    fn the_palette_refuses_to_delete_a_terminal_that_is_not_selected() {
+    fn the_palette_asks_before_closing_the_terminal_on_a_selected_row() {
+        let mut app = test_support::test_app(test_support::default_bindings());
+        test_support::add_terminal(&mut app, "term-1", TerminalOwner::Standalone);
+        app.reselect_left_terminal("term-1");
+        app.focus = FocusPane::Left;
+
+        app.execute_command("close-terminal").unwrap();
+
+        assert!(
+            matches!(
+                &app.prompt,
+                PromptState::ConfirmDeleteTerminal { terminal_id, .. } if terminal_id == "term-1"
+            ),
+            "expected the close confirmation for the selected row, got {:?}",
+            app.prompt
+        );
+    }
+
+    #[test]
+    fn the_palette_refuses_to_close_a_terminal_the_user_is_not_on() {
         let mut app = test_support::test_app(test_support::default_bindings());
         app.show_companion_terminal();
-        app.left_section = LeftSection::Projects;
-        app.selected_terminal_index = 0;
+        // The agent's row, not its dock: no terminal is the one the user means.
+        app.focus = FocusPane::Left;
 
-        app.execute_command("delete-terminal").unwrap();
+        app.execute_command("close-terminal").unwrap();
 
         assert!(matches!(app.prompt, PromptState::None));
         assert!(
-            app.status
-                .text()
-                .contains("Select a terminal in the agents pane first"),
+            app.status.text().contains(
+                "Focus an agent's terminal dock, or select a project or standalone terminal"
+            ),
             "{}",
             app.status.text()
         );
@@ -10129,6 +10297,28 @@ mod tests {
         );
     }
 
+    /// The list built from agents alone, with none of their own terminals running.
+    fn agent_rows(
+        sessions: &[AgentSession],
+        tail: InactiveTail,
+        mode: AgentSortMode,
+        is_hot: &dyn Fn(usize) -> bool,
+        is_visible: &dyn Fn(usize) -> bool,
+    ) -> Vec<LeftItem> {
+        build_left_items(
+            sessions,
+            &[],
+            tail,
+            mode,
+            &dux_core::flat_list::AgentRowFacts {
+                is_hot,
+                is_visible,
+                has_running_terminal: &|_| false,
+            },
+            &|_| true,
+        )
+    }
+
     #[test]
     fn build_left_items_flat_splits_active_and_inactive() {
         let mut active = test_session("active-1", "p", 0);
@@ -10140,7 +10330,7 @@ mod tests {
         // Collapsed (default): the active row, then a single Inactive toggle; the
         // inactive session is hidden.
         assert_eq!(
-            build_left_items(
+            agent_rows(
                 &sessions,
                 InactiveTail::Collapsed,
                 AgentSortMode::Active,
@@ -10152,7 +10342,7 @@ mod tests {
 
         // Expanded: the inactive session follows the toggle.
         assert_eq!(
-            build_left_items(
+            agent_rows(
                 &sessions,
                 InactiveTail::Expanded,
                 AgentSortMode::Active,
@@ -10173,7 +10363,7 @@ mod tests {
         a.status = SessionStatus::Active;
         let mut b = test_session("b", "other", 0);
         b.status = SessionStatus::Active;
-        let items = build_left_items(
+        let items = agent_rows(
             &[a, b],
             InactiveTail::Collapsed,
             AgentSortMode::Active,
@@ -10194,7 +10384,7 @@ mod tests {
         let mut ghost = test_session("ghost", "gone-project", 0);
         ghost.status = SessionStatus::Active;
         assert_eq!(
-            build_left_items(
+            agent_rows(
                 &[real, ghost],
                 InactiveTail::Collapsed,
                 AgentSortMode::Active,
@@ -10225,7 +10415,7 @@ mod tests {
             mk("i4", SessionStatus::Exited, 20),   // newer
         ];
         let hot = |i: usize| i == 2;
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Expanded,
             AgentSortMode::Active,
@@ -10259,7 +10449,7 @@ mod tests {
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
 
-        let asc = build_left_items(
+        let asc = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::NameAsc,
@@ -10275,7 +10465,7 @@ mod tests {
             ],
         );
 
-        let desc = build_left_items(
+        let desc = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::NameDesc,
@@ -10320,7 +10510,7 @@ mod tests {
             s
         };
         let sessions = vec![mk("s0", "charlie"), mk("s1", "alpha"), mk("s2", "bravo")];
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::Manual,
@@ -10357,7 +10547,7 @@ mod tests {
             mk("i2", "zeta", SessionStatus::Detached),
             mk("i3", "aardvark", SessionStatus::Detached),
         ];
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Expanded,
             AgentSortMode::NameAsc,
@@ -10393,7 +10583,7 @@ mod tests {
             mk("i1", SessionStatus::Detached, 5),  // older
             mk("i2", SessionStatus::Detached, 50), // newer
         ];
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Expanded,
             AgentSortMode::Active,
@@ -10422,7 +10612,7 @@ mod tests {
         };
         let sessions = vec![mk("s0", 0), mk("s1", 100), mk("s2", 50)];
 
-        let updated = build_left_items(
+        let updated = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::Updated,
@@ -10439,7 +10629,7 @@ mod tests {
             "Updated must order the active bucket newest-first",
         );
 
-        let created = build_left_items(
+        let created = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::Created,
@@ -10482,7 +10672,7 @@ mod tests {
             AgentSortMode::NameAsc,
             AgentSortMode::NameDesc,
         ] {
-            let items = build_left_items(
+            let items = agent_rows(
                 &sessions,
                 InactiveTail::Collapsed,
                 mode,
@@ -10514,7 +10704,7 @@ mod tests {
             mk("i3", SessionStatus::Detached), // 3: hidden inactive
         ];
         let visible = |i: usize| i == 0 || i == 2;
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Expanded,
             AgentSortMode::Active,
@@ -10547,7 +10737,7 @@ mod tests {
             mk("i1", SessionStatus::Detached),
         ];
         let visible = |i: usize| i == 0;
-        let items = build_left_items(
+        let items = agent_rows(
             &sessions,
             InactiveTail::Collapsed,
             AgentSortMode::Active,

@@ -130,14 +130,14 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         action: Action::MoveTabLeft,
         name: "move-tab-left",
-        description: "Move the focused tab of the selected agent one place left",
+        description: "Move the focused tab of the selected agent, or its docked terminal, one place left",
         // Per-tab: the web reorders tabs by dragging a pill along the strip, so
         // it gets no app-menu entry for this.
     },
     PaletteCommand {
         action: Action::MoveTabRight,
         name: "move-tab-right",
-        description: "Move the focused tab of the selected agent one place right",
+        description: "Move the focused tab of the selected agent, or its docked terminal, one place right",
         // Per-tab: see move-tab-left.
     },
     PaletteCommand {
@@ -349,16 +349,24 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-session: web manages companion terminals per session inline.
     },
     PaletteCommand {
+        action: Action::CycleTerminalLayout,
+        name: "cycle-terminal-layout",
+        description: "Cycle the center pane between the agent, the split with its terminals, and the terminals",
+        // Per-agent: the web's layout controls are the dock strip's buttons and
+        // the floating layout pill, so it gets no app-menu entry for this.
+    },
+    PaletteCommand {
         action: Action::DeleteSession,
         name: "delete-agent",
         description: "Delete the selected agent session",
         // Per-session: web deletes a session via its per-row delete + confirm.
     },
     PaletteCommand {
-        action: Action::DeleteTerminal,
-        name: "delete-terminal",
-        description: "Delete the selected companion terminal",
-        // Per-terminal: web deletes terminals via their per-row delete + confirm.
+        action: Action::CloseTerminal,
+        name: "close-terminal",
+        description: "Close the selected terminal",
+        // Per-terminal: the web closes a terminal from its row's or its dock
+        // pill's menu, behind the same confirm.
     },
     PaletteCommand {
         action: Action::OpenCurrentPullRequest,

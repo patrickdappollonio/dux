@@ -438,6 +438,7 @@ mod tests {
                 "move-tab-right",
                 "read-startup-command-logs",
                 "clone-project",
+                "cycle-terminal-layout",
                 "recreate-working-copy",
                 "toggle-always-show-tabs",
                 "toggle-randomized-pet-name-default",

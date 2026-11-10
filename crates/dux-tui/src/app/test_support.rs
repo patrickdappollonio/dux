@@ -283,8 +283,11 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         engine,
         bindings,
         selected_left: 0,
-        left_section: crate::app::LeftSection::Projects,
-        selected_terminal_index: 0,
+        left_terminals: Vec::new(),
+        dock_layouts: std::collections::HashMap::new(),
+        dock_active: std::collections::HashMap::new(),
+        stopped_layout: None,
+        last_dock_strip: None,
         right_section: RightSection::Unstaged,
         files_index: 0,
         files_search: TextInput::new(),
@@ -295,7 +298,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_commit: None,
         left_width_pct: 20,
         right_width_pct: 23,
-        terminal_pane_height_pct: 35,
+        terminal_dock_pct: 35,
         staged_pane_height_pct: 50,
         commit_pane_height_pct: 40,
         focus: FocusPane::Left,
@@ -346,7 +349,6 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         host_forward_carry: Vec::new(),
         host_forward_error_logged_at: None,
         agent_tab_regions: Vec::new(),
-        terminal_return_to_list: false,
         pty_sizes: std::collections::HashMap::new(),
         part_targets: crate::app::PartTargets::default(),
         tui_launched_ptys: HashSet::default(),
@@ -408,7 +410,6 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         published_ptys: None,
         companion: None,
         left_rows: Vec::new(),
-        terminal_cursor: None,
         tui_fallback_tabs: HashSet::default(),
         pending_background_server_start: None,
         pending_tailscale_mode_op: None,
@@ -858,4 +859,40 @@ fn the_shared_fixture_repository_never_signs_under_a_signing_global_config() {
             "{key} in the shared fixture repository"
         );
     }
+}
+
+/// Run a sleeping shell as terminal `id` owned by `owner`, placed after every
+/// terminal already running, and rebuild the agents list. A project or
+/// standalone terminal becomes a row of the list; a session's lives in its
+/// agent's dock.
+pub(crate) fn add_terminal(app: &mut App, id: &str, owner: dux_core::model::TerminalOwner) {
+    let client = crate::pty::PtyClient::spawn(
+        "/bin/sh",
+        &["-c".to_string(), "sleep 30".to_string()],
+        std::path::Path::new("."),
+        24,
+        80,
+        100,
+    )
+    .expect("spawn pty");
+    let sort_order = app
+        .engine
+        .companion_terminals
+        .values()
+        .map(|terminal| terminal.sort_order + 1)
+        .max()
+        .unwrap_or(0);
+    app.engine.companion_terminals.insert(
+        id.to_string(),
+        dux_core::model::CompanionTerminal {
+            owner,
+            label: id.to_string(),
+            foreground_cmd: None,
+            client,
+            sort_order,
+            created_at: Utc::now(),
+            list_after: None,
+        },
+    );
+    app.rebuild_left_items();
 }

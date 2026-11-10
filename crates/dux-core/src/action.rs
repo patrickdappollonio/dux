@@ -62,16 +62,20 @@ pub enum Action {
     ChangeProjectBaseBranch,
     /// Restart the CLI for the selected agent.
     ReconnectAgent,
-    /// Delete the selected session and worktree.
+    /// Delete the selected session and worktree; with an agent's terminal dock focused, or a
+    /// terminal's row selected, close that terminal instead.
     DeleteSession,
-    /// Delete the selected companion terminal.
-    DeleteTerminal,
+    /// Close the selected terminal.
+    CloseTerminal,
     // Agent pane
     /// Open the selected agent fullscreen, where keys go to the agent verbatim.
     InteractAgent,
     /// Open the first companion terminal for the selected agent, or launch a new one in the agent's
     /// directory if none exists.
     ShowTerminal,
+    /// Cycle the selected agent's center pane between the agent alone, the agent with its
+    /// terminal dock, and the dock alone.
+    CycleTerminalLayout,
     // Agent tabs (Center-scope; non-interactive only)
     /// Focus the next tab of the selected agent.
     NextTab,
@@ -419,9 +423,10 @@ impl Action {
             Action::ChangeProjectBaseBranch => "change_project_base_branch",
             Action::ReconnectAgent => "reconnect_agent",
             Action::DeleteSession => "delete_session",
-            Action::DeleteTerminal => "delete_terminal",
+            Action::CloseTerminal => "close_terminal",
             Action::InteractAgent => "interact_agent",
             Action::ShowTerminal => "show_terminal",
+            Action::CycleTerminalLayout => "cycle_terminal_layout",
             Action::NextTab => "next_tab",
             Action::PrevTab => "prev_tab",
             Action::NewTab => "new_tab",
@@ -600,23 +605,36 @@ impl Action {
                 "Pick any local or origin branch for the selected project to switch to, and branch new worktrees from it."
             }
             Action::ReconnectAgent => "Restart the CLI for the selected agent.",
-            Action::DeleteSession => "Delete the selected session and worktree.",
-            Action::DeleteTerminal => "Delete the selected companion terminal.",
+            Action::DeleteSession => {
+                "Delete the selected session and worktree; with an agent's terminal dock focused, or a terminal's row selected, close that terminal instead."
+            }
+            Action::CloseTerminal => "Close the selected terminal.",
             Action::InteractAgent => {
                 "Open the selected agent fullscreen, where keys go to the agent verbatim."
             }
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one in the agent's directory if none exists."
             }
-            Action::NextTab => "Focus the next tab of the selected agent.",
-            Action::PrevTab => "Focus the previous tab of the selected agent.",
+            Action::CycleTerminalLayout => {
+                "Cycle the selected agent's center pane between the agent alone, the agent with its terminal dock, and the dock alone."
+            }
+            Action::NextTab => {
+                "Focus the next tab of the selected agent, or its next terminal while its terminal dock has focus."
+            }
+            Action::PrevTab => {
+                "Focus the previous tab of the selected agent, or its previous terminal while its terminal dock has focus."
+            }
             Action::NewTab => "Add a tab to the selected agent (starts fresh).",
             Action::CloseTab => "Close the focused tab of the selected agent.",
             Action::StopTab => {
                 "Stop the focused tab of the selected agent; the tab stays, ready to start again."
             }
-            Action::MoveTabLeft => "Move the focused tab of the selected agent one place left.",
-            Action::MoveTabRight => "Move the focused tab of the selected agent one place right.",
+            Action::MoveTabLeft => {
+                "Move the focused tab of the selected agent one place left, or its terminal while its terminal dock has focus."
+            }
+            Action::MoveTabRight => {
+                "Move the focused tab of the selected agent one place right, or its terminal while its terminal dock has focus."
+            }
             Action::SelectTab1 => {
                 "Focus tab 1 of the selected agent. Ships with no default key: most terminals send Ctrl-1 as a plain 1, so bind your own key here for direct access."
             }
@@ -880,7 +898,7 @@ impl Action {
             | Action::InteractAgent
             | Action::ReconnectAgent
             | Action::DeleteSession
-            | Action::DeleteTerminal => Some("Projects pane"),
+            | Action::CloseTerminal => Some("Projects pane"),
             Action::NewAgentFromPr
             | Action::ManageProjects
             | Action::ManageWorktrees
@@ -947,6 +965,7 @@ impl Action {
             | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::ShowTerminal
+            | Action::CycleTerminalLayout
             | Action::NextTab
             | Action::PrevTab
             | Action::NewTab

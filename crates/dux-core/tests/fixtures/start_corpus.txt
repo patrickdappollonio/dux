@@ -72,6 +72,11 @@
 #   (with a binding's shape) is a name there: an auth setting under `[keys]`
 #   is misplaced whatever its value, and a `password` there is a plaintext
 #   password.
+# - A retired `[ui]` key (`terminal_pane_height_pct`) is ignored whatever its
+#   value, so a value that used to fail its range or type check starts.
+# - `[ui] terminal_dock_pct` is checked like the other pane heights, so a
+#   value that fails its range or type check stops the terminal UI. 7437238c
+#   had no such key and ignored it.
 #
 # The cases vary every setting 7437238c had (a valid other value and a value
 # of the wrong type), the stock and a custom provider field by field, env,
@@ -136,9 +141,13 @@ refuse start "[ui]\nright_width_pct = -1\n"
 start start "[ui]\nright_width_pct = 24\n"
 refuse start "[ui]\nright_width_pct = \"many\"\n"
 start start "[ui]\nterminal_pane_height_pct = 0\n"
-refuse start "[ui]\nterminal_pane_height_pct = -1\n"
+start(was:refuse) start "[ui]\nterminal_pane_height_pct = -1\n"
 start start "[ui]\nterminal_pane_height_pct = 36\n"
-refuse start "[ui]\nterminal_pane_height_pct = \"many\"\n"
+start(was:refuse) start "[ui]\nterminal_pane_height_pct = \"many\"\n"
+start start "[ui]\nterminal_dock_pct = 0\n"
+refuse(was:start) start "[ui]\nterminal_dock_pct = -1\n"
+start start "[ui]\nterminal_dock_pct = 51\n"
+refuse(was:start) start "[ui]\nterminal_dock_pct = \"many\"\n"
 start start "[ui]\nempty_project_separator_min_projects = 0\n"
 refuse start "[ui]\nempty_project_separator_min_projects = -1\n"
 start start "[ui]\nempty_project_separator_min_projects = 6\n"
@@ -481,6 +490,7 @@ refuse refuse(was:start) "[[server]]\npassword_hash = \"x\"\n"
 refuse refuse(was:start) "[[server]]\n[server.auth]\npassword_hash = \"x\"\n"
 refuse refuse(was:start) "server = [{auth = {require = \"network\"}}]\n"
 start start "[keys]\nexit_interactive = [\"ctrl-x\"]\n"
+start start "[keys]\nexit_interactive = [\"ctrl-e\"]\n"
 refuse start "[env]\n\"ghp.SECRET 1\" = \"x\"\n"
 start start "[providers.\"a.b c\"]\ncommand = \"x\"\n"
 refuse start "[macros]\n\"a.b c\" = \"x\"\n"
@@ -671,12 +681,12 @@ refuse start "ui = { right_width_pct = \"many\" }\n"
 refuse start "ui.right_width_pct = \"many\"\n"
 start start "ui = { terminal_pane_height_pct = 0 }\n"
 start start "ui.terminal_pane_height_pct = 0\n"
-refuse start "ui = { terminal_pane_height_pct = -1 }\n"
-refuse start "ui.terminal_pane_height_pct = -1\n"
+start(was:refuse) start "ui = { terminal_pane_height_pct = -1 }\n"
+start(was:refuse) start "ui.terminal_pane_height_pct = -1\n"
 start start "ui = { terminal_pane_height_pct = 36 }\n"
 start start "ui.terminal_pane_height_pct = 36\n"
-refuse start "ui = { terminal_pane_height_pct = \"many\" }\n"
-refuse start "ui.terminal_pane_height_pct = \"many\"\n"
+start(was:refuse) start "ui = { terminal_pane_height_pct = \"many\" }\n"
+start(was:refuse) start "ui.terminal_pane_height_pct = \"many\"\n"
 start start "ui = { empty_project_separator_min_projects = 0 }\n"
 start start "ui.empty_project_separator_min_projects = 0\n"
 refuse start "ui = { empty_project_separator_min_projects = -1 }\n"

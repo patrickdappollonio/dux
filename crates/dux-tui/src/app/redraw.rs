@@ -48,7 +48,7 @@ const ROW_ATTENTION: u8 = 1 << 3;
 
 #[derive(Default)]
 pub(crate) struct RedrawGate {
-    dirty: bool,
+    pub(crate) dirty: bool,
     last_frame: Option<Instant>,
     phase: Option<AnimationPhase>,
     status_line: Option<(dux_core::statusline::StatusTone, String)>,
@@ -83,7 +83,7 @@ impl App {
             FullscreenOverlay::StartupLog => Vec::new(),
             FullscreenOverlay::Agent | FullscreenOverlay::Terminal => vec![self.focused_part()],
             FullscreenOverlay::None => match self.center_mode {
-                CenterMode::Agent => vec![self.focused_part()],
+                CenterMode::Agent => self.layout_parts(),
                 CenterMode::Diff { .. } => Vec::new(),
             },
         }

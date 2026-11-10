@@ -519,6 +519,16 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
             (HintContext::Center, "Terminal"),
         ],
     },
+    BindingDef {
+        action: Action::CycleTerminalLayout,
+        default_keys: &[key!(ctrl - e)],
+        scopes: &[BindingScope::Center],
+        help: Some(HelpEntry {
+            section: "Agent pane",
+            description: "Cycle the agent, the split with its terminal dock, and the dock alone",
+        }),
+        hint_contexts: &[(HintContext::Center, "Layout")],
+    },
     // ── Agent tabs (Center-scope; never in fullscreen) ────────────
     // Only Ctrl chords are tab keys: the focused center pane
     // types into a live agent, so a plain arrow must reach it as a caret move
@@ -529,7 +539,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Next tab",
+            description: "Next tab (the next terminal while the dock has focus)",
         }),
         hint_contexts: &[],
     },
@@ -539,7 +549,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Previous tab",
+            description: "Previous tab (the previous terminal while the dock has focus)",
         }),
         hint_contexts: &[],
     },
@@ -557,7 +567,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Focus tab by number",
+            description: "Focus tab by number (a dock terminal while the dock has focus)",
         }),
         hint_contexts: &[],
     },
@@ -658,7 +668,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left, BindingScope::Center],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Delete selected session/worktree",
+            description: "Delete selected session/worktree (close the terminal with the dock or a terminal row focused)",
         }),
         hint_contexts: &[
             (HintContext::LeftSession, "Delete"),
@@ -667,7 +677,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         ],
     },
     BindingDef {
-        action: Action::DeleteTerminal,
+        action: Action::CloseTerminal,
         default_keys: &[],
         scopes: &[],
         help: None,
@@ -743,7 +753,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Toggle fullscreen (fullscreen keys go to the agent verbatim)",
+            description: "Toggle fullscreen for the focused agent or dock terminal (keys go to it verbatim)",
         }),
         hint_contexts: &[(HintContext::Center, "Fullscreen")],
     },
@@ -2453,6 +2463,7 @@ fn keys_conflict(a: &KeyCombination, b: &KeyCombination) -> bool {
 /// keeps it and the modal's default steps aside.
 const LATE_DEFAULTS: &[Action] = &[
     Action::NextPullRequest,
+    Action::CycleTerminalLayout,
     Action::PullRequestsAttach,
     Action::PullRequestHideOrDetach,
     Action::PullRequestsToggleHidden,
@@ -3315,7 +3326,17 @@ mod tests {
         let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
         let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let plain_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
         for (holder, bound, key, scope, holder_action, late, late_name) in [
+            (
+                "reconnect_agent",
+                &["ctrl-e"][..],
+                ctrl_e,
+                BindingScope::Center,
+                Action::ReconnectAgent,
+                Action::CycleTerminalLayout,
+                "cycle_terminal_layout",
+            ),
             (
                 "next_tab",
                 &["ctrl-n"][..],
@@ -3390,6 +3411,23 @@ mod tests {
         assert_eq!(late_default_warnings(&keys), Vec::<String>::new());
     }
 
+    /// The help overlay names the layout key, and the retired name of the close
+    /// action binds nothing.
+    #[test]
+    fn the_layout_key_is_in_the_help_and_delete_terminal_is_not_an_action() {
+        let sections = default_bindings().help_sections();
+        assert!(
+            sections.iter().any(|(name, rows)| *name == "Agent pane"
+                && rows.iter().any(|(_, text)| text.contains("terminal dock"))),
+            "{sections:?}"
+        );
+        let mut keys = crate::config::KeysConfig::default();
+        keys.bindings
+            .insert("delete_terminal".to_string(), vec!["ctrl-k".to_string()]);
+        assert!(crate::config::validate_keys(&keys).is_err());
+        assert_eq!(Action::CloseTerminal.config_name(), "close_terminal");
+    }
+
     #[test]
     fn help_sections_produces_valid_sections() {
         let bindings = default_bindings();
@@ -3462,7 +3500,10 @@ mod tests {
             label,
             "Alt-1/Alt-2/Alt-3/Alt-4/Alt-5/Alt-6/Alt-7/Alt-8/Alt-9"
         );
-        assert_eq!(desc, "Focus tab by number");
+        assert_eq!(
+            desc,
+            "Focus tab by number (a dock terminal while the dock has focus)"
+        );
     }
 
     /// With no tab key bound at all the row still says how to bind one.
@@ -3910,7 +3951,7 @@ mod tests {
     }
 
     /// The TUI palette's command set, sorted, kept by hand.
-    const EXPECTED_PALETTE_COMMANDS: [&str; 86] = [
+    const EXPECTED_PALETTE_COMMANDS: [&str; 87] = [
         "add-project",
         "agent-info",
         "change-agent-provider",
@@ -3922,13 +3963,14 @@ mod tests {
         "clear-status-line",
         "clone-project",
         "close-tab",
+        "close-terminal",
         "configure-global-env",
         "configure-project-env",
         "configure-startup-command",
         "copy-path",
+        "cycle-terminal-layout",
         "delete-agent",
         "delete-project",
-        "delete-terminal",
         "detach-agent",
         "edit-macros",
         "filter-agents",

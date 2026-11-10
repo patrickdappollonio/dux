@@ -584,11 +584,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::U16(c.ui.right_width_pct),
         },
         ConfigEntry::Field {
-            key: "terminal_pane_height_pct",
+            key: "terminal_dock_pct",
             comment: Some(CommentSource::Static(
-                "# Maximum height percentage of the left pane used by the companion terminals list.",
+                "# Percentage of the center pane's height an agent's terminal dock takes when the\n\
+                 # agent and its terminals share it (10-80). Drag the divider between them to\n\
+                 # change it; dragging it to an edge shows the agent or the terminal alone.",
             )),
-            value_fn: |c| FieldValue::U16(c.ui.terminal_pane_height_pct),
+            value_fn: |c| FieldValue::U16(c.ui.terminal_dock_pct),
         },
         ConfigEntry::Field {
             key: "empty_project_separator_min_projects",
@@ -5284,10 +5286,14 @@ mod legacy_exit_interactive_tests {
 
     /// A config as an older dux would have written it: `[keys]` carries an
     /// ACTIVE `exit_interactive` row (dux stores resolved defaults as real
-    /// values), optionally alongside a `toggle_fullscreen` row.
+    /// values), optionally alongside a `toggle_fullscreen` row, and none of the
+    /// rows for actions that dux did not have yet.
     fn config_with_legacy_row(legacy_row: &str, toggle_row: Option<&str>) -> String {
         let mut out = String::new();
         for line in render_default_config().lines() {
+            if line.starts_with("cycle_terminal_layout = ") {
+                continue;
+            }
             if line.starts_with("toggle_fullscreen = ") {
                 match toggle_row {
                     Some(row) => {

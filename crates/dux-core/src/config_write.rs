@@ -2074,12 +2074,7 @@ fn patch_ui_layout(doc: &mut DocumentMut, config: &Config) {
     // --- [ui] ---
     patch_table_u16(doc, "ui", "left_width_pct", config.ui.left_width_pct);
     patch_table_u16(doc, "ui", "right_width_pct", config.ui.right_width_pct);
-    patch_table_u16(
-        doc,
-        "ui",
-        "terminal_pane_height_pct",
-        config.ui.terminal_pane_height_pct,
-    );
+    patch_table_u16(doc, "ui", "terminal_dock_pct", config.ui.terminal_dock_pct);
     patch_table_u16(
         doc,
         "ui",

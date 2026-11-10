@@ -13,7 +13,7 @@ use super::background_server::CompanionRouting;
 use super::text_input::TextInput;
 use super::{
     App, CenterMode, ChangedFilesAnswer, CpuWindow, DeleteReport, DrainedEventMetadata, FocusPane,
-    FullscreenOverlay, InputTarget, LaunchView, LeftItem, LeftSection, PersistFinalOutcome,
+    FullscreenOverlay, InputTarget, LaunchView, LeftItem, PersistFinalOutcome,
     PrLookupFinalOutcome, PrReferenceResolutionAnswer, PromptState, PruneViewContext,
     StartupCommandLogFocus, StartupCommandLogPrompt, TuiCheckoutInspectOutcome,
     TuiConfigReloadOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
@@ -445,19 +445,18 @@ impl App {
         if exited_terminal_ids.is_empty() {
             return;
         }
-        if let Some(active_id) = self.active_terminal_id.as_deref()
-            && exited_terminal_ids.contains(&active_id)
+        if let Some(active_id) = self.active_terminal_id.clone()
+            && exited_terminal_ids.contains(&active_id.as_str())
         {
-            self.active_terminal_id = None;
+            self.land_beside_a_closed_terminal(&active_id);
             if self.input_target == InputTarget::Terminal {
                 self.input_target = InputTarget::None;
             }
             self.fullscreen_overlay = FullscreenOverlay::None;
-            self.session_surface = SessionSurface::Agent;
             self.set_info("Terminal exited. Press the terminal key to launch a new one.");
         }
-        self.clamp_terminal_cursor();
         self.rebuild_left_items();
+        self.reconcile_center_target();
     }
 
     fn drain_worker_events(&mut self) {
@@ -1563,11 +1562,11 @@ impl App {
     }
 
     fn apply_delete_terminal_view(&mut self, view: DeleteTerminalView) {
-        if self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str()) {
-            self.active_terminal_id = None;
-        }
-        self.clamp_terminal_cursor();
+        let shown = self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str());
         self.rebuild_left_items();
+        if shown {
+            self.land_beside_a_closed_terminal(&view.terminal_id);
+        }
         if let Some(label) = view.label {
             self.set_info(dux_core::engine::closed_terminal_notice(&label));
         }
@@ -2023,10 +2022,6 @@ impl App {
                 startup_result_error: _,
             } => {
                 self.rebuild_left_items();
-                // The agent list scrolls to its cursor only while the cursor is
-                // in its section, so a create from the Terminals section would
-                // otherwise select a row that can sit below the fold.
-                self.left_section = LeftSection::Projects;
                 self.selected_left = self
                     .left_items()
                     .iter()
@@ -3560,9 +3555,8 @@ mod tests {
     }
 
     /// A fresh agent created here is the list's selection AND on screen, even when the
-    /// sidebar cursor was in the Terminals section and the agent lands at the
-    /// bottom of a list taller than the pane: the agent list scrolls only to
-    /// the selection of the section that has the cursor.
+    /// cursor was on a terminal row and the agent lands at the bottom of a list
+    /// taller than the pane: the list scrolls only to its selection.
     #[test]
     fn create_committed_ready_scrolls_the_new_agent_into_view() {
         use ratatui::Terminal;
@@ -3582,12 +3576,12 @@ mod tests {
             app.engine.sessions.push(session);
         }
         app.rebuild_left_items();
-        app.engine
+        let (terminal_id, _) = app
+            .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
-        app.selected_left = 0;
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&terminal_id);
 
         let newest = app.engine.sessions[19].clone();
         app.notes.create_agent_started_here = true;
@@ -3604,7 +3598,6 @@ mod tests {
             },
         });
 
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
             Some(newest.id.as_str())

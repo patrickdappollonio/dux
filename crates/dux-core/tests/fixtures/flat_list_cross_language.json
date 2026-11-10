@@ -1,0 +1,100 @@
+{
+  "note": "The flat list with project and standalone terminal rows among the agents. Read by `the_shared_flat_list_fixture_holds` in crates/dux-core/src/flat_list.rs, which orders `agents` and `terminals` under `mode` (an `[ui] agent_sort` value) and checks the main bucket against `main` and the inactive tail against `inactive`, by id. An agent's `name` is its title, a terminal's the name it was opened with. `hot` is an agent working or needing you, `running_terminal` whether one of the agent's own terminals is running, `busy` a running terminal, and `after` the agent a terminal sits after in manual order (null for the top). The web's flatList.test.ts reads the same file.",
+  "cases": [
+    {
+      "what": "by name, a terminal sorts by the name it was opened with among the agents",
+      "mode": "name",
+      "agents": [
+        {"id": "a-zulu", "name": "zulu", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-alpha", "name": "alpha", "status": "active", "created": "2026-07-17T11:00:00Z", "updated": "2026-07-17T11:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-mike", "name": "Mike", "created": "2026-07-17T12:00:00Z", "updated": "2026-07-17T12:00:00Z", "busy": false, "after": "a-alpha"}
+      ],
+      "main": ["a-alpha", "t-mike", "a-zulu"],
+      "inactive": []
+    },
+    {
+      "what": "by name descending, the same key reversed",
+      "mode": "name_desc",
+      "agents": [
+        {"id": "a-zulu", "name": "zulu", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-alpha", "name": "alpha", "status": "active", "created": "2026-07-17T11:00:00Z", "updated": "2026-07-17T11:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-mike", "name": "mike", "created": "2026-07-17T12:00:00Z", "updated": "2026-07-17T12:00:00Z", "busy": false, "after": null}
+      ],
+      "main": ["a-zulu", "t-mike", "a-alpha"],
+      "inactive": []
+    },
+    {
+      "what": "by activity, a running terminal is busy and floats with the hot agents, each group keeping incoming order",
+      "mode": "active",
+      "agents": [
+        {"id": "a-idle", "name": "idle", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-hot", "name": "hot", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": true, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-quiet", "name": "quiet", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": false, "after": null},
+        {"id": "t-busy", "name": "busy", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": true, "after": "a-idle"}
+      ],
+      "main": ["t-busy", "a-hot", "t-quiet", "a-idle"],
+      "inactive": []
+    },
+    {
+      "what": "by updated, a terminal sorts by its last output",
+      "mode": "updated",
+      "agents": [
+        {"id": "a-old", "name": "old", "status": "active", "created": "2026-07-17T09:00:00Z", "updated": "2026-07-17T09:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-new", "name": "new", "status": "active", "created": "2026-07-17T09:00:00Z", "updated": "2026-07-17T13:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-mid", "name": "shell", "created": "2026-07-17T08:00:00Z", "updated": "2026-07-17T11:00:00Z", "busy": false, "after": null}
+      ],
+      "main": ["a-new", "t-mid", "a-old"],
+      "inactive": []
+    },
+    {
+      "what": "by created, a terminal sorts by when it was opened",
+      "mode": "created",
+      "agents": [
+        {"id": "a-first", "name": "first", "status": "active", "created": "2026-07-17T08:00:00Z", "updated": "2026-07-17T15:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-last", "name": "last", "status": "active", "created": "2026-07-17T12:00:00Z", "updated": "2026-07-17T12:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-between", "name": "shell", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T16:00:00Z", "busy": false, "after": null}
+      ],
+      "main": ["a-last", "t-between", "a-first"],
+      "inactive": []
+    },
+    {
+      "what": "in manual order a terminal keeps its place after its agent, one naming no agent leads, and one naming an agent that is gone trails",
+      "mode": "manual",
+      "agents": [
+        {"id": "a-one", "name": "one", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-two", "name": "two", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-orphan", "name": "orphan", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": false, "after": "a-deleted"},
+        {"id": "t-after-one", "name": "after one", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": true, "after": "a-one"},
+        {"id": "t-top", "name": "top", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": false, "after": null}
+      ],
+      "main": ["t-top", "a-one", "t-after-one", "a-two", "t-orphan"],
+      "inactive": []
+    },
+    {
+      "what": "a stopped agent with a running terminal of its own stays in the main list, and terminals are never in the tail",
+      "mode": "manual",
+      "agents": [
+        {"id": "a-live", "name": "live", "status": "active", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false},
+        {"id": "a-stopped-with-shell", "name": "stopped", "status": "detached", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": true},
+        {"id": "a-exited", "name": "exited", "status": "exited", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "hot": false, "running_terminal": false}
+      ],
+      "terminals": [
+        {"id": "t-after-exited", "name": "shell", "created": "2026-07-17T10:00:00Z", "updated": "2026-07-17T10:00:00Z", "busy": false, "after": "a-exited"}
+      ],
+      "main": ["a-live", "a-stopped-with-shell", "t-after-exited"],
+      "inactive": ["a-exited"]
+    }
+  ]
+}

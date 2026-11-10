@@ -2912,9 +2912,7 @@ mod tests {
     }
 
     /// A companion terminal's card says "terminal" where an agent's says
-    /// "agent", the same word swap the web makes. Drawn through the terminal's
-    /// own surface, which is an overlay: the windowed center pane is always the
-    /// agent's.
+    /// "agent", the same word swap the web makes.
     #[test]
     fn a_free_companion_terminals_card_names_a_terminal() {
         let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
@@ -2924,7 +2922,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("session-1-slot".to_string()),
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: crate::pty::PtyClient::spawn(
@@ -2938,6 +2936,7 @@ mod tests {
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -3023,6 +3022,7 @@ mod tests {
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         let browser = seat.owners.next_conn_id();
@@ -3481,6 +3481,7 @@ mod tests {
                 client: spawn_sleeper(),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
     }

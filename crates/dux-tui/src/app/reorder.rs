@@ -1,11 +1,14 @@
-//! Manual reordering of the sidebar's agents and terminals, driven by the
-//! `move-agent-*` / `move-terminal-*` palette commands (the TUI's equivalent of
+//! Manual reordering of the agents list's rows, agents and project and
+//! standalone terminals together, driven by the `move-agent-*` /
+//! `move-terminal-*` palette commands and the mouse drag (the TUI's equivalent of
 //! the web's drag-to-reorder). The pure `move_in_order` helper does the list
-//! math; the `impl App` handlers apply it to the live agent/terminal order,
-//! switch the sort to manual, persist, and keep the selection on the moved item.
+//! math; the `impl App` handlers apply it to the live order, switch the sort to
+//! manual, persist the agents' order, place each terminal after its agent, and
+//! keep the selection on the moved row.
 
-use super::{AgentSortMode, App, LeftItem};
+use super::{AgentSortMode, App, LeftRow};
 use dux_core::engine::Command;
+use dux_core::flat_list::FlatRow;
 
 /// Direction for a manual reorder move in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,49 +95,78 @@ fn already_at_edge_message(kind: &str, dir: MoveDir) -> String {
 }
 
 impl App {
-    /// Move the selected agent within the global agent order and switch the sort
-    /// to manual (like the web's drag-to-reorder), keeping the selection on the
-    /// moved agent. The move is made in the order the user is looking at, the
-    /// same baseline a drag uses, so under a computed sort the agent steps past
-    /// the row it is drawn next to. Guards like the rest of the palette: no
-    /// selected agent posts a status and does nothing; a single agent or an
-    /// already-at-the-edge move says so and leaves the sort mode untouched.
+    /// Move the selected agent within the list and switch the sort to manual
+    /// (like the web's drag-to-reorder), keeping the selection on the moved
+    /// agent. The move is made in the order the user is looking at, the same
+    /// baseline a drag uses, so under a computed sort the agent steps past the
+    /// row it is drawn next to. Guards like the rest of the palette: no selected
+    /// agent posts a status and does nothing; an already-at-the-edge move says
+    /// so and leaves the sort mode untouched.
     pub(crate) fn move_selected_agent(&mut self, dir: MoveDir) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select an agent to move.");
             return;
         };
-        let order = self.agent_drag_baseline();
+        self.move_list_row(&LeftRow::Agent(session_id), dir, "agent");
+    }
+
+    /// Move the selected project or standalone terminal within the list, as
+    /// [`Self::move_selected_agent`] moves an agent. Only a terminal row of the
+    /// list moves: an agent's own terminals are ordered in its dock.
+    pub(crate) fn move_selected_terminal(&mut self, dir: MoveDir) {
+        let Some(terminal_id) = self.selected_terminal_row() else {
+            self.set_error(
+                "Select a project or standalone terminal in the agents list to move it. An \
+                 agent's own terminals are moved along its terminal dock with move-tab-left and \
+                 move-tab-right.",
+            );
+            return;
+        };
+        self.move_list_row(&LeftRow::Terminal(terminal_id), dir, "terminal");
+    }
+
+    fn move_list_row(&mut self, row: &LeftRow, dir: MoveDir, kind: &str) {
+        let order = self.list_drag_baseline();
         if order.len() < 2 {
-            self.set_info("Only one agent; nothing to reorder.");
+            self.set_info("Only one row in the list; nothing to reorder.");
             return;
         }
-        let Some(idx) = order.iter().position(|id| *id == session_id) else {
+        let Some(idx) = order.iter().position(|candidate| candidate == row) else {
             return;
         };
         let new_order = move_in_order(&order, idx, dir);
         if new_order == order {
-            self.set_info(already_at_edge_message("agent", dir));
+            self.set_info(already_at_edge_message(kind, dir));
             return;
         }
-        self.apply_agent_order(&order, new_order, &session_id);
+        self.apply_list_order(&order, &new_order, row);
     }
 
-    /// The complete agent id order a drop is computed against: the whole roster
-    /// in the order the user is actually looking at.
+    /// The complete row order a move or a drop is computed against: every agent
+    /// and every project and standalone terminal, in the order the user is
+    /// actually looking at.
     ///
     /// The cross-language twin of the web's `displayedSessionOrder`, and it must
-    /// stay that way: the persisted order is shared, so a drop made on either
-    /// surface has to mean the same thing. Every session is included, never just
-    /// the rows a live query leaves on screen, because the stored order is
+    /// stay that way: the persisted agent order is shared, so a drop made on
+    /// either surface has to mean the same thing. Every row is included, never
+    /// just the rows a live query leaves on screen, because the stored order is
     /// total. Under a computed sort the baseline is the displayed order: the
     /// main list as that comparator arranges it, then the quiet tail. Under
     /// `Manual` the stored order is taken verbatim, quiet agents left
     /// interleaved where it has them.
-    pub(crate) fn agent_drag_baseline(&self) -> Vec<String> {
+    pub(crate) fn list_drag_baseline(&self) -> Vec<LeftRow> {
         let mode = AgentSortMode::from_config_str(&self.engine.config.ui.agent_sort);
+        let terminal_ids = self.list_terminal_ids();
+        let terminals = self.list_terminal_facts(&terminal_ids);
+        let row = |flat: FlatRow| match flat {
+            FlatRow::Agent(i) => LeftRow::Agent(self.engine.sessions[i].id.clone()),
+            FlatRow::Terminal(i) => LeftRow::Terminal(terminal_ids[i].clone()),
+        };
         if mode == AgentSortMode::Manual {
-            return self.engine.sessions.iter().map(|s| s.id.clone()).collect();
+            return dux_core::flat_list::manual_rows(&self.engine.sessions, &terminals)
+                .into_iter()
+                .map(row)
+                .collect();
         }
         // The same "working or waiting on you" mask the sidebar builds its rows
         // with, so the baseline and the screen agree about the active float.
@@ -147,158 +179,119 @@ impl App {
                     || self.engine.session_needs_attention(&s.id)
             })
             .collect();
-        let order = dux_core::flat_list::order_sessions(
+        let has_terminal: Vec<bool> = self
+            .engine
+            .sessions
+            .iter()
+            .map(|s| self.session_terminal_count(&s.id) > 0)
+            .collect();
+        let order = dux_core::flat_list::order_rows(
             &self.engine.sessions,
+            &terminals,
             mode.to_flat_sort_mode(),
-            &|i| hot[i],
+            &dux_core::flat_list::AgentRowFacts {
+                is_hot: &|i| hot[i],
+                is_visible: &|_| true,
+                has_running_terminal: &|i| has_terminal[i],
+            },
             &|_| true,
         );
         order
-            .active
+            .main
             .into_iter()
-            .chain(order.inactive)
-            .filter_map(|i| self.engine.sessions.get(i).map(|s| s.id.clone()))
+            .map(row)
+            .chain(
+                order
+                    .inactive
+                    .into_iter()
+                    .map(|i| LeftRow::Agent(self.engine.sessions[i].id.clone())),
+            )
             .collect()
     }
 
-    /// Apply a new GLOBAL agent order: flip the sort to manual, persist the
-    /// order, rebuild the sidebar, and leave the selection on `follow` (the id of
-    /// the agent that moved).
+    /// Apply a new list order: flip the sort to manual, persist the agents'
+    /// order, place each terminal after the agent it now follows, rebuild the
+    /// list, and leave the selection on `follow` (the row that moved).
     ///
-    /// `baseline` is the order the caller computed `new_order` from, and an order
-    /// that comes back equal to it is a no-op: nothing is persisted and the sort
-    /// mode is left alone, so an already-at-the-edge move or a drop back where it
-    /// started does not silently take the list off its computed sort. It is a
-    /// parameter rather than the current `engine.sessions` order because a drop's
-    /// baseline is what the screen shows, which under a computed sort is not the
-    /// Vec order (the web's `handleDragEnd` compares against the same baseline).
+    /// `baseline` is the order the caller computed `new_order` from, and an
+    /// order that comes back equal to it is a no-op: nothing is persisted and
+    /// the sort mode is left alone, so a drop back where it started does not
+    /// silently take the list off its computed sort.
     ///
-    /// Every caller that reorders agents goes through here, so the manual flip,
-    /// the persisted write and the status the user reads cannot drift apart.
-    pub(crate) fn apply_agent_order(
+    /// Every caller that reorders the list goes through here, so the manual
+    /// flip, the persisted write and the status the user reads cannot drift
+    /// apart.
+    pub(crate) fn apply_list_order(
         &mut self,
-        baseline: &[String],
-        new_order: Vec<String>,
-        follow: &str,
+        baseline: &[LeftRow],
+        new_order: &[LeftRow],
+        follow: &LeftRow,
     ) {
         if new_order == baseline {
             return;
         }
         // Switch to manual so the display honors the new order.
         self.engine.set_agent_sort("manual");
-        match self.engine.apply(Command::ReorderAgents {
-            session_ids: new_order,
-        }) {
-            Ok(reaction) => self.apply_reaction(reaction),
-            Err(err) => {
-                self.set_error(format!("Could not reorder agents: {err}"));
-                return;
+        let agents = |order: &[LeftRow]| -> Vec<String> {
+            order
+                .iter()
+                .filter_map(|row| match row {
+                    LeftRow::Agent(id) => Some(id.clone()),
+                    LeftRow::Terminal(_) | LeftRow::InactiveToggle => None,
+                })
+                .collect()
+        };
+        let agent_order = agents(new_order);
+        let stored: Vec<String> = self.engine.sessions.iter().map(|s| s.id.clone()).collect();
+        if agent_order != stored {
+            match self.engine.apply(Command::ReorderAgents {
+                session_ids: agent_order,
+            }) {
+                Ok(reaction) => self.apply_reaction(reaction),
+                Err(err) => {
+                    self.set_error(format!("Could not reorder the list: {err}"));
+                    return;
+                }
             }
+        }
+        // Each terminal now follows the agent above it, or leads the list.
+        let mut after: Option<String> = None;
+        let mut terminal_order: Vec<String> = Vec::new();
+        for row in new_order {
+            match row {
+                LeftRow::Agent(id) => after = Some(id.clone()),
+                LeftRow::Terminal(id) => {
+                    self.engine.place_terminal_in_list(id, after.clone());
+                    terminal_order.push(id.clone());
+                }
+                LeftRow::InactiveToggle => {}
+            }
+        }
+        // The terminals' own order: the list's in the new order, then every
+        // agent's dock in its own order, untouched.
+        let mut docked: Vec<(&String, u64)> = self
+            .engine
+            .companion_terminals
+            .iter()
+            .filter(|(id, _)| !terminal_order.contains(id))
+            .map(|(id, terminal)| (id, terminal.sort_order))
+            .collect();
+        docked.sort_by_key(|(_, order)| *order);
+        let docked: Vec<String> = docked.into_iter().map(|(id, _)| id.clone()).collect();
+        terminal_order.extend(docked);
+        if let Err(err) = self.engine.apply(Command::ReorderTerminals {
+            terminal_ids: terminal_order,
+        }) {
+            self.set_error(format!("Could not reorder the list: {err}"));
+            return;
         }
         self.rebuild_left_items();
-        // The selection follows the moved agent to its new row.
-        let target = self
-            .left_items()
-            .iter()
-            .enumerate()
-            .find_map(|(pos, item)| match item {
-                LeftItem::Session(i)
-                    if self.engine.sessions.get(*i).map(|s| s.id.as_str()) == Some(follow) =>
-                {
-                    Some(pos)
-                }
-                _ => None,
-            });
-        if let Some(pos) = target {
+        // The selection follows the moved row to its new place.
+        if let Some(pos) = self.left_rows.iter().position(|row| row == follow) {
             self.selected_left = pos;
+            self.reconcile_center_target();
         }
-        self.set_info("Reordered agents. Sorting is now manual.");
-    }
-
-    /// Move the selected terminal within the terminal order and switch the sort
-    /// to manual, keeping the selection on the moved terminal. Runtime-only
-    /// (terminal order resets on restart). A single terminal or an
-    /// already-at-the-edge move is a no-op that leaves the sort mode untouched.
-    pub(crate) fn move_selected_terminal(&mut self, dir: MoveDir) {
-        // The selection indexes the VISIBLE list, so the terminal to move comes
-        // from there; the move itself happens in the FULL order, which is the
-        // thing being persisted. Same shape as `move_selected_agent`, which
-        // resolves the agent from the filtered sidebar and then moves it within
-        // the whole agent baseline: a reorder must never rewrite the order as if the
-        // rows a live query is hiding did not exist.
-        let Some(terminal_id) = self
-            .terminal_items()
-            .get(self.selected_terminal_index)
-            .map(|(id, _)| (*id).clone())
-        else {
-            self.set_error("Select a terminal to move.");
-            return;
-        };
-        let order: Vec<String> = self
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        if order.len() < 2 {
-            self.set_info("Only one terminal; nothing to reorder.");
-            return;
-        }
-        let Some(idx) = order.iter().position(|id| *id == terminal_id) else {
-            return;
-        };
-        let new_order = move_in_order(&order, idx, dir);
-        if new_order == order {
-            self.set_info(already_at_edge_message("terminal", dir));
-            return;
-        }
-        self.apply_terminal_order(&order, new_order, &terminal_id);
-    }
-
-    /// The COMPLETE terminal id order a drop is computed against: every
-    /// terminal, whatever its owner, in the order the section shows them. The
-    /// twin of the web's `displayedTerminalOrder`, and total for the same
-    /// reason the agent baseline is: the rows a live query hides still hold
-    /// their places in the order that gets persisted.
-    pub(crate) fn terminal_drag_baseline(&self) -> Vec<String> {
-        self.sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect()
-    }
-
-    /// Apply a new terminal order: flip the sort to manual, stamp the order,
-    /// and leave the selection on `follow` (the terminal that moved). The
-    /// terminal twin of [`Self::apply_agent_order`], including the baseline
-    /// no-op guard, and runtime-only: terminals have no stored row, so this
-    /// order resets to creation order on restart.
-    pub(crate) fn apply_terminal_order(
-        &mut self,
-        baseline: &[String],
-        new_order: Vec<String>,
-        follow: &str,
-    ) {
-        if new_order == baseline {
-            return;
-        }
-        self.engine.set_agent_sort("manual");
-        match self.engine.apply(Command::ReorderTerminals {
-            terminal_ids: new_order,
-        }) {
-            Ok(reaction) => self.apply_reaction(reaction),
-            Err(err) => {
-                self.set_error(format!("Could not reorder terminals: {err}"));
-                return;
-            }
-        }
-        // The selection follows the moved terminal to its new row.
-        if let Some(pos) = self
-            .terminal_items()
-            .iter()
-            .position(|(id, _)| id.as_str() == follow)
-        {
-            self.select_terminal_row(pos);
-        }
-        self.set_info("Reordered terminals. Sorting is now manual.");
+        self.set_info("Reordered the agents list. Sorting is now manual.");
     }
 }
 

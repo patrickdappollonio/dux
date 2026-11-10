@@ -307,7 +307,7 @@ impl PromptState {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
-    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem, LeftSection};
+    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem};
     use crate::model::AgentSession;
     use crate::pty::PtyClient;
     use dux_core::attachments::Policy;
@@ -699,9 +699,9 @@ mod tests {
             .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
-        app.open_terminal_from_terminal_list();
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&terminal);
+        app.open_selected_terminal_row();
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         render(&mut app);
         assert_eq!(attached_here(&app), vec![terminal.clone()]);

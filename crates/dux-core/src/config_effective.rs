@@ -184,7 +184,7 @@ pub(crate) const MIN_PANE_HEIGHT_PCT: u16 = 10;
 /// The most share of the terminal UI's height a resizable pane takes.
 pub(crate) const MAX_PANE_HEIGHT_PCT: u16 = 80;
 
-/// `[ui] terminal_pane_height_pct`, `staged_pane_height_pct` and
+/// `[ui] terminal_dock_pct`, `staged_pane_height_pct` and
 /// `commit_pane_height_pct`: held in [`MIN_PANE_HEIGHT_PCT`]..=
 /// [`MAX_PANE_HEIGHT_PCT`], the same bounds a resize with the keyboard or
 /// the mouse stops at.
@@ -833,7 +833,7 @@ fn ui_corrections(found: &mut Corrections, config: &Config) {
     );
     pr_poll_corrections(found, config);
     for (key, pct) in [
-        ("terminal_pane_height_pct", ui.terminal_pane_height_pct),
+        ("terminal_dock_pct", ui.terminal_dock_pct),
         ("staged_pane_height_pct", ui.staged_pane_height_pct),
         ("commit_pane_height_pct", ui.commit_pane_height_pct),
     ] {

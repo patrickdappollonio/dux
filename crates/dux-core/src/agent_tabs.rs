@@ -74,6 +74,35 @@ pub fn tab_after_close<'a>(strip: &'a [String], closed: &str) -> Option<&'a str>
         .map(String::as_str)
 }
 
+/// Whether an agent's two strips show: its provider tabs' and its terminal
+/// dock's, which always show and hide together. Both show while the agent has
+/// two or more tabs, or two or more terminals, or the user asked to always see
+/// them; otherwise neither does, and a lone tab and a lone terminal stand
+/// without one. Mirrors the web's `shouldShowTabStrip`.
+pub fn strips_shown(tab_count: usize, terminal_count: usize, setting: StripSetting) -> bool {
+    setting == StripSetting::Always || tab_count >= 2 || terminal_count >= 2
+}
+
+/// `[ui] always_show_tab_strip`, as [`strips_shown`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StripSetting {
+    /// The strips show whatever the agent has.
+    Always,
+    /// The strips show once there is a second tab or a second terminal.
+    WhenNeeded,
+}
+
+impl From<bool> for StripSetting {
+    /// The setting `always_show_tab_strip`'s value stands for.
+    fn from(always_show: bool) -> Self {
+        if always_show {
+            Self::Always
+        } else {
+            Self::WhenNeeded
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +196,15 @@ mod tests {
         // current != "". This is the phantom "(orig: )" guard.
         assert!(!branch_drifted("main", ""));
         assert!(!branch_drifted("", ""));
+    }
+
+    #[test]
+    fn the_strips_show_together_for_a_second_tab_a_second_terminal_or_the_setting() {
+        let auto = StripSetting::WhenNeeded;
+        assert!(!strips_shown(1, 0, auto));
+        assert!(!strips_shown(1, 1, auto));
+        assert!(strips_shown(2, 0, auto));
+        assert!(strips_shown(1, 2, auto));
+        assert!(strips_shown(1, 1, StripSetting::Always));
     }
 }
