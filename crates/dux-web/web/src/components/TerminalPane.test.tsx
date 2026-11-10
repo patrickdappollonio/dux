@@ -623,9 +623,9 @@ function installStubs() {
   )
 }
 
-// An agent tab's failed socket holds its picture for `HANDOFF_GRACE_MS` in case
-// a promotion is about to take the pane away, so a test about the box waits that
-// window out. A terminal has no such hold and never needs this.
+// A failed socket holds its picture for `HANDOFF_GRACE_MS` in case the pane is
+// about to go (a promotion, a closed terminal, a shell that exited), so a test
+// about the box waits that window out.
 async function passHandoffGrace(): Promise<void> {
   const past = HANDOFF_GRACE_MS + 50
   if (vi.isFakeTimers()) {
@@ -842,6 +842,45 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
       // if anybody else holds the pty by then.
       expect(pty.sendResize).toHaveBeenCalledWith(24, 80, true, "conn-a")
     } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe("TerminalPane self-succession from a page hidden since it armed", () => {
+  // The handshake arms the succession while the page is in front; the page is
+  // hidden before the first resize goes out. A hidden page claims nothing, so
+  // the flagged frame never leaves and the pane stays a watcher.
+  it("drops the succession and sends no flagged frame", () => {
+    vi.useFakeTimers()
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      act(() => pty.onOpen())
+      act(() => pty.onConnected("conn-a", null))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      act(() => pty.onReconnecting())
+      pty.sendResize.mockClear()
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("conn-b", "conn-a")
+      })
+      Object.defineProperty(document, "visibilityState", {
+        value: "hidden",
+        configurable: true,
+      })
+      act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(pty.sendResize.mock.calls.filter((call) => call[2] === true)).toEqual([])
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      })
       vi.useRealTimers()
     }
   })
@@ -5417,6 +5456,45 @@ describe("a promoted-away slot tab hands its pane over", () => {
     expect(first.dispose).toHaveBeenCalled()
     expect(TermStub.instances.length).toBe(terminals + 1)
     expect(second.connect).toHaveBeenCalled()
+  })
+})
+
+// A terminal's socket also fails when the terminal is closed or its shell
+// exits, and the spine's update that removes the pane follows by a moment.
+describe("TerminalPane terminal socket handover", () => {
+  const owner = { kind: "session", sessionId: "s1" } as const
+
+  it("holds the Reconnect box through the grace, then paints it", async () => {
+    render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    last().emit("failed")
+    expect(screen.queryByText("Connection lost.")).toBeNull()
+    await passHandoffGrace()
+    expect(screen.getByText("Connection lost.")).toBeTruthy()
+  })
+
+  it("stops retrying once the spine no longer lists the terminal", () => {
+    const view = render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    const pty = last()
+    expect(pty.shouldRetry()).toBe(true)
+
+    mockState = {
+      ...mockState,
+      spine: { ...mockState.spine!, terminals: [] },
+    } as DuxState
+    view.rerender(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+
+    expect(pty.shouldRetry()).toBe(false)
+  })
+
+  // A new terminal is opened on screen before the spine that names it
+  // arrives; a socket dropped in that window keeps retrying.
+  it("keeps retrying for a terminal the spine has not listed yet", () => {
+    mockState = {
+      ...mockState,
+      spine: { ...mockState.spine!, terminals: [] },
+    } as DuxState
+    render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    expect(last().shouldRetry()).toBe(true)
   })
 })
 

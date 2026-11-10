@@ -1,4 +1,5 @@
 import { agentTabSocketGone } from "@/lib/agentTabs"
+import { terminalSocketGone } from "@/lib/terminals"
 import type { Heartbeat } from "@/lib/heartbeat"
 import type { HandshakeOwner } from "@/lib/ptyOwnership"
 import type { PtySocket } from "@/lib/ptySocket"
@@ -116,6 +117,17 @@ export function registerTerminalSocketCallbacks(
     pty.shouldRetry = () =>
       !agentTabSocketGone(live.current.sessionTabs, sessionId, id)
     pty.onGone = () => handleTabGone(id)
+  }
+
+  // A terminal is runtime-only, so one that is not on the spine is gone for good
+  // and its route keeps 404ing. `onGone` is left at its quiet default: the spine
+  // update that removed the terminal also prunes its selection and unmounts the
+  // pane, so there is nothing for the socket to announce.
+  if (kind === "terminal") {
+    pty.shouldRetry = () => {
+      const listed = live.current.terminalListed
+      return !terminalSocketGone(listed.now, listed.ever)
+    }
   }
 
   pty.onBeat = (sequence) => beat.noteAnswer(sequence)

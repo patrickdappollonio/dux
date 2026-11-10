@@ -155,6 +155,15 @@ impl App {
             .and_then(|companion| companion.ownership())
     }
 
+    /// This surface's seat, with `pty_id` placed in its row first, so every
+    /// answer about it is its row's: a device drives an agent's tabs and its
+    /// terminals together.
+    fn pty_ownership_for(&self, pty_id: &str) -> Option<TuiOwnership> {
+        let seat = self.pty_ownership()?;
+        seat.owners.join_row(pty_id, self.engine.pty_row(pty_id));
+        Some(seat)
+    }
+
     /// This surface's id in the ownership record, or `None` when nothing is
     /// serving.
     pub(super) fn pty_ownership_conn_id(&self) -> Option<u64> {
@@ -166,7 +175,7 @@ impl App {
     /// this surface happens, and a cached verdict is how a screen ends up telling
     /// the user about a browser tab that closed.
     pub(crate) fn pty_driver(&self, pty_id: &str) -> PtyDriver {
-        let Some(seat) = self.pty_ownership() else {
+        let Some(seat) = self.pty_ownership_for(pty_id) else {
             return PtyDriver::Free;
         };
         let (owner, _, device) = seat.owners.current_owner(pty_id);
@@ -232,7 +241,7 @@ impl App {
     /// The same gate for a pty named explicitly, rather than for whichever pane
     /// currently has focus.
     pub(crate) fn may_type_into_pty(&mut self, pty_id: &str) -> bool {
-        let Some(seat) = self.pty_ownership() else {
+        let Some(seat) = self.pty_ownership_for(pty_id) else {
             return true;
         };
         let allowed = seat.owners.is_owner(pty_id, seat.conn_id);
@@ -262,7 +271,7 @@ impl App {
         let Some(pty_id) = self.selected_terminal_surface_id() else {
             return false;
         };
-        let seat = self.pty_ownership();
+        let seat = self.pty_ownership_for(&pty_id);
         let Some(provider) = self.selected_terminal_surface_client() else {
             return false;
         };
@@ -302,19 +311,21 @@ impl App {
         dux_core::logger::debug(&format!("keystroke for pty {pty_id} dropped: {reason}"));
     }
 
-    /// Claim `pty_id` because this surface just started the child behind it.
+    /// Claim `pty_id`'s row because this surface just started the child behind
+    /// it.
     ///
     /// A launch is a deliberate act by the person at this keyboard, so it claims
-    /// the pty and spares them a card over a terminal they just started here.
+    /// the row and spares them a card over a terminal they just started here.
     ///
-    /// It never steals: a pty another device already drives is left alone, so a
+    /// It never steals: a row another device already drives is left alone, so a
     /// relaunch of a terminal a browser is driving does not quietly move the
-    /// driver's seat to this window.
+    /// driver's seat to this window, and a terminal opened here in an agent a
+    /// browser drives joins that browser's row and is watched from here.
     pub(crate) fn claim_launched_pty(&mut self, pty_id: &str) {
-        let Some(seat) = self.pty_ownership() else {
+        let Some(seat) = self.pty_ownership_for(pty_id) else {
             return;
         };
-        let claimed: Vec<PtyOwnershipEvent> = seat.claim_if_free(pty_id).into_iter().collect();
+        let claimed = seat.claim_if_free(pty_id);
         self.announce_claims(&claimed);
     }
 
@@ -354,7 +365,7 @@ impl App {
     pub(crate) fn resize_pty_if_permitted(&mut self, pty_id: &str, rows: u16, cols: u16) -> bool {
         // The grid the child will really get, which is the one to announce.
         let (rows, cols) = dux_core::pty::bounded_grid(rows, cols);
-        let Some(seat) = self.pty_ownership() else {
+        let Some(seat) = self.pty_ownership_for(pty_id) else {
             // Nothing serving means no registry, no gate and no apply order to
             // take part in: resize the child directly, exactly as this surface
             // did before any of this existed.
@@ -409,15 +420,21 @@ impl App {
             Some(TUI_DEVICE_LABEL),
             |_| {},
         );
-        let mut events = Vec::new();
-        if let Some(epoch) = outcome.epoch {
-            events.push(PtyOwnershipEvent::Claimed {
-                pty_id: pty_id.to_string(),
-                conn_id: seat.conn_id,
-                epoch,
-                device: TUI_DEVICE_LABEL.to_string(),
-            });
-        }
+        // A take-over moves the whole row, so every pty of it is announced.
+        let mut events: Vec<PtyOwnershipEvent> = match outcome.epoch {
+            Some(epoch) => seat
+                .owners
+                .row_members(pty_id)
+                .into_iter()
+                .map(|member| PtyOwnershipEvent::Claimed {
+                    pty_id: member,
+                    conn_id: seat.conn_id,
+                    epoch,
+                    device: TUI_DEVICE_LABEL.to_string(),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         if !outcome.apply {
             // Reachable only as a race: the ownership check above passed and
             // another device took the pty between it and this claim.
@@ -2920,6 +2937,78 @@ mod tests {
             !flat.contains("Running in the background"),
             "the card is gone once the pane is this surface's: {flat}"
         );
+    }
+
+    /// The card's press takes the whole ROW from the browser driving it: once
+    /// the agent's tab is this surface's, the agent's terminal resizes as
+    /// this surface's too, with no card and no press of its own.
+    #[test]
+    fn the_cards_press_claims_the_row_and_the_agents_terminal_resizes_as_owner() {
+        let (mut app, recorded, seat) = app_with_a_live_pty_running("sleep 5");
+        let session_id = app
+            .engine
+            .owning_session_for_tab("session-1-slot")
+            .expect("the slot tab has a session");
+        app.engine.companion_terminals.insert(
+            "term-1".to_string(),
+            dux_core::model::CompanionTerminal {
+                owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
+                label: "shell".to_string(),
+                foreground_cmd: None,
+                client: crate::pty::PtyClient::spawn(
+                    "sh",
+                    &["-c".to_string(), "sleep 5".to_string()],
+                    std::path::Path::new("."),
+                    10,
+                    10,
+                    100,
+                )
+                .expect("spawn pty"),
+                sort_order: 0,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        let browser = seat.owners.next_conn_id();
+        seat.owners.join_row(
+            "term-1",
+            dux_core::pty_owners::RowKey::Agent(session_id.clone()),
+        );
+        seat.owners
+            .claim("term-1", browser)
+            .expect("the browser drives the row");
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(
+            matches!(
+                app.pty_driver("session-1-slot"),
+                PtyDriver::Elsewhere { .. }
+            ),
+            "the browser driving the agent's terminal drives the agent's tab too"
+        );
+
+        app.take_over_focused_pty();
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
+        assert!(seat.owners.is_owner("term-1", seat.conn_id));
+        let announced: Vec<String> = recorded
+            .lock()
+            .expect("not poisoned")
+            .published
+            .iter()
+            .filter_map(|event| match event {
+                PtyOwnershipEvent::Claimed { pty_id, .. } => Some(pty_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            announced.contains(&"term-1".to_string()),
+            "the browser's terminal pane hears it lost the row: {announced:?}"
+        );
+
+        assert!(
+            app.resize_pty_if_permitted("term-1", 20, 70),
+            "the agent's terminal resizes as this surface's, no press needed"
+        );
+        assert!(!seat.owners.is_owner("term-1", browser));
     }
 
     /// Typing no longer claims. While the card is up the gate refuses the write,

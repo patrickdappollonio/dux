@@ -95,6 +95,21 @@ impl App {
         scope
     }
 
+    /// Who stopping `targets` from the running-processes list is judged
+    /// against: every row a target belongs to, because a device with any part
+    /// of a row open is attached to the whole row. Only
+    /// [`Self::kill_running_scope`] is reserved.
+    pub(super) fn kill_running_judged_scope(
+        &self,
+        targets: &[RuntimeTargetId],
+    ) -> dux_core::attachments::Scope {
+        let mut judged = dux_core::attachments::Scope::default();
+        for pty_id in self.kill_running_scope(targets).ptys {
+            judged.extend(self.engine.pty_row_scope(&pty_id));
+        }
+        judged
+    }
+
     /// Run the confirm of `asked`: as the override when its dialog already
     /// names who is attached, otherwise as a plain confirm the guard may refuse.
     pub(crate) fn guarded_by<R>(
@@ -157,19 +172,20 @@ impl App {
             | PromptState::ConfirmDetachAgent { session_id, .. } => {
                 self.engine.agent_scope(session_id)
             }
-            PromptState::ConfirmDeleteTerminal { terminal_id, .. } => {
-                dux_core::engine::Engine::pty_scope(terminal_id)
+            PromptState::ConfirmDeleteTerminal {
+                terminal_id: pty_id,
+                ..
             }
-            PromptState::ConfirmCloseTab { tab_id, .. }
-            | PromptState::ConfirmStopTab { tab_id, .. } => {
-                dux_core::engine::Engine::pty_scope(tab_id)
+            | PromptState::ConfirmCloseTab { tab_id: pty_id, .. }
+            | PromptState::ConfirmStopTab { tab_id: pty_id, .. } => {
+                self.engine.pty_row_scope(pty_id)
             }
             PromptState::ConfirmDeleteProject { project_id, .. }
             | PromptState::ConfirmRemoveProject { project_id, .. } => {
                 self.engine.project_scope(project_id)
             }
             PromptState::ConfirmKillRunning(confirm) => {
-                self.kill_running_scope(&confirm.target_ids)
+                self.kill_running_judged_scope(&confirm.target_ids)
             }
             PromptState::ConfirmRecreateWorkingCopy { session_id, .. } => {
                 self.engine.recreate_restart_scope(session_id)

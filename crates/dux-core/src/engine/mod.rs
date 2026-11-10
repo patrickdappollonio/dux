@@ -6874,6 +6874,23 @@ impl Engine {
             .map(|session| session.id.clone())
     }
 
+    /// The row of the agents list a pty belongs to, which is what a device
+    /// drives: its agent's for a tab or a terminal an agent owns, its own for
+    /// a project or standalone terminal and for an id this engine does not
+    /// know.
+    pub fn pty_row(&self, pty_id: &str) -> crate::pty_owners::RowKey {
+        let agent = self.owning_session_for_tab(pty_id).or_else(|| {
+            self.companion_terminals
+                .get(pty_id)
+                .and_then(|terminal| match &terminal.owner {
+                    crate::model::TerminalOwner::Session(session_id) => Some(session_id.clone()),
+                    crate::model::TerminalOwner::Project(_)
+                    | crate::model::TerminalOwner::Standalone => None,
+                })
+        });
+        crate::pty_owners::RowKey::of(pty_id, agent.as_deref())
+    }
+
     /// Swap which provider (CLI) an agent session uses on its NEXT launch.
     ///
     /// Does not kill or relaunch a running agent: it changes the persisted

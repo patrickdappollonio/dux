@@ -15,10 +15,13 @@ import { deviceLabel } from "@/lib/deviceLabel"
 import type { PtySocket } from "@/lib/ptySocket"
 import {
   appliedPtyOwnerEpoch,
+  forgetHeldConnIds,
   handshakeSuperseded,
+  heldConnIdStamp,
   isForeground,
   isOwnerAfterHandover,
   onPtyOwner,
+  rememberHeldConnId,
   seedDeviceFromConnected,
   seedVerdictFromConnected,
   type HandshakeOwner,
@@ -126,31 +129,33 @@ export function useTerminalOwnership(
   )
 
   const myConnIdRef = useRef<string | null>(null)
-  // Every id this pane has ever held, not merely the last: a returning owner
-  // recognises its own dead connection in the next handshake (see the
-  // self-succession rule in `seedFromConnected`), and a flapping radio can
-  // produce two handshakes where the second still names the connection from
-  // before the first. Each id is stamped with the server run it was learned
+  // Every id this page has ever held (`rememberHeldConnId`), not merely this
+  // pane's last: a returning owner recognises its own dead connection in the
+  // next handshake (see the self-succession rule in `seedFromConnected`), a
+  // flapping radio can produce two handshakes where the second still names the
+  // connection from before the first, and a device drives a whole row, so the
+  // ghost can be the connection this page held on another tab or terminal of
+  // the same agent. Each id is stamped with the server run it was learned
   // under, because a restarted server mints ids from zero again and another
   // device's fresh id can equal one of ours (see `serverRun.ts`).
-  const heldConnIdsRef = useRef<Map<string, number>>(new Map())
+  //
   // Ghosts do not survive a server restart: ids come from a process-global
   // counter that starts at zero again, so self-succession onto a re-minted id
   // would hand this pane a pty it never owned. Only a confirmed run change
   // retires them, since an events reconnect is not evidence of a restart and
   // may precede the handshake naming the ghost; an unproven answer is safe
   // because a ghost is acted on only while its stamped run is confirmed.
-  useEffect(() => onServerRunChanged(() => heldConnIdsRef.current.clear()), [])
-  // May a handshake naming `id` be treated as this pane meeting its own ghost?
+  useEffect(() => onServerRunChanged(forgetHeldConnIds), [])
+  // May a handshake naming `id` be treated as this page meeting its own ghost?
   const ownGhostOfThisRun = (id: string): boolean => {
-    const stamp = heldConnIdsRef.current.get(id)
+    const stamp = heldConnIdStamp(id)
     return stamp !== undefined && runIdentityConfirmedAs(stamp)
   }
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
-        if (next !== null) heldConnIdsRef.current.set(next, currentRunStamp())
+        if (next !== null) rememberHeldConnId(next, currentRunStamp())
         myConnIdRef.current = next
       },
     }),
@@ -170,6 +175,10 @@ export function useTerminalOwnership(
   // flash the card back over a pane the user just took. A press names no
   // expected owner and so cannot be refused, which is why blocking is safe.
   const pressedClaimRef = useRef(false)
+  // Whether the newest `pty.owner` applied for this pty said nobody drives it.
+  // A handshake superseded by that word, naming one of this page's own ghosts,
+  // is a row the page let go of between the snapshot and the event.
+  const newestEventFreedRef = useRef(false)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
@@ -253,7 +262,7 @@ export function useTerminalOwnership(
     if (!ownership.read()) return
     if (spineInputOwner === null) return
     if (spineInputOwner === myConnId) return
-    if (heldConnIdsRef.current.has(spineInputOwner)) return
+    if (heldConnIdStamp(spineInputOwner) !== undefined) return
     if (pressedClaimRef.current) return
     ownership.write(false)
     setOwnerPresent(true)
@@ -270,6 +279,16 @@ export function useTerminalOwnership(
       // spine. This event is the definitive word either way.
       pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
+      newestEventFreedRef.current = freed
+      // A self-succession still waiting to be sent outlives its ghost letting
+      // go: the row is free, and the server claims a free row for that frame
+      // as it would for a plain resize, displacing nobody. Dropping the intent
+      // here left a page that switched from an agent's tab to its terminal
+      // watching a row it had just been driving.
+      if (freed && takeoverIntent.read() && takeoverIntent.expectedOwner() !== undefined) {
+        setOwnerPresent(false)
+        return
+      }
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setOwnerPresent(!freed)
       // Through the channel, not an inline copy of its body: the verdict has
@@ -290,8 +309,9 @@ export function useTerminalOwnership(
 
   // Publish this pane's verdict into the store ledger so surfaces outside the
   // pane (the agent ⋯ menu) can disable mutating actions while another device
-  // drives the agent. Agent PTYs only: a companion terminal taken over
-  // elsewhere says nothing about the agent. The verdict is the ledger's fast
+  // drives the agent. Agent PTYs only, because the ledger is keyed by tab; a
+  // device drives a whole row, so an agent tab's verdict already speaks for
+  // the agent's terminals too. The verdict is the ledger's fast
   // path in both directions, gating the menu when a handover lands and
   // un-gating it after a take-over, while the spine's `input_owner` still names
   // the previous owner until the refetch. A pane whose socket has failed for
@@ -354,15 +374,29 @@ export function useTerminalOwnership(
     ) {
       takeoverIntent.arm(owner)
     }
-    const mine = seedVerdictFromConnected({
-      owner,
-      myConnId,
-      foreground: isForeground(),
-      takeoverArmed: takeoverIntent.read(),
-      handshakeEpoch: ownerEpoch,
-      appliedEpoch,
-      priorVerdict: ownership.read(),
-    })
+    // The same switch in the other order: the event freeing the row was applied
+    // before this handshake, which was snapshotted while this page's own ghost
+    // still held the row. The newer word is that nobody drives it, so a
+    // foregrounded page owns it as it would an unowned handshake, and its plain
+    // resize claims it. Anything newer naming an owner leaves this false.
+    const ghostLetGo =
+      superseded &&
+      newestEventFreedRef.current &&
+      typeof owner === "string" &&
+      owner !== myConnId &&
+      ownGhostOfThisRun(owner) &&
+      isForeground()
+    const mine =
+      ghostLetGo ||
+      seedVerdictFromConnected({
+        owner,
+        myConnId,
+        foreground: isForeground(),
+        takeoverArmed: takeoverIntent.read(),
+        handshakeEpoch: ownerEpoch,
+        appliedEpoch,
+        priorVerdict: ownership.read(),
+      })
     ownership.write(mine)
     // Seed the other device's name from the same frame: a watcher that merely
     // attached hears no `pty.owner` broadcast, so this is its only chance at a

@@ -173,6 +173,11 @@ pick agents without a `show` for each.
 > or terminals it has open. So it can be higher than the count on the agent's row in the
 > terminal UI, which shows only the browsers that have it open right now.
 
+`dux terminals ls` has the columns `ID`, `LABEL`, `OWNER`, `RUNNING` and `BROWSERS`.
+Its `BROWSERS` counts the same way, for the browsers that would stop closing the terminal.
+A browser with any of an agent's tabs or terminals open counts on every terminal of that
+agent, because closing one of them is refused over it exactly as stopping the agent is.
+
 ## Changes ask first, and wait until they are done
 
 A change asks before it does anything, and the question names the dux it is about to

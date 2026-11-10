@@ -139,3 +139,27 @@ export function terminalTitle(
   const n = terminalNumber(t.label)
   return n != null ? `${cmd} (#${n})` : `${cmd} (${t.label})`
 }
+
+// Whether a terminal's PTY socket must stop reconnecting: the spine listed
+// this terminal once and no longer does, so it is closed and the route will
+// keep 404ing.
+//
+// A terminal the spine has never listed is not gone: a new terminal is opened
+// on screen before the spine that names it arrives, and a socket dropped in
+// that window must keep retrying rather than stop for good. An empty list after
+// the terminal was listed is a real answer (the last terminal was closed).
+export function terminalSocketGone(
+  listedNow: boolean,
+  everListed: boolean,
+): boolean {
+  return everListed && !listedNow
+}
+
+// Whether the spine lists terminal `terminalId` right now; false while the
+// spine has not arrived.
+export function spineListsTerminal(
+  terminals: readonly TerminalView[] | undefined,
+  terminalId: string,
+): boolean {
+  return terminals?.some((t) => t.id === terminalId) ?? false
+}

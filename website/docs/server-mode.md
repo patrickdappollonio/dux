@@ -241,13 +241,15 @@ as another.
 - **Each agent's row** picks up a quiet `2 browsers` on its second line when browsers have
   that agent open in any terminal it owns: its provider tabs and its companion terminals.
   One browser with several of them open still counts once.
-- **The center pane's caption** says the same for the provider tab it is showing.
-- **`dux agents ls`** has a `BROWSERS` column.
+- **Each project or standalone terminal's row** does the same for that terminal.
+- **The center pane's caption** says the same for the provider tab or terminal it is
+  showing.
+- **`dux agents ls`** and **`dux terminals ls`** have a `BROWSERS` column.
 
 The row and the caption count only what is open right now: a browser whose connection
 dropped leaves the count at once. The `BROWSERS` column also counts a browser whose
 connection dropped, for `presence_grace_seconds`, because it still holds off stopping or
-deleting the agent for that long.
+deleting the agent, or closing the terminal, for that long.
 
 ![The terminal UI top bar carrying a serving crumb with the port, above the usual workspace with one agent working.](/screens/tui-serving-crumb.png)
 
@@ -269,6 +271,8 @@ the terminal UI and in the browser alike.
   nowhere.
 - **Taking over** also retargets the terminal's size to the device that took it, and
   everyone watching adopts that geometry.
+- **An agent's tabs and terminals go together:** taking one over, or starting an agent from
+  the terminal UI, takes all of that agent's tabs and terminals at once.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 

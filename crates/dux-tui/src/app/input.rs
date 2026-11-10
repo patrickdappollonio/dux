@@ -9414,15 +9414,18 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
+        // Judged against the whole row, reserving only the tab that ends.
+        let judged = self.engine.pty_row_scope(&tab_id);
         let scope = dux_core::engine::Engine::pty_scope(&tab_id);
-        let _reservation =
-            match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope)) {
-                Ok(reservation) => reservation,
-                Err(refused) => {
-                    self.reopen_naming_attached(asked, refused);
-                    return false;
-                }
-            };
+        let _reservation = match self.guarded_by(&asked, |app| {
+            app.engine.reserve_destruction_judging(&judged, scope)
+        }) {
+            Ok(reservation) => reservation,
+            Err(refused) => {
+                self.reopen_naming_attached(asked, refused);
+                return false;
+            }
+        };
         // Read both names off the PRE-close strip, which is the strip the
         // confirmation named its successor from: after the close the labels can
         // renumber (two tabs on one provider lose their " 2"), and the closed
@@ -9504,15 +9507,17 @@ impl App {
         // The dialog asks about ending processes, not people: the guard refuses
         // while somebody else is attached, and the dialog reopens naming them.
         let asked = PromptState::ConfirmKillRunning(confirm_prompt.clone());
+        let judged = self.kill_running_judged_scope(&confirm_prompt.target_ids);
         let scope = self.kill_running_scope(&confirm_prompt.target_ids);
-        let _reservation =
-            match self.guarded_by(&asked, |app| app.engine.reserve_destruction(scope)) {
-                Ok(reservation) => reservation,
-                Err(refused) => {
-                    self.reopen_naming_attached(asked, refused);
-                    return false;
-                }
-            };
+        let _reservation = match self.guarded_by(&asked, |app| {
+            app.engine.reserve_destruction_judging(&judged, scope)
+        }) {
+            Ok(reservation) => reservation,
+            Err(refused) => {
+                self.reopen_naming_attached(asked, refused);
+                return false;
+            }
+        };
         self.prompt = PromptState::None;
         let requested = confirm_prompt.target_ids.len();
         let (agents, terminals) = self.kill_runtime_targets(&confirm_prompt.target_ids);
@@ -38992,6 +38997,62 @@ cyan = "#00ffff"
             "the first tab confirms and names its successor, got {:?}",
             app.prompt
         );
+    }
+
+    /// A browser with only the agent's terminal open is attached to the whole
+    /// row, so closing one of the agent's tabs from here is refused naming it:
+    /// the dialog stays open on Cancel and the tab stays.
+    #[test]
+    fn closing_a_tab_is_refused_over_a_browser_with_only_the_agents_terminal_open() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        insert_extra_tab(&mut app, &session_id, "tab-1");
+        app.selected_left = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("a session row");
+        app.set_focused_tab(&session_id, "tab-1");
+        crate::app::test_support::watch_from_a_browser(&app, "term-7", &session_id);
+
+        app.close_focused_tab_prompt();
+        app.resolve_confirm_close_tab(ConfirmAnswer::Confirm);
+
+        match &app.prompt {
+            PromptState::ConfirmCloseTab {
+                attached, focus, ..
+            } => {
+                assert_eq!(attached.len(), 1, "{attached:?}");
+                assert_eq!(attached[0].address.as_deref(), Some("10.0.0.7"));
+                assert_eq!(*focus, ConfirmFocus::Cancel);
+            }
+            other => panic!("the close dialog stays open, got {other:?}"),
+        }
+        assert!(app.engine.agent_tabs.contains_key(TabIdRef::new("tab-1")));
+    }
+
+    /// Killing one of an agent's tabs from the kill list is judged against the
+    /// agent's whole row: a browser with only the agent's terminal open is in
+    /// the way and named, and nothing is killed.
+    #[test]
+    fn the_kill_list_refuses_a_tab_over_a_browser_with_only_the_agents_terminal_open() {
+        let mut app = test_app(default_bindings());
+        let session_id = app.engine.sessions[0].id.clone();
+        insert_extra_tab(&mut app, &session_id, "tab-1");
+        crate::app::test_support::watch_from_a_browser(&app, "term-7", &session_id);
+        let mut confirm = confirm_kill_running_prompt();
+        confirm.target_ids = vec![RuntimeTargetId::Tab("tab-1".to_string())];
+        app.prompt = PromptState::ConfirmKillRunning(confirm);
+
+        app.resolve_confirm_kill_running(ConfirmAnswer::Confirm);
+
+        match &app.prompt {
+            PromptState::ConfirmKillRunning(confirm) => {
+                assert_eq!(confirm.attached.len(), 1, "{:?}", confirm.attached);
+                assert_eq!(confirm.attached[0].address.as_deref(), Some("10.0.0.7"));
+            }
+            other => panic!("the kill dialog reopens naming the browser, got {other:?}"),
+        }
     }
 
     /// An agent's ONLY tab still cannot be closed: the engine refuses it, so

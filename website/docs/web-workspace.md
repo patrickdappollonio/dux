@@ -313,6 +313,13 @@ Every device pointed at the same terminal sees the same output at the same time,
 watcher unless nobody is driving.** If nobody holds the terminal, the first device to
 look at it picks it up.
 
+**A device drives an agent and its terminals together.** Whoever has the keyboard for an
+agent's tab has it for every tab and every companion terminal of that agent, and taking
+one over takes them all, so one device never drives the agent while another drives its
+dev server. A terminal you open on an agent somebody else is driving is theirs too: you
+watch it until you press **Take over**. A project or standalone terminal is driven on its
+own.
+
 ![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 
 **The terminal UI is one of those devices.** When dux is [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui), that terminal can hold a terminal or be a watcher like any browser, and the card names it as `the dux TUI`. It shows the same card, with the same words, when your browser is the one driving.
@@ -424,6 +431,12 @@ agent opens that agent's editor instead. See [The code editor](/docs/web-editor)
 > [!WARNING]
 > Killing a companion terminal **destroys** it. Agents detach when you kill them;
 > terminals do not.
+
+Closing a companion terminal is guarded the way stopping its agent is: while another
+device has any of the agent's tabs or terminals open, dux refuses and names that device,
+and you can go ahead anyway from the dialog. Closing or stopping one of the agent's tabs is
+guarded the same way. A project or standalone terminal is refused
+only over a device that has that terminal open.
 
 Nothing closes a standalone terminal for you. Removing a project closes that project's
 terminals and deleting an agent closes that agent's; neither touches a standalone one. It

@@ -2,7 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 
-import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import {
+  forgetHeldConnIds,
+  notifyPtyOwner,
+  resetPtyOwnerEpochs,
+} from "@/lib/ptyOwnership"
 import { noteServerRunProbe } from "@/lib/serverRun"
 import type { PtySocket } from "@/lib/ptySocket"
 
@@ -71,6 +75,7 @@ function setup(
 beforeEach(() => {
   ledger.length = 0
   resetPtyOwnerEpochs()
+  forgetHeldConnIds()
   setVisibility("visible")
   // The run-identity fan-out is module state shared by every test in this file,
   // and self-succession now depends on it. Start each test from the state a
@@ -459,6 +464,61 @@ describe("self-succession after a blipped socket", () => {
     // Flagged, because the server grants a flagged claim against ANY owner and
     // the owner being displaced here is our own ghost. Nothing is stolen.
     expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  // A device drives a whole row, so the connection this page held on the tab
+  // it just left is this device's ghost on the next tab of the same agent too.
+  it("claims back a row the handshake says another pane of this page owned", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  // A switch from an agent's tab to its terminal: the terminal's handshake
+  // names the tab's connection, and the tab's close frees the row before the
+  // terminal's flagged frame goes out. The succession still goes out, and the
+  // server claims the free row for it.
+  it("keeps a waiting succession when its ghost frees the row first", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 3))
+    act(() => notifyPtyOwner("p1", undefined, 4, undefined))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  // The other order of the same switch: the row is freed and that event is
+  // applied BEFORE the terminal's handshake, which was snapshotted while the
+  // tab's connection still held the row. The handshake is superseded, and the
+  // newer word is that nobody drives a row this page's own ghost let go, so
+  // the pane owns it and its plain resize claims it.
+  it("owns a row its ghost freed before the superseded handshake arrived", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", undefined, 5, undefined))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 4))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("stays a watcher of that freed row while the page is backgrounded", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", undefined, 5, undefined))
+    setVisibility("hidden")
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 4))
+    expect(view.result.current.isOwner).toBe(false)
   })
 
   it("does NOT self-succeed while the page is backgrounded", () => {

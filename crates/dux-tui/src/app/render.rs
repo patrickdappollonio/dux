@@ -3479,26 +3479,10 @@ impl App {
         let term_items: Vec<ListItem<'_>> = terminal_render_data
             .iter()
             .map(|row| {
-                // Terminal state precedence is typing, working, then idle;
-                // working includes output streaming or a foreground app.
-                let typing = self.engine.is_typing(&row.id);
-                let working = self.engine.terminal_is_working(&row.id);
                 let (line1, line2) = terminal_row_lines(
                     &self.theme,
                     self.glyphs(),
-                    TerminalRowContent {
-                        facts: dux_core::row_state::TerminalRowFacts { working, typing },
-                        spinner,
-                        display_title: row.display_title.as_deref(),
-                        owner_name: &row.owner_name,
-                        owner: if row.standalone {
-                            TerminalOwnerKind::Standalone
-                        } else {
-                            TerminalOwnerKind::Owned
-                        },
-                        elapsed_ms: self.start_time.elapsed().as_millis(),
-                        highlight: term_highlight,
-                    },
+                    self.terminal_row_content(row, spinner, term_highlight),
                     term_text_width,
                 );
                 // Same three-line row shape as the agents (see `framed_row_item`).
@@ -14029,8 +14013,56 @@ impl App {
         self.paint_modal_surface(frame, area, self.theme.app_bg);
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
-        self.render_agent_terminal(frame, area, " Terminal ", FocusState::Focused);
+        let title = self.terminal_caption();
+        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
         self.session_surface = saved;
+    }
+
+    /// What one terminal row of the sidebar shows.
+    fn terminal_row_content<'a>(
+        &self,
+        row: &'a TerminalSidebarRow,
+        spinner: char,
+        highlight: Option<(&'a str, Style)>,
+    ) -> TerminalRowContent<'a> {
+        // Terminal state precedence is typing, working, then idle;
+        // working includes output streaming or a foreground app.
+        let typing = self.engine.is_typing(&row.id);
+        let working = self.engine.terminal_is_working(&row.id);
+        // A project or standalone terminal is a row of its own and counts its
+        // own browsers; an agent's terminal is part of the agent's row, whose
+        // count is on the agent.
+        let own_row = matches!(
+            self.engine.pty_row(&row.id),
+            dux_core::pty_owners::RowKey::Terminal(_)
+        );
+        TerminalRowContent {
+            facts: dux_core::row_state::TerminalRowFacts { working, typing },
+            spinner,
+            display_title: row.display_title.as_deref(),
+            owner_name: &row.owner_name,
+            owner: if row.standalone {
+                TerminalOwnerKind::Standalone
+            } else {
+                TerminalOwnerKind::Owned
+            },
+            remote: own_row
+                .then(|| remote_viewers_segment(self.pty_browser_count(&row.id)))
+                .flatten(),
+            elapsed_ms: self.start_time.elapsed().as_millis(),
+            highlight,
+        }
+    }
+
+    /// The shown terminal's caption, with how many browsers have that terminal
+    /// open, as the agent's caption counts the tab it shows.
+    fn terminal_caption(&self) -> String {
+        let remote = self
+            .selected_terminal_surface_id()
+            .and_then(|id| remote_viewers_segment(self.pty_browser_count(&id)))
+            .map(|segment| format!(" · {segment}"))
+            .unwrap_or_default();
+        format!(" Terminal{remote} ")
     }
 
     fn render_fullscreen_startup_log(&mut self, frame: &mut Frame<'_>) {
@@ -14788,7 +14820,7 @@ enum TerminalOwnerKind {
 
 /// What a terminal's sidebar row says, apart from the theme it is painted in
 /// and the width it fits.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TerminalRowContent<'a> {
     facts: dux_core::row_state::TerminalRowFacts,
     spinner: char,
@@ -14799,6 +14831,10 @@ struct TerminalRowContent<'a> {
     /// Whether this terminal is standalone (owned by nothing at all), resolved by
     /// the caller through an exhaustive match on the owner.
     owner: TerminalOwnerKind,
+    /// "2 browsers" for a project or standalone terminal, a row of its own,
+    /// while browsers have it open; `None` otherwise, and always for an agent's
+    /// terminal, whose browsers are counted on the agent's row.
+    remote: Option<String>,
     elapsed_ms: u128,
     /// The live sidebar query and the style to emphasize its hit with, or `None`
     /// when nothing is being filtered. The owner element is a searched field, so
@@ -14837,6 +14873,7 @@ fn terminal_row_lines(
         display_title,
         owner_name,
         owner,
+        remote,
         elapsed_ms,
         highlight,
     } = content;
@@ -14930,7 +14967,12 @@ fn terminal_row_lines(
         )),
         Span::styled(word_text, Style::default().fg(word_color)),
         None,
-        MetaCounts::default(),
+        MetaCounts {
+            tabs: None,
+            // Muted for the agent row's reason: identity tones mean something
+            // else, and a count reads quieter than the state word beside it.
+            remote: remote.map(|label| Span::styled(label, Style::default().fg(muted))),
+        },
         &MetaLineStyle {
             sep: Style::default().fg(muted),
             highlight,
@@ -17392,6 +17434,7 @@ mod tests {
                         display_title: Some("cargo test"),
                         owner_name: "proj",
                         owner: TerminalOwnerKind::Owned,
+                        remote: None,
                         elapsed_ms: elapsed,
                         highlight: None,
                     },
@@ -17471,6 +17514,7 @@ mod tests {
                 display_title: None,
                 owner_name: "my-branch",
                 owner: TerminalOwnerKind::Owned,
+                remote: None,
                 elapsed_ms: 0,
                 highlight: None,
             },
@@ -17508,6 +17552,7 @@ mod tests {
                 display_title: Some("cargo test"),
                 owner_name: "proj",
                 owner: TerminalOwnerKind::Owned,
+                remote: None,
                 elapsed_ms: 0,
                 highlight: None,
             },
@@ -17534,9 +17579,19 @@ mod tests {
                 0
             ))
         );
+    }
 
-        // Typing wins over working: the typing glyph shows, but line one stays
-        // neutral; only the "Typing" word carries the session_typing color.
+    /// Typing wins over working: the typing glyph shows, but line one stays
+    /// neutral; only the "Typing" word carries the `session_typing` color.
+    #[test]
+    fn terminal_row_lines_put_typing_over_working() {
+        let theme = crate::theme::Theme::default_dark();
+        let line_text = |line: &Line<'_>| -> String {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
         let (typing0, typing1) = terminal_row_lines(
             &theme,
             &crate::theme::Glyphs::PLAIN,
@@ -17549,15 +17604,21 @@ mod tests {
                 display_title: Some("vim"),
                 owner_name: "proj",
                 owner: TerminalOwnerKind::Owned,
+                remote: None,
                 elapsed_ms: 0,
                 highlight: None,
             },
-            width,
+            40,
         );
         assert!(line_text(&typing0).contains(crate::theme::TYPING_GLYPH));
         assert!(line_text(&typing0).contains("vim"));
         assert_eq!(typing0.spans[0].style.fg, Some(theme.session_active));
-        assert_eq!(word_span(&typing1, "Typing"), Some(theme.session_typing));
+        let typing_word = typing1
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "Typing")
+            .expect("a Typing span");
+        assert_eq!(typing_word.style.fg, Some(theme.session_typing));
     }
 
     /// A STANDALONE terminal's second line wears the same standalone star and
@@ -17579,6 +17640,7 @@ mod tests {
                 display_title: None,
                 owner_name: "~/notes",
                 owner: TerminalOwnerKind::Standalone,
+                remote: None,
                 elapsed_ms: 0,
                 highlight: None,
             },
@@ -17784,6 +17846,112 @@ mod tests {
             !row_line(&mut app).contains("browser"),
             "the segment goes away with the last browser"
         );
+    }
+
+    /// A standalone terminal is a row of its own, so its line two counts the
+    /// browsers that have it open, and the caption over it counts the terminal
+    /// it shows.
+    #[test]
+    fn a_standalone_terminal_row_and_its_caption_name_its_browsers() {
+        use dux_core::attachments::TargetKind;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        let (terminal_id, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone terminal");
+        app.rebuild_left_items();
+        let star = crate::theme::Glyphs::PLAIN.standalone;
+        let terminal_row_line = |app: &mut App| -> String {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("terminal");
+            terminal
+                .draw(|frame| app.render(frame))
+                .expect("render frame");
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .find(|line| line.contains(star) && line.contains("Idle"))
+                .expect("the terminal row's line two is on screen")
+        };
+        assert!(!terminal_row_line(&mut app).contains("browser"));
+
+        attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Terminal,
+            &terminal_id,
+            None,
+        );
+        let rendered = terminal_row_line(&mut app);
+        assert!(rendered.contains("· 1 browser"), "{rendered}");
+
+        app.session_surface = SessionSurface::Terminal;
+        app.active_terminal_id = Some(terminal_id);
+        assert_eq!(app.terminal_caption(), " Terminal · 1 browser ");
+    }
+
+    /// An agent's terminal is part of the agent's row: its browsers are counted
+    /// on the agent, never on a row of the terminal's own.
+    #[test]
+    fn an_agents_terminal_row_carries_no_count_of_its_own() {
+        use dux_core::attachments::TargetKind;
+
+        let mut app = test_app(default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = vec![];
+        let session_id = app.engine.sessions[0].id.clone();
+        let worktree = tempfile::tempdir().expect("worktree");
+        app.engine.sessions[0]
+            .workspace
+            .as_managed_mut()
+            .expect("a managed agent")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        let (terminal_id, _) = app
+            .engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("the agent's terminal");
+        app.rebuild_left_items();
+        attach_browser_tab(
+            &app,
+            "e1",
+            Some(LAPTOP),
+            TargetKind::Terminal,
+            &terminal_id,
+            Some(&session_id),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let arrow = crate::theme::Glyphs::PLAIN.owned_by;
+        let terminal_line = rows
+            .iter()
+            .find(|line| line.contains(arrow) && line.contains("Idle"))
+            .expect("the agent's terminal row is on screen");
+        assert!(!terminal_line.contains("browser"), "{terminal_line}");
+        let agent_line = rows
+            .iter()
+            .find(|line| line.contains(crate::theme::Glyphs::PLAIN.project))
+            .expect("the agent's row is on screen");
+        assert!(agent_line.contains("· 1 browser"), "{agent_line}");
     }
 
     /// The center pane's caption names the browsers on the terminal it is
@@ -23617,6 +23785,7 @@ mod tests {
                     } else {
                         TerminalOwnerKind::Owned
                     },
+                    remote: None,
                     elapsed_ms: 0,
                     highlight: None,
                 },

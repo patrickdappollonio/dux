@@ -41,7 +41,7 @@ import type {
   OwnershipVerdict,
   TakeoverIntent,
 } from "./channels"
-import type { HandshakeOwner } from "@/lib/ptyOwnership"
+import { isForeground, type HandshakeOwner } from "@/lib/ptyOwnership"
 import { createResizeCoordinator } from "./resizeCoordinator"
 import { createAttachReplay } from "./attachReplay"
 import { plainBounce } from "./plainBounce"
@@ -236,6 +236,20 @@ export function useTerminalLifecycle(
       // a CONNECTING or CLOSED socket discards the frame silently, and clearing
       // on a discarded one spends the take-over on nothing.
       sendResize: (rows, cols) => {
+        // A self-succession is a foreground act. A page hidden since it was
+        // armed (during the replay, say) drops it and stays a watcher, as its
+        // own handshake would have decided had it arrived hidden: the server
+        // would grant the frame on a free row, and a hidden page claims nothing.
+        if (
+          takeoverIntent.read() &&
+          takeoverIntent.expectedOwner() !== undefined &&
+          !isForeground()
+        ) {
+          takeoverIntent.clear()
+          ownership.write(false)
+          lastSendFlagged = false
+          return false
+        }
         const takeover = takeoverIntent.read()
         // A self-succession names the ghost it expects to displace; a pressed
         // take-over names nobody, because a press may take from anyone. The

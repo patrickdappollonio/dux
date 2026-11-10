@@ -50,7 +50,7 @@ import {
 } from "@/lib/theater"
 import type { PtySocket } from "@/lib/ptySocket"
 import { matchOwner, ownerProjectId, ownerSessionId } from "@/lib/terminalOwner"
-import { terminalsForOwner } from "@/lib/terminals"
+import { spineListsTerminal, terminalsForOwner } from "@/lib/terminals"
 import { DEFAULT_ATTENTION_GRACE_SECONDS } from "@/lib/viewedPing"
 import {
   attachCover,
@@ -363,7 +363,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     composeBarEnabled,
   })
 
-  const everReady = useEverReady(hasOutput)
+  const everReady = useLatched(hasOutput)
   // The one lifecycle owner: it creates and tears down the terminal and socket,
   // re-running only when the streamed target changes.
   useTerminalLifecycle(props, {
@@ -489,9 +489,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // There is one periodic client frame and one timer behind it (`lib/heartbeat.ts`);
   // gaining ownership retimes that timer rather than adding a second sender.
 
-  // Only an agent tab can be handed over; a terminal's socket failing is only
-  // ever a fault, so its box goes up at once.
-  const handoffGrace = useHandoffGrace(kind === "agent" && connectionLost)
+  // A failed socket may mean the pane is about to leave rather than that the
+  // connection is at fault: an agent tab's provider exiting hands its slot to a
+  // sibling, and a terminal's shell exiting or its being closed elsewhere takes
+  // the terminal and this pane with it. Either way the spine's update follows
+  // the socket's failure by a moment, so the box waits for it.
+  const handoffGrace = useHandoffGrace(connectionLost)
   const cover = attachCover({
     socket: connectionLost ? "failed" : reconnecting ? "connecting" : "open",
     replayApplied,
@@ -783,9 +786,10 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   }
 }
 
-// Whether a just-failed agent socket is still inside the window a promotion
-// would land in. Armed during render, so the box never paints for one frame on
-// its way to being held, and released by the clock or by the socket coming back.
+// Whether a just-failed socket is still inside the window in which the spine
+// removes its pane (a promotion, a closed terminal). Armed during render, so the
+// box never paints for one frame on its way to being held, and released by the
+// clock or by the socket coming back.
 function useHandoffGrace(failing: boolean): boolean {
   const [holding, setHolding] = useState(false)
   const [wasFailing, setWasFailing] = useState(failing)
@@ -801,15 +805,17 @@ function useHandoffGrace(failing: boolean): boolean {
   return holding
 }
 
-function useEverReady(hasOutput: boolean): boolean {
-  const [everReady, setEverReady] = useState(false)
-  if (hasOutput && !everReady) setEverReady(true)
-  return everReady
+// True from the first render `value` is true on, for the rest of the mount.
+function useLatched(value: boolean): boolean {
+  const [latched, setLatched] = useState(false)
+  if (value && !latched) setLatched(true)
+  return latched
 }
 
 function terminalLiveSettings(
   preferences: TerminalPreferences,
   target: ReturnType<typeof terminalTargetView>,
+  terminalListed: { now: boolean; ever: boolean },
   viewerOverflow: boolean,
   composeBarEnabled: boolean,
 ): TerminalLiveSettings {
@@ -829,6 +835,7 @@ function terminalLiveSettings(
     configuredDropPaste: preferences.configuredDropPaste,
     launchedDropPaste: target.focusedTab?.drop_paste,
     sessionTabs: target.session?.tabs,
+    terminalListed,
     viewerOverflow,
     composeActive: composeBarEnabled,
   }
@@ -858,10 +865,19 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
   const target = terminalTargetView(props, spine, ids)
   const composeInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [viewerOverflow, setViewerOverflow] = useState(false)
+  const listedNow =
+    props.kind === "terminal" && spineListsTerminal(spine?.terminals, props.id)
+  const terminalListed = { now: listedNow, ever: useLatched(listedNow) }
   // Built here and published in the component body: whether the message box is
   // the typing surface depends on ownership, which resolves after this hook.
   const liveSettingsFor = (composeActive: boolean) =>
-    terminalLiveSettings(preferences, target, viewerOverflow, composeActive)
+    terminalLiveSettings(
+      preferences,
+      target,
+      terminalListed,
+      viewerOverflow,
+      composeActive,
+    )
 
   return {
     hostRef,

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { terminalForeground, terminalTitle } from "./terminals"
+import {
+  spineListsTerminal,
+  terminalForeground,
+  terminalSocketGone,
+  terminalTitle,
+} from "./terminals"
 import type { TerminalView } from "./types"
 
 function term(overrides: Partial<TerminalView>): TerminalView {
@@ -116,5 +121,28 @@ describe("terminalTitle", () => {
     })
     expect(terminalTitle(a, [a, b])).toBe("vim (#1)")
     expect(terminalTitle(b, [a, b])).toBe("vim (#2)")
+  })
+})
+
+describe("terminalSocketGone", () => {
+  it("is not gone while the spine has never listed it", () => {
+    expect(terminalSocketGone(false, false)).toBe(false)
+  })
+
+  it("is gone once the spine stops listing a terminal it listed", () => {
+    expect(terminalSocketGone(false, true)).toBe(true)
+  })
+
+  it("is not gone while the spine lists it", () => {
+    expect(terminalSocketGone(true, true)).toBe(false)
+  })
+})
+
+describe("spineListsTerminal", () => {
+  it("answers false before the spine arrives and by id after", () => {
+    expect(spineListsTerminal(undefined, "t1")).toBe(false)
+    expect(spineListsTerminal([], "t1")).toBe(false)
+    expect(spineListsTerminal([term({ id: "t2" })], "t1")).toBe(false)
+    expect(spineListsTerminal([term({ id: "t1" })], "t1")).toBe(true)
   })
 })

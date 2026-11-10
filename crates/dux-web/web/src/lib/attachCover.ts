@@ -20,9 +20,10 @@ export type AttachCoverInputs = {
   /// replay. Always false when the wait is configured to zero.
   waitExpired: boolean
   isOwner: boolean
-  /// This pane's tab may be on its way out: an agent tab's socket failed moments
-  /// ago, and a provider that exited cleanly hands its slot to a sibling and
-  /// takes this pane with it. False for a terminal, which has no such handover.
+  /// This pane may be on its way out: its socket failed moments ago, and a
+  /// provider that exited cleanly hands its slot to a sibling and takes this
+  /// pane with it. A terminal's socket also fails when the terminal is closed or
+  /// its shell exits, and the pane leaves with it.
   handoffGrace: boolean
   /// This pane has never had a screen: no replay has been applied on this mount.
   /// It is what "Attaching…" versus "Reconnecting…" turns on, a fact about the
