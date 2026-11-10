@@ -13,7 +13,9 @@ Tabs live in a strip at the top of the agent's terminal. A brand-new agent has e
 one tab, and the strip stays hidden until you add a second. Turn on **Always show tab
 strip** (a Preferences row on the web, `toggle-always-show-tabs` in the terminal UI's
 palette, or `always_show_tab_strip` under `[ui]`) if you would rather see it from the first
-tab on.
+tab on. In the browser an agent's [terminal dock](/docs/web-workspace#the-terminal-dock) has
+a strip of its own, and the two show and hide together: both appear once the agent has a
+second tab or a second terminal, or while the setting is on.
 
 > [!NOTE]
 > The browser's [theater mode](/docs/web-workspace#theater-mode-one-pane-no-chrome) takes

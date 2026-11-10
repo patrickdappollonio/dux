@@ -495,6 +495,32 @@ describe("the input group's rows", () => {
   // A companion terminal's pane publishes under the TERMINAL's id while the
   // menu over it is the agent's, so the group is read from the pane on screen
   // and a sibling pane's answer says nothing about it.
+  // Over an agent with its dock, the header's menu is handed the part typing
+  // goes to, and Attach a file… sends the file there rather than to the agent.
+  it("attaches to the dock terminal typing goes to, not to the agent beside it", async () => {
+    const toAgent = vi.fn()
+    const toDock = vi.fn()
+    registerAttachCapability("s1", toAgent)
+    registerAttachCapability("t7", toDock)
+    registerPaneInputGroup("t7", { surfaceSwitch: false, keysToggle: false })
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={{
+          kind: "terminal",
+          terminalId: "t7",
+          owner: { kind: "session", sessionId: "s1" },
+        }}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    fireEvent.click(screen.getByText("Attach a file…"))
+    expect(toDock).toHaveBeenCalledTimes(1)
+    expect(toAgent).not.toHaveBeenCalled()
+  })
+
   it("reads the pane on screen over a companion terminal, not a sibling's", async () => {
     pane({}) // the agent's own tab, "s1": not the pane on screen
     render(

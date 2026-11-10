@@ -12,8 +12,13 @@ The durable home for every entry here is the code comment at the cited line, the
 pinning test, and the CLAUDE.md web-terminal tenets. Do not "preserve" this file,
 do not link to it, and do not let it drift into a second source of truth.
 
-**Conventions.** `TP` is `src/components/TerminalPane.tsx` (paths are relative to
-`crates/dux-web/web/` unless they start with `crates/`). Line numbers were
+**Conventions.** `TP` is the pane's own code, which is now three modules:
+`src/components/TerminalPane.tsx` (the lone pane, a stack of one),
+`src/components/TerminalStack.tsx` (the stack and its part) and
+`src/components/terminal/partSetup.tsx` (the part's setup and input layout) with
+`src/components/terminal/partPieces.tsx` (its surface, covers and input rows); a `TP:` line number predates that split and names the code that moved
+with it (paths are relative to `crates/dux-web/web/` unless they start with
+`crates/`). Line numbers were
 against commit `39f5c2ce` and have been RE-CITED against the rebuilt wiring: the
 pane's internals now live in `src/components/terminal/` (the lifecycle hook, the
 live-settings container, the six named machines, and the two pane-adjacent
@@ -1965,7 +1970,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     not the object), and a paste, upload or pick runs through that part's own
     pipeline. The overlay layer
     is the stack's too, over the parts' box and withheld when a cover owns the target's
-    part. Fix: `TerminalStack`/`TerminalPart` in `TerminalPane.tsx`. Pinned:
+    part. Fix: `TerminalStack`/`TerminalPart` in `TerminalStack.tsx`; on a computer the
+    target is the store's (`selectedTarget`, moved by `chooseStackPart` with a REPLACE,
+    never a push, because focus moving between the parts on screen is not a position).
+    Pinned:
     `components/TerminalPane.test.tsx` "TerminalStack with two parts" and "the stack's
     overlay layer over a lone terminal" (among them "sends a Send's Enter to the part
     the body went to after the target moved", "lands a click into the other part's
@@ -1982,9 +1990,48 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     part of a stack gets a live socket only when its tab is live, or when it is on
     screen and showing it is what starts it (the dormant-card table); otherwise it
     gets its card. The rule lives in the pure layout model so the dock wiring reads it
-    rather than re-deriving it. Fix: `partsOnScreen`'s `agentLiveSocket` in
-    `src/lib/layoutModel.ts`. Pinned: `src/lib/layoutModel.test.ts` "gives the agent
-    part a live socket for a … tab".
+    rather than re-deriving it, and the dormant-card table it reads gained the input
+    that makes it bite: with one of the agent's terminals running, its healthy dormant
+    first tab gets the card too (`dormantTabNeedsCard`'s `terminalRunning`). The agent
+    part is then not a part at all: the stack mounts the dock alone, and the agent's
+    slot shows the short card when on screen and nothing when folded away. Fix:
+    `partsOnScreen`'s `agentLiveSocket` in `src/lib/layoutModel.ts`, read by
+    `agentStackModel` and `AgentStack`. Pinned: `src/lib/layoutModel.test.ts` "gives
+    the agent part a live socket for a … tab"; `components/TerminalArea.test.tsx` "a
+    stopped agent with a running terminal" (no agent part in any layout).
+
+32. **A take-over card over a stack of two is ONE card with one button.** Trap: covers
+    are per part, and a row is driven or watched whole, so a watcher of an agent with
+    its dock saw two identical cards, each with its own Take over, and a press on the
+    non-target one bounced a socket the user was not looking at. The stack gives its
+    parts a cover area over all of them; the typing target's part paints its card
+    there through a portal and every part withholds its own card. A reconnect box
+    stays per part: it is about one socket. Fix: `coverArea` in `TerminalStack.tsx`,
+    `cardInStack` in `TerminalPaneSurface`. Pinned: `components/TerminalPane.test.tsx`
+    "covers the whole stack with one take-over card when another device drives the row".
+
+33. **A cover over the part typing does NOT go to shrinks the overlay layer to the
+    target's box.** Trap: the layer covered the whole stack, so the floating pill could
+    rest over a part showing Reconnect, where it could neither be read nor reach the
+    terminal it acts on. A cover over the target still withholds the layer whole. The
+    target's box is measured against the stack's (a ResizeObserver on both), and parts
+    are found by `data-stack-part`. Fix: `usePartBounds` and `useAnyPaneCoverOwned` in
+    `TerminalStack.tsx` and `src/lib/paneCover.ts`. Pinned:
+    `components/TerminalPane.test.tsx` "takes a part whose own socket was lost out of
+    the overlay's bounds".
+
+34. **A part folded away keeps its split-size box, and the part keeps its component
+    across every layout.** Trap: rendering the split and the maximized layouts as
+    different trees remounted the parts on every layout change (a replay and a cover
+    flash each time), and collapsing a panel to its strip shrank the folded part's
+    terminal to a sliver. The stack always renders one panel group (the dock's panel
+    and divider are added when the first terminal arrives, the agent's panel stays
+    put); the folded part's box is placed under its panel's edge at its split height
+    in container units and clipped there. A dormant agent with NO terminal has no part
+    to keep in place, so it shows its full card in the column with no stack at all. Fix: `StackSplit` and
+    `PartBox` in `src/components/AgentStack.tsx`, `panelSizes` in
+    `agentStackLayout.ts`. Pinned: `components/TerminalArea.test.tsx` "lays out the …
+    layout with both strips kept" (both parts mounted in every layout).
 
 ## I. Viewer suppression and notifications
 
@@ -2413,8 +2460,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     height OUT of the terminal in the desktop shell (panel geometry untouched) and the
     pane's own RO reports the reflow. The rows are the STACK's: only the typing target's
     part renders them, through a portal into the stack's one input area under all its
-    parts, so a stack of two never shows two boxes. Fix: `terminalInputLayout`,
-    `TerminalPart` and `TerminalStack` in `TerminalPane.tsx`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane has no
+    parts, so a stack of two never shows two boxes. Fix: `terminalInputLayout` in
+    `terminal/partSetup.tsx`, `TerminalPart` and `TerminalStack` in `TerminalStack.tsx`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane has no
     menu under the terminal" and "TerminalPane input group for the top menu" suites.
 
 10. **Both hint latches are MODULE scope: once per page session, surviving the pane

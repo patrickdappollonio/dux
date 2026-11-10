@@ -19,8 +19,11 @@ into a collapsible "Inactive" tail.
 
 - **Terminal UI:** two panes. The Agents pane ends with the Inactive tail, and Terminals is
   its own pane below.
-- **Web:** two labelled groups. The Terminals group is collapsible and sits above the
-  Inactive tail.
+- **Web:** one list, titled **Agents & Terminals** with a count of each. Project and
+  standalone terminals are rows of it, sorted with the agents and never in the Inactive
+  tail. An agent's own terminals are not rows: they sit in its
+  [terminal dock](/docs/web-workspace#the-terminal-dock), and an agent you stopped while
+  one of them keeps running stays out of the Inactive tail until its last terminal ends.
 - **Every row** is two lines: the name, then who it belongs to and what it is doing.
 
 The terminal UI looks like this (the `※` before a project name marks the project, and the
@@ -63,9 +66,11 @@ On the web, use the **Sort** dropdown above the agent list. In the terminal UI, 
   does not include it, since it is what you get by placing a row by hand. The web dropdown
   lists it as **Manual order**.
 
-Terminals follow the same choice. Sort by name and terminals sort by their foreground command
-(or their label when nothing is running in the foreground); pick manual and each holds the
-spot you put it in.
+Terminals follow the same choice. In the browser they sort among the agents: by name a
+terminal uses the name it was opened with (`Terminal 3`), never what is running in it, so a
+program starting does not move the row; by activity a terminal running something counts as
+busy; by updated, its last output counts; in manual order it keeps the place you put it in
+among the agents until dux restarts.
 
 > [!NOTE]
 > The web's cog menu also has **Sort agents by** (Recently updated, Created, Name). That is
@@ -75,9 +80,9 @@ spot you put it in.
 ## Hand-ordering
 
 **Drag it, on either surface.** Grab a row with the mouse and drop it where you want,
-in the browser or in the terminal UI. Agents reorder among agents and terminals among
-terminals; a terminal never jumps into the agent list, and vice versa. Agents move
-freely across projects, because the order is one list rather than one list per project.
+in the browser or in the terminal UI. Agents move freely across projects, because the
+order is one list rather than one list per project. In the browser a project or standalone
+terminal row can be dropped between agent rows, since it is a row of the same list.
 
 In the terminal UI:
 
@@ -107,4 +112,4 @@ order you left them. So is the order of each agent's [provider tabs](/docs/agent
 
 Your **terminal** order is not, because terminals themselves do not survive a restart.
 A terminal is a live shell; when dux stops, it is gone. New terminals start in creation
-order until you rearrange them.
+order until you rearrange them. The same goes for the order of an agent's terminal dock.

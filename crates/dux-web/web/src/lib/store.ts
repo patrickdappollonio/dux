@@ -167,6 +167,13 @@ import {
   type TerminalOwnerRef,
 } from "./terminalOwner"
 import { ownerHasTerminal } from "./terminals"
+import {
+  layoutOnStart,
+  resolveStackOpening,
+  type ComputerLayout,
+} from "./layoutModel"
+import { readStackMemory, writeStackMemory } from "./stackMemory"
+import { holdLayoutForGesture } from "./layoutGesture"
 import { closeModals, onModalsChange, openModals, spendModals } from "./modalHistory"
 import {
   clearTheaterMemory,
@@ -789,6 +796,14 @@ export interface DuxState {
   // list of terminal ids (any owner) in the just-dragged order, cleared once the
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
+  // The layout each agent's stack is in on this page, keyed by session id. No
+  // entry means the agent is being opened, and its opening rule decides (see
+  // `resolveStackOpening`); the entry is dropped whenever the agent is arrived
+  // at again, so every opening is judged afresh.
+  stackLayouts: Record<string, ComputerLayout>
+  // The dock terminal last in front, per agent. Mirrored into this device's
+  // stack memory, so a reload keeps it while the terminal lives.
+  stackTerminals: Record<string, string>
   // Optimistic overlay for project and standalone terminals' places in the
   // agents list, keyed by terminal id: the agent each row now sits after (null
   // for the top), each dropped once the spine shows it (see
@@ -1228,6 +1243,8 @@ let state: DuxState = {
   routeNotFound: null,
   pendingAgentOrder: null,
   pendingTerminalOrder: null,
+  stackLayouts: {},
+  stackTerminals: {},
   pendingTerminalPlacement: {},
   pendingTabOrder: {},
   pendingSlotTab: {},
@@ -1276,6 +1293,19 @@ function emit(): void {
 // changes screen opens and how a URL naming a deleted agent is recorded.
 function setState(patch: Partial<DuxState>): void {
   const next = { ...state, ...patch }
+  // Arriving at an agent opens it afresh: whatever layout it was left in on
+  // this page is forgotten, and the opening rule (memory, the address, a
+  // stopped agent's terminal) decides again.
+  const arriving = patch.selectedSessionId
+  if (
+    arriving != null &&
+    arriving !== state.selectedSessionId &&
+    !("stackLayouts" in patch) &&
+    arriving in next.stackLayouts
+  ) {
+    const { [arriving]: _forgotten, ...rest } = next.stackLayouts
+    next.stackLayouts = rest
+  }
   if ("selectedTarget" in patch) {
     if (!("mobileScreen" in patch)) {
       next.mobileScreen = patch.selectedTarget ? "terminal" : "home"
@@ -4966,6 +4996,7 @@ export function selectTerminal(
       // same rule as an agent selection.
       ...editorSelectionPatch({ kind: "terminal", terminalId, owner }),
       ...screenPatch(opts?.changes),
+      ...(sessionId === null ? {} : dockTerminalPatch(sessionId, terminalId)),
       ...(opts?.extra ?? {}),
     }),
   )
@@ -4975,6 +5006,95 @@ export function selectTerminal(
   switchChangesSubscription(prev, sessionId)
   syncUrl(opts?.urlMode)
   if (sessionId !== null && prev !== sessionId) void restartChanges(sessionId)
+}
+
+// What bringing one of an agent's terminals to the front of its dock changes:
+// the dock remembers it, and a layout with the dock folded away opens so the
+// terminal asked for is on screen. Arriving at the agent this way opens it the
+// way a link naming the terminal does.
+function dockTerminalPatch(sessionId: string, terminalId: string): Partial<DuxState> {
+  writeStackMemory(sessionId, { terminal: terminalId })
+  const stackTerminals = { ...state.stackTerminals, [sessionId]: terminalId }
+  const dock = dockTerminalIds(sessionId)
+  // A dock that was empty had no layout of its own: its first terminal opens
+  // the way an arrival does.
+  const current =
+    sessionId === state.selectedSessionId && dock.some((id) => id !== terminalId)
+      ? state.stackLayouts[sessionId]
+      : undefined
+  let layout: ComputerLayout
+  if (current === undefined) {
+    const session = state.spine?.sessions.find((s) => s.id === sessionId)
+    layout = resolveStackOpening({
+      addressTerminal: terminalId,
+      rememberedTerminal: null,
+      rememberedLayout: readStackMemory(sessionId).layout,
+      dockTerminals: dock.includes(terminalId) ? dock : [...dock, terminalId],
+      agentStopped: session !== undefined && session.status !== "active",
+      anyTerminalRunning: true,
+    }).layout
+  } else {
+    layout = current === "agent" ? "split" : current
+  }
+  return { stackTerminals, stackLayouts: { ...state.stackLayouts, [sessionId]: layout } }
+}
+
+// An agent's own terminals, in its dock's order.
+function dockTerminalIds(sessionId: string): string[] {
+  return (state.spine?.terminals ?? [])
+    .filter((t) => t.owner.kind === "session" && t.owner.session_id === sessionId)
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((t) => t.id)
+}
+
+// Put an agent's stack in a layout from one of its controls (the dock strip's
+// buttons, the floating layout pill, a divider drag that folded a part). The
+// choice is remembered for this device, so the agent reopens in it. Both parts
+// are held through the change and refit once at the layout they land in.
+export function setStackLayout(sessionId: string, layout: ComputerLayout): void {
+  if (state.stackLayouts[sessionId] === layout) return
+  holdLayoutForGesture(0)
+  writeStackMemory(sessionId, { layout })
+  setState({ stackLayouts: { ...state.stackLayouts, [sessionId]: layout } })
+}
+
+// Record the layout an agent opened in, so it holds while the user works in
+// it: the opening rule reads the address and the agent's state, and either can
+// change under an open agent without that being a request to move anything.
+// Not remembered: memory is what the user chose, not what an opening decided.
+export function settleStackOpening(sessionId: string, layout: ComputerLayout): void {
+  if (sessionId !== state.selectedSessionId) return
+  if (state.stackLayouts[sessionId] !== undefined) return
+  setState({ stackLayouts: { ...state.stackLayouts, [sessionId]: layout } })
+}
+
+// Make one part of an agent's stack the one typing goes to: a press into its
+// terminal does it. Focus moving between the parts on screen is not a move to
+// another position, so the address is rewritten rather than pushed.
+export function chooseStackPart(sessionId: string, ptyId: string): void {
+  const cur = state.selectedTarget
+  if (cur?.kind === "terminal" && cur.terminalId === ptyId) return
+  if (cur?.kind === "agent" && cur.tabId === ptyId) return
+  const isDockTerminal = dockTerminalIds(sessionId).includes(ptyId)
+  setState({
+    selectedTarget: isDockTerminal
+      ? { kind: "terminal", terminalId: ptyId, owner: { kind: "session", sessionId } }
+      : { kind: "agent", sessionId, tabId: ptyId },
+    // A tab resting on its idle screen stays resting: moving the typing to
+    // its dock is not asking for it again.
+    endedInViewTab: state.endedInViewTab,
+    ...(isDockTerminal ? { stackTerminals: { ...state.stackTerminals, [sessionId]: ptyId } } : {}),
+  })
+  if (isDockTerminal) writeStackMemory(sessionId, { terminal: ptyId })
+  syncUrl("replace")
+}
+
+// The Start on a stopped agent's band or its short card: start its first tab,
+// and put the stack back in the layout this device last chose for it, or the
+// split.
+export function startStoppedAgent(sessionId: string, tabId: string): void {
+  setStackLayout(sessionId, layoutOnStart(readStackMemory(sessionId).layout))
+  startDormantTab(sessionId, tabId)
 }
 
 // Spawn a new companion terminal for a session via REST. The 201 reply
@@ -8083,6 +8203,23 @@ export function placeTerminalsInList(placements: Record<string, string | null>):
       notifyError(e instanceof Error ? e.message : "Could not move the terminal in the list.")
     })
   }
+}
+
+// Reorder one agent's terminal dock, a drag along its strip. The dock's order
+// is each terminal's place in the one runtime terminal order, so the agent's
+// terminals trade the places they already hold and nothing else moves: no
+// other dock, and no row of the agents list, whose sort mode stays as it is.
+export function reorderDock(sessionId: string, dockOrder: string[]): void {
+  const all = (state.spine?.terminals ?? [])
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order)
+  const pending = state.pendingTerminalOrder
+  const base = (pending ? reorderById(all, pending) : all).map((t) => t.id)
+  const mine = new Set(dockTerminalIds(sessionId))
+  const next = dockOrder.filter((id) => mine.has(id))
+  if (next.length !== mine.size) return
+  let i = 0
+  reorderTerminals(base.map((id) => (mine.has(id) ? next[i++] : id)))
 }
 
 // One-shot reorder of every agent, distinct from `setAgentSort`, which sets the

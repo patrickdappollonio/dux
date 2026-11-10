@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react"
 import { createPortal } from "react-dom"
 import { outsideGate } from "@/lib/gateLayer"
@@ -25,7 +26,11 @@ import { useTerminalOwnership } from "@/components/terminal/ownership"
 import { useViewerGrid } from "@/components/terminal/viewerGrid"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
-import { registerPaneCover, usePaneCoverOwned } from "@/lib/paneCover"
+import {
+  registerPaneCover,
+  useAnyPaneCoverOwned,
+  usePaneCoverOwned,
+} from "@/lib/paneCover"
 import { registerPaneMacroTarget } from "@/lib/paneMacroTarget"
 import { registerPaneInputGroup } from "@/lib/paneInputGroup"
 import {
@@ -36,13 +41,16 @@ import {
 } from "@/components/terminal/inputSurface"
 import { useUploadPipeline } from "@/components/terminal/uploadPipeline"
 import {
+  TerminalCover,
   TerminalInputRows,
   TerminalPaneSurface,
+} from "@/components/terminal/partPieces"
+import {
   terminalInputLayout,
   useHandoffGrace,
   useLatched,
   useTerminalPaneSetup,
-} from "@/components/terminal/partPieces"
+} from "@/components/terminal/partSetup"
 
 /// One part of a stack: one live terminal, with its own socket, ownership,
 /// upload sink, paste handling and IME guard.
@@ -65,6 +73,9 @@ type StackContextValue = {
   typingTarget: string | null
   chooseTypingTarget: (ptyId: string) => void
   inputArea: HTMLElement | null
+  /// Where a take-over card covering the whole stack goes, when the stack has
+  /// more than one part.
+  coverArea: HTMLElement | null
 }
 
 const StackContext = createContext<StackContextValue | null>(null)
@@ -80,40 +91,92 @@ function stackTypingTarget(
   return onScreen[0]?.id ?? parts[0]?.id ?? null
 }
 
+/// A part as the stack is handed it: its props, and the slot it is laid out
+/// in. The slot keys the part's component, so a part whose sibling comes or
+/// goes (an agent's tab turning into its card and back) keeps its connection.
+export type StackPartSpec = TerminalPartProps & {
+  slot?: string
+  /** Changing it replaces the part's component, as a reconnect asks for. */
+  instance?: string
+}
 
+/// Lays the rendered parts out, by slot, inside the stack's box. Given the
+/// part typing goes to, so a layout can mark the other one.
+export type StackArrange = (
+  parts: Readonly<Record<string, ReactNode>>,
+  typingTarget: string | null,
+) => ReactNode
 
 /// An agent and its docked terminal (or any one terminal) rendered as one unit.
 /// Each part keeps everything about its own connection; the stack owns what is
 /// shared: which part typing goes to, the one input area under the parts, and
 /// the one overlay layer over them.
+///
+/// The typing target is the caller's when it passes one (the agent's stack
+/// keeps it in the store, where the header and the top menu read it), and the
+/// stack's own otherwise.
 export function TerminalStack({
   parts,
   overlay,
+  arrange,
+  typingTarget: chosenByCaller,
+  onChooseTypingTarget,
 }: {
-  parts: TerminalPartProps[]
+  parts: StackPartSpec[]
   overlay?: ReactNode
+  arrange?: StackArrange
+  typingTarget?: string | null
+  onChooseTypingTarget?: (ptyId: string) => void
 }) {
-  const [chosen, setChosen] = useState<string | null>(null)
+  const [chosenHere, setChosenHere] = useState<string | null>(null)
+  const controlled = onChooseTypingTarget !== undefined
+  const chosen = controlled ? (chosenByCaller ?? null) : chosenHere
+  const chooseTypingTarget = controlled ? onChooseTypingTarget : setChosenHere
   const typingTarget = stackTypingTarget(parts, chosen)
   // Held in state so the parts re-render once it exists and can portal their
   // input rows into it.
   const [inputArea, setInputArea] = useState<HTMLElement | null>(null)
+  const [coverArea, setCoverArea] = useState<HTMLElement | null>(null)
   const context = useMemo<StackContextValue>(
-    () => ({ typingTarget, chooseTypingTarget: setChosen, inputArea }),
-    [typingTarget, inputArea],
+    () => ({ typingTarget, chooseTypingTarget, inputArea, coverArea }),
+    [typingTarget, chooseTypingTarget, inputArea, coverArea],
   )
   // A cover that owns the typing target's part withholds the layer whole; the
   // take-over cards are row-wide, so the parts of a row always agree on them.
   const layerWithheld = usePaneCoverOwned(typingTarget)
+  // A cover over the OTHER part (its own socket reconnecting) leaves the
+  // target's part usable, so the layer stays and shrinks to that part: a pill
+  // resting over a covered terminal could neither be read nor reach it.
+  const otherCovered = useAnyPaneCoverOwned(
+    parts.map((part) => part.id).filter((id) => id !== typingTarget),
+  )
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  const bounds = usePartBounds(boxRef, otherCovered ? typingTarget : null)
+  const rendered: Record<string, ReactNode> = {}
+  parts.forEach((part, index) => {
+    const { slot, instance, ...props } = part
+    const key = slot ?? String(index)
+    // Keyed by slot, never by pty id: a part switching tab or terminal keeps
+    // its component, as a lone pane always has, unless its caller names a new
+    // instance.
+    rendered[key] = <TerminalPart key={`${key}:${instance ?? ""}`} {...props} />
+  })
   return (
     <StackContext.Provider value={context}>
       <div className="flex h-full w-full flex-col bg-background">
-        <div className="relative flex min-h-0 w-full flex-1 flex-col">
-          {parts.map((part, index) => (
-            // Keyed by place, never by pty id: a part switching tab or terminal
-            // keeps its component, as a lone pane always has.
-            <TerminalPart key={index} {...part} />
-          ))}
+        <div ref={boxRef} className="relative flex min-h-0 w-full flex-1 flex-col">
+          {arrange ? arrange(rendered, typingTarget) : Object.values(rendered)}
+          {/* A row is driven or watched whole, so a take-over card is one card
+            * over every part with one button, painted here by the typing
+            * target's part. Above the parts, below the overlay layer, which a
+            * card withholds anyway. */}
+          {parts.length > 1 ? (
+            <div
+              ref={setCoverArea}
+              data-testid="stack-cover-area"
+              className="pointer-events-none absolute inset-0 z-20 empty:hidden *:pointer-events-auto"
+            />
+          ) : null}
           {/* Withheld whole under a full-pane cover, layer included, so nothing of
             * the pill can paint over a cover or over the band it brings back.
             * The layer admits exactly the one pixel row above the stack, which is
@@ -126,6 +189,12 @@ export function TerminalStack({
             <div
               data-testid="pane-overlay-layer"
               className="pointer-events-none absolute inset-0 z-30 [clip-path:polygon(0_-1px,100%_-1px,100%_100%,0_100%)] *:pointer-events-auto"
+              data-bounds={bounds ? "part" : "stack"}
+              style={
+                bounds
+                  ? { ...bounds, right: "auto", bottom: "auto" }
+                  : undefined
+              }
             >
               {overlay}
             </div>
@@ -136,6 +205,56 @@ export function TerminalStack({
       </div>
     </StackContext.Provider>
   )
+}
+
+type PartBounds = { top: number; left: number; width: number; height: number }
+
+/// Where one part's box sits inside the stack's, tracked through resizes, or
+/// null when no part is asked for.
+function usePartBounds(
+  boxRef: RefObject<HTMLDivElement | null>,
+  partId: string | null,
+): PartBounds | null {
+  const [bounds, setBounds] = useState<PartBounds | null>(null)
+  useLayoutEffect(() => {
+    const box = boxRef.current
+    const part =
+      partId === null || box === null
+        ? null
+        : (Array.from(box.querySelectorAll<HTMLElement>("[data-stack-part]")).find(
+            (el) => el.dataset.stackPart === partId,
+          ) ?? null)
+    if (box === null || part === null) {
+      setBounds(null)
+      return
+    }
+    const measure = () => {
+      const outer = box.getBoundingClientRect()
+      const inner = part.getBoundingClientRect()
+      setBounds((prev) => {
+        const next = {
+          top: inner.top - outer.top,
+          left: inner.left - outer.left,
+          width: inner.width,
+          height: inner.height,
+        }
+        return prev !== null &&
+          prev.top === next.top &&
+          prev.left === next.left &&
+          prev.width === next.width &&
+          prev.height === next.height
+          ? prev
+          : next
+      })
+    }
+    measure()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(measure)
+    observer.observe(box)
+    observer.observe(part)
+    return () => observer.disconnect()
+  }, [boxRef, partId])
+  return partId === null ? null : bounds
 }
 
 function TerminalPart(props: TerminalPartProps) {
@@ -504,6 +623,7 @@ function TerminalPart(props: TerminalPartProps) {
   // The box mounts in the stack's input area one commit after the area exists,
   // so the area is a dependency too.
   const inputArea = stack?.inputArea ?? null
+  const coverArea = stack?.coverArea ?? null
   useEffect(() => {
     if (!composeSurfaceLive) return
     const el = composeInputRef.current
@@ -619,6 +739,8 @@ function TerminalPart(props: TerminalPartProps) {
 
   const surface = (
     <TerminalPaneSurface
+      partId={id}
+      cardInStack={coverArea !== null}
       onScreen={onScreen}
       onPress={() => stack?.chooseTypingTarget(id)}
       kind={kind}
@@ -655,9 +777,26 @@ function TerminalPart(props: TerminalPartProps) {
       />
     ) : null
   const area = stack?.inputArea ?? null
+  const stackCard =
+    coverArea !== null && isTypingTarget && cover.kind === "card"
+      ? createPortal(
+          <TerminalCover
+            cover={cover}
+            kind={kind}
+            providerName={providerName}
+            ptyRef={ptyRef}
+            takeoverIntent={takeoverIntent}
+            takeoverLabel={takeoverLabel}
+            ownerPresent={ownerPresent}
+            takeOver={takeOver}
+          />,
+          coverArea,
+        )
+      : null
   return (
     <>
       {surface}
+      {stackCard}
       {rows === null ? null : area === null ? (stack === null ? rows : null) : createPortal(rows, area)}
     </>
   )

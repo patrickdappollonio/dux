@@ -502,3 +502,90 @@ describe("store terminal reorder overlay", () => {
     })
   })
 })
+
+// An agent's stack: which layout it opens in when one of its terminals is
+// brought to the front, how focus moves between its parts, and how its dock
+// reorders.
+describe("store agent stack", () => {
+  function withSessionStatus(status: string, terminals: unknown[] = []) {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [{ id: "s1", project_id: "p1", status }],
+      terminals,
+      sidebar: { groups: [] },
+    }
+  }
+  const companion = (id: string, sortOrder: number) => ({
+    id,
+    label: id,
+    owner: { kind: "session", session_id: "s1" },
+    sort_order: sortOrder,
+  })
+
+  it("opens a stopped agent's new terminal maximized, so nothing starts the agent", async () => {
+    withSessionStatus("detached")
+    const mod = await loadStore()
+    mod.createTerminal("s1")
+    await vi.waitFor(() => expect(mod.getSnapshot().stackLayouts.s1).toBe("terminal"))
+  })
+
+  it("opens at least the split when a terminal is brought to the front of a folded dock", async () => {
+    withSessionStatus("active", [companion("t1", 1)])
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    mod.setStackLayout("s1", "agent")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    expect(mod.getSnapshot().stackLayouts.s1).toBe("split")
+    expect(mod.getSnapshot().stackTerminals.s1).toBe("t1")
+  })
+
+  it("judges every arrival at an agent afresh", async () => {
+    withSessionStatus("active", [companion("t1", 1)])
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    mod.setStackLayout("s1", "terminal")
+    mod.selectSession(null)
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().stackLayouts.s1).toBeUndefined()
+  })
+
+  it("moves typing between the parts on screen without a new history entry", async () => {
+    withSessionStatus("active", [companion("t1", 1)])
+    const pushState = vi.fn()
+    const replaceState = vi.fn()
+    vi.stubGlobal("history", { go: () => {}, pushState, replaceState, state: null })
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const pushesBefore = pushState.mock.calls.length
+    mod.chooseStackPart("s1", "t1")
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "terminal",
+      terminalId: "t1",
+      owner: { kind: "session", sessionId: "s1" },
+    })
+    const slot = mod.getSnapshot().spine!.sessions[0].slot_tab_id
+    mod.chooseStackPart("s1", slot)
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: slot,
+    })
+    expect(pushState.mock.calls.length).toBe(pushesBefore)
+    expect(replaceState).toHaveBeenCalled()
+  })
+
+  it("reorders one dock among the places its terminals hold, leaving every other terminal put", async () => {
+    withSessionStatus("active", [
+      companion("t1", 1),
+      { id: "p-term", label: "p", owner: { kind: "project", project_id: "p1" }, sort_order: 2 },
+      companion("t2", 3),
+    ])
+    const mod = await loadStore()
+    mod.reorderDock("s1", ["t2", "t1"])
+    await tick()
+    const post = find((u, init) => u === "/api/v1/terminals/reorder" && init?.method === "POST")
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({
+      terminal_ids: ["t2", "p-term", "t1"],
+    })
+  })
+})

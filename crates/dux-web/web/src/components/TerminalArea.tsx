@@ -1,6 +1,7 @@
 import { Suspense, useState, type ReactNode } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
+import { AgentStack } from "@/components/AgentStack"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { DormantTabSurface } from "@/components/DormantTabSurface"
@@ -13,8 +14,11 @@ import { shouldShowTabStrip } from "@/lib/agentTabs"
 import { prKeyOf, samePrKey, sessionPrs } from "@/lib/pr"
 import { openPullRequests, useDux } from "@/lib/store"
 import type { Bootstrap } from "@/lib/bootstrapApi"
+import { readStackMemory } from "@/lib/stackMemory"
+import { ownerSessionId } from "@/lib/terminalOwner"
 import type { AgentTabView, PrKeyView, PrView, SessionView } from "@/lib/types"
 
+import { agentStackModel } from "./agentStackModel"
 import { terminalAreaModel, type SelectedTarget } from "./terminalAreaModel"
 
 function PrLane({
@@ -191,6 +195,9 @@ export function TerminalArea() {
     pendingSlotTab,
     endedInViewTab,
     routeNotFound,
+    stackLayouts,
+    stackTerminals,
+    pendingTerminalOrder,
   } = useDux()
   const [prCursors, setPrCursors] = useState<PrCursors>({})
   const stepPr = (sessionId: string, key: PrKeyView) =>
@@ -244,6 +251,31 @@ export function TerminalArea() {
   // ResizablePanel's inner wrapper is `overflow: auto`, so unclipped that frame
   // sprouts scrollbars, which shrink the content box, which refits, which
   // toggles them again: a visible jitter loop.
+  // An agent, or one of its own terminals, is shown as the agent's stack: the
+  // agent on top and its terminal dock below.
+  const stackSessionId =
+    selectedTarget.kind === "agent"
+      ? selectedTarget.sessionId
+      : ownerSessionId(selectedTarget.owner)
+  const stackSession =
+    stackSessionId === null ? undefined : spine?.sessions.find((s) => s.id === stackSessionId)
+  const stack =
+    stackSession === undefined
+      ? null
+      : agentStackModel({
+          target: selectedTarget,
+          session: stackSession,
+          terminals: spine?.terminals ?? [],
+          stackLayouts,
+          stackTerminals,
+          memory: readStackMemory(stackSession.id),
+          startedDormantTabs,
+          pendingSlotTab,
+          endedInViewTab,
+          pendingTerminalOrder,
+          alwaysShowTabStrip: bootstrap?.always_show_tab_strip ?? false,
+        })
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* The pane's own chrome stack, and the one real loss theater costs: the
@@ -258,27 +290,40 @@ export function TerminalArea() {
           atBottom={bannerAtBottom}
           position="top"
         />
-        <AgentTabLane
-          target={selectedTarget}
-          session={session}
-          tabs={tabs}
-          bootstrap={bootstrap}
-        />
+        {stack === null ? (
+          <AgentTabLane
+            target={selectedTarget}
+            session={session}
+            tabs={tabs}
+            bootstrap={bootstrap}
+          />
+        ) : null}
       </TheaterChrome>
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <TerminalSurface
-          target={selectedTarget}
-          paneKey={paneKey}
-          targetId={targetId}
-          slotTabId={slotTabId}
-          dormant={dormant}
-          focusedTab={focusedTab}
-          overlay={
-            theater ? (
-              <TheaterPill target={selectedTarget} session={session} />
-            ) : null
-          }
-        />
+        {stack !== null && stackSession !== undefined ? (
+          <AgentStack
+            model={stack}
+            session={stackSession}
+            target={selectedTarget}
+            theater={theater}
+            maxTabs={bootstrap?.agent_tabs_max}
+            terminalEpoch={terminalEpoch}
+          />
+        ) : (
+          <TerminalSurface
+            target={selectedTarget}
+            paneKey={paneKey}
+            targetId={targetId}
+            slotTabId={slotTabId}
+            dormant={dormant}
+            focusedTab={focusedTab}
+            overlay={
+              theater ? (
+                <TheaterPill target={selectedTarget} session={session} />
+              ) : null
+            }
+          />
+        )}
       </div>
       <TheaterChrome hidden={theater}>
         <PrLane

@@ -66,6 +66,8 @@ const {
   DIVIDER_TARGET_MIN,
 } = await import("@/lib/paneDivider")
 const { sidebarWidthToPx } = await import("@/lib/sidebarResize")
+const { DockDivider } = await import("./DockDivider")
+const { dividerRelease } = await import("./agentStackLayout")
 
 const mockState = {
   spine: null,
@@ -169,6 +171,38 @@ describe("the two workspace dividers", () => {
       expect(el.getAttribute("aria-orientation")).toBe("vertical")
       expect(el.tabIndex).toBe(0)
     }
+  })
+})
+
+// The third divider, between an agent and its terminal dock. It lies the other
+// way, so its band grows in height rather than width, but it is the Changes
+// divider's own handle and wears the same chrome, stacking and held paint.
+describe("the terminal dock's divider", () => {
+  function dockDivider(): HTMLElement {
+    const { container } = render(
+      <ResizablePanelGroup orientation="vertical">
+        <ResizablePanel id="a" defaultSize="50%" />
+        <DockDivider disabled={false} />
+        <ResizablePanel id="b" defaultSize="50%" />
+      </ResizablePanelGroup>,
+    )
+    return container.querySelector('[data-slot="resizable-handle"]')!
+  }
+
+  it("wears the same chrome, stacking and held paint as the others", () => {
+    const el = dockDivider()
+    const tokens = el.className.split(/\s+/)
+    for (const token of DIVIDER_CHROME.split(/\s+/)) expect(tokens).toContain(token)
+    expect(tokens).toContain(DIVIDER_STACKING)
+    expect(el.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_OFF)
+    expect(el.getAttribute("role")).toBe("separator")
+    expect(el.getAttribute("aria-orientation")).toBe("horizontal")
+  })
+
+  it("remembers a release that left both parts open, and never one that folded a part", () => {
+    expect(dividerRelease(40, 60)).toEqual({ persist: 40 })
+    expect(dividerRelease(100, 0)).toEqual({ fold: "agent" })
+    expect(dividerRelease(0, 100)).toEqual({ fold: "terminal" })
   })
 })
 
