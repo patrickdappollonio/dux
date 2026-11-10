@@ -3489,7 +3489,7 @@ impl App {
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
-            (self.input_target, self.session_surface),
+            (self.input_target, self.focused_surface()),
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
@@ -4519,13 +4519,9 @@ impl App {
     /// `Theme`, reusing `nudge_border`.
     pub(crate) fn scroll_mode_cue_line(&self, width: u16) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
-        // The card is about the row, whichever part has focus: an agent's
-        // stack is the agent's, and a terminal's row is the terminal's.
-        let target = if self.selected_terminal_row().is_some() || self.selected_session().is_none()
-        {
-            "terminal"
-        } else {
-            "agent"
+        let target = match self.focused_surface() {
+            SessionSurface::Agent => "agent",
+            SessionSurface::Terminal => "terminal",
         };
         let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
@@ -4725,9 +4721,13 @@ impl App {
             return;
         }
 
-        let target = match self.session_surface {
-            SessionSurface::Agent => "agent",
-            SessionSurface::Terminal => "terminal",
+        // The card is about the row, whichever part has focus: an agent's
+        // stack is the agent's, and a terminal's row is the terminal's.
+        let target = if self.selected_terminal_row().is_some() || self.selected_session().is_none()
+        {
+            "terminal"
+        } else {
+            "agent"
         };
         let button_label = "Take over";
         let button_h: u16 = 3;

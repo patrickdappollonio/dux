@@ -321,7 +321,7 @@ impl App {
             .or_else(|| self.engine.first_live_tab(session_id))
             .unwrap_or_else(|| session_id.to_string());
         self.set_focused_tab(session_id, &target);
-        if self.session_surface == SessionSurface::Agent {
+        if self.focused_surface() == SessionSurface::Agent {
             self.reset_raw_input_state();
             self.fullscreen_overlay = FullscreenOverlay::None;
             if pty.agent_detached {
@@ -335,7 +335,7 @@ impl App {
             self.set_info(format!("Tab ({provider}) exited."));
         }
         if self.input_target == InputTarget::Agent
-            && self.session_surface == SessionSurface::Agent
+            && self.focused_surface() == SessionSurface::Agent
             && tab_focus == FocusState::Focused
         {
             self.reset_raw_input_state();
@@ -397,7 +397,7 @@ impl App {
 
     fn apply_selected_agent_exit_status(&mut self, pty: &PrunedPty) {
         let key = self.bindings.label_for(Action::ReconnectAgent);
-        if self.session_surface != SessionSurface::Agent {
+        if self.focused_surface() != SessionSurface::Agent {
             self.set_info(dux_core::engine::agent_exit_with_companion_notice(
                 pty,
                 &format!("Press \"{key}\" to relaunch the agent."),
@@ -2137,7 +2137,7 @@ impl App {
 
     /// Whether the centre pane on screen is tab `tab_id` of agent `session_id`.
     fn shows_agent_tab(&self, session_id: &str, tab_id: &str) -> bool {
-        self.session_surface == SessionSurface::Agent
+        self.focused_surface() == SessionSurface::Agent
             && matches!(self.center_mode, CenterMode::Agent)
             && matches!(
                 self.fullscreen_overlay,
@@ -4023,6 +4023,51 @@ mod tests {
             !ordinary.contains("read error"),
             "an ordinary end of input must not gain a read-error clause: {ordinary}"
         );
+    }
+
+    /// The agent exiting while it is typed into fullscreen, opened from a
+    /// layout that shows only its terminal, ends the typing and the fullscreen
+    /// view as it does anywhere else.
+    #[test]
+    fn an_agent_typed_into_from_a_terminal_only_layout_exits_out_of_fullscreen() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        app.engine.providers.insert(
+            dux_core::ids::TabId::new(slot),
+            crate::pty::PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("companion terminal");
+        app.rebuild_left_items();
+        app.reselect_left_session(&session_id);
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.reconcile_center_target();
+        app.set_dock_layout(&session_id, crate::app::DockLayout::Term);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('i'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.reconcile_center_target();
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+
+        app.apply_selected_agent_exit_status(&pruned_agent("feat/x"));
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     /// A pruned agent whose exit detached it, with no refusal recorded.

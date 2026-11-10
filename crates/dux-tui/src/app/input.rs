@@ -1145,7 +1145,7 @@ impl App {
         self.focus == FocusPane::Center
             && !self.resize_mode
             && matches!(self.center_mode, CenterMode::Agent)
-            && self.focused_pty_is_covered_by_card()
+            && self.card_covers_center()
     }
 
     fn handle_takeover_card_key(&mut self, key: KeyEvent, claim: KeyClaim) -> bool {
@@ -1860,9 +1860,7 @@ impl App {
     /// True while keys typed at the center pane go to its child: a live,
     /// typeable surface at the live edge with no take-over card over it.
     pub(crate) fn center_takes_typing(&self) -> bool {
-        self.center_typeable()
-            && !self.scroll_mode_active()
-            && !self.focused_pty_is_covered_by_card()
+        self.center_typeable() && !self.scroll_mode_active() && !self.card_covers_center()
     }
 
     fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
@@ -3328,7 +3326,7 @@ impl App {
             return true;
         }
 
-        let label = match self.session_surface {
+        let label = match self.focused_surface() {
             SessionSurface::Agent => "Agent",
             SessionSurface::Terminal => "Companion terminal",
         };
@@ -3459,7 +3457,7 @@ impl App {
     }
 
     fn demoted_input_patterns(&self) -> DemotedInputPatterns {
-        if !self.focused_pty_is_covered_by_card() {
+        if !self.card_covers_center() {
             return DemotedInputPatterns::default();
         }
 
@@ -11262,7 +11260,7 @@ impl App {
         if !matches!(self.center_mode, CenterMode::Agent) {
             return Ok(());
         }
-        if self.session_surface == SessionSurface::Terminal {
+        if self.focused_surface() == SessionSurface::Terminal {
             // A terminal is never launched by focus: it exists while it runs.
             // Fullscreen shows the one with focus, and nothing else happens.
             if self.selected_terminal_surface_client().is_some() {

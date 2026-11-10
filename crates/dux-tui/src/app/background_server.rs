@@ -302,7 +302,7 @@ impl App {
         }
         if self.selected_session().is_none()
             && matches!(self.input_target, InputTarget::Agent)
-            && self.session_surface == SessionSurface::Agent
+            && self.focused_surface() == SessionSurface::Agent
         {
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;

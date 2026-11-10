@@ -229,10 +229,46 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
 /// moved to the new name on load (and the migrated document is persisted, like
 /// every other load migration) so the file converges and never has to be
 /// understood twice.
-const FOLDED_KEY_ACTIONS: &[(&str, &str)] = &[
-    ("exit_interactive", "toggle_fullscreen"),
-    ("delete_terminal", "close_terminal"),
+const FOLDED_KEY_ACTIONS: &[FoldedKeyAction] = &[
+    FoldedKeyAction {
+        legacy: "exit_interactive",
+        current: "toggle_fullscreen",
+        relation: "is now part of",
+        does: "toggles the agent pane fullscreen in both directions",
+    },
+    FoldedKeyAction {
+        legacy: "delete_terminal",
+        current: "close_terminal",
+        relation: "is now called",
+        does: "closes the selected terminal",
+    },
 ];
+
+impl FoldedKeyAction {
+    /// What the load log says when the legacy row is moved, value and all.
+    fn rename_sentence(&self) -> String {
+        let Self {
+            legacy,
+            current,
+            relation,
+            does,
+        } = self;
+        format!(
+            "[keys] \"{legacy}\" {relation} \"{current}\"; renamed your binding to \
+             \"{current}\", which {does}"
+        )
+    }
+}
+
+/// One folded `[keys]` action, with the words the load log uses for it.
+struct FoldedKeyAction {
+    legacy: &'static str,
+    current: &'static str,
+    /// How the old name relates to the new one, in a sentence.
+    relation: &'static str,
+    /// What the surviving action does, for the rename's log line.
+    does: &'static str,
+}
 
 /// Read a `[keys]` value as a list of key strings. `None` for any other shape,
 /// which is left for `validate_keys` to report in its own words.
@@ -257,7 +293,13 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
         return false;
     };
     let mut changed = false;
-    for (legacy, current) in FOLDED_KEY_ACTIONS {
+    for fold in FOLDED_KEY_ACTIONS {
+        let FoldedKeyAction {
+            legacy,
+            current,
+            relation,
+            ..
+        } = fold;
         let Some(legacy_item) = keys.remove(legacy) else {
             continue;
         };
@@ -271,7 +313,7 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
         // nothing else happens.
         if legacy_keys.as_ref().is_some_and(Vec::is_empty) {
             dux_core::logger::info(&format!(
-                "[keys] \"{legacy}\" is now part of \"{current}\"; dropped the empty legacy row \
+                "[keys] \"{legacy}\" {relation} \"{current}\"; dropped the empty legacy row \
                  and left \"{current}\" alone"
             ));
             continue;
@@ -296,7 +338,7 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
                 }
                 keys[current] = toml_edit::value(array);
                 dux_core::logger::info(&format!(
-                    "[keys] \"{legacy}\" is now part of \"{current}\"; merged its keys in, \
+                    "[keys] \"{legacy}\" {relation} \"{current}\"; merged its keys in, \
                      leaving {current} = {merged:?}"
                 ));
             }
@@ -305,10 +347,13 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
             // rather than silently vanishing here.
             (_, None) if !keys.contains_key(current) => {
                 keys.insert(current, legacy_item);
-                dux_core::logger::info(&format!(
-                    "[keys] \"{legacy}\" is now part of \"{current}\"; renamed your binding to \
-                     \"{current}\", which toggles the agent pane fullscreen in both directions"
-                ));
+                dux_core::logger::info(
+                    &FOLDED_KEY_ACTIONS
+                        .iter()
+                        .find(|fold| fold.legacy == *legacy)
+                        .map(FoldedKeyAction::rename_sentence)
+                        .unwrap_or_default(),
+                );
             }
             // The new name is present but is not a key list (or the legacy value
             // is not one). Keep what the user wrote under the surviving name and
@@ -316,7 +361,7 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
             // invent a binding nobody asked for.
             _ => {
                 dux_core::logger::warn(&format!(
-                    "[keys] \"{legacy}\" is now part of \"{current}\"; dropped the legacy row \
+                    "[keys] \"{legacy}\" {relation} \"{current}\"; dropped the legacy row \
                      because it could not be merged into the \"{current}\" value already there"
                 ));
             }
@@ -2069,7 +2114,7 @@ fn is_key_action(name: &str) -> bool {
         .iter()
         .any(|def| def.action.config_name() == name)
         || RETIRED_KEY_ACTIONS.contains(&name)
-        || FOLDED_KEY_ACTIONS.iter().any(|(legacy, _)| *legacy == name)
+        || FOLDED_KEY_ACTIONS.iter().any(|fold| fold.legacy == name)
 }
 
 /// The `[keys]` the terminal UI runs with for a whole config file, by its
@@ -5375,6 +5420,20 @@ mod legacy_exit_interactive_tests {
         assert!(
             saved.contains("# A comment the user wrote themselves."),
             "the rewrite must preserve user comments:\n{saved}"
+        );
+    }
+
+    /// Each folded row's log line names its own action and what it does.
+    #[test]
+    fn a_renamed_close_terminal_row_logs_its_own_sentence() {
+        let fold = FOLDED_KEY_ACTIONS
+            .iter()
+            .find(|fold| fold.legacy == "delete_terminal")
+            .expect("the close action's old name folds");
+        assert_eq!(
+            fold.rename_sentence(),
+            "[keys] \"delete_terminal\" is now called \"close_terminal\"; renamed your binding \
+             to \"close_terminal\", which closes the selected terminal"
         );
     }
 

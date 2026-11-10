@@ -5168,14 +5168,14 @@ impl App {
 
         if active_terminal_killed {
             self.active_terminal_id = None;
-            if self.session_surface == SessionSurface::Terminal {
+            if self.focused_surface() == SessionSurface::Terminal {
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 self.session_surface = SessionSurface::Agent;
             }
         }
 
-        if selected_agent_killed && self.session_surface == SessionSurface::Agent {
+        if selected_agent_killed && self.focused_surface() == SessionSurface::Agent {
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.focus = FocusPane::Left;

@@ -580,10 +580,7 @@ impl App {
     /// against the registry: a flagged claim, which an unowned pty grants
     /// outright and an owned one transfers. Only the sentence differs.
     pub(crate) fn take_over_focused_pty(&mut self) {
-        let Some(card) = self.focused_pty_takeover_card() else {
-            return;
-        };
-        let Some(pty_id) = self.selected_terminal_surface_id() else {
+        let Some((card, pty_id)) = self.covering_card() else {
             return;
         };
         let row = self.engine.pty_row(&pty_id);
@@ -2662,6 +2659,49 @@ mod tests {
             app.focused_pty_takeover_card().is_none(),
             "the row is this surface's"
         );
+    }
+
+    /// With the agent part focused on a dormant tab, the row is still taken
+    /// over through the docked terminal's pty, and neither Space nor the focus
+    /// key reaches the covered agent part to launch the dormant tab.
+    #[test]
+    fn the_card_takes_the_row_over_through_any_drawn_part() {
+        let (mut app, _seat, _terminal) = a_browser_driving_a_docked_row();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.agent_tabs.insert(
+            TabId::new("dormant-tab"),
+            dux_core::model::AgentTab {
+                id: "dormant-tab".to_string(),
+                session_id: session_id.clone(),
+                provider: dux_core::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.set_focused_tab(&session_id, "dormant-tab");
+        app.session_surface = SessionSurface::Agent;
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.card_covers_center());
+
+        for key in [
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            app.pending_pty_takeover = None;
+            app.handle_key(key).unwrap();
+            assert_eq!(
+                app.pending_pty_takeover,
+                Some(app.engine.pty_row("session-1-slot")),
+                "{key:?} presses the card's button"
+            );
+            assert!(
+                !app.engine
+                    .providers
+                    .contains_key(TabIdRef::new("dormant-tab"))
+                    && !app.tui_launched_ptys.contains("dormant-tab"),
+                "{key:?} launched the dormant tab under the card"
+            );
+        }
     }
 
     /// The intent is spent by a resize of the DOCK's pty just as by the

@@ -7339,7 +7339,7 @@ impl App {
     /// searching name first then text content.
     /// If `query` is empty, returns all surface-matching macros in config order.
     pub(crate) fn filtered_macros(&self, query: &str) -> Vec<(&str, &str)> {
-        let surface = self.session_surface;
+        let surface = self.focused_surface();
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return self
@@ -7632,7 +7632,7 @@ impl App {
         if let Some(row) = self.selected_terminal_row() {
             return Some(row);
         }
-        (self.focus == FocusPane::Center && self.session_surface == SessionSurface::Terminal)
+        (self.focus == FocusPane::Center && self.focused_surface() == SessionSurface::Terminal)
             .then(|| self.selected_terminal_surface_id())
             .flatten()
     }
@@ -8650,10 +8650,19 @@ impl App {
         if let Some(active) = self.active_terminal_id.clone() {
             self.dock_active.insert(session_id, active);
         }
-        let surface = match self.selected_dock_layout() {
-            DockLayout::Agent => SessionSurface::Agent,
-            DockLayout::Term => SessionSurface::Terminal,
-            DockLayout::Split => self.session_surface,
+        // The part being typed into or shown fullscreen keeps the keyboard,
+        // whatever the layout draws around it: the pane focus is brought in
+        // step with it rather than moved off it.
+        let surface = if self.input_target != InputTarget::None
+            || self.fullscreen_overlay != FullscreenOverlay::None
+        {
+            self.focused_surface()
+        } else {
+            match self.selected_dock_layout() {
+                DockLayout::Agent => SessionSurface::Agent,
+                DockLayout::Term => SessionSurface::Terminal,
+                DockLayout::Split => self.session_surface,
+            }
         };
         if self.session_surface != surface {
             self.session_surface = surface;
@@ -8776,7 +8785,7 @@ impl App {
     /// surface. Agents resolve it from their provider config; companion
     /// terminals have no provider config, so they always auto-detect (`None`).
     pub(crate) fn selected_surface_forward_scroll(&self) -> Option<bool> {
-        match self.session_surface {
+        match self.focused_surface() {
             SessionSurface::Agent => {
                 let session = self.selected_session()?;
                 let provider = self.focused_tab_provider(session);
@@ -8801,6 +8810,13 @@ impl App {
                 SessionSurface::Terminal => CenterPart::Dock,
             },
         }
+    }
+
+    /// Which kind of terminal the part with the keyboard draws. Every reader
+    /// asks this rather than the pane focus, which the part being typed into
+    /// or shown fullscreen outranks.
+    pub(crate) fn focused_surface(&self) -> SessionSurface {
+        Self::part_surface(self.focused_part())
     }
 
     /// Which kind of terminal `part` draws.

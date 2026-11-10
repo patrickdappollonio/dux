@@ -67,7 +67,7 @@ impl App {
     /// Whether the dock of the selected agent has focus.
     pub(crate) fn dock_has_focus(&self) -> bool {
         self.focus == FocusPane::Center
-            && self.session_surface == SessionSurface::Terminal
+            && self.focused_surface() == SessionSurface::Terminal
             && self.selected_terminal_row().is_none()
             && self.selected_session().is_some()
             && self.layout_parts().contains(&CenterPart::Dock)
@@ -81,6 +81,9 @@ impl App {
             && self.selected_agent_running();
         if running {
             self.dock_layouts.insert(session_id.to_string(), layout);
+            // A layout held while the agent's terminal had the keyboard is
+            // replaced by the one asked for now.
+            self.stopped_layout = None;
         } else {
             self.stopped_layout = Some((session_id.to_string(), layout));
         }
@@ -355,13 +358,28 @@ impl App {
     /// fullscreen view or a terminal's row shows, or over any part of an
     /// agent's stack, which all belong to one row with one driver.
     pub(crate) fn card_covers_center(&self) -> bool {
-        if self.drawing_agent_stack() {
-            return self
-                .layout_parts()
-                .into_iter()
-                .any(|part| self.part_takeover_card(part).is_some());
-        }
-        self.focused_pty_is_covered_by_card()
+        self.covering_card().is_some()
+    }
+
+    /// The take-over card over the center pane and a pty of the row it
+    /// covers. Over an agent's stack that is any drawn part with a pty, so a
+    /// dormant tab in the focused part does not leave the row unclaimable.
+    pub(crate) fn covering_card(
+        &self,
+    ) -> Option<(crate::app::pty_ownership::PtyTakeoverCard, String)> {
+        let shows_stack = matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+            && matches!(self.center_mode, super::CenterMode::Agent)
+            && self.selected_terminal_row().is_none()
+            && self.selected_session().is_some();
+        let parts = if shows_stack {
+            self.layout_parts()
+        } else {
+            vec![self.focused_part()]
+        };
+        parts.into_iter().find_map(|part| {
+            let card = self.part_takeover_card(part)?;
+            Some((card, self.part_pty_id(part)?))
+        })
     }
 
     /// The card over the stack, when the row is not this surface's: one card
@@ -1624,5 +1642,59 @@ mod tests {
         app.focus = FocusPane::Left;
         let cell = marker_cell(&draw(&mut app)).expect("still on screen");
         assert_eq!(cell.fg, ratatui::style::Color::Reset, "full colour again");
+    }
+
+    /// The scroll-forwarding policy is the part with the keyboard's: the
+    /// agent's provider setting while the agent is typed into, the terminal's
+    /// automatic one while the dock is, whatever the pane focus says.
+    #[test]
+    fn the_forward_scroll_policy_follows_the_part_with_the_keyboard() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        let session = app.engine.sessions[0].clone();
+        let provider = app.focused_tab_provider(&session).as_str().to_string();
+        app.engine
+            .config
+            .providers
+            .commands
+            .entry(provider)
+            .or_default()
+            .forward_scroll = Some(true);
+        app.session_surface = SessionSurface::Terminal;
+        assert_eq!(app.selected_surface_forward_scroll(), None);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        assert_eq!(app.selected_surface_forward_scroll(), Some(true));
+    }
+
+    /// A layout held while the agent's terminal had the keyboard gives way at
+    /// once to a layout asked for by the control or the key.
+    #[test]
+    fn asking_for_a_layout_replaces_a_held_one() {
+        let mut app = app_with_a_dock(1, Agent::Stopped);
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        app.engine.providers.insert(TabId::new(slot), sleeper());
+        app.reconcile_center_target();
+        assert_eq!(app.selected_dock_layout(), DockLayout::Term, "held");
+        app.set_dock_layout(&session_id, DockLayout::Split);
+        assert_eq!(app.selected_dock_layout(), DockLayout::Split);
+        app.reconcile_center_target();
+        assert_eq!(app.selected_dock_layout(), DockLayout::Split);
+    }
+
+    /// Fullscreen on the agent from the sidebar, with its terminal shown alone,
+    /// keeps the keyboard on the agent frame after frame.
+    #[test]
+    fn the_agent_typed_into_from_a_terminal_only_layout_keeps_the_keyboard() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        let session_id = app.engine.sessions[0].id.clone();
+        app.set_dock_layout(&session_id, DockLayout::Term);
+        app.focus = FocusPane::Left;
+        app.handle_key(key(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        draw(&mut app);
+        draw(&mut app);
+        assert_eq!(app.session_surface, SessionSurface::Agent);
+        assert_eq!(app.focused_surface(), SessionSurface::Agent);
     }
 }
