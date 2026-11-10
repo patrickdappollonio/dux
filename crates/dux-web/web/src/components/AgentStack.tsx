@@ -35,6 +35,7 @@ import {
 } from "@/lib/paneDivider"
 import {
   chooseStackPart,
+  holdStoppedAgent,
   setStackLayout,
   settleStackOpening,
 } from "@/lib/store"
@@ -93,6 +94,24 @@ export function AgentStack({
     if (opening !== null) settleStackOpening(sessionId, opening)
   }, [sessionId, opening])
 
+  // One answer for where typing goes. When the part the store names is folded
+  // away or has no live terminal, the stack routes typing to a part on screen,
+  // and the store is told the same, so the header's Macros, the top menu, the
+  // theater pill and the shell's cover read all act on that part too.
+  const { chosenPtyId, typingPtyId } = model
+  useLayoutEffect(() => {
+    if (typingPtyId !== null && typingPtyId !== chosenPtyId) {
+      chooseStackPart(sessionId, typingPtyId)
+    }
+  }, [sessionId, chosenPtyId, typingPtyId])
+
+  // A stopped agent beside its running terminals rests on its idle screen while
+  // it stays selected, so the last terminal ending does not start it.
+  const stoppedSlot = model.agentStopped ? model.slotTabId : null
+  useLayoutEffect(() => {
+    if (stoppedSlot !== null) holdStoppedAgent(sessionId, stoppedSlot)
+  }, [sessionId, stoppedSlot])
+
   const onLayoutAction = (action: LayoutAction) =>
     setStackLayout(sessionId, applyLayoutAction(layout, action))
 
@@ -130,28 +149,6 @@ export function AgentStack({
     />
   )
 
-  // A dormant tab with no terminal beside it gets the full card, painted
-  // in the column with no pane, so its overlay rides the column itself.
-  if (!hasDock && !on.agentLiveSocket) {
-    return (
-      <div className="relative flex h-full min-h-0 flex-col">
-        <TheaterChrome hidden={theater}>{agentHeader}</TheaterChrome>
-        <div className="relative min-h-0 flex-1 overflow-hidden">
-          {model.tab ? (
-            <DormantTabSurface
-              sessionId={sessionId}
-              tabId={model.tab.id}
-              provider={model.tab.provider}
-              lastRunFailed={model.tab.last_run_failed === true}
-              lastRunVerdict={model.tab.last_run_verdict}
-            />
-          ) : null}
-          {overlay}
-        </div>
-      </div>
-    )
-  }
-
   const stackParts: StackPartSpec[] = []
   if (on.agentLiveSocket) {
     stackParts.push({
@@ -176,10 +173,20 @@ export function AgentStack({
     })
   }
   // Only on screen: a card has no connection to keep alive while folded away.
-  const agentCard =
-    model.tab && !on.agentLiveSocket && on.agent ? (
-      <StoppedAgentShortCard sessionId={sessionId} tab={model.tab} />
-    ) : null
+  // A stopped agent's first tab beside its dock gets the short card; any other
+  // dormant tab keeps its own card, whose Start is about that tab alone.
+  const showCard = model.tab !== undefined && on.agent && model.agentCard !== null
+  const agentCard = !showCard || model.tab === undefined ? null : model.agentCard === "short" ? (
+    <StoppedAgentShortCard sessionId={sessionId} tab={model.tab} />
+  ) : (
+    <DormantTabSurface
+      sessionId={sessionId}
+      tabId={model.tab.id}
+      provider={model.tab.provider}
+      lastRunFailed={model.tab.last_run_failed === true}
+      lastRunVerdict={model.tab.last_run_verdict}
+    />
+  )
 
   return (
     <ChunkBoundary>

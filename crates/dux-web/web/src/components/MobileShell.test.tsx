@@ -776,6 +776,16 @@ describe("MobileShell dormant first tab", () => {
     render(<MobileShell />)
     expect(screen.getByText("Start session")).toBeTruthy()
   })
+
+  it("shows the card, starting nothing, while one of the agent's terminals runs", () => {
+    const state = dormantState(false)
+    ;(state.spine as unknown as { terminals: unknown[] }).terminals = [
+      { id: "t1", owner: { kind: "session", session_id: "s1" }, label: "Terminal 1" },
+    ]
+    mockState = state
+    render(<MobileShell />)
+    expect(screen.getByText("Start session")).toBeTruthy()
+  })
 })
 
 // The in-app Back chevrons and the not-found screen's way out are UP controls,

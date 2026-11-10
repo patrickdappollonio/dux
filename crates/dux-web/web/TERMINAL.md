@@ -1973,6 +1973,11 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     part. Fix: `TerminalStack`/`TerminalPart` in `TerminalStack.tsx`; on a computer the
     target is the store's (`selectedTarget`, moved by `chooseStackPart` with a REPLACE,
     never a push, because focus moving between the parts on screen is not a position).
+    The store's target and the stack's are ONE answer: when the part the store names
+    is folded away or has no live terminal (a layout button, a fold, Back, a stopped
+    agent opened from its row), the agent's screen hands the stack's fallback back to
+    the store, so Macros, the top menu, the pill and the shell's cover read the part
+    on screen (`stackTypingTarget` in `layoutModel.ts`, used by both).
     Pinned:
     `components/TerminalPane.test.tsx` "TerminalStack with two parts" and "the stack's
     overlay layer over a lone terminal" (among them "sends a Send's Enter to the part
@@ -2027,8 +2032,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     terminal to a sliver. The stack always renders one panel group (the dock's panel
     and divider are added when the first terminal arrives, the agent's panel stays
     put); the folded part's box is placed under its panel's edge at its split height
-    in container units and clipped there. A dormant agent with NO terminal has no part
-    to keep in place, so it shows its full card in the column with no stack at all. Fix: `StackSplit` and
+    in container units and clipped there. A dormant tab's card takes the agent's slot
+    in the same tree, so switching between a live tab and a dormant one never
+    remounts the tab strip above it, whose working pill's bounce is user-locked. Fix: `StackSplit` and
     `PartBox` in `src/components/AgentStack.tsx`, `panelSizes` in
     `agentStackLayout.ts`. Pinned: `components/TerminalArea.test.tsx` "lays out the …
     layout with both strips kept" (both parts mounted in every layout).

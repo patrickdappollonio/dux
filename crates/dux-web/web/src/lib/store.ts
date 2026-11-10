@@ -804,6 +804,8 @@ export interface DuxState {
   // The dock terminal last in front, per agent. Mirrored into this device's
   // stack memory, so a reload keeps it while the terminal lives.
   stackTerminals: Record<string, string>
+  // The provider tab this page last showed on top of each agent's stack.
+  stackTabs: Record<string, string>
   // Optimistic overlay for project and standalone terminals' places in the
   // agents list, keyed by terminal id: the agent each row now sits after (null
   // for the top), each dropped once the spine shows it (see
@@ -1245,6 +1247,7 @@ let state: DuxState = {
   pendingTerminalOrder: null,
   stackLayouts: {},
   stackTerminals: {},
+  stackTabs: {},
   pendingTerminalPlacement: {},
   pendingTabOrder: {},
   pendingSlotTab: {},
@@ -1312,11 +1315,23 @@ function setState(patch: Partial<DuxState>): void {
     }
     if (!("routeNotFound" in patch)) next.routeNotFound = null
     const target = patch.selectedTarget
+    // A tab resting on its idle screen stays resting while typing moves to its
+    // own agent's dock and back: neither is asking for the tab again.
+    const sameStack =
+      target?.kind === "terminal" &&
+      target.owner.kind === "session" &&
+      target.owner.sessionId === state.selectedSessionId
     if (
       !("endedInViewTab" in patch) &&
+      !sameStack &&
       (target?.kind !== "agent" || target.tabId !== state.endedInViewTab)
     ) {
       next.endedInViewTab = null
+    }
+    // The tab this page last showed for an agent, which stays on top of its
+    // stack while typing goes to the dock.
+    if (target?.kind === "agent" && state.stackTabs[target.sessionId] !== target.tabId) {
+      next.stackTabs = { ...next.stackTabs, [target.sessionId]: target.tabId }
     }
   }
   state = next
@@ -2210,6 +2225,7 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
   // vanished agent picks its replacement from this ordering (see
   // `navigateAfterVanish`), since the new list no longer holds its position.
   const previousSessions = state.spine?.sessions ?? []
+  const previousTerminals = state.spine?.terminals ?? []
   // Retire the "explicitly started" latch for any tab whose launch has been
   // answered, either way: the process is up, or the run is recorded as failed.
   // Dropping it on liveness lets a later exit re-show the card, and dropping it
@@ -2261,7 +2277,7 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
   // why, and on either surface the editor prune would silently delete the
   // tabs a dirty hold exists to protect.
   if (!endOpenEditorIfRootGone(spine)) {
-    pruneSelectionIfGone(spine, previousSessions)
+    pruneSelectionIfGone(spine, previousSessions, previousTerminals)
     pruneEditorStateIfGone(spine)
   }
   // Re-restore a reconnect deep-link once its agent is present and back to
@@ -2462,7 +2478,11 @@ function isSlotTabOf(sessionId: string, tabId: string): boolean {
 // outright when their PTY exits. `previous` is the session list from the spine
 // before this one, which is what gives the gone agent a position to pick a
 // neighbour from.
-function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
+function pruneSelectionIfGone(
+  spine: Spine,
+  previous: SessionView[],
+  previousTerminals: readonly TerminalView[],
+): void {
   const target = state.selectedTarget
   if (!target) return
   if (target.kind === "agent") {
@@ -2510,6 +2530,19 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
   // in hand, so nothing here knows how each owner kind nests.
   const owner = target.owner
   const stillExists = ownerHasTerminal(spine.terminals, owner, target.terminalId)
+  const dockSession = owner.kind === "session" ? owner.sessionId : null
+  if (!stillExists && dockSession !== null && spine.sessions.some((s) => s.id === dockSession)) {
+    // Like a browser tab: the terminal on screen ending shows its neighbour in
+    // the dock, the one to its right or else the one to its left, and with
+    // none left the agent alone.
+    const neighbour = dockNeighbour(previousTerminals, spine.terminals, dockSession, target.terminalId)
+    if (neighbour !== null) {
+      selectTerminal(neighbour, owner, { urlMode: "replace" })
+      return
+    }
+    fallBackTo(() => showAgentAfterDock(spine, dockSession))
+    return
+  }
   if (!stillExists) {
     // A terminal that exited has no "next terminal" worth guessing at, so the
     // destination is one level up: the owning agent, or home when there is
@@ -5089,12 +5122,64 @@ export function chooseStackPart(sessionId: string, ptyId: string): void {
   syncUrl("replace")
 }
 
+// An agent stopped while its terminals run was stopped on purpose, so it rests
+// on its idle screen for as long as it stays selected: its last terminal ending
+// under the user must not turn its first tab into one that starts on sight.
+export function holdStoppedAgent(sessionId: string, slotTabId: string): void {
+  if (state.selectedSessionId !== sessionId) return
+  if (state.endedInViewTab === slotTabId) return
+  setState({ endedInViewTab: slotTabId })
+}
+
 // The Start on a stopped agent's band or its short card: start its first tab,
 // and put the stack back in the layout this device last chose for it, or the
 // split.
 export function startStoppedAgent(sessionId: string, tabId: string): void {
   setStackLayout(sessionId, layoutOnStart(readStackMemory(sessionId).layout))
   startDormantTab(sessionId, tabId)
+}
+
+// The terminal beside a closed one in an agent's dock, read off the dock as it
+// stood before the close: the one to its right, else the one to its left, as
+// long as it is still there.
+function dockNeighbour(
+  before: readonly TerminalView[],
+  now: readonly TerminalView[],
+  sessionId: string,
+  closedId: string,
+): string | null {
+  const own = (list: readonly TerminalView[]) =>
+    list
+      .filter((t) => t.owner.kind === "session" && t.owner.session_id === sessionId)
+      .slice()
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .map((t) => t.id)
+  const order = own(before)
+  const alive = new Set(own(now))
+  const at = order.indexOf(closedId)
+  if (at === -1) return null
+  for (const id of [...order.slice(at + 1), ...order.slice(0, at).reverse()]) {
+    if (alive.has(id)) return id
+  }
+  return null
+}
+
+// The agent alone once its dock has emptied under the user: the tab this page
+// last showed, resting on its idle screen if the agent is stopped, because the
+// agent was stopped on purpose and only its Start may start it again.
+function showAgentAfterDock(spine: Spine, sessionId: string): void {
+  const session = spine.sessions.find((s) => s.id === sessionId)
+  if (session === undefined) return
+  const shown = state.stackTabs[sessionId]
+  const tabId =
+    shown !== undefined && session.tabs.some((t) => t.id === shown)
+      ? shown
+      : session.slot_tab_id
+  selectTab(sessionId, tabId, {
+    urlMode: "replace",
+    persist: false,
+    extra: session.status === "active" ? {} : { endedInViewTab: session.slot_tab_id },
+  })
 }
 
 // Spawn a new companion terminal for a session via REST. The 201 reply

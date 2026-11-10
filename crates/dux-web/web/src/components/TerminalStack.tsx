@@ -12,6 +12,7 @@ import {
 import { createPortal } from "react-dom"
 import { outsideGate } from "@/lib/gateLayer"
 import { inactiveCursorStyle } from "@/lib/composebar"
+import { stackTypingTarget } from "@/lib/layoutModel"
 import { slotTabEndedInView } from "@/lib/agentTabs"
 import { noteTheaterOwnershipLost, settleSlotTabExit } from "@/lib/store"
 import type { TerminalOwnerRef } from "@/lib/store"
@@ -79,17 +80,6 @@ type StackContextValue = {
 }
 
 const StackContext = createContext<StackContextValue | null>(null)
-
-/// The part typing goes to: the one chosen, while it is still a part of the
-/// stack and on screen, else the first part on screen, else the first part.
-function stackTypingTarget(
-  parts: readonly Pick<TerminalPartProps, "id" | "onScreen">[],
-  chosen: string | null,
-): string | null {
-  const onScreen = parts.filter((part) => part.onScreen !== false)
-  if (chosen !== null && onScreen.some((part) => part.id === chosen)) return chosen
-  return onScreen[0]?.id ?? parts[0]?.id ?? null
-}
 
 /// A part as the stack is handed it: its props, and the slot it is laid out
 /// in. The slot keys the part's component, so a part whose sibling comes or

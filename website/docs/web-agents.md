@@ -291,7 +291,8 @@ These entries are about a branch dux manages, so a standalone agent does not get
 An agent can run more than one provider session in its single shared worktree, as **tabs**.
 With two or more (or two or more [docked terminals](/docs/web-workspace#the-terminal-dock)),
 a strip of pills appears atop the terminal, each a live provider session against the same
-files. With the strip hidden, the floating pill's **+** adds a tab on the default provider.
+files. With the strip hidden, the floating pill's **+** opens a small dialog that adds
+a tab on the default provider or a new terminal.
 
 - **Add** one with the split **+** button: the main button uses the project's default
   provider, the caret lets you pick.

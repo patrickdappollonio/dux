@@ -5420,6 +5420,7 @@ describe("a promoted-away slot tab hands its pane over", () => {
       pendingSlotTab: {},
       stackLayouts: {},
       stackTerminals: {},
+      stackTabs: {},
       pendingTerminalOrder: null,
       theater: false,
     } as unknown as DuxState

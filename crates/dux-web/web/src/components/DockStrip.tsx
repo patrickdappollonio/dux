@@ -24,9 +24,10 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
-// The strip's icon buttons: the tab strip's own, at one height token.
+// The strip's icon buttons: the tab strip's own, at one height token, lifted to
+// the 40px floor under a finger, where Hide and Maximize sit side by side.
 const STRIP_ICON_BUTTON =
-  "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+  "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-10"
 
 // An agent's terminal dock strip: one pill per terminal of the agent, in the
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
@@ -159,7 +160,9 @@ function DockPill({
                 type="button"
                 aria-label="Terminal actions"
                 onClick={(e) => e.stopPropagation()}
-                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                // The touch floor under a finger: its neighbours are the next
+                // pill and its own pill's select.
+                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground pointer-coarse:size-10"
               />
             }
           >

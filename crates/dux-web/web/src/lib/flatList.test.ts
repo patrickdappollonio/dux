@@ -14,6 +14,8 @@ import {
   stateWord,
   type FlatRow,
   type FlatSortKey,
+  inInactiveTail,
+  isQuietSession,
 } from "@/lib/flatList"
 import type { SessionView, TerminalView } from "@/lib/types"
 
@@ -407,5 +409,17 @@ describe("stateWord", () => {
       stateWord(makeSession({ id: "a", status: "exited", typing: true, working: true }))
         .label,
     ).toBe("Exited")
+  })
+})
+
+// Two questions about a stopped agent with a terminal of its own still running:
+// the list keeps it out of the Inactive tail, while the agent alone is still
+// inactive, which is what the pull-request poller's slow clock goes by.
+describe("a stopped agent whose terminal still runs", () => {
+  const stopped = { status: "detached" } as SessionView
+  it("stays out of the tail and is still inactive by itself", () => {
+    expect(inInactiveTail(stopped, true)).toBe(false)
+    expect(inInactiveTail(stopped, false)).toBe(true)
+    expect(isQuietSession(stopped)).toBe(true)
   })
 })

@@ -647,6 +647,44 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(index).toBe(depth)
   })
 
+  it("shows the dock terminal to the right of the one that closed, else the one to its left", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t2", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2", "t3"] },
+    ])
+    const depth = index
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1", "t3"] }])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t3" })
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+    expect(index).toBe(depth)
+  })
+
+  it("leaves a stopped agent resting, not starting, when its last terminal closes under the user", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t1", [
+      { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
+    ])
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", status: "detached" }])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1-slot",
+    })
+    expect(mod.getSnapshot().endedInViewTab).toBe("s1-slot")
+  })
+
+  it("pushes for a dock terminal brought to the front, and only rewrites for typing moving between parts", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2"] },
+    ])
+    const depth = index
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    expect(index).toBe(depth + 1)
+    mod.chooseStackPart("s1", "s1-slot")
+    expect(index).toBe(depth + 1)
+    expect(loc.hash).toBe("#/agent/s1")
+  })
+
   it("goes home when a PROJECT terminal closes under the user", async () => {
     // A project terminal has no agent above it, so home is the only honest
     // destination.

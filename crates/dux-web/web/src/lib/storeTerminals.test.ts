@@ -574,6 +574,56 @@ describe("store agent stack", () => {
     expect(replaceState).toHaveBeenCalled()
   })
 
+  it("pushes for a new terminal, which is a new position", async () => {
+    withSessionStatus("active", [companion("t1", 1)])
+    const pushState = vi.fn()
+    vi.stubGlobal("history", { go: () => {}, pushState, replaceState: vi.fn(), state: null })
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const before = pushState.mock.calls.length
+    mod.createTerminal("s1")
+    await vi.waitFor(() => expect(pushState.mock.calls.length).toBe(before + 1))
+  })
+
+  it("leaves the list's sort mode alone when the dock is reordered", async () => {
+    withSessionStatus("active", [companion("t1", 1), companion("t2", 2)])
+    const mod = await loadStore()
+    const sortBefore = mod.agentSortValue(mod.getSnapshot())
+    mod.reorderDock("s1", ["t2", "t1"])
+    await tick()
+    expect(mod.agentSortValue(mod.getSnapshot())).toBe(sortBefore)
+    expect(calls.some(([u]) => u.includes("/config"))).toBe(false)
+  })
+
+  it("puts a started agent back in the layout this device last chose, or the split", async () => {
+    withSessionStatus("detached", [companion("t1", 1)])
+    const mem = new Map<string, string>([["dux:stack:s1", JSON.stringify({ layout: "agent" })]])
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k),
+    })
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    mod.startStoppedAgent("s1", "s1")
+    expect(mod.getSnapshot().stackLayouts.s1).toBe("agent")
+    mem.clear()
+    mod.startStoppedAgent("s1", "s1")
+    expect(mod.getSnapshot().stackLayouts.s1).toBe("split")
+  })
+
+  it("keeps the tab shown and its resting state while typing moves to the dock", async () => {
+    withSessionStatus("detached", [companion("t1", 1)])
+    const mod = await loadStore()
+    mod.selectSession("s1")
+    const slot = mod.getSnapshot().spine!.sessions[0].slot_tab_id
+    mod.holdStoppedAgent("s1", slot)
+    mod.chooseStackPart("s1", "t1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    expect(mod.getSnapshot().endedInViewTab).toBe(slot)
+    expect(mod.getSnapshot().stackTabs.s1).toBe(slot)
+  })
+
   it("reorders one dock among the places its terminals hold, leaving every other terminal put", async () => {
     withSessionStatus("active", [
       companion("t1", 1),

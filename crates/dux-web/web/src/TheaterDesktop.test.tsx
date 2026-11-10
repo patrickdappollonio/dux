@@ -156,6 +156,7 @@ function makeState(
     createTabInFlight: [],
     stackLayouts: {},
     stackTerminals: {},
+    stackTabs: {},
     pendingTerminalOrder: null,
     pendingTabOrder: {},
     mobileScreen: "terminal",

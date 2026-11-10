@@ -132,6 +132,7 @@ function makeState(theater: boolean): DuxState {
     createTabInFlight: [],
     stackLayouts: {},
     stackTerminals: {},
+    stackTabs: {},
     pendingTerminalOrder: null,
     mobileScreen: "terminal",
     changes: { bySession: {} },

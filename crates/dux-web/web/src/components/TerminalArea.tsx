@@ -197,6 +197,7 @@ export function TerminalArea() {
     routeNotFound,
     stackLayouts,
     stackTerminals,
+    stackTabs,
     pendingTerminalOrder,
   } = useDux()
   const [prCursors, setPrCursors] = useState<PrCursors>({})
@@ -268,6 +269,7 @@ export function TerminalArea() {
           terminals: spine?.terminals ?? [],
           stackLayouts,
           stackTerminals,
+          stackTabs,
           memory: readStackMemory(stackSession.id),
           startedDormantTabs,
           pendingSlotTab,

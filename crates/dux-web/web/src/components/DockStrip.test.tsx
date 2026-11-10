@@ -117,6 +117,13 @@ describe("DockStrip", () => {
     expect(selectTerminalMock).not.toHaveBeenCalled()
   })
 
+  it("lifts every control on the strip to the touch floor under a finger", () => {
+    render(strip([terminal("t1", 1)]))
+    for (const label of ["New terminal", "Hide terminals", "Maximize terminal", "Terminal actions"]) {
+      expect(screen.getByLabelText(label).className, label).toContain("pointer-coarse:size-10")
+    }
+  })
+
   it("opens another terminal from its +", () => {
     render(strip([terminal("t1", 1)]))
     fireEvent.click(screen.getByLabelText("New terminal"))

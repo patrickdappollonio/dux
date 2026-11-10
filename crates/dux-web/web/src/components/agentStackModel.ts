@@ -1,12 +1,9 @@
-import {
-  dormantTabNeedsCard,
-  resolveFocusedTab,
-  slotTabIdOf,
-} from "@/lib/agentTabs"
+import { dormantTabNeedsCard, slotTabIdOf } from "@/lib/agentTabs"
 import {
   partsOnScreen,
   resolveStackOpening,
   shouldShowStackStrips,
+  stackTypingTarget,
   type AgentTabState,
   type ComputerLayout,
   type StackParts,
@@ -36,8 +33,14 @@ export interface AgentStackModel {
   openingToSettle: ComputerLayout | null
   agentTab: AgentTabState
   parts: StackParts
-  /** The pty typing goes to: the agent's tab, or the dock terminal in front. */
-  typingPtyId: string
+  /** The pty the store names as the one typing goes to. */
+  chosenPtyId: string
+  /** The pty typing goes to: the chosen one while it is a part on screen, else
+   * a part that is, or null with no part at all. */
+  typingPtyId: string | null
+  /** What the agent's slot shows when it has no live part: the short card of a
+   * stopped agent beside its dock, the full card otherwise. */
+  agentCard: "short" | "full" | null
   /** Both strips show, or neither. */
   stripsShown: boolean
   /** The agent is stopped while its terminals run, so its strip gives way to a
@@ -51,6 +54,7 @@ export function agentStackModel(ctx: {
   terminals: readonly TerminalView[]
   stackLayouts: DuxState["stackLayouts"]
   stackTerminals: DuxState["stackTerminals"]
+  stackTabs: DuxState["stackTabs"]
   memory: StackMemory
   startedDormantTabs: DuxState["startedDormantTabs"]
   pendingSlotTab: DuxState["pendingSlotTab"]
@@ -68,9 +72,18 @@ export function agentStackModel(ctx: {
   const dock = ctx.pendingTerminalOrder ? reorderById(own, ctx.pendingTerminalOrder) : own
   const dockIds = dock.map((t) => t.id)
 
-  const tabId = target.kind === "agent" ? target.tabId : resolveFocusedTab(session)
-  const tab = session.tabs.find((t) => t.id === tabId)
   const slotTabId = slotTabIdOf(sessionId, session, ctx.pendingSlotTab) ?? session.slot_tab_id
+  // With typing in the dock, the agent keeps the tab this page last showed on
+  // top. The agent's shared last-focused tab is another device's answer too,
+  // and following it would swap the tab under the user.
+  const shownHere = ctx.stackTabs[sessionId]
+  const tabId =
+    target.kind === "agent"
+      ? target.tabId
+      : shownHere !== undefined && session.tabs.some((t) => t.id === shownHere)
+        ? shownHere
+        : slotTabId
+  const tab = session.tabs.find((t) => t.id === tabId)
   const terminalRunning = dock.length > 0
   const agentStopped = terminalRunning && session.status !== "active"
 
@@ -105,6 +118,12 @@ export function agentStackModel(ctx: {
       : opening.activeTerminal
 
   const parts = partsOnScreen({ surface: "computer", layout, agentTab })
+  const stackParts = [
+    ...(parts.agentLiveSocket ? [{ id: tabId, onScreen: parts.agent }] : []),
+    ...(activeTerminal !== null ? [{ id: activeTerminal, onScreen: parts.dock }] : []),
+  ]
+  const chosenPtyId =
+    target.kind === "terminal" && activeTerminal !== null ? activeTerminal : tabId
   return {
     sessionId,
     tabId,
@@ -116,8 +135,13 @@ export function agentStackModel(ctx: {
     openingToSettle: terminalRunning && recorded === undefined ? opening.layout : null,
     agentTab,
     parts,
-    typingPtyId:
-      target.kind === "terminal" && activeTerminal !== null ? activeTerminal : tabId,
+    chosenPtyId,
+    typingPtyId: stackTypingTarget(stackParts, chosenPtyId),
+    agentCard: parts.agentLiveSocket
+      ? null
+      : agentStopped && tabId === slotTabId
+        ? "short"
+        : "full",
     stripsShown: shouldShowStackStrips(session.tabs, dock.length, ctx.alwaysShowTabStrip),
     agentStopped,
   }
