@@ -258,7 +258,8 @@ describe("entering and leaving theater", () => {
     expect(mod.getSnapshot().theater).toBe(true)
     mod.chooseStackPart("s1", "t2")
     expect(mod.getSnapshot().theater).toBe(true)
-    expect(loc.hash).toBe("#/agent/s1/tab/t2/terminal/tm2?view=theater")
+    // The press into the tab moved typing back to the agent: a rewrite.
+    expect(loc.hash).toBe("#/agent/s1/tab/t2?view=theater")
     expect(pushStateMock).toHaveBeenCalledTimes(2)
   })
 
@@ -291,6 +292,31 @@ describe("entering and leaving theater", () => {
     mod.enterTheater()
     expect(mod.getSnapshot().theater).toBe(true)
     expect(loc.hash).toBe("#/agent/s1/terminal/tm1?view=theater")
+  })
+})
+
+describe("theater shows what the address is about", () => {
+  it("reopens on the agent after a reload, its terminals beside it", async () => {
+    const mod = await loadStore("#/agent/s1/tab/t2?view=theater", [
+      { id: "s1", project_id: "p1", tabs: ["t2"], terminals: ["tm1"] },
+    ])
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "t2" })
+  })
+
+  it("comes back to the agent on Back from one of its terminals", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["tm1"] },
+    ])
+    mod.selectSession("s1")
+    mod.enterTheater()
+    const agentEntry = loc.hash
+    mod.selectTerminal("tm1", { kind: "session", sessionId: "s1" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/tm1?view=theater")
+    loc.hash = agentEntry
+    windowListeners.get("popstate")?.()
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
   })
 })
 
@@ -570,7 +596,7 @@ describe("losing input ownership", () => {
     expect(store.get("dux:theater:agent:s1")).toBe("on")
   })
 
-  it("forgets the agent row's mode when a terminal of its dock is lost", async () => {
+  it("forgets the agent row's mode when the terminal theater shows is lost", async () => {
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1", terminals: ["tm1"] },
     ])
@@ -579,6 +605,17 @@ describe("losing input ownership", () => {
     mod.noteTheaterOwnershipLost("terminal", "tm1")
     expect(mod.getSnapshot().theater).toBe(false)
     expect(store.has("dux:theater:agent:s1")).toBe(false)
+  })
+
+  it("stays in theater when only the part off screen is lost", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["tm1"] },
+    ])
+    mod.selectSession("s1")
+    mod.enterTheater()
+    mod.noteTheaterOwnershipLost("terminal", "tm1")
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(store.get("dux:theater:agent:s1")).toBe("on")
   })
 })
 

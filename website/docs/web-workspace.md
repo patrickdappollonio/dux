@@ -65,7 +65,7 @@ The URL tracks what you are looking at, so you can bookmark a session or send a 
 
 - An agent is `#/agent/<sessionId>`.
 - An extra provider tab is `#/agent/<sessionId>/tab/<tabId>`.
-- An agent with terminals also names the terminal in front of its dock: `#/agent/<sessionId>/terminal/<terminalId>`, or `#/agent/<sessionId>/tab/<tabId>/terminal/<terminalId>` with an extra tab on top. A link naming a terminal opens with that terminal on screen. The layout (split or maximized) is not part of the link.
+- One of an agent's terminals is `#/agent/<sessionId>/terminal/<terminalId>`, or `#/agent/<sessionId>/tab/<tabId>/terminal/<terminalId>` with an extra tab on top of the agent. The link names the part you were typing into, and a link naming a terminal opens with that terminal on screen beside its agent. The layout (split or maximized) is not part of the link.
 - A project terminal is `#/project/<projectId>/terminal/<terminalId>`.
 - A standalone terminal is `#/terminal/<terminalId>`, with no owner in the address.
 - The phone's Changes screen is the same link with `/changes` on the end.
@@ -74,7 +74,7 @@ The URL tracks what you are looking at, so you can bookmark a session or send a 
 
 Every move to a different place adds one history entry, so Back always returns you to where you were: select three agents in turn and Back walks them in reverse. Every tab and every terminal you look at is a place of its own, like browser tabs: switch from one of an agent's tabs to another, or from one of its terminals to the next, and Back takes you to the one before.
 
-Changing the layout, or clicking from the agent into its terminal and back, adds nothing: you are still looking at the same things. Moves that stay where you already are rewrite the one entry instead:
+Changing the layout, or clicking from the agent into its terminal and back, adds nothing: the address follows the part you are typing into, rewritten in place. Closing the tab you are on adds nothing either: its step becomes the tab beside it. Moves that stay where you already are rewrite the one entry instead:
 
 - reconnecting after the wifi drops
 - following a link back to where you already were
@@ -249,7 +249,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 - On a computer both side panels leave too, the agent list and the changes list. They come back as you had them: open, collapsed to the rail, hidden, and at the widths you dragged them to.
 - Open a link that goes straight into theater and there was no layout on screen to remember, so leaving lands on your saved preferences instead.
 - Theater is the only thing that takes the top bar away, and it all comes back when you leave.
-- On an agent with terminals, theater shows only the part you are typing into, the agent or the terminal in front of its dock, with no tab strip and no dock strip. On a computer nothing inside theater switches to the other part: leave theater, pick it, and go back in. Leaving puts the split, or whichever layout you had, back.
+- On an agent with terminals, theater shows only the part you are typing into, the agent or the terminal in front of its dock, with no tab strip and no dock strip. The link says which, so a reload or Back in theater shows the same part. On a computer nothing inside theater switches to the other part: leave theater, pick it, and go back in. Leaving puts the split, or whichever layout you had, back.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 

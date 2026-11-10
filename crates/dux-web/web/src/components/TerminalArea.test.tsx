@@ -19,6 +19,8 @@ const reconcileStackPartMock = vi.fn()
 const startStoppedAgentMock = vi.fn()
 const addTabMock = vi.fn()
 const createTerminalMock = vi.fn()
+const createProjectTerminalMock = vi.fn()
+const createStandaloneTerminalMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -32,6 +34,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     startStoppedAgent: (...args: unknown[]) => startStoppedAgentMock(...args),
     addTab: (...args: unknown[]) => addTabMock(...args),
     createTerminal: (...args: unknown[]) => createTerminalMock(...args),
+    createProjectTerminal: (...args: unknown[]) => createProjectTerminalMock(...args),
+    createStandaloneTerminal: () => createStandaloneTerminalMock(),
   }
 })
 
@@ -333,6 +337,26 @@ describe("TerminalArea terminal not-found route", () => {
     expect(screen.getByText("t9")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "New terminal" }))
     expect(createTerminalMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("opens a new terminal at the project's root, or a new standalone one", () => {
+    const spine = dormantSpine()!
+    spine.projects = [{ id: "p1", name: "Repo" }] as never
+    mockState = makeState({
+      spine,
+      routeNotFound: { kind: "terminal", terminalId: "t9", owner: { kind: "project", projectId: "p1" } },
+    })
+    const { rerender } = render(<TerminalArea />)
+    fireEvent.click(screen.getByRole("button", { name: "New terminal" }))
+    expect(createProjectTerminalMock).toHaveBeenCalledWith("p1")
+
+    mockState = makeState({
+      spine,
+      routeNotFound: { kind: "terminal", terminalId: "t9", owner: { kind: "standalone" } },
+    })
+    rerender(<TerminalArea />)
+    fireEvent.click(screen.getByRole("button", { name: "New terminal" }))
+    expect(createStandaloneTerminalMock).toHaveBeenCalledTimes(1)
   })
 
   it("offers no new terminal for an owner that is gone too", () => {

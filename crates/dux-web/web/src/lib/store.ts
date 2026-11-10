@@ -2596,33 +2596,27 @@ function pruneSelectionIfGone(
 }
 
 // The terminal in front of the dock ended while typing goes to the agent. The
-// dock shows its neighbour, like a browser tab, and the address stops naming the
-// one that ended: it is rewritten, or the entry behind is gone back to when it
-// already names where the dock landed.
+// dock shows its neighbour, like a browser tab. The address names the agent,
+// not the dock, so nothing is written.
 function followDockAfterClose(
   spine: Spine,
   previousTerminals: readonly TerminalView[],
   previousTerminalOrder: string[] | null,
   sessionId: string,
 ): void {
-  const route = parseRoute(currentHash())
-  if (route.target === null || targetSessionId(route.target) !== sessionId) return
-  const named = (route.stack ?? impliedAgentAddress(route.target)).terminalId
-  if (named === null) return
-  const owner: TerminalOwnerRef = { kind: "session", sessionId }
-  if (ownerHasTerminal(spine.terminals, owner, named)) return
+  const front = state.stackTerminals[sessionId] ?? readStackMemory(sessionId).terminal
+  if (front === null || front === undefined) return
+  if (ownerHasTerminal(spine.terminals, { kind: "session", sessionId }, front)) return
   const neighbour = dockNeighbour(
     previousTerminals,
     previousTerminalOrder,
     spine.terminals,
     sessionId,
-    named,
+    front,
   )
-  if (neighbour !== null) {
-    writeStackMemory(sessionId, { terminal: neighbour })
-    setState({ stackTerminals: { ...state.stackTerminals, [sessionId]: neighbour } })
-  }
-  fallBackTo(() => syncUrl("replace"))
+  if (neighbour === null) return
+  writeStackMemory(sessionId, { terminal: neighbour })
+  setState({ stackTerminals: { ...state.stackTerminals, [sessionId]: neighbour } })
 }
 
 // The destination when the focused agent vanishes under the user: the hub on a
@@ -3576,6 +3570,17 @@ function currentRoute(): Route {
     er !== null && target !== null && sameRoot(editorRootForTarget(target), er.root)
       ? { mode: er.mode, path: er.path, view: er.view }
       : null
+  if (target === null && state.routeNotFound?.kind === "terminal") {
+    // The address of a terminal that is not found is that terminal's.
+    const missing = state.routeNotFound
+    return {
+      target: { kind: "terminal", terminalId: missing.terminalId, owner: missing.owner },
+      changes: false,
+      editor: null,
+      theater: false,
+      standalone: false,
+    }
+  }
   return {
     target,
     stack: target === null ? null : currentAgentAddress(target),
@@ -3589,22 +3594,17 @@ function currentRoute(): Route {
   }
 }
 
-// What the address of the agent behind a target names. On a computer the whole
-// stack is on screen, so the address names its tab and the terminal in front of
-// its dock, whichever of the two typing goes to. A phone shows one part, and its
-// address names that part alone.
+// What the address of the agent behind a target names: the part typing goes
+// to. An agent's tab is named alone; a terminal of its dock is named with the
+// tab on top of the agent on a computer, so a reload or Back puts that tab back
+// above it. A phone shows one part, and its address names that part alone.
 function currentAgentAddress(target: SelectedTarget): AgentAddress | null {
-  if (target.kind === "terminal") {
-    if (target.owner.kind !== "session") return null
-    const sessionId = target.owner.sessionId
-    return {
-      tabId: isMobileViewport() ? slotTabIdFor(sessionId) : shownStackTab(sessionId),
-      terminalId: target.terminalId,
-    }
-  }
+  if (target.kind === "agent") return { tabId: target.tabId, terminalId: null }
+  if (target.owner.kind !== "session") return null
+  const sessionId = target.owner.sessionId
   return {
-    tabId: target.tabId,
-    terminalId: isMobileViewport() ? null : activeDockTerminal(target.sessionId),
+    tabId: isMobileViewport() ? slotTabIdFor(sessionId) : shownStackTab(sessionId),
+    terminalId: target.terminalId,
   }
 }
 
@@ -3617,19 +3617,6 @@ function shownStackTab(sessionId: string): string {
   return slotTabIdFor(sessionId)
 }
 
-// The terminal in front of an agent's dock, read the way the dock draws it: the
-// one last brought to the front while it lives, else the dock's first pill.
-function activeDockTerminal(sessionId: string): string | null {
-  const dock = dockTerminalIds(sessionId)
-  return resolveStackOpening({
-    addressTerminal: null,
-    rememberedTerminal: state.stackTerminals[sessionId] ?? readStackMemory(sessionId).terminal,
-    rememberedLayout: null,
-    dockTerminals: dock,
-    agentStopped: false,
-    anyTerminalRunning: dock.length > 0,
-  }).activeTerminal
-}
 
 // Bring the URL in line with the app's current position: pushes on a screen
 // change, replaces within one screen. `mode: "replace"` forces a replace for a
@@ -4282,7 +4269,10 @@ function applyUrlRoute(): void {
     selectSessionRoute(null)
     return
   }
-  traversing = true
+  // An entry this page labelled is one Back or Forward landed on; a link or an
+  // address typed into the bar arrives on a fresh entry with no label, and
+  // resolves the way a boot does.
+  traversing = ownLabel(history.state) !== null
   try {
     resolveRoute(spine, route)
   } finally {
@@ -4290,7 +4280,7 @@ function applyUrlRoute(): void {
   }
 }
 
-// Set while a route the browser traversed to is being resolved. That entry was
+// Set while a route Back or Forward landed on is being resolved. That entry was
 // a position the user was on, so a bare agent address there means its first
 // tab, the one it was written for, rather than whichever tab the agent
 // remembers: following the memory would make Back land on the tab it was
@@ -4615,6 +4605,7 @@ function setRouteNotFound(sessionId: string): void {
       mobileScreen: "home",
       theater: false,
       routeNotFound: { kind: "agent", sessionId },
+      ...notFoundEditorPatch(),
     }),
   )
   switchChangesSubscription(prev, null)
@@ -4633,9 +4624,17 @@ function setTerminalNotFound(terminalId: string, owner: TerminalOwnerRef): void 
       mobileScreen: "home",
       theater: false,
       routeNotFound: { kind: "terminal", terminalId, owner },
+      ...notFoundEditorPatch(),
     }),
   )
   switchChangesSubscription(prev, null)
+}
+
+// A not-found screen has nothing for the in-app editor to be about, so it closes
+// with no write: the address keeps naming what was asked for. The standalone tab
+// keeps its surface, and says not found itself.
+function notFoundEditorPatch(): Partial<DuxState> {
+  return state.standaloneEditor ? {} : { editorTarget: null, editorRoute: null }
 }
 
 // The route parsed from the URL at module load, restored once the first spine
@@ -4683,10 +4682,10 @@ function applyDeepLinkSelection(
           selectAgentAddress(session, terminal.terminalId, stack?.tabId ?? null, urlMode, changes)
           return
         }
-        // Terminal id gone, so fall back to the owning agent, keeping the
-        // changes screen: changed files are SESSION-scoped, so they survive any
-        // fallback that stays inside the same session.
-        selectSessionRoute(owner.sessionId, urlMode, changes)
+        // The terminal the address was about has closed: say so, and put that
+        // address back if something rewrote it meanwhile.
+        setTerminalNotFound(terminal.terminalId, owner)
+        syncUrl("replace")
       },
       // Project-terminal links restore through `applyProjectTerminalDeepLink`,
       // which resolves them against the project rather than a session, so they
@@ -4709,6 +4708,19 @@ function applyDeepLinkSelection(
     selectTab(target.sessionId, target.tabId, { persist: false, urlMode, changes })
     return
   }
+  if (!isFirstTab(session, target.tabId) && !isSlotTabOf(target.sessionId, target.tabId)) {
+    // The tab the address names has closed, here or on another device: fall
+    // back to the agent out loud, onto the entry behind when it already names
+    // where this lands.
+    fallBackTo(() =>
+      selectTab(target.sessionId, session.slot_tab_id, {
+        persist: false,
+        urlMode: "replace",
+        changes,
+      }),
+    )
+    return
+  }
   if (traversing) {
     selectTab(target.sessionId, session.slot_tab_id, { persist: false, urlMode, changes })
     return
@@ -4717,10 +4729,7 @@ function applyDeepLinkSelection(
 }
 
 // Arrive at an address naming one of an agent's terminals and the tab above it.
-// Which part typing goes to rides no address, so it follows what moved: a new
-// terminal in front takes it, a new tab under the same terminal takes it back
-// to the agent, and an address moving neither leaves it where it was. Arriving
-// from anywhere else gives it to the terminal the address asked for.
+// The terminal is what the address is about, so typing goes to it.
 function selectAgentAddress(
   session: Spine["sessions"][number],
   terminalId: string,
@@ -4731,15 +4740,6 @@ function selectAgentAddress(
   const sessionId = session.id
   const tab =
     tabId !== null && session.tabs.some((t) => t.id === tabId) ? tabId : session.slot_tab_id
-  const current = state.selectedTarget
-  const here = current !== null && state.selectedSessionId === sessionId
-  const terminalMoved = !here || activeDockTerminal(sessionId) !== terminalId
-  const shownTab = current?.kind === "agent" ? current.tabId : shownStackTab(sessionId)
-  const tabMoved = here && shownTab !== tab
-  if (!terminalMoved && (tabMoved || current?.kind === "agent")) {
-    selectTab(sessionId, tab, { persist: false, urlMode, changes })
-    return
-  }
   writeStackMemory(sessionId, { tab })
   selectTerminal(terminalId, { kind: "session", sessionId }, {
     urlMode,
@@ -5316,7 +5316,6 @@ export function selectTerminal(
 // terminal asked for is on screen. Arriving at the agent this way opens it the
 // way a link naming the terminal does.
 function dockTerminalPatch(sessionId: string, terminalId: string): Partial<DuxState> {
-  const remembered = readStackMemory(sessionId).terminal
   writeStackMemory(sessionId, { terminal: terminalId })
   const stackTerminals = { ...state.stackTerminals, [sessionId]: terminalId }
   const dock = dockTerminalIds(sessionId)
@@ -5331,7 +5330,7 @@ function dockTerminalPatch(sessionId: string, terminalId: string): Partial<DuxSt
     const session = state.spine?.sessions.find((s) => s.id === sessionId)
     layout = resolveStackOpening({
       addressTerminal: terminalId,
-      rememberedTerminal: remembered,
+      rememberedTerminal: null,
       rememberedLayout: readStackMemory(sessionId).layout,
       dockTerminals: dock.includes(terminalId) ? dock : [...dock, terminalId],
       agentStopped: session !== undefined && session.status !== "active",
@@ -5376,8 +5375,8 @@ export function settleStackOpening(sessionId: string, layout: ComputerLayout): v
 
 // Make one part of an agent's stack the one typing goes to: a press into its
 // terminal does it. Focus moving between the parts on screen is not a move to
-// another position: the address already names both parts, so it is only ever
-// rewritten, when it had fallen behind the dock.
+// another position, so the address, which names the part typing goes to, is
+// rewritten rather than pushed.
 export function chooseStackPart(sessionId: string, ptyId: string): void {
   const patch = stackPartPatch(sessionId, ptyId)
   if (patch === null) return
@@ -5718,7 +5717,12 @@ export function closeTab(
       // spine, which can still name the tab we just deleted. With no neighbour
       // to name, whichever tab holds the slot NOW (the promoted one after a
       // slot close) is the answer.
-      selectTab(sessionId, neighbour ?? slotTabIdFor(sessionId))
+      //
+      // A replace, through a fallback: the closed tab is no place to come back
+      // to, so its entry becomes the neighbour's, or the entry behind is gone
+      // back to when it already names the neighbour.
+      const landing = neighbour ?? slotTabIdFor(sessionId)
+      fallBackTo(() => selectTab(sessionId, landing, { urlMode: "replace" }))
     })
   return guardedChange(closing, (e) =>
     notifyError(e instanceof Error ? e.message : "Could not close the tab."),
@@ -8869,7 +8873,11 @@ export function toggleTheater(): void {
  * deciding what to do about a take-over wants the chrome in view, and
  * re-entering is then a fresh press. Losing ownership itself stays sticky.
  *
- * Keyed on the PTY, not the selection, so an unfocused pane forgets too.
+ * Keyed on the PTY's row, not the selection, so an unfocused row forgets too.
+ * Within the row on screen only the part shown counts, as for the cover that
+ * brings the top bar back: a take-over moves the whole row, so the shown part
+ * loses too, and a part off screen losing on its own is not what anybody is
+ * looking at.
  */
 export function noteTheaterOwnershipLost(
   kind: "agent" | "terminal",
@@ -8877,6 +8885,9 @@ export function noteTheaterOwnershipLost(
 ): void {
   const key = theaterRowKeyForPty(kind, id)
   if (key === null) return
+  const shown = state.selectedTarget
+  const shownPty = shown === null ? null : shown.kind === "agent" ? shown.tabId : shown.terminalId
+  if (theaterMemoryKey(shown) === key && shownPty !== id) return
   clearTheaterMemory(key)
   if (!state.theater) return
   if (theaterMemoryKey(state.selectedTarget) !== key) return

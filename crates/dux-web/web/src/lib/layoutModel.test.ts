@@ -224,19 +224,6 @@ describe("resolveStackOpening", () => {
     })
   })
 
-  it("keeps the remembered layout when the address names the terminal it last showed", () => {
-    // A reload: the address was written for this device's own dock, so it is
-    // not a request to open the terminal, and the stack opens as it was left.
-    const opening = resolveStackOpening({
-      ...base,
-      addressTerminal: "t2",
-      rememberedTerminal: "t2",
-      rememberedLayout: "agent",
-    })
-    expect(opening.activeTerminal).toBe("t2")
-    expect(opening.layout).toBe("agent")
-  })
-
   it("reports an address naming a gone terminal without picking another", () => {
     const opening = resolveStackOpening({
       ...base,

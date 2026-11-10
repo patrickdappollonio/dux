@@ -508,6 +508,29 @@ describe("InsetHeader session terminal chips", () => {
   })
 })
 
+describe("InsetHeader assistant chip over a dock terminal", () => {
+  it("names the provider of the tab the stack keeps on top after a reload", () => {
+    const base = stateFor("main", "main")
+    const session = base.spine!.sessions[0]
+    session.tabs = [
+      ...session.tabs,
+      { ...session.tabs[0], id: "s1-t2", provider: "codex", order: 1 },
+    ]
+    mockState = {
+      ...base,
+      selectedTarget: { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } },
+      spine: {
+        ...base.spine,
+        terminals: [{ id: "t1", owner: { kind: "session", session_id: "s1" }, label: "Terminal 1" }],
+      },
+    } as unknown as DuxState
+    // This page has not shown a tab yet; the device remembers the extra one.
+    localStorage.setItem("dux:stack:s1", JSON.stringify({ tab: "s1-t2" }))
+    render(<InsetHeader />)
+    expect(chipValue("assistant")).toBe("codex")
+  })
+})
+
 describe("InsetHeader standalone terminal chips", () => {
   it("names the directory for a focused standalone terminal", () => {
     // It has no owner to name, so a header that only knows how to name owners

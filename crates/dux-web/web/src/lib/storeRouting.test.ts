@@ -195,6 +195,8 @@ interface SessionSpec {
   // The default "active" sort floats a working agent above the rest, so this is
   // what lets a test tell the sort apart from the raw server order.
   working?: boolean
+  // The tab the server remembers as last focused.
+  focused?: string
 }
 
 function makeSpine(
@@ -226,6 +228,7 @@ function makeSpine(
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
       working: s.working ?? false,
+      last_focused_tab: s.focused ?? null,
       needs_attention: false,
       // The slot tab is a GENERATED id the session points at, deliberately not
       // the session id, so a URL that names the agent by the bare form has to
@@ -687,7 +690,7 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(mod.getSnapshot().endedInViewTab).toBe("s1-slot")
   })
 
-  it("pushes for a dock terminal brought to the front, and writes nothing for typing moving between parts", async () => {
+  it("pushes for a dock terminal brought to the front, and replaces for typing moving between parts", async () => {
     const mod = await loadStore("#/agent/s1", [
       { id: "s1", project_id: "p1", terminals: ["t1", "t2"] },
     ])
@@ -696,9 +699,9 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(index).toBe(depth + 1)
     mod.chooseStackPart("s1", "s1-slot")
     expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
+    // The address names the part typing goes to, rewritten in place.
     expect(index).toBe(depth + 1)
-    // The address names both parts, so where typing goes changes nothing in it.
-    expect(loc.hash).toBe("#/agent/s1/terminal/t2")
+    expect(loc.hash).toBe("#/agent/s1")
   })
 
   it.each([
@@ -732,7 +735,7 @@ describe("a deleted agent never throws the user out of dux", () => {
     const depth = index
     mod.reconcileStackPart("s1", "t1")
     expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
-    expect(loc.hash).toBe("#/agent/s1/tab/b2/terminal/t1")
+    expect(loc.hash).toBe("#/agent/s1/tab/b2")
     expect(index).toBe(depth)
     // The tab named by the link stays the one on top of the stack.
     expect(mod.getSnapshot().stackTabs.s1).toBe("b2")
@@ -1815,6 +1818,23 @@ describe("a URL naming a terminal that has closed", () => {
     expect(entries).toEqual(visited)
   })
 
+  it.each([
+    ["an agent's", "#/agent/s1/terminal/t1", { kind: "session", sessionId: "s1" }],
+    ["a project's", "#/project/p1/terminal/t1", { kind: "project", projectId: "p1" }],
+  ] as const)("retires %s terminal's not-found screen once the terminal is there", async (_w, hash, owner) => {
+    const mod = await loadStore(hash, [{ id: "s1", project_id: "p1" }], [{ id: "p1" }])
+    expect(mod.getSnapshot().routeNotFound).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    const agentTerminals = owner.kind === "session" ? ["t1"] : []
+    const projectTerminals = owner.kind === "project" ? ["t1"] : []
+    await pushSpine(
+      mod,
+      [{ id: "s1", project_id: "p1", terminals: agentTerminals }],
+      [{ id: "p1", terminals: projectTerminals }],
+    )
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "terminal", terminalId: "t1", owner })
+  })
+
   it("retires the not-found screen once the terminal it names is there", async () => {
     const mod = await loadStore("#/terminal/st1", [], [], [])
     expect(mod.getSnapshot().routeNotFound).toMatchObject({ kind: "terminal", terminalId: "st1" })
@@ -1848,28 +1868,30 @@ describe("an agent's address names its tab and its terminal", () => {
       { id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1", "t2"] },
     ])
     mod.selectSession("s1")
-    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+    expect(loc.hash).toBe("#/agent/s1")
     const opened = index
     mod.clickTab("s1", "b2")
     mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
     expect(index).toBe(opened + 2)
+    // A terminal is named with the tab on top of the agent above it.
     expect(loc.hash).toBe("#/agent/s1/tab/b2/terminal/t2")
 
     history.back()
-    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
-    expect(mod.getSnapshot().stackTabs.s1).toBe("b2")
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "b2" })
     history.back()
-    // The tab moved back under the same terminal, so typing goes back to the
-    // agent's tab.
     expect(mod.getSnapshot().selectedTarget).toEqual({
       kind: "agent",
       sessionId: "s1",
       tabId: "s1-slot",
     })
-    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
     history.back()
     expect(mod.getSnapshot().selectedTarget).toBeNull()
     expect(leftApp).toBe(false)
+    history.go(1)
+    history.go(1)
+    history.go(1)
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t2" })
+    expect(mod.getSnapshot().stackTabs.s1).toBe("b2")
   })
 
   it("makes a step of a link naming another of the agent's terminals", async () => {
@@ -1894,15 +1916,98 @@ describe("an agent's address names its tab and its terminal", () => {
     expect(index).toBe(DUX_ENTRY_INDEX)
   })
 
-  it("names the next terminal in the dock when the one in front ends under the agent", async () => {
+  it("shows the next terminal in the dock when the one in front ends under the agent", async () => {
     const mod = await loadStore("#/agent/s1/terminal/t2", [
       { id: "s1", project_id: "p1", terminals: ["t1", "t2", "t3"] },
     ])
     mod.chooseStackPart("s1", "s1-slot")
     await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1", "t3"] }])
     expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
-    expect(loc.hash).toBe("#/agent/s1/terminal/t3")
+    expect(mod.getSnapshot().stackTerminals.s1).toBe("t3")
+    // The address names the agent, which is still there.
+    expect(loc.hash).toBe("#/agent/s1")
     expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+
+  it("opens an agent bookmark as the agent once its terminals are gone", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.selectSession("s2")
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    history.back()
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+  })
+
+  it("never leaves two identical entries side by side across typing moves, tab closes and Back", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1"] },
+    ])
+    mod.selectSession("s1")
+    mod.chooseStackPart("s1", "t1")
+    mod.chooseStackPart("s1", "s1-slot")
+    mod.clickTab("s1", "b2")
+    await mod.closeTab("s1", "b2")
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedTarget).toMatchObject({ tabId: "s1-slot" }))
+    mod.chooseStackPart("s1", "t1")
+    history.back()
+    history.go(1)
+    const live = entries.slice(DUX_ENTRY_INDEX, index + 1)
+    for (let i = 1; i < live.length; i++) expect(live[i]).not.toBe(live[i - 1])
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+  })
+
+  it("leaves no step behind for a tab closed on screen", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["b2", "b3"] }])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.clickTab("s1", "b3")
+    const depth = index
+    await mod.closeTab("s1", "b3")
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedTarget).toMatchObject({ tabId: "b2" }))
+    // The closed tab's entry was the neighbour's own step, so the page went
+    // back onto that entry rather than writing a copy of it.
+    expect(index).toBe(depth - 1)
+    expect(loc.hash).toBe("#/agent/s1/tab/b2")
+  })
+
+  it("falls back out loud from Back onto a tab that has since closed", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.selectSession("s2")
+    await pushSpine(mod, [
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1" },
+    ])
+    history.back()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1-slot",
+    })
+    // Onto the entry behind, which already named the agent, rather than a copy.
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(index).toBe(DUX_ENTRY_INDEX + 1)
+  })
+
+  it("follows a link to a bare agent address to the tab it remembers, like a boot", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"], focused: "b2" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    popstateTo("#/agent/s1")
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "b2" })
   })
 
   it("names only the part on screen on a phone", async () => {
@@ -2189,12 +2294,23 @@ describe("the editor rides the URL", () => {
     // anyone's bookmark: a terminal spawned in the agent's worktree opens the
     // agent's editor, with its tabs, its diff mode and its changed files.
     const mod = await loadStore("#/agent/s1/terminal/t9/editor", [
-      { id: "s1", project_id: "p1" },
+      { id: "s1", project_id: "p1", terminals: ["t9"] },
     ])
     expect(mod.getSnapshot().editorTarget?.root).toEqual({
       kind: "agent",
       sessionId: "s1",
     })
+  })
+
+  it("shows no editor over a closed terminal's not-found screen, and keeps its address", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t1/editor/file/x", [
+      { id: "s1", project_id: "p1" },
+    ])
+    expect(mod.getSnapshot().routeNotFound).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(mod.getSnapshot().editorTarget).toBeNull()
+    expect(mod.getSnapshot().editorRoute).toBeNull()
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1/editor/file/x")
+    expect(index).toBe(DUX_ENTRY_INDEX)
   })
 
   it("normalizes the shapes the standalone grammar cannot carry", async () => {
@@ -2527,9 +2643,10 @@ describe("the editor rides the URL", () => {
   })
 
   it("ends a standalone terminal editor out loud when its terminal closes", async () => {
-    // Ruling: an editor does not outlive its target. A terminal id never comes
-    // back, so there is no truthful not-found screen to sit on; the tab says
-    // what happened and lands somewhere real.
+    // Ruling: an editor does not outlive its target. The terminal closing under
+    // an open editor is not a link arriving at a closed terminal, so there is
+    // no Terminal not found screen here: the tab says what happened and lands
+    // somewhere real.
     const mod = await loadStore(
       "#/editor/terminal/t1",
       [{ id: "s1", project_id: "p1" }],
