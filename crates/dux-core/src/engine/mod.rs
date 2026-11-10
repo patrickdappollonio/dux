@@ -15519,6 +15519,7 @@ mod resource_monitor_targets_tests {
                 client: spawn_cat(worktree.path()),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         engine.sync_has_active_processes();
@@ -15583,6 +15584,7 @@ mod resource_monitor_targets_tests {
                 client: spawn_cat(worktree.path()),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 

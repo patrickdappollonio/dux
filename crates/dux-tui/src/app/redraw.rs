@@ -8,7 +8,7 @@
 //! last frame: a mutation marked dirty, an animation frame that advanced, the
 //! status line, or the once-a-second backstop.
 
-use super::{App, CenterMode, FullscreenOverlay, PromptState, attention_blink_phase};
+use super::{App, CenterMode, CenterPart, FullscreenOverlay, PromptState, attention_blink_phase};
 use crate::app::pty_ownership::PtyTakeoverCard;
 use crate::numeric::u128_to_usize_wrapping;
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ const ROW_ATTENTION: u8 = 1 << 3;
 
 #[derive(Default)]
 pub(crate) struct RedrawGate {
-    dirty: bool,
+    pub(crate) dirty: bool,
     last_frame: Option<Instant>,
     phase: Option<AnimationPhase>,
     status_line: Option<(dux_core::statusline::StatusTone, String)>,
@@ -75,29 +75,47 @@ impl App {
         self.redraw.dirty = true;
     }
 
-    /// The one PTY whose output is on screen, if any. Output on every other PTY
-    /// changes the sidebar's row state or nothing at all.
-    pub(crate) fn visible_pty_id(&self) -> Option<String> {
+    /// The center parts this frame draws, the focused one first. Computed from
+    /// the same state the render pass walks, so output on a part that is drawn
+    /// always marks the frame and output on one that is not never does.
+    pub(crate) fn drawn_parts(&self) -> Vec<CenterPart> {
         match self.fullscreen_overlay {
-            FullscreenOverlay::StartupLog => None,
-            FullscreenOverlay::Agent | FullscreenOverlay::Terminal => {
-                self.selected_terminal_surface_id()
-            }
+            FullscreenOverlay::StartupLog => Vec::new(),
+            FullscreenOverlay::Agent | FullscreenOverlay::Terminal => vec![self.focused_part()],
             FullscreenOverlay::None => match self.center_mode {
-                CenterMode::Agent => self.selected_terminal_surface_id(),
-                CenterMode::Diff { .. } => None,
+                CenterMode::Agent => self.layout_parts(),
+                CenterMode::Diff { .. } => Vec::new(),
             },
         }
     }
 
-    /// Whether the pane on screen holds grid changes the next snapshot would
-    /// pick up. A non-consuming read: `refresh_snapshot_buf` is the consumer,
-    /// and it runs inside the draw this answer decides.
+    /// The PTYs whose output is on screen. Output on every other PTY changes the
+    /// sidebar's row state or nothing at all.
+    #[cfg(test)]
+    pub(crate) fn visible_pty_ids(&self) -> Vec<String> {
+        self.drawn_parts()
+            .into_iter()
+            .filter_map(|part| self.part_pty_id(part))
+            .collect()
+    }
+
+    /// Whether a pane on screen holds grid changes the next snapshot would pick
+    /// up. A non-consuming read: the snapshot refresh is the consumer, and it
+    /// runs inside the draw this answer decides.
     fn visible_pty_has_pending_output(&self) -> bool {
-        self.visible_pty_id().is_some()
-            && self
-                .selected_terminal_surface_client()
+        self.drawn_parts().into_iter().any(|part| {
+            self.part_client(part)
                 .is_some_and(|client| client.has_output() && client.has_pending_output())
+        })
+    }
+
+    /// The card over the drawn stack, if any. Every part of the center belongs
+    /// to one row and a row has one driver, so the first drawn part answers for
+    /// all of them.
+    fn drawn_takeover_card(&self) -> Option<PtyTakeoverCard> {
+        self.drawn_parts()
+            .into_iter()
+            .find_map(|part| self.part_takeover_card(part))
     }
 
     /// Poll every PTY for activity (the consuming read the row indicators need)
@@ -199,10 +217,10 @@ impl App {
         ) {
             return true;
         }
-        self.visible_pty_id().is_some()
-            && self
-                .selected_terminal_surface_client()
+        self.drawn_parts().into_iter().any(|part| {
+            self.part_client(part)
                 .is_some_and(|client| !client.has_output())
+        })
     }
 
     /// Whether an attention glyph is actually painted somewhere. Without this
@@ -248,7 +266,7 @@ impl App {
         let status_line = self.status.most_recent_tui();
         // Compared rather than marked: a browser claims or releases a pty on the
         // socket thread, so no path on this surface runs at all.
-        let takeover_card = self.focused_pty_takeover_card();
+        let takeover_card = self.drawn_takeover_card();
         let pr_revisions = self
             .engine
             .pr_revision
@@ -528,7 +546,7 @@ mod tests {
         app.session_surface = SessionSurface::Terminal;
         app.active_terminal_id = Some(terminal_id.clone());
         assert_eq!(
-            app.visible_pty_id().as_deref(),
+            app.visible_pty_ids().first().map(String::as_str),
             Some(terminal_id.as_str()),
             "the selected terminal is the pane on screen"
         );
@@ -559,7 +577,7 @@ mod tests {
 
         // The same PTY with nothing of it on screen: its output is not a redraw.
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        assert_eq!(app.visible_pty_id(), None);
+        assert_eq!(app.visible_pty_ids(), Vec::<String>::new());
         app.redraw.dirty = false;
         app.engine
             .companion_terminals

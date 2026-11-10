@@ -17,7 +17,7 @@ use ratatui::buffer::CellWidth;
 /// is forwarded to the child, which sends exactly one SGR report per tick so a
 /// mouse-tracking app is never over-scrolled. Keyboard scrolling is unaffected.
 /// Must match xterm's `scrollSensitivity` in the web's TerminalPane.tsx.
-const MOUSE_WHEEL_LINES: usize = 3;
+pub(super) const MOUSE_WHEEL_LINES: usize = 3;
 
 /// The furthest a diff of `visual_lines` wrapped rows scrolls in a pane
 /// `height` rows tall: its last row on the pane's last row.
@@ -215,8 +215,6 @@ fn is_reverse_tab(key: KeyEvent) -> bool {
 enum MouseTarget {
     LeftPane,
     LeftRow(usize),
-    TerminalRow(usize),
-    TerminalPane,
     Center,
     FilesPane,
     UnstagedFile(Option<usize>),
@@ -1147,7 +1145,7 @@ impl App {
         self.focus == FocusPane::Center
             && !self.resize_mode
             && matches!(self.center_mode, CenterMode::Agent)
-            && self.focused_pty_is_covered_by_card()
+            && self.card_covers_center()
     }
 
     fn handle_takeover_card_key(&mut self, key: KeyEvent, claim: KeyClaim) -> bool {
@@ -1230,22 +1228,20 @@ impl App {
         } else {
             StagedFiles::Present
         };
-        if self.focus == FocusPane::Left
-            && self.left_section == LeftSection::Projects
-            && self.has_terminal_items()
+        let parts = self.layout_parts();
+        if self.focus == FocusPane::Center
+            && self.focused_part() == CenterPart::Main
+            && parts.contains(&CenterPart::Dock)
         {
-            self.left_section = LeftSection::Terminals;
-            self.clamp_terminal_cursor();
-        } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
-            self.left_section = LeftSection::Projects;
-            self.focus = self.focus.next();
+            // The dock is a pane of its own for Tab, between the agent and the
+            // changes pane.
+            self.session_surface = SessionSurface::Terminal;
         } else if self.focus == FocusPane::Files {
             if let Some(next) = self.right_section.next(has_staged) {
                 self.right_section = next;
                 self.clamp_files_cursor();
             } else {
                 self.focus = self.focus.next();
-                self.left_section = LeftSection::Projects;
             }
         } else {
             self.focus = self.focus.next();
@@ -1255,8 +1251,8 @@ impl App {
             if self.focus == FocusPane::Files {
                 self.right_section = RightSection::first();
                 self.clamp_files_cursor();
-            } else if self.focus == FocusPane::Left {
-                self.left_section = LeftSection::Projects;
+            } else if self.focus == FocusPane::Center {
+                self.focus_center_part(parts.first().copied());
             }
         }
         self.input_target = InputTarget::None;
@@ -1269,24 +1265,19 @@ impl App {
         } else {
             StagedFiles::Present
         };
-        if self.focus == FocusPane::Left && self.left_section == LeftSection::Terminals {
-            self.left_section = LeftSection::Projects;
-        } else if self.focus == FocusPane::Left && self.left_section == LeftSection::Projects {
-            self.focus = self.focus.previous();
-            if self.focus == FocusPane::Files && self.panes.right_hidden {
-                self.focus = self.focus.previous();
-            }
-            if self.focus == FocusPane::Files {
-                self.right_section = RightSection::last(has_staged);
-                self.clamp_files_cursor();
-            }
+        let parts = self.layout_parts();
+        if self.focus == FocusPane::Center
+            && self.focused_part() == CenterPart::Dock
+            && parts.contains(&CenterPart::Main)
+        {
+            self.session_surface = SessionSurface::Agent;
         } else if self.focus == FocusPane::Files {
-            match self.right_section.previous() {
-                Some(previous) => {
-                    self.right_section = previous;
-                    self.clamp_files_cursor();
-                }
-                None => self.focus = self.focus.previous(),
+            if let Some(previous) = self.right_section.previous() {
+                self.right_section = previous;
+                self.clamp_files_cursor();
+            } else {
+                self.focus = self.focus.previous();
+                self.focus_center_part(parts.last().copied());
             }
         } else {
             self.focus = self.focus.previous();
@@ -1296,17 +1287,19 @@ impl App {
             if self.focus == FocusPane::Files {
                 self.right_section = RightSection::last(has_staged);
                 self.clamp_files_cursor();
-            } else if self.focus == FocusPane::Left {
-                if self.has_terminal_items() {
-                    self.left_section = LeftSection::Terminals;
-                    self.clamp_terminal_cursor();
-                } else {
-                    self.left_section = LeftSection::Projects;
-                }
+            } else if self.focus == FocusPane::Center {
+                self.focus_center_part(parts.last().copied());
             }
         }
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
+    }
+
+    /// Give focus to `part` of the center pane, when it is one the layout draws.
+    fn focus_center_part(&mut self, part: Option<CenterPart>) {
+        if let Some(part) = part {
+            self.session_surface = Self::part_surface(part);
+        }
     }
 
     fn toggle_resize_mode(&mut self) {
@@ -1357,7 +1350,6 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        self.follow_terminal_cursor();
         if self.server_log_viewer.is_some() {
             self.handle_server_log_key(key);
             return Ok(false);
@@ -1406,76 +1398,32 @@ impl App {
         self.close_diff_view();
         self.reload_changed_files();
         self.update_missing_project_warning();
+        self.reconcile_center_target();
     }
 
-    /// Move the Left pane's cursor one row DOWN, across the whole sidebar: the
-    /// agent rows, then the terminal rows below them, then back to the top.
+    /// Move the Left pane's cursor one row DOWN the list, wrapping to the top.
     ///
-    /// The sidebar is one list with two sections, so this owns the whole
-    /// traversal and both callers share it: ordinary Left-pane navigation and
-    /// the agent-list filter, whose rows are these rows.
+    /// Both callers share it: ordinary Left-pane navigation and the agent-list
+    /// filter, whose rows are these rows.
     pub(crate) fn move_left_cursor_down(&mut self) {
-        if self.left_section == LeftSection::Terminals {
-            if self.selected_terminal_index + 1 < self.terminal_items().len() {
-                self.select_terminal_row(self.selected_terminal_index + 1);
-            } else if let Some(first) = self.first_selectable_left_item() {
-                // Wrap: down from the last terminal loops back to the first
-                // agent at the top of the list.
-                self.left_section = LeftSection::Projects;
-                self.select_left_agent_item(first);
-            } else {
-                // Nothing above to wrap onto (a query matching terminals only),
-                // so the wrap stays inside the terminals.
-                self.select_terminal_row(0);
-            }
-            return;
-        }
         if let Some(next) = self.next_selectable_left_item_after(self.selected_left) {
             self.select_left_agent_item(next);
-        } else if self.has_terminal_items() {
-            // Jump to terminals section.
-            self.left_section = LeftSection::Terminals;
-            self.select_terminal_row(0);
-            self.close_diff_view();
         } else if let Some(first) = self.first_selectable_left_item() {
-            // Wrap: past the last agent (no terminals below) loops
-            // back to the top of the list.
             self.select_left_agent_item(first);
         }
     }
 
-    /// Move the Left pane's cursor one row UP. The mirror of
-    /// [`Self::move_left_cursor_down`]; see it for why this traversal is shared.
+    /// Move the Left pane's cursor one row UP the list, wrapping to the bottom.
     pub(crate) fn move_left_cursor_up(&mut self) {
-        if self.left_section == LeftSection::Terminals {
-            if self.selected_terminal_index > 0 {
-                self.select_terminal_row(self.selected_terminal_index - 1);
-            } else if let Some(last) = self.last_selectable_left_item() {
-                // Jump back to projects section, onto the last agent.
-                self.left_section = LeftSection::Projects;
-                self.select_left_agent_item(last);
-            } else {
-                // No agent row to land on, so wrap within the terminals.
-                self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
-            }
-            return;
-        }
         if let Some(prev) = self.previous_selectable_left_item_before(self.selected_left) {
             self.select_left_agent_item(prev);
-        } else if self.has_terminal_items() {
-            // Wrap: up from the first agent lands on the last terminal.
-            self.left_section = LeftSection::Terminals;
-            self.select_terminal_row(self.terminal_items().len().saturating_sub(1));
-            self.close_diff_view();
         } else if let Some(last) = self.last_selectable_left_item() {
-            // Wrap: up from the first agent (no terminals) loops to the
-            // last agent.
             self.select_left_agent_item(last);
         }
     }
 
     fn handle_left_key(&mut self, key: KeyEvent) -> Result<()> {
-        if self.left_section == LeftSection::Terminals {
+        if self.selected_terminal_row().is_some() {
             return {
                 self.handle_left_terminal_key(key);
                 Ok(())
@@ -1523,6 +1471,7 @@ impl App {
                     {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
+                        self.session_surface = SessionSurface::Agent;
                         self.input_target = InputTarget::Agent;
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
                         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
@@ -1562,15 +1511,12 @@ impl App {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Enter if self.left_section == LeftSection::Terminals => {
+            KeyCode::Enter if self.selected_terminal_row().is_some() => {
                 // The terminal is resolved by id BEFORE the filter closes: the
                 // restored full list is longer, so the index the cursor holds
-                // now names a different terminal afterwards.
-                let keep = self
-                    .terminal_items()
-                    .get(self.selected_terminal_index)
-                    .map(|(id, _)| (*id).clone());
-                self.open_terminal_from_terminal_list();
+                // now names a different row afterwards.
+                let keep = self.selected_terminal_row();
+                self.open_selected_terminal_row();
                 self.close_agent_filter();
                 if let Some(id) = keep {
                     self.reselect_left_terminal(&id);
@@ -1622,18 +1568,16 @@ impl App {
         }
     }
 
-    /// After leaving filter mode, move the terminal cursor back onto the row for
+    /// After leaving filter mode, move the Left selection back onto the row for
     /// `terminal_id` in the restored full list, if it is still there. The twin
-    /// of [`Self::reselect_left_session`], and needed for the same reason: the
-    /// cursor is an INDEX into the visible list, and un-pruning that list moves
-    /// every row the query had been hiding back underneath it.
+    /// of [`Self::reselect_left_session`].
     pub(crate) fn reselect_left_terminal(&mut self, terminal_id: &str) {
-        if let Some(index) = self
-            .terminal_items()
-            .iter()
-            .position(|(id, _)| id.as_str() == terminal_id)
-        {
-            self.select_terminal_row(index);
+        if let Some(index) = self.left_items().iter().position(|item| {
+            matches!(item, LeftItem::Terminal(i)
+                if self.left_terminals.get(*i).is_some_and(|id| id == terminal_id))
+        }) {
+            self.selected_left = index;
+            self.reconcile_center_target();
         }
     }
 
@@ -1653,23 +1597,25 @@ impl App {
         }
     }
 
+    /// Keys on a project or standalone terminal's row of the list.
     fn handle_left_terminal_key(&mut self, key: KeyEvent) {
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
-                Action::FocusAgent | Action::ToggleFullscreen => {
-                    // Open terminal overlay for the selected terminal item.
-                    self.open_terminal_from_terminal_list();
+                Action::FocusAgent => self.open_selected_terminal_row(),
+                Action::ToggleFullscreen => {
+                    self.open_selected_terminal_row();
+                    self.fullscreen_overlay = FullscreenOverlay::Terminal;
                 }
                 Action::ShowTerminal => {
                     self.spawn_terminal_for_selected_terminal();
                 }
-                Action::DeleteSession => self.confirm_delete_selected_terminal(),
+                Action::DeleteSession => self.confirm_close_focused_terminal(),
+                Action::FilterAgents => self.open_agent_filter(),
                 // A standalone agent belongs to no row, so it is creatable
-                // from anywhere in the Left pane: the terminals subsection is
-                // still the agents pane, and the footer names the key there
-                // too.
+                // from anywhere in the Left pane, and the footer names the key
+                // on a terminal row too.
                 Action::NewStandaloneAgent => self.leave_pane_for_standalone_browser(),
                 _ => {}
             }
@@ -1711,6 +1657,32 @@ impl App {
     }
 
     fn handle_center_tab_action(&mut self, action: Action) -> Result<bool> {
+        if self.dock_has_focus() {
+            return Ok(self.handle_dock_tab_action(action));
+        }
+        if self.selected_terminal_row().is_some() {
+            // A terminal of its own row has no strip: the tab keys have nothing
+            // to act on.
+            return Ok(matches!(
+                action,
+                Action::NextTab
+                    | Action::PrevTab
+                    | Action::NewTab
+                    | Action::CloseTab
+                    | Action::StopTab
+                    | Action::MoveTabLeft
+                    | Action::MoveTabRight
+                    | Action::SelectTab1
+                    | Action::SelectTab2
+                    | Action::SelectTab3
+                    | Action::SelectTab4
+                    | Action::SelectTab5
+                    | Action::SelectTab6
+                    | Action::SelectTab7
+                    | Action::SelectTab8
+                    | Action::SelectTab9
+            ));
+        }
         match action {
             Action::NextTab => self.focus_tab_relative(FocusStep::Forward),
             Action::PrevTab => self.focus_tab_relative(FocusStep::Backward),
@@ -1733,6 +1705,38 @@ impl App {
         Ok(true)
     }
 
+    /// The tab keys with the dock focused: they walk its pills.
+    fn handle_dock_tab_action(&mut self, action: Action) -> bool {
+        use super::reorder::MoveDir;
+        let index = match action {
+            Action::SelectTab1 => Some(0),
+            Action::SelectTab2 => Some(1),
+            Action::SelectTab3 => Some(2),
+            Action::SelectTab4 => Some(3),
+            Action::SelectTab5 => Some(4),
+            Action::SelectTab6 => Some(5),
+            Action::SelectTab7 => Some(6),
+            Action::SelectTab8 => Some(7),
+            Action::SelectTab9 => Some(8),
+            _ => None,
+        };
+        if let Some(index) = index {
+            self.focus_dock_index(index);
+            return true;
+        }
+        match action {
+            Action::NextTab => self.focus_dock_relative(FocusStep::Forward),
+            Action::PrevTab => self.focus_dock_relative(FocusStep::Backward),
+            Action::NewTab => self.show_companion_terminal(),
+            Action::CloseTab => self.confirm_close_focused_terminal(),
+            Action::StopTab => self.set_error(super::dock::TERMINAL_STOP_REFUSAL),
+            Action::MoveTabLeft => self.move_dock_terminal(MoveDir::Up),
+            Action::MoveTabRight => self.move_dock_terminal(MoveDir::Down),
+            _ => return false,
+        }
+        true
+    }
+
     fn handle_center_agent_action(&mut self, action: Action, key: KeyEvent) -> Result<()> {
         if self.handle_center_tab_action(action)? {
             return Ok(());
@@ -1742,6 +1746,10 @@ impl App {
             Action::ToggleFullscreen => self.toggle_center_fullscreen()?,
             Action::OpenMacroBar => self.open_center_macro_bar(),
             Action::ShowTerminal => self.show_or_open_first_terminal(),
+            Action::CycleTerminalLayout => self.cycle_terminal_layout(),
+            Action::DeleteSession if self.focused_terminal_to_close().is_some() => {
+                self.confirm_close_focused_terminal();
+            }
             Action::DeleteSession => self.confirm_delete_selected_session(),
             Action::RenameSession => self.open_rename_session(),
             Action::OpenAgentInfo => self.open_agent_info(),
@@ -1752,6 +1760,11 @@ impl App {
                 self.forward_typing_key_to_center(&key);
             }
             Action::NextPullRequest => self.step_pull_request(),
+            // A stopped agent beside its terminals starts its first tab,
+            // whichever part has focus.
+            Action::ReconnectAgent if self.selected_agent_stopped_beside_dock() => {
+                self.start_stopped_agent();
+            }
             Action::ReconnectAgent => {
                 self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
             }
@@ -1766,8 +1779,8 @@ impl App {
             *scroll = scroll.saturating_sub(page);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Up, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(ScrollDirection::Up, usize::from(self.focused_pty_size().0));
         }
     }
 
@@ -1778,8 +1791,11 @@ impl App {
             *scroll = scroll.saturating_add(page).min(max_scroll);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Down, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(
+                ScrollDirection::Down,
+                usize::from(self.focused_pty_size().0),
+            );
         }
     }
 
@@ -1787,7 +1803,7 @@ impl App {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
             *scroll = scroll.saturating_sub(1);
         } else if !self.center_scroll_keys_gated() {
-            if self.last_pty_size.0 > 0 {
+            if self.focused_pty_size().0 > 0 {
                 self.scroll_pty(ScrollDirection::Up, 1);
             }
         } else {
@@ -1800,7 +1816,7 @@ impl App {
             let max_scroll = diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
             *scroll = scroll.saturating_add(1).min(max_scroll);
         } else if !self.center_scroll_keys_gated() {
-            if self.last_pty_size.0 > 0 {
+            if self.focused_pty_size().0 > 0 {
                 self.scroll_pty(ScrollDirection::Down, 1);
             }
         } else {
@@ -1844,9 +1860,7 @@ impl App {
     /// True while keys typed at the center pane go to its child: a live,
     /// typeable surface at the live edge with no take-over card over it.
     pub(crate) fn center_takes_typing(&self) -> bool {
-        self.center_typeable()
-            && !self.scroll_mode_active()
-            && !self.focused_pty_is_covered_by_card()
+        self.center_typeable() && !self.scroll_mode_active() && !self.card_covers_center()
     }
 
     fn forward_unbound_center_key(&mut self, key: &KeyEvent) {
@@ -2230,7 +2244,12 @@ impl App {
     }
 
     pub(crate) fn reset_pty_scrollback(&mut self) {
-        if let Some(provider) = self.selected_terminal_surface_client() {
+        self.reset_part_scrollback(self.focused_part());
+    }
+
+    /// Snap `part` back to its live edge.
+    pub(crate) fn reset_part_scrollback(&mut self, part: CenterPart) {
+        if let Some(provider) = self.part_client(part) {
             provider.set_scrollback(0);
         }
         // A snap to the live edge is a user action, so scroll mode ends here
@@ -2238,7 +2257,7 @@ impl App {
         // you asked to is not a surprise and needs no status message. Scoped to
         // the surface whose offset was just zeroed, so an agent parked in its own
         // scrollback keeps both its frozen view and its cue.
-        if let Some(id) = self.selected_terminal_surface_id() {
+        if let Some(id) = self.part_pty_id(part) {
             self.scroll_mode.remove(&id);
         }
         self.note_selection_survives_own_scroll();
@@ -2281,7 +2300,12 @@ impl App {
     /// Whether the selected terminal surface is in scroll mode, which is what
     /// gates keystroke forwarding, the hint-bar cue and the badge.
     pub(crate) fn scroll_mode_active(&self) -> bool {
-        self.selected_terminal_surface_id()
+        self.part_scroll_mode_active(self.focused_part())
+    }
+
+    /// Whether `part`'s pty is in scroll mode.
+    pub(crate) fn part_scroll_mode_active(&self, part: CenterPart) -> bool {
+        self.part_pty_id(part)
             .is_some_and(|current| self.scroll_mode.contains(&current))
     }
 
@@ -2294,8 +2318,8 @@ impl App {
     /// typing back to the child. Doing that silently is the hazard, so the mode
     /// is retired with a status saying what happened and how to get back.
     ///
-    /// Only the surface the user is looking at is reconciled; a background agent
-    /// is reconciled the moment the user returns to it.
+    /// Only the parts on screen are reconciled; a background agent is
+    /// reconciled the moment the user returns to it.
     ///
     /// The wording is about the effect and not a cause: dux resizes the PTY from
     /// the render path whenever the pane geometry changes, so merely resizing the
@@ -2325,18 +2349,25 @@ impl App {
             self.scroll_mode.remove(&id);
         }
 
-        let Some(current) = self.selected_terminal_surface_id() else {
+        for part in self.drawn_parts() {
+            self.reconcile_part_scroll_mode(part);
+        }
+    }
+
+    /// End `part`'s scroll mode out loud when its child pulled it back to the
+    /// live edge. See [`Self::reconcile_scroll_mode`].
+    fn reconcile_part_scroll_mode(&mut self, part: CenterPart) {
+        let Some(current) = self.part_pty_id(part) else {
             return;
         };
         if !self.scroll_mode.contains(&current) {
             return;
         }
         match self
-            .selected_terminal_surface_client()
+            .part_client(part)
             .map(dux_core::pty::PtyClient::scrollback_offset)
         {
-            // No client behind the selected surface: nothing to be in scroll
-            // mode over.
+            // No client behind the part: nothing to be in scroll mode over.
             None => {
                 self.scroll_mode.remove(&current);
                 return;
@@ -2346,10 +2377,11 @@ impl App {
         }
         self.scroll_mode.remove(&current);
         let up = self.bindings.label_for(Action::ScrollPageUp);
-        let typing = if matches!(
-            self.input_target,
-            InputTarget::Agent | InputTarget::Terminal
-        ) {
+        let typing = if part == self.focused_part()
+            && matches!(
+                self.input_target,
+                InputTarget::Agent | InputTarget::Terminal
+            ) {
             " Your keystrokes reach it again."
         } else {
             ""
@@ -2380,7 +2412,12 @@ impl App {
     /// and its re-read is re-stamped along with it: a frame-wide window that
     /// fails toward keeping the selection.
     pub(crate) fn drop_drifted_selection(&mut self) {
-        let live_cols = self.snapshot_buf.cols;
+        let Some(part) = self.terminal_selection.as_ref().map(|sel| sel.part) else {
+            return;
+        };
+        let snapshot = self.part_snapshots.get(part);
+        let live_cols = snapshot.buf.cols;
+        let live_generation = snapshot.generation;
         let drifted = self.terminal_selection.as_ref().is_some_and(|sel| {
             // A WIDTH change reflows the grid under the recorded rows, at ANY
             // history depth, so it is its own retirement trigger and not a
@@ -2389,8 +2426,7 @@ impl App {
             // total arithmetic translates that exactly, so the selection
             // follows its text. See `SelectionOrigin::grid_size`.
             sel.origin.grid_size.1 != live_cols
-                || (sel.origin.history_saturated
-                    && sel.origin.grid_generation != self.grid_generation)
+                || (sel.origin.history_saturated && sel.origin.grid_generation != live_generation)
         });
         if drifted {
             self.terminal_selection = None;
@@ -2406,7 +2442,7 @@ impl App {
         }
         // Consume the rebuild this scroll caused, then adopt its generation.
         self.refresh_snapshot_buf();
-        let generation = self.grid_generation;
+        let generation = self.part_snapshots.get(self.focused_part()).generation;
         if let Some(sel) = &mut self.terminal_selection {
             sel.origin.grid_generation = generation;
         }
@@ -2416,7 +2452,7 @@ impl App {
         let Some(viewer) = &self.startup_log_viewer else {
             return 0;
         };
-        let Some(area) = self.mouse_layout.agent_term else {
+        let Some(area) = self.mouse_layout.focused_term else {
             return 0;
         };
         u16::try_from(startup_command_log_visual_lines(&viewer.content, area.width).len())
@@ -2455,7 +2491,7 @@ impl App {
     /// error, so a query that stops matching leaves the offset where it is.
     pub(crate) fn reconcile_startup_log_wrap_width(&mut self) {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
-            && let Some(area) = self.mouse_layout.agent_term
+            && let Some(area) = self.mouse_layout.focused_term
             && let Some(viewer) = self.startup_log_viewer.as_ref()
         {
             let width = area.width;
@@ -2533,7 +2569,7 @@ impl App {
             viewer.scroll_offset = 0;
             return;
         }
-        let Some(width) = self.mouse_layout.agent_term.map(|area| area.width) else {
+        let Some(width) = self.mouse_layout.focused_term.map(|area| area.width) else {
             return;
         };
         if let Some(index) = startup_command_log_visual_lines(&viewer.content, width)
@@ -2622,11 +2658,17 @@ impl App {
                 }
             }
             Some(Action::ScrollPageDown) => {
-                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
+                let page = self
+                    .mouse_layout
+                    .focused_term
+                    .map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(page.max(1).cast_signed());
             }
             Some(Action::ScrollPageUp) => {
-                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
+                let page = self
+                    .mouse_layout
+                    .focused_term
+                    .map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(-page.max(1).cast_signed());
             }
             Some(Action::ScrollLineDown | Action::MoveDown) => {
@@ -3284,7 +3326,7 @@ impl App {
             return true;
         }
 
-        let label = match self.session_surface {
+        let label = match self.focused_surface() {
             SessionSurface::Agent => "Agent",
             SessionSurface::Terminal => "Companion terminal",
         };
@@ -3415,7 +3457,7 @@ impl App {
     }
 
     fn demoted_input_patterns(&self) -> DemotedInputPatterns {
-        if !self.focused_pty_is_covered_by_card() {
+        if !self.card_covers_center() {
             return DemotedInputPatterns::default();
         }
 
@@ -3543,7 +3585,7 @@ impl App {
             has_scrollback: self
                 .selected_terminal_surface_client()
                 .is_some_and(|provider| provider.scrollback_offset() > 0),
-            has_page_height: self.last_pty_size.0 > 0,
+            has_page_height: self.focused_pty_size().0 > 0,
         };
         let batch_can_reach_pty = actions
             .iter()
@@ -3571,8 +3613,8 @@ impl App {
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
             }
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(direction, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(direction, usize::from(self.focused_pty_size().0));
         }
     }
 
@@ -3586,7 +3628,8 @@ impl App {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.last_pty_size.0 > 0 {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.focused_pty_size().0 > 0
+        {
             dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
@@ -3731,7 +3774,7 @@ impl App {
         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
-                .agent_term
+                .focused_term
                 .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
     }
 
@@ -3782,7 +3825,7 @@ impl App {
         } else if !dispatch.is_scrolled_back {
             // SGR coordinates are screen-absolute; the child expects them
             // relative to the embedded terminal grid.
-            if let Some(term_area) = self.mouse_layout.agent_term
+            if let Some(term_area) = self.mouse_layout.focused_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(raw, term_area.x, term_area.y)
                 && self.write_into_focused_pty(&translated)
@@ -3975,7 +4018,7 @@ impl App {
         }
         if self.focus == FocusPane::Center
             && matches!(self.center_mode, CenterMode::Agent)
-            && self.active_terminal_id.is_none()
+            && self.agent_part_has_focus()
             && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
         {
             let tab_id = self.focused_tab_id(&session_id);
@@ -7895,7 +7938,7 @@ impl App {
 
     fn fullscreen_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
         self.mouse_layout
-            .agent_term
+            .focused_term
             .filter(|rect| contains_point(*rect, column, row))
             .map(|_| MouseTarget::Center)
     }
@@ -7916,22 +7959,6 @@ impl App {
             return Some(MouseTarget::LeftPane);
         }
         Some(MouseTarget::LeftRow(index))
-    }
-
-    fn terminal_list_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
-        let list = self.mouse_layout.terminal_list;
-        if list.width == 0 || list.height == 0 || !contains_point(list, column, row) {
-            return None;
-        }
-
-        let screen_row = usize::from(row.saturating_sub(list.y));
-        let terminal_count = self.terminal_items().len();
-        if let Some(&index) = self.mouse_layout.terminal_row_to_item.get(screen_row)
-            && index < terminal_count
-        {
-            return Some(MouseTarget::TerminalRow(index));
-        }
-        Some(MouseTarget::TerminalPane)
     }
 
     fn files_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
@@ -7976,9 +8003,6 @@ impl App {
         if let Some(target) = self.left_list_mouse_target(column, row) {
             return Some(target);
         }
-        if let Some(target) = self.terminal_list_mouse_target(column, row) {
-            return Some(target);
-        }
         if contains_point(self.mouse_layout.left, column, row) {
             return Some(MouseTarget::LeftPane);
         }
@@ -8008,14 +8032,13 @@ impl App {
             return Some(DraggedDivider::Right);
         }
 
-        // Horizontal divider between Projects and Terminals sections.
-        let tl = self.mouse_layout.terminal_list;
-        if tl.width > 0 && tl.height > 0 {
-            let left = self.mouse_layout.left;
-            let divider_row = tl.y.saturating_sub(1);
-            if row == divider_row && column >= left.x && column < left.x + left.width {
-                return Some(DraggedDivider::Terminal);
-            }
+        // The divider between an agent and its terminal dock.
+        if self
+            .mouse_layout
+            .dock_divider
+            .is_some_and(|divider| contains_point(divider, column, row))
+        {
+            return Some(DraggedDivider::Dock);
         }
 
         // Horizontal dividers inside the right pane. The inner content rects
@@ -11165,9 +11188,19 @@ impl App {
     /// fullscreen path in `handle_left_key`.
     fn activate_selected_left_item(&mut self, on_dormant: OnDormant) -> Result<()> {
         match self.left_items().get(self.selected_left) {
+            Some(LeftItem::Terminal(_)) => {
+                self.open_selected_terminal_row();
+                if on_dormant == OnDormant::Leave {
+                    self.fullscreen_overlay = FullscreenOverlay::Terminal;
+                }
+            }
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
                 self.focus = FocusPane::Center;
+                // Activating the agent's row is about the agent, so the agent
+                // part takes the keyboard (the layout hands it back to the dock
+                // when the agent part is not drawn).
+                self.session_surface = SessionSurface::Agent;
                 self.reload_changed_files();
                 if self
                     .selected_session()
@@ -11225,6 +11258,23 @@ impl App {
         view: LaunchView,
     ) -> Result<()> {
         if !matches!(self.center_mode, CenterMode::Agent) {
+            return Ok(());
+        }
+        if self.focused_surface() == SessionSurface::Terminal {
+            // A terminal is never launched by focus: it exists while it runs.
+            // Fullscreen shows the one with focus, and nothing else happens.
+            if self.selected_terminal_surface_client().is_some() {
+                self.reset_pty_scrollback();
+                self.focus = FocusPane::Center;
+                if view == LaunchView::Fullscreen {
+                    self.input_target = InputTarget::Terminal;
+                    self.fullscreen_overlay = FullscreenOverlay::Terminal;
+                    let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
+                    self.set_info(format!(
+                        "Fullscreen terminal. Keys go to it verbatim. Press {exit_key} to minimize."
+                    ));
+                }
+            }
             return Ok(());
         }
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
@@ -11421,7 +11471,7 @@ impl App {
             };
             let screen_seq =
                 format!("\x1b[<{cb};{};{}M", mouse.column + 1, mouse.row + 1).into_bytes();
-            let forwarded = if let Some(term_area) = self.mouse_layout.agent_term
+            let forwarded = if let Some(term_area) = self.mouse_layout.focused_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
             {
@@ -11475,19 +11525,21 @@ impl App {
         // agent's cells as far as this buffer is concerned. Opening a link out
         // of them would open an address the user is not looking at.
         let live = self.selected_terminal_surface_id();
-        if live.is_none() || self.last_snapshot_id != live {
+        let snapshot = self.part_snapshots.get(self.focused_part());
+        if live.is_none() || snapshot.last_id != live {
             return None;
         }
         self.selected_terminal_surface_client()?;
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point(term_area, column, row)?;
-        let cell = self.snapshot_buf.cells.iter().find(|cell| {
+        let cell = snapshot.buf.cells.iter().find(|cell| {
             cell.row == row
                 && col >= cell.col
                 && col < cell.col + snapshot_cell_columns(cell.symbol.as_str())
         })?;
         let index = cell.link?;
-        self.snapshot_buf
+        snapshot
+            .buf
             .links
             .get(usize::from(index))
             .map(String::as_str)
@@ -11516,6 +11568,7 @@ impl App {
             // against whatever button comes back up.
             button: MouseButton::Left,
             surface: self.selected_terminal_surface_id(),
+            part: self.focused_part(),
             uri: decision.uri,
             suppress: decision.suppress,
             open: decision.open && !repeat,
@@ -11721,7 +11774,7 @@ impl App {
         let MouseEventKind::Down(button) = mouse.kind else {
             return false;
         };
-        let Some(term_area) = self.mouse_layout.agent_term else {
+        let Some(term_area) = self.mouse_layout.focused_term else {
             return false;
         };
         if !contains_point(term_area, mouse.column, mouse.row) {
@@ -11796,7 +11849,7 @@ impl App {
     /// itself (press/release arm the short Button window, motion arms
     /// nothing), keeping this in lockstep with `classify_pty_write`.
     fn write_center_mouse_report(&mut self, cb: u16, final_byte: u8, column: u16, row: u16) {
-        let Some(term_area) = self.mouse_layout.agent_term else {
+        let Some(term_area) = self.mouse_layout.focused_term else {
             return;
         };
         if term_area.width == 0 || term_area.height == 0 {
@@ -11868,17 +11921,7 @@ impl App {
                 let columns = body_right.saturating_sub(column).clamp(1, body.width);
                 self.set_right_width_pct(pct_from_columns(columns, body.width));
             }
-            Some(DraggedDivider::Terminal) => {
-                let left = self.mouse_layout.left;
-                if left.height > 0 {
-                    // Terminal height = distance from mouse row to bottom of left pane.
-                    let left_bottom = left.y + left.height;
-                    let term_rows = left_bottom.saturating_sub(row).clamp(1, left.height);
-                    let pct = pct_from_columns(term_rows, left.height); // reuse same % helper
-                    self.terminal_pane_height_pct =
-                        dux_core::config_effective::effective_pane_height_pct(pct);
-                }
-            }
+            Some(DraggedDivider::Dock) => self.drag_dock_divider(row),
             Some(DraggedDivider::Staged) => {
                 let right = self.mouse_layout.right;
                 if right.height > 0 {
@@ -11916,16 +11959,46 @@ impl App {
         }
     }
 
+    /// Move the divider between an agent and its dock to `row`. Dragged onto
+    /// the top or bottom edge of the center pane it shows one part alone: the
+    /// terminal at the top, the agent at the bottom.
+    fn drag_dock_divider(&mut self, row: u16) {
+        let Some(stack) = self.mouse_layout.center_stack else {
+            return;
+        };
+        if stack.height < 2 {
+            return;
+        }
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        let edge = if row <= stack.y {
+            Some(DockLayout::Term)
+        } else if row >= stack.bottom().saturating_sub(1) {
+            Some(DockLayout::Agent)
+        } else {
+            None
+        };
+        if let Some(layout) = edge {
+            self.set_dock_layout(&session_id, layout);
+            return;
+        }
+        let dock_rows = stack.bottom().saturating_sub(row);
+        self.terminal_dock_pct = dux_core::config_effective::effective_pane_height_pct(
+            pct_from_columns(dock_rows, stack.height),
+        );
+    }
+
     fn persist_pane_widths(&mut self) {
         if self.engine.config.ui.left_width_pct != self.left_width_pct
             || self.engine.config.ui.right_width_pct != self.right_width_pct
-            || self.engine.config.ui.terminal_pane_height_pct != self.terminal_pane_height_pct
+            || self.engine.config.ui.terminal_dock_pct != self.terminal_dock_pct
             || self.engine.config.ui.staged_pane_height_pct != self.staged_pane_height_pct
             || self.engine.config.ui.commit_pane_height_pct != self.commit_pane_height_pct
         {
             self.engine.config.ui.left_width_pct = self.left_width_pct;
             self.engine.config.ui.right_width_pct = self.right_width_pct;
-            self.engine.config.ui.terminal_pane_height_pct = self.terminal_pane_height_pct;
+            self.engine.config.ui.terminal_dock_pct = self.terminal_dock_pct;
             self.engine.config.ui.staged_pane_height_pct = self.staged_pane_height_pct;
             self.engine.config.ui.commit_pane_height_pct = self.commit_pane_height_pct;
             self.engine
@@ -12076,7 +12149,7 @@ impl App {
         }
         let inside_log = self
             .mouse_layout
-            .agent_term
+            .focused_term
             .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
@@ -12111,7 +12184,7 @@ impl App {
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
-                .agent_term
+                .focused_term
                 .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
         {
             self.close_top_overlay();
@@ -12155,7 +12228,6 @@ impl App {
             MouseTarget::LeftRow(index) => {
                 let double_click =
                     self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
-                self.left_section = LeftSection::Projects;
                 self.set_left_selection(index);
                 if double_click {
                     self.activate_selected_left_item_from_mouse();
@@ -12164,28 +12236,8 @@ impl App {
                     // press of a double click never does: that press has already
                     // activated the row, and arming there would leave a gesture
                     // behind an action the user has finished with.
-                    self.arm_row_drag(RowDragList::Agents, index);
+                    self.arm_row_drag(index);
                 }
-            }
-            MouseTarget::TerminalRow(index) => {
-                let double_click =
-                    self.register_mouse_click(MouseClickTarget::LeftPane, Some(index));
-                self.focus = FocusPane::Left;
-                self.left_section = LeftSection::Terminals;
-                self.select_terminal_row(index);
-                self.input_target = InputTarget::None;
-                self.fullscreen_overlay = FullscreenOverlay::None;
-                if double_click {
-                    let () = self.open_terminal_from_terminal_list();
-                } else {
-                    self.arm_row_drag(RowDragList::Terminals, index);
-                }
-            }
-            MouseTarget::TerminalPane => {
-                self.focus = FocusPane::Left;
-                self.left_section = LeftSection::Terminals;
-                self.input_target = InputTarget::None;
-                self.fullscreen_overlay = FullscreenOverlay::None;
             }
             _ => return false,
         }
@@ -12305,15 +12357,14 @@ impl App {
     /// releases where it landed is the same plain click it always was. A press
     /// on a row that cannot be reordered (the Inactive tail, its toggle) arms
     /// nothing and clears any gesture a previous press left behind.
-    fn arm_row_drag(&mut self, list: RowDragList, index: usize) {
+    fn arm_row_drag(&mut self, index: usize) {
         if self.panes.left_collapsed {
             // The collapsed rail is a column of glyphs: there is no room to show a
             // row being carried or a gap opening, so it does not drag.
             self.row_drag = None;
             return;
         }
-        self.row_drag = self.row_drag_id(list, index).map(|source_id| RowDragState {
-            list,
+        self.row_drag = self.row_drag_id(index).map(|source_id| RowDragState {
             source: index,
             source_id,
             hover: None,
@@ -12322,31 +12373,23 @@ impl App {
         });
     }
 
-    /// The id of the agent or terminal in row `index` of `list`, when that row is
-    /// one a drag may pick up or drop onto. `None` for every other row, which is
-    /// what makes the tail, the toggle and an out-of-range index unreachable.
-    fn row_drag_id(&self, list: RowDragList, index: usize) -> Option<String> {
-        match list {
-            RowDragList::Agents => self
-                .is_reorderable_left_item(index)
-                .then(|| self.left_item_session_id(index))
-                .flatten(),
-            RowDragList::Terminals => self
-                .terminal_items()
-                .get(index)
-                .map(|(id, _)| (*id).clone()),
+    /// What is in row `index`, when that row is one a drag may pick up or drop
+    /// onto. `None` for every other row, which is what makes the tail, the
+    /// toggle and an out-of-range index unreachable.
+    fn row_drag_id(&self, index: usize) -> Option<LeftRow> {
+        if !self.is_reorderable_left_item(index) {
+            return None;
         }
+        self.left_rows.get(index).cloned()
     }
 
-    /// The row of `list` the pointer is over, drop target or not. A gesture only
-    /// ever asks about its OWN list, so a drag that wanders into the other
-    /// section finds no row there. This is the promotion threshold's question
-    /// ("is the pointer still on the row it pressed on?"), which is about the
-    /// rect and not about whether a drop there would mean anything.
-    fn row_drag_target_row(&self, list: RowDragList, mouse: MouseEvent) -> Option<usize> {
-        match (list, self.mouse_target(mouse.column, mouse.row)) {
-            (RowDragList::Agents, Some(MouseTarget::LeftRow(index)))
-            | (RowDragList::Terminals, Some(MouseTarget::TerminalRow(index))) => Some(index),
+    /// The row the pointer is over, drop target or not. This is the promotion
+    /// threshold's question ("is the pointer still on the row it pressed on?"),
+    /// which is about the rect and not about whether a drop there would mean
+    /// anything.
+    fn row_drag_target_row(&self, mouse: MouseEvent) -> Option<usize> {
+        match self.mouse_target(mouse.column, mouse.row) {
+            Some(MouseTarget::LeftRow(index)) => Some(index),
             _ => None,
         }
     }
@@ -12363,7 +12406,7 @@ impl App {
         let Some(mut drag) = self.row_drag.clone() else {
             return;
         };
-        let over_row = self.row_drag_target_row(drag.list, mouse);
+        let over_row = self.row_drag_target_row(mouse);
         if !drag.promoted {
             let still_home = over_row == Some(drag.source);
             if still_home {
@@ -12377,7 +12420,7 @@ impl App {
         }
         let target = over_row
             .filter(|index| *index != drag.source)
-            .and_then(|index| self.row_drag_id(drag.list, index).map(|id| (index, id)));
+            .and_then(|index| self.row_drag_id(index).map(|id| (index, id)));
         drag.hover = target.as_ref().map(|(index, _)| *index);
         drag.hover_id = target.map(|(_, id)| id);
         self.row_drag = Some(drag);
@@ -12389,9 +12432,8 @@ impl App {
     /// The move is computed the way the web computes a drop: take the complete
     /// order of that list as the screen shows it, move the dragged row to the
     /// slot the row it was dropped on occupies, and hand the whole list to the
-    /// engine, which accepts nothing less. Agents and terminals are separate
-    /// orders and never mix; an unpromoted or untargeted gesture reorders
-    /// nothing and says nothing.
+    /// engine, which accepts nothing less. An unpromoted or untargeted gesture
+    /// reorders nothing and says nothing.
     fn finish_row_drag(&mut self) {
         let Some(drag) = self.row_drag.take() else {
             return;
@@ -12407,23 +12449,14 @@ impl App {
         // row that no longer holds what the press picked up means the user is
         // looking at a different list from the one the drag was aimed at, and the
         // gesture is dropped quietly rather than moving a row nobody grabbed.
-        if self.row_drag_id(drag.list, drag.source).as_deref() != Some(drag.source_id.as_str())
-            || self.row_drag_id(drag.list, hover).as_deref() != Some(target_id.as_str())
+        if self.row_drag_id(drag.source).as_ref() != Some(&drag.source_id)
+            || self.row_drag_id(hover).as_ref() != Some(&target_id)
         {
             return;
         }
-        match drag.list {
-            RowDragList::Agents => {
-                let baseline = self.agent_drag_baseline();
-                let next = super::reorder::move_to_target(&baseline, &drag.source_id, &target_id);
-                self.apply_agent_order(&baseline, next, &drag.source_id);
-            }
-            RowDragList::Terminals => {
-                let baseline = self.terminal_drag_baseline();
-                let next = super::reorder::move_to_target(&baseline, &drag.source_id, &target_id);
-                self.apply_terminal_order(&baseline, next, &drag.source_id);
-            }
-        }
+        let baseline = self.list_drag_baseline();
+        let next = super::reorder::move_to_target(&baseline, &drag.source_id, &target_id);
+        self.apply_list_order(&baseline, &next, &drag.source_id);
     }
 
     fn handle_primary_mouse_down(&mut self, mouse: MouseEvent, layout: PaneLayout) {
@@ -12435,6 +12468,12 @@ impl App {
         self.row_drag = None;
         self.tab_drag = None;
         self.end_terminal_selection_drag();
+        // The layout control can sit on the divider's own row, and a press on
+        // one of its words is the control's rather than a drag.
+        if layout == PaneLayout::Windowed && self.handle_dock_chrome_press(mouse.column, mouse.row)
+        {
+            return;
+        }
         if layout == PaneLayout::Windowed
             && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row)
         {
@@ -12446,6 +12485,9 @@ impl App {
             && self.handle_agent_tab_strip_click(mouse.column, mouse.row)
         {
             return;
+        }
+        if layout == PaneLayout::Windowed {
+            self.focus_part_under(mouse.column, mouse.row);
         }
         if self.handle_pr_banner_press(mouse, layout) {
             return;
@@ -12466,6 +12508,8 @@ impl App {
             Some(MouseTarget::LeftRow(_)) => {
                 self.handle_left_mouse_wheel(direction, mouse.column, mouse.row);
             }
+            Some(MouseTarget::Center)
+                if self.scroll_part_under(mouse.column, mouse.row, direction) => {}
             Some(MouseTarget::Center) => self.handle_center_mouse_wheel(mouse),
             Some(MouseTarget::UnstagedFile(_)) => {
                 self.scroll_file_selection(RightSection::Unstaged, direction);
@@ -12566,7 +12610,7 @@ impl App {
     /// Map screen coordinates to terminal grid position.
     /// Returns `None` if the point is outside the terminal area.
     fn screen_to_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point(term_area, screen_col, screen_row)?;
         Some(TermGridPos { row, col })
     }
@@ -12575,7 +12619,7 @@ impl App {
     /// terminal area edges. Used during drag so the selection extends to the
     /// nearest boundary when the mouse leaves the terminal area.
     fn screen_to_grid_clamped(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point_clamped(term_area, screen_col, screen_row);
         Some(TermGridPos { row, col })
     }
@@ -12631,6 +12675,10 @@ impl App {
     /// Launch whatever dormant tab the card is currently about. The same act the
     /// focus-agent binding performs, so the button and the key cannot diverge.
     fn start_focused_dormant_tab(&mut self) {
+        if self.selected_agent_stopped_beside_dock() {
+            self.start_stopped_agent();
+            return;
+        }
         let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
             return;
         };
@@ -12651,7 +12699,7 @@ impl App {
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
     pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !self.focused_pty_is_covered_by_card() {
+        if !self.card_covers_center() {
             // The card can vanish under the pointer: this surface takes over, or
             // a launch started here claims the pty, between press and release.
             self.takeover_press = None;
@@ -12698,10 +12746,16 @@ impl App {
                     // marked as dragging.
                     self.terminal_selection = None;
                 }
-                let covered = self
-                    .mouse_layout
-                    .agent_term
-                    .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
+                // Over an agent's stack the card covers every part of it, so
+                // nothing under it can be focused, selected, scrolled or
+                // followed.
+                let covered_area = if self.drawing_agent_stack() {
+                    self.mouse_layout.card_cover
+                } else {
+                    self.mouse_layout.focused_term
+                };
+                let covered =
+                    covered_area.is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
                 if covered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     // A click on a pane still focuses it, which is the one thing
                     // a click on the covered area may still do.
@@ -12725,6 +12779,7 @@ impl App {
                         // read of the live grid: the click selects the cells on
                         // screen, and output may already have arrived since.
                         origin: self.snapshot_selection_origin(),
+                        part: self.focused_part(),
                     });
                 }
             }
@@ -12804,7 +12859,9 @@ impl App {
         // takes whatever text has since scrolled into those screen rows instead of
         // the text the user highlighted.
         let selected: Vec<(u16, u16, &str)> = self
-            .snapshot_buf
+            .part_snapshots
+            .get(self.focused_part())
+            .buf
             .cells
             .iter()
             .filter_map(|cell| {
@@ -12863,6 +12920,7 @@ impl App {
                         // its scroll offset), so it needs no frame to translate
                         // against and never calls `contains_live`.
                         origin: SelectionOrigin::default(),
+                        part: crate::app::CenterPart::Main,
                     });
                     return true;
                 }
@@ -12899,7 +12957,7 @@ impl App {
         let (sel, content, width) = match (
             self.fullscreen_overlay,
             &self.startup_log_viewer,
-            self.mouse_layout.agent_term,
+            self.mouse_layout.focused_term,
             &self.prompt,
             self.overlay_layout.active,
         ) {
@@ -12957,8 +13015,6 @@ impl App {
     /// and show a status message. Used by `ToggleFullscreen` key handling,
     /// mouse-click-outside-overlay, and the loading-phase exit path.
     pub(crate) fn exit_interactive_mode(&mut self) {
-        let return_to_terminal_list =
-            matches!(self.input_target, InputTarget::Terminal) && self.terminal_return_to_list;
         let return_to_projects = matches!(self.input_target, InputTarget::Agent);
         // Snap the PTY to the live edge before the surface fields reset, since
         // the client resolves through the current surface. The terminal library
@@ -12966,9 +13022,9 @@ impl App {
         // behind freezes the minimized pane on stale content. Entering
         // interactive mode already snaps to the live edge, so exiting mirrors it.
         self.reset_pty_scrollback();
+        // Focus stays on the part that was being typed into.
         self.input_target = InputTarget::None;
         self.fullscreen_overlay = FullscreenOverlay::None;
-        self.session_surface = SessionSurface::Agent;
         self.terminal_selection = None;
         self.raw_paste.in_bracket = false;
         self.raw_paste.normalize = false;
@@ -12976,19 +13032,6 @@ impl App {
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
         self.loading_input_buf.clear();
-        if return_to_terminal_list {
-            self.left_section = LeftSection::Terminals;
-            self.select_active_terminal_row();
-            self.clamp_terminal_cursor();
-            self.focus = FocusPane::Left;
-        } else if return_to_projects {
-            // Snap the sidebar to Projects so the agent you are looking at is the
-            // visible selection, but do not take focus: minimizing lands on the
-            // focused, typeable center pane, so keystrokes keep reaching the
-            // agent and the fullscreen toggle re-enters from right here. Yanking
-            // focus to the sidebar would silently end typeability.
-            self.left_section = LeftSection::Projects;
-        }
         let key = self.bindings.label_for(Action::ToggleFullscreen);
         if return_to_projects {
             // Same truthfulness rule as `close_top_overlay`: promise typing
@@ -13032,7 +13075,7 @@ impl App {
             if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
                 let outside_overlay =
                     matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
-                        && !self.mouse_layout.agent_term.is_some_and(|rect| {
+                        && !self.mouse_layout.focused_term.is_some_and(|rect| {
                             contains_point(rect, mouse_ev.column, mouse_ev.row)
                         });
                 if outside_overlay {
@@ -13208,13 +13251,13 @@ mod tests {
         ConfirmNonDefaultBranchFocus, CreateAgentBranchInspection, CreateAgentRequest,
         DeleteAgentFocus, FirstLoadButton, FirstLoadPrompt, FocusPane, FullscreenOverlay,
         InputTarget, KillRunningAction, KillRunningFocus, KillRunningFooterAction,
-        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftSection,
-        MacroBarState, MacroEditFocus, MacroEditState, MouseClickTarget, MouseLayoutState,
-        NameNewAgentFocus, NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId,
-        OverlayMouseLayout, PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent,
-        ProjectWorktreeEntry, PromptState, PullTarget, RenameSessionFocus, ResourceKind,
-        ResourceStats, RightSection, RuntimeTargetId, SearchableList, StartupCommandLogFocus,
-        StartupCommandLogPrompt, TextInput, WorkerEvent,
+        KillRunningPrompt, KillableRuntime, KillableRuntimeKind, LeftItem, LeftRow, MacroBarState,
+        MacroEditFocus, MacroEditState, MouseClickTarget, MouseLayoutState, NameNewAgentFocus,
+        NonDefaultBranchAction, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+        PickProjectWorktreePrompt, ProcessInfo, ProjectChooserIntent, ProjectWorktreeEntry,
+        PromptState, PullTarget, RenameSessionFocus, ResourceKind, ResourceStats, RightSection,
+        RuntimeTargetId, SearchableList, StartupCommandLogFocus, StartupCommandLogPrompt,
+        TextInput, WorkerEvent,
     };
     use crate::app::{StartupLogViewer, pick_project_matches};
     use crate::app::{TermGridPos, TerminalSelection};
@@ -13365,9 +13408,8 @@ mod tests {
             // keep their 1:1 row->item expectations; the real two-line mapping is
             // covered by `left_row_to_item`'s own unit tests and a render test.
             left_row_to_item: (0..10usize).collect(),
-            terminal_list: Rect::default(),
-            terminal_row_to_item: Vec::new(),
-            agent_term: Some(Rect::new(21, 1, 55, 16)),
+            focused_term: Some(Rect::new(21, 1, 55, 16)),
+            other_term: None,
             takeover_button: None,
             dormant_tab_button: None,
             pr_banner: None,
@@ -13375,6 +13417,7 @@ mod tests {
             staged_list: Some(Rect::new(78, 9, 21, 5)),
             commit_area: Some(Rect::new(77, 14, 23, 6)),
             commit_text_area: Some(Rect::new(78, 15, 21, 4)),
+            ..MouseLayoutState::default()
         };
     }
 
@@ -13527,11 +13570,10 @@ mod tests {
     fn a_host_resize_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s1".to_string(),
+            source_id: LeftRow::Agent("s1".to_string()),
             hover: Some(1),
-            hover_id: Some("s2".to_string()),
+            hover_id: Some(LeftRow::Agent("s2".to_string())),
             promoted: true,
         });
 
@@ -13544,11 +13586,10 @@ mod tests {
     fn focus_loss_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s1".to_string(),
+            source_id: LeftRow::Agent("s1".to_string()),
             hover: Some(1),
-            hover_id: Some("s2".to_string()),
+            hover_id: Some(LeftRow::Agent("s2".to_string())),
             promoted: true,
         });
 
@@ -13561,11 +13602,10 @@ mod tests {
     fn a_keystroke_retires_a_live_row_drag() {
         let mut app = drag_test_app();
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s1".to_string(),
+            source_id: LeftRow::Agent("s1".to_string()),
             hover: Some(1),
-            hover_id: Some("s2".to_string()),
+            hover_id: Some(LeftRow::Agent("s2".to_string())),
             promoted: true,
         });
 
@@ -13580,11 +13620,10 @@ mod tests {
         let mut app = drag_test_app();
         app.selected_left = 1;
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 1,
-            source_id: "s2".to_string(),
+            source_id: LeftRow::Agent("s2".to_string()),
             hover: Some(2),
-            hover_id: Some("s3".to_string()),
+            hover_id: Some(LeftRow::Agent("s3".to_string())),
             promoted: true,
         });
 
@@ -13605,11 +13644,10 @@ mod tests {
         let mut app = drag_test_app();
         let x = app.mouse_layout.left_list.x;
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s1".to_string(),
+            source_id: LeftRow::Agent("s1".to_string()),
             hover: Some(2),
-            hover_id: Some("s3".to_string()),
+            hover_id: Some(LeftRow::Agent("s3".to_string())),
             promoted: true,
         });
 
@@ -13634,25 +13672,15 @@ mod tests {
         // Stored order s1, s2, s3, s4 with s4 detached.
         app.engine.config.ui.agent_sort = "name_desc".to_string();
         assert_eq!(
-            app.agent_drag_baseline(),
-            vec![
-                "s3".to_string(),
-                "s2".to_string(),
-                "s1".to_string(),
-                "s4".to_string()
-            ],
+            app.list_drag_baseline(),
+            ["s3", "s2", "s1", "s4"].map(|id| LeftRow::Agent(id.to_string())),
             "a computed sort shows the sorted main list, then the quiet tail",
         );
 
         app.engine.config.ui.agent_sort = "manual".to_string();
         assert_eq!(
-            app.agent_drag_baseline(),
-            vec![
-                "s1".to_string(),
-                "s2".to_string(),
-                "s3".to_string(),
-                "s4".to_string()
-            ],
+            app.list_drag_baseline(),
+            ["s1", "s2", "s3", "s4"].map(|id| LeftRow::Agent(id.to_string())),
             "manual takes the stored order verbatim, as the web's drags do",
         );
     }
@@ -13665,7 +13693,7 @@ mod tests {
             .iter()
             .position(|item| match item {
                 LeftItem::Session(i) => app.engine.sessions[*i].id == id,
-                LeftItem::InactiveToggle => false,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => false,
             })
             .expect("the agent has a row");
     }
@@ -13734,7 +13762,7 @@ mod tests {
         assert_eq!(app.engine.config.ui.agent_sort, "manual");
         assert_eq!(
             app.status.most_recent_tui().map(|(_, text)| text),
-            Some("Reordered agents. Sorting is now manual.".to_string()),
+            Some("Reordered the agents list. Sorting is now manual.".to_string()),
         );
         assert!(app.row_drag.is_none(), "the drop retires the gesture");
     }
@@ -13859,187 +13887,146 @@ mod tests {
         assert_eq!(app.engine.config.ui.agent_sort, "manual");
     }
 
-    /// Three terminals in the sidebar's Terminals section, with a mouse layout
-    /// that maps one screen row per terminal (the agents map above is the same
-    /// synthetic shape, for the same reason).
+    /// Three standalone terminals, rows of the agents list ahead of the agents
+    /// (no terminal names an agent to follow yet), under the same synthetic
+    /// one-row-per-item mouse layout: t1, t2, t3, s1, s2, s3, then the tail.
     fn terminal_drag_test_app() -> App {
         let mut app = drag_test_app();
-        let now = Utc::now();
-        for (index, id) in ["t1", "t2", "t3"].into_iter().enumerate() {
-            let client = crate::pty::PtyClient::spawn(
-                "echo",
-                &[],
-                std::path::Path::new("/tmp"),
-                24,
-                80,
-                1000,
-            )
-            .expect("spawn a test terminal");
-            app.engine.companion_terminals.insert(
-                id.to_string(),
-                crate::app::CompanionTerminal {
-                    owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
-                    label: id.to_string(),
-                    foreground_cmd: None,
-                    client,
-                    sort_order: u64::try_from(index).expect("a test index fits in a u64"),
-                    created_at: now,
-                },
-            );
+        for id in ["t1", "t2", "t3"] {
+            add_terminal(&mut app, id, dux_core::model::TerminalOwner::Standalone);
         }
-        app.mouse_layout.terminal_list = Rect::new(1, 12, 18, 6);
-        app.mouse_layout.terminal_row_to_item = (0..6usize).collect();
         app
     }
 
-    /// The screen row carrying terminal `index` under the identity map.
-    fn terminal_row_y(app: &App, index: usize) -> u16 {
-        app.mouse_layout.terminal_list.y + usize_to_u16_wrapping(index)
+    /// The terminal rows in the order the whole list holds them, every row
+    /// included whatever a live query hides.
+    fn list_terminal_order(app: &App) -> Vec<String> {
+        app.list_drag_baseline()
+            .into_iter()
+            .filter_map(|row| match row {
+                LeftRow::Terminal(id) => Some(id),
+                LeftRow::Agent(_) | LeftRow::InactiveToggle => None,
+            })
+            .collect()
+    }
+
+    /// Press on row `from`, drag onto row `to`, and release there.
+    fn drag_left_row(app: &mut App, from: usize, to: usize) {
+        let x = app.mouse_layout.left_list.x;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            left_row_y(app, from),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            left_row_y(app, to),
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            x,
+            left_row_y(app, to),
+        ));
     }
 
     #[test]
     fn a_drop_on_another_terminal_row_reorders_the_terminals() {
         let mut app = terminal_drag_test_app();
         app.engine.config.ui.agent_sort = "active".to_string();
-        let x = app.mouse_layout.terminal_list.x;
 
         // Drag the third terminal onto the first row.
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 2),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 0),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 0),
-        ));
+        drag_left_row(&mut app, 2, 0);
 
-        let order: Vec<String> = app
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        assert_eq!(order, vec!["t3", "t1", "t2"]);
+        assert_eq!(list_terminal_order(&app), vec!["t3", "t1", "t2"]);
         assert_eq!(app.engine.config.ui.agent_sort, "manual");
         assert_eq!(
             app.status.most_recent_tui().map(|(_, text)| text),
-            Some("Reordered terminals. Sorting is now manual.".to_string()),
+            Some("Reordered the agents list. Sorting is now manual.".to_string()),
         );
         assert_eq!(
-            app.selected_terminal_index, 0,
+            app.selected_terminal_row().as_deref(),
+            Some("t3"),
             "the selection follows the terminal that moved",
         );
     }
 
     #[test]
-    fn a_terminal_drag_over_an_agent_row_has_no_drop_target() {
-        let mut app = terminal_drag_test_app();
-        let tx = app.mouse_layout.terminal_list.x;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            tx,
-            terminal_row_y(&app, 2),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            app.mouse_layout.left_list.x,
-            left_row_y(&app, 0),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            app.mouse_layout.left_list.x,
-            left_row_y(&app, 0),
-        ));
-
-        let order: Vec<String> = app
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        assert_eq!(
-            order,
-            vec!["t1", "t2", "t3"],
-            "the two lists are separate: a terminal never lands among the agents",
-        );
-        let agents: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(agents, vec!["s1", "s2", "s3", "s4"]);
-    }
-
-    #[test]
-    fn an_agent_drag_over_a_terminal_row_has_no_drop_target() {
-        let mut app = terminal_drag_test_app();
-        let x = app.mouse_layout.left_list.x;
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            x,
-            left_row_y(&app, 0),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            app.mouse_layout.terminal_list.x,
-            terminal_row_y(&app, 1),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            app.mouse_layout.terminal_list.x,
-            terminal_row_y(&app, 1),
-        ));
-
-        let agents: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(agents, vec!["s1", "s2", "s3", "s4"]);
-        let order: Vec<String> = app
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
-        assert_eq!(order, vec!["t1", "t2", "t3"]);
-    }
-
-    #[test]
-    fn a_terminal_drop_under_a_live_filter_still_sends_every_terminal() {
+    fn a_terminal_dropped_on_an_agent_row_lands_among_the_agents() {
         let mut app = terminal_drag_test_app();
         app.engine.config.ui.agent_sort = "active".to_string();
-        // Rename the middle terminal out of the query's reach, so the section
-        // shows t1 and t3 while t2 stays in the order underneath.
-        if let Some(middle) = app.engine.companion_terminals.get_mut("t2") {
-            middle.label = "shell".to_string();
-        }
-        app.agent_filter = Some(TextInput::with_text("t".to_string()));
-        app.rebuild_left_items();
-        assert_eq!(app.terminal_items().len(), 2, "t1 and t3 are visible");
 
-        let x = app.mouse_layout.terminal_list.x;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 1),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 0),
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            x,
-            terminal_row_y(&app, 0),
-        ));
+        // t1 travels down onto s2, so it lands in the gap below s2.
+        drag_left_row(&mut app, 0, 4);
 
-        let order: Vec<String> = app
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
         assert_eq!(
-            order,
+            app.left_rows[..6],
+            [
+                LeftRow::Terminal("t2".to_string()),
+                LeftRow::Terminal("t3".to_string()),
+                LeftRow::Agent("s1".to_string()),
+                LeftRow::Agent("s2".to_string()),
+                LeftRow::Terminal("t1".to_string()),
+                LeftRow::Agent("s3".to_string()),
+            ],
+        );
+        let agents: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            agents,
+            vec!["s1", "s2", "s3", "s4"],
+            "moving a terminal leaves the agents' stored order alone",
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+    }
+
+    #[test]
+    fn an_agent_dropped_on_a_terminal_row_moves_past_it() {
+        let mut app = terminal_drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+
+        // s1 travels up onto t2, so it lands in the gap above t2.
+        drag_left_row(&mut app, 3, 1);
+
+        assert_eq!(
+            app.left_rows[..6],
+            [
+                LeftRow::Terminal("t1".to_string()),
+                LeftRow::Agent("s1".to_string()),
+                LeftRow::Terminal("t2".to_string()),
+                LeftRow::Terminal("t3".to_string()),
+                LeftRow::Agent("s2".to_string()),
+                LeftRow::Agent("s3".to_string()),
+            ],
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+    }
+
+    #[test]
+    fn a_terminal_drop_under_a_live_filter_still_keeps_every_terminal_in_order() {
+        let mut app = terminal_drag_test_app();
+        app.engine.config.ui.agent_sort = "active".to_string();
+        // Only t1 and t3 match the query, so the list shows those two while t2
+        // stays in the order underneath.
+        for (id, label) in [("t1", "alpha one"), ("t2", "shell"), ("t3", "alpha three")] {
+            if let Some(terminal) = app.engine.companion_terminals.get_mut(id) {
+                terminal.label = label.to_string();
+            }
+        }
+        app.agent_filter = Some(TextInput::with_text("alpha".to_string()));
+        app.rebuild_left_items();
+        assert_eq!(
+            app.left_rows,
+            vec![
+                LeftRow::Terminal("t1".to_string()),
+                LeftRow::Terminal("t3".to_string()),
+            ],
+            "only the matching terminals are rows",
+        );
+
+        drag_left_row(&mut app, 1, 0);
+
+        assert_eq!(
+            list_terminal_order(&app),
             vec!["t3", "t1", "t2"],
             "the hidden terminal keeps its place in the total order",
         );
@@ -14200,49 +14187,32 @@ mod tests {
         app.engine.config.ui.agent_sort = "active".to_string();
         // A fourth terminal, so that losing one still leaves every row index the
         // gesture holds IN range but pointing at a different terminal.
-        let client =
-            crate::pty::PtyClient::spawn("echo", &[], std::path::Path::new("/tmp"), 24, 80, 1000)
-                .expect("spawn a test terminal");
-        app.engine.companion_terminals.insert(
-            "t4".to_string(),
-            crate::app::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
-                label: "t4".to_string(),
-                foreground_cmd: None,
-                client,
-                sort_order: 3,
-                created_at: Utc::now(),
-            },
-        );
-        let x = app.mouse_layout.terminal_list.x;
+        add_terminal(&mut app, "t4", dux_core::model::TerminalOwner::Standalone);
+        let x = app.mouse_layout.left_list.x;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             x,
-            terminal_row_y(&app, 2),
+            left_row_y(&app, 2),
         ));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
             x,
-            terminal_row_y(&app, 0),
+            left_row_y(&app, 0),
         ));
 
         // A terminal exits while the button is down, so the rows shift up.
         app.engine.companion_terminals.remove("t1");
+        app.rebuild_left_items();
 
         app.handle_mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
             x,
-            terminal_row_y(&app, 0),
+            left_row_y(&app, 0),
         ));
 
-        let order: Vec<String> = app
-            .sorted_terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
         assert_eq!(
-            order,
+            list_terminal_order(&app),
             vec!["t2", "t3", "t4"],
             "the survivors keep their order; no row the gesture never named is moved",
         );
@@ -14383,7 +14353,6 @@ mod tests {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
 
-        app.mouse_layout.terminal_list = app.mouse_layout.left_list;
         assert_eq!(app.mouse_target(2, 1), Some(MouseTarget::LeftRow(0)));
 
         let overlap = Rect::new(40, 4, 8, 4);
@@ -14441,7 +14410,7 @@ mod tests {
         );
 
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.mouse_layout.agent_term = Some(Rect::new(60, 5, 5, 5));
+        app.mouse_layout.focused_term = Some(Rect::new(60, 5, 5, 5));
         assert_eq!(app.mouse_target(61, 6), Some(MouseTarget::Center));
         assert_eq!(app.mouse_target(overlap.x, overlap.y), None);
     }
@@ -16999,6 +16968,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -17052,6 +17022,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -17445,7 +17416,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                LeftItem::InactiveToggle => None,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["alpha", "bravo", "charlie"]);
@@ -17506,7 +17477,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                LeftItem::InactiveToggle => None,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => None,
             })
             .collect()
     }
@@ -17527,7 +17498,6 @@ not_a_real_action = ["x"]
         }
         app.rebuild_left_items();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
 
         // `/` (the Left-scope FilterAgents binding) enters filter mode.
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
@@ -17587,7 +17557,7 @@ not_a_real_action = ["x"]
             .iter()
             .filter_map(|item| match item {
                 LeftItem::Session(i) => Some(app.engine.sessions[*i].id.clone()),
-                LeftItem::InactiveToggle => None,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(ids, vec!["s-web".to_string()]);
@@ -17658,7 +17628,6 @@ not_a_real_action = ["x"]
         }
         app.rebuild_left_items();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
 
         app.open_agent_filter();
         for c in "zzzznomatch".chars() {
@@ -17703,7 +17672,6 @@ not_a_real_action = ["x"]
         }
         app.rebuild_left_items();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
 
         app.open_agent_filter();
         for c in "api".chars() {
@@ -17735,7 +17703,6 @@ not_a_real_action = ["x"]
         }
         app.rebuild_left_items();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
 
         app.open_agent_filter();
         for c in "web".chars() {
@@ -17850,7 +17817,7 @@ not_a_real_action = ["x"]
                         .expect("managed test session")
                         .to_string(),
                 ),
-                LeftItem::InactiveToggle => None,
+                LeftItem::Terminal(_) | LeftItem::InactiveToggle => None,
             })
             .collect();
         assert_eq!(displayed, vec!["charlie", "alpha", "bravo"]);
@@ -17879,6 +17846,7 @@ not_a_real_action = ["x"]
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some("term-1".to_string());
@@ -20129,22 +20097,41 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn mouse_click_terminal_row_selects_the_terminal_section() {
+    fn mouse_click_on_a_terminal_row_selects_it_and_shows_it() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal();
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
+        app.focus = FocusPane::Center;
         install_mouse_layout(&mut app);
-        app.mouse_layout.terminal_list = Rect::new(1, 12, 18, 3);
-        app.mouse_layout.terminal_row_to_item = vec![0, 0, 0];
+        let row = app
+            .left_rows
+            .iter()
+            .position(|row| *row == LeftRow::Terminal("term-1".to_string()))
+            .expect("a standalone terminal is a row");
 
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, 13));
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            app.mouse_layout.left_list.x + 1,
+            app.mouse_layout.left_list.y + usize_to_u16_wrapping(row),
+        ));
+        // The center pane follows the selection on the next frame.
+        ratatui::Terminal::new(TestBackend::new(100, 30))
+            .expect("terminal")
+            .draw(|frame| app.render(frame))
+            .expect("render");
 
         assert_eq!(app.focus, FocusPane::Left);
-        assert_eq!(app.left_section, LeftSection::Terminals);
-        assert_eq!(app.selected_terminal_index, 0);
-        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.selected_terminal_row().as_deref(), Some("term-1"));
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.active_terminal_id.as_deref(), Some("term-1"));
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "a single click selects; it does not start typing into the terminal"
+        );
     }
 
     #[test]
@@ -20318,7 +20305,6 @@ not_a_real_action = ["x"]
             app.engine.mark_session_status(&id, SessionStatus::Active);
         }
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         // Select the SECOND agent: its name/meta/spacer land on rows 3/4/5.
         app.selected_left = app
@@ -20380,7 +20366,6 @@ not_a_real_action = ["x"]
             app.engine.mark_session_status(&id, SessionStatus::Active);
         }
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -20421,7 +20406,6 @@ not_a_real_action = ["x"]
         let id = app.engine.sessions[0].id.clone();
         app.engine.mark_session_status(&id, SessionStatus::Active);
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         app.selected_left = app
             .left_items()
@@ -20520,7 +20504,6 @@ not_a_real_action = ["x"]
         app.engine
             .mark_session_status("inactive-1", SessionStatus::Exited);
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         let toggle_idx = app
             .left_items()
@@ -20567,7 +20550,6 @@ not_a_real_action = ["x"]
         app.engine
             .mark_session_status("inactive-1", SessionStatus::Exited);
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         // Expand the Inactive section by hand so the inactive agent renders.
         app.inactive_tail.collapsed = false;
         app.inactive_tail.overridden = true;
@@ -20626,7 +20608,6 @@ not_a_real_action = ["x"]
         app.engine.sessions[0].title =
             Some("this-is-an-extremely-long-agent-name-that-cannot-possibly-fit".to_string());
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
 
         let backend = TestBackend::new(120, 30);
@@ -20670,7 +20651,6 @@ not_a_real_action = ["x"]
             app.engine.mark_session_status(&id, SessionStatus::Active);
         }
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         app
     }
@@ -20678,7 +20658,6 @@ not_a_real_action = ["x"]
     #[test]
     fn left_nav_wraps_from_last_agent_to_first() {
         let mut app = two_active_agents_app();
-        assert!(!app.has_terminal_items(), "test assumes no terminals");
         let first = app.first_selectable_left_item().expect("an agent row");
         let last = app.last_selectable_left_item().expect("an agent row");
         assert_ne!(
@@ -20689,21 +20668,18 @@ not_a_real_action = ["x"]
         // Down past the last agent (no terminals below) wraps to the top.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(app.selected_left, first);
     }
 
     #[test]
     fn left_nav_wraps_from_first_agent_to_last() {
         let mut app = two_active_agents_app();
-        assert!(!app.has_terminal_items(), "test assumes no terminals");
         let first = app.first_selectable_left_item().expect("an agent row");
         let last = app.last_selectable_left_item().expect("an agent row");
         app.selected_left = first;
         // Up from the first agent (no terminals) wraps to the last agent.
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .unwrap();
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(app.selected_left, last);
     }
 
@@ -20732,7 +20708,6 @@ not_a_real_action = ["x"]
             )],
         );
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
         app.selected_left = app.first_selectable_left_item().expect("agent row");
 
@@ -20937,7 +20912,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         app.focus = FocusPane::Left;
 
-        // agent_term is (21,1,55,16); a click at screen (30,5) translates to
+        // focused_term is (21,1,55,16); a click at screen (30,5) translates to
         // child cell (10,5) in 1-based SGR coordinates.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
 
@@ -21019,7 +20994,7 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         wait_for_forwarded_echo(&app, "[<0;10;5M");
 
-        // (0,0) is far outside agent_term (21,1,55,16): clamped to the pane's
+        // (0,0) is far outside focused_term (21,1,55,16): clamped to the pane's
         // top-left content cell, which is (1,1) in child coordinates.
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
 
@@ -21088,7 +21063,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
 
-        // agent_term is (21,1,55,16), so screen (21,1) is child cell (0,0),
+        // focused_term is (21,1,55,16), so screen (21,1) is child cell (0,0),
         // where the fixture's READY sentinel starts.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
         assert!(
@@ -21264,10 +21239,12 @@ not_a_real_action = ["x"]
     /// as belonging to the surface on screen (which is what the hit test
     /// requires before it will read a cell at all).
     fn install_linked_cells(app: &mut App, uri: &str, cells: &[(u16, u16, &str)]) {
-        app.snapshot_buf.rows = 16;
-        app.snapshot_buf.cols = 55;
-        app.snapshot_buf.links = vec![uri.to_string()];
-        app.snapshot_buf.cells = cells
+        let last_id = app.selected_terminal_surface_id();
+        let snapshot = app.part_snapshots.get_mut(app.focused_part());
+        snapshot.buf.rows = 16;
+        snapshot.buf.cols = 55;
+        snapshot.buf.links = vec![uri.to_string()];
+        snapshot.buf.cells = cells
             .iter()
             .map(|(row, col, symbol)| crate::pty::SnapshotCell {
                 row: *row,
@@ -21279,7 +21256,7 @@ not_a_real_action = ["x"]
                 link: Some(0),
             })
             .collect();
-        app.last_snapshot_id = app.selected_terminal_surface_id();
+        snapshot.last_id = last_id;
     }
 
     /// The common case: one linked cell at grid (4, 9), which the synthetic
@@ -21311,7 +21288,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
-        // agent_term is (21,1,55,16), so screen (30,5) is grid cell (9,4).
+        // focused_term is (21,1,55,16), so screen (30,5) is grid cell (9,4).
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
@@ -21593,8 +21570,8 @@ not_a_real_action = ["x"]
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/history");
         // A snapshot taken well above the live edge resolves the same point to
         // the same cell: adding the offset anywhere in the lookup moves it.
-        app.snapshot_buf.scrollback_offset = 120;
-        app.snapshot_buf.scrollback_total = 400;
+        app.part_snapshots.main.buf.scrollback_offset = 120;
+        app.part_snapshots.main.buf.scrollback_total = 400;
 
         assert_eq!(
             app.link_at_screen_point(30, 5),
@@ -21716,6 +21693,7 @@ not_a_real_action = ["x"]
                 .expect("spawn pty"),
                 sort_order: 0,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.session_surface = SessionSurface::Terminal;
@@ -21750,6 +21728,7 @@ not_a_real_action = ["x"]
             end: TermGridPos { row: 0, col: 4 },
             dragging: false,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
@@ -21897,11 +21876,11 @@ not_a_real_action = ["x"]
         nothing_opened(&rx);
     }
 
-    /// Switching surface retires the record where the SELECTION is retired,
-    /// eagerly: coming back to the original surface must not resurrect a press
-    /// that belongs to a view the user has since left and returned to.
+    /// Switching a part to another pty retires the record where the SELECTION
+    /// is retired, eagerly: coming back to the original tab must not resurrect
+    /// a press that belongs to a view the user has since left and returned to.
     #[test]
-    fn switching_surface_away_and_back_retires_a_pending_press() {
+    fn switching_tab_away_and_back_retires_a_pending_press() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
@@ -21911,31 +21890,25 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         assert!(app.pending_link_click.is_some());
 
-        // Away to a companion terminal with a child of its own, and back.
-        let terminal_id = "terminal-1".to_string();
-        app.engine.companion_terminals.insert(
-            terminal_id.clone(),
-            dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
-                label: "shell".to_string(),
-                foreground_cmd: None,
-                client: PtyClient::spawn(
-                    "sh",
-                    &["-c".to_string(), "sleep 5".to_string()],
-                    std::path::Path::new("."),
-                    16,
-                    55,
-                    100,
-                )
-                .expect("spawn pty"),
-                sort_order: 0,
-                created_at: chrono::Utc::now(),
-            },
+        // Away to another tab of the same agent, with a child of its own, and
+        // back: the part's own switch of pty.
+        let slot_tab = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        seed_input_tab(&mut app, &session_id, "tab-x", "codex", 1);
+        app.engine.providers.insert(
+            TabId::new("tab-x"),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "sleep 5".to_string()],
+                std::path::Path::new("."),
+                16,
+                55,
+                100,
+            )
+            .expect("spawn pty"),
         );
-        app.session_surface = SessionSurface::Terminal;
-        app.active_terminal_id = Some(terminal_id);
+        app.set_focused_tab(&session_id, "tab-x");
         app.refresh_snapshot_buf();
-        app.session_surface = SessionSurface::Agent;
+        app.set_focused_tab(&session_id, &slot_tab);
         app.refresh_snapshot_buf();
 
         assert_eq!(
@@ -22282,12 +22255,12 @@ not_a_real_action = ["x"]
     fn the_link_lookup_follows_the_snapshots_own_table() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "");
-        app.snapshot_buf.rows = 16;
-        app.snapshot_buf.cols = 55;
-        app.snapshot_buf.links = (0..256)
+        app.part_snapshots.main.buf.rows = 16;
+        app.part_snapshots.main.buf.cols = 55;
+        app.part_snapshots.main.buf.links = (0..256)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
-        app.last_snapshot_id = app.selected_terminal_surface_id();
+        app.part_snapshots.main.last_id = app.selected_terminal_surface_id();
         let cell = |col: u16, link: u16| crate::pty::SnapshotCell {
             row: 0,
             col,
@@ -22298,7 +22271,7 @@ not_a_real_action = ["x"]
             link: Some(link),
         };
         // The 256th interned URI is index 255; index 256 is one past the end.
-        app.snapshot_buf.cells = vec![cell(0, 255), cell(1, 256)];
+        app.part_snapshots.main.buf.cells = vec![cell(0, 255), cell(1, 256)];
 
         assert_eq!(
             app.link_at_screen_point(21, 1),
@@ -22311,8 +22284,8 @@ not_a_real_action = ["x"]
         );
 
         // A rebuild replaces the table; the same cell now names the new address.
-        app.snapshot_buf.links = vec!["https://example.com/rebuilt".to_string()];
-        app.snapshot_buf.cells = vec![cell(0, 0)];
+        app.part_snapshots.main.buf.links = vec!["https://example.com/rebuilt".to_string()];
+        app.part_snapshots.main.buf.cells = vec![cell(0, 0)];
         assert_eq!(
             app.link_at_screen_point(21, 1),
             Some("https://example.com/rebuilt")
@@ -22331,7 +22304,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (16, 55);
+        app.set_focused_pty_size((16, 55));
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
         (app, rx)
@@ -22408,7 +22381,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         // Stretch the recorded terminal rect over the left divider column
         // (center.x == 20 in the synthetic layout) so the two claims overlap.
-        app.mouse_layout.agent_term = Some(Rect::new(20, 1, 56, 16));
+        app.mouse_layout.focused_term = Some(Rect::new(20, 1, 56, 16));
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 5));
 
@@ -22787,7 +22760,9 @@ not_a_real_action = ["x"]
         for _ in 0..200 {
             app.refresh_snapshot_buf();
             if app
-                .snapshot_buf
+                .part_snapshots
+                .main
+                .buf
                 .cells
                 .iter()
                 .any(|c| c.row == 0 && c.col == 0 && c.symbol == "R")
@@ -22811,14 +22786,14 @@ not_a_real_action = ["x"]
         for _ in 0..200 {
             app.refresh_snapshot_buf();
             // Also drawable, or a test that renders next gets the loading card.
-            if app.snapshot_buf.scrollback_total == total && surface_has_output(app) {
+            if app.part_snapshots.main.buf.scrollback_total == total && surface_has_output(app) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!(
             "PTY reached {} lines of scrollback, expected {total}",
-            app.snapshot_buf.scrollback_total
+            app.part_snapshots.main.buf.scrollback_total
         );
     }
 
@@ -22828,7 +22803,7 @@ not_a_real_action = ["x"]
     fn snapshot_row_of(app: &mut App, needle: &str) -> u16 {
         app.refresh_snapshot_buf();
         let mut rows: std::collections::BTreeMap<u16, String> = std::collections::BTreeMap::new();
-        for cell in &app.snapshot_buf.cells {
+        for cell in &app.part_snapshots.main.buf.cells {
             rows.entry(cell.row).or_default().push_str(&cell.symbol);
         }
         rows.into_iter()
@@ -22844,6 +22819,7 @@ not_a_real_action = ["x"]
             end: TermGridPos { row, col: last_col },
             dragging: false,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
     }
 
@@ -22994,7 +22970,7 @@ not_a_real_action = ["x"]
             app.refresh_snapshot_buf();
             let mut rows: std::collections::BTreeMap<u16, String> =
                 std::collections::BTreeMap::new();
-            for cell in &app.snapshot_buf.cells {
+            for cell in &app.part_snapshots.main.buf.cells {
                 rows.entry(cell.row).or_default().push_str(&cell.symbol);
             }
             if rows.values().any(|line| line.trim().starts_with(needle)) {
@@ -23016,7 +22992,7 @@ not_a_real_action = ["x"]
         feed_until_row_present(&mut app, &fill, "L39");
         app.refresh_snapshot_buf();
         assert_eq!(
-            app.snapshot_buf.scrollback_total, 5,
+            app.part_snapshots.main.buf.scrollback_total, 5,
             "test premise: the ring must be at capacity, not merely deep"
         );
         let row = snapshot_row_of(&mut app, "L30");
@@ -23111,7 +23087,7 @@ not_a_real_action = ["x"]
     fn a_drag_that_races_output_selects_the_rows_the_user_dragged_over() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        let term = app.mouse_layout.agent_term.expect("agent term rect");
+        let term = app.mouse_layout.focused_term.expect("agent term rect");
         fill_and_select_l30(&mut app);
         // Start from no selection: this test builds one with the mouse.
         app.terminal_selection = None;
@@ -23169,7 +23145,7 @@ not_a_real_action = ["x"]
     }
 
     /// Wheel-up over the PTY pane in interactive mode, as the host sends it
-    /// (SGR button 64), landing inside the installed `agent_term` rect.
+    /// (SGR button 64), landing inside the installed `focused_term` rect.
     const WHEEL_UP_IN_PANE: &[u8] = b"\x1b[<64;30;5M";
 
     /// A wheel that scrolls dux's OWN scrollback keeps the selection: the text
@@ -23496,7 +23472,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         assert!(
             divider >= term.x && divider < term.x + term.width,
@@ -23632,7 +23608,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         let row = (rect.y..rect.y + rect.height)
             .find(|r| *r >= term.y && *r < term.y + term.height)
@@ -23663,7 +23639,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         assert!(
             term.x > 0,
@@ -23693,7 +23669,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized terminal records its terminal area");
         let row = term.y + term.height / 2;
 
@@ -23720,7 +23696,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized startup log records its body area");
         let row = term.y + term.height / 2;
 
@@ -23776,7 +23752,7 @@ not_a_real_action = ["x"]
         draw_frame(&mut app, &mut terminal);
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
 
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, term.x + 5, term.y + 3));
@@ -24113,6 +24089,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         // A companion terminal is focused, not the agent PTY.
         app.active_terminal_id = Some("term-1".to_string());
+        app.session_surface = SessionSurface::Terminal;
 
         app.note_focused_agent_viewed();
 
@@ -24610,6 +24587,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         let with_terminal = app.filtered_palette_commands("terminal").len();
@@ -24814,42 +24792,29 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn availability_can_empty_the_palette_entirely() {
-        // `terminal move` reaches the four terminal-move commands and nothing
-        // else, and all four are hidden while no terminal exists.
-        let app = test_app(default_bindings());
-        assert!(app.filtered_palette_commands("terminal move").is_empty());
+    fn the_terminal_move_commands_are_hidden_while_no_terminal_runs() {
+        const MOVES: [&str; 4] = [
+            "move-terminal-up",
+            "move-terminal-down",
+            "move-terminal-top",
+            "move-terminal-bottom",
+        ];
+        let moves_offered = |app: &App| -> Vec<&'static str> {
+            palette_names(app, "move-terminal")
+                .into_iter()
+                .filter(|name| MOVES.contains(name))
+                .collect()
+        };
 
         let mut app = test_app(default_bindings());
-        let args: Vec<String> = vec![];
-        app.engine.companion_terminals.insert(
-            "term-1".to_string(),
-            crate::app::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
-                label: "shell".to_string(),
-                foreground_cmd: None,
-                client: PtyClient::spawn(
-                    "/bin/sh",
-                    &args,
-                    std::path::Path::new("."),
-                    24,
-                    80,
-                    1_000,
-                )
-                .expect("spawn terminal"),
-                sort_order: 1,
-                created_at: chrono::Utc::now(),
-            },
+        assert_eq!(moves_offered(&app), Vec::<&str>::new());
+
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
         );
-        assert_eq!(
-            palette_names(&app, "terminal move"),
-            vec![
-                "move-terminal-up",
-                "move-terminal-down",
-                "move-terminal-top",
-                "move-terminal-bottom"
-            ]
-        );
+        assert_eq!(moves_offered(&app), MOVES);
     }
 
     #[test]
@@ -24979,6 +24944,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert!(app.any_row_animating());
@@ -25233,7 +25199,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn apply_agent_order_reorders_flips_to_manual_and_follows_the_agent() {
+    fn apply_list_order_reorders_flips_to_manual_and_follows_the_agent() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();
         app.engine.sessions.clear();
@@ -25244,9 +25210,17 @@ not_a_real_action = ["x"]
         }
         app.engine.config.ui.agent_sort = "active".to_string();
         app.rebuild_left_items();
-        let baseline: Vec<String> = vec!["s1".into(), "s2".into(), "s3".into()];
+        let rows = |ids: &[&str]| -> Vec<LeftRow> {
+            ids.iter()
+                .map(|id| LeftRow::Agent((*id).to_string()))
+                .collect()
+        };
 
-        app.apply_agent_order(&baseline, vec!["s3".into(), "s1".into(), "s2".into()], "s3");
+        app.apply_list_order(
+            &rows(&["s1", "s2", "s3"]),
+            &rows(&["s3", "s1", "s2"]),
+            &LeftRow::Agent("s3".to_string()),
+        );
 
         let order: Vec<&str> = app.engine.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(order, vec!["s3", "s1", "s2"]);
@@ -25255,7 +25229,7 @@ not_a_real_action = ["x"]
     }
 
     #[test]
-    fn apply_agent_order_is_a_no_op_when_the_order_matches_its_baseline() {
+    fn apply_list_order_is_a_no_op_when_the_order_matches_its_baseline() {
         let mut app = test_app(default_bindings());
         let now = Utc::now();
         app.engine.sessions.clear();
@@ -25266,9 +25240,12 @@ not_a_real_action = ["x"]
         }
         app.engine.config.ui.agent_sort = "active".to_string();
         app.rebuild_left_items();
-        let baseline: Vec<String> = vec!["s1".into(), "s2".into()];
+        let baseline = vec![
+            LeftRow::Agent("s1".to_string()),
+            LeftRow::Agent("s2".to_string()),
+        ];
 
-        app.apply_agent_order(&baseline, baseline.clone(), "s1");
+        app.apply_list_order(&baseline, &baseline, &baseline[0]);
 
         assert_eq!(
             app.engine.config.ui.agent_sort, "active",
@@ -25326,45 +25303,53 @@ not_a_real_action = ["x"]
     #[test]
     fn move_terminal_down_reorders_switches_to_manual_and_follows_the_selection() {
         let mut app = test_app(default_bindings());
-        let args: Vec<String> = vec![];
-        for (id, ord) in [("term-1", 1u64), ("term-2", 2), ("term-3", 3)] {
-            app.engine.companion_terminals.insert(
-                id.to_string(),
-                crate::app::CompanionTerminal {
-                    owner: dux_core::model::TerminalOwner::Session("s1".to_string()),
-                    label: "shell".to_string(),
-                    foreground_cmd: None,
-                    client: PtyClient::spawn(
-                        "/bin/sh",
-                        &args,
-                        std::path::Path::new("."),
-                        24,
-                        80,
-                        1_000,
-                    )
-                    .expect("spawn terminal"),
-                    sort_order: ord,
-                    created_at: chrono::Utc::now(),
-                },
-            );
+        app.engine.config.ui.agent_sort = "active".to_string();
+        for id in ["term-1", "term-2", "term-3"] {
+            add_terminal(&mut app, id, dux_core::model::TerminalOwner::Standalone);
         }
-        app.engine.config.ui.agent_sort = "manual".to_string();
-        app.selected_terminal_index = 0; // term-1 (first by sort_order)
-        assert_eq!(app.terminal_items()[0].0, "term-1");
+        app.reselect_left_terminal("term-1");
 
         app.move_selected_terminal(crate::app::reorder::MoveDir::Down);
 
-        // term-1 moved below term-2; the selection follows it to index 1.
-        let order: Vec<String> = app
-            .terminal_items()
+        let terminals: Vec<LeftRow> = app
+            .left_rows
             .iter()
-            .map(|(id, _)| (*id).clone())
+            .filter(|row| matches!(row, LeftRow::Terminal(_)))
+            .cloned()
             .collect();
-        assert_eq!(order, vec!["term-2", "term-1", "term-3"]);
-        assert_eq!(app.engine.config.ui.agent_sort, "manual");
         assert_eq!(
-            app.terminal_items()[app.selected_terminal_index].0,
-            "term-1"
+            terminals,
+            ["term-2", "term-1", "term-3"].map(|id| LeftRow::Terminal(id.to_string())),
+        );
+        assert_eq!(app.engine.config.ui.agent_sort, "manual");
+        assert_eq!(app.selected_terminal_row().as_deref(), Some("term-1"));
+    }
+
+    #[test]
+    fn move_terminal_refuses_without_a_terminal_row_selected() {
+        let mut app = test_app(default_bindings());
+        app.engine.config.ui.agent_sort = "active".to_string();
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
+        add_terminal(
+            &mut app,
+            "term-2",
+            dux_core::model::TerminalOwner::Standalone,
+        );
+        app.reselect_left_session("session-1");
+
+        app.move_selected_terminal(crate::app::reorder::MoveDir::Down);
+
+        assert_eq!(app.engine.config.ui.agent_sort, "active", "nothing moved");
+        assert!(
+            app.status
+                .text()
+                .contains("Select a project or standalone terminal in the agents list"),
+            "{}",
+            app.status.text()
         );
     }
 
@@ -25389,6 +25374,7 @@ not_a_real_action = ["x"]
                 .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         assert!(!app.filtered_palette_commands("move-terminal-up").is_empty());
@@ -27200,6 +27186,7 @@ cyan = "#00ffff"
                 client: term_client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -27714,7 +27701,7 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn launch_companion_terminal_sets_runtime_state_and_overlay() {
+    fn launch_companion_terminal_sets_runtime_state_and_opens_the_dock() {
         let mut app = test_app(default_bindings());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
@@ -27734,8 +27721,12 @@ cyan = "#00ffff"
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.session_surface, SessionSurface::Terminal);
-        assert_eq!(app.input_target, InputTarget::Terminal);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "the terminal opens windowed in the agent's dock"
+        );
     }
 
     #[test]
@@ -27761,8 +27752,15 @@ cyan = "#00ffff"
             "a launch announced itself"
         );
         assert_ne!(first_id, second_id);
-        assert_eq!(app.engine.companion_terminals.len(), 2);
-        assert_eq!(app.terminal_items().len(), 2);
+        assert_eq!(
+            app.dock_terminal_ids("session-1"),
+            vec![first_id, second_id],
+            "both terminals sit in the agent's dock, in the order they opened"
+        );
+        assert!(
+            app.left_terminals.is_empty(),
+            "an agent's own terminals are not rows of the agents list"
+        );
     }
 
     fn viewport_contains(client: &crate::pty::PtyClient, needle: &str) -> bool {
@@ -27859,56 +27857,16 @@ cyan = "#00ffff"
         }
     }
 
-    #[test]
-    fn exit_interactive_from_terminal_overlay_resets_state() {
-        let mut app = test_app(default_bindings());
-
-        app.show_companion_terminal();
-
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
-        assert_eq!(app.input_target, InputTarget::Terminal);
-
-        // Simulate the fullscreen toggle via the raw input path: feed Ctrl-g
-        // (0x07) into the raw input buffer and process sequences.
-        app.raw_input_buf = vec![0x07];
-        let (sequences, _) = crate::raw_input::split_sequences(&app.raw_input_buf);
-        assert_eq!(sequences.len(), 1);
-        let matched = app.interactive_patterns.match_sequence(sequences[0]);
-        assert_eq!(matched, Some((Action::ToggleFullscreen, false)));
-
-        // Apply the same state change that poll_and_forward_raw_input does.
-        let return_to_list =
-            matches!(app.input_target, InputTarget::Terminal) && app.terminal_return_to_list;
-        app.input_target = InputTarget::None;
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.session_surface = SessionSurface::Agent;
-        app.raw_input_buf.clear();
-        if return_to_list {
-            app.left_section = LeftSection::Terminals;
-            app.focus = FocusPane::Left;
-        }
-
-        // Launched via `t` → returns to terminals list on the left pane.
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
-        assert_eq!(app.session_surface, SessionSurface::Agent);
-        assert_eq!(app.input_target, InputTarget::None);
-        assert_eq!(app.left_section, LeftSection::Terminals);
-        assert_eq!(app.focus, FocusPane::Left);
-    }
-
     /// Minimizing an agent leaves focus on the pane you were in.
     ///
     /// Jumping to the sidebar made the Center-scope tab keys dead the instant
-    /// you minimized, with nothing on screen explaining why. The sidebar still
-    /// SNAPS to Projects so the agent you are looking at is the visible
-    /// selection, but it does not steal focus to do it.
+    /// you minimized, with nothing on screen explaining why.
     #[test]
     fn exit_interactive_from_a_multi_tab_agent_keeps_focus_on_the_agent_pane() {
         let mut app = test_app(default_bindings());
         let session_id = app.engine.sessions[0].id.clone();
         seed_input_tab(&mut app, &session_id, "tab-2", "claude", 1);
         app.focus = FocusPane::Center;
-        app.left_section = LeftSection::Terminals;
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
@@ -27918,7 +27876,6 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(app.session_surface, SessionSurface::Agent);
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.focus,
             FocusPane::Center,
@@ -27942,14 +27899,12 @@ cyan = "#00ffff"
             "the fixture must be a single-tab agent or this proves nothing"
         );
         app.focus = FocusPane::Center;
-        app.left_section = LeftSection::Terminals;
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
 
         app.process_raw_input_bytes(&[0x07]);
 
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.focus,
             FocusPane::Center,
@@ -28055,7 +28010,12 @@ cyan = "#00ffff"
     /// pane: a typing-owned key like Home now belongs to the agent there.
     #[test]
     fn a_migrated_custom_exit_key_reopens_a_minimized_agent() {
-        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
+        // The layout key's default steps aside for a key the user's own
+        // bindings give to another action, as `[keys]` loading does.
+        let bindings = bindings_with_overrides(&[
+            (Action::ToggleFullscreen, &["ctrl-e"]),
+            (Action::CycleTerminalLayout, &[]),
+        ]);
         let mut app = test_app(bindings);
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
@@ -28081,7 +28041,6 @@ cyan = "#00ffff"
         app.process_raw_input_bytes(&[0x05]);
 
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.focus,
             FocusPane::Center,
@@ -28176,7 +28135,12 @@ cyan = "#00ffff"
     /// here so nobody reads it as a regression.
     #[test]
     fn a_migrated_custom_exit_key_on_a_dormant_tab_launches_seeking_fullscreen() {
-        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
+        // The layout key's default steps aside for a key the user's own
+        // bindings give to another action, as `[keys]` loading does.
+        let bindings = bindings_with_overrides(&[
+            (Action::ToggleFullscreen, &["ctrl-e"]),
+            (Action::CycleTerminalLayout, &[]),
+        ]);
         let mut app = test_app(bindings);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;
@@ -28422,7 +28386,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         // The fullscreen surface occupies this rect; the click lands outside.
-        app.mouse_layout.agent_term = Some(Rect::new(20, 5, 60, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(20, 5, 60, 20));
 
         app.handle_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -28443,13 +28407,16 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         app.show_companion_terminal();
-
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
 
         let closed = app.close_top_overlay();
         assert!(closed);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
-        assert_eq!(app.session_surface, SessionSurface::Agent);
+        assert_eq!(
+            app.focus,
+            FocusPane::Center,
+            "closing the overlay keeps focus on the terminal's part"
+        );
         // Terminal PTY should still be alive in the map.
         assert_eq!(app.engine.companion_terminals.len(), 1);
     }
@@ -28459,8 +28426,7 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
 
         app.show_companion_terminal();
-
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
 
         // Switch to project row (index 0): simulates user clicking a different item.
         app.set_left_selection(0);
@@ -28471,38 +28437,65 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn terminal_items_returns_running_terminals() {
+    fn only_project_and_standalone_terminals_are_rows_of_the_list() {
         let mut app = test_app(default_bindings());
+        add_terminal(
+            &mut app,
+            "term-agent",
+            dux_core::model::TerminalOwner::Session("session-1".to_string()),
+        );
+        add_terminal(
+            &mut app,
+            "term-project",
+            dux_core::model::TerminalOwner::Project("project-1".to_string()),
+        );
+        add_terminal(
+            &mut app,
+            "term-standalone",
+            dux_core::model::TerminalOwner::Standalone,
+        );
 
-        // No terminals launched yet.
-        assert!(app.terminal_items().is_empty());
-
-        // Launch a terminal.
-        app.show_companion_terminal();
-
-        assert_eq!(app.terminal_items().len(), 1);
+        let mut rows: Vec<&str> = app
+            .left_rows
+            .iter()
+            .filter_map(|row| match row {
+                LeftRow::Terminal(id) => Some(id.as_str()),
+                LeftRow::Agent(_) | LeftRow::InactiveToggle => None,
+            })
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            vec!["term-project", "term-standalone"],
+            "an agent's own terminal lives in its dock, not in the list"
+        );
     }
 
     #[test]
-    fn left_section_navigation_crosses_to_terminals() {
-        let mut app = test_app(default_bindings());
-        app.show_companion_terminal();
-        // Close overlay and go back to projects section.
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-        app.left_section = LeftSection::Projects;
-        app.focus = FocusPane::Left;
+    fn j_and_k_walk_terminal_and_agent_rows_as_one_list() {
+        let mut app = two_active_agents_app();
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
+        let terminal = app
+            .left_rows
+            .iter()
+            .position(|row| *row == LeftRow::Terminal("term-1".to_string()))
+            .expect("the terminal is a row");
+        let last = app.last_selectable_left_item().expect("a row");
+        assert_ne!(terminal, last, "the agents follow the terminal");
+        app.selected_left = terminal;
 
-        // Navigate down past the last project item.
-        let item_count = app.left_items().len();
-        app.selected_left = item_count - 1;
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_left, terminal + 1, "j steps onto the next row");
+        assert!(app.selected_session().is_some(), "the next row is an agent");
 
-        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        app.handle_key(down).unwrap();
-
-        assert_eq!(app.left_section, LeftSection::Terminals);
-        assert_eq!(app.selected_terminal_index, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.selected_terminal_row().as_deref(), Some("term-1"));
     }
 
     #[test]
@@ -28528,6 +28521,7 @@ cyan = "#00ffff"
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
 
@@ -28545,10 +28539,12 @@ cyan = "#00ffff"
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
         assert_eq!(app.session_surface, SessionSurface::Terminal);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
-        assert_eq!(app.input_target, InputTarget::Terminal);
-        // Spawned via fallback: returns to terminal list on close.
-        assert!(app.terminal_return_to_list);
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "the terminal opens windowed in the agent's dock"
+        );
+        assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
@@ -28575,36 +28571,29 @@ cyan = "#00ffff"
         );
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(app.session_surface, SessionSurface::Terminal);
-        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Terminal);
-        assert_eq!(app.input_target, InputTarget::Terminal);
-        // Reused: should NOT return to terminal list on close.
-        assert!(!app.terminal_return_to_list);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(app.focus, FocusPane::Center);
     }
 
     #[test]
-    fn show_or_open_first_terminal_picks_lowest_id() {
+    fn show_or_open_first_terminal_returns_to_the_docks_active_terminal() {
         let mut app = test_app(default_bindings());
 
-        // Spawn two terminals.
         app.show_companion_terminal();
         let first_id = app.active_terminal_id.clone().unwrap();
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-
         app.show_companion_terminal();
         let second_id = app.active_terminal_id.clone().unwrap();
         assert_ne!(first_id, second_id);
-        assert_eq!(app.engine.companion_terminals.len(), 2);
 
-        // Close overlay.
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
+        // Back on the agent: the dock comes back on the terminal it last showed.
         app.session_surface = SessionSurface::Agent;
-
-        // Should pick the first (lowest ID), not the second.
         app.show_or_open_first_terminal();
+        assert_eq!(app.active_terminal_id.as_deref(), Some(second_id.as_str()));
 
+        // With no terminal remembered, the dock opens on its first terminal.
+        app.dock_active.clear();
+        app.session_surface = SessionSurface::Agent;
+        app.show_or_open_first_terminal();
         assert_eq!(app.active_terminal_id.as_deref(), Some(first_id.as_str()));
         assert_eq!(
             app.engine.companion_terminals.len(),
@@ -28614,37 +28603,29 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn spawn_terminal_for_selected_terminal_creates_new() {
+    fn spawn_terminal_for_selected_terminal_creates_a_sibling_for_its_owner() {
         let mut app = test_app(default_bindings());
+        add_terminal(
+            &mut app,
+            "term-project",
+            dux_core::model::TerminalOwner::Project("project-1".to_string()),
+        );
+        app.focus = FocusPane::Left;
+        app.reselect_left_terminal("term-project");
 
-        // Spawn an initial terminal so the terminals list is populated.
-        app.show_companion_terminal();
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-
-        // Point the terminal cursor at the first terminal.
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
-
-        let initial_count = app.engine.companion_terminals.len();
-        let before = app.status.most_recent_tui().map(|(_, text)| text);
         app.spawn_terminal_for_selected_terminal();
 
-        // Another terminal launches and streams, so nothing is owed.
+        let new_id = app
+            .active_terminal_id
+            .clone()
+            .expect("a terminal on screen");
+        assert_ne!(new_id, "term-project", "a new terminal was created");
         assert_eq!(
-            app.status.most_recent_tui().map(|(_, text)| text),
-            before,
-            "the spawn announced itself"
-        );
-        assert_eq!(
-            app.engine.companion_terminals.len(),
-            initial_count + 1,
-            "a new terminal was created"
+            app.engine.companion_terminals[&new_id].owner,
+            dux_core::model::TerminalOwner::Project("project-1".to_string()),
+            "the sibling belongs to the selected terminal's project"
         );
         assert_eq!(app.session_surface, SessionSurface::Terminal);
-        assert_eq!(app.input_target, InputTarget::Terminal);
-        assert!(app.terminal_return_to_list);
     }
 
     #[test]
@@ -28747,7 +28728,8 @@ cyan = "#00ffff"
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
         assert!(app.active_terminal_id.is_some());
-        assert_eq!(app.input_target, InputTarget::Terminal);
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
+        assert_eq!(app.focus, FocusPane::Center);
     }
 
     /// #8 regression: TUI terminal spawn now routes through the shared core
@@ -28857,39 +28839,50 @@ cyan = "#00ffff"
     /// modifier chords), so the action has to close the filter on its way out.
     #[test]
     fn the_standalone_key_closes_the_agent_filter_behind_it() {
-        for section in [LeftSection::Projects, LeftSection::Terminals] {
+        for section in ["agent row", "terminal row"] {
             let mut app = test_app(default_bindings());
             app.focus = FocusPane::Left;
-            app.left_section = section;
+            if section == "terminal row" {
+                add_terminal(
+                    &mut app,
+                    "term-1",
+                    dux_core::model::TerminalOwner::Standalone,
+                );
+                app.reselect_left_terminal("term-1");
+            }
             app.open_agent_filter();
             app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
                 .expect("the letter types into the query");
-            assert!(app.agent_filter.is_some(), "{section:?}: fixture");
+            assert!(app.agent_filter.is_some(), "{section}: fixture");
 
             app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
                 .expect("the chord must be handled");
 
             assert!(
                 app.agent_filter.is_none(),
-                "{section:?}: the filter must not survive behind the browser"
+                "{section}: the filter must not survive behind the browser"
             );
-            assert_in_the_standalone_folder_browser(&app, &format!("{section:?}"));
+            assert_in_the_standalone_folder_browser(&app, section);
         }
     }
 
-    /// The terminals subsection has a key handler of its own that ignores every
-    /// action it does not name. A standalone agent needs nothing selected, so
-    /// it is creatable from anywhere in the pane, terminals included.
+    /// A standalone agent needs nothing selected, so it is creatable from any
+    /// row of the pane, a terminal's included.
     #[test]
-    fn the_terminals_subsection_starts_a_standalone_agent_too() {
+    fn a_terminal_row_starts_a_standalone_agent_too() {
         let mut app = test_app(default_bindings());
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
+        app.reselect_left_terminal("term-1");
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
             .expect("the key must be handled");
 
-        assert_in_the_standalone_folder_browser(&app, "terminals subsection");
+        assert_in_the_standalone_folder_browser(&app, "terminal row");
     }
 
     /// Inside the project chooser, with the search idle, both keys fire:
@@ -29414,7 +29407,7 @@ cyan = "#00ffff"
         let terminal = app.engine.companion_terminals.values().next().unwrap();
         assert_eq!(terminal.owner, dux_core::model::TerminalOwner::Standalone);
         assert!(app.active_terminal_id.is_some());
-        assert_eq!(app.input_target, InputTarget::Terminal);
+        assert_eq!(app.focus, FocusPane::Center);
         // The lifetime it promises has to be the one dux keeps: shutdown closes
         // every terminal, so a message saying nothing but the user closes it
         // would be wrong on the one event that always happens.
@@ -29425,11 +29418,11 @@ cyan = "#00ffff"
         );
     }
 
-    /// Leaving a just-launched terminal's fullscreen lands the sidebar cursor ON
-    /// that terminal, scrolled into view, rather than on whichever terminal the
-    /// cursor held before, which can sit a screenful away from the new row.
+    /// A just-launched standalone terminal is the selected row, scrolled into
+    /// view, rather than whichever row the cursor held before, which can sit a
+    /// screenful away from the new one.
     #[test]
-    fn a_new_terminal_is_the_selected_and_visible_row_when_its_fullscreen_closes() {
+    fn a_new_terminal_is_the_selected_and_visible_row() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -29437,24 +29430,23 @@ cyan = "#00ffff"
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
         app.engine.config.ui.agent_sort = "manual".to_string();
+        let mut first = None;
         for _ in 0..8 {
-            app.engine
+            let (id, _) = app
+                .engine
                 .create_standalone_terminal(24, 80)
                 .expect("standalone terminal");
+            first.get_or_insert(id);
         }
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&first.expect("a terminal"));
 
         app.execute_command("new-standalone-terminal")
             .expect("should spawn a standalone terminal");
         let new_id = app.active_terminal_id.clone().expect("a new terminal");
-        app.exit_interactive_mode();
 
-        assert_eq!(app.left_section, LeftSection::Terminals);
         assert_eq!(
-            app.terminal_items()
-                .get(app.selected_terminal_index)
-                .map(|(id, _)| id.as_str()),
+            app.selected_terminal_row().as_deref(),
             Some(new_id.as_str()),
             "the cursor must be on the terminal that was just launched"
         );
@@ -29464,17 +29456,17 @@ cyan = "#00ffff"
             .expect("render frame");
         assert!(
             app.mouse_layout
-                .terminal_row_to_item
-                .contains(&app.selected_terminal_index),
+                .left_row_to_item
+                .contains(&app.selected_left),
             "the new terminal's row must be on screen; visible items {:?}, selected {}",
-            app.mouse_layout.terminal_row_to_item,
-            app.selected_terminal_index
+            app.mouse_layout.left_row_to_item,
+            app.selected_left
         );
     }
 
     /// Under the `active` sort a terminal being typed into floats to the top
-    /// between its launch and its fullscreen closing, so the cursor is resolved
-    /// by id when the list is returned to, never by the launch-time index.
+    /// after its launch, so the cursor is resolved by id when the list is
+    /// rebuilt, never by the launch-time index.
     #[test]
     fn new_terminal_cursor_survives_active_sort_reorder() {
         let mut app = test_app(default_bindings());
@@ -29484,53 +29476,31 @@ cyan = "#00ffff"
         for _ in 0..8 {
             app.engine.create_standalone_terminal(24, 80).unwrap();
         }
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
         app.execute_command("new-standalone-terminal").unwrap();
         let new_id = app.active_terminal_id.clone().unwrap();
+        let launched_at = app.selected_left;
         app.engine
             .pty_input
             .insert(new_id.clone(), std::time::Instant::now());
-        app.exit_interactive_mode();
-        let order: Vec<String> = app
-            .terminal_items()
-            .iter()
-            .map(|(id, _)| (*id).clone())
-            .collect();
+
+        app.rebuild_left_items();
+
+        assert_ne!(app.selected_left, launched_at, "the typed-into row moved");
         assert_eq!(
-            order.get(app.selected_terminal_index).map(String::as_str),
+            app.selected_terminal_row().as_deref(),
             Some(new_id.as_str())
         );
     }
 
-    /// The overlay-dismiss route back to the list resolves the cursor the same
-    /// way as leaving interactive mode does.
-    #[test]
-    fn closing_a_new_terminals_overlay_lands_the_cursor_on_it() {
-        let mut app = test_app(default_bindings());
-        app.engine.config.terminal.command = "cat".to_string();
-        app.engine.config.terminal.args = vec![];
-        app.engine.config.ui.agent_sort = "active".to_string();
-        for _ in 0..8 {
-            app.engine.create_standalone_terminal(24, 80).unwrap();
-        }
-        app.left_section = LeftSection::Terminals;
-        // Away from the top, where the typed-into terminal sorts, so a cursor
-        // left alone cannot land on it by accident.
-        app.selected_terminal_index = 3;
-        app.execute_command("new-standalone-terminal").unwrap();
-        let new_id = app.active_terminal_id.clone().unwrap();
-        app.engine
-            .pty_input
-            .insert(new_id.clone(), std::time::Instant::now());
-        assert!(app.close_top_overlay());
-        assert_eq!(app.left_section, LeftSection::Terminals);
-        assert_eq!(
-            app.terminal_items()
-                .get(app.selected_terminal_index)
-                .map(|(id, _)| id.as_str()),
-            Some(new_id.as_str())
-        );
+    /// The ids of the terminal rows, top to bottom.
+    fn terminal_row_ids(app: &App) -> Vec<String> {
+        app.left_rows
+            .iter()
+            .filter_map(|row| match row {
+                LeftRow::Terminal(id) => Some(id.clone()),
+                LeftRow::Agent(_) | LeftRow::InactiveToggle => None,
+            })
+            .collect()
     }
 
     /// A standalone terminal is an ordinary sidebar element: it sorts with the
@@ -29539,31 +29509,30 @@ cyan = "#00ffff"
     #[test]
     fn a_standalone_terminal_sorts_with_the_others_under_every_sort_mode() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
 
-        let (companion_tid, _) = app
+        let (project_tid, _) = app
             .engine
-            .create_companion_terminal(&session_id, 24, 80)
-            .expect("session terminal");
+            .create_project_terminal("project-1", 24, 80)
+            .expect("project terminal");
         let (standalone_tid, _) = app
             .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
-        // A distinctive foreground so the two name-sort modes have something to
-        // order by, and the standalone one sorts LAST by name so the ascending
-        // and descending cases are genuinely different.
+        // Distinctive names so the two name-sort modes have something to order
+        // by, and the standalone one sorts LAST by name so the ascending and
+        // descending cases are genuinely different.
         app.engine
             .companion_terminals
             .get_mut(&standalone_tid)
             .unwrap()
-            .foreground_cmd = Some("zsh".to_string());
+            .label = "zsh".to_string();
         app.engine
             .companion_terminals
-            .get_mut(&companion_tid)
+            .get_mut(&project_tid)
             .unwrap()
-            .foreground_cmd = Some("ash".to_string());
+            .label = "ash".to_string();
 
         for mode in [
             "manual",
@@ -29574,110 +29543,81 @@ cyan = "#00ffff"
             "active",
         ] {
             app.engine.config.ui.agent_sort = mode.to_string();
-            let ids: Vec<&str> = app
-                .terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect();
+            app.rebuild_left_items();
+            let ids = terminal_row_ids(&app);
             assert!(
-                ids.contains(&standalone_tid.as_str()) && ids.contains(&companion_tid.as_str()),
+                ids.contains(&standalone_tid) && ids.contains(&project_tid),
                 "both terminals must be listed under sort mode {mode}; got {ids:?}"
             );
         }
 
         // Manual is the drag order, so it is the spawn order verbatim.
         app.engine.config.ui.agent_sort = "manual".to_string();
+        app.rebuild_left_items();
         assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec![companion_tid.as_str(), standalone_tid.as_str()],
+            terminal_row_ids(&app),
+            vec![project_tid.clone(), standalone_tid.clone()]
         );
         // Name ascending puts "ash" before "zsh"; descending flips it, which is
         // only meaningful because the standalone row takes part in the compare.
         app.engine.config.ui.agent_sort = "name_desc".to_string();
-        assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec![standalone_tid.as_str(), companion_tid.as_str()],
-        );
+        app.rebuild_left_items();
+        assert_eq!(terminal_row_ids(&app), vec![standalone_tid, project_tid]);
     }
 
     // The sidebar search over terminals is proved by a JOURNEY test rather than a
     // matcher call: see
     // `render::tests::the_sidebar_filter_hides_terminals_that_do_not_match_the_query`,
     // which opens the filter, types a query, and reads the surviving rows out of
-    // the frame buffer. The test that used to live here called
-    // `agent_search::matches_terminal` directly, so it passed whether or not the
-    // terminal list was filtered at all, which is exactly how the missing filter
-    // shipped.
+    // the frame buffer, so it fails when the matcher is right but the list is
+    // not filtered.
 
-    /// The cursor is an index into the VISIBLE terminals, so a query that hides
-    /// the selected row has to move it, and a query that empties the section has
-    /// to hand focus back to the agents. Without the repair the selection would
-    /// point past the end of the list and act on the wrong terminal.
+    /// A query that hides the selected row has to move the cursor onto a row
+    /// that still exists; without the repair the selection would point at a
+    /// hidden row and act on the wrong terminal.
     #[test]
     fn filtering_away_the_selected_terminal_repairs_the_cursor() {
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
-        let (companion_tid, _) = app
+        let (project_tid, _) = app
             .engine
-            .create_companion_terminal(&session_id, 24, 80)
-            .expect("session terminal");
-        let (_standalone_tid, _) = app
+            .create_project_terminal("project-1", 24, 80)
+            .expect("project terminal");
+        let (standalone_tid, _) = app
             .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
         app.engine.config.ui.agent_sort = "manual".to_string();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
-        // The cursor is on the second (standalone) row.
-        app.selected_terminal_index = 1;
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&standalone_tid);
 
-        // "demo" is the project, so it matches the agent's terminal only.
+        // "demo" is the project, so no standalone terminal matches it.
         app.agent_filter = Some(TextInput::with_text("demo".to_string()));
-        app.rebuild_left_items();
-        assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec![companion_tid.as_str()],
+        app.rebuild_left_items_for_filter();
+        assert!(terminal_row_ids(&app).contains(&project_tid));
+        assert!(!terminal_row_ids(&app).contains(&standalone_tid));
+        assert!(
+            app.selected_left < app.left_rows.len(),
+            "the cursor must sit on a row that still exists"
         );
-        assert_eq!(
-            app.selected_terminal_index, 0,
-            "the cursor must move onto a row that still exists"
+        assert_ne!(
+            app.selected_terminal_row().as_deref(),
+            Some(standalone_tid.as_str())
         );
-        assert_eq!(app.left_section, LeftSection::Terminals);
 
-        // A query nothing matches empties the section, which cannot hold focus.
+        // A query nothing matches empties the list, and the cursor names no row.
         app.agent_filter = Some(TextInput::with_text("zzz-nothing".to_string()));
-        app.rebuild_left_items();
-        assert!(app.terminal_items().is_empty());
-        assert_eq!(app.selected_terminal_index, 0);
-        assert_eq!(
-            app.left_section,
-            LeftSection::Projects,
-            "an empty terminals section hands focus back to the agents"
-        );
+        app.rebuild_left_items_for_filter();
+        assert_eq!(app.left_rows, Vec::<LeftRow>::new());
+        assert_eq!(app.selected_terminal_row(), None);
+        assert!(app.selected_session().is_none());
     }
 
     /// The journey, keyboard only: the user opens the sidebar filter and types a
     /// query only a TERMINAL matches. The result has to be reachable and
-    /// openable, and the query has to stay editable once the cursor is down
-    /// among the terminals.
-    ///
-    /// Filtering the terminal list was only half the feature. The filter's keys
-    /// were routed exclusively while the Left pane sat on the agents section,
-    /// and its Enter/Up/Down went exclusively through agent selection, so a
-    /// search whose only results were terminals rendered them, refused to move
-    /// the cursor onto them, refused to open one, and stopped accepting query
-    /// edits the moment focus reached the section.
+    /// openable, and the query has to stay editable while the cursor is on it.
     #[test]
     fn the_filter_reaches_and_opens_a_matching_terminal_with_the_keyboard_alone() {
         // The `~` collapse needs a home to collapse; a machine without one is
@@ -29688,18 +29628,16 @@ cyan = "#00ffff"
         let mut app = test_app(default_bindings());
         app.engine.config.terminal.command = "cat".to_string();
         app.engine.config.terminal.args = vec![];
-        let session_id = app.engine.sessions[0].id.clone();
-        let (companion_tid, _) = app
+        let (project_tid, _) = app
             .engine
-            .create_companion_terminal(&session_id, 24, 80)
-            .expect("session terminal");
+            .create_project_terminal("project-1", 24, 80)
+            .expect("project terminal");
         let (standalone_tid, _) = app
             .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
         app.engine.config.ui.agent_sort = "manual".to_string();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
         app.rebuild_left_items();
 
         // The filter opens and the query is typed, exactly as a user would.
@@ -29712,38 +29650,24 @@ cyan = "#00ffff"
             Some("~")
         );
         // Only the standalone terminal names a directory, so it is the only
-        // match anywhere in the sidebar: no agent row survives, which is the
-        // whole point of the case.
-        assert!(
-            !app.left_items()
-                .iter()
-                .any(|item| matches!(item, LeftItem::Session(_))),
-            "the query must match no agent, or the terminals are not the only way \
-             through; got {:?}",
-            app.left_items()
-        );
+        // row left: no agent and no project terminal matches.
         assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec![standalone_tid.as_str()],
+            app.left_rows,
+            vec![LeftRow::Terminal(standalone_tid.clone())],
             "the standalone terminal is the one visible result",
         );
 
-        // Down crosses into the terminals section and lands on the one result.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .expect("move down");
         assert_eq!(
-            app.left_section,
-            LeftSection::Terminals,
-            "down from the agents must reach the matching terminal"
+            app.selected_terminal_row().as_deref(),
+            Some(standalone_tid.as_str()),
+            "the cursor must reach the matching terminal"
         );
-        assert_eq!(app.selected_terminal_index, 0);
 
-        // The query is still the thing being typed into, from down here.
+        // The query is still the thing being typed into, from the terminal row.
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
-            .expect("type from the terminals section");
+            .expect("type on the terminal row");
         assert_eq!(
             app.agent_filter.as_ref().map(|i| i.text.as_str()),
             Some("~x"),
@@ -29755,12 +29679,12 @@ cyan = "#00ffff"
             app.agent_filter.as_ref().map(|i| i.text.as_str()),
             Some("~")
         );
-
-        // `~x` matched nothing, so the emptied section handed focus back; the
-        // corrected query brings the row back and down reaches it again.
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .expect("move down again");
-        assert_eq!(app.left_section, LeftSection::Terminals);
+        assert_eq!(
+            app.selected_terminal_row().as_deref(),
+            Some(standalone_tid.as_str())
+        );
 
         // Enter opens the result and leaves filter mode, exactly as it does for
         // an agent row.
@@ -29775,18 +29699,12 @@ cyan = "#00ffff"
         assert!(app.agent_filter.is_none(), "opening leaves filter mode");
         // The restored full list keeps the cursor on the terminal that opened,
         // rather than on whatever now sits at the old index.
-        assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec![companion_tid.as_str(), standalone_tid.as_str()],
-            "the full list is back",
+        assert!(
+            terminal_row_ids(&app).contains(&project_tid),
+            "the full list is back"
         );
         assert_eq!(
-            app.terminal_items()
-                .get(app.selected_terminal_index)
-                .map(|(id, _)| id.as_str()),
+            app.selected_terminal_row().as_deref(),
             Some(standalone_tid.as_str()),
             "the cursor follows the terminal it opened, not its old index"
         );
@@ -31235,7 +31153,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 10));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 10));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
             .unwrap();
@@ -31277,7 +31195,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 20, 4));
 
         // First reconcile only records the width; nothing has been stamped yet.
         app.reconcile_startup_log_wrap_width();
@@ -31317,9 +31235,10 @@ cyan = "#00ffff"
             },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: crate::app::CenterPart::Main,
         });
 
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 4));
         app.reconcile_startup_log_wrap_width();
 
         let viewer = app.startup_log_viewer.as_ref().expect("viewer");
@@ -31366,7 +31285,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 20, 4));
         app.reconcile_startup_log_wrap_width();
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
@@ -31396,7 +31315,7 @@ cyan = "#00ffff"
             .expect("viewer")
             .scroll_offset = 32;
 
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 4));
         app.reconcile_startup_log_wrap_width();
 
         let viewer = app.startup_log_viewer.as_ref().expect("viewer");
@@ -31469,6 +31388,7 @@ cyan = "#00ffff"
             end: TermGridPos { row: 35, col: 5 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: crate::app::CenterPart::Main,
         });
 
         app.overlay_layout.active = layout(Rect::new(0, 4, 80, 10));
@@ -31513,7 +31433,7 @@ cyan = "#00ffff"
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
-        let body = app.mouse_layout.agent_term.expect("log body");
+        let body = app.mouse_layout.focused_term.expect("log body");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -32971,7 +32891,6 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.focus, FocusPane::Left);
-        assert_eq!(app.left_section, LeftSection::Projects);
     }
 
     #[test]
@@ -32992,34 +32911,6 @@ cyan = "#00ffff"
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
             .unwrap();
         assert_eq!(app.focus, FocusPane::Center);
-    }
-
-    #[test]
-    fn focus_navigation_visits_the_terminal_list_as_a_left_pane_section() {
-        let mut app = test_app(default_bindings());
-        app.show_companion_terminal();
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-        app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.focus, FocusPane::Left);
-        assert_eq!(app.left_section, LeftSection::Terminals);
-
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
-            .unwrap();
-        assert_eq!(app.focus, FocusPane::Left);
-        assert_eq!(app.left_section, LeftSection::Projects);
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(app.focus, FocusPane::Center);
-        assert_eq!(app.left_section, LeftSection::Projects);
     }
 
     #[test]
@@ -33527,7 +33418,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
 
         // Scroll back the way a user does. Poking `set_scrollback` directly
         // would move the VIEW without entering scroll mode, and scroll mode is
@@ -33564,7 +33455,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
         install_mouse_layout(&mut app);
         // Pin the local branch of every scroll path: with `forward_scroll`
         // unset these tests would depend on whether the child happened to raise
@@ -33574,13 +33465,13 @@ cyan = "#00ffff"
         // Wait on the fact the test depends on (real history), not on a sleep.
         for _ in 0..200 {
             app.refresh_snapshot_buf();
-            if app.snapshot_buf.scrollback_total > 0 {
+            if app.part_snapshots.main.buf.scrollback_total > 0 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
-            app.snapshot_buf.scrollback_total > 0,
+            app.part_snapshots.main.buf.scrollback_total > 0,
             "PTY produced no scrollback within 2s"
         );
         assert!(
@@ -33932,7 +33823,7 @@ cyan = "#00ffff"
             app.input_target = InputTarget::Agent;
             app.session_surface = SessionSurface::Agent;
             app.fullscreen_overlay = FullscreenOverlay::Agent;
-            app.last_pty_size = (5, 40);
+            app.set_focused_pty_size((5, 40));
 
             enter_scroll_mode(&mut app, 3);
 
@@ -34341,6 +34232,7 @@ cyan = "#00ffff"
                     .expect("spawn terminal"),
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some("term-1".to_string());
@@ -34446,7 +34338,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
         assert!(
             app.center_typeable(),
             "test setup: the fixture must be typeable or these tests prove nothing"
@@ -34461,7 +34353,7 @@ cyan = "#00ffff"
             app.refresh_snapshot_buf();
             let mut rows: std::collections::BTreeMap<u16, String> =
                 std::collections::BTreeMap::new();
-            for cell in &app.snapshot_buf.cells {
+            for cell in &app.part_snapshots.main.buf.cells {
                 rows.entry(cell.row).or_default().push_str(&cell.symbol);
             }
             if rows.values().any(|line| line.trim().starts_with(needle)) {
@@ -34508,7 +34400,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
         wait_for_grid_row(&mut app, "READY");
         assert!(
             app.center_typeable(),
@@ -35200,7 +35092,7 @@ cyan = "#00ffff"
             let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
 
         tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
 
@@ -35327,7 +35219,6 @@ cyan = "#00ffff"
     fn ctrl_g_from_left_reopens_fullscreen_for_a_live_agent() {
         let mut app = app_with_minimized_typeable_agent();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
 
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
             .expect("handle key");
@@ -35371,6 +35262,7 @@ cyan = "#00ffff"
             end: TermGridPos { row: 0, col: 1 },
             dragging: true,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
@@ -35643,7 +35535,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
         install_mouse_layout(&mut app);
         app
     }
@@ -35654,8 +35546,8 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
 
-        // Click at (1,1) which is inside the left pane, outside agent_term
-        // (agent_term starts at x=21). SGR coords are 1-based.
+        // Click at (1,1) which is inside the left pane, outside focused_term
+        // (focused_term starts at x=21). SGR coords are 1-based.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35676,7 +35568,7 @@ cyan = "#00ffff"
         let mut app = app_with_interactive_agent_pty();
         assert_eq!(app.input_target, InputTarget::Agent);
 
-        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // Click at (30, 5) which is inside focused_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         let bytes = sgr_mouse_down(31, 6);
         let result = app.process_raw_input_bytes(&bytes);
@@ -35701,7 +35593,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         app.session_surface = SessionSurface::Terminal;
 
-        // Click outside agent_term.
+        // Click outside focused_term.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35718,12 +35610,11 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn click_outside_fullscreen_terminal_returns_to_left_pane() {
+    fn click_outside_fullscreen_terminal_keeps_focus_on_the_center_pane() {
         let mut app = app_with_interactive_agent_pty();
         app.input_target = InputTarget::Terminal;
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         app.session_surface = SessionSurface::Terminal;
-        app.terminal_return_to_list = true;
         app.focus = FocusPane::Center;
 
         let bytes = sgr_mouse_down(2, 2);
@@ -35733,8 +35624,8 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(
             app.focus,
-            FocusPane::Left,
-            "focus should move to left pane when terminal_return_to_list is set"
+            FocusPane::Center,
+            "closing the overlay keeps focus on the terminal that was typed into"
         );
     }
 
@@ -35754,7 +35645,7 @@ cyan = "#00ffff"
             "test setup: should be scrolled back"
         );
 
-        // Click outside agent_term while scrolled back: the overlay must close.
+        // Click outside focused_term while scrolled back: the overlay must close.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35949,8 +35840,8 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         install_mouse_layout(&mut app);
 
-        // Click at (1,1) which is inside the left pane, outside agent_term
-        // (agent_term starts at x=21). SGR coords are 1-based, so (2,2).
+        // Click at (1,1) which is inside the left pane, outside focused_term
+        // (focused_term starts at x=21). SGR coords are 1-based, so (2,2).
         app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
             app.scan_loading_phase_exit(),
@@ -35968,7 +35859,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         install_mouse_layout(&mut app);
 
-        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // Click at (30, 5) which is inside focused_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         app.loading_input_buf = sgr_mouse_down(31, 6);
         assert!(
@@ -36023,12 +35914,12 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
-        // No mouse layout installed, so agent_term is None.
+        // No mouse layout installed, so focused_term is None.
         // Any left-click should be treated as outside.
         app.loading_input_buf = sgr_mouse_down(50, 10);
         assert!(
             app.scan_loading_phase_exit(),
-            "left-click must exit when agent_term rect is not set"
+            "left-click must exit when focused_term rect is not set"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -36040,11 +35931,10 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Terminal;
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         app.session_surface = SessionSurface::Terminal;
-        app.terminal_return_to_list = true;
         app.focus = FocusPane::Center;
         install_mouse_layout(&mut app);
 
-        // Click outside agent_term (which also covers terminal overlays).
+        // Click outside focused_term (which also covers terminal overlays).
         app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
             app.scan_loading_phase_exit(),
@@ -36054,8 +35944,8 @@ cyan = "#00ffff"
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
         assert_eq!(
             app.focus,
-            FocusPane::Left,
-            "focus should move to left pane when terminal_return_to_list is set"
+            FocusPane::Center,
+            "closing the overlay keeps focus on the terminal that was typed into"
         );
     }
 
@@ -36162,24 +36052,26 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn ctrl_d_in_terminal_list_shows_confirm_dialog() {
+    fn ctrl_d_on_a_terminal_row_shows_the_close_confirm() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal();
-
-        // Close overlay so we're back in the normal left pane.
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-        app.left_section = LeftSection::Terminals;
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
         app.focus = FocusPane::Left;
-        app.selected_terminal_index = 0;
+        app.reselect_left_terminal("term-1");
 
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         app.handle_key(ctrl_d).unwrap();
 
         assert!(
-            matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
-            "Ctrl+d in terminal list should show confirm delete terminal dialog"
+            matches!(
+                &app.prompt,
+                PromptState::ConfirmDeleteTerminal { terminal_id, .. } if terminal_id == "term-1"
+            ),
+            "Ctrl+d on a terminal row asks before closing that terminal, got {:?}",
+            app.prompt
         );
     }
 
@@ -36189,7 +36081,7 @@ cyan = "#00ffff"
         app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
-        let terminal_id = app.terminal_items()[0].0.clone();
+        let terminal_id = app.active_terminal_id.clone().expect("the new terminal");
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
             attached: Vec::new(),
@@ -36231,7 +36123,7 @@ cyan = "#00ffff"
         app.show_companion_terminal();
 
         assert_eq!(app.engine.companion_terminals.len(), 1);
-        let terminal_id = app.terminal_items()[0].0.clone();
+        let terminal_id = app.active_terminal_id.clone().expect("the new terminal");
 
         app.prompt = PromptState::ConfirmDeleteTerminal {
             attached: Vec::new(),
@@ -36252,24 +36144,27 @@ cyan = "#00ffff"
     }
 
     #[test]
-    fn delete_last_terminal_switches_to_projects() {
+    fn closing_the_selected_terminal_row_leaves_the_cursor_off_it() {
         let mut app = test_app(default_bindings());
-        app.show_companion_terminal();
-
-        app.fullscreen_overlay = FullscreenOverlay::None;
-        app.input_target = InputTarget::None;
-        app.session_surface = SessionSurface::Agent;
-        app.left_section = LeftSection::Terminals;
-
-        let terminal_id = app.terminal_items()[0].0.clone();
-        app.do_delete_terminal(&terminal_id);
-
-        assert!(app.engine.companion_terminals.is_empty());
-        assert_eq!(
-            app.left_section,
-            LeftSection::Projects,
-            "should switch back to projects when last terminal deleted"
+        add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
         );
+        app.focus = FocusPane::Left;
+        app.reselect_left_terminal("term-1");
+
+        app.do_delete_terminal("term-1");
+
+        assert!(
+            !app.engine.companion_terminals.contains_key("term-1"),
+            "the terminal is closed"
+        );
+        assert!(
+            !app.left_rows
+                .contains(&LeftRow::Terminal("term-1".to_string()))
+        );
+        assert_eq!(app.selected_terminal_row(), None);
     }
 
     // ---------------------------------------------------------------
@@ -40993,7 +40888,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app
     }
 
@@ -41667,8 +41562,7 @@ cyan = "#00ffff"
         match which {
             "ConfirmDeleteTerminal" => {
                 app.show_companion_terminal();
-                app.selected_terminal_index = 0;
-                app.confirm_delete_selected_terminal();
+                app.confirm_close_focused_terminal();
             }
             "ConfirmCloseTab" => {
                 // Only an EXTRA tab reaches this confirmation; the first tab
@@ -42481,7 +42375,7 @@ cyan = "#00ffff"
     }
 
     /// The terminal list sorted by activity reorders itself as output arrives,
-    /// and the terminal cursor stays on the terminal it was on: the row drawn as
+    /// and the cursor stays on the terminal it was on: the row drawn as
     /// selected and the one Enter opens are that terminal, not whichever slid
     /// into its row.
     #[test]
@@ -42516,16 +42410,16 @@ cyan = "#00ffff"
         };
         produce_output(&mut app, &first);
         app.rebuild_left_items();
-        assert_eq!(app.terminal_items()[0].0, &first);
+        assert_eq!(terminal_row_ids(&app)[0], first);
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
-        app.select_terminal_row(0);
+        app.reselect_left_terminal(&first);
 
         produce_output(&mut app, &second);
+        app.rebuild_left_items();
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).expect("terminal");
         terminal.draw(|frame| app.render(frame)).expect("render");
-        assert_eq!(app.terminal_items()[0].0, &second, "the list re-sorted");
+        assert_eq!(terminal_row_ids(&app)[0], second, "the list re-sorted");
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("Enter");
 

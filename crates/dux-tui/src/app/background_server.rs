@@ -302,7 +302,7 @@ impl App {
         }
         if self.selected_session().is_none()
             && matches!(self.input_target, InputTarget::Agent)
-            && self.session_surface == SessionSurface::Agent
+            && self.focused_surface() == SessionSurface::Agent
         {
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
@@ -620,7 +620,7 @@ impl App {
                             // launch's claim does: a child something else
                             // re-gridded would otherwise keep that grid.
                             if claim_before_serving {
-                                self.last_pty_resize_target = None;
+                                self.forget_sent_pty_sizes();
                             }
                             // Persist the choice, so a restart comes up the way the
                             // user left it. Lazy rather than eager: nothing is
@@ -1934,9 +1934,9 @@ pub(crate) mod tests {
 
     /// A change made in a browser has to rebuild this surface's sidebar. Nothing
     /// on this surface has any other reason to: the change did not arrive through
-    /// its own event stream. The rebuilt list keeps the cursor on the agent and
-    /// the terminal it was on, found by id, so a delete or a reorder above it
-    /// does not slide this surface onto another agent and draw that one. When
+    /// its own event stream. The rebuilt list keeps the cursor on the agent it
+    /// was on, found by id, so a delete, a reorder or a terminal row leaving
+    /// above it does not slide this surface onto another agent and draw that one. When
     /// its own agent is the one deleted, the cursor rests on no row rather than
     /// on a neighbour it was never on.
     #[test]
@@ -2079,9 +2079,13 @@ pub(crate) mod tests {
                 .insert(TabId::new("agent-c-slot".to_string()), client);
             app.rebuild_left_items();
             app.reselect_left_session("agent-c");
-            let first_terminal = app.terminal_items()[0].0.clone();
-            let terminal = app.terminal_items()[1].0.clone();
-            app.reselect_left_terminal(&terminal);
+            let first_terminal = app
+                .engine
+                .companion_terminals
+                .iter()
+                .min_by_key(|(_, terminal)| terminal.sort_order)
+                .map(|(id, _)| id.clone())
+                .expect("a terminal");
             let before = app.left_items_cache.len();
             recorded.lock().expect("not poisoned").mutated_next = true;
             match lend {
@@ -2126,15 +2130,6 @@ pub(crate) mod tests {
                 selected,
                 "{name}: the cursor's agent"
             );
-            if app.engine.companion_terminals.contains_key(&terminal) {
-                assert_eq!(
-                    app.terminal_items()
-                        .get(app.selected_terminal_index)
-                        .map(|(id, _)| id.as_str()),
-                    Some(terminal.as_str()),
-                    "{name}: the terminal cursor's terminal"
-                );
-            }
             let attached: Vec<String> = app
                 .engine
                 .attachments

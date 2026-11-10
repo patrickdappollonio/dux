@@ -9,7 +9,8 @@
 //! ([`Engine::attached_elsewhere`](dux_core::engine::Engine::attached_elsewhere)).
 
 use super::{
-    App, ConfirmFocus, DeleteAgentFocus, PromptState, RecreateWorkingCopyFocus, RuntimeTargetId,
+    App, CenterPart, ConfirmFocus, DeleteAgentFocus, PromptState, RecreateWorkingCopyFocus,
+    RuntimeTargetId,
 };
 use crate::model::SessionSurface;
 use anyhow::Result;
@@ -21,13 +22,13 @@ use dux_core::ids::SessionIdRef;
 use dux_core::model::TerminalOwner;
 
 impl App {
-    /// The pane being drawn right now streams this surface's selected
-    /// terminal: remember it for this frame's attachments.
-    pub(super) fn note_drawn_pty(&mut self) {
-        let Some(id) = self.selected_terminal_surface_id() else {
+    /// `part` is being drawn and streams its pty: remember it for this frame's
+    /// attachments.
+    pub(super) fn note_drawn_pty(&mut self, part: CenterPart) {
+        let Some(id) = self.part_pty_id(part) else {
             return;
         };
-        let (kind, agent) = match self.session_surface {
+        let (kind, agent) = match Self::part_surface(part) {
             SessionSurface::Agent => (
                 TargetKind::Tab,
                 self.selected_session().map(|s| s.id.clone()),
@@ -306,7 +307,7 @@ impl PromptState {
 mod tests {
     use super::*;
     use crate::app::test_support::{default_bindings, test_app};
-    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem, LeftSection};
+    use crate::app::{CenterMode, ConfirmAnswer, FullscreenOverlay, LeftItem};
     use crate::model::AgentSession;
     use crate::pty::PtyClient;
     use dux_core::attachments::Policy;
@@ -698,9 +699,9 @@ mod tests {
             .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
-        app.open_terminal_from_terminal_list();
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&terminal);
+        app.open_selected_terminal_row();
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         render(&mut app);
         assert_eq!(attached_here(&app), vec![terminal.clone()]);

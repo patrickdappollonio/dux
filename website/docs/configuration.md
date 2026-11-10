@@ -684,8 +684,9 @@ key, and `dux.log` gets a warning naming both actions.
 
 Tab is the exception, because it moves between panes rather than typing. Set
 `tab_reaches_agent = true` under `[ui]` to send Tab and Shift-Tab to the agent in the
-windowed pane instead; `focus_next` and `focus_prev` (`Ctrl-o` and `Ctrl-y` by default)
-move between panes whichever way it is set.
+windowed pane instead, and to an agent's docked terminal while you type into it;
+`focus_next` and `focus_prev` (`Ctrl-o` and `Ctrl-y` by default) move between panes
+whichever way it is set.
 
 Rather than memorizing hotkeys, reach most actions through the terminal UI's command
 palette. It is the fastest way to discover what dux can do.

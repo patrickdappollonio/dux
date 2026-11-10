@@ -398,6 +398,7 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
             terminal_status: CompanionTerminalStatus::Running,
             is_input,
             receives_keys: is_input,
+            part_focus: FocusState::Focused,
             session_id: session_id.map(str::to_string),
             focused_tab: None,
             provider_name: None,
@@ -525,9 +526,14 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
             app.focus = FocusPane::Left;
             app.selected_left = app.left_items().len().saturating_sub(1);
         }),
-        ("footer: terminals", |app| {
+        ("footer: terminal row", |app| {
+            crate::app::test_support::add_terminal(
+                app,
+                "term-1",
+                dux_core::model::TerminalOwner::Standalone,
+            );
             app.focus = FocusPane::Left;
-            app.left_section = LeftSection::Terminals;
+            app.reselect_left_terminal("term-1");
         }),
         ("footer: center", |app| app.focus = FocusPane::Center),
         ("footer: changes", |app| app.focus = FocusPane::Files),

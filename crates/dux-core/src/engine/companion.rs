@@ -239,6 +239,15 @@ impl Engine {
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);
         let label = format!("Terminal {}", self.terminal_counter);
+        // A new list row lands at the end of the list, after the last agent in
+        // the stored order. An agent's own terminal is not a list row.
+        let list_after = match owner.as_ref() {
+            crate::model::TerminalOwnerRef::Session(_) => None,
+            crate::model::TerminalOwnerRef::Project(_)
+            | crate::model::TerminalOwnerRef::Standalone => {
+                self.sessions.last().map(|session| session.id.clone())
+            }
+        };
 
         self.companion_terminals.insert(
             terminal_id.clone(),
@@ -252,10 +261,20 @@ impl Engine {
                 sort_order: u64::try_from(self.terminal_counter)
                     .expect("the terminal counter fits in u64"),
                 created_at: chrono::Utc::now(),
+                list_after,
             },
         );
 
         Ok((terminal_id, label))
+    }
+
+    /// Put a project or standalone terminal's row right after `after_agent` in
+    /// the agents list's manual order, or first when `None`. Runtime only, like
+    /// the terminal.
+    pub fn place_terminal_in_list(&mut self, terminal_id: &str, after_agent: Option<String>) {
+        if let Some(terminal) = self.companion_terminals.get_mut(terminal_id) {
+            terminal.list_after = after_agent;
+        }
     }
 
     /// Where a file dropped onto the pane currently showing `pty_id` should be

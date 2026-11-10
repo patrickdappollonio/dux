@@ -39,6 +39,72 @@ fn blendable_rgb(color: Color) -> Option<(u8, u8, u8)> {
     }
 }
 
+/// How far the part of a split without focus fades toward its pane's
+/// background, after it has gone grey: a terminal cell has no opacity, so this
+/// blend is the fade.
+pub(crate) const UNFOCUSED_PART_FADE: f32 = 0.2;
+
+/// A PTY cell color as the part of a split without focus draws it: grayscale,
+/// then blended [`UNFOCUSED_PART_FADE`] of the way toward `pane_bg`. Every
+/// color a terminal can name resolves to channels first: RGB as it is, a
+/// 256-color index through the standard xterm palette, a named ANSI color
+/// through its canonical channels. `None` for the terminal's own default
+/// (`Reset`), which has no channels to grey; the caller decides what stands in
+/// for it.
+pub(crate) fn unfocused_part_color(color: Color, pane_bg: Color) -> Option<Color> {
+    let (r, g, b) = cell_rgb(color)?;
+    let luma = f32_to_u8_saturating(
+        (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)).round(),
+    );
+    let grey = Color::Rgb(luma, luma, luma);
+    Some(match blendable_rgb(pane_bg) {
+        Some(bg) => blend_over(
+            grey,
+            Color::Rgb(bg.0, bg.1, bg.2),
+            1.0 - UNFOCUSED_PART_FADE,
+        ),
+        None => grey,
+    })
+}
+
+/// The channels behind any color a PTY cell can carry, or `None` for `Reset`.
+fn cell_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Indexed(index) => Some(xterm256_rgb(index)),
+        Color::Gray => Some((192, 192, 192)),
+        Color::LightRed => Some((255, 85, 85)),
+        Color::LightGreen => Some((85, 255, 85)),
+        Color::LightYellow => Some((255, 255, 85)),
+        Color::LightBlue => Some((85, 85, 255)),
+        Color::LightMagenta => Some((255, 85, 255)),
+        Color::LightCyan => Some((85, 255, 255)),
+        other => blendable_rgb(other),
+    }
+}
+
+/// A xterm-256 palette index as (R, G, B).
+fn xterm256_rgb(index: u8) -> (u8, u8, u8) {
+    #[rustfmt::skip]
+    const BASIC: [(u8, u8, u8); 16] = [
+        (0, 0, 0),       (128, 0, 0),     (0, 128, 0),     (128, 128, 0),
+        (0, 0, 128),     (128, 0, 128),   (0, 128, 128),   (192, 192, 192),
+        (128, 128, 128), (255, 0, 0),     (0, 255, 0),     (255, 255, 0),
+        (0, 0, 255),     (255, 0, 255),   (0, 255, 255),   (255, 255, 255),
+    ];
+    match index {
+        0..=15 => BASIC[usize::from(index)],
+        16..=231 => {
+            let value = index - 16;
+            let level = |step: u8| if step == 0 { 0 } else { 55 + 40 * step };
+            (level(value / 36), level((value % 36) / 6), level(value % 6))
+        }
+        232..=255 => {
+            let level = 8 + 10 * (index - 232);
+            (level, level, level)
+        }
+    }
+}
+
 /// The working state word's shade at `step`, the quantized pulse cell from
 /// `dux_core::working_cue::pulse_step`. Full `working` at the top of the pulse,
 /// blended toward `muted` by `working_cue::mute_blend` as the level falls, so
@@ -991,6 +1057,27 @@ pub(crate) fn is_name_chip(style: Style) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unfocused_part_cell_goes_grey_and_fades_toward_the_pane_background() {
+        let pane = Color::Rgb(0, 0, 0);
+        // Pure red is luma 76; a fifth of the way to black is 61.
+        assert_eq!(
+            unfocused_part_color(Color::Rgb(255, 0, 0), pane),
+            Some(Color::Rgb(61, 61, 61))
+        );
+        // A palette index and a named color resolve to the same channels first.
+        assert_eq!(
+            unfocused_part_color(Color::Indexed(196), pane),
+            Some(Color::Rgb(61, 61, 61))
+        );
+        assert_eq!(
+            unfocused_part_color(Color::Red, pane),
+            Some(Color::Rgb(61, 61, 61))
+        );
+        // The terminal's own default has no channels to grey.
+        assert_eq!(unfocused_part_color(Color::Reset, pane), None);
+    }
+
     use super::*;
 
     #[test]

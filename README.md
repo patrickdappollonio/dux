@@ -135,8 +135,8 @@ Already have a Git worktree you want dux to use? In the browser, **Worktrees…*
 
 In the terminal UI, the interface has three panes:
 
-- **Left:** a flat list of your agents, most-active first by default, with search and a project chooser
-- **Center:** the agent's live terminal (or a file diff). Focus it and type: your keystrokes go straight to the agent, right there in the window, while dux's own shortcuts keep working around it
+- **Left:** one flat list of your agents and your project and standalone terminals, most-active first by default, with search and a project chooser
+- **Center:** the agent's live terminal (or a file diff), with its companion terminals docked underneath. Focus it and type: your keystrokes go straight to the agent or the terminal you focused, right there in the window, while dux's own shortcuts keep working around it. When the agent and its terminals share the pane, the part without focus is drawn grey and faded
 - **Right:** changed files, staging, and diffs
 
 That sort order is one setting shared by the terminal UI and the browser (activity, last updated, recently created, name, or your own hand-placed order), so whichever surface you change it on, the other follows.
@@ -243,7 +243,9 @@ A folder with nothing tracked inside it, like a fresh `node_modules`, is one row
 
 Each agent gets its own companion terminal: a separate shell session in the same worktree. Use it for builds, tests, git operations, or anything else you'd normally do in a terminal. You can spawn multiple companion terminals per agent.
 
-Projects get terminals too. A **project terminal** is a plain shell opened at the project's repo root with no agent attached, handy for repo-wide chores (and, over the web UI, for reaching the machine when there is no local terminal to fall back to). Spawn one from the project's menu on either surface; removing the project closes its project terminals.
+In the terminal UI an agent's terminals dock right under it in the center pane, one numbered pill each in the dock's own strip, so the dev server stays in view while you talk to the agent. One key cycles the pane between the agent alone, the agent and its terminals split, and the terminals alone, and the `agent | split | term` control on the strip does the same with a click. Drag the divider between them to give either part more room, or all the way to an edge to show one part alone. Tab moves focus into the dock, and while it has focus the tab keys walk its terminals and the close and fullscreen keys act on the terminal you are looking at. The `?` overlay names every key. An agent you stopped while its terminals keep running opens on its terminal, with a band saying it is not running and how to start it.
+
+Projects get terminals too. A **project terminal** is a plain shell opened at the project's repo root with no agent attached, handy for repo-wide chores (and, over the web UI, for reaching the machine when there is no local terminal to fall back to). Spawn one from the project's menu on either surface; removing the project closes its project terminals. In the terminal UI, project and standalone terminals are rows of the agents list, sorted with the agents, and selecting one shows it in the center pane the way selecting an agent does.
 
 And a **standalone terminal** belongs to nothing at all: no agent, no project. It opens in your home directory, so you can reach for one before you have added a single project. Open it from the `new-standalone-terminal` palette command in the TUI, or in the browser from the **▾** beside **New agent…** at the bottom of the sidebar, under **Terminals** (the cog menu's **New** submenu has the same entry). Its sidebar row shows the directory it opened in rather than an owner. Nothing closes it for you: removing a project or deleting an agent closes their own terminals and leaves this one alone, so it ends when you close it or when dux shuts down.
 

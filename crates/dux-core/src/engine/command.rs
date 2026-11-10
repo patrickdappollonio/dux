@@ -3890,6 +3890,7 @@ mod tests {
                 client: spawn_cat_v_pty(),
                 sort_order,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
     }

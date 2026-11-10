@@ -1759,6 +1759,12 @@ pub struct CompanionTerminal {
     /// compute the same "recently created" order over terminals and agents.
     /// RUNTIME ONLY (memory-only, like the terminal itself).
     pub created_at: DateTime<Utc>,
+    /// A project or standalone terminal's manual place in the agents list:
+    /// right after this agent in the stored agent order, first when `None`.
+    /// RUNTIME ONLY, so the stored agent order never names a terminal and a
+    /// restart forgets it along with the terminal. An agent's own terminals
+    /// are not list rows and leave it `None`.
+    pub list_after: Option<String>,
 }
 
 #[cfg(test)]

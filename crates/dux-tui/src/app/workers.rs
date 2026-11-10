@@ -13,7 +13,7 @@ use super::background_server::CompanionRouting;
 use super::text_input::TextInput;
 use super::{
     App, CenterMode, ChangedFilesAnswer, CpuWindow, DeleteReport, DrainedEventMetadata, FocusPane,
-    FullscreenOverlay, InputTarget, LaunchView, LeftItem, LeftSection, PersistFinalOutcome,
+    FullscreenOverlay, InputTarget, LaunchView, LeftItem, PersistFinalOutcome,
     PrLookupFinalOutcome, PrReferenceResolutionAnswer, PromptState, PruneViewContext,
     StartupCommandLogFocus, StartupCommandLogPrompt, TuiCheckoutInspectOutcome,
     TuiConfigReloadOutcome, TuiDeleteOutcome, TuiServerFlipOutcome, WorktreesFinalOutcome,
@@ -321,7 +321,7 @@ impl App {
             .or_else(|| self.engine.first_live_tab(session_id))
             .unwrap_or_else(|| session_id.to_string());
         self.set_focused_tab(session_id, &target);
-        if self.session_surface == SessionSurface::Agent {
+        if self.focused_surface() == SessionSurface::Agent {
             self.reset_raw_input_state();
             self.fullscreen_overlay = FullscreenOverlay::None;
             if pty.agent_detached {
@@ -335,7 +335,7 @@ impl App {
             self.set_info(format!("Tab ({provider}) exited."));
         }
         if self.input_target == InputTarget::Agent
-            && self.session_surface == SessionSurface::Agent
+            && self.focused_surface() == SessionSurface::Agent
             && tab_focus == FocusState::Focused
         {
             self.reset_raw_input_state();
@@ -397,7 +397,7 @@ impl App {
 
     fn apply_selected_agent_exit_status(&mut self, pty: &PrunedPty) {
         let key = self.bindings.label_for(Action::ReconnectAgent);
-        if self.session_surface != SessionSurface::Agent {
+        if self.focused_surface() != SessionSurface::Agent {
             self.set_info(dux_core::engine::agent_exit_with_companion_notice(
                 pty,
                 &format!("Press \"{key}\" to relaunch the agent."),
@@ -445,19 +445,18 @@ impl App {
         if exited_terminal_ids.is_empty() {
             return;
         }
-        if let Some(active_id) = self.active_terminal_id.as_deref()
-            && exited_terminal_ids.contains(&active_id)
+        if let Some(active_id) = self.active_terminal_id.clone()
+            && exited_terminal_ids.contains(&active_id.as_str())
         {
-            self.active_terminal_id = None;
+            self.land_beside_a_closed_terminal(&active_id);
             if self.input_target == InputTarget::Terminal {
                 self.input_target = InputTarget::None;
             }
             self.fullscreen_overlay = FullscreenOverlay::None;
-            self.session_surface = SessionSurface::Agent;
             self.set_info("Terminal exited. Press the terminal key to launch a new one.");
         }
-        self.clamp_terminal_cursor();
         self.rebuild_left_items();
+        self.reconcile_center_target();
     }
 
     fn drain_worker_events(&mut self) {
@@ -1563,11 +1562,19 @@ impl App {
     }
 
     fn apply_delete_terminal_view(&mut self, view: DeleteTerminalView) {
-        if self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str()) {
-            self.active_terminal_id = None;
-        }
-        self.clamp_terminal_cursor();
+        let shown = self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str());
         self.rebuild_left_items();
+        if shown {
+            // Whatever was typing into it stops with it: keys never carry over
+            // to the neighbour or the agent the view lands on.
+            if self.input_target == InputTarget::Terminal {
+                self.input_target = InputTarget::None;
+            }
+            if self.fullscreen_overlay == FullscreenOverlay::Terminal {
+                self.fullscreen_overlay = FullscreenOverlay::None;
+            }
+            self.land_beside_a_closed_terminal(&view.terminal_id);
+        }
         if let Some(label) = view.label {
             self.set_info(dux_core::engine::closed_terminal_notice(&label));
         }
@@ -2003,7 +2010,8 @@ impl App {
     }
 
     pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
-        self.last_pty_size = outcome.pty_size;
+        self.pty_sizes
+            .insert(outcome.tab_id.clone(), outcome.pty_size);
         let started_here = self.note_launch_origin(&outcome);
         let view = if outcome.wants_fullscreen {
             LaunchView::Fullscreen
@@ -2022,10 +2030,6 @@ impl App {
                 startup_result_error: _,
             } => {
                 self.rebuild_left_items();
-                // The agent list scrolls to its cursor only while the cursor is
-                // in its section, so a create from the Terminals section would
-                // otherwise select a row that can sit below the fold.
-                self.left_section = LeftSection::Projects;
                 self.selected_left = self
                     .left_items()
                     .iter()
@@ -2133,7 +2137,7 @@ impl App {
 
     /// Whether the centre pane on screen is tab `tab_id` of agent `session_id`.
     fn shows_agent_tab(&self, session_id: &str, tab_id: &str) -> bool {
-        self.session_surface == SessionSurface::Agent
+        self.focused_surface() == SessionSurface::Agent
             && matches!(self.center_mode, CenterMode::Agent)
             && matches!(
                 self.fullscreen_overlay,
@@ -2996,6 +3000,7 @@ mod tests {
             end: TermGridPos { row: 0, col: 1 },
             dragging: true,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
@@ -3558,9 +3563,8 @@ mod tests {
     }
 
     /// A fresh agent created here is the list's selection AND on screen, even when the
-    /// sidebar cursor was in the Terminals section and the agent lands at the
-    /// bottom of a list taller than the pane: the agent list scrolls only to
-    /// the selection of the section that has the cursor.
+    /// cursor was on a terminal row and the agent lands at the bottom of a list
+    /// taller than the pane: the list scrolls only to its selection.
     #[test]
     fn create_committed_ready_scrolls_the_new_agent_into_view() {
         use ratatui::Terminal;
@@ -3580,12 +3584,12 @@ mod tests {
             app.engine.sessions.push(session);
         }
         app.rebuild_left_items();
-        app.engine
+        let (terminal_id, _) = app
+            .engine
             .create_standalone_terminal(24, 80)
             .expect("standalone terminal");
-        app.selected_left = 0;
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&terminal_id);
 
         let newest = app.engine.sessions[19].clone();
         app.notes.create_agent_started_here = true;
@@ -3602,7 +3606,6 @@ mod tests {
             },
         });
 
-        assert_eq!(app.left_section, LeftSection::Projects);
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
             Some(newest.id.as_str())
@@ -4020,6 +4023,51 @@ mod tests {
             !ordinary.contains("read error"),
             "an ordinary end of input must not gain a read-error clause: {ordinary}"
         );
+    }
+
+    /// The agent exiting while it is typed into fullscreen, opened from a
+    /// layout that shows only its terminal, ends the typing and the fullscreen
+    /// view as it does anywhere else.
+    #[test]
+    fn an_agent_typed_into_from_a_terminal_only_layout_exits_out_of_fullscreen() {
+        let mut app =
+            crate::app::test_support::test_app(crate::app::test_support::default_bindings());
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let session_id = app.engine.sessions[0].id.clone();
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        app.engine.providers.insert(
+            dux_core::ids::TabId::new(slot),
+            crate::pty::PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("companion terminal");
+        app.rebuild_left_items();
+        app.reselect_left_session(&session_id);
+        app.center_mode = CenterMode::Agent;
+        app.focus = FocusPane::Left;
+        app.reconcile_center_target();
+        app.set_dock_layout(&session_id, crate::app::DockLayout::Term);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('i'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .unwrap();
+        app.reconcile_center_target();
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
+
+        app.apply_selected_agent_exit_status(&pruned_agent("feat/x"));
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     /// A pruned agent whose exit detached it, with no refusal recorded.

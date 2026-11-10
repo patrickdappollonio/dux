@@ -29,18 +29,18 @@ use super::pty_ownership::PtyTakeoverCard;
 use super::text_input::TextInput;
 use super::{
     AgentInfoTone, AgentRowCues, AgentTerminalContext, App, BranchHolder, BrowseProjectsFooterKeys,
-    BrowsePurpose, CenterMode, ChangeAgentProviderMode, CloneProjectFocus, ConfigReloadFailedFocus,
-    ConfigureFieldFocus, ConfirmFocus, ConfirmNonDefaultBranchFocus, CpuWindow, DeleteAgentFocus,
-    DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache, FieldEngagement, FocusPane,
-    FullscreenOverlay, InputTarget, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-    KillableRuntimeKind, LeftItem, LeftSection, Listing, MacroEditFocus, MacroEditState,
-    ManageWorktreeVisualRow, ManagerSelection, NameNewAgentFocus, OverlayCheckbox,
-    OverlayCheckboxId, OverlayMouseLayout, ProjectActionsTarget, ProjectChooserEntry,
-    ProjectChooserIntent, ProjectWorktreeVisualRow, PromptState, PullRequestInputFocus,
-    RecreateWorkingCopyFocus, RenameSessionFocus, RightSection, RowDragList, RuntimeTargetId,
-    SelectionOrigin, SidebarListGeometry, StartupCommandLogFocus, TerminalSidebarRow, VisualRow,
-    WorkingCopy, build_visual_rows, first_load, manage_worktree_visual_rows, pick_project_matches,
-    project_worktree_visual_rows,
+    BrowsePurpose, CenterMode, CenterPart, ChangeAgentProviderMode, CloneProjectFocus,
+    ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmNonDefaultBranchFocus,
+    CpuWindow, DeleteAgentFocus, DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache,
+    FieldEngagement, FocusPane, FullscreenOverlay, InputTarget, KillRunningFocus,
+    KillRunningFooterAction, KillRunningPrompt, KillableRuntimeKind, LeftItem, Listing,
+    MacroEditFocus, MacroEditState, ManageWorktreeVisualRow, ManagerSelection, NameNewAgentFocus,
+    OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout, PillStrip, ProjectActionsTarget,
+    ProjectChooserEntry, ProjectChooserIntent, ProjectWorktreeVisualRow, PromptState,
+    PullRequestInputFocus, RecreateWorkingCopyFocus, RenameSessionFocus, RightSection,
+    RuntimeTargetId, SelectionOrigin, SidebarListGeometry, StartupCommandLogFocus,
+    TerminalSidebarRow, VisualRow, WorkingCopy, build_visual_rows, first_load,
+    manage_worktree_visual_rows, pick_project_matches, project_worktree_visual_rows,
 };
 use crate::config::MacroSurface;
 use crate::git;
@@ -379,7 +379,7 @@ fn squeeze_focused_segment(
 
 /// Paint every cell of `area` blank in `style`, so leftover buffer cells never
 /// bleed through.
-fn fill_blank(buf: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
+pub(super) fn fill_blank(buf: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
             buf[(x, y)].set_symbol(" ").set_style(style);
@@ -694,19 +694,19 @@ fn tab_activity_glyph(cue: TabCue, blink: BlinkPhase, spinner_idx: usize) -> Tab
 /// One struct per pill rather than parallel vectors: the label and the two
 /// activity flags describe the same tab, and keeping them together means an
 /// index can never pair one tab's label with another's spinner.
-struct TabStripItem {
-    id: String,
-    label: String,
-    working: bool,
-    needs_attention: bool,
+pub(super) struct TabStripItem {
+    pub(super) id: String,
+    pub(super) label: String,
+    pub(super) working: bool,
+    pub(super) needs_attention: bool,
     /// The lifecycle tone the spinner is drawn in: the agent row's own glyph
     /// color for this tab's session status (`Theme::session_dot`). NOT the
     /// pill's title style, which on a focused pill is the same accent as
     /// `session_attention`, so a focused working pill and a flagged one would
     /// render the same color and the attention dot would lose its exclusivity.
-    glyph_tone: Color,
+    pub(super) glyph_tone: Color,
     /// The agent's first tab while it has two or more: the pill wears the pin.
-    pinned: bool,
+    pub(super) pinned: bool,
 }
 
 impl TabStripItem {
@@ -1113,7 +1113,7 @@ fn ellipsize_field_highlighted(
 /// driving it, which "watching" would deny, and every tab of one browser profile
 /// counts once, the same word and the same count as the header's serving chip.
 /// Absent at zero rather than "0 browsers".
-fn remote_viewers_segment(count: usize) -> Option<String> {
+pub(super) fn remote_viewers_segment(count: usize) -> Option<String> {
     if count == 0 {
         return None;
     }
@@ -1992,15 +1992,6 @@ fn delete_agent_box_state(
     }
 }
 
-/// Whether the sidebar has a Terminals section under the agents.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TerminalsSection {
-    /// It does, so the sidebar splits.
-    Shown,
-    /// It does not.
-    Hidden,
-}
-
 /// Whether the agent list starts with active agents, which earns a top margin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveSection {
@@ -2017,15 +2008,6 @@ enum FilterRow {
     Shown,
     /// No filter is open.
     Hidden,
-}
-
-/// Whether a modal will dim the sidebar body this frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BodyDim {
-    /// It will, so the cursor rows are not painted.
-    Dimmed,
-    /// It will not.
-    Lit,
 }
 
 /// Whether a file list draws its hint row.
@@ -2300,8 +2282,14 @@ impl App {
         // The panes this frame draws are the terminals this surface is
         // attached to (see `attachment_presence`).
         self.drawn_ptys.clear();
-        self.follow_terminal_cursor();
+        self.reconcile_center_target();
         self.render_frame(frame);
+        let drawn: Vec<String> = self
+            .drawn_ptys
+            .iter()
+            .map(|target| target.id.clone())
+            .collect();
+        self.expire_stale_pty_takeover(&drawn);
         self.publish_drawn_attachments();
     }
 
@@ -2478,6 +2466,16 @@ impl App {
                     session.provider.as_str().to_string(),
                 );
             }
+            self.push_live_header_chip(&mut spans, self.running_terminals_chip());
+        } else if let Some((label, owner)) = self
+            .selected_terminal_row()
+            .and_then(|id| self.engine.companion_terminals.get(&id))
+            .map(|terminal| (terminal.label.clone(), self.terminal_owner_label(terminal)))
+        {
+            // A project or standalone terminal's row is its own row: the header
+            // names it, and where it belongs.
+            self.push_header_crumb(&mut spans, "terminal: ", label);
+            self.push_header_crumb(&mut spans, "in: ", owner);
             self.push_live_header_chip(&mut spans, self.running_terminals_chip());
         }
         Paragraph::new(Line::from(spans))
@@ -2919,8 +2917,9 @@ impl App {
             return;
         };
         match item {
-            LeftItem::Session(_) => {
-                // The three-line framed selection, shared with terminal rows.
+            LeftItem::Session(_) | LeftItem::Terminal(_) => {
+                // The three-line framed selection, shared by agent and terminal
+                // rows.
                 self.paint_framed_row_selection(buf, list_inner, map, sel, top_pad_y);
             }
             LeftItem::InactiveToggle => {
@@ -3012,12 +3011,11 @@ impl App {
     fn paint_row_drag_marker(
         &self,
         buf: &mut ratatui::buffer::Buffer,
-        list: RowDragList,
         list_content: Rect,
         map: &[usize],
         top_pad_y: Option<u16>,
     ) {
-        let Some(drag) = self.row_drag.as_ref().filter(|drag| drag.list == list) else {
+        let Some(drag) = self.row_drag.as_ref() else {
             return;
         };
         if !drag.promoted {
@@ -3074,7 +3072,7 @@ impl App {
         else {
             return;
         };
-        if self.left_section == LeftSection::Projects && self.selected_left == toggle_idx {
+        if self.selected_left == toggle_idx {
             return;
         }
         let map = &self.mouse_layout.left_row_to_item;
@@ -3159,6 +3157,21 @@ impl App {
                     }
                     ListItem::new(Line::from(spans))
                 }
+                LeftItem::Terminal(index) => {
+                    // The same glyph shape the terminal's full row leads with.
+                    let id = self.left_terminals.get(*index).map_or("", String::as_str);
+                    let glyph = if self.engine.is_typing(id) {
+                        crate::theme::TYPING_GLYPH.to_string()
+                    } else if self.engine.terminal_is_working(id) {
+                        crate::theme::SPINNER_FRAMES[self.spinner_frame_index()].to_string()
+                    } else {
+                        crate::theme::DOT_GLYPH.to_string()
+                    };
+                    ListItem::new(Line::from(Span::styled(
+                        glyph,
+                        Style::default().fg(self.theme.session_active),
+                    )))
+                }
                 LeftItem::InactiveToggle => ListItem::new(Line::from(Span::styled(
                     "─",
                     Style::default().fg(self.theme.header_separator_fg),
@@ -3182,30 +3195,13 @@ impl App {
             left_row_to_item(state.offset(), &heights, self.mouse_layout.left_list.height);
     }
 
-    fn left_sidebar_areas(&self, area: Rect, terminals: TerminalsSection) -> (Rect, Option<Rect>) {
-        if terminals == TerminalsSection::Hidden {
-            return (area, None);
-        }
-        let terminals_pct =
-            dux_core::config_effective::effective_pane_height_pct(self.terminal_pane_height_pct);
-        let projects_pct = 100u16.saturating_sub(terminals_pct).max(20);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(projects_pct),
-                Constraint::Percentage(terminals_pct),
-            ])
-            .split(area);
-        (chunks[0], Some(chunks[1]))
-    }
-
-    fn terminal_sidebar_rows(
-        &self,
-        visible: &[(&String, &CompanionTerminal)],
-        all: &[(&String, &CompanionTerminal)],
-    ) -> Vec<TerminalSidebarRow> {
-        visible
-            .iter()
+    /// The rows the list shows for `ids`, each with its display title
+    /// disambiguated against every other terminal of the same owner.
+    fn terminal_sidebar_rows(&self, ids: &[String]) -> Vec<TerminalSidebarRow> {
+        let all: Vec<(&String, &CompanionTerminal)> =
+            self.engine.companion_terminals.iter().collect();
+        ids.iter()
+            .filter_map(|id| self.engine.companion_terminals.get_key_value(id))
             .map(|(id, terminal)| {
                 let standalone = match terminal.owner.as_ref() {
                     dux_core::model::TerminalOwnerRef::Standalone => true,
@@ -3218,7 +3214,9 @@ impl App {
                 .map(|_| {
                     let siblings = all
                         .iter()
-                        .filter(|(other_id, other)| other_id != id && other.owner == terminal.owner)
+                        .filter(|(other_id, other)| {
+                            *other_id != id && other.owner == terminal.owner
+                        })
                         .map(|(_, other)| other.foreground_cmd.as_deref())
                         .collect::<Vec<_>>();
                     dux_core::terminal_title::terminal_title(
@@ -3237,16 +3235,23 @@ impl App {
             .collect()
     }
 
+    /// "Agents & Terminals (A + T)", or "(a/A + t/T)" while a query prunes
+    /// the list, so a pruned list never reads as the whole roster.
     fn agent_sidebar_title(&self, left_items: &[LeftItem]) -> String {
-        let total = self.engine.sessions.len();
+        let agents = self.engine.sessions.len();
+        let terminals = self.left_terminals.len();
         if self.agent_filter.is_none() {
-            return format!("Agents ({total})");
+            return format!("Agents & Terminals ({agents} + {terminals})");
         }
-        let visible = left_items
+        let visible_agents = left_items
             .iter()
             .filter(|item| matches!(item, LeftItem::Session(_)))
             .count();
-        format!("Agents ({visible}/{total})")
+        let visible_terminals = left_items
+            .iter()
+            .filter(|item| matches!(item, LeftItem::Terminal(_)))
+            .count();
+        format!("Agents & Terminals ({visible_agents}/{agents} + {visible_terminals}/{terminals})")
     }
 
     fn agent_sidebar_items(
@@ -3255,6 +3260,22 @@ impl App {
         active: ActiveSection,
         row_text_width: u16,
     ) -> (Vec<ListItem<'static>>, Vec<u16>) {
+        let terminal_rows = self.terminal_sidebar_rows(&self.left_terminals);
+        let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
+        // A terminal row's owner element is a searched field, so a live hit
+        // inside it gets the same emphasis an agent row's project and branch
+        // get. Same style, same per-field range on the exact fitted text.
+        let highlight = self.agent_filter.as_ref().and_then(|input| {
+            let query = input.text.as_str();
+            (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
+                (
+                    query,
+                    Style::default()
+                        .fg(self.theme.search_match_fg)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+        });
         let items = left_items
             .iter()
             .map(|item| match item {
@@ -3278,12 +3299,27 @@ impl App {
                     || ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]),
                     |session| self.render_agent_row(session, row_text_width),
                 ),
+                LeftItem::Terminal(index) => {
+                    let id = self.left_terminals.get(*index);
+                    match terminal_rows.iter().find(|row| Some(&row.id) == id) {
+                        Some(row) => {
+                            let (line1, line2) = terminal_row_lines(
+                                &self.theme,
+                                self.glyphs(),
+                                self.terminal_row_content(row, spinner, highlight),
+                                row_text_width,
+                            );
+                            framed_row_item(line1, line2)
+                        }
+                        None => ListItem::new(vec![Line::from(""), Line::from(""), Line::from("")]),
+                    }
+                }
             })
             .collect();
         let heights = left_items
             .iter()
             .map(|item| match item {
-                LeftItem::Session(_) => 3,
+                LeftItem::Session(_) | LeftItem::Terminal(_) => 3,
                 LeftItem::InactiveToggle if (active == ActiveSection::Present) => 3,
                 LeftItem::InactiveToggle => 2,
             })
@@ -3337,18 +3373,16 @@ impl App {
         focused: FocusState,
     ) -> bool {
         let left_items = self.left_items();
-        let projects_focused =
-            if focused == FocusState::Focused && self.left_section == LeftSection::Projects {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            };
+        let projects_focused = focused;
         let title = self.agent_sidebar_title(left_items);
-        // Active agents always sort ahead of the Inactive toggle, so the list
-        // leads with a Session iff any agent is active. The toggle only earns a
+        // Active rows always sort ahead of the Inactive toggle, so the list
+        // leads with a row iff anything is active. The toggle only earns a
         // leading spacer row (separating it from the active agents) when there is
         // something above it; with only inactive agents it sits flush at the top.
-        let has_active = if matches!(left_items.first(), Some(LeftItem::Session(_))) {
+        let has_active = if matches!(
+            left_items.first(),
+            Some(LeftItem::Session(_) | LeftItem::Terminal(_))
+        ) {
             ActiveSection::Present
         } else {
             ActiveSection::Absent
@@ -3393,12 +3427,7 @@ impl App {
             )
             .render(search_area, frame.buffer_mut());
         }
-        let mut state =
-            ListState::default().with_selected(if self.left_section == LeftSection::Projects {
-                self.left_cursor_on_a_row()
-            } else {
-                None
-            });
+        let mut state = ListState::default().with_selected(self.left_cursor_on_a_row());
         // No widget highlight: the selection is painted by hand below (an accent
         // bar plus a faint tint) so it keeps each row's text colors and leaves the
         // Inactive separator row untouched, neither of which a whole-cell List
@@ -3421,7 +3450,7 @@ impl App {
         // the dim like every other row. The widget-highlight era got this for free
         // because the selection was a background that dimmed to the overlay color.
         let body_will_dim = self.sidebar_body_will_dim();
-        if self.left_section == LeftSection::Projects && !body_will_dim {
+        if !body_will_dim {
             self.paint_left_selection(frame.buffer_mut(), geometry.content, geometry.top_pad_y);
         }
         // The drag marker rides on top of the selection: the row being dragged is
@@ -3430,7 +3459,6 @@ impl App {
         if !body_will_dim {
             self.paint_row_drag_marker(
                 frame.buffer_mut(),
-                RowDragList::Agents,
                 geometry.content,
                 &self.mouse_layout.left_row_to_item,
                 geometry.top_pad_y,
@@ -3445,124 +3473,6 @@ impl App {
         body_will_dim
     }
 
-    fn render_terminal_sidebar_section(
-        &mut self,
-        frame: &mut Frame<'_>,
-        term_area: Rect,
-        focused: FocusState,
-        terminal_render_data: &[TerminalSidebarRow],
-        total_terminal_count: usize,
-        body: BodyDim,
-    ) {
-        let terminals_focused =
-            if focused == FocusState::Focused && self.left_section == LeftSection::Terminals {
-                FocusState::Focused
-            } else {
-                FocusState::Unfocused
-            };
-        let term_count = terminal_render_data.len();
-        // The same visible-over-total count the Agents title carries while a
-        // query is live, for the same reason: a pruned list must not read as
-        // the whole roster.
-        let term_title = if self.agent_filter.is_some() {
-            format!("Terminals ({term_count}/{total_terminal_count})")
-        } else {
-            format!("Terminals ({term_count})")
-        };
-        let term_block = self.themed_block(&term_title, terminals_focused);
-        let term_inner = term_block.inner(term_area);
-        // Reserve a top row and side gutters for the framed selection. The
-        // content rect owns clicks and frame edges; the body holds list text.
-        let term_top_margin: u16 = u16::from(term_count > 0 && term_inner.height >= 4);
-        let term_top_pad_y = (term_top_margin == 1).then_some(term_inner.y);
-        let term_content = Rect {
-            y: term_inner.y + term_top_margin,
-            height: term_inner.height - term_top_margin,
-            ..term_inner
-        };
-        let term_body = Rect {
-            x: term_content.x + LEFT_PANE_GUTTER,
-            width: term_content.width.saturating_sub(LEFT_PANE_GUTTER * 2),
-            ..term_content
-        };
-        self.mouse_layout.terminal_list = term_content;
-        let term_text_width = term_body.width;
-        let spinner = crate::theme::SPINNER_FRAMES[self.spinner_frame_index()];
-        // A terminal row's owner element is a searched field, so a live hit
-        // inside it gets the same emphasis an agent row's project and branch
-        // get. Same style, same per-field range on the exact fitted text.
-        let term_highlight = self.agent_filter.as_ref().and_then(|input| {
-            let query = input.text.as_str();
-            (!dux_core::agent_search::normalize_query(query).is_empty()).then(|| {
-                (
-                    query,
-                    Style::default()
-                        .fg(self.theme.search_match_fg)
-                        .add_modifier(Modifier::BOLD),
-                )
-            })
-        });
-        let term_items: Vec<ListItem<'_>> = terminal_render_data
-            .iter()
-            .map(|row| {
-                let (line1, line2) = terminal_row_lines(
-                    &self.theme,
-                    self.glyphs(),
-                    self.terminal_row_content(row, spinner, term_highlight),
-                    term_text_width,
-                );
-                // Same three-line row shape as the agents (see `framed_row_item`).
-                framed_row_item(line1, line2)
-            })
-            .collect();
-        // Every terminal row is exactly three lines tall; keep the height
-        // vector in lockstep so the post-render mouse map lands on the right
-        // row even after the list scrolls.
-        let term_heights: Vec<u16> = vec![3; term_count];
-        // No widget highlight: the selection is hand-painted below. The widget
-        // selection is still set (when focused) purely so the list scrolls to
-        // keep the selected terminal visible, exactly as the agent list does.
-        let mut term_state =
-            ListState::default().with_selected(if self.left_section == LeftSection::Terminals {
-                Some(self.selected_terminal_index)
-            } else {
-                None
-            });
-        term_block.render(term_area, frame.buffer_mut());
-        StatefulWidget::render(
-            List::new(term_items),
-            term_body,
-            frame.buffer_mut(),
-            &mut term_state,
-        );
-        // Rebuild the reverse map from the post-render scroll offset, the
-        // three-tall heights, and the content height (mirrors the agent path).
-        self.mouse_layout.terminal_row_to_item =
-            left_row_to_item(term_state.offset(), &term_heights, term_content.height);
-        // Hand-paint the framed selection into the content surface, reusing the
-        // same `body_will_dim` gate the agent path computed above.
-        if self.left_section == LeftSection::Terminals && body == BodyDim::Lit {
-            self.paint_framed_row_selection(
-                frame.buffer_mut(),
-                term_content,
-                &self.mouse_layout.terminal_row_to_item,
-                self.selected_terminal_index,
-                term_top_pad_y,
-            );
-        }
-        // The terminals reorder by drag exactly as the agents do, so they get
-        // the same insertion rule and the same muted moving row.
-        if body == BodyDim::Lit {
-            self.paint_row_drag_marker(
-                frame.buffer_mut(),
-                RowDragList::Terminals,
-                term_content,
-                &self.mouse_layout.terminal_row_to_item,
-                term_top_pad_y,
-            );
-        }
-    }
-
     fn render_left(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let focused = FocusState::of(self.focus, FocusPane::Left);
 
@@ -3571,44 +3481,7 @@ impl App {
             return;
         }
 
-        // The VISIBLE terminals: sorted, then pruned by the live sidebar query
-        // exactly as the agent list above is. Every index below (the rows, the
-        // selection, the mouse map) is an index into this list.
-        let terminal_items = self.terminal_items();
-        let has_terminals = if terminal_items.is_empty() {
-            TerminalsSection::Hidden
-        } else {
-            TerminalsSection::Shown
-        };
-        // Titles disambiguate against the unfiltered list, and the pane total
-        // remains stable while a search changes visible rows.
-        let all_terminals = self.sorted_terminal_items();
-        let total_terminal_count = all_terminals.len();
-
-        let (projects_area, terminals_area) = self.left_sidebar_areas(area, has_terminals);
-        let terminal_render_data = self.terminal_sidebar_rows(&terminal_items, &all_terminals);
-
-        let body_will_dim = if self.render_agent_sidebar_section(frame, projects_area, focused) {
-            BodyDim::Dimmed
-        } else {
-            BodyDim::Lit
-        };
-
-        // Hand-paint the selection in the inset body so terminal and agent rows
-        // share identical framing, spacing, and selection geometry.
-        if let Some(term_area) = terminals_area {
-            self.render_terminal_sidebar_section(
-                frame,
-                term_area,
-                focused,
-                &terminal_render_data,
-                total_terminal_count,
-                body_will_dim,
-            );
-        } else {
-            self.mouse_layout.terminal_list = Rect::default();
-            self.mouse_layout.terminal_row_to_item.clear();
-        }
+        self.render_agent_sidebar_section(frame, area, focused);
     }
 
     fn render_center(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -3616,7 +3489,7 @@ impl App {
 
         // Determine if a PR banner should be shown above the center pane.
         let is_input = matches!(
-            (self.input_target, self.session_surface),
+            (self.input_target, self.focused_surface()),
             (InputTarget::Agent, SessionSurface::Agent)
                 | (InputTarget::Terminal, SessionSurface::Terminal)
         );
@@ -3674,17 +3547,13 @@ impl App {
                 self.themed_block(&title, focused)
                     .render(pane_area, frame.buffer_mut());
             }
-            CenterMode::Agent => {
-                let title = self.center_pane_agent_title();
-                // Center pane always renders the agent; terminal is an overlay.
-                let saved = self.session_surface;
-                self.session_surface = SessionSurface::Agent;
-                // Draw the tab strip (>=2 tabs) above the terminal and render
-                // the terminal into the remaining area.
-                let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area);
-                self.render_agent_terminal(frame, term_area, &title, focused);
-                self.session_surface = saved;
+            CenterMode::Agent if self.selected_terminal_row().is_some() => {
+                // A project or standalone terminal's row shows its terminal, the
+                // way an agent's row shows the agent.
+                let title = self.dock_caption();
+                self.render_agent_terminal(frame, (CenterPart::Dock, pane_area), &title, focused);
             }
+            CenterMode::Agent => self.render_agent_stack(frame, pane_area, focused),
         }
     }
 
@@ -3760,7 +3629,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(content_area);
+        self.mouse_layout.focused_term = Some(content_area);
 
         self.last_diff_height = content_area.height;
 
@@ -3825,7 +3694,7 @@ impl App {
         // Scroll marker in the pane's right border column, on the content
         // pane's last row. Units are wrapped VISUAL lines (what the diff already
         // measures with), never the logical line count. The cell lies outside
-        // `content_area`, which is also `mouse_layout.agent_term`, so text
+        // `content_area`, which is also `mouse_layout.focused_term`, so text
         // selection is untouched.
         render_scroll_marker(
             frame,
@@ -3898,7 +3767,7 @@ impl App {
     /// Layout is entirely [`plan_pane_card`]'s; this is the styled paint and
     /// nothing else, which is what keeps the geometry unit-testable without a
     /// frame. Every colour comes from `theme.rs`.
-    fn render_pane_card(
+    pub(super) fn render_pane_card(
         &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
@@ -4343,25 +4212,63 @@ impl App {
     /// tab strip at the top of `area` and return the reduced rect for the terminal
     /// below it. With fewer than two tabs (or no room) returns `area` unchanged, so
     /// single-tab agents look exactly as before.
-    fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
+    /// Draw the selected agent's provider tab strip above `area` when the
+    /// strips show, and return the area left for the agent's terminal and the
+    /// strip's row band, when one was drawn. `reserve` columns at the strip's
+    /// right end are left free for the layout control.
+    pub(super) fn render_agent_tab_strip_if_needed(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        reserve: u16,
+    ) -> (Rect, Option<Rect>) {
         self.agent_tab_regions.clear();
 
         self.land_beside_a_tab_closed_elsewhere();
         let Some(session) = self.selected_session() else {
-            return area;
+            return (area, None);
         };
         let session_id = session.id.clone();
         let tab_ids = self.session_tab_ids(&session_id);
-        let always_show = self.engine.config.ui.always_show_tab_strip;
         // The strip is a 3-row band of rounded boxes (top border, label,
         // bottom border), the same bordered-and-rounded idiom every other
         // dux surface uses, so it needs a taller minimum than a flat row.
-        if (tab_ids.len() < 2 && !always_show) || area.height < 6 || area.width < 12 {
-            return area;
+        if !self.strips_shown() || area.height < 6 || area.width < 12 {
+            return (area, None);
         }
         let focused_id = self.focused_tab_id(&session_id);
-
         let items = self.tab_strip_items(session, &tab_ids);
+        let [strip_area, term_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1)])
+            .areas(area);
+        let pills = Rect {
+            width: strip_area.width.saturating_sub(reserve),
+            ..strip_area
+        };
+        fill_blank(
+            frame.buffer_mut(),
+            strip_area,
+            Style::default().bg(self.theme.app_bg),
+        );
+        let regions = self.paint_pill_strip(frame, pills, &items, &focused_id, PillStrip::Tabs);
+        self.agent_tab_regions = regions;
+        (term_area, Some(strip_area))
+    }
+
+    /// Paint a strip of numbered pills into the 3-row `strip_area`, the focused
+    /// one scrolled into view, and return where each pill landed. Shared by the
+    /// provider tab strip and the terminal dock's strip, which are the same
+    /// idiom.
+    pub(super) fn paint_pill_strip(
+        &self,
+        frame: &mut Frame<'_>,
+        strip_area: Rect,
+        items: &[TabStripItem],
+        focused_id: &str,
+        strip: PillStrip,
+    ) -> Vec<(String, Rect)> {
+        let mut regions = Vec::new();
         // Each pill carries its strip ordinal in its own SEGMENT left of the
         // label (`│ 1 │ codex │`): the visible address for the tab switch
         // keys. See `tab_pill_ordinal_cell` for why every pill is numbered
@@ -4377,18 +4284,13 @@ impl App {
             BlinkPhase::Dark
         };
 
-        let [strip_area, term_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1)])
-            .areas(area);
-
         // No "+" add button: new tabs are created via the `new-agent-tab`
         // palette command (or the NewTab keybinding), so the boxes get the
         // full strip width, minus one column when a leading truncation mark is
         // needed (decided below, once the segment widths are known).
         let strip_width = strip_area.width;
 
-        let (mut seg_content, seg_ord_w, mut seg_w) = tab_strip_segments(&items, &seg_ordinal);
+        let (mut seg_content, seg_ord_w, mut seg_w) = tab_strip_segments(items, &seg_ordinal);
 
         // Choose a start index so the focused tab is visible within `avail`.
         let focused_idx = items.iter().position(|i| i.id == focused_id).unwrap_or(0);
@@ -4422,9 +4324,6 @@ impl App {
         let start = tab_strip_start_index(&seg_w, avail, focused_idx);
 
         let buf = frame.buffer_mut();
-        // Base fill for the whole 3-row strip band, painted with the app
-        // background so leftover buffer cells never bleed between the boxes.
-        fill_blank(buf, strip_area, Style::default().bg(self.theme.app_bg));
 
         // Each tab is a miniature pane: the shared rounded border set with
         // the shared focused/unfocused border and title styles, so the strip
@@ -4458,7 +4357,7 @@ impl App {
             } else {
                 FocusState::Unfocused
             };
-            let border_style = self.tab_border_style(&items[i], active);
+            let border_style = self.tab_border_style(&items[i], active, strip);
             let label_style = self.theme.title_style(active);
             // The pill is two cells behind one frame: the ordinal cell, a
             // full-height divider joined to the frame with light-set tees
@@ -4502,14 +4401,14 @@ impl App {
             buf.set_string(x, bot_y, &bottom, border_style);
             // The whole box (all 3 rows, borders included) is clickable;
             // the trailing gap column is not.
-            self.agent_tab_regions.push((
+            regions.push((
                 items[i].id.clone(),
                 Rect::new(x, top_y, seg_w[i].saturating_sub(1), 3),
             ));
             x += seg_w[i];
         }
 
-        term_area
+        regions
     }
 
     /// One pill's worth of state per tab, snapshotted under the engine's
@@ -4560,10 +4459,11 @@ impl App {
     /// A pill's border style: its focus state, except that while a pill is being
     /// dragged the one the pointer is over takes the focused border, because it
     /// is where the drop would land.
-    fn tab_border_style(&self, item: &TabStripItem, active: FocusState) -> Style {
+    fn tab_border_style(&self, item: &TabStripItem, active: FocusState, strip: PillStrip) -> Style {
         let drop_target = self
             .tab_drag
             .as_ref()
+            .filter(|drag| drag.strip == strip)
             .and_then(|drag| drag.hover_id.as_deref())
             == Some(item.id.as_str());
         self.theme.border_style(if drop_target {
@@ -4619,7 +4519,7 @@ impl App {
     /// `Theme`, reusing `nudge_border`.
     pub(crate) fn scroll_mode_cue_line(&self, width: u16) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
-        let target = match self.session_surface {
+        let target = match self.focused_surface() {
             SessionSurface::Agent => "agent",
             SessionSurface::Terminal => "terminal",
         };
@@ -4821,9 +4721,16 @@ impl App {
             return;
         }
 
-        let target = match self.session_surface {
-            SessionSurface::Agent => "agent",
-            SessionSurface::Terminal => "terminal",
+        // Over an agent's stack the card is about the agent's row, whichever
+        // part has focus; over one terminal shown alone (fullscreen, or a
+        // terminal's own row) it names what is shown.
+        let target = if self.drawing_agent_stack() && self.selected_terminal_row().is_none() {
+            "agent"
+        } else {
+            match self.focused_surface() {
+                SessionSurface::Agent => "agent",
+                SessionSurface::Terminal => "terminal",
+            }
         };
         let button_label = "Take over";
         let button_h: u16 = 3;
@@ -4945,14 +4852,16 @@ impl App {
         self.mouse_layout.takeover_button = Some(area);
     }
 
-    fn agent_terminal_context(&self) -> AgentTerminalContext {
-        let active_surface = self.session_surface;
+    fn agent_terminal_context(&self, part: CenterPart) -> AgentTerminalContext {
+        let active_surface = Self::part_surface(part);
         let terminal_status = self.selected_companion_terminal_status();
-        let is_input = matches!(
-            (self.input_target, active_surface),
-            (InputTarget::Agent, SessionSurface::Agent)
-                | (InputTarget::Terminal, SessionSurface::Terminal)
-        );
+        let has_focus = part == self.focused_part();
+        let is_input = has_focus
+            && matches!(
+                (self.input_target, active_surface),
+                (InputTarget::Agent, SessionSurface::Agent)
+                    | (InputTarget::Terminal, SessionSurface::Terminal)
+            );
         let session_id = self.selected_session().map(|session| session.id.clone());
         let focused_tab = session_id.as_ref().map(|id| self.focused_tab_id(id));
         let provider_name = match active_surface {
@@ -4980,7 +4889,8 @@ impl App {
             active_surface,
             terminal_status,
             is_input,
-            receives_keys: is_input || self.center_typeable(),
+            receives_keys: is_input || (has_focus && self.center_typeable()),
+            part_focus: FocusState::of(part, self.focused_part()),
             session_id,
             focused_tab,
             provider_name,
@@ -4988,31 +4898,29 @@ impl App {
         }
     }
 
-    fn resize_agent_terminal(&mut self, term_area: Rect) {
+    /// Send `part`'s pane size to the pty it draws, once per change of size or
+    /// of target.
+    fn resize_part_terminal(&mut self, part: CenterPart, term_area: Rect) {
         let new_size = (term_area.height, term_area.width);
-        let resize_target = self.selected_terminal_surface_id();
-        let target_changed = self.last_pty_resize_target != resize_target;
-        let should_resize =
-            (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
-        let resize_granted = should_resize
-            && match resize_target.as_deref() {
-                Some(pty_id) => {
-                    let pty_id = pty_id.to_string();
-                    self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1)
-                }
-                None => true,
-            };
-        self.expire_stale_pty_takeover(resize_target.as_deref());
-        if should_resize && resize_granted {
-            self.last_pty_size = new_size;
-            self.last_pty_resize_target = resize_target;
+        let Some(pty_id) = self.part_pty_id(part) else {
+            self.part_targets.set(part, None);
+            return;
+        };
+        let target_changed = self.part_targets.get(part) != Some(pty_id.as_str());
+        let size_changed = self.pty_sizes.get(&pty_id) != Some(&new_size);
+        if !(size_changed || target_changed) || new_size.0 == 0 || new_size.1 == 0 {
+            return;
+        }
+        if self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1) {
+            self.pty_sizes.insert(pty_id.clone(), new_size);
+            self.part_targets.set(part, Some(pty_id));
         }
     }
 
-    fn prepare_terminal_takeover(&mut self) -> Option<PtyTakeoverCard> {
-        let card = self.focused_pty_takeover_card();
-        if card.is_some() && self.scroll_mode_active() {
-            self.reset_pty_scrollback();
+    fn prepare_terminal_takeover(&mut self, part: CenterPart) -> Option<PtyTakeoverCard> {
+        let card = self.part_takeover_card(part);
+        if card.is_some() && self.part_scroll_mode_active(part) {
+            self.reset_part_scrollback(part);
         }
         card
     }
@@ -5020,17 +4928,17 @@ impl App {
     fn render_terminal_client_content(
         &mut self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         provider_name: Option<&str>,
         active_surface: SessionSurface,
         caret: Caret,
     ) -> (bool, usize) {
-        let Some(provider) = self.selected_terminal_surface_client() else {
+        let Some(provider) = self.part_client(part) else {
             return (false, 0);
         };
         let has_output = provider.has_output();
-        self.note_drawn_pty();
-        let Some(provider) = self.selected_terminal_surface_client() else {
+        self.note_drawn_pty(part);
+        let Some(provider) = self.part_client(part) else {
             return (false, 0);
         };
         if !has_output {
@@ -5042,7 +4950,7 @@ impl App {
         } else {
             dux_core::pty::ScreenBuffer::Primary
         };
-        let scrollback_offset = self.render_terminal_grid(frame, term_area, caret, screen);
+        let scrollback_offset = self.render_terminal_grid(frame, (part, term_area), caret, screen);
         (true, scrollback_offset)
     }
 
@@ -5134,40 +5042,59 @@ impl App {
     fn render_terminal_grid(
         &mut self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         caret: Caret,
         screen: dux_core::pty::ScreenBuffer,
     ) -> usize {
-        self.refresh_snapshot_buf();
+        self.refresh_part_snapshot(part);
         self.drop_drifted_selection();
-        let scrollback_offset = self.snapshot_buf.scrollback_offset;
-        let selection_origin = self.snapshot_selection_origin();
-        self.paint_terminal_cells(frame, term_area, selection_origin);
-        self.render_terminal_caret(frame, term_area, caret);
-        self.render_terminal_scrollback_indicator(frame, term_area, screen);
+        let scrollback_offset = self.part_snapshots.get(part).buf.scrollback_offset;
+        let selection_origin = self.part_selection_origin(part);
+        self.paint_terminal_cells(frame, (part, term_area), selection_origin);
+        self.render_terminal_caret(frame, (part, term_area), caret);
+        self.render_terminal_scrollback_indicator(frame, (part, term_area), screen);
         scrollback_offset
     }
 
     fn paint_terminal_cells(
         &self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         selection_origin: SelectionOrigin,
     ) {
         let buf = frame.buffer_mut();
-        for cell in &self.snapshot_buf.cells {
-            if cell.row >= self.snapshot_buf.rows
-                || cell.col >= self.snapshot_buf.cols
+        let snapshot = &self.part_snapshots.get(part).buf;
+        let selection = self
+            .terminal_selection
+            .as_ref()
+            .filter(|selection| selection.part == part);
+        let greyed = self.part_is_greyed(part);
+        for cell in &snapshot.cells {
+            if cell.row >= snapshot.rows
+                || cell.col >= snapshot.cols
                 || cell.row >= term_area.height
                 || cell.col >= term_area.width
             {
                 continue;
             }
             let ratatui_cell = &mut buf[(term_area.x + cell.col, term_area.y + cell.row)];
-            let style = Style::default()
-                .fg(to_ratatui_color(cell.fg))
-                .bg(to_ratatui_color(cell.bg))
-                .add_modifier(to_ratatui_modifier(cell.modifier));
+            let (fg, bg) = (to_ratatui_color(cell.fg), to_ratatui_color(cell.bg));
+            let mut style = Style::default().add_modifier(to_ratatui_modifier(cell.modifier));
+            if greyed {
+                // A default background is left unset, so the pane's own fill
+                // shows through every such cell alike and the part reads as one
+                // even surface; a default foreground greys from the theme's body
+                // text, the color it stands for.
+                let pane = self.theme.app_bg;
+                style = style.fg(crate::theme::unfocused_part_color(fg, pane)
+                    .or_else(|| crate::theme::unfocused_part_color(self.theme.text_fg, pane))
+                    .unwrap_or(fg));
+                if let Some(bg) = crate::theme::unfocused_part_color(bg, pane) {
+                    style = style.bg(bg);
+                }
+            } else {
+                style = style.fg(fg).bg(bg);
+            }
             let symbol = visible_terminal_symbol(&cell.symbol, cell.col, term_area.width);
             let link_uri = self
                 .engine
@@ -5176,7 +5103,7 @@ impl App {
                 .hyperlinks
                 .then_some(cell.link)
                 .flatten()
-                .and_then(|index| self.snapshot_buf.links.get(usize::from(index)))
+                .and_then(|index| snapshot.links.get(usize::from(index)))
                 .filter(|_| symbol == cell.symbol.as_str());
             if let Some(uri) = link_uri {
                 let width = symbol.cell_width().max(1);
@@ -5188,7 +5115,7 @@ impl App {
                 ratatui_cell.set_symbol(symbol);
             }
             ratatui_cell.set_style(style);
-            if let Some(selection) = &self.terminal_selection
+            if let Some(selection) = selection
                 && selection.anchor != selection.end
                 && selection.contains_live(cell.row, cell.col, selection_origin)
             {
@@ -5197,14 +5124,20 @@ impl App {
         }
     }
 
-    fn render_terminal_caret(&self, frame: &mut Frame<'_>, term_area: Rect, caret: Caret) {
+    fn render_terminal_caret(
+        &self,
+        frame: &mut Frame<'_>,
+        (part, term_area): (CenterPart, Rect),
+        caret: Caret,
+    ) {
         if caret == Caret::Hidden {
             return;
         }
-        let Some(cursor) = self.snapshot_buf.cursor else {
+        let snapshot = &self.part_snapshots.get(part).buf;
+        let Some(cursor) = snapshot.cursor else {
             return;
         };
-        if cursor.row >= self.snapshot_buf.rows || cursor.col >= self.snapshot_buf.cols {
+        if cursor.row >= snapshot.rows || cursor.col >= snapshot.cols {
             return;
         }
         let cx = term_area.x + cursor.col;
@@ -5217,13 +5150,15 @@ impl App {
     fn render_terminal_scrollback_indicator(
         &self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         screen: dux_core::pty::ScreenBuffer,
     ) {
         if screen == dux_core::pty::ScreenBuffer::Alternate {
             return;
         }
-        let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
+        let Some(label) =
+            scrollback_indicator_label(self.part_snapshots.get(part).buf.scrollback_offset)
+        else {
             return;
         };
         let badge_width = usize_to_u16_wrapping(label.len());
@@ -5273,6 +5208,12 @@ impl App {
                 self.welcome_logo.visible = false;
                 let tab_id = context.focused_tab.clone();
                 self.render_dormant_extra_tab(frame, term_area, tab_id.as_deref());
+            }
+            // Sharing the pane with its terminals, a stopped agent shows the
+            // short card rather than the logo and its tip.
+            SessionSurface::Agent if !self.selected_dock_terminal_ids().is_empty() => {
+                self.welcome_logo.visible = false;
+                self.render_short_agent_card(frame, term_area);
             }
             SessionSurface::Agent => self.render_ascii_logo(frame, term_area),
             SessionSurface::Terminal => {
@@ -5324,7 +5265,7 @@ impl App {
             self.interactive_terminal_hint_line(scrollback_offset, width)
         } else if scrollback_offset > 0 {
             self.scrolled_terminal_hint_line(scrollback_offset, width)
-        } else if self.center_typeable() {
+        } else if context.part_focus == FocusState::Focused && self.center_typeable() {
             self.typeable_hint_line(context.active_surface, width)
         } else {
             self.inactive_terminal_hint_line(context, width)
@@ -5430,10 +5371,10 @@ impl App {
         Line::from(Span::styled("No agent selected.", desc_style))
     }
 
-    fn render_agent_terminal(
+    pub(super) fn render_agent_terminal(
         &mut self,
         frame: &mut Frame<'_>,
-        area: Rect,
+        (part, area): (CenterPart, Rect),
         title: &str,
         focused: FocusState,
     ) {
@@ -5444,7 +5385,7 @@ impl App {
         // Ratatui cannot detect damage to the physical terminal outside its
         // previous-frame buffer, so resend the vulnerable focused edge.
         if focused == FocusState::Focused
-            && self.session_surface == SessionSurface::Agent
+            && part == CenterPart::Main
             && area.width > 0
             && area.height > 2
         {
@@ -5458,7 +5399,7 @@ impl App {
             return;
         }
 
-        let context = self.agent_terminal_context();
+        let context = self.agent_terminal_context(part);
         let active_surface = context.active_surface;
         let receives_keys = context.receives_keys;
         let session_provider_name = context.provider_name.as_deref();
@@ -5470,13 +5411,17 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(term_area);
+        if context.part_focus == FocusState::Focused {
+            self.mouse_layout.focused_term = Some(term_area);
+        } else {
+            self.mouse_layout.other_term = Some(term_area);
+        }
 
-        self.resize_agent_terminal(term_area);
+        self.resize_part_terminal(part, term_area);
 
         // Read ownership after sizing spends an armed claim, preventing a
         // one-frame stale take-over card after a successful claim.
-        let takeover_card = self.prepare_terminal_takeover();
+        let takeover_card = self.prepare_terminal_takeover(part);
         let cover = if takeover_card.is_some() {
             CardCover::Covered
         } else {
@@ -5490,7 +5435,7 @@ impl App {
 
         let (rendered_content, scrollback_offset) = self.render_terminal_client_content(
             frame,
-            term_area,
+            (part, term_area),
             session_provider_name,
             active_surface,
             caret,
@@ -5503,11 +5448,15 @@ impl App {
         }
 
         // Paint the card last over the grid only; tab, PR, and hint lanes remain
-        // visible siblings, matching the web pane geometry.
-        if let Some(card) = takeover_card {
-            self.render_takeover_card(frame, term_area, &card);
-        } else {
-            self.mouse_layout.takeover_button = None;
+        // visible siblings, matching the web pane geometry. Inside an agent's
+        // stack the row has one driver, so the stack paints one card over all
+        // of it instead (see `render_agent_stack`).
+        if !self.drawing_agent_stack() {
+            if let Some(card) = takeover_card {
+                self.render_takeover_card(frame, term_area, &card);
+            } else {
+                self.mouse_layout.takeover_button = None;
+            }
         }
 
         // Macro bar overlays the hint area when active.
@@ -6148,9 +6097,7 @@ impl App {
             Some(LeftItem::Session(_))
         );
         match self.focus {
-            FocusPane::Left if self.left_section == LeftSection::Terminals => {
-                HintContext::LeftTerminal
-            }
+            FocusPane::Left if self.selected_terminal_row().is_some() => HintContext::LeftTerminal,
             FocusPane::Left if is_on_project => HintContext::LeftProject,
             FocusPane::Left => HintContext::LeftSession,
             FocusPane::Center => HintContext::Center,
@@ -14060,7 +14007,7 @@ impl App {
         // boxes would be dead chrome spending three rows of a surface whose
         // whole point is maximum terminal space. The windowed center pane is
         // where tabs render and switch.
-        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
+        self.render_agent_terminal(frame, (CenterPart::Main, area), &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -14070,8 +14017,8 @@ impl App {
         self.paint_modal_surface(frame, area, self.theme.app_bg);
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
-        let title = self.terminal_caption();
-        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
+        let title = self.dock_caption();
+        self.render_agent_terminal(frame, (CenterPart::Dock, area), &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -14111,17 +14058,6 @@ impl App {
         }
     }
 
-    /// The shown terminal's caption, with how many browsers have that terminal
-    /// open, as the agent's caption counts the tab it shows.
-    fn terminal_caption(&self) -> String {
-        let remote = self
-            .selected_terminal_surface_id()
-            .and_then(|id| remote_viewers_segment(self.pty_browser_count(&id)))
-            .map(|segment| format!(" · {segment}"))
-            .unwrap_or_default();
-        format!(" Terminal{remote} ")
-    }
-
     fn render_fullscreen_startup_log(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
         let area = centered_rect(96, 94, frame.area());
@@ -14147,7 +14083,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(2)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(term_area);
+        self.mouse_layout.focused_term = Some(term_area);
 
         let Some(viewer) = &mut self.startup_log_viewer else {
             return;
@@ -14429,7 +14365,7 @@ impl App {
         }
     }
 
-    fn themed_block<'a>(&self, title: &'a str, focused: FocusState) -> Block<'a> {
+    pub(super) fn themed_block<'a>(&self, title: &'a str, focused: FocusState) -> Block<'a> {
         self.themed_block_line(
             Line::from(Span::styled(title, self.theme.title_style(focused))),
             focused,
@@ -14653,7 +14589,7 @@ impl App {
         }
     }
 
-    fn center_pane_agent_title(&self) -> String {
+    pub(super) fn center_pane_agent_title(&self) -> String {
         if let Some(session) = self.selected_session() {
             // Reflect the FOCUSED tab's provider, not just the Main one.
             let provider = capitalize(self.focused_tab_provider(session).as_str());
@@ -17951,15 +17887,17 @@ mod tests {
         let rendered = terminal_row_line(&mut app);
         assert!(rendered.contains("· 1 browser"), "{rendered}");
 
+        // The caption names the terminal, which a hidden strip cannot.
+        let label = app.engine.companion_terminals[&terminal_id].label.clone();
         app.session_surface = SessionSurface::Terminal;
         app.active_terminal_id = Some(terminal_id);
-        assert_eq!(app.terminal_caption(), " Terminal · 1 browser ");
+        assert_eq!(app.dock_caption(), format!(" {label} · 1 browser "));
     }
 
-    /// An agent's terminal is part of the agent's row: its browsers are counted
-    /// on the agent, never on a row of the terminal's own.
+    /// An agent's terminal is part of the agent's row: a browser on it is
+    /// counted on the agent's row, the only row the terminal has.
     #[test]
-    fn an_agents_terminal_row_carries_no_count_of_its_own() {
+    fn a_browser_on_an_agents_terminal_is_counted_on_the_agents_row() {
         use dux_core::attachments::TargetKind;
 
         let mut app = test_app(default_bindings());
@@ -17998,12 +17936,6 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        let arrow = crate::theme::Glyphs::PLAIN.owned_by;
-        let terminal_line = rows
-            .iter()
-            .find(|line| line.contains(arrow) && line.contains("Idle"))
-            .expect("the agent's terminal row is on screen");
-        assert!(!terminal_line.contains("browser"), "{terminal_line}");
         let agent_line = rows
             .iter()
             .find(|line| line.contains(crate::theme::Glyphs::PLAIN.project))
@@ -18168,7 +18100,22 @@ mod tests {
                     client,
                     sort_order: u64::try_from(i).expect("a test index fits in a u64"),
                     created_at: chrono::Utc::now(),
+                    list_after: None,
                 },
+            );
+        }
+        app
+    }
+
+    /// Two standalone terminals, each a row of the agents list, beside the
+    /// fixture's one agent.
+    fn app_with_two_terminal_rows() -> App {
+        let mut app = test_app(default_bindings());
+        for id in ["term-1", "term-2"] {
+            crate::app::test_support::add_terminal(
+                &mut app,
+                id,
+                dux_core::model::TerminalOwner::Standalone,
             );
         }
         app
@@ -18208,11 +18155,11 @@ mod tests {
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
-        app.terminal_pane_height_pct = 50;
+        app.rebuild_left_items();
 
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -18237,16 +18184,14 @@ mod tests {
         );
     }
 
-    /// The journey: two terminals are in the sidebar, one owned by an agent and
-    /// one owned by nothing. The user opens the sidebar filter and types `~`.
-    /// Only the standalone terminal names a directory, so it is the only
-    /// terminal left: the agent's terminal leaves the rendered list, the pane
-    /// count, and the click map with it.
+    /// The journey: two terminals are rows of the sidebar, a project's and one
+    /// owned by nothing. The user opens the sidebar filter and types `~`. Only
+    /// the standalone terminal names a directory, so it is the only row left:
+    /// the project's terminal leaves the rendered list, the pane count, and the
+    /// click map with it.
     ///
-    /// Rendered rather than reasoned about, deliberately. The test this replaced
-    /// called the matcher helper directly, so it never turned the filter on and
-    /// never looked at what was on screen, and it passed while the terminal list
-    /// was not filtered at all.
+    /// Rendered rather than reasoned about, so it fails when the matcher is
+    /// right but the list on screen is not filtered.
     #[test]
     fn the_sidebar_filter_hides_terminals_that_do_not_match_the_query() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -18259,14 +18204,13 @@ mod tests {
             return;
         };
         let mut app = test_app(default_bindings());
-        let session_id = app.engine.sessions[0].id.clone();
-        // The agent's terminal, whose row names `agent-branch@demo`, and the
-        // standalone one, whose row names `~`. Neither label nor foreground can
-        // match `~`, so the owner element is the only thing the query can hit.
+        // The project's terminal, whose row names `demo`, and the standalone
+        // one, whose row names `~`. Neither label nor foreground can match `~`,
+        // so the owner element is the only thing the query can hit.
         for (term_id, owner, dir) in [
             (
                 "term-1",
-                dux_core::model::TerminalOwner::Session(session_id.clone()),
+                dux_core::model::TerminalOwner::Project("project-1".to_string()),
                 std::path::Path::new("."),
             ),
             (
@@ -18293,12 +18237,13 @@ mod tests {
                     client,
                     sort_order: 1,
                     created_at: chrono::Utc::now(),
+                    list_after: None,
                 },
             );
         }
-        app.terminal_pane_height_pct = 50;
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
+        // Wide enough that the pane title is not clipped.
+        app.left_width_pct = 60;
         app.rebuild_left_items();
 
         // `/` opens the filter; `~` is typed into it, exactly as a user would.
@@ -18328,53 +18273,41 @@ mod tests {
             rendered.contains("✷ ~ "),
             "the standalone terminal matches `~` and must still be on screen; got:\n{rendered}"
         );
-        // The prefix, not the whole `agent-branch@demo`: the left pane is narrow
-        // enough that the owner element ellipsizes, so the full string is absent
-        // even when the row is right there on screen.
         assert!(
-            !rendered.contains("↳ agent-br"),
-            "the agent's terminal matches nothing and must be gone from the list; got:\n{rendered}"
+            !rendered.contains("Terminal 1"),
+            "the project's terminal matches nothing and must be gone from the list; got:\n{rendered}"
         );
         assert!(
-            rendered.contains("Terminals (1/2)"),
+            rendered.contains("Agents & Terminals (0/1 + 1/2)"),
             "the pane count must report the filtered list over the total; got:\n{rendered}"
         );
 
         // The visible list itself, which is what selection and the click map are
         // indexed against.
         assert_eq!(
-            app.terminal_items()
-                .iter()
-                .map(|(id, _)| id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["term-2"],
+            app.left_rows,
+            vec![crate::app::LeftRow::Terminal("term-2".to_string())]
         );
-        // The click map, pinned by LENGTH and by CONTENTS. `.iter().all(…)` is
-        // what this used to say, and an empty map satisfies it, so the check
-        // passed whether or not the one surviving terminal was clickable at all.
-        // A terminal row is exactly three lines tall (two content lines and the
-        // spacer, see `framed_row_item`), and there is exactly one row left, so
-        // the map is three entries and every one of them names item 0. That
-        // fails when the map is empty AND when it names a different row.
+        // The click map, pinned by LENGTH and by CONTENTS, so an empty map fails
+        // as surely as one naming another row: the one row left is three lines
+        // tall (two content lines and the spacer, see `framed_row_item`) and
+        // every one of them clicks through to item 0.
         assert_eq!(
-            app.mouse_layout.terminal_row_to_item,
+            app.mouse_layout.left_row_to_item,
             vec![0, 0, 0],
             "the one visible row is three lines tall and every one of them must \
              click through to it; got {:?}",
-            app.mouse_layout.terminal_row_to_item
+            app.mouse_layout.left_row_to_item
         );
     }
 
     #[test]
-    fn terminal_mouse_map_accounts_for_top_margin_and_gutter() {
+    fn terminal_rows_take_their_place_in_the_agents_click_map() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = app_with_two_terminals();
+        let mut app = app_with_two_terminal_rows();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
-        // Give the terminals pane plenty of height so the top margin is reserved.
-        app.terminal_pane_height_pct = 50;
 
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -18382,23 +18315,25 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render frame");
 
-        // The click surface is recorded (the content area after the margin), and
-        // it is offset one row below the block's inner top (the reserved margin).
-        let term_content = app.mouse_layout.terminal_list;
-        assert!(
-            term_content.height >= 6 && term_content.width > 0,
-            "terminal content surface should be recorded with room for two rows"
-        );
-        // Each terminal row is three lines tall, so the first three content rows
-        // map to item 0 and the next three to item 1, even with the top margin
-        // and the side gutters in play.
-        let map = &app.mouse_layout.terminal_row_to_item;
-        assert!(
-            map.len() >= 6,
-            "map should cover both three-line rows, got {}",
-            map.len()
-        );
-        assert_eq!(&map[0..6], &[0, 0, 0, 1, 1, 1], "3-tall rows in order");
+        // Each terminal row is three lines tall, and every line of it clicks
+        // through to its own item, wherever the row sits in the list.
+        let map = &app.mouse_layout.left_row_to_item;
+        for id in ["term-1", "term-2"] {
+            let item = app
+                .left_rows
+                .iter()
+                .position(|row| *row == crate::app::LeftRow::Terminal(id.to_string()))
+                .expect("a standalone terminal is a row of the list");
+            let first = map
+                .iter()
+                .position(|&i| i == item)
+                .expect("the terminal's row is on screen");
+            assert_eq!(
+                &map[first..first + 3],
+                &[item, item, item],
+                "{id}'s row is three lines tall"
+            );
+        }
     }
 
     #[test]
@@ -18424,49 +18359,13 @@ mod tests {
     }
 
     #[test]
-    fn expanded_sidebar_keeps_agent_and_terminal_click_surfaces_separate() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = app_with_two_terminals();
-        app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Projects;
-        app.terminal_pane_height_pct = 50;
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-
-        let agents = app.mouse_layout.left_list;
-        let terminals = app.mouse_layout.terminal_list;
-        assert!(agents.width > 0 && agents.height > 0);
-        assert!(terminals.width > 0 && terminals.height > 0);
-        assert!(
-            agents.bottom() <= terminals.y,
-            "agent and terminal click surfaces must occupy their own pane sections"
-        );
-        assert_eq!(
-            &app.mouse_layout.left_row_to_item[..3],
-            &[0, 0, 1],
-            "with no active agent above it, the inactive toggle occupies two rows"
-        );
-        assert_eq!(
-            &app.mouse_layout.terminal_row_to_item[..6],
-            &[0, 0, 0, 1, 1, 1],
-            "the terminal section keeps its independent three-row mapping"
-        );
-    }
-
-    #[test]
     fn selected_terminal_gets_tinted_frame() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut app = app_with_two_terminals();
+        let mut app = app_with_two_terminal_rows();
         app.focus = FocusPane::Left;
-        app.left_section = LeftSection::Terminals;
-        app.selected_terminal_index = 0;
-        app.terminal_pane_height_pct = 50;
+        app.reselect_left_terminal("term-1");
 
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -18475,13 +18374,19 @@ mod tests {
             .expect("render frame");
 
         let buf = terminal.backend().buffer();
-        // The content surface origin; the first terminal's two content rows sit at
-        // y0 and y0+1, its trailing spacer at y0+2, and the reserved top-margin
-        // row (its `▄` top edge) at y0-1.
-        let content = app.mouse_layout.terminal_list;
+        // The selected terminal's two content rows sit at y0 and y0+1, its
+        // trailing spacer at y0+2, and the row above it carries its `▄` top edge.
+        let content = app.mouse_layout.left_list;
         let gx = content.x;
         let x1 = content.x + content.width;
-        let y0 = content.y;
+        let y0 = content.y
+            + usize_to_u16_wrapping(
+                app.mouse_layout
+                    .left_row_to_item
+                    .iter()
+                    .position(|&i| i == app.selected_left)
+                    .expect("the selected row is on screen"),
+            );
         let tint = app.theme.selection_bar_tint();
 
         // The tint fills the two content rows edge to edge, both gutters included,
@@ -18587,11 +18492,10 @@ mod tests {
         app.rebuild_left_items();
         app.left_width_pct = 40;
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source,
-            source_id: format!("s{source}"),
+            source_id: crate::app::LeftRow::Agent(format!("s{source}")),
             hover,
-            hover_id: hover.map(|index| format!("s{index}")),
+            hover_id: hover.map(|index| crate::app::LeftRow::Agent(format!("s{index}"))),
             promoted: promotion == DragPromotion::Promoted,
         });
 
@@ -18626,11 +18530,10 @@ mod tests {
         );
 
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s0".to_string(),
+            source_id: crate::app::LeftRow::Agent("s0".to_string()),
             hover: Some(1),
-            hover_id: Some("s1".to_string()),
+            hover_id: Some(crate::app::LeftRow::Agent("s1".to_string())),
             promoted: true,
         });
         let dragging = app.footer_hints_for(HintContext::LeftSession);
@@ -18647,9 +18550,8 @@ mod tests {
 
         // A press that has not become a drag leaves the ordinary hints alone.
         app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Agents,
             source: 0,
-            source_id: "s0".to_string(),
+            source_id: crate::app::LeftRow::Agent("s0".to_string()),
             hover: None,
             hover_id: None,
             promoted: false,
@@ -18723,77 +18625,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_terminal_drag_paints_its_marker_in_the_terminals_section() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut app = test_app(default_bindings());
-        let now = chrono::Utc::now();
-        for (index, id) in ["t1", "t2", "t3"].into_iter().enumerate() {
-            let client = crate::pty::PtyClient::spawn(
-                "echo",
-                &[],
-                std::path::Path::new("/tmp"),
-                24,
-                80,
-                1000,
-            )
-            .expect("spawn a test terminal");
-            app.engine.companion_terminals.insert(
-                id.to_string(),
-                crate::app::CompanionTerminal {
-                    owner: dux_core::model::TerminalOwner::Session(
-                        app.engine.sessions[0].id.clone(),
-                    ),
-                    label: id.to_string(),
-                    foreground_cmd: None,
-                    client,
-                    sort_order: u64::try_from(index).expect("a test index fits in a u64"),
-                    created_at: now,
-                },
-            );
-        }
-        app.left_width_pct = 40;
-        app.rebuild_left_items();
-        app.row_drag = Some(crate::app::RowDragState {
-            list: crate::app::RowDragList::Terminals,
-            source: 0,
-            source_id: "t1".to_string(),
-            hover: Some(2),
-            hover_id: Some("t3".to_string()),
-            promoted: true,
-        });
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("terminal");
-        terminal
-            .draw(|frame| app.render(frame))
-            .expect("render frame");
-        let buf = terminal.backend().buffer().clone();
-        let area = app.mouse_layout.terminal_list;
-        // Travelling down, so the gap is BELOW the hovered row: the same
-        // boundary rule the agent list paints by.
-        let boundary = crate::app::reorder::drop_marker_boundary(0, 2);
-        let marker_y = area.y
-            + usize_to_u16_wrapping(
-                app.mouse_layout
-                    .terminal_row_to_item
-                    .iter()
-                    .rposition(|&i| i == boundary - 1)
-                    .expect("the row above the gap is on screen"),
-            );
-        let rule = drag_row_text(&buf, area, marker_y);
-        assert!(
-            rule.chars().all(|c| c == '\u{2500}') && !rule.is_empty(),
-            "the terminals section paints the same insertion rule: {rule:?}",
-        );
-        assert_eq!(
-            buf[(area.x, marker_y)].fg,
-            app.theme.border_focused,
-            "the rule uses the focused border tone",
-        );
     }
 
     #[test]
@@ -19343,7 +19174,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    let context = app.agent_terminal_context();
+                    let context = app.agent_terminal_context(CenterPart::Main);
                     app.render_terminal_empty_state(frame, area, &context);
                 })
                 .expect("render frame");
@@ -19833,7 +19664,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
+                let (term_area, _) = app.render_agent_tab_strip_if_needed(frame, area, 0);
                 assert_eq!(
                     term_area, area,
                     "single tab with the preference off must not reserve a strip row"
@@ -19862,7 +19693,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         terminal
             .draw(|frame| {
-                let term_area = app.render_agent_tab_strip_if_needed(frame, area);
+                let (term_area, _) = app.render_agent_tab_strip_if_needed(frame, area, 0);
                 assert_eq!(
                     term_area,
                     Rect::new(area.x, area.y + 3, area.width, area.height - 3),
@@ -19938,7 +19769,7 @@ mod tests {
         let bottom_row = Rect::new(area.x, area.y + 2, area.width, 1);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
 
@@ -20090,7 +19921,7 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area);
+                    app.render_agent_tab_strip_if_needed(frame, area, 0);
                 })
                 .expect("render frame");
             strip_row_cells(&terminal, label_row)
@@ -20162,7 +19993,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
 
@@ -20204,7 +20035,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
 
@@ -20237,7 +20068,7 @@ mod tests {
         let area = Rect::new(0, 0, width, 24);
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
 
@@ -20294,7 +20125,7 @@ mod tests {
             let area = Rect::new(0, 0, width, 24);
             terminal
                 .draw(|frame| {
-                    app.render_agent_tab_strip_if_needed(frame, area);
+                    app.render_agent_tab_strip_if_needed(frame, area, 0);
                 })
                 .expect("render frame");
 
@@ -20363,7 +20194,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer().clone();
@@ -20781,7 +20612,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
         let buf = terminal.backend().buffer();
@@ -21274,7 +21105,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
         let focused_width = app
@@ -21290,7 +21121,7 @@ mod tests {
         let mut terminal2 = Terminal::new(backend2).expect("terminal");
         terminal2
             .draw(|frame| {
-                app.render_agent_tab_strip_if_needed(frame, area);
+                app.render_agent_tab_strip_if_needed(frame, area, 0);
             })
             .expect("render frame");
         let unfocused_width = app
@@ -21335,19 +21166,23 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
+            .draw(|frame| {
+                app.render_agent_terminal(
+                    frame,
+                    (CenterPart::Main, area),
+                    " Agent ",
+                    FocusState::Unfocused,
+                );
+            })
             .expect("render frame");
 
         let expected_grid = Rect::new(4, 3, 68, 10);
-        assert_eq!(app.mouse_layout.agent_term, Some(expected_grid));
+        assert_eq!(app.mouse_layout.focused_term, Some(expected_grid));
         assert_eq!(
-            app.last_pty_size,
-            (expected_grid.height, expected_grid.width)
+            app.pty_sizes.get(&slot_tab).copied(),
+            Some((expected_grid.height, expected_grid.width))
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(slot_tab.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(slot_tab.as_str()));
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Starting"), "loading card: {rendered}");
         assert!(
@@ -21371,10 +21206,17 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
+            .draw(|frame| {
+                app.render_agent_terminal(
+                    frame,
+                    (CenterPart::Main, area),
+                    " Agent ",
+                    FocusState::Unfocused,
+                );
+            })
             .expect("render frame");
 
-        assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
+        assert_eq!(app.mouse_layout.focused_term, Some(Rect::new(4, 3, 68, 10)));
         assert!(!app.welcome_logo.visible);
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         // This tab has no recorded verdict, so the card's ranked content is the
@@ -21439,14 +21281,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         // Confirm the renderer's input cursor really is the parked PTY cursor,
         // then derive the expected screen cell from the KNOWN (row 4, col 9)
         // literals, not from snapshot_buf, so a transposed or mis-offset
         // production computation cannot make this assertion tautologically true.
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("interactive agent snapshot should expose a PTY cursor");
         assert_eq!(
@@ -21494,7 +21338,7 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         // Guard against a tautological pass: the terminal must be offset from
         // the origin so the +9/+4 offset below is actually exercised (mirrors
@@ -21504,7 +21348,9 @@ mod tests {
             "test setup: agent terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("inline agent snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -21544,7 +21390,7 @@ mod tests {
             .expect("render frame");
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
@@ -21758,7 +21604,7 @@ mod tests {
             app.input_target = InputTarget::None;
             let (mut terminal, _) = draw_caret_frame(&mut app);
             assert!(
-                app.snapshot_buf.cursor.is_some(),
+                app.part_snapshots.main.buf.cursor.is_some(),
                 "test setup: the PTY should still expose a cursor to (not) place"
             );
             terminal.backend_mut().assert_cursor_position((0u16, 0u16));
@@ -21857,7 +21703,7 @@ mod tests {
         let (_, _) = draw_caret_frame(&mut app);
         wait_for_parsed_output(&mut app, "L100");
         assert!(
-            app.snapshot_buf.scrollback_total > 0,
+            app.part_snapshots.main.buf.scrollback_total > 0,
             "test setup: the child must have produced scrollback"
         );
         app.selected_terminal_surface_client()
@@ -21871,9 +21717,11 @@ mod tests {
         // Scrolled back, the cursor cell maps below the viewport (or not at
         // all), so the render gate must leave the hardware cursor alone.
         assert!(
-            app.snapshot_buf
+            app.part_snapshots
+                .main
+                .buf
                 .cursor
-                .is_none_or(|c| c.row >= app.snapshot_buf.rows),
+                .is_none_or(|c| c.row >= app.part_snapshots.main.buf.rows),
             "test premise: the PTY cursor cell must be out of the viewport"
         );
         terminal.backend_mut().assert_cursor_position((0u16, 0u16));
@@ -21908,6 +21756,7 @@ mod tests {
                 client,
                 sort_order: 1,
                 created_at: chrono::Utc::now(),
+                list_after: None,
             },
         );
         app.active_terminal_id = Some(terminal_id);
@@ -21927,14 +21776,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
             "test setup: companion terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .dock
+            .buf
             .cursor
             .expect("companion terminal snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -21993,29 +21844,24 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
         select(&mut app, 0);
         draw(&mut app);
-        let pane = app.last_pty_size;
+        let pane = app.pty_sizes[&first_slot];
         assert_ne!(
             pane,
             (5, 40),
             "test setup: the pane must differ from the spawn geometry"
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(first_slot.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(first_slot.as_str()));
 
         // Same pane, different agent. Comparing geometry alone says "nothing
         // changed" here, which is exactly the bug.
         select(&mut app, 1);
         draw(&mut app);
         assert_eq!(
-            app.last_pty_size, pane,
+            app.pty_sizes.get(&second_slot).copied(),
+            Some(pane),
             "test premise: the pane did not change between the two frames"
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(second_slot.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(second_slot.as_str()));
         let snapshot = app.engine.providers[TabIdRef::new(&second_slot)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
@@ -22093,7 +21939,7 @@ mod tests {
     /// not part of the pane surface these tests measure. Mirrors the render
     /// site's geometry rather than guessing it.
     fn scrollback_badge_rect(app: &App, term_area: Rect) -> Option<Rect> {
-        let label = scrollback_indicator_label(app.snapshot_buf.scrollback_offset)?;
+        let label = scrollback_indicator_label(app.part_snapshots.main.buf.scrollback_offset)?;
         let width = usize_to_u16_wrapping(label.len());
         (term_area.height > 0 && width <= term_area.width)
             .then(|| Rect::new(term_area.x + term_area.width - width, term_area.y, width, 1))
@@ -22186,10 +22032,10 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
-            app.snapshot_buf.scrollback_offset > 0,
+            app.part_snapshots.main.buf.scrollback_offset > 0,
             "test setup: the pane must be parked in scrollback"
         );
 
@@ -22197,7 +22043,7 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render quiet frame");
-        let quiet_offset = app.snapshot_buf.scrollback_offset;
+        let quiet_offset = app.part_snapshots.main.buf.scrollback_offset;
         let quiet_badge = scrollback_badge_rect(&app, term_area);
         let quiet = pane_bg_tally(terminal.backend().buffer(), term_area, quiet_badge);
 
@@ -22210,7 +22056,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render moved frame");
         assert_ne!(
-            app.snapshot_buf.scrollback_offset, quiet_offset,
+            app.part_snapshots.main.buf.scrollback_offset, quiet_offset,
             "test setup: the second frame must carry a CHANGED scrollback offset"
         );
         let moved_badge = scrollback_badge_rect(&app, term_area);
@@ -22265,10 +22111,12 @@ mod tests {
             .expect("render wide frame");
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
-            app.snapshot_buf
+            app.part_snapshots
+                .main
+                .buf
                 .cells
                 .iter()
                 .any(|cell| cell.symbol.as_str() == "日"),
@@ -22293,7 +22141,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let mut covered = std::collections::HashSet::new();
-        for cell in &app.snapshot_buf.cells {
+        for cell in &app.part_snapshots.main.buf.cells {
             if cell.row >= term_area.height || cell.col >= term_area.width {
                 continue;
             }
@@ -22371,14 +22219,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
             "test setup: agent terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("interactive agent snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -22993,7 +22843,7 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         let cell = &terminal.backend().buffer()[(term_area.x + 8, term_area.y + 4)];
         assert_eq!(cell.symbol(), "X");
@@ -24858,7 +24708,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("first frame");
 
-        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
         let border = (term_area.right(), term_area.y + 2);
         assert_eq!(terminal.backend().physical[border].symbol(), "│");
         terminal.backend_mut().physical[border].set_symbol(" ");
@@ -24896,7 +24746,7 @@ mod tests {
                 .draw(|frame| app.render(frame))
                 .expect("render frame");
 
-            let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+            let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
             let x = term_area.right();
             let expected: Vec<_> = if focus == FocusPane::Center {
                 (term_area.y..term_area.bottom() + 2)
@@ -24926,7 +24776,7 @@ mod tests {
             .draw(|frame| {
                 app.render_agent_terminal(
                     frame,
-                    Rect::new(2, 2, 96, 26),
+                    (CenterPart::Dock, Rect::new(2, 2, 96, 26)),
                     " Terminal ",
                     FocusState::Focused,
                 );
@@ -24980,7 +24830,7 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("initial frame");
-        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
         let border = (term_area.right(), term_area.y + 2);
 
         app.help_scroll = Some(0);
@@ -25438,7 +25288,7 @@ mod tests {
     fn diff_rects(app: &App) -> (Rect, Rect) {
         let content = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the diff records its content area for text selection");
         (
             content,
@@ -25533,15 +25383,15 @@ mod tests {
 
     #[test]
     fn the_diff_marker_leaves_text_selection_geometry_untouched() {
-        // `mouse_layout.agent_term` is the drag-to-select surface. The marker
+        // `mouse_layout.focused_term` is the drag-to-select surface. The marker
         // lands in the border column OUTSIDE it, so a short diff (no marker) and
         // a long one (marker) must record the same rect, and the marker cell must
         // never be inside it.
         for gutter_width in [0usize, 6] {
             let (short, _) = diff_frame((120, 40), 3, gutter_width, 0);
             let (long, _) = diff_frame((120, 40), 400, gutter_width, 7);
-            let short_rect = short.mouse_layout.agent_term.expect("selection surface");
-            let long_rect = long.mouse_layout.agent_term.expect("selection surface");
+            let short_rect = short.mouse_layout.focused_term.expect("selection surface");
+            let long_rect = long.mouse_layout.focused_term.expect("selection surface");
             assert_eq!(
                 short_rect, long_rect,
                 "drawing a scroll marker must not resize the selection surface"
@@ -25975,7 +25825,7 @@ mod tests {
     fn startup_log_rects(app: &App, frame: Rect) -> (Rect, Rect) {
         let content = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the startup log records its content area");
         let area = centered_rect(96, 94, frame);
         (
@@ -27219,7 +27069,7 @@ mod tests {
     /// The diff pane's outer rect, reconstructed from the content rect it
     /// recorded: the block's border ring is one cell on each side.
     fn centered_diff_pane_area(app: &App) -> Rect {
-        let content = app.mouse_layout.agent_term.expect("selection surface");
+        let content = app.mouse_layout.focused_term.expect("selection surface");
         // The content pane is the block's inner area minus the two hint rows at
         // the bottom, so the outer pane is one cell out on the left/top and two
         // rows taller at the bottom plus the border.

@@ -2251,7 +2251,7 @@ mod randomized_model {
             &path,
             text.replace(
                 "left_width_pct = 20",
-                "left_width_pct = 20\nterminal_pane_height_pct = 44",
+                "left_width_pct = 20\nterminal_dock_pct = 44",
             ),
         )
         .unwrap();
@@ -2260,7 +2260,7 @@ mod randomized_model {
         q.save_eager(memory).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.ui.terminal_pane_height_pct, 44, "{text}");
+        assert_eq!(back.ui.terminal_dock_pct, 44, "{text}");
         assert_eq!(back.ui.left_width_pct, 30, "{text}");
     }
 
