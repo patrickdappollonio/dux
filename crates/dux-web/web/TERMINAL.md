@@ -1047,9 +1047,18 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     self-succession) counts as confirmation enough to ask. The verdict itself is not
     touched, so a hidden part over an unclaimed row shows no card. Fix: `onScreen` and
     `rowConfirmed` in `resizeCoordinator.ts`, `faithfulWatcher` in `TerminalPane.tsx`.
+    Second trap, the ordinary startup race once two parts mount on an unclaimed row:
+    the page's claim is announced (`pty.owner` naming the shared id) before the off-screen
+    part's own handshake lands, and that handshake was snapshotted before the claim.
+    The pane had no id to compare the event with yet, so it read the event as another
+    device's, and the superseded handshake kept that verdict for good. The newest
+    event's owner is remembered and compared again when the handshake lands. Fix:
+    `newestEventOwnerRef` in `ownership.ts`. Pinned: `components/TerminalPane.test.tsx`
+    "owns the row when its page's claim is announced before its own handshake lands".
     Pinned: `resizeCoordinator.test.ts` "a pane kept mounted off screen";
     `components/TerminalPane.test.tsx` "never makes the first claim of a row from the
-    part off screen".
+    part off screen" and "lets a part off screen ask for its row back with a
+    self-succession" (the armed claim counting as confirmation, through the lifecycle).
 
 ## D. Keys and clipboard
 
@@ -1951,13 +1960,31 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     focuses by itself, and the compose surface counts as live only for it, so the
     redirect, the paste listener and the tab-stop suspension follow it. A press anywhere
     on a part makes it the target. Every asynchronous input stays bound to the part it
-    started on: Send's delayed Enter rides the socket the body went to or is dropped,
-    and a paste, upload or pick runs through that part's own pipeline. The overlay layer
+    started on: Send's delayed Enter rides the CONNECTION the body went to or is
+    dropped (the socket object reconnects in place, so the check is its `openSerial`,
+    not the object), and a paste, upload or pick runs through that part's own
+    pipeline. The overlay layer
     is the stack's too, over the parts' box and withheld when a cover owns the target's
     part. Fix: `TerminalStack`/`TerminalPart` in `TerminalPane.tsx`. Pinned:
     `components/TerminalPane.test.tsx` "TerminalStack with two parts" and "the stack's
-    overlay layer over a lone terminal"; `components/terminal/inputSurface.test.ts`
-    "Send from a stack of two parts".
+    overlay layer over a lone terminal" (among them "sends a Send's Enter to the part
+    the body went to after the target moved", "lands a click into the other part's
+    terminal in the message box, now for that part", "falls back to the part on screen
+    when the chosen part goes off screen"); `components/TerminalPane.filedrop.test.tsx`
+    "a stack of two parts" (drop, pick, pasted image, and a paste into the box);
+    `components/terminal/inputSurface.test.ts` "Send's delayed Enter across a reconnect".
+
+31. **A dormant tab's part never gets a live socket just because it is mounted.**
+    Trap: subscribing to a dormant tab's pty LAUNCHES it, and `handle_subscribe` does
+    so for a `viewed=0` subscribe too: the viewed flag decides attention and the
+    pull-request cadence, never whether to launch. So a stopped agent kept mounted off
+    screen beside its running terminal would be started by nobody's request. The agent
+    part of a stack gets a live socket only when its tab is live, or when it is on
+    screen and showing it is what starts it (the dormant-card table); otherwise it
+    gets its card. The rule lives in the pure layout model so the dock wiring reads it
+    rather than re-deriving it. Fix: `partsOnScreen`'s `agentLiveSocket` in
+    `src/lib/layoutModel.ts`. Pinned: `src/lib/layoutModel.test.ts` "gives the agent
+    part a live socket for a … tab".
 
 ## I. Viewer suppression and notifications
 
@@ -2339,7 +2366,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     on only when present). Pinned too: `src/lib/ptySocket.test.ts` "says a pane off screen
     is not viewed when it opens, and again on its reconnect"; `crates/dux-web/src/engine_actor.rs`
     "only_a_subscribe_from_a_pane_on_screen_counts_as_looking_at_the_tab",
-    "coming_on_screen_is_looking_at_the_tab". Fix: src/components/terminal/useTerminalLifecycle.ts:988-1049,
+    "coming_on_screen_is_looking_at_the_tab". Fix: the heartbeat's `viewed` and `onScreenChangeRef` in
+    src/components/terminal/useTerminalLifecycle.ts,
     TP:422-430, `src/lib/viewedPing.ts`;
     `crates/dux-web/src/server.rs:1626-1631`.
     Pinned: `src/lib/viewedPing.test.ts` (all three suites; the grace vectors are twins

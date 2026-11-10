@@ -5390,9 +5390,6 @@ fn last_run_failed_refusal() -> String {
         .to_string()
 }
 
-/// Handle a `SubscribePty` request. If the provider already exists, reply
-/// immediately. Otherwise launch/resume the real agent provider and defer the
-/// reply via a `PendingSubscribe` until the provider comes up (or times out).
 /// Whether the pane behind a terminal socket is on screen. A part of a stack
 /// kept mounted off screen is not looking at its tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5452,6 +5449,9 @@ fn note_tab_looked_at(
     Some(check)
 }
 
+/// Handle a `SubscribePty` request. If the provider already exists, reply
+/// immediately. Otherwise launch/resume the real agent provider and defer the
+/// reply via a `PendingSubscribe` until the provider comes up (or times out).
 fn handle_subscribe(
     engine: &mut Engine,
     pending: &mut Vec<PendingSubscribe>,

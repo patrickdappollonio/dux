@@ -2848,13 +2848,8 @@ impl AttachedPtySocket<'_> {
     }
 
     async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
-        match frame.viewed {
-            Some(true) => {
-                self.attachment.note_viewed();
-                self.engine.note_viewed(self.target.pty_id().to_string());
-            }
-            Some(false) => self.attachment.note_unviewed(),
-            None => {}
+        if self.attachment.note_beat_viewed(frame.viewed) {
+            self.engine.note_viewed(self.target.pty_id().to_string());
         }
         if frame.shown {
             self.engine.pty_shown(self.target.pty_id().to_string());
@@ -4543,6 +4538,18 @@ impl AttachmentGuard {
         self.deliberate
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Record what a beat frame said about being looked at, and answer whether
+    /// it said "looked at" (so the engine is told too). A frame that says
+    /// nothing (a `shown` frame) leaves the attachment's viewed state as it was.
+    fn note_beat_viewed(&self, viewed: Option<bool>) -> bool {
+        match viewed {
+            Some(true) => self.note_viewed(),
+            Some(false) => self.note_unviewed(),
+            None => {}
+        }
+        viewed == Some(true)
+    }
 }
 
 impl Drop for AttachmentGuard {
@@ -5933,6 +5940,76 @@ mod tests {
             cleared,
             Event::Resource { ref event, owner: None, .. } if event == "pty.owner"
         ));
+    }
+
+    /// A `shown` frame carries no `viewed`, and an owner sending one must not
+    /// lose the "looked at" its last beat recorded: losing the socket afterwards
+    /// still keeps the row protected for the grace. A frame that does say
+    /// unviewed is what drops it.
+    #[test]
+    fn a_shown_frame_leaves_the_attachments_viewed_state_alone() {
+        use dux_core::attachments::{
+            Attachments, ConnectionFacts, Scope, Surface, Target, TargetKind,
+        };
+        for (frames, protected) in [
+            (vec![Some(true), None], true),
+            (vec![Some(true), Some(false)], false),
+        ] {
+            let attachments = Attachments::default();
+            attachments.register(
+                "e1",
+                ConnectionFacts {
+                    surface: Surface::Browser,
+                    device: None,
+                    address: None,
+                    verified: false,
+                    events: true,
+                    browser: None,
+                },
+                None,
+            );
+            let token = attachments
+                .attach(
+                    "e1",
+                    Target {
+                        kind: TargetKind::Tab,
+                        id: "s1-slot".to_string(),
+                        agent: Some("s1".to_string()),
+                    },
+                    None,
+                    Some(9),
+                )
+                .unwrap();
+            let guard = AttachmentGuard {
+                attachments: attachments.clone(),
+                token,
+                own_connection: None,
+                live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
+                deliberate: std::sync::atomic::AtomicBool::new(false),
+            };
+            for viewed in frames.iter().copied() {
+                guard.note_beat_viewed(viewed);
+            }
+            // The socket is lost, with a grace long enough to read the answer.
+            attachments.detach(
+                token,
+                dux_core::attachments::Ending::Lost,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(300),
+            );
+            drop(guard);
+            let scope = Scope {
+                ptys: std::collections::BTreeSet::new(),
+                agents: ["s1".to_string()].into(),
+            };
+            assert_eq!(
+                !attachments
+                    .blockers(&scope, None, std::time::Instant::now())
+                    .is_empty(),
+                protected,
+                "{frames:?}"
+            );
+        }
     }
 
     /// The quiet clock starts when the socket's receive loop does: a socket
