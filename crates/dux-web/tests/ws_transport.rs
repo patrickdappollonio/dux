@@ -3031,7 +3031,15 @@ async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     let (mut creator, hello) = owner_on_open(addr, &path).await;
     assert_eq!(hello["owner"], serde_json::Value::Null);
     let creator_id = hello["id"].as_str().expect("an id").to_string();
-    claim(&mut creator, "dux-row-undriven-marker").await;
+    // The resize alone, no stdin: a write claims too, and this is about the
+    // resize. The applied grid coming back means the claim was granted.
+    creator
+        .send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    next_event_frame(&mut creator, "size", Duration::from_secs(8))
+        .await
+        .expect("the creator's resize applied");
     let (_agent, hello) = owner_on_open(addr, "/ws/sessions/s1/pty").await;
     assert_eq!(
         hello["owner"].as_str(),

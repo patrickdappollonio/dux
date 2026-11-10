@@ -271,6 +271,8 @@ the terminal UI and in the browser alike.
   nowhere.
 - **Taking over** also retargets the terminal's size to the device that took it, and
   everyone watching adopts that geometry.
+- **An agent's tabs and terminals go together:** taking one over, or starting an agent from
+  the terminal UI, takes all of that agent's tabs and terminals at once.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 

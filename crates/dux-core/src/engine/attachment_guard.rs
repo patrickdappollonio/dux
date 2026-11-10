@@ -732,12 +732,13 @@ mod tests {
     #[test]
     fn closing_an_agents_terminal_leaves_the_agent_open_to_attach() {
         let (engine, _tmp, _worktree, companion, _) = engine_with_a_watched_agent_and_terminals();
-        let _held = engine
+        let refused = engine
             .reserve_destruction_judging(
                 &engine.pty_row_scope(&companion),
                 crate::engine::Engine::pty_scope(&companion),
             )
             .expect_err("the watcher is in the way");
+        assert_eq!(refused.blockers.len(), 1, "{refused}");
         engine.attachments.register(
             "e2",
             ConnectionFacts {

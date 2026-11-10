@@ -477,6 +477,12 @@ would end:
 - removing a project, recreating a working copy with its tabs restarted;
 - starting an agent that would stop another agent already working in the same folder.
 
+An agent's tabs and terminals count as one thing here. Closing or stopping one of an
+agent's tabs, or closing one of its terminals, is refused over anyone who has any of that
+agent's tabs or terminals open, not only the one being closed, and the dialog names them
+with the same option to go ahead anyway. A project or standalone terminal counts on its
+own.
+
 The refusal says who, and changes nothing. It gives:
 
 - the device;
