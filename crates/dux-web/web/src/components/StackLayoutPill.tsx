@@ -1,11 +1,11 @@
 import { useState } from "react"
-import { Bot, Plus, SquareTerminal } from "lucide-react"
+import { Bot, Circle, Plus, SquareTerminal } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import type { ReactNode } from "react"
 
-import { AttentionDot } from "@/components/AttentionDot"
 import { layoutControls } from "@/components/stackLayoutControls"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -109,28 +109,35 @@ function placementStyle(placement: LayoutPillPlacement): React.CSSProperties {
 
 // What the agent is doing, for the pill over its maximized terminal: the
 // attention look when it needs you, the working pulse while it works, nothing
-// when it is idle. Needs-you outranks working, as on its row.
+// when it is idle. Needs-you outranks working, as on its row. It is the working
+// glyph drawn as a dot, without the bounce: a hand-over to needs-you lets the
+// pulse land before the attention look eases in, and both ride the shared
+// clock's phase.
 export function AgentStateDot({ session }: { session: SessionView }) {
-  if (session.needs_attention) {
-    return (
-      <span className="flex size-8 items-center justify-center pointer-coarse:size-10">
-        <AttentionDot />
-      </span>
-    )
-  }
-  if (session.status === "active" && session.working && !session.typing) {
-    return (
-      <span className="flex size-8 items-center justify-center pointer-coarse:size-10">
-        <SimpleTooltip content="The agent is working">
-          <span
-            aria-label="The agent is working"
-            className="size-2 rounded-full bg-dux-working motion-safe:animate-working-pulse"
+  const attention = session.needs_attention
+  const working = !attention && session.status === "active" && session.working && !session.typing
+  if (!attention && !working) return null
+  const label = attention ? "Needs attention" : "The agent is working"
+  return (
+    <span className="flex size-8 items-center justify-center pointer-coarse:size-10">
+      <SimpleTooltip content={label}>
+        <span role="img" aria-label={label} className="inline-flex">
+          <WorkingGlyph
+            icon={Circle}
+            working={working}
+            look={
+              attention
+                ? "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+                : "text-dux-working"
+            }
+            bounce={false}
+            onCueClock
+            className="size-2 fill-current stroke-none"
           />
-        </SimpleTooltip>
-      </span>
-    )
-  }
-  return null
+        </span>
+      </SimpleTooltip>
+    </span>
+  )
 }
 
 // The pill's + dialog: another of this agent's tabs, on its default provider,

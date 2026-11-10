@@ -79,7 +79,19 @@ export function agentStackModel(ctx: {
     .slice()
     .sort((a, b) => a.sort_order - b.sort_order)
   // A drag just made shows at once; the server's order replaces it.
-  const dock = ctx.pendingTerminalOrder ? reorderById(own, ctx.pendingTerminalOrder) : own
+  const ordered = ctx.pendingTerminalOrder ? reorderById(own, ctx.pendingTerminalOrder) : own
+  // A terminal is selected the moment its create answers, before the workspace
+  // that lists it arrives. Until then it is the dock's newest member, so it
+  // shows and takes typing at once; the next workspace confirms it, or the
+  // selection's own prune drops it.
+  const unlisted =
+    target.kind === "terminal" &&
+    target.owner.kind === "session" &&
+    target.owner.sessionId === sessionId &&
+    !ordered.some((t) => t.id === target.terminalId)
+      ? target.terminalId
+      : null
+  const dock = unlisted === null ? ordered : [...ordered, unlistedTerminal(unlisted, sessionId)]
   const dockIds = dock.map((t) => t.id)
 
   const slotTabId = slotTabIdOf(sessionId, session, ctx.pendingSlotTab) ?? session.slot_tab_id
@@ -168,5 +180,22 @@ export function agentStackModel(ctx: {
         : "full",
     stripsShown: shouldShowStackStrips(session.tabs, dock.length, ctx.alwaysShowTabStrip),
     agentStopped,
+  }
+}
+
+// What a terminal the workspace does not list yet looks like until it does.
+function unlistedTerminal(id: string, sessionId: string): TerminalView {
+  return {
+    id,
+    owner: { kind: "session", session_id: sessionId },
+    label: "Terminal",
+    has_output: false,
+    working: false,
+    typing: false,
+    foreground_cmd: null,
+    sort_order: Number.MAX_SAFE_INTEGER,
+    created_at: "",
+    updated_at: "",
+    list_after: null,
   }
 }

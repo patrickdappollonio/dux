@@ -4,7 +4,9 @@
 // module decides what the stack looks like and holds no state of its own: the
 // caller owns the remembered values and passes them in.
 
+import { agentRowVisual } from "./agentRow"
 import { shouldShowTabStrip } from "./agentTabs"
+import { terminalStateWord } from "./flatTerminals"
 import type { AgentTabView, SessionView, TerminalView } from "./types"
 
 /** A computer's stack: agent maximized, both parts, or terminal maximized. */
@@ -134,23 +136,28 @@ export interface PhoneSwitch {
 /**
  * What the switch between an agent and its terminals shows, or null when the
  * agent has no terminal to switch to. It points at the part that is not on
- * screen and carries that part's state, read off the same ladder the list's
- * state word reads: needs-you over working, and a part typing into is not
- * working. Terminals have no needs-you state.
+ * screen and carries that part's state, read off the list's own ladder for
+ * that part (`agentRowVisual`, `terminalStateWord`): needs-you over working,
+ * and a part being typed into is not working. Terminals have no needs-you
+ * state.
  */
 export function phoneSwitch(
   view: PhoneView,
   session: Pick<SessionView, "needs_attention" | "status" | "working" | "typing">,
-  terminals: readonly Pick<TerminalView, "working" | "typing">[],
+  terminals: readonly TerminalView[],
 ): PhoneSwitch | null {
   if (terminals.length === 0) return null
   if (view === "agent") {
-    const running = terminals.some((t) => t.working && !t.typing)
+    const running = terminals.some((t) => terminalStateWord(t).label === "Running")
     return { shows: "terminals", count: terminals.length, cue: running ? "working" : "plain" }
   }
-  let cue: PartCue = "plain"
-  if (session.needs_attention) cue = "attention"
-  else if (session.status === "active" && session.working && !session.typing) cue = "working"
+  const row = agentRowVisual(
+    session.status,
+    session.working,
+    session.needs_attention,
+    session.typing,
+  )
+  const cue: PartCue = row.attention ? "attention" : row.working ? "working" : "plain"
   return { shows: "agent", count: null, cue }
 }
 

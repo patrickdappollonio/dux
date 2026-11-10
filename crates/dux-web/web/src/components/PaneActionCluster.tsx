@@ -12,6 +12,7 @@ import { useLayoutEffect, useRef, type ReactNode } from "react"
 
 import { MacroPopover } from "@/components/MacroPopover"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { WorkingGlyph } from "@/components/WorkingGlyph"
 import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
 import { phoneSwitch, type PartCue, type PhoneView } from "@/lib/layoutModel"
@@ -216,13 +217,14 @@ function KeysToggleButton({ target }: { target: SelectedTarget }) {
   )
 }
 
-// The look the switch's icon takes for the part it points to: the shared
-// attention colour and blink, or the busy colour and the working pulse on the
-// shared clock. The icon itself carries it, with no dot beside it, and it never
-// bounces: one bouncing icon among still ones would pull the eye all the time.
+// The look the switch's icon takes for the part it points to: the busy colour
+// while it works (the pulse itself is the glyph's), and the shared attention
+// colour and blink when it needs you. The icon carries it with no dot beside
+// it, and it never bounces: one bouncing icon among still ones would pull the
+// eye all the time.
 const PART_CUE_LOOK: Record<PartCue, string | undefined> = {
   attention: "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none",
-  working: "text-dux-working motion-safe:animate-working-pulse motion-reduce:animate-none",
+  working: "text-dux-working",
   plain: undefined,
 }
 
@@ -271,7 +273,17 @@ function PartSwitchButton({
         aria-label={label}
         onClick={() => switchPhonePart(session.id)}
       >
-        <Icon data-testid="pane-part-switch-icon" className={PART_CUE_LOOK[shown.cue]} />
+        {/* The working glyph without its bounce: a hand-over to needs-you
+          * lets the pulse land before the attention look eases in, and both
+          * ride the shared clock's phase, so the flap and the pill it flies
+          * into pulse as one. */}
+        <WorkingGlyph
+          icon={Icon}
+          working={shown.cue === "working"}
+          look={PART_CUE_LOOK[shown.cue]}
+          bounce={false}
+          onCueClock
+        />
         {toTerminals ? <span className="text-sm">{shown.count}</span> : null}
       </Button>
     </SimpleTooltip>

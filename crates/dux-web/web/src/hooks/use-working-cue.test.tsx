@@ -6,9 +6,10 @@ import { Bot } from "lucide-react"
 import { useRef } from "react"
 
 import { WorkingGlyph } from "@/components/WorkingGlyph"
-import { fireAnimationStart, stubGlyphEase } from "@/test/animationEvents"
+import { expectLookEasesIn, fireAnimationStart, stubGlyphEase } from "@/test/animationEvents"
 
 import {
+  cueEpochStartTime,
   useWorkingCue,
   useWorkingPulseAnchor,
   WORKING_BOUNCE_ANIMATION,
@@ -295,5 +296,111 @@ describe("WorkingGlyph's held look", () => {
       document.dispatchEvent(new Event("visibilitychange"))
     })
     expect(frame().className).toContain("needs-you")
+  })
+})
+
+// A glyph that reports a part rather than names it (the phone's agent/terminals
+// switch, the computer's layout pill dot) pulses and lands like any working
+// glyph but never bounces, and rides the shared clock's phase so a copy of it
+// remounted elsewhere carries on in step.
+describe("a working glyph without the bounce", () => {
+  const ATTENTION =
+    "text-cyan-100 motion-safe:animate-attention-pulse motion-reduce:animate-none"
+  afterEach(() => {
+    cleanup()
+    setHidden(false)
+    vi.unstubAllGlobals()
+  })
+
+  it("pulses, and never puts the bounce on its frame", () => {
+    const { container, rerender } = render(<WorkingGlyph icon={Bot} working bounce={false} />)
+    const frame = container.querySelector("[data-slot='working-glyph']")!
+    expect(container.querySelector("svg")!.getAttribute("class")).toContain(WORKING_PULSE_ANIMATION)
+    expect(frame.className).not.toContain("bounce")
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} />)
+    expect(frame.className).not.toContain("bounce")
+  })
+
+  it("lets the pulse land before the attention look eases in, then blinks", async () => {
+    const { container, rerender } = render(
+      <WorkingGlyph icon={Bot} working bounce={false} look="text-dux-working" />,
+    )
+    const frame = () => container.querySelector("[data-slot='working-glyph']")!
+    const ease = stubGlyphEase(container.querySelector("svg")!)
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} />)
+    // The pulse yields at once and the glyph eases back from where it was.
+    expect(container.querySelector("svg")!.getAttribute("class")).not.toContain("animate-working-pulse")
+    expect(ease.animate).toHaveBeenCalledTimes(1)
+    expect(frame().className).not.toContain("text-cyan-100")
+    await ease.eased()
+    expect(frame().className).toContain("text-cyan-100")
+    expectLookEasesIn(frame().className, "the attention look after the landing")
+  })
+
+  it("snaps to the new look under reduced motion", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query.includes("prefers-reduced-motion"),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    )
+    const { container, rerender } = render(
+      <WorkingGlyph icon={Bot} working bounce={false} look="text-dux-working" />,
+    )
+    stubGlyphEase(container.querySelector("svg")!)
+    rerender(<WorkingGlyph icon={Bot} working={false} bounce={false} look={ATTENTION} />)
+    const frame = container.querySelector("[data-slot='working-glyph']")!
+    expect(frame.className).toContain("text-cyan-100")
+    expect(frame.className).not.toContain("duration-200")
+  })
+
+  it.each([
+    [{ now: 5000, period: 1600, delay: 0, fresh: false }, -0],
+    [{ now: 5000, period: 1600, delay: 200, fresh: false }, -200],
+    [{ now: 5000, period: 1600, delay: 0, fresh: true }, 6400],
+    [{ now: 5000, period: 2000, delay: 200, fresh: true }, 5800],
+  ])("starts %o at %d on the shared clock", (timing, start) => {
+    expect(cueEpochStartTime(timing)).toBe(start)
+  })
+
+  it("keeps a remounted glyph in phase with the one it replaced, and starts a fresh pulse on the next period", () => {
+    Object.defineProperty(document, "timeline", {
+      configurable: true,
+      value: { currentTime: 5000 },
+    })
+    const starts = new Map<Element, { startTime: number | null }>()
+    const original = Element.prototype.getAnimations
+    Element.prototype.getAnimations = function (this: Element) {
+      if (!(this.getAttribute("class") ?? "").includes("animate-working-pulse")) return []
+      if (!starts.has(this)) starts.set(this, { startTime: 3333 })
+      const clock = starts.get(this)!
+      return [
+        Object.assign(clock, {
+          animationName: "working-pulse",
+          effect: { getComputedTiming: () => ({ duration: 1600, delay: 0 }) },
+        }),
+      ] as unknown as Animation[]
+    }
+    try {
+      const first = render(<WorkingGlyph icon={Bot} working bounce={false} onCueClock />)
+      const before = starts.get(first.container.querySelector("svg")!)!.startTime!
+      first.unmount()
+      const second = render(<WorkingGlyph icon={Bot} working bounce={false} onCueClock />)
+      const after = starts.get(second.container.querySelector("svg")!)!.startTime!
+      // Both on a whole number of periods from the clock's origin.
+      expect(Math.abs(before % 1600)).toBe(0)
+      expect(Math.abs(after % 1600)).toBe(0)
+      second.unmount()
+
+      const idle = render(<WorkingGlyph icon={Bot} working={false} bounce={false} onCueClock />)
+      idle.rerender(<WorkingGlyph icon={Bot} working bounce={false} onCueClock />)
+      expect(starts.get(idle.container.querySelector("svg")!)!.startTime).toBe(6400)
+    } finally {
+      Element.prototype.getAnimations = original
+      Reflect.deleteProperty(document, "timeline")
+    }
   })
 })

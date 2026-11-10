@@ -1,7 +1,8 @@
 import type { LucideIcon } from "lucide-react"
-import { type RefObject, useCallback, useState } from "react"
+import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from "react"
 
 import {
+  anchorCueAnimations,
   useWorkingCue,
   WORKING_BOUNCE_ANIMATION,
   WORKING_PULSE_ANIMATION,
@@ -42,6 +43,8 @@ export function WorkingGlyph({
   className,
   frameClassName,
   frameRef,
+  bounce = true,
+  onCueClock = false,
 }: {
   icon: LucideIcon
   working: boolean
@@ -49,15 +52,32 @@ export function WorkingGlyph({
   className?: string
   frameClassName?: string
   frameRef?: RefObject<HTMLSpanElement | null>
+  /** False for a glyph that reports a part rather than names it, which pulses
+   * and lands but never bounces. */
+  bounce?: boolean
+  /** Put the pulse and the look's own animation on the shared clock's phase,
+   * so a glyph remounted elsewhere carries on in step (see
+   * `cueEpochStartTime`). */
+  onCueClock?: boolean
 }) {
   const { bouncing, pulsing, landing, attachBounce, attachPulse, handlers } =
-    useWorkingCue<HTMLSpanElement, SVGSVGElement>(working)
+    useWorkingCue<HTMLSpanElement, SVGSVGElement>(working, { bounce })
+  const [frame, setFrame] = useState<HTMLSpanElement | null>(null)
+  const [icon, setIcon] = useState<SVGSVGElement | null>(null)
   const attachFrame = useCallback(
     (el: HTMLSpanElement | null) => {
       attachBounce(el)
+      setFrame(el)
       if (frameRef) frameRef.current = el
     },
     [attachBounce, frameRef],
+  )
+  const attachIcon = useCallback(
+    (el: SVGSVGElement | null) => {
+      attachPulse(el)
+      setIcon(el)
+    },
+    [attachPulse],
   )
 
   const [shown, setShown] = useState(look)
@@ -79,6 +99,26 @@ export function WorkingGlyph({
     setHeld(false)
   }
 
+  // A cue running when the glyph mounts carries on in phase; one that starts
+  // under a mounted glyph waits for the clock's next period.
+  const pulseFresh = useRef(false)
+  useLayoutEffect(() => {
+    if (!onCueClock) return
+    if (!pulsing) {
+      pulseFresh.current = true
+      return
+    }
+    if (icon === null) return
+    anchorCueAnimations(icon, pulseFresh.current)
+    pulseFresh.current = false
+  }, [onCueClock, pulsing, icon])
+  const lookFresh = useRef(false)
+  useLayoutEffect(() => {
+    if (!onCueClock || frame === null) return
+    anchorCueAnimations(frame, lookFresh.current)
+    lookFresh.current = true
+  }, [onCueClock, shownNow, easedNow, frame])
+
   return (
     <span
       ref={attachFrame}
@@ -93,7 +133,7 @@ export function WorkingGlyph({
       )}
     >
       <Icon
-        ref={attachPulse}
+        ref={attachIcon}
         className={cn("shrink-0", className, pulsing && WORKING_PULSE_ANIMATION)}
       />
     </span>

@@ -241,7 +241,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 **Where the button is.**
 
 - **On a computer** it is in the terminal's header, beside **Macros…** and the pane's own `⋯`.
-- **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the tab strip when the agent has more than one tab and the header itself when it does not, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
+- **On a phone** it is the first button in the flap that hangs off the band above the terminal. That band is the strip of the part on screen when the agent has two or more tabs or two or more terminals (its tab strip over the agent, the dock strip over a terminal) and the header itself otherwise, and the flap takes the colour of whichever one it is hanging from, so it always reads as part of it.
 
 **What happens when you go in.**
 
@@ -440,7 +440,7 @@ When an agent has a terminal of its own, the center pane splits: the agent and i
 
 ![The same agent with the strips hidden: a thin grip band between the agent and its terminal, and the floating pill at the band's right end.](/screens/web-terminal-dock-hidden-strips.png#full)
 
-**On a phone** there is no room for both, so an agent's screen shows the agent or its terminals, never both, with only that part's strip. The **agent/terminals switch** in the action flap moves between them (see [The action flap](#the-action-flap)), and Back moves back. Each agent reopens on whichever part you last left it on in that browser, and on the agent the first time. A lone tab beside a lone terminal shows no strip at all; make a second one from the flap's `⋯` with **New agent tab…** or **New terminal**.
+**On a phone** there is no room for both, so an agent's screen shows the agent or its terminals, never both, with only that part's strip. The **agent/terminals switch** in the action flap moves between them (see [The action flap](#the-action-flap)), and Back moves back. Each agent reopens on whichever part you last left it on in that browser, and on the agent the first time. The part on screen shows its own strip (the tab strip over the agent, the dock strip over a terminal) once the agent has two or more tabs or two or more terminals, or while **Always show tab strip** is on. A lone tab beside a lone terminal shows no strip at all; make a second one from the flap's `⋯` with **New agent tab…** or **New terminal in the worktree** (**New terminal in the folder** for a standalone agent).
 
 ![An agent's terminal on a phone: the dock strip with two terminal pills under the slim header, and the action flap carrying the agent switch beside the menu.](/screens/phone-terminal-view.png)
 
@@ -520,7 +520,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 ![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
 - **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New agent…** launcher along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's **▾** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
-- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip) and the tab strip when the agent has more than one tab.
+- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip), with the strip of the part on screen under it when the agent has two or more tabs or two or more terminals: the tab strip over the agent, the dock strip over a terminal.
 - **An agent's own terminals** are on the same screen, one part at a time: the agent/terminals switch in the flap shows them in place of the agent, with the dock strip when there are two or more. The header, the menu and the count stay the agent's, and the menu adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**. The message box says what it is talking to: "Write a message to the agent…" over the agent, "Type a command…" over a terminal.
 - **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, then a **Terminal** group holding **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - **The changes screen** is the full Changes pane. Tapping a file opens its diff in the standalone editor in the same browser tab, and Back comes back to the Changes screen.
@@ -538,7 +538,7 @@ It holds:
 - the changed-file count (agents only)
 - the terminal-keys button, which hides and shows the key row, while this device is typing into the terminal
 - the **agent/terminals switch**, on an agent with at least one terminal. Over the agent it shows the terminal icon and how many terminals there are; over a terminal, the agent icon. The icon tells you what the other part is doing: green and pulsing while it works, cyan and blinking when the agent needs you (needs-you wins), plain otherwise. Tap it to show that part and type into it.
-- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal** among them) and a **Settings** drill into the app menu
+- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
 

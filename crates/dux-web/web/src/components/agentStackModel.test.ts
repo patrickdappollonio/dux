@@ -181,4 +181,18 @@ describe("agentStackModel", () => {
     expect(agent.parts.agentLiveSocket).toBe(false)
     expect(agent.agentCard).toBe("full")
   })
+
+  // A new terminal is selected the moment its create answers, before the
+  // workspace that lists it arrives: it is the dock's newest member until then.
+  it.each(["computer", "phone"] as const)(
+    "puts a selected terminal the workspace does not list yet in front of the dock on a %s",
+    (surface) => {
+      const fresh = { ...dockTarget, terminalId: "t9" }
+      const m = model({ surface, target: fresh, stackLayouts: { s1: "split" } })
+      expect(m.dock.map((t) => t.id)).toEqual(["t1", "t9"])
+      expect(m.activeTerminal).toBe("t9")
+      expect(m.typingPtyId).toBe("t9")
+      if (surface === "phone") expect(m.view).toBe("terminals")
+    },
+  )
 })

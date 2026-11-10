@@ -2103,13 +2103,48 @@ describe("a phone shows one part of an agent at a time", () => {
     expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
   })
 
-  it("opens a stopped agent on its running terminal, rewriting a bare address rather than pushing", async () => {
+  it("opens a stopped agent tapped in the list on its running terminal", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
+    ])
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+  })
+
+  // The address is the position. Memory and the stopped-agent rule decide only
+  // an arrival that names no part: a row of the list.
+  it("reloads an agent's address onto the agent, a stopped one's card included", async () => {
     const mod = await loadStore("#/agent/s1", [
       { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
     ])
-    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
-    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
-    expect(index).toBe(DUX_ENTRY_INDEX)
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+    expect(loc.hash).toBe("#/agent/s1")
+  })
+
+  it("reloads onto the agent after it was chosen, though this device last showed a terminal", async () => {
+    const first = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    first.selectSession("s1")
+    first.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    first.switchPhonePart("s1")
+    expect(loc.hash).toBe("#/agent/s1")
+    first.eventsSocket.dispose()
+    vi.resetModules()
+    const reloaded = await loadStore(loc.hash, [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    expect(reloaded.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+  })
+
+  it("keeps a tab on its address when another tab of the same browser shows the terminal", async () => {
+    // Two tabs share this browser's storage: one leaving the agent on its
+    // terminal must not move the other off the agent its address names.
+    const other = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    other.selectSession("s1")
+    other.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    other.eventsSocket.dispose()
+    vi.resetModules()
+    const mine = await loadStore("#/agent/s1", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    expect(mine.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+    expect(loc.hash).toBe("#/agent/s1")
   })
 })
 

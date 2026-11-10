@@ -5252,6 +5252,15 @@ function restoreSessionScopedReconnect(
 // agent already in view is how the user asks for it to start again.
 export function selectSession(id: string | null): void {
   const extra = id === null ? undefined : { endedInViewTab: null }
+  // Asking for an agent names no part of it, so a phone opens it on the part
+  // this device left it on. An address that names the agent is a position and
+  // never comes through here.
+  const session = id === null ? undefined : state.spine?.sessions.find((s) => s.id === id)
+  const phoneTerminal = session === undefined ? null : phoneOpeningTerminal(session)
+  if (id !== null && phoneTerminal !== null) {
+    selectTerminal(phoneTerminal, { kind: "session", sessionId: id }, { extra })
+    return
+  }
   selectSessionRoute(id, undefined, undefined, extra)
 }
 
@@ -5300,11 +5309,6 @@ function selectSessionRoute(
     return
   }
   const session = state.spine?.sessions.find((s) => s.id === id)
-  const phoneTerminal = session ? phoneOpeningTerminal(session) : null
-  if (phoneTerminal !== null) {
-    selectTerminal(phoneTerminal, { kind: "session", sessionId: id }, { urlMode, changes, extra })
-    return
-  }
   const focusedTab = session ? resolveFocusedTab(session) : id
   if (focusedTab !== id) {
     // A remembered extra tab is still live: select it directly so the
@@ -5339,10 +5343,11 @@ function selectSessionRoute(
   if (prev !== id) void restartChanges(id)
 }
 
-// The terminal a phone opens an agent on, or null when it opens on the agent:
-// the view this device last left the agent in, or its terminals when the agent
-// is stopped while one of them runs, because that is the only part with
-// anything live in it. Opening it never starts the agent.
+// The terminal a phone opens an agent on when the request names no part of it
+// (a row of the list), or null when it opens on the agent: the view this
+// device last left the agent in, or its terminals when the agent is stopped
+// while one of them runs, because that is the only part with anything live in
+// it. Opening it never starts the agent.
 function phoneOpeningTerminal(session: SessionView): string | null {
   if (!isMobileViewport()) return null
   const dock = dockTerminalIds(session.id)

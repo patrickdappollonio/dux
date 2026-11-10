@@ -525,7 +525,11 @@ describe("the agent/terminals switch in the docked flap", () => {
         band="plain"
       />,
     )
-  const icon = () => screen.getByTestId("pane-part-switch-icon")
+  // The look rides the glyph's frame and the pulse its icon, as on every
+  // working glyph.
+  const look = () =>
+    screen.getByTestId("pane-part-switch").querySelector("[data-slot='working-glyph']")!.className
+  const icon = () => screen.getByTestId("pane-part-switch").querySelector("svg")!
 
   it("sits after the keys toggle and before the menu", () => {
     phone()
@@ -559,7 +563,7 @@ describe("the agent/terminals switch in the docked flap", () => {
     expect(toggle.textContent).toBe("2")
     expect(toggle.getAttribute("aria-label")).toBe("Show terminals (2), working")
     expect(icon().getAttribute("class")).toContain("lucide-square-terminal")
-    expect(icon().getAttribute("class")).toContain("text-dux-working")
+    expect(look()).toContain("text-dux-working")
     expect(icon().getAttribute("class")).toContain("motion-safe:animate-working-pulse")
   })
 
@@ -570,7 +574,8 @@ describe("the agent/terminals switch in the docked flap", () => {
     expect(screen.getByTestId("pane-part-switch").getAttribute("aria-label")).toBe(
       "Show terminals (1)",
     )
-    expect(icon().getAttribute("class")).not.toMatch(/animate-|text-dux-working|text-cyan/)
+    expect(icon().getAttribute("class")).not.toContain("animate-")
+    expect(look()).not.toMatch(/animate-|text-dux-working|text-cyan/)
   })
 
   it("shows the agent's icon over its terminals, needs-you over working", () => {
@@ -580,9 +585,10 @@ describe("the agent/terminals switch in the docked flap", () => {
     const toggle = screen.getByTestId("pane-part-switch")
     expect(toggle.getAttribute("aria-label")).toBe("Show the agent, needs you")
     expect(icon().getAttribute("class")).toContain("lucide-bot")
-    expect(icon().getAttribute("class")).toContain("text-cyan-100")
-    expect(icon().getAttribute("class")).toContain("motion-safe:animate-attention-pulse")
-    expect(icon().getAttribute("class")).not.toContain("working")
+    expect(look()).toContain("text-cyan-100")
+    expect(look()).toContain("motion-safe:animate-attention-pulse")
+    // Needs-you wins: no pulse inside the blink.
+    expect(icon().getAttribute("class")).not.toContain("working-pulse")
   })
 
   it("carries no dot, never bounces, and holds still for less motion", () => {
@@ -590,12 +596,16 @@ describe("the agent/terminals switch in the docked flap", () => {
     mockState = withTerminals([term("t1")], { working: true })
     flap(dockTarget)
     const toggle = screen.getByTestId("pane-part-switch")
-    expect(toggle.querySelector("[aria-label='Needs attention'], .rounded-full.size-2")).toBeNull()
+    // One graphic: the icon itself, with no dot or other mark beside it.
+    expect(toggle.querySelectorAll("svg")).toHaveLength(1)
+    expect(toggle.querySelector("[aria-label='Needs attention']")).toBeNull()
     expect(toggle.innerHTML).not.toContain("bounce")
-    expect(toggle.querySelector("[data-slot='working-glyph']")).toBeNull()
     // Every animation it has runs only where motion is welcome.
-    expect(icon().getAttribute("class")).toContain("motion-reduce:animate-none")
-    expect(icon().getAttribute("class")).not.toMatch(/(^| )animate-/)
+    for (const cls of [icon().getAttribute("class") ?? "", look()]) {
+      for (const anim of cls.match(/\S*animate-\S+/g) ?? []) {
+        expect(anim).toMatch(/^motion-(safe|reduce):/)
+      }
+    }
   })
 
   it("asks the store to flip the view", () => {

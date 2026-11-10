@@ -59,7 +59,7 @@ vi.mock("@/components/LazyTerminalPane", () => ({
   // An agent's screen is its stack: each part a stand-in naming its pty and
   // whether it is on screen, laid out by the screen's own arrangement.
   LazyTerminalStack: (props: {
-    parts: { slot?: string; id: string; kind: string; onScreen?: boolean }[]
+    parts: { slot?: string; instance?: string; id: string; kind: string; onScreen?: boolean }[]
     overlay?: React.ReactNode
     typingTarget?: string | null
     arrange?: (parts: Record<string, React.ReactNode>, target: string | null) => React.ReactNode
@@ -68,7 +68,9 @@ vi.mock("@/components/LazyTerminalPane", () => ({
     for (const part of props.parts) {
       rendered[part.slot ?? part.id] = (
         <div
-          key={part.id}
+          // Keyed as the real stack keys its parts, so a new instance is a
+          // remount here too.
+          key={`${part.slot ?? ""}:${part.instance ?? ""}`}
           data-testid="terminal-part-stub"
           data-id={part.id}
           data-kind={part.kind}

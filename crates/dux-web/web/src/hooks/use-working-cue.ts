@@ -91,6 +91,7 @@ export function useWorkingPulseAnchor(
  */
 export function useWorkingCue<B extends Element, G extends Element>(
   working: boolean,
+  { bounce: bounces = true }: { bounce?: boolean } = {},
 ): {
   bouncing: boolean
   pulsing: boolean
@@ -99,7 +100,9 @@ export function useWorkingCue<B extends Element, G extends Element>(
   attachPulse: (el: G | null) => void
   handlers: SettlingAnimationHandlers
 } {
-  const bounce = useSettlingAnimation<B>(working, WORKING_BOUNCE_NAME)
+  // A glyph that never bounces has no bounce to finish: its landing is the
+  // opacity ease alone.
+  const bounce = useSettlingAnimation<B>(working && bounces, WORKING_BOUNCE_NAME)
   const [frame, setFrame] = React.useState<B | null>(null)
   const [glyph, setGlyph] = React.useState<G | null>(null)
   const fade = React.useRef<Animation | null>(null)
@@ -192,5 +195,40 @@ export function useWorkingCue<B extends Element, G extends Element>(
     attachBounce,
     attachPulse: setGlyph,
     handlers: bounce.handlers,
+  }
+}
+
+/**
+ * The start time that puts a looping cue animation on the shared clock's
+ * phase: its active time begins on a whole number of periods since the
+ * document timeline's origin, so every element anchored this way is in step
+ * however and whenever it was mounted, and a cue that is remounted elsewhere
+ * (the phone's flap flying into the floating pill) carries on where it was.
+ * A `fresh` cue (one that has just started, rather than a mounted element
+ * picking up a cue already running) waits for the next period boundary after
+ * its own delay instead of starting mid-cycle with a jump.
+ */
+export function cueEpochStartTime(timing: {
+  now: number
+  period: number
+  delay: number
+  fresh: boolean
+}): number {
+  const { now, period, delay, fresh } = timing
+  if (!fresh || period <= 0) return -delay
+  return Math.ceil((now + delay) / period) * period - delay
+}
+
+/** Puts every looping animation on `el` other than the bounce on the shared
+ * clock's phase (see `cueEpochStartTime`). */
+export function anchorCueAnimations(el: Element | null, fresh: boolean): void {
+  if (!el || typeof el.getAnimations !== "function") return
+  const now = Number(document.timeline?.currentTime ?? performance.now())
+  for (const animation of el.getAnimations()) {
+    if ((animation as CSSAnimation).animationName === WORKING_BOUNCE_NAME) continue
+    const timing = animation.effect?.getComputedTiming()
+    const period = Number(timing?.duration ?? 0)
+    const start = cueEpochStartTime({ now, period, delay: Number(timing?.delay ?? 0), fresh })
+    if (animation.startTime !== start) animation.startTime = start
   }
 }
