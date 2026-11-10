@@ -76,8 +76,18 @@ export function useKeepCueClocks(orderKey: string) {
     if (held.size === 0) return
     const mine = ++run.current
     const released = new WeakSet<Element>()
+    const seen = new WeakSet<Element>()
     const until = performance.now() + CORRECT_MS
     let frames = 0
+    // Frames do not run while the page is hidden, so a window opened before the
+    // page was hidden would resume after it and force a clock held from before
+    // onto a cue that has since stopped and started again. Hiding ends it.
+    const onVisibility = () => {
+      if (!document.hidden) return
+      document.removeEventListener("visibilitychange", onVisibility)
+      if (run.current === mine) run.current += 1
+    }
+    document.addEventListener("visibilitychange", onVisibility)
     const correct = () => {
       if (mine !== run.current) return
       frames += 1
@@ -86,7 +96,13 @@ export function useKeepCueClocks(orderKey: string) {
         if (start === undefined || released.has(pill)) continue
         const animations = cueAnimations(pill)
         const bounce = animations.find((a) => a.animationName === WORKING_BOUNCE_NAME)
-        if (!bounce) continue
+        if (!bounce) {
+          // Its cue went away: the clock it was on belongs to a cycle that is
+          // over, and a cue that comes back is a new one on a clock of its own.
+          if (seen.has(pill)) released.add(pill)
+          continue
+        }
+        seen.add(pill)
         if (bounce.effect?.getTiming().iterations !== Infinity) {
           released.add(pill)
           continue
@@ -99,6 +115,7 @@ export function useKeepCueClocks(orderKey: string) {
       if (frames < CORRECT_FRAMES || performance.now() < until) {
         requestAnimationFrame(correct)
       } else {
+        document.removeEventListener("visibilitychange", onVisibility)
         clocks.current = read()
       }
     }

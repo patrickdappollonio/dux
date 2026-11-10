@@ -8641,6 +8641,14 @@ impl App {
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
         // The slot tab is the default focus, so focusing it is recorded as "no
         // memory" on both the in-process map and the persisted column.
+        // The drawing of the strip is only refreshed when the strip is drawn, and
+        // a focus change made while it is not (a diff, a fullscreen overlay) must
+        // not be overridden by a later close elsewhere landing from the old one.
+        if let Some(drawn) = self.last_tab_strip.as_mut()
+            && drawn.session_id == session_id
+        {
+            drawn.focused = tab_id.to_string();
+        }
         let is_slot = self
             .engine
             .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id));

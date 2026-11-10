@@ -64,6 +64,8 @@ function makeSpine() {
 }
 
 let spineBody: unknown = makeSpine()
+// The revision the fake server names when it answers a tab reorder.
+let reorderMinRev: number | null = 5
 let calls: [string, RequestInit | undefined][] = []
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -93,6 +95,16 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       status: 201,
       json: async () => ({ tab_id: "b9", provider: "codex" }),
       text: async () => JSON.stringify({ tab_id: "b9", provider: "codex" }),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.endsWith("/tabs/reorder") && init?.method === "POST") {
+    const body = reorderMinRev === null ? {} : { min_workspace_rev: reorderMinRev }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -253,6 +265,7 @@ function writeUrl(url: string) {
 }
 
 beforeEach(() => {
+  reorderMinRev = 5
   calls = []
   sockets = []
   spineBody = makeSpine()
@@ -554,6 +567,54 @@ describe("store agent-tab lifecycle", () => {
     await vi.waitFor(() => {
       expect(mod.getSnapshot().pendingTabOrder).toEqual({})
     })
+  })
+
+  it("a stale push that arrives after the answer does not retire the overlay, the revision the answer named does", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    reorderMinRev = 5
+    const mod = await loadStore()
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered?.minRev).toBe(5)
+    })
+
+    // Made before the reorder reached the server, delivered after the answer.
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const pushed = (rev: number) =>
+      mod.eventsSocket.onEvent({
+        event: "workspace",
+        rev,
+        workspace: { ...(spineBody as object), rev },
+      } as never)
+    pushed(4)
+    await tick()
+    expect(mod.getSnapshot().pendingTabOrder.s1).toBeDefined()
+
+    // The first document made after the reorder: it retires the overlay
+    // whatever order it shows (here another screen's).
+    seedTabs("t1", ["t2", "t3", "t1"])
+    pushed(5)
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("keeps the overlay against every push when the answer names no revision", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    reorderMinRev = null
+    const mod = await loadStore()
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered).not.toBeNull()
+    })
+    // An older server's answer: no revision to hold a push to.
+    mod.eventsSocket.onEvent({
+      event: "workspace",
+      rev: 99,
+      workspace: { ...(spineBody as object), rev: 99 },
+    } as never)
+    await tick()
+    expect(mod.getSnapshot().pendingTabOrder.s1).toBeDefined()
   })
 
   it("a refused reorder drops the overlay and says so", async () => {

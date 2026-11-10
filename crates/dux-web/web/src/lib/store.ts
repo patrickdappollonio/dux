@@ -2323,8 +2323,9 @@ function reconcilePendingTerminalOrder(
 // it, the agent is gone, or the request was answered and this document was made
 // after that answer (whatever order it shows: another screen's reorder in
 // between must not stay hidden behind ours until a reload). A fetch is newer
-// when it started after the answer; a pushed document when its revision is
-// beyond the one applied at the time.
+// when it started after the answer; a pushed document when its revision reaches
+// the one the answer named, since a push made before the reorder can still
+// arrive after the answer.
 function reconcilePendingTabOrder(
   spine: Spine,
   pending: Record<string, PendingTabOrder>,
@@ -2344,7 +2345,7 @@ function reconcilePendingTabOrder(
     const answered = entry.answered
     if (answered === null) return true
     const newer = doc.pushed
-      ? doc.rev === undefined || answered.rev === null || doc.rev > answered.rev
+      ? doc.rev !== undefined && answered.minRev !== null && doc.rev >= answered.minRev
       : doc.seq > answered.seq
     return !newer
   })
@@ -5231,7 +5232,7 @@ export function reorderTabs(sessionId: string, orderedIds: string[]): void {
     setState({ pendingTabOrder: rest })
   }
   tabsApi.reorder(sessionId, orderedIds).then(
-    () => {
+    (reordered) => {
       // Answered: the overlay now only bridges the wait for a document made
       // after this answer, which retires it whatever order it shows.
       if (state.pendingTabOrder[sessionId] !== entry) return
@@ -5240,7 +5241,10 @@ export function reorderTabs(sessionId: string, orderedIds: string[]): void {
           ...state.pendingTabOrder,
           [sessionId]: {
             ids: orderedIds,
-            answered: { seq: loadWorkspaceSeq, rev: appliedWorkspaceRev },
+            answered: {
+              seq: loadWorkspaceSeq,
+              minRev: reordered?.min_workspace_rev ?? null,
+            },
           },
         },
       })

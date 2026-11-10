@@ -546,6 +546,10 @@ async fn reordering_tabs_moves_the_slot_tab_without_moving_the_pointer() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let min_rev = body["min_workspace_rev"]
+        .as_u64()
+        .expect("the answer names a revision");
 
     let session = wait_for_session(&client, addr, "s1", |s| {
         s["tabs"][0]["id"].as_str() == Some(extra.as_str())
@@ -553,6 +557,17 @@ async fn reordering_tabs_moves_the_slot_tab_without_moving_the_pointer() {
     .await;
     assert_eq!(session["tabs"][1]["id"].as_str(), Some(slot.as_str()));
     assert_eq!(session["slot_tab_id"].as_str(), Some(slot.as_str()));
+    // The revision named is one that shows the new order: the document served
+    // once the strip has moved is at or past it.
+    let workspace: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/workspace"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(workspace["rev"].as_u64().unwrap() >= min_rev);
 
     let partial = client
         .post(&url)

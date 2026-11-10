@@ -97,6 +97,39 @@ describe("useKeepCueClocks", () => {
     expect(cues.get("a")?.[0].startTime).toBe(5000)
   })
 
+  it("lets go of a pill whose cue went away, so a new cycle keeps its own clock", () => {
+    working("a", 1000)
+    const view = render(<Strip order={["a", "b"]} />)
+    view.rerender(<Strip order={["b", "a"]} />)
+    working("a", 5000)
+    frame()
+    expect(cues.get("a")?.[0].startTime).toBe(1000)
+
+    // The agent stopped working and then started again.
+    cues.delete("a")
+    frame()
+    working("a", 9000)
+    frame()
+    expect(cues.get("a")?.[0].startTime).toBe(9000)
+  })
+
+  it("does not carry a correction window across the page being hidden", () => {
+    working("a", 1000)
+    const view = render(<Strip order={["a", "b"]} />)
+    view.rerender(<Strip order={["b", "a"]} />)
+    working("a", 5000)
+    frame()
+
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true })
+    document.dispatchEvent(new Event("visibilitychange"))
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false })
+    // While hidden the cue stopped and started again on a clock of its own.
+    working("a", 9000)
+    frame()
+
+    expect(cues.get("a")?.[0].startTime).toBe(9000)
+  })
+
   it("touches nothing when the order did not change", () => {
     working("a", 1000)
     const view = render(<Strip order={["a", "b"]} />)

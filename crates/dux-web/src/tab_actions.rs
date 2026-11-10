@@ -142,10 +142,24 @@ struct ReorderTabsBody {
     tab_ids: Vec<String>,
 }
 
+/// 200 body for a tab reorder: the lowest workspace revision that is certain to
+/// show the new order. Pushed documents travel on another channel from this
+/// answer, so one made before the reorder can still arrive after it; the browser
+/// keeps its own order on screen until a document at or past this revision (or a
+/// fetch begun after the answer) replaces it.
+#[derive(Serialize)]
+struct ReorderedTabs {
+    min_workspace_rev: u64,
+}
+
 /// `POST /api/v1/sessions/:id/tabs/reorder` - persist a new left-to-right order
 /// for the agent's provider tabs, the slot tab included. `tab_ids` must be the
 /// complete set of the agent's tabs; the engine validates it strictly. Which
 /// tab holds the slot does not change.
+///
+/// The revision is read after the command has been applied, on the engine's own
+/// thread order: the document published now cannot show the change unless it was
+/// made after it, and the next one is the first certain to.
 async fn reorder_tabs(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -169,7 +183,18 @@ async fn reorder_tabs(
         )
         .await
     {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => {
+            let published = state
+                .engine
+                .workspace_docs()
+                .borrow()
+                .as_ref()
+                .map_or(0, |doc| doc.rev);
+            Json(ReorderedTabs {
+                min_workspace_rev: published.saturating_add(1),
+            })
+            .into_response()
+        }
         Err(e) => refusal(e, StatusCode::BAD_REQUEST),
     }
 }

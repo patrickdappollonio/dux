@@ -13,6 +13,11 @@ function pageHidden(): boolean {
   return typeof document !== "undefined" && document.hidden
 }
 
+function findAnimation(el: Element, name: string): Animation | undefined {
+  if (typeof el.getAnimations !== "function") return undefined
+  return el.getAnimations().find((a) => (a as CSSAnimation).animationName === name)
+}
+
 /**
  * Keeps a looping CSS animation applied after `active` turns false until the
  * iteration in flight finishes, so a stop comes to rest exactly on the
@@ -28,6 +33,12 @@ function pageHidden(): boolean {
  * first restores infinite iterations on the same animation, so nothing
  * restarts. Where `getAnimations` is missing, the next `animationiteration` (or
  * `animationend`) of `animationName` is the fallback signal.
+ *
+ * Moving the element in the DOM (a reordered strip) makes the browser end its
+ * animation and start a new one of the same name from the first frame. A move
+ * mid-settle is therefore not a stop: the settle is handed to the replacement,
+ * which gets the old start time and the shortened iteration count, so the bounce
+ * still lands on the schedule it had and nothing snaps to rest in mid-air.
  *
  * A stop is immediate when there is nothing to finish: the animation never
  * reported `animationstart` (reduced motion gates it off in CSS, or the
@@ -73,6 +84,9 @@ export function useSettlingAnimation<T extends Element>(
     if (!el) return
     const onCancel = (event: Event) => {
       if ((event as AnimationEvent).animationName !== animationName) return
+      // A move replaced the animation rather than ending it: the new one is
+      // already there, and a settle in progress follows it.
+      if (el.isConnected && findAnimation(el, animationName)) return
       setStarted(false)
       setSettling(false)
     }
@@ -111,15 +125,36 @@ export function useSettlingAnimation<T extends Element>(
       return cleanupVisibility
     }
     const { currentIteration } = effect.getComputedTiming()
-    effect.updateTiming({ iterations: (currentIteration ?? 0) + 1 })
-    // A cancel rejects the promise, and a cancelled animation is just as done.
-    animation.finished.then(finish, finish)
+    const iterations = (currentIteration ?? 0) + 1
+    // Where the settle lands, kept so a replacement can be put on the same
+    // schedule.
+    const landing = { start: animation.startTime, iterations }
+    let shortened: AnimationEffect = effect
+    shortened.updateTiming({ iterations })
+    const follow = (followed: Animation) => {
+      // A finish ends the settle. A cancel is either a real stop (nothing
+      // replaces the animation) or a move, which hands the settle on.
+      followed.finished.then(finish, () => adopt(followed))
+    }
+    const adopt = (cancelled: Animation) => {
+      if (!live) return
+      const replacement = el.isConnected ? findAnimation(el, animationName) : undefined
+      if (!replacement?.effect || replacement === cancelled) {
+        finish()
+        return
+      }
+      shortened = replacement.effect
+      shortened.updateTiming({ iterations: landing.iterations })
+      if (landing.start !== null) replacement.startTime = landing.start
+      follow(replacement)
+    }
+    follow(animation)
     return () => {
       live = false
       cleanupVisibility()
       // Resuming keeps this same animation looping from where it is. On a stop
       // the class is leaving in this same commit, which cancels it anyway.
-      effect.updateTiming({ iterations: Infinity })
+      shortened.updateTiming({ iterations: Infinity })
     }
   }, [el, settlingNow, animationName])
 

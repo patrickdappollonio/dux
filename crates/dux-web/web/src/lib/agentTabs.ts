@@ -46,10 +46,13 @@ export function slotTabTargetId(sessionId: string): string {
 // `answered` is set once the request has been answered: the overlay then goes
 // with the first workspace document that was made after that answer, whatever
 // order it shows, so a reorder another screen made in between is not hidden
-// until a reload.
+// until a reload. A fetched document is after it when it began after the answer;
+// a pushed one when its revision reaches `minRev`, the lowest the server named
+// as showing the reorder. Pushes travel on another channel from the answer, so a
+// stale one can arrive after it, and with no revision named none retires it.
 export interface PendingTabOrder {
   ids: string[]
-  answered: { seq: number; rev: number | null } | null
+  answered: { seq: number; minRev: number | null } | null
 }
 
 // The session as this client's screen shows it: the tabs in the order just

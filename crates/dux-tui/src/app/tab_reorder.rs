@@ -481,4 +481,20 @@ mod tests {
 
         assert_eq!(app.focused_tab_id("session-1"), "tab-3");
     }
+
+    #[test]
+    fn a_focus_change_made_while_the_strip_is_not_drawn_survives_a_close_elsewhere() {
+        let mut app = app_with_three_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
+        app.set_focused_tab("session-1", "tab-2");
+        draw(&mut app, &mut terminal);
+
+        // The user moves to the first tab while a fullscreen overlay hides the
+        // strip, and then another screen closes the tab that was last drawn.
+        app.set_focused_tab("session-1", "session-1-slot");
+        app.engine.close_tab("session-1", "tab-2").unwrap();
+        draw(&mut app, &mut terminal);
+
+        assert_eq!(app.focused_tab_id("session-1"), "session-1-slot");
+    }
 }

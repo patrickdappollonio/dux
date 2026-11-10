@@ -32,6 +32,11 @@ export interface ClosedTab {
   promoted?: string
 }
 
+// The 200 body for a tab reorder: the lowest workspace revision certain to show it.
+export interface ReorderedTabs {
+  min_workspace_rev?: number
+}
+
 const request = createJsonRequest(
   (message, status) => new TabsApiError(message, status),
   { mapSerializationErrors: true },
@@ -74,7 +79,7 @@ export const tabsApi = {
   // Persist a new left-to-right order for the agent's tabs, the slot tab included. `tabIds`
   // must be the complete set. Which tab holds the slot does not change.
   reorder: (sessionId: string, tabIds: string[]) =>
-    request<void>(
+    request<ReorderedTabs | undefined>(
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/reorder`,
       { tab_ids: tabIds },
