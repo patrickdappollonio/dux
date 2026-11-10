@@ -1,6 +1,6 @@
 import { Suspense, useState, type ReactNode } from "react"
 
-import { AgentNotFound } from "@/components/AgentNotFound"
+import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { AgentStack } from "@/components/AgentStack"
 import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -208,11 +208,11 @@ export function TerminalArea() {
   const listedCursors = spine ? keepListedCursors(prCursors, spine.sessions) : prCursors
   if (listedCursors !== prCursors) setPrCursors(listedCursors)
 
-  // The URL names an agent this workspace does not have (a stale bookmark, or
+  // The URL names an agent or terminal this workspace does not have (a stale bookmark, or
   // Back landing on a deleted agent). Say so rather than showing the idle
   // welcome screen, which would read as "nothing was selected".
   if (routeNotFound) {
-    return <AgentNotFound sessionId={routeNotFound.sessionId} />
+    return <RouteNotFoundScreen missing={routeNotFound} />
   }
 
   // Idle center pane: the duck + logo + a tip, exactly like the TUI's welcome
@@ -276,6 +276,7 @@ export function TerminalArea() {
           endedInViewTab,
           pendingTerminalOrder,
           alwaysShowTabStrip: bootstrap?.always_show_tab_strip ?? false,
+          theater,
         })
 
   return (

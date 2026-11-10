@@ -61,6 +61,8 @@ export function agentStackModel(ctx: {
   endedInViewTab: DuxState["endedInViewTab"]
   pendingTerminalOrder: DuxState["pendingTerminalOrder"]
   alwaysShowTabStrip: boolean
+  /** Theater shows the part typing goes to alone, maximized. */
+  theater: boolean
 }): AgentStackModel {
   const { target, session } = ctx
   const sessionId = session.id
@@ -111,19 +113,26 @@ export function agentStackModel(ctx: {
   const recorded = ctx.stackLayouts[sessionId]
   // With no dock there is nothing to lay out, and whatever was recorded waits
   // for the next terminal.
-  const layout: ComputerLayout = terminalRunning ? (recorded ?? opening.layout) : "agent"
+  const laidOut: ComputerLayout = terminalRunning ? (recorded ?? opening.layout) : "agent"
   const activeTerminal =
     target.kind === "terminal" && dockIds.includes(target.terminalId)
       ? target.terminalId
       : opening.activeTerminal
+  // Theater maximizes the part typing goes to without touching the layout the
+  // stack is in, so leaving it puts that layout back.
+  const typingInDock = target.kind === "terminal" && activeTerminal !== null
+  const layout: ComputerLayout = !ctx.theater
+    ? laidOut
+    : typingInDock
+      ? "terminal"
+      : "agent"
 
   const parts = partsOnScreen({ surface: "computer", layout, agentTab })
   const stackParts = [
     ...(parts.agentLiveSocket ? [{ id: tabId, onScreen: parts.agent }] : []),
     ...(activeTerminal !== null ? [{ id: activeTerminal, onScreen: parts.dock }] : []),
   ]
-  const chosenPtyId =
-    target.kind === "terminal" && activeTerminal !== null ? activeTerminal : tabId
+  const chosenPtyId = typingInDock ? activeTerminal : tabId
   return {
     sessionId,
     tabId,

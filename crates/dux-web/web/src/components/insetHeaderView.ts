@@ -8,7 +8,7 @@ import {
 import type { PaneMenuSubject } from "@/components/PaneMenu"
 import type { TerminalTarget } from "@/lib/editorRoot"
 import type { DuxState, SelectedTarget } from "@/lib/store"
-import { matchOwner } from "@/lib/terminalOwner"
+import { matchOwner, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalsForOwner, terminalTitle } from "@/lib/terminals"
 import type { SessionView, TerminalView } from "@/lib/types"
 import {
@@ -23,15 +23,12 @@ import {
 
 type Spine = DuxState["spine"]
 
-// The facts describing one AGENT. Shared by an agent selection, where the
-// agent's own name is the primary chip, and by a session-owned terminal, where
-// the terminal is primary and the agent's chips sit in front of it.
+// The facts describing one AGENT, whose own name is the primary chip.
 function agentFacts(
   spine: Spine,
   agent: SessionView,
   provider: string | undefined,
   terminalCount: number,
-  primary: "agent" | "none",
 ): AgentChipsInput {
   // A standalone agent has no project; it names its FOLDER in the same slot
   // instead, through the chip a standalone terminal already uses.
@@ -49,7 +46,6 @@ function agentFacts(
     branchName: managed?.branch_name ?? null,
     initialBranch: managed?.initial_branch ?? null,
     terminalCount,
-    primary,
   }
 }
 
@@ -65,19 +61,9 @@ function terminalOwnerContext(
   return matchOwner<{ chips: HeaderChip[]; siblings: TerminalView[] }>(
     focused.owner,
     {
-      session: (owner) => {
-        const agent = spine?.sessions.find((s) => s.id === owner.sessionId)
-        // The agent is no longer the primary chip here, and its terminal COUNT
-        // is suppressed: the focused terminal's own chip carries that count in
-        // its hover clause, and two terminal glyphs in one row would read as
-        // two different terminals.
-        return {
-          chips: agent
-            ? agentHeaderChips(agentFacts(spine, agent, undefined, 0, "none"))
-            : [],
-          siblings: terminalsForOwner(allTerminals, owner),
-        }
-      },
+      // Never asked: an agent's own terminal is named by its agent's row (see
+      // `insetHeaderChips`), so it has no chips of its own here.
+      session: () => ({ chips: [], siblings: [] }),
       project: (owner) => {
         const owningProject = spine?.projects.find(
           (p) => p.id === owner.projectId,
@@ -129,22 +115,30 @@ function terminalChips(spine: Spine, focused: TerminalTarget): HeaderChip[] {
   ]
 }
 
+// The header names the selected row of the agents list, never the part of it
+// that has focus: an agent with its terminal count whether typing goes to one
+// of its tabs or a terminal of its dock, and a project or standalone terminal,
+// which is a row of its own, by itself. `shownTabId` is the tab on top of the
+// agent's stack while its dock has focus.
 export function insetHeaderChips(
   spine: Spine,
   session: SessionView | undefined,
   selectedTarget: SelectedTarget | null,
+  shownTabId?: string,
 ): HeaderChip[] {
-  if (selectedTarget?.kind === "terminal") {
+  if (selectedTarget?.kind === "terminal" && selectedTarget.owner.kind !== "session") {
     return terminalChips(spine, selectedTarget)
   }
+  if (selectedTarget?.kind === "terminal") {
+    const ownTerminal = spine?.terminals.some((t) => t.id === selectedTarget.terminalId)
+    if (!ownTerminal || session?.id !== ownerSessionId(selectedTarget.owner)) return []
+  }
   if (!session) return []
-  // When an agent tab is focused, the assistant chip reflects the FOCUSED TAB
-  // (an extra tab can run a different provider than the session-slot tab), not
-  // the session-slot tab's own provider.
-  const focusedTabProvider =
-    selectedTarget?.kind === "agent"
-      ? session.tabs.find((t) => t.id === selectedTarget.tabId)?.provider
-      : undefined
+  // The assistant chip reflects the tab on top of the stack (an extra tab can
+  // run a different provider than the session-slot tab), not the session-slot
+  // tab's own provider.
+  const tabOnTop = selectedTarget?.kind === "agent" ? selectedTarget.tabId : shownTabId
+  const focusedTabProvider = session.tabs.find((t) => t.id === tabOnTop)?.provider
   const sessionTerminals = terminalsForOwner(spine?.terminals ?? [], {
     kind: "session",
     sessionId: session.id,
@@ -155,7 +149,6 @@ export function insetHeaderChips(
       session,
       focusedTabProvider,
       sessionTerminals.length,
-      "agent",
     ),
   )
 }

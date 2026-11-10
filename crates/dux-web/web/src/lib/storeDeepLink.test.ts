@@ -299,14 +299,15 @@ describe("deep-link restore on load", () => {
     expect(mod.getSnapshot().selectedTarget).toBeNull()
   })
 
-  it("falls back to the agent when the terminal id is gone", async () => {
+  it("says the terminal is not found when its id is gone, never swapping in another", async () => {
     const mod = await loadStore("#/agent/s1/terminal/gone", [
       { id: "s1", project_id: "p1", terminals: ["t-other"] },
     ])
-    expect(mod.getSnapshot().selectedTarget).toEqual({
-      kind: "agent",
-      sessionId: "s1",
-      tabId: "s1",
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(mod.getSnapshot().routeNotFound).toEqual({
+      kind: "terminal",
+      terminalId: "gone",
+      owner: { kind: "session", sessionId: "s1" },
     })
   })
 
@@ -404,11 +405,11 @@ describe("selection writes the hash", () => {
       "",
       "#/agent/s1/tab/t2",
     )
-    replaceStateMock.mockClear()
+    pushStateMock.mockClear()
     // Focusing the first tab collapses back to the bare form (here spelled with
-    // the placeholder id), and stays on the same agent, so it replaces.
+    // the placeholder id). Another tab is another position, so it pushes.
     mod.selectTab("s1", "s1")
-    expect(replaceStateMock).toHaveBeenCalledWith(
+    expect(pushStateMock).toHaveBeenCalledWith(
       expect.objectContaining({ duxRoute: "#/agent/s1" }),
       "",
       "#/agent/s1",

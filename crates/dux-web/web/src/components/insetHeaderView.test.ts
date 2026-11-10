@@ -66,27 +66,27 @@ describe("insetHeaderChips", () => {
     expect(insetHeaderChips(spineWith(), undefined, null)).toEqual([])
   })
 
-  it("hands the primary slot to a session-owned terminal, keeping the agent's fields", () => {
+  it("names the agent with its terminal count while a terminal of its dock has focus", () => {
     const terminals = [
-      {
-        id: "t1",
-        owner: { kind: "session", session_id: "s1" },
-        title: "shell",
-      },
+      { id: "t1", owner: { kind: "session", session_id: "s1" }, title: "shell" },
+      { id: "t2", owner: { kind: "session", session_id: "s1" }, title: "server" },
     ]
-    const target: SelectedTarget = {
-      kind: "terminal",
-      terminalId: "t1",
-      owner: { kind: "session", sessionId: "s1" },
-    }
-    const chips = insetHeaderChips(
+    const session = agent("s1", "feature-x")
+    const onAgent = insetHeaderChips(spineWith(terminals), session, {
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1-t2",
+    })
+    const onTerminal = insetHeaderChips(
       spineWith(terminals),
-      agent("s1", "feature-x"),
-      target,
+      session,
+      { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } },
+      "s1-t2",
     )
-    expect(kinds(chips)).toContain("terminal")
-    expect(chips.find((c) => c.kind === "terminal")?.primary).toBe(true)
-    expect(chips.find((c) => c.kind === "agent")?.primary).toBeFalsy()
+    // The header is the row's: focus moving into the dock changes nothing.
+    expect(onTerminal).toEqual(onAgent)
+    expect(onTerminal.find((c) => c.kind === "agent")?.primary).toBe(true)
+    expect(onTerminal.find((c) => c.kind === "terminal")?.value).toBe("2 terminals")
   })
 
   it("names the directory of a focused standalone terminal", () => {

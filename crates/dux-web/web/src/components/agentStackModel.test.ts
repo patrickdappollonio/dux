@@ -49,6 +49,7 @@ function model(over: Partial<Ctx> = {}) {
     endedInViewTab: null,
     pendingTerminalOrder: null,
     alwaysShowTabStrip: false,
+    theater: false,
     ...over,
   })
 }
@@ -142,4 +143,18 @@ describe("agentStackModel", () => {
     expect(m.parts.agentLiveSocket).toBe(false)
     expect(m.agentCard).toBe("full")
   })
+
+  it.each([
+    ["the agent", { kind: "agent", sessionId: "s1", tabId: "s1" } as const, "agent", "s1"],
+    ["the dock terminal", dockTarget, "terminal", "t1"],
+  ] as const)(
+    "maximizes %s typing goes to in theater, leaving the layout to come back to",
+    (_part, target, shown, typing) => {
+      const m = model({ target, theater: true, stackLayouts: { s1: "split" } })
+      expect(m.layout).toBe(shown)
+      expect(m.typingPtyId).toBe(typing)
+      // Recorded already, so leaving theater finds the split it left.
+      expect(m.openingToSettle).toBeNull()
+    },
+  )
 })

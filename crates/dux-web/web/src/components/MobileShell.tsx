@@ -1,7 +1,7 @@
 import { ChevronLeft, GitPullRequest, Settings } from "lucide-react"
 import { Suspense, useState, type ReactElement, type ReactNode } from "react"
 
-import { AgentNotFound } from "@/components/AgentNotFound"
+import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { LauncherCorner } from "@/components/LauncherCorner"
 import { AppMenuSheet } from "@/components/AppMenuSheet"
 import { ChangedFiles } from "@/components/ChangedFiles"
@@ -654,14 +654,14 @@ function ChangesScreen() {
 }
 
 // The screen the URL names, plus the one it cannot name: a route pointing at an
-// agent that no longer exists. Not-found is checked first only to stay ahead of
+// agent or a terminal that no longer exists. Not-found is checked first only to stay ahead of
 // the hub, which is the fallthrough at the bottom; it cannot compete with the
 // other branches, since `setRouteNotFound` commits the home screen in the same
 // patch and any patch carrying a target clears the flag.
 export function MobileShell() {
   const { mobileScreen, routeNotFound } = useDux()
 
-  if (routeNotFound) return <AgentNotFound sessionId={routeNotFound.sessionId} />
+  if (routeNotFound) return <RouteNotFoundScreen missing={routeNotFound} />
   if (mobileScreen === "terminal") return <TerminalScreen />
   if (mobileScreen === "changes") return <ChangesScreen />
   return <HomeScreen />

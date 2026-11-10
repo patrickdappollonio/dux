@@ -2,6 +2,7 @@ import { PanelRightOpen } from "lucide-react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
+import { readStackMemory } from "@/lib/stackMemory"
 import { PaneMenu } from "@/components/PaneMenu"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
 import {
@@ -58,7 +59,13 @@ export function InsetHeader() {
   const dux = useDux()
   const { spine, selectedSessionId, selectedTarget } = dux
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const chips = insetHeaderChips(spine, session, selectedTarget)
+  const chips = insetHeaderChips(
+    spine,
+    session,
+    selectedTarget,
+    // The tab on top of the stack, read the way the stack reads it.
+    session ? (dux.stackTabs[session.id] ?? readStackMemory(session.id).tab ?? undefined) : undefined,
+  )
 
   const paneSubject = insetHeaderPaneSubject(spine, session, selectedTarget)
 

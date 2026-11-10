@@ -191,6 +191,35 @@ describe("the computer layout under a full-pane cover", () => {
     render(<DesktopShell />)
     expect(theaterButton()).toBeNull()
   })
+
+  it("follows the part theater shows when it is a terminal of the agent's dock", () => {
+    const base = makeState(true)
+    mockState = {
+      ...base,
+      spine: {
+        ...base.spine!,
+        terminals: [
+          {
+            id: "t1",
+            owner: { kind: "session", session_id: "s1" },
+            label: "Terminal 1",
+            sort_order: 1,
+          },
+        ],
+      },
+      selectedTarget: { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } },
+    } as unknown as DuxState
+    // A box lost on the agent's socket, folded away under the terminal, is
+    // not the screen anybody is looking at.
+    const agentCover = registerPaneCover("s1", true)
+    render(<DesktopShell />)
+    expect(theaterButton()).toBeNull()
+    agentCover()
+    cleanup()
+    registerPaneCover("t1", true)
+    render(<DesktopShell />)
+    expect(theaterButton()).toBeTruthy()
+  })
 })
 
 // The header coming and going changes the terminal's height, and the mode never
