@@ -189,7 +189,7 @@ pub(crate) enum EngineRequest {
     /// as looking at the tab (see [`note_tab_looked_at`]).
     SubscribePty(
         String,
-        bool,
+        PaneVisibility,
         oneshot::Sender<Result<PtySubscription, String>>,
     ),
     /// A pane that was mounted off screen came on screen: the same "looking at
@@ -1469,7 +1469,7 @@ impl EngineHandle {
     pub(crate) async fn subscribe_pty(
         &self,
         session_id: String,
-        viewed: bool,
+        viewed: PaneVisibility,
     ) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
@@ -5393,11 +5393,19 @@ fn last_run_failed_refusal() -> String {
 /// Handle a `SubscribePty` request. If the provider already exists, reply
 /// immediately. Otherwise launch/resume the real agent provider and defer the
 /// reply via a `PendingSubscribe` until the provider comes up (or times out).
+/// Whether the pane behind a terminal socket is on screen. A part of a stack
+/// kept mounted off screen is not looking at its tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PaneVisibility {
+    OnScreen,
+    OffScreen,
+}
+
 /// What a `SubscribePty` asks for: the tab, and whether the pane opening it
 /// is on screen.
 struct Subscribe {
     tab_id: String,
-    viewed: bool,
+    viewed: PaneVisibility,
 }
 
 /// Which pull-request check looking at a tab started.
@@ -5455,7 +5463,7 @@ fn handle_subscribe(
     // A pane mounted off screen is not looking at its tab: it must neither
     // clear the tab's attention nor pull it into the foreground PR cadence,
     // here or on any of its reconnects. Coming on screen is `PtyShown`.
-    if viewed {
+    if viewed == PaneVisibility::OnScreen {
         note_tab_looked_at(engine, last_pr_foregrounded, &tab_id);
     }
     if let Some(client) = engine.providers.get(TabIdRef::new(&tab_id)) {
@@ -6544,10 +6552,7 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            Subscribe {
-                tab_id: slot.as_str().to_string(),
-                viewed: true,
-            },
+            on_screen(slot.as_str().to_string()),
             tx,
         );
 
@@ -6597,10 +6602,7 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            Subscribe {
-                tab_id: slot.as_str().to_string(),
-                viewed: true,
-            },
+            on_screen(slot.as_str().to_string()),
             tx,
         );
         assert!(pending.is_empty(), "no launch may be waited on");
@@ -6611,6 +6613,15 @@ mod tests {
         match rx.blocking_recv().expect("a reply") {
             Ok(_) => panic!("subscribing a held tab must be refused"),
             Err(err) => assert!(err.contains("op-held"), "{err}"),
+        }
+    }
+
+    /// A subscribe from a pane on screen, as every subscribe was before
+    /// panes could be mounted off screen.
+    fn on_screen(tab_id: impl Into<String>) -> Subscribe {
+        Subscribe {
+            tab_id: tab_id.into(),
+            viewed: PaneVisibility::OnScreen,
         }
     }
 
@@ -6659,7 +6670,7 @@ mod tests {
             );
         };
 
-        subscribe(&mut engine, &mut last_pr, false);
+        subscribe(&mut engine, &mut last_pr, PaneVisibility::OffScreen);
         assert!(
             engine.tab_needs_attention(&slot),
             "a hidden pane leaves the flag up"
@@ -6667,7 +6678,7 @@ mod tests {
         assert!(!engine.agent_viewed.contains_key(TabIdRef::new(&slot)));
         assert_eq!(last_pr, None, "and starts no foreground check");
 
-        subscribe(&mut engine, &mut last_pr, true);
+        subscribe(&mut engine, &mut last_pr, PaneVisibility::OnScreen);
         assert!(!engine.tab_needs_attention(&slot));
         assert!(engine.agent_viewed.contains_key(TabIdRef::new(&slot)));
         assert_eq!(last_pr.as_deref(), Some("s1"));
@@ -6778,10 +6789,7 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            Subscribe {
-                tab_id: slot.as_str().to_string(),
-                viewed: true,
-            },
+            on_screen(slot.as_str().to_string()),
             tx,
         );
         let said = "is being restarted after its working copy was recreated";
@@ -6895,10 +6903,7 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            Subscribe {
-                tab_id: "t2".to_string(),
-                viewed: true,
-            },
+            on_screen("t2".to_string()),
             tx,
         );
 
@@ -9676,7 +9681,7 @@ mod tests {
             ),
             (
                 "SubscribePty",
-                EngineRequest::SubscribePty("s1".into(), true, dead_reply()),
+                EngineRequest::SubscribePty("s1".into(), PaneVisibility::OnScreen, dead_reply()),
                 true,
             ),
             (
@@ -10025,7 +10030,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            49,
+            50,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

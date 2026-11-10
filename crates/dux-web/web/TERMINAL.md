@@ -816,6 +816,11 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "registers its socket id as this client's
     own and retires it on reconnect and unmount"; `src/lib/storePtyOwnership.test.ts`
     "noteOwnPtyConnection registers and retires this client's socket ids".
+    Second trap: two panes of one page on one row share ONE id (C21), so retiring it
+    for one pane must leave it standing for the other. The set counts holders, each
+    pane's socket being one. Fix: `noteOwnPtyConnection`'s `holder` in `lib/store.ts`,
+    passed by `socketCallbacks.ts` and `lifecycleCleanup.ts`. Pinned:
+    `src/lib/storePtyOwnership.test.ts` "keeps the id while a sibling socket still holds it".
 
 12. **The take-over surface yields to the connection-lost affordance.** Trap: the
     card paints solid over the whole pane; a non-owner with a dead socket would see
@@ -1008,6 +1013,43 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `src/components/terminal/resizeCoordinator.test.ts` "does not book the
     geometry of a FLAGGED send until the wire confirms it" and "books the geometry a
     flagged claim asked for once the pty reports it".
+
+21. **A page is ONE driver of a row: every terminal socket names the page (`?page=`),
+    and the server seats every socket of one page on one row on the same driver id.**
+    Trap: an agent and the terminal docked under it are two sockets; with an id per
+    socket the second pane's writes and resizes are refused as another device's, and
+    the page-wide ghost set would self-succeed onto the live sibling and take the row
+    from it. The id is minted once per page load (`lib/pageSeat.ts`), never the events
+    id (it changes on every events reconnect) and never the browser id (display-only).
+    The server lets go of the row only when the page's LAST socket on it ends, counted
+    once per socket however many exit paths reach it, in the same critical section that
+    seats a sibling, so a sibling opening at that moment either shares the seat and
+    keeps the row or arrives after the release on a fresh id that may succeed its own
+    ghost as before. A socket naming no page drives alone, as every socket once did.
+    Fix: `PtySizeOwners::take_seat`/`leave_seat` in `crates/dux-core/src/pty_owners.rs`,
+    the seat in `handle_pty_socket` and `leave_seat_announcing` in
+    `crates/dux-web/src/server.rs`, `openUrl` in `src/lib/ptySocket.ts`. Pinned:
+    `crates/dux-core/src/pty_owners.rs` "two_sockets_of_one_page_on_one_row_are_one_driver",
+    "a_page_lets_go_of_a_row_only_when_its_last_socket_on_it_ends",
+    "leaving_a_seat_twice_counts_once", "a_row_is_never_let_go_while_any_socket_of_its_page_is_open";
+    `crates/dux-web/tests/ws_transport.rs` "the_panes_of_one_page_drive_a_row_as_one_driver";
+    `src/lib/ptySocket.test.ts` "names one page id on every socket this page opens".
+
+22. **A part off screen never makes the FIRST claim of a row.** Trap: a resize frame is
+    a claim, so a hidden part's resize over a row nobody drives would make this device
+    the driver of something nobody is looking at, or resize somebody else's terminal on
+    its way to being refused. Until the server names this pane's driver id as the row's
+    owner (`rowConfirmed` in `ownership.ts`: the handshake or a `pty.owner`), a part off
+    screen is a watcher to the coordinator: it renders at the handshake grid and sends
+    nothing. Once the part on screen claims the row, the event names the shared id and
+    the hidden part resizes as an owner; coming on screen re-asserts its size through the
+    coordinator, which is how it claims a row still unclaimed. An armed claim (a
+    self-succession) counts as confirmation enough to ask. The verdict itself is not
+    touched, so a hidden part over an unclaimed row shows no card. Fix: `onScreen` and
+    `rowConfirmed` in `resizeCoordinator.ts`, `faithfulWatcher` in `TerminalPane.tsx`.
+    Pinned: `resizeCoordinator.test.ts` "a pane kept mounted off screen";
+    `components/TerminalPane.test.tsx` "never makes the first claim of a row from the
+    part off screen".
 
 ## D. Keys and clipboard
 
@@ -1902,6 +1944,21 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     flap gone", and the whole rect-mocked "the phone flight, with real boxes to measure"
     block, which is unchanged apart from the dropped `variant` prop.
 
+30. **The stack owns the typing target; a part publishes, the target acts.** Trap: two
+    owning parts each run the once-per-attach automatic focus, so the second to finish
+    its replay steals focus from the part the user chose; and two compose redirects,
+    paste listeners and suspended tab stops fight over one box. Only the typing target
+    focuses by itself, and the compose surface counts as live only for it, so the
+    redirect, the paste listener and the tab-stop suspension follow it. A press anywhere
+    on a part makes it the target. Every asynchronous input stays bound to the part it
+    started on: Send's delayed Enter rides the socket the body went to or is dropped,
+    and a paste, upload or pick runs through that part's own pipeline. The overlay layer
+    is the stack's too, over the parts' box and withheld when a cover owns the target's
+    part. Fix: `TerminalStack`/`TerminalPart` in `TerminalPane.tsx`. Pinned:
+    `components/TerminalPane.test.tsx` "TerminalStack with two parts" and "the stack's
+    overlay layer over a lone terminal"; `components/terminal/inputSurface.test.ts`
+    "Send from a stack of two parts".
+
 ## I. Viewer suppression and notifications
 
 1. **The browser xterm is a VIEWER; dux-core's alacritty_terminal is the authoritative
@@ -2272,7 +2329,17 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (a PTY socket stays open in a background tab); an instant clear on tab return
     dismissed the attention flag before the returning user saw it; window focus covers
     the never-hidden desktop case; initial load observes no transition and gets no
-    grace. Server-side the ping never claims ownership. Fix: src/components/terminal/useTerminalLifecycle.ts:988-1049,
+    grace. Server-side the ping never claims ownership. A part kept mounted OFF SCREEN
+    is not looked at even on a visible page: its socket opens with `viewed=0` (and every
+    reopen names its visibility then), so the subscribe neither clears attention nor
+    starts the foreground pull-request check; its beats say viewed false; going off
+    screen sends `{"viewed":false}` at once and coming on screen sends `{"shown":true}`,
+    which the server answers exactly as a subscribe on screen, owner or watcher, and
+    which leaves the attachment's viewed state alone (`viewed` on the beat frame is acted
+    on only when present). Pinned too: `src/lib/ptySocket.test.ts` "says a pane off screen
+    is not viewed when it opens, and again on its reconnect"; `crates/dux-web/src/engine_actor.rs`
+    "only_a_subscribe_from_a_pane_on_screen_counts_as_looking_at_the_tab",
+    "coming_on_screen_is_looking_at_the_tab". Fix: src/components/terminal/useTerminalLifecycle.ts:988-1049,
     TP:422-430, `src/lib/viewedPing.ts`;
     `crates/dux-web/src/server.rs:1626-1631`.
     Pinned: `src/lib/viewedPing.test.ts` (all three suites; the grace vectors are twins
@@ -2316,8 +2383,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     something a thumb reaching for the newline should be able to hit, and the action
     lives in the INPUT group, which is a menu and says what it does. Bars still take
     height OUT of the terminal in the desktop shell (panel geometry untouched) and the
-    pane's own RO reports the reflow. Fix: `terminalInputLayout` and `TerminalPaneLayout`
-    in `TerminalPane.tsx`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane has no
+    pane's own RO reports the reflow. The rows are the STACK's: only the typing target's
+    part renders them, through a portal into the stack's one input area under all its
+    parts, so a stack of two never shows two boxes. Fix: `terminalInputLayout`,
+    `TerminalPart` and `TerminalStack` in `TerminalPane.tsx`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane has no
     menu under the terminal" and "TerminalPane input group for the top menu" suites.
 
 10. **Both hint latches are MODULE scope: once per page session, surviving the pane

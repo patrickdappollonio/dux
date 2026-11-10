@@ -295,7 +295,7 @@ pub(crate) struct SocketClient {
     page: Option<dux_core::pty_owners::PageId>,
     /// Whether a terminal socket's pane is on screen as it opens (`?viewed=`).
     /// Absent is on screen, so an older page behaves as it always has.
-    viewed: bool,
+    viewed: crate::engine_actor::PaneVisibility,
     address: Option<IpAddr>,
     verified: bool,
 }
@@ -339,9 +339,19 @@ impl SocketClient {
                     .page
                     .as_deref()
                     .and_then(dux_core::pty_owners::PageId::parse),
-                query.viewed.as_deref() != Some("0"),
+                if query.viewed.as_deref() == Some("0") {
+                    crate::engine_actor::PaneVisibility::OffScreen
+                } else {
+                    crate::engine_actor::PaneVisibility::OnScreen
+                },
             ),
-            None => (None, None, None, None, true),
+            None => (
+                None,
+                None,
+                None,
+                None,
+                crate::engine_actor::PaneVisibility::OnScreen,
+            ),
         };
         let verified = parts
             .extensions
@@ -2182,18 +2192,7 @@ async fn handle_pty_socket(
         return;
     }
 
-    // Placed in its row before anything is asked about it, so the handshake's
-    // owner, every claim and every release are the row's: a terminal opened in
-    // a row another device drives is that device's from here on.
-    pty_size_owners.join_row(
-        target.pty_id(),
-        dux_core::pty_owners::RowKey::of(target.pty_id(), attach.target.agent.as_deref()),
-    );
-    // Seated before the subscribe so the attachment can carry the driver id,
-    // and not a claim: only a resize of an unowned row or a flagged take-over
-    // claims. Every socket its page has open on this row shares the id, so the
-    // page drives the row as one driver however many of its panes are mounted.
-    let seat = Arc::new(pty_size_owners.take_seat(attach.client.page.as_ref(), target.pty_id()));
+    let seat = seat_pty_socket(&pty_size_owners, &target, &attach);
     let conn_id = seat.id();
     let viewed = attach.client.viewed;
     // The release, on EVERY exit path. A socket that gave up on its opening
@@ -2292,6 +2291,28 @@ async fn handle_pty_socket(
     // The guards above release ownership and connection accounting on every exit.
 }
 
+/// Place a terminal socket's pty in its row and seat the socket at its page's
+/// seat for that row.
+///
+/// Placed in its row before anything is asked about it, so the handshake's
+/// owner, every claim and every release are the row's: a terminal opened in a
+/// row another device drives is that device's from here on. Seated before the
+/// subscribe so the attachment can carry the driver id, and not a claim: only a
+/// resize of an unowned row or a flagged take-over claims. Every socket its
+/// page has open on this row shares the id, so the page drives the row as one
+/// driver however many of its panes are mounted.
+fn seat_pty_socket(
+    owners: &PtySizeOwners,
+    target: &PtyTarget,
+    attach: &PtyAttach,
+) -> Arc<dux_core::pty_owners::Seat> {
+    owners.join_row(
+        target.pty_id(),
+        dux_core::pty_owners::RowKey::of(target.pty_id(), attach.target.agent.as_deref()),
+    );
+    Arc::new(owners.take_seat(attach.client.page.as_ref(), target.pty_id()))
+}
+
 /// Subscribe a terminal socket to its PTY. An agent subscribe also
 /// launches/resumes the provider if it isn't running yet (the same flow the
 /// legacy Subscribe uses); a terminal subscribe attaches to an already-created
@@ -2299,7 +2320,7 @@ async fn handle_pty_socket(
 async fn subscribe_or_close(
     engine: &EngineHandle,
     target: &PtyTarget,
-    viewed: bool,
+    viewed: crate::engine_actor::PaneVisibility,
     sink: &SharedSink,
     peer_ip: IpAddr,
 ) -> Option<crate::engine_actor::PtySubscription> {
