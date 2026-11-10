@@ -217,12 +217,6 @@ impl App {
         }
     }
 
-    /// The same question with the sentence thrown away, for the gates that only
-    /// need to know whether the card is between the keyboard and the child.
-    pub(crate) fn focused_pty_is_covered_by_card(&self) -> bool {
-        self.focused_pty_takeover_card().is_some()
-    }
-
     /// The typing chokepoint: may this surface write to the focused terminal
     /// surface's PTY right now?
     ///
@@ -1558,7 +1552,7 @@ mod tests {
         // pressed.
         assert!(seat.owners.release("session-1-slot", browser).is_some());
         assert!(
-            app.focused_pty_is_covered_by_card(),
+            app.card_covers_center(),
             "a pty nobody drives is still covered"
         );
         app.claim_launched_pty("session-1-slot");
@@ -1812,7 +1806,7 @@ mod tests {
             .expect("render frame");
 
         assert!(
-            app.focused_pty_is_covered_by_card(),
+            app.card_covers_center(),
             "test setup: the card is between this surface and the child"
         );
         let band = app
@@ -2242,7 +2236,7 @@ mod tests {
         seat.owners
             .claim("session-1-slot", browser)
             .expect("claimed");
-        assert!(app.focused_pty_is_covered_by_card(), "the card is up");
+        assert!(app.card_covers_center(), "the card is up");
 
         let press = |kind, column, row| MouseEvent {
             kind,

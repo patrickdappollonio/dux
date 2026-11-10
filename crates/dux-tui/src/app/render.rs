@@ -4721,13 +4721,16 @@ impl App {
             return;
         }
 
-        // The card is about the row, whichever part has focus: an agent's
-        // stack is the agent's, and a terminal's row is the terminal's.
-        let target = if self.selected_terminal_row().is_some() || self.selected_session().is_none()
-        {
-            "terminal"
-        } else {
+        // Over an agent's stack the card is about the agent's row, whichever
+        // part has focus; over one terminal shown alone (fullscreen, or a
+        // terminal's own row) it names what is shown.
+        let target = if self.drawing_agent_stack() && self.selected_terminal_row().is_none() {
             "agent"
+        } else {
+            match self.focused_surface() {
+                SessionSurface::Agent => "agent",
+                SessionSurface::Terminal => "terminal",
+            }
         };
         let button_label = "Take over";
         let button_h: u16 = 3;
