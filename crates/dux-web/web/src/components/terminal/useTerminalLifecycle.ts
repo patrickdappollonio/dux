@@ -138,6 +138,12 @@ export type TerminalLifecyclePorts = {
   /// The rendered ownership verdict, read for one thing: the periodic frame's
   /// cadence depends on it, and a change must clear the armed timer.
   isOwnerRendered: boolean
+  /// Whether the server has named this pane's driver id as its row's owner on
+  /// the current connection (see `ownership.ts`), read live by the coordinator.
+  readRowConfirmed: () => boolean
+  /// Installed here over this mount's socket and coordinator: the pane calls it
+  /// when it comes on screen (true) or goes off screen (false).
+  onScreenChangeRef: RefObject<((onScreen: boolean) => void) | null>
 }
 
 export function useTerminalLifecycle(
@@ -193,6 +199,8 @@ export function useTerminalLifecycle(
     setReconnecting,
     resetReplayWait,
     isOwnerRendered,
+    readRowConfirmed,
+    onScreenChangeRef,
   } = ports
 
   // This mount's heartbeat, so the cadence can be retimed from outside the big
@@ -216,6 +224,7 @@ export function useTerminalLifecycle(
     // running, with resume decided server-side. A dormant tab is never
     // auto-mounted, so reaching here for one is an intentional launch.
     const pty = new PtySocket(ptyUrl)
+    pty.onScreen = () => live.current.onScreen !== false
     ptyRef.current = pty
     // Constructed before the addon so the coordinator below can be given the
     // socket's own `sendResize`; `connect()` is still the explicit act below.
@@ -268,6 +277,10 @@ export function useTerminalLifecycle(
       lastSendWasFlagged: () => lastSendFlagged,
       isOwner: () => ownership.read(),
       onViewerLayout: () => viewerRelayoutRef.current?.(),
+      onScreen: () => live.current.onScreen !== false,
+      // An armed claim is how a pane off screen asks for its row back (a
+      // self-succession), so it counts as reason enough to send.
+      rowConfirmed: () => readRowConfirmed() || takeoverIntent.read(),
     })
     // The pane's handle on this mount's grid adoption (see the port's doc).
     viewerRegridRef.current = () => resize.applyViewerGrid()
@@ -350,6 +363,7 @@ export function useTerminalLifecycle(
         shouldSendViewed({
           isOwner: ownership.read(),
           visible: document.visibilityState === "visible",
+          onScreen: live.current.onScreen !== false,
           now: Date.now(),
           visibleSince: visibleSinceRef.current,
           graceMs: live.current.attentionGraceMs,
@@ -357,6 +371,19 @@ export function useTerminalLifecycle(
       onStalled: () => pty.dropForRetry(),
     })
     beatRef.current = beat
+    // Coming on screen is looking at the tab, whoever drives it, and it is the
+    // moment a part over a row nobody has claimed yet claims it, through the
+    // coordinator's own gates; going off screen stops being looked at at once
+    // rather than at the next beat.
+    onScreenChangeRef.current = (onScreen) => {
+      if (onScreen) {
+        pty.sendShown()
+        resize.resyncToForeground()
+      } else {
+        pty.sendUnviewed()
+      }
+      beat.resync()
+    }
     registerTerminalSocketCallbacks({
       pty,
       kind,
@@ -429,6 +456,7 @@ export function useTerminalLifecycle(
     })
 
     return () => {
+      if (onScreenChangeRef.current !== null) onScreenChangeRef.current = null
       stopAuthResync()
       unregisterLayoutGesture()
       disposeTerminalLifecycle({

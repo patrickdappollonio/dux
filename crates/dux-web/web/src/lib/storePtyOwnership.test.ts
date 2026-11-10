@@ -94,6 +94,20 @@ describe("ptyOwnership ledger", () => {
   })
 })
 
+describe("noteOwnPtyConnection with two sockets of one page on one id", () => {
+  it("keeps the id while a sibling socket still holds it", async () => {
+    const mod = await import("./store")
+    const agentPane = {}
+    const dockPane = {}
+    mod.noteOwnPtyConnection("9", true, agentPane)
+    mod.noteOwnPtyConnection("9", true, dockPane)
+    mod.noteOwnPtyConnection("9", false, agentPane)
+    expect(mod.getSnapshot().ownPtyConnIds).toEqual({ "9": true })
+    mod.noteOwnPtyConnection("9", false, dockPane)
+    expect(mod.getSnapshot().ownPtyConnIds).toEqual({})
+  })
+})
+
 describe("sessionActiveElsewhere", () => {
   type Mod = typeof import("./store")
   type S = ReturnType<Mod["getSnapshot"]>

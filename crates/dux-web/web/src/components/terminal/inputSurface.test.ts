@@ -302,6 +302,43 @@ describe("Send", () => {
   })
 })
 
+// A stack's one input area sends through whichever part is the typing target
+// when Send is pressed; the delayed Enter is bound to that part's connection,
+// whatever the target becomes in the meantime.
+describe("Send from a stack of two parts", () => {
+  it("delivers the delayed Enter to the part the body went to, or nowhere once its socket closed", () => {
+    vi.useFakeTimers()
+    try {
+      const agent = setup()
+      const dock = setup()
+      act(() => {
+        agent.view.result.current.sendCompose("hello")
+      })
+      // The typing target moves to the dock before the Enter is due.
+      act(() => {
+        dock.view.result.current.sendCompose("ls")
+      })
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(agent.sent).toEqual(["hello", "\r"])
+      expect(dock.sent).toEqual(["ls", "\r"])
+
+      act(() => {
+        agent.view.result.current.sendCompose("again")
+      })
+      agent.pty.isOpen = false
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(agent.sent).toEqual(["hello", "\r", "again"])
+      expect(dock.sent).toEqual(["ls", "\r"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe("the draft", () => {
   it("splices inserted text at the caret and leaves nothing on the wire", () => {
     const { view, compose, sent } = setup({ composeActive: true })

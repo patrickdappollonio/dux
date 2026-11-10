@@ -152,3 +152,43 @@ describe("holdLayoutForGesture", () => {
     expect(ended).toHaveBeenCalledTimes(1)
   })
 })
+
+// An agent and its docked terminal are two panes under one layout change: a
+// collapse, an expand, a fold or a phone flip holds both, and each is released
+// once, at the geometry the change settled on.
+describe("layout gestures over a stack of two panes", () => {
+  it.each([
+    ["an animated change that runs out", 300, false],
+    ["an animated change that is cancelled", 300, true],
+    ["a change with no animation (reduced motion)", 0, false],
+  ])("holds both panes and releases each once: %s", (_case, durationMs, cancel) => {
+    vi.useFakeTimers()
+    try {
+      const agent = holder()
+      const dock = holder()
+      const offs = [registerLayoutGestureHolder(agent), registerLayoutGestureHolder(dock)]
+      const gesture = holdLayoutForGesture(durationMs)
+      expect([agent.hold.mock.calls.length, dock.hold.mock.calls.length]).toEqual([1, 1])
+      if (cancel) gesture.cancel()
+      vi.advanceTimersByTime(durationMs)
+      gesture.cancel()
+      expect([agent.release.mock.calls.length, dock.release.mock.calls.length]).toEqual([1, 1])
+      for (const off of offs) off()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("still releases the other pane once when one unmounts mid-drag", () => {
+    const agent = holder()
+    const dock = holder()
+    const offAgent = registerLayoutGestureHolder(agent)
+    const offDock = registerLayoutGestureHolder(dock)
+    beginLayoutGesture()
+    offDock()
+    endLayoutGesture()
+    expect(agent.release).toHaveBeenCalledTimes(1)
+    expect(dock.release).not.toHaveBeenCalled()
+    offAgent()
+  })
+})

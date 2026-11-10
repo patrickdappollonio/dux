@@ -8708,14 +8708,31 @@ export function noteAgentPtyOwnership(
   setState({ ptyOwnership: map })
 }
 
+// Which of this page's sockets hold each id. Every terminal this page has open
+// on one row acts as one driver and is handed the SAME id, so an id leaves the
+// set only when the last socket holding it retires it, never when a sibling
+// that is still open does.
+const ownPtyConnHolders = new Map<string, Set<unknown>>()
+
 // TerminalPane's other reporter: register (live) or retire (dead) one of this
 // client's OWN PTY-socket connection ids, from the socket's `connected` frame
-// and its reconnect/close paths. See the `ownPtyConnIds` field doc.
-export function noteOwnPtyConnection(connId: string, live: boolean): void {
-  const has = Boolean(state.ownPtyConnIds[connId])
-  if (has === live) return
+// and its reconnect/close paths. See the `ownPtyConnIds` field doc. `holder`
+// names the socket holding it, and defaults to the id itself for a caller with
+// one socket per id.
+export function noteOwnPtyConnection(
+  connId: string,
+  live: boolean,
+  holder: unknown = connId,
+): void {
+  const holders = ownPtyConnHolders.get(connId) ?? new Set<unknown>()
+  if (live) holders.add(holder)
+  else holders.delete(holder)
+  if (holders.size > 0) ownPtyConnHolders.set(connId, holders)
+  else ownPtyConnHolders.delete(connId)
+  const held = holders.size > 0
+  if (Boolean(state.ownPtyConnIds[connId]) === held) return
   const next = { ...state.ownPtyConnIds }
-  if (live) next[connId] = true
+  if (held) next[connId] = true
   else delete next[connId]
   setState({ ownPtyConnIds: next })
 }

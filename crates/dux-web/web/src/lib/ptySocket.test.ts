@@ -12,6 +12,7 @@ import {
 } from "./ptySocket"
 import { setAppSocketGivenUp } from "./appSocketGiveUp"
 import { browserId } from "./browserId"
+import { pageSeatId } from "./pageSeat"
 import { noteConnectionIdPending, setConnectionId } from "./connection"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import type { ConnState } from "./types"
@@ -162,13 +163,15 @@ describe("PtySocket", () => {
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()
     const ws = last()
-    expect(ws.url).toBe(`ws://x/ws/sessions/s1/pty?browser=${encodeURIComponent(browserId())}`)
+    expect(ws.url).toBe(
+      `ws://x/ws/sessions/s1/pty?browser=${encodeURIComponent(browserId())}&page=${pageSeatId()}`,
+    )
     expect(ws.binaryType).toBe("arraybuffer")
   })
 
   it("names this browser on every open, linked to the tab's events connection or not", () => {
     vi.useFakeTimers()
-    const browser = encodeURIComponent(browserId())
+    const browser = `${encodeURIComponent(browserId())}&page=${pageSeatId()}`
     setConnectionId(null)
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()
@@ -181,12 +184,48 @@ describe("PtySocket", () => {
     setConnectionId(null)
   })
 
+  it("names one page id on every socket this page opens, so the page drives a row as one", () => {
+    const agent = new PtySocket("ws://x/ws/sessions/s1/pty")
+    agent.connect()
+    const first = new URL(last().url).searchParams.get("page")
+    const dock = new PtySocket("ws://x/ws/sessions/s1/terminals/t1/pty")
+    dock.connect()
+    expect(first).toMatch(/^[0-9a-f]{32}$/)
+    expect(new URL(last().url).searchParams.get("page")).toBe(first)
+  })
+
+  it("says a pane off screen is not viewed when it opens, and again on its reconnect", () => {
+    vi.useFakeTimers()
+    let onScreen = false
+    const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
+    sock.onScreen = () => onScreen
+    sock.connect()
+    expect(new URL(last().url).searchParams.get("viewed")).toBe("0")
+    last().open()
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(600)
+    expect(new URL(last().url).searchParams.get("viewed")).toBe("0")
+    onScreen = true
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(2000)
+    expect(new URL(last().url).searchParams.has("viewed")).toBe(false)
+  })
+
+  it("sends the shown and unviewed frames without a beat to echo", () => {
+    const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
+    sock.connect()
+    last().open()
+    expect(sock.sendShown()).toBe(true)
+    expect(sock.sendUnviewed()).toBe(true)
+    expect(last().sent.slice(-2)).toEqual(['{"shown":true}', '{"viewed":false}'])
+  })
+
   it("names this tab's events connection on every open, the one it has at that moment", () => {
     vi.useFakeTimers()
     setConnectionId("e/1")
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()
-    const browser = `browser=${encodeURIComponent(browserId())}`
+    const browser = `browser=${encodeURIComponent(browserId())}&page=${pageSeatId()}`
     expect(last().url).toBe(`ws://x/ws/sessions/s1/pty?events=e%2F1&${browser}`)
     last().open()
     setConnectionId("e2")
@@ -200,7 +239,7 @@ describe("PtySocket", () => {
     vi.useFakeTimers()
     setConnectionId(null)
     noteConnectionIdPending()
-    const browser = `browser=${encodeURIComponent(browserId())}`
+    const browser = `browser=${encodeURIComponent(browserId())}&page=${pageSeatId()}`
     const first = new PtySocket("ws://x/ws/sessions/s1/pty")
     first.connect()
     expect(FakeWS.instances.length).toBe(0)

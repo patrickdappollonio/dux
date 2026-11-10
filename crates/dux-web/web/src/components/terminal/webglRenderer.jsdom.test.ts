@@ -7,6 +7,28 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { Terminal } from "@xterm/xterm"
 
+// The addon's own GL work needs a real canvas; what is pinned below is how two
+// panes share the page-wide give-up latch, so the addon only records what was
+// done to it and hands its context-loss listener to the test.
+const { addons, FakeWebglAddon } = vi.hoisted(() => {
+  const addons: { disposed: boolean; lose: () => void }[] = []
+  class FakeWebglAddon {
+    disposed = false
+    lose: () => void = () => {}
+    constructor() {
+      addons.push(this)
+    }
+    onContextLoss(listener: () => void) {
+      this.lose = listener
+    }
+    dispose() {
+      this.disposed = true
+    }
+  }
+  return { addons, FakeWebglAddon }
+})
+vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: FakeWebglAddon }))
+
 import {
   attachWebglRenderer,
   detectWebgl2,
@@ -18,6 +40,7 @@ import {
 afterEach(() => {
   resetGlGaveUpForTests()
   vi.restoreAllMocks()
+  addons.length = 0
 })
 
 describe("detectWebgl2", () => {
@@ -97,5 +120,48 @@ describe("attaching the renderer", () => {
 
     expect(attachWebglRenderer(fakeTerminal(), container)).toBeNull()
     expect(container.style.willChange).toBe("")
+  })
+})
+
+// An agent and its docked terminal are two panes on one page, so two renderers
+// and two GL contexts, with one give-up latch between them.
+describe("two panes on one page", () => {
+  const fakeTerminal = () => ({ loadAddon: vi.fn() }) as unknown as Terminal
+  const withWebgl2 = () => {
+    const gl = { getExtension: vi.fn(() => null) }
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      gl as unknown as RenderingContext,
+    )
+  }
+  const quietly = () => vi.spyOn(console, "warn").mockImplementation(() => {})
+
+  it("starts a pane mounted after the first gave up on the DOM renderer", () => {
+    withWebgl2()
+    quietly()
+    const first = document.createElement("div")
+    expect(attachWebglRenderer(fakeTerminal(), first)).not.toBeNull()
+    addons[0].lose()
+    expect(first.style.willChange).toBe("")
+    expect(attachWebglRenderer(fakeTerminal(), document.createElement("div"))).toBeNull()
+  })
+
+  it("leaves the other pane drawing when one loses its context", () => {
+    withWebgl2()
+    quietly()
+    const agent = document.createElement("div")
+    const dock = document.createElement("div")
+    attachWebglRenderer(fakeTerminal(), agent)
+    attachWebglRenderer(fakeTerminal(), dock)
+    addons[0].lose()
+    expect(addons[0].disposed).toBe(true)
+    expect(addons[1].disposed).toBe(false)
+    expect(dock.style.willChange).toBe("transform")
+  })
+
+  it("draws both on the DOM renderer where there is no WebGL2", () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null)
+    expect(attachWebglRenderer(fakeTerminal(), document.createElement("div"))).toBeNull()
+    expect(attachWebglRenderer(fakeTerminal(), document.createElement("div"))).toBeNull()
+    expect(addons).toHaveLength(0)
   })
 })

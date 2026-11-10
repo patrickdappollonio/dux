@@ -50,11 +50,15 @@ export function withinAttentionGrace(
 export function shouldSendViewed(ctx: {
   isOwner: boolean
   visible: boolean
+  /// Whether the pane is on screen. A part of a stack kept mounted off screen
+  /// is not being looked at even on a visible page. Absent means on screen.
+  onScreen?: boolean
   now?: number
   visibleSince?: number
   graceMs?: number
 }): boolean {
   if (!ctx.isOwner || !ctx.visible) return false
+  if (ctx.onScreen === false) return false
   if (ctx.now === undefined || ctx.graceMs === undefined) return true
   return !withinAttentionGrace(ctx.now, ctx.visibleSince, ctx.graceMs)
 }

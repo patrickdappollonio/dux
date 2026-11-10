@@ -73,7 +73,7 @@ export function disposeTerminalLifecycle(
   touchWiring.dispose()
   document.removeEventListener("visibilitychange", noteVisibility)
   localGridSubscription.dispose()
-  retireConnectionIdentity(connId)
+  retireConnectionIdentity(connId, pty)
   pty.dispose()
   if (ptyRef.current === pty) ptyRef.current = null
   termRef.current = null

@@ -37,6 +37,16 @@ export type ResizeCoordinatorDeps = {
   /// callback the fit would have used, so the two modes react to a layout
   /// change in one place.
   onViewerLayout: () => void
+  /// Whether the pane is on screen. A part kept mounted off screen (the other
+  /// half of a stack, maximized away or behind the phone's switch) never makes
+  /// the first claim of a row: a resize frame is a claim, and the row must be
+  /// claimed by the part the user is looking at. Absent means on screen.
+  onScreen?: () => boolean
+  /// Whether the server has said this pane's row is this page's (the pane's
+  /// own driver id named as the owner), or a flagged claim is armed to ask for
+  /// it. Until then a pane off screen renders as a watcher at the pty's own
+  /// grid and sends nothing. Absent means confirmed.
+  rowConfirmed?: () => boolean
 }
 
 export type ResizeCoordinator = {
@@ -104,11 +114,19 @@ export type ResizeCoordinator = {
 export function createResizeCoordinator(
   deps: ResizeCoordinatorDeps,
 ): ResizeCoordinator {
-  const { term, fit, sendResize, isOwner, onViewerLayout } = deps
+  const { term, fit, sendResize, onViewerLayout } = deps
   const lastSendWasFlagged = deps.lastSendWasFlagged ?? (() => false)
+  const onScreen = deps.onScreen ?? (() => true)
+  const rowConfirmed = deps.rowConfirmed ?? (() => true)
 
-  // Viewer mode, derived and never latched: anybody who is not the driver.
-  // Named because "not the owner" is the reason at every decision point that
+  // Whether this pane may drive: the owner, and either on screen or already
+  // confirmed as the row's driver. The second half is the on-screen rule: an
+  // owner's verdict over a row nobody has claimed yet is only a guess that
+  // this page may claim it, and a pane off screen does not act on that guess.
+  const isOwner = () => deps.isOwner() && (onScreen() || rowConfirmed())
+
+  // Viewer mode, derived and never latched: anybody who may not drive.
+  // Named because "not the driver" is the reason at every decision point that
   // asks it, not an accident of this expression.
   const viewerMode = () => !isOwner()
 

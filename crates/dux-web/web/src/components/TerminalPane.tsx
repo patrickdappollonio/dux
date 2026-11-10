@@ -1,11 +1,15 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
   type RefObject,
 } from "react"
+import { createPortal } from "react-dom"
 import { outsideGate } from "@/lib/gateLayer"
 import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
@@ -77,7 +81,7 @@ import {
   REPLAY_WAIT_POLL_MS,
 } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
-import { registerPaneCover } from "@/lib/paneCover"
+import { registerPaneCover, usePaneCoverOwned } from "@/lib/paneCover"
 import { registerPaneMacroTarget } from "@/lib/paneMacroTarget"
 import { registerPaneInputGroup } from "@/lib/paneInputGroup"
 import {
@@ -94,20 +98,116 @@ import {
 import type { TakeoverIntent } from "@/components/terminal/channels"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// Painted over the terminal's own box, which is the only positioning context
-// that excludes the compose row and the key rows sitting under the terminal.
+// Painted over the stack's box, which is the only positioning context that
+// excludes the compose row and the key rows sitting under the terminals.
 type TerminalPaneOverlayProp = { overlay?: ReactNode }
 
-type TerminalPaneProps = (
+/// One part of a stack: one live terminal, with its own socket, ownership,
+/// upload sink, paste handling and IME guard.
+export type TerminalPartProps = (
   // The streamed target. `id` is the focused tab id for an agent and the terminal
   // id for a terminal; `slotTabId` names the slot tab, never the session id.
   | { kind: "agent"; id: string; sessionId: string; slotTabId?: string }
   | { kind: "terminal"; id: string; owner: TerminalOwnerRef }
-) &
-  TerminalPaneOverlayProp
+) & {
+  /// Whether this part is on screen. A part off screen stays mounted in a real
+  /// box the size of the stack, so its child keeps a usable grid and showing
+  /// it again costs no reattach; it is not looked at, and it never makes the
+  /// first claim of a row. Absent means on screen.
+  onScreen?: boolean
+}
 
+type TerminalPaneProps = TerminalPartProps & TerminalPaneOverlayProp
+
+/// What the stack tells its parts: which part typing goes to, how a part
+/// becomes that part, and where the one input area is.
+type StackContextValue = {
+  typingTarget: string | null
+  chooseTypingTarget: (ptyId: string) => void
+  inputArea: HTMLElement | null
+}
+
+const StackContext = createContext<StackContextValue | null>(null)
+
+/// The part typing goes to: the one chosen, while it is still a part of the
+/// stack and on screen, else the first part on screen, else the first part.
+function stackTypingTarget(
+  parts: readonly Pick<TerminalPartProps, "id" | "onScreen">[],
+  chosen: string | null,
+): string | null {
+  const onScreen = parts.filter((part) => part.onScreen !== false)
+  if (chosen !== null && onScreen.some((part) => part.id === chosen)) return chosen
+  return onScreen[0]?.id ?? parts[0]?.id ?? null
+}
+
+/// One terminal screen: today's single terminal, run as a stack of one.
 export function TerminalPane(props: TerminalPaneProps) {
+  const { overlay, ...part } = props
+  return <TerminalStack parts={[part]} overlay={overlay} />
+}
+
+/// An agent and its docked terminal (or any one terminal) rendered as one unit.
+/// Each part keeps everything about its own connection; the stack owns what is
+/// shared: which part typing goes to, the one input area under the parts, and
+/// the one overlay layer over them.
+export function TerminalStack({
+  parts,
+  overlay,
+}: {
+  parts: TerminalPartProps[]
+  overlay?: ReactNode
+}) {
+  const [chosen, setChosen] = useState<string | null>(null)
+  const typingTarget = stackTypingTarget(parts, chosen)
+  // Held in state so the parts re-render once it exists and can portal their
+  // input rows into it.
+  const [inputArea, setInputArea] = useState<HTMLElement | null>(null)
+  const context = useMemo<StackContextValue>(
+    () => ({ typingTarget, chooseTypingTarget: setChosen, inputArea }),
+    [typingTarget, inputArea],
+  )
+  // A cover that owns the typing target's part withholds the layer whole; the
+  // take-over cards are row-wide, so the parts of a row always agree on them.
+  const layerWithheld = usePaneCoverOwned(typingTarget)
+  return (
+    <StackContext.Provider value={context}>
+      <div className="flex h-full w-full flex-col bg-background">
+        <div className="relative flex min-h-0 w-full flex-1 flex-col">
+          {parts.map((part, index) => (
+            // Keyed by place, never by pty id: a part switching tab or terminal
+            // keeps its component, as a lone pane always has.
+            <TerminalPart key={index} {...part} />
+          ))}
+          {/* Withheld whole under a full-pane cover, layer included, so nothing of
+            * the pill can paint over a cover or over the band it brings back.
+            * The layer admits exactly the one pixel row above the stack, which is
+            * the band's hairline the docked flap hangs over, so the phone's pill
+            * covers it at the handoff the way the flap does; every other edge
+            * stays clipped, so the pill's shadow never spills onto the input
+            * rows or a neighbouring panel. Pointer events pass through the layer
+            * to the terminals and land only on what it carries. */}
+          {layerWithheld || overlay == null ? null : (
+            <div
+              data-testid="pane-overlay-layer"
+              className="pointer-events-none absolute inset-0 z-30 [clip-path:polygon(0_-1px,100%_-1px,100%_100%,0_100%)] *:pointer-events-auto"
+            >
+              {overlay}
+            </div>
+          )}
+        </div>
+        {/* The one input area: the typing target's part renders its rows here. */}
+        <div ref={setInputArea} data-testid="stack-input-area" className="contents" />
+      </div>
+    </StackContext.Provider>
+  )
+}
+
+function TerminalPart(props: TerminalPartProps) {
   const { kind, id } = props
+  const stack = useContext(StackContext)
+  // Outside a stack (never in the app) a part is its own typing target.
+  const isTypingTarget = stack === null || stack.typingTarget === id
+  const onScreen = props.onScreen !== false
   const {
     hostRef,
     containerRef,
@@ -194,6 +294,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     connectionLost,
     notePtyConn,
     handshakeSeen,
+    rowConfirmed,
+    readRowConfirmed,
     takeOver,
   } = useTerminalOwnership({
     id,
@@ -208,8 +310,14 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   // Is the message box the typing surface in this pane right now? The bar renders
   // for the input owner alone, so a watcher with a stored choice has no box.
-  const composeSurfaceLive = composeBarEnabled && isOwner
-  const live = useTerminalLiveSettings(liveSettingsFor(composeSurfaceLive))
+  //
+  // Only the typing target's: the box is rendered for one part of a stack, and
+  // the compose redirect, the paste listener and the suspended tab stop follow
+  // it.
+  const composeSurfaceLive = composeBarEnabled && isOwner && isTypingTarget
+  const live = useTerminalLiveSettings(
+    liveSettingsFor(composeSurfaceLive, onScreen),
+  )
 
   // Every refocus in the pane goes through this one binding. It is standalone
   // because the take-over and the lifecycle need it before the input hook runs.
@@ -238,7 +346,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
   // A watcher renders at the PTY's grid, with no preference behind it. The
   // coordinator derives the same answer off the verdict channel, synchronously.
-  const faithfulWatcher = !isOwner
+  //
+  // So does a part off screen whose row the server has not named this page's
+  // driver for yet: it renders at the pty's own grid and sends nothing until
+  // the part on screen has claimed the row.
+  const faithfulWatcher = !isOwner || (!onScreen && !rowConfirmed)
   // The grid to render, broken out so the relayout effect depends on the
   // NUMBERS rather than on the object identity the machine hands back.
   const remoteRows = viewerGrid.remoteGrid?.rows ?? 0
@@ -364,6 +476,7 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   const everReady = useLatched(hasOutput)
+  const onScreenChangeRef = useRef<((onScreen: boolean) => void) | null>(null)
   // The one lifecycle owner: it creates and tears down the terminal and socket,
   // re-running only when the streamed target changes.
   useTerminalLifecycle(props, {
@@ -400,18 +513,33 @@ export function TerminalPane(props: TerminalPaneProps) {
     setReconnecting,
     resetReplayWait: () => replayClockRef.current?.reset(),
     isOwnerRendered: isOwner,
+    readRowConfirmed,
+    onScreenChangeRef,
   })
+
+  // Coming on screen and going off it, after mount: the socket opened naming
+  // the visibility it had then (`ptySocket.ts`), so only a change is news.
+  const onScreenSeenRef = useRef(onScreen)
+  useEffect(() => {
+    if (onScreenSeenRef.current === onScreen) return
+    onScreenSeenRef.current = onScreen
+    onScreenChangeRef.current?.(onScreen)
+  }, [onScreen])
 
   // The pane's one automatic typing focus: once per attach, and never before the
   // ownership verdict and the replay are in, or while an IME composition runs.
   useEffect(() => {
     const decision = nextTypingFocus({
-      allowed: typingFocusAllowed({
-        isOwner,
-        ownershipConfirmed: handshakeSeen,
-        replayApplied,
-        composing: composingRef.current,
-      }),
+      // Only the typing target's part moves focus by itself, so a second part
+      // finishing its replay later never pulls focus off the part chosen.
+      allowed:
+        isTypingTarget &&
+        typingFocusAllowed({
+          isOwner,
+          ownershipConfirmed: handshakeSeen,
+          replayApplied,
+          composing: composingRef.current,
+        }),
       isOwner,
       attach: `${kind}:${id}:${composeBarEnabled}`,
       focusedFor: focusedForRef.current,
@@ -424,6 +552,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isOwner,
+    isTypingTarget,
     composeBarEnabled,
     handshakeSeen,
     replayApplied,
@@ -435,8 +564,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   ])
   // The compose bar renders outside the terminal container, so the container's
   // capture listener cannot see a paste that lands in the box.
+  //
+  // The box mounts in the stack's input area one commit after the area exists,
+  // so the area is a dependency too.
+  const inputArea = stack?.inputArea ?? null
   useEffect(() => {
-    if (!(composeBarEnabled && isOwner)) return
+    if (!composeSurfaceLive) return
     const el = composeInputRef.current
     if (el === null) return
     const handler = (e: ClipboardEvent) => upload.onClipboardPaste(e)
@@ -445,7 +578,7 @@ export function TerminalPane(props: TerminalPaneProps) {
     // `onClipboardPaste` reads refs and the live bootstrap at call time, so
     // re-registering on every identity change would buy nothing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [composeBarEnabled, isOwner])
+  }, [composeSurfaceLive, inputArea])
 
   // The focus guard would bounce a Shift-Tab out of the box straight back, so
   // xterm's tab stop is suspended: the tab order is what a pointer does not consult.
@@ -548,8 +681,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     [id, takeoverCard, isOwner, composeSinkLive],
   )
 
-  const pane = (
+  const surface = (
     <TerminalPaneSurface
+      onScreen={onScreen}
+      onPress={() => stack?.chooseTypingTarget(id)}
       kind={kind}
       dragActive={dragActive}
       setDragActive={setDragActive}
@@ -568,20 +703,27 @@ export function TerminalPane(props: TerminalPaneProps) {
       takeoverLabel={takeoverLabel}
       ownerPresent={ownerPresent}
       takeOver={takeOver}
-      overlay={props.overlay}
     />
   )
 
+  // The typing target's rows go in the stack's one input area, for the input
+  // owner alone; every other part publishes nothing there.
+  const rows =
+    isTypingTarget && isOwner ? (
+      <TerminalInputRows
+        accessoryBarShown={accessoryBarShown}
+        composeBarShown={composeBarShownHere}
+        input={input}
+        composeInputRef={composeInputRef}
+        kind={kind}
+      />
+    ) : null
+  const area = stack?.inputArea ?? null
   return (
-    <TerminalPaneLayout
-      pane={pane}
-      isOwner={isOwner}
-      accessoryBarShown={accessoryBarShown}
-      composeBarShown={composeBarShownHere}
-      input={input}
-      composeInputRef={composeInputRef}
-      kind={kind}
-    />
+    <>
+      {surface}
+      {rows === null ? null : area === null ? (stack === null ? rows : null) : createPortal(rows, area)}
+    </>
   )
 }
 
@@ -590,7 +732,7 @@ type TerminalTargetIds = {
   projectId: string | null
 }
 
-function terminalTargetIds(props: TerminalPaneProps): TerminalTargetIds {
+function terminalTargetIds(props: TerminalPartProps): TerminalTargetIds {
   return {
     sessionId:
       props.kind === "agent" ? props.sessionId : ownerSessionId(props.owner),
@@ -600,7 +742,7 @@ function terminalTargetIds(props: TerminalPaneProps): TerminalTargetIds {
 }
 
 function terminalTargetRecords(
-  props: TerminalPaneProps,
+  props: TerminalPartProps,
   spine: DuxState["spine"],
   ids: TerminalTargetIds,
 ) {
@@ -630,7 +772,7 @@ function terminalTargetRecords(
 type TerminalTargetRecords = ReturnType<typeof terminalTargetRecords>
 
 function terminalNotifyTitle(
-  props: TerminalPaneProps,
+  props: TerminalPartProps,
   records: TerminalTargetRecords,
 ): string {
   if (props.kind === "agent") {
@@ -645,7 +787,7 @@ function terminalNotifyTitle(
 }
 
 function terminalHasOutput(
-  props: TerminalPaneProps,
+  props: TerminalPartProps,
   records: TerminalTargetRecords,
 ): boolean {
   if (props.kind === "agent") {
@@ -658,7 +800,7 @@ function terminalHasOutput(
 }
 
 function terminalProviderName(
-  kind: TerminalPaneProps["kind"],
+  kind: TerminalPartProps["kind"],
   records: TerminalTargetRecords,
 ): string | undefined {
   if (kind === "agent") {
@@ -668,7 +810,7 @@ function terminalProviderName(
 }
 
 function terminalSpineInputOwner(
-  kind: TerminalPaneProps["kind"],
+  kind: TerminalPartProps["kind"],
   records: TerminalTargetRecords,
 ): string | null | undefined {
   if (kind === "agent") {
@@ -680,7 +822,7 @@ function terminalSpineInputOwner(
 }
 
 function terminalTargetView(
-  props: TerminalPaneProps,
+  props: TerminalPartProps,
   spine: DuxState["spine"],
   ids: TerminalTargetIds,
 ) {
@@ -841,7 +983,7 @@ function terminalLiveSettings(
   }
 }
 
-function useTerminalPaneSetup(props: TerminalPaneProps) {
+function useTerminalPaneSetup(props: TerminalPartProps) {
   const ids = terminalTargetIds(props)
   const hostRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -870,14 +1012,16 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
   const terminalListed = { now: listedNow, ever: useLatched(listedNow) }
   // Built here and published in the component body: whether the message box is
   // the typing surface depends on ownership, which resolves after this hook.
-  const liveSettingsFor = (composeActive: boolean) =>
-    terminalLiveSettings(
+  const liveSettingsFor = (composeActive: boolean, onScreen: boolean) => ({
+    ...terminalLiveSettings(
       preferences,
       target,
       terminalListed,
       viewerOverflow,
       composeActive,
-    )
+    ),
+    onScreen,
+  })
 
   return {
     hostRef,
@@ -913,7 +1057,12 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
 }
 
 type TerminalPaneSurfaceProps = {
-  kind: TerminalPaneProps["kind"]
+  /// Off screen, the part keeps a real box the size of the stack's and is
+  /// hidden, never shrunk.
+  onScreen: boolean
+  /// A press anywhere on the part makes it the typing target.
+  onPress: () => void
+  kind: TerminalPartProps["kind"]
   dragActive: boolean
   setDragActive: (active: boolean) => void
   dragDepthRef: RefObject<number>
@@ -931,10 +1080,11 @@ type TerminalPaneSurfaceProps = {
   takeoverLabel: string | null
   ownerPresent: boolean
   takeOver: () => void
-  overlay: ReactNode
 }
 
 function TerminalPaneSurface({
+  onScreen,
+  onPress,
   kind,
   dragActive,
   setDragActive,
@@ -953,19 +1103,19 @@ function TerminalPaneSurface({
   takeoverLabel,
   ownerPresent,
   takeOver,
-  overlay,
 }: TerminalPaneSurfaceProps) {
   // The pane's box is not itself the clip: the terminal, its covers and the
-  // drop overlay are clipped by an inner layer, while an overlay handed to this
-  // live pane gets a layer of its own over the same box. That layer admits
-  // exactly the one pixel row above the pane, which is the band's hairline the
-  // docked flap hangs over, so the phone's pill covers it at the handoff the
-  // way the flap does; every other edge stays clipped, so the pill's shadow
-  // never spills onto the input rows or a neighbouring panel. (A dormant tab
-  // has no pane, and its shell paints the overlay in the column instead.)
+  // drop overlay are clipped by an inner layer, while the stack's overlay
+  // layer sits over the stack's box beside it. (A dormant tab has no pane, and
+  // its shell paints the overlay in the column instead.)
   return (
     <div
-      className="group relative min-h-0 w-full flex-1 bg-background"
+      className={
+        onScreen
+          ? "group relative min-h-0 w-full flex-1 bg-background"
+          : "group invisible absolute inset-0 bg-background"
+      }
+      onPointerDownCapture={onPress}
       onDragEnter={(event) => {
         if (!upload.paneAcceptsFileDrag(event)) return
         event.preventDefault()
@@ -1031,23 +1181,11 @@ function TerminalPaneSurface({
           takeOver={takeOver}
         />
       </div>
-      {/* Withheld whole under a full-pane cover, layer included, so nothing of
-        * the pill can paint over a cover or over the band it brings back.
-        * Pointer events pass through the layer to the terminal and land only
-        * on what it carries. */}
-      {coverOwnsThePane(cover) || overlay == null ? null : (
-        <div
-          data-testid="pane-overlay-layer"
-          className="pointer-events-none absolute inset-0 z-30 [clip-path:polygon(0_-1px,100%_-1px,100%_100%,0_100%)] *:pointer-events-auto"
-        >
-          {overlay}
-        </div>
-      )}
     </div>
   )
 }
 
-function FileDropOverlay({ kind }: { kind: TerminalPaneProps["kind"] }) {
+function FileDropOverlay({ kind }: { kind: TerminalPartProps["kind"] }) {
   return (
     <div
       data-testid="file-drop-overlay"
@@ -1067,7 +1205,7 @@ function FileDropOverlay({ kind }: { kind: TerminalPaneProps["kind"] }) {
 
 type TerminalCoverProps = {
   cover: AttachCover
-  kind: TerminalPaneProps["kind"]
+  kind: TerminalPartProps["kind"]
   providerName?: string
   ptyRef: RefObject<PtySocket | null>
   takeoverIntent: TakeoverIntent
@@ -1126,7 +1264,7 @@ function TerminalCover(props: TerminalCoverProps) {
 
 function terminalCoverText(
   wording: "starting" | "attaching" | "reconnecting",
-  kind: TerminalPaneProps["kind"],
+  kind: TerminalPartProps["kind"],
   providerName?: string,
 ): string {
   if (wording === "reconnecting") return "Reconnecting…"
@@ -1142,7 +1280,7 @@ function TakeoverCard({
   ownerPresent,
   takeOver,
 }: {
-  kind: TerminalPaneProps["kind"]
+  kind: TerminalPartProps["kind"]
   takeoverLabel: string | null
   ownerPresent: boolean
   takeOver: () => void
@@ -1186,47 +1324,12 @@ function TakeoverCard({
   )
 }
 
-type TerminalPaneLayoutProps = {
-  pane: ReactNode
-  isOwner: boolean
-  accessoryBarShown: boolean
-  composeBarShown: boolean
-  input: InputSurface
-  composeInputRef: RefObject<HTMLTextAreaElement | null>
-  kind: TerminalPaneProps["kind"]
-}
-
-function TerminalPaneLayout({
-  pane,
-  isOwner,
-  accessoryBarShown,
-  composeBarShown,
-  input,
-  composeInputRef,
-  kind,
-}: TerminalPaneLayoutProps) {
-  return (
-    <div className="flex h-full w-full flex-col bg-background">
-      {pane}
-      {isOwner ? (
-        <TerminalInputRows
-          accessoryBarShown={accessoryBarShown}
-          composeBarShown={composeBarShown}
-          input={input}
-          composeInputRef={composeInputRef}
-          kind={kind}
-        />
-      ) : null}
-    </div>
-  )
-}
-
 type TerminalInputRowsProps = {
   accessoryBarShown: boolean
   composeBarShown: boolean
   input: InputSurface
   composeInputRef: RefObject<HTMLTextAreaElement | null>
-  kind: TerminalPaneProps["kind"]
+  kind: TerminalPartProps["kind"]
 }
 
 function TerminalInputRows({
