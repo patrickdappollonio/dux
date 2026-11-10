@@ -612,15 +612,13 @@ describe("store agent stack", () => {
     expect(mod.getSnapshot().stackLayouts.s1).toBe("split")
   })
 
-  it("keeps the tab shown and its resting state while typing moves to the dock", async () => {
+  it("keeps the tab shown while typing moves to the dock", async () => {
     withSessionStatus("detached", [companion("t1", 1)])
     const mod = await loadStore()
     mod.selectSession("s1")
     const slot = mod.getSnapshot().spine!.sessions[0].slot_tab_id
-    mod.holdStoppedAgent("s1", slot)
     mod.chooseStackPart("s1", "t1")
     mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
-    expect(mod.getSnapshot().endedInViewTab).toBe(slot)
     expect(mod.getSnapshot().stackTabs.s1).toBe(slot)
   })
 

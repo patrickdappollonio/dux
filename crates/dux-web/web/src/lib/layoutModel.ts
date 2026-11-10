@@ -254,7 +254,9 @@ function openingLayout(
 
 /**
  * The part typing goes to: the one chosen, while it is still a part of the
- * stack and on screen, else the first part on screen, else the first part. One
+ * stack and on screen, else the first part on screen, else none: a part off
+ * screen is never where typing goes, so with nothing typeable on screen no part
+ * takes focus or renders input rows, and the chosen target stays. One
  * rule, read by the stack that routes the keystrokes and by the agent's screen
  * that hands the answer back to the store, so the header's controls, the top
  * menu and the stack never disagree about where typing goes.
@@ -265,5 +267,5 @@ export function stackTypingTarget(
 ): string | null {
   const onScreen = parts.filter((part) => part.onScreen !== false)
   if (chosen !== null && onScreen.some((part) => part.id === chosen)) return chosen
-  return onScreen[0]?.id ?? parts[0]?.id ?? null
+  return onScreen[0]?.id ?? null
 }

@@ -1977,7 +1977,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     is folded away or has no live terminal (a layout button, a fold, Back, a stopped
     agent opened from its row), the agent's screen hands the stack's fallback back to
     the store, so Macros, the top menu, the pill and the shell's cover read the part
-    on screen (`stackTypingTarget` in `layoutModel.ts`, used by both).
+    on screen (`stackTypingTarget` in `layoutModel.ts`, used by both). That hand-back
+    writes NO history (`reconcileStackPart`): the view changed, not the position, and
+    a write would spend an open dialog's entry. With nothing typeable on screen there
+    is no target at all, never a folded part, so nothing hidden takes focus or rows.
     Pinned:
     `components/TerminalPane.test.tsx` "TerminalStack with two parts" and "the stack's
     overlay layer over a lone terminal" (among them "sends a Send's Enter to the part
@@ -2004,6 +2007,12 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `agentStackModel` and `AgentStack`. Pinned: `src/lib/layoutModel.test.ts` "gives
     the agent part a live socket for a … tab"; `components/TerminalArea.test.tsx` "a
     stopped agent with a running terminal" (no agent part in any layout).
+    The same hold outlives the terminal: while the selected agent's first tab is
+    dormant beside a running terminal of its own, the store marks it resting
+    (`heldFirstTab` in `lib/store.ts`, applied on every state change), so the last
+    terminal ending, on either shell and whichever part was on screen, never turns
+    it into a tab that starts on sight. Pinned: `src/lib/storeRouting.test.ts`
+    "holds the dormant first tab when the last terminal ends with …".
 
 32. **A take-over card over a stack of two is ONE card with one button.** Trap: covers
     are per part, and a row is driven or watched whole, so a watcher of an agent with

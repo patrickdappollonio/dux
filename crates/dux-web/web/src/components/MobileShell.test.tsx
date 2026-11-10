@@ -777,6 +777,16 @@ describe("MobileShell dormant first tab", () => {
     expect(screen.getByText("Start session")).toBeTruthy()
   })
 
+  it("keeps the card, starting nothing, once the agent's last terminal has ended under it", () => {
+    // The store holds the first tab resting when its last terminal ends; the
+    // phone reads that hold as the computer does.
+    const state = dormantState(false)
+    state.endedInViewTab = "s1"
+    mockState = state
+    render(<MobileShell />)
+    expect(screen.getByText("Start session")).toBeTruthy()
+  })
+
   it("shows the card, starting nothing, while one of the agent's terminals runs", () => {
     const state = dormantState(false)
     ;(state.spine as unknown as { terminals: unknown[] }).terminals = [

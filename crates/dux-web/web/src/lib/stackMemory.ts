@@ -9,6 +9,8 @@ import type { ComputerLayout } from "./layoutModel"
 export interface StackMemory {
   layout: ComputerLayout | null
   terminal: string | null
+  /** The provider tab last on top of the agent's stack. */
+  tab: string | null
 }
 
 const PREFIX = "dux:stack:"
@@ -25,15 +27,16 @@ export function readStackMemory(sessionId: string): StackMemory {
   } catch {
     raw = null
   }
-  const empty: StackMemory = { layout: null, terminal: null }
+  const empty: StackMemory = { layout: null, terminal: null, tab: null }
   if (raw === null) return empty
   try {
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== "object" || parsed === null) return empty
-    const { layout, terminal } = parsed as Record<string, unknown>
+    const { layout, terminal, tab } = parsed as Record<string, unknown>
     return {
       layout: LAYOUTS.find((l) => l === layout) ?? null,
       terminal: typeof terminal === "string" ? terminal : null,
+      tab: typeof tab === "string" ? tab : null,
     }
   } catch {
     // A half-written or foreign entry is no memory at all.

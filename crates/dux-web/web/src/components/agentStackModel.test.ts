@@ -43,7 +43,7 @@ function model(over: Partial<Ctx> = {}) {
     stackLayouts: {},
     stackTerminals: {},
     stackTabs: {},
-    memory: { layout: null, terminal: null },
+    memory: { layout: null, terminal: null, tab: null },
     startedDormantTabs: [],
     pendingSlotTab: {},
     endedInViewTab: null,
@@ -82,6 +82,28 @@ describe("agentStackModel", () => {
     expect(m.typingPtyId).toBe("t1")
     // Beside the dock the stopped agent's own first tab gets the short card.
     expect(m.agentCard).toBe("short")
+  })
+
+  it("names no part when nothing typeable is on screen, leaving the chosen one", () => {
+    const withDormantExtra = session({
+      tabs: [
+        { id: "s1", provider: "claude", order: 0, has_live_process: true },
+        { id: "b2", provider: "codex", order: 1, has_live_process: false },
+      ],
+    } as Partial<SessionView>)
+    const m = model({
+      session: withDormantExtra,
+      target: { kind: "agent", sessionId: "s1", tabId: "b2" },
+      stackLayouts: { s1: "agent" },
+    })
+    expect(m.typingPtyId).toBeNull()
+    expect(m.chosenPtyId).toBe("b2")
+  })
+
+  it("keeps the tab this device showed on top after a reload", () => {
+    expect(
+      model({ target: dockTarget, memory: { layout: null, terminal: null, tab: "b2" } }).tabId,
+    ).toBe("b2")
   })
 
   it("keeps the tab this page showed on top while typing goes to the dock, never the shared one", () => {

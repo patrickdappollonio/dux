@@ -73,10 +73,10 @@ export function agentStackModel(ctx: {
   const dockIds = dock.map((t) => t.id)
 
   const slotTabId = slotTabIdOf(sessionId, session, ctx.pendingSlotTab) ?? session.slot_tab_id
-  // With typing in the dock, the agent keeps the tab this page last showed on
-  // top. The agent's shared last-focused tab is another device's answer too,
+  // With typing in the dock, the agent keeps the tab this device last showed on
+  // top, a reload included. The agent's shared last-focused tab is another device's answer too,
   // and following it would swap the tab under the user.
-  const shownHere = ctx.stackTabs[sessionId]
+  const shownHere = ctx.stackTabs[sessionId] ?? ctx.memory.tab ?? undefined
   const tabId =
     target.kind === "agent"
       ? target.tabId

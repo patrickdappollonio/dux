@@ -5776,6 +5776,22 @@ describe("TerminalStack with two parts", () => {
     expect(screen.queryByText("Running in the background")).toBeNull()
   })
 
+  it("gives no part focus or input rows while none of them is on screen", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(
+      <TerminalStack
+        parts={[{ ...agent, onScreen: false }, { ...dock, onScreen: false }]}
+        typingTarget="s1"
+        onChooseTypingTarget={() => {}}
+      />,
+    )
+    const [agentPty, dockPty] = FakePtySocket.instances
+    ownBoth()
+    act(() => agentPty.bytesCb?.(new Uint8Array([0x61])))
+    act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
   it("covers the whole stack with one take-over card when another device drives the row", () => {
     render(<TerminalStack parts={[agent, dock]} />)
     for (const pty of FakePtySocket.instances) {

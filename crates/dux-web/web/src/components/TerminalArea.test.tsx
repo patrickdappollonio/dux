@@ -15,6 +15,7 @@ const startDormantTabMock = vi.fn()
 // and the store's handling of each is pinned in the store's own tests.
 const setStackLayoutMock = vi.fn()
 const chooseStackPartMock = vi.fn()
+const reconcileStackPartMock = vi.fn()
 const startStoppedAgentMock = vi.fn()
 const addTabMock = vi.fn()
 const createTerminalMock = vi.fn()
@@ -27,6 +28,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     setStackLayout: (...args: unknown[]) => setStackLayoutMock(...args),
     settleStackOpening: () => {},
     chooseStackPart: (...args: unknown[]) => chooseStackPartMock(...args),
+    reconcileStackPart: (...args: unknown[]) => reconcileStackPartMock(...args),
     startStoppedAgent: (...args: unknown[]) => startStoppedAgentMock(...args),
     addTab: (...args: unknown[]) => addTabMock(...args),
     createTerminal: (...args: unknown[]) => createTerminalMock(...args),
@@ -289,6 +291,7 @@ beforeEach(() => {
   for (const mock of [
     setStackLayoutMock,
     chooseStackPartMock,
+    reconcileStackPartMock,
     startStoppedAgentMock,
     addTabMock,
     createTerminalMock,
@@ -782,22 +785,22 @@ describe("TerminalArea dock", () => {
     mockState = dockState({ layout: "split" })
     const { rerender } = render(<TerminalArea />)
     await screen.findByTestId("stack-agent-box")
-    expect(chooseStackPartMock).not.toHaveBeenCalled()
+    expect(reconcileStackPartMock).not.toHaveBeenCalled()
     // Maximizing the terminal folds the agent the store still names away.
     mockState = dockState({ layout: "terminal" })
     rerender(<TerminalArea />)
-    expect(chooseStackPartMock).toHaveBeenLastCalledWith("s1", "t1")
+    expect(reconcileStackPartMock).toHaveBeenLastCalledWith("s1", "t1")
     // And back: hiding the terminals folds the dock the store names away.
     mockState = dockState({ layout: "agent", target: "terminal" })
     rerender(<TerminalArea />)
-    expect(chooseStackPartMock).toHaveBeenLastCalledWith("s1", "s1")
+    expect(reconcileStackPartMock).toHaveBeenLastCalledWith("s1", "s1")
   })
 
   it("names the dock as the typing target of a stopped agent opened from its row", async () => {
     mockState = dockState({ stopped: true })
     render(<TerminalArea />)
     await screen.findByTestId("stopped-agent-band")
-    expect(chooseStackPartMock).toHaveBeenCalledWith("s1", "t1")
+    expect(reconcileStackPartMock).toHaveBeenCalledWith("s1", "t1")
   })
 
   it("never remounts a part when the layout changes", async () => {

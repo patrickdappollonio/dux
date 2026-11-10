@@ -35,7 +35,7 @@ import {
 } from "@/lib/paneDivider"
 import {
   chooseStackPart,
-  holdStoppedAgent,
+  reconcileStackPart,
   setStackLayout,
   settleStackOpening,
 } from "@/lib/store"
@@ -101,16 +101,9 @@ export function AgentStack({
   const { chosenPtyId, typingPtyId } = model
   useLayoutEffect(() => {
     if (typingPtyId !== null && typingPtyId !== chosenPtyId) {
-      chooseStackPart(sessionId, typingPtyId)
+      reconcileStackPart(sessionId, typingPtyId)
     }
   }, [sessionId, chosenPtyId, typingPtyId])
-
-  // A stopped agent beside its running terminals rests on its idle screen while
-  // it stays selected, so the last terminal ending does not start it.
-  const stoppedSlot = model.agentStopped ? model.slotTabId : null
-  useLayoutEffect(() => {
-    if (stoppedSlot !== null) holdStoppedAgent(sessionId, stoppedSlot)
-  }, [sessionId, stoppedSlot])
 
   const onLayoutAction = (action: LayoutAction) =>
     setStackLayout(sessionId, applyLayoutAction(layout, action))
