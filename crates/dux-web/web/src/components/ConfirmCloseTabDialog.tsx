@@ -90,8 +90,8 @@ export function ConfirmCloseTabDialog() {
             {successorLabel ? (
               <>
                 {" "}
-                The next tab, <InlineCode>{successorLabel}</InlineCode>, takes its
-                place as the agent&rsquo;s first tab.
+                <InlineCode>{successorLabel}</InlineCode> takes its place as the
+                agent&rsquo;s first tab.
               </>
             ) : null}{" "}
             <a

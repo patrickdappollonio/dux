@@ -128,7 +128,7 @@ describe("ConfirmCloseTabDialog", () => {
   })
 
   // Closing the tab in the session slot is not refused any more: the slot moves
-  // to the next tab in strip order, and the copy has to say so and name it, or
+  // to the leftmost other tab, and the copy has to say so and name it, or
   // the user cannot tell this close apart from an extra tab's.
   it("says which tab takes the slot when closing the agent's first tab", () => {
     seed(
@@ -144,7 +144,7 @@ describe("ConfirmCloseTabDialog", () => {
     expect(body.textContent).toContain("This ends the claude session")
     expect(screen.getByText("claude", { selector: "code" })).toBeTruthy()
     expect(body.textContent).toMatch(
-      /The next tab, Codex, takes its place as the agent’s first tab/,
+      /Codex takes its place as the agent’s first tab/,
     )
     // The tab's name is the shared chip.
     expect(screen.getByText("Codex", { selector: "code" })).toBeTruthy()
@@ -165,7 +165,7 @@ describe("ConfirmCloseTabDialog", () => {
     const body = screen.getByText(/This ends the/)
     expect(body.textContent).toContain("This ends the codex session")
     expect(body.textContent).toMatch(
-      /The next tab, Codex 2, takes its place as the agent’s first tab/,
+      /Codex 2 takes its place as the agent’s first tab/,
     )
     expect(screen.getByText("Codex 2", { selector: "code" })).toBeTruthy()
   })
@@ -200,7 +200,7 @@ describe("ConfirmCloseTabDialog", () => {
     expect(body.textContent).toContain("This ends the claude session")
     expect(screen.getByText("claude", { selector: "code" })).toBeTruthy()
     expect(body.textContent).toMatch(
-      /The next tab, Codex, takes its place as the agent’s first tab/,
+      /Codex takes its place as the agent’s first tab/,
     )
     // The tab's name is the shared chip.
     expect(screen.getByText("Codex", { selector: "code" })).toBeTruthy()

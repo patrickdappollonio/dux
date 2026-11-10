@@ -15801,9 +15801,9 @@ fn confirm_close_tab_tail_prose(effect: CloseTabEffect, successor: Option<&str>)
         " dux deletes this tab for good. A new tab always starts fresh, so use your provider's own history command to get back to this conversation."
     });
     if let Some(successor) = successor {
-        tail.push_text(" The next tab, ");
+        tail.push_text(" ");
         tail.push_name(successor);
-        tail.push_text(", takes its place as the agent's first tab.");
+        tail.push_text(" takes its place as the agent's first tab.");
     }
     tail
 }
@@ -18802,7 +18802,7 @@ mod tests {
     fn confirm_close_tab_tail_names_the_tab_taking_the_slot() {
         let tail = confirm_close_tab_tail(CloseTabEffect::DeletesTab, Some("Codex"));
         assert!(
-            tail.contains("The next tab, Codex, takes its place as the agent's first tab."),
+            tail.contains(" Codex takes its place as the agent's first tab."),
             "tail: {tail}"
         );
         assert!(tail.contains("deletes this tab for good"), "tail: {tail}");
