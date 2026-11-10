@@ -1,6 +1,6 @@
 // Pure send rules for the compose bar's Send action, and the rules deciding
 // which typing surface a pane gets. This module owns what a send looks like on
-// the wire; `ComposeBar.tsx` owns the input surface and `TerminalPane.tsx` owns
+// the wire; `ComposeBar.tsx` owns the input surface and `TerminalStack.tsx` owns
 // the PTY write.
 
 import { macroPayloadBytes } from "./macros"
