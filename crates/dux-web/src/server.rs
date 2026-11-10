@@ -289,6 +289,13 @@ pub(crate) struct SocketClient {
     /// The browser profile it says it belongs to (`?browser=`), for counting
     /// only: malformed is the same as absent.
     browser: Option<dux_core::attachments::BrowserId>,
+    /// The page a terminal socket says it belongs to (`?page=`): every socket
+    /// of one page drives a row as ONE driver. Malformed is the same as
+    /// absent, which makes the socket a driver of its own.
+    page: Option<dux_core::pty_owners::PageId>,
+    /// Whether a terminal socket's pane is on screen as it opens (`?viewed=`).
+    /// Absent is on screen, so an older page behaves as it always has.
+    viewed: crate::engine_actor::PaneVisibility,
     address: Option<IpAddr>,
     verified: bool,
 }
@@ -298,6 +305,8 @@ struct SocketLinkQuery {
     events: Option<String>,
     after: Option<String>,
     browser: Option<String>,
+    page: Option<String>,
+    viewed: Option<String>,
 }
 
 impl axum::extract::FromRequestParts<AppState> for SocketClient {
@@ -318,7 +327,7 @@ impl SocketClient {
             .ok()
             .map(|axum::extract::Query(query)| query);
         let bounded = |id: Option<String>| id.filter(|id| crate::rest_common::id_within_bound(id));
-        let (link, after, browser) = match query {
+        let (link, after, browser, page, viewed) = match query {
             Some(query) => (
                 bounded(query.events),
                 bounded(query.after),
@@ -326,8 +335,23 @@ impl SocketClient {
                     .browser
                     .as_deref()
                     .and_then(dux_core::attachments::BrowserId::parse),
+                query
+                    .page
+                    .as_deref()
+                    .and_then(dux_core::pty_owners::PageId::parse),
+                if query.viewed.as_deref() == Some("0") {
+                    crate::engine_actor::PaneVisibility::OffScreen
+                } else {
+                    crate::engine_actor::PaneVisibility::OnScreen
+                },
             ),
-            None => (None, None, None),
+            None => (
+                None,
+                None,
+                None,
+                None,
+                crate::engine_actor::PaneVisibility::OnScreen,
+            ),
         };
         let verified = parts
             .extensions
@@ -341,6 +365,8 @@ impl SocketClient {
             link,
             after,
             browser,
+            page,
+            viewed,
             address: verified.or(peer),
             verified: verified.is_some(),
         }
@@ -1620,8 +1646,16 @@ struct PtyBeatFrame {
     /// unreachable endpoint as no evidence of a change.
     #[serde(default)]
     beat: Option<u64>,
+    /// Whether the page is being looked at, acted on only when present: a
+    /// `shown` frame says nothing about it and must leave the attachment's
+    /// viewed state as it was.
     #[serde(default)]
-    viewed: bool,
+    viewed: Option<bool>,
+    /// The pane came on screen (it was mounted off screen, or hidden since):
+    /// the same "looking at it" a subscribe from a pane on screen is, sent
+    /// whoever owns the pty.
+    #[serde(default)]
+    shown: bool,
 }
 
 /// What a terminal socket's upgrade handler extracted from its request.
@@ -2158,23 +2192,16 @@ async fn handle_pty_socket(
         return;
     }
 
-    // Allocated before the subscribe so the attachment can carry it, and not a
-    // claim: only a resize of an unowned pty or a flagged take-over claims.
-    let conn_id = pty_size_owners.next_conn_id();
-    // Placed in its row before anything is asked about it, so the handshake's
-    // owner, every claim and every release are the row's: a terminal opened in
-    // a row another device drives is that device's from here on.
-    pty_size_owners.join_row(
-        target.pty_id(),
-        dux_core::pty_owners::RowKey::of(target.pty_id(), attach.target.agent.as_deref()),
-    );
+    let seat = seat_pty_socket(&pty_size_owners, &target, &attach);
+    let conn_id = seat.id();
+    let viewed = attach.client.viewed;
     // The release, on EVERY exit path. A socket that gave up on its opening
     // sends has to let go of the pty too (it may have claimed it at the
     // handshake), and so does one a panic unwinds through: leaving it held wedges
     // the pty behind a client that can never see it. `PtyOwnershipGuard` also
     // broadcasts the owner-cleared `pty.owner`, without which every other
     // device's card keeps naming a browser tab that closed.
-    let _ownership_guard = PtyOwnershipGuard::new(target.pty_id(), conn_id, &pty_size_owners, &bus);
+    let _ownership_guard = PtyOwnershipGuard::new(&seat, &pty_size_owners, &bus);
     // Attached before the subscribe, which can launch the provider: a PTY that a
     // change has reserved turns the socket away instead of relaunching it.
     let heard = dux_core::attachments::Heard::now();
@@ -2199,8 +2226,7 @@ async fn handle_pty_socket(
         attachments: engine.attachments().clone(),
         token: attachment.token,
         owners: Arc::clone(&pty_size_owners),
-        pty_id: target.pty_id().to_string(),
-        conn_id,
+        seat: Arc::clone(&seat),
         bus: Arc::clone(&bus),
         expired: Arc::clone(&expired),
         live_limits: Arc::clone(&live_limits),
@@ -2209,7 +2235,7 @@ async fn handle_pty_socket(
     // Bind the guard for the socket's full lifetime. Dropping it when this
     // function returns removes the subscriber immediately on disconnect.
     let Some((_viewer_guard, repaint, rx)) =
-        subscribe_or_close(&engine, &target, &sink, peer_ip).await
+        subscribe_or_close(&engine, &target, viewed, &sink, peer_ip).await
     else {
         // The console's count is decremented by `_client_count_guard` above,
         // on this return like any other; saying so again here would count
@@ -2265,6 +2291,28 @@ async fn handle_pty_socket(
     // The guards above release ownership and connection accounting on every exit.
 }
 
+/// Place a terminal socket's pty in its row and seat the socket at its page's
+/// seat for that row.
+///
+/// Placed in its row before anything is asked about it, so the handshake's
+/// owner, every claim and every release are the row's: a terminal opened in a
+/// row another device drives is that device's from here on. Seated before the
+/// subscribe so the attachment can carry the driver id, and not a claim: only a
+/// resize of an unowned row or a flagged take-over claims. Every socket its
+/// page has open on this row shares the id, so the page drives the row as one
+/// driver however many of its panes are mounted.
+fn seat_pty_socket(
+    owners: &PtySizeOwners,
+    target: &PtyTarget,
+    attach: &PtyAttach,
+) -> Arc<dux_core::pty_owners::Seat> {
+    owners.join_row(
+        target.pty_id(),
+        dux_core::pty_owners::RowKey::of(target.pty_id(), attach.target.agent.as_deref()),
+    );
+    Arc::new(owners.take_seat(attach.client.page.as_ref(), target.pty_id()))
+}
+
 /// Subscribe a terminal socket to its PTY. An agent subscribe also
 /// launches/resumes the provider if it isn't running yet (the same flow the
 /// legacy Subscribe uses); a terminal subscribe attaches to an already-created
@@ -2272,6 +2320,7 @@ async fn handle_pty_socket(
 async fn subscribe_or_close(
     engine: &EngineHandle,
     target: &PtyTarget,
+    viewed: crate::engine_actor::PaneVisibility,
     sink: &SharedSink,
     peer_ip: IpAddr,
 ) -> Option<crate::engine_actor::PtySubscription> {
@@ -2279,7 +2328,7 @@ async fn subscribe_or_close(
         // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
         // dormant extra tab this launches it via `launch_agent`, which resolves
         // resume vs. fresh dynamically per `tab_resume_decision` (not always fresh).
-        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone()).await,
+        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone(), viewed).await,
         PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
     };
     match subscription {
@@ -2799,13 +2848,11 @@ impl AttachedPtySocket<'_> {
     }
 
     async fn handle_beat_frame(&self, frame: PtyBeatFrame) {
-        if frame.viewed {
-            self.attachment.note_viewed();
-        } else {
-            self.attachment.note_unviewed();
-        }
-        if frame.viewed {
+        if self.attachment.note_beat_viewed(frame.viewed) {
             self.engine.note_viewed(self.target.pty_id().to_string());
+        }
+        if frame.shown {
+            self.engine.pty_shown(self.target.pty_id().to_string());
         }
         if let Some(n) = frame.beat {
             let _ = with_send_deadline(
@@ -4389,17 +4436,19 @@ impl Drop for ConnectionGuard {
 /// pressed Take over. Nobody claims the freed pty passively; the broadcast only
 /// re-titles the card.
 struct PtyOwnershipGuard {
-    pty_id: String,
-    conn_id: u64,
+    seat: Arc<dux_core::pty_owners::Seat>,
     owners: Arc<PtySizeOwners>,
     bus: Arc<EventBus>,
 }
 
 impl PtyOwnershipGuard {
-    fn new(pty_id: &str, conn_id: u64, owners: &Arc<PtySizeOwners>, bus: &Arc<EventBus>) -> Self {
+    fn new(
+        seat: &Arc<dux_core::pty_owners::Seat>,
+        owners: &Arc<PtySizeOwners>,
+        bus: &Arc<EventBus>,
+    ) -> Self {
         Self {
-            pty_id: pty_id.to_string(),
-            conn_id,
+            seat: Arc::clone(seat),
             owners: Arc::clone(owners),
             bus: Arc::clone(bus),
         }
@@ -4408,16 +4457,28 @@ impl PtyOwnershipGuard {
 
 impl Drop for PtyOwnershipGuard {
     fn drop(&mut self) {
-        let Some(epoch) = self.owners.release(&self.pty_id, self.conn_id) else {
-            return;
-        };
-        dux_core::logger::info(&crate::pty_log::describe_ownership_released(
-            &self.pty_id,
-            self.conn_id,
-            epoch,
-        ));
-        emit_row_owner_cleared(&self.bus, &self.owners, &self.pty_id, epoch);
+        leave_seat_announcing(&self.owners, &self.bus, &self.seat);
     }
+}
+
+/// Count a terminal socket out of its page's seat and, when that let go of
+/// the row, log it and announce the owner-cleared `pty.owner` for every pty
+/// of the row. Once per socket, however many exit paths reach it.
+fn leave_seat_announcing(
+    owners: &Arc<PtySizeOwners>,
+    bus: &Arc<EventBus>,
+    seat: &dux_core::pty_owners::Seat,
+) {
+    let Some(epoch) = owners.leave_seat(seat) else {
+        return;
+    };
+    let pty_id = seat.pty_id();
+    dux_core::logger::info(&crate::pty_log::describe_ownership_released(
+        pty_id,
+        seat.id(),
+        epoch,
+    ));
+    emit_row_owner_cleared(bus, owners, pty_id, epoch);
 }
 
 /// A terminal socket's place in the attachment registry while it lives: part of the
@@ -4476,6 +4537,18 @@ impl AttachmentGuard {
     fn end_deliberately(&self) {
         self.deliberate
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record what a beat frame said about being looked at, and answer whether
+    /// it said "looked at" (so the engine is told too). A frame that says
+    /// nothing (a `shown` frame) leaves the attachment's viewed state as it was.
+    fn note_beat_viewed(&self, viewed: Option<bool>) -> bool {
+        match viewed {
+            Some(true) => self.note_viewed(),
+            Some(false) => self.note_unviewed(),
+            None => {}
+        }
+        viewed == Some(true)
     }
 }
 
@@ -4546,8 +4619,7 @@ struct QuietWatch {
     attachments: dux_core::attachments::Attachments,
     token: u64,
     owners: Arc<PtySizeOwners>,
-    pty_id: String,
-    conn_id: u64,
+    seat: Arc<dux_core::pty_owners::Seat>,
     bus: Arc<EventBus>,
     expired: Arc<tokio::sync::Notify>,
     live_limits: Arc<crate::engine_actor::LiveServerLimits>,
@@ -4578,14 +4650,7 @@ impl QuietWatchdog {
                 std::time::Instant::now(),
                 watch.live_limits.presence_grace(),
             );
-            if let Some(epoch) = watch.owners.release(&watch.pty_id, watch.conn_id) {
-                dux_core::logger::info(&crate::pty_log::describe_ownership_released(
-                    &watch.pty_id,
-                    watch.conn_id,
-                    epoch,
-                ));
-                emit_row_owner_cleared(&watch.bus, &watch.owners, &watch.pty_id, epoch);
-            }
+            leave_seat_announcing(&watch.owners, &watch.bus, &watch.seat);
             watch.expired.notify_one();
         }))
     }
@@ -5839,7 +5904,8 @@ mod tests {
             )
             .unwrap();
         let owners = Arc::new(PtySizeOwners::default());
-        owners.claim("s1-slot", 9);
+        let seat = Arc::new(owners.take_seat(None, "s1-slot"));
+        owners.claim("s1-slot", seat.id());
         let bus = Arc::new(EventBus::new());
         let mut events = bus.subscribe();
         let expired = Arc::new(tokio::sync::Notify::new());
@@ -5849,8 +5915,7 @@ mod tests {
             attachments: attachments.clone(),
             token,
             owners: Arc::clone(&owners),
-            pty_id: "s1-slot".to_string(),
-            conn_id: 9,
+            seat,
             bus: Arc::clone(&bus),
             expired: Arc::clone(&expired),
             live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
@@ -5877,6 +5942,76 @@ mod tests {
         ));
     }
 
+    /// A `shown` frame carries no `viewed`, and an owner sending one must not
+    /// lose the "looked at" its last beat recorded: losing the socket afterwards
+    /// still keeps the row protected for the grace. A frame that does say
+    /// unviewed is what drops it.
+    #[test]
+    fn a_shown_frame_leaves_the_attachments_viewed_state_alone() {
+        use dux_core::attachments::{
+            Attachments, ConnectionFacts, Scope, Surface, Target, TargetKind,
+        };
+        for (frames, protected) in [
+            (vec![Some(true), None], true),
+            (vec![Some(true), Some(false)], false),
+        ] {
+            let attachments = Attachments::default();
+            attachments.register(
+                "e1",
+                ConnectionFacts {
+                    surface: Surface::Browser,
+                    device: None,
+                    address: None,
+                    verified: false,
+                    events: true,
+                    browser: None,
+                },
+                None,
+            );
+            let token = attachments
+                .attach(
+                    "e1",
+                    Target {
+                        kind: TargetKind::Tab,
+                        id: "s1-slot".to_string(),
+                        agent: Some("s1".to_string()),
+                    },
+                    None,
+                    Some(9),
+                )
+                .unwrap();
+            let guard = AttachmentGuard {
+                attachments: attachments.clone(),
+                token,
+                own_connection: None,
+                live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
+                deliberate: std::sync::atomic::AtomicBool::new(false),
+            };
+            for viewed in frames.iter().copied() {
+                guard.note_beat_viewed(viewed);
+            }
+            // The socket is lost, with a grace long enough to read the answer.
+            attachments.detach(
+                token,
+                dux_core::attachments::Ending::Lost,
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(300),
+            );
+            drop(guard);
+            let scope = Scope {
+                ptys: std::collections::BTreeSet::new(),
+                agents: ["s1".to_string()].into(),
+            };
+            assert_eq!(
+                !attachments
+                    .blockers(&scope, None, std::time::Instant::now())
+                    .is_empty(),
+                protected,
+                "{frames:?}"
+            );
+        }
+    }
+
     /// The quiet clock starts when the socket's receive loop does: a socket
     /// whose opening (a long scrollback replay) took longer than the deadline
     /// is not revoked the moment its loop begins.
@@ -5892,9 +6027,8 @@ mod tests {
             deadline: std::time::Duration::from_millis(300),
             attachments,
             token: 1,
+            seat: Arc::new(PtySizeOwners::default().take_seat(None, "s1-slot")),
             owners: Arc::new(PtySizeOwners::default()),
-            pty_id: "s1-slot".to_string(),
-            conn_id: 1,
             bus: Arc::new(EventBus::new()),
             expired: Arc::clone(&expired),
             live_limits: Arc::new(crate::engine_actor::LiveServerLimits::default()),
@@ -6604,20 +6738,27 @@ mod tests {
         );
         let beat: PtyBeatFrame =
             serde_json::from_str(r#"{"beat":7,"viewed":true}"#).expect("a viewer's beat parses");
-        assert_eq!((beat.beat, beat.viewed), (Some(7), true));
+        assert_eq!(
+            (beat.beat, beat.viewed, beat.shown),
+            (Some(7), Some(true), false)
+        );
 
-        // A WATCHER sends the same frame with `viewed` false, and an older
-        // client that omits it entirely must not suppress attention for
-        // everybody.
+        // A frame that omits `viewed` says nothing about it, so an older client
+        // that omits it entirely must not suppress attention for everybody,
+        // and a `shown` frame must leave the attachment's viewed state as it
+        // was.
         let watcher: PtyBeatFrame =
             serde_json::from_str(r#"{"beat":8}"#).expect("a watcher's beat parses");
-        assert_eq!((watcher.beat, watcher.viewed), (Some(8), false));
+        assert_eq!((watcher.beat, watcher.viewed), (Some(8), None));
+        let shown: PtyBeatFrame =
+            serde_json::from_str(r#"{"shown":true}"#).expect("a shown frame parses");
+        assert_eq!((shown.beat, shown.viewed, shown.shown), (None, None, true));
 
         // The pre-fold viewed ping. Nothing to echo, and the attention stamp
         // still lands.
         let legacy: PtyBeatFrame =
             serde_json::from_str(r#"{"viewed":true}"#).expect("a pre-fold viewed ping parses");
-        assert_eq!((legacy.beat, legacy.viewed), (None, true));
+        assert_eq!((legacy.beat, legacy.viewed), (None, Some(true)));
 
         assert!(
             serde_json::from_str::<PtyBeatFrame>(r#"{"rows":24,"cols":80}"#).is_err(),
@@ -6635,7 +6776,8 @@ mod tests {
     fn a_panicking_socket_still_releases_its_pty_ownership() {
         let owners = Arc::new(PtySizeOwners::default());
         let bus = Arc::new(EventBus::new());
-        let conn_id = owners.next_conn_id();
+        let seat = Arc::new(owners.take_seat(None, "pty-1"));
+        let conn_id = seat.id();
         // Claim it the way a granted take-over does, so there is something to
         // release.
         assert!(owners.claim("pty-1", conn_id).is_some());
@@ -6645,12 +6787,7 @@ mod tests {
             let owners = Arc::clone(&owners);
             let bus = Arc::clone(&bus);
             move || {
-                let _guard = PtyOwnershipGuard {
-                    pty_id: "pty-1".to_string(),
-                    conn_id,
-                    owners,
-                    bus,
-                };
+                let _guard = PtyOwnershipGuard { seat, owners, bus };
                 panic!("the socket handler blew up");
             }
         });

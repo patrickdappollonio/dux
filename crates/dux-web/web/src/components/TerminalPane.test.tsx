@@ -394,6 +394,10 @@ class FakePtySocket {
   // class grew with it. Answering `true` means "it went on the wire", which is
   // what starts the heartbeat's answer deadline.
   sendBeat = vi.fn(() => true)
+  // A pane coming on screen and going off it, which carry no beat.
+  sendShown = vi.fn(() => true)
+  sendUnviewed = vi.fn(() => true)
+  onScreen: () => boolean = () => true
   onBeat: (n: number) => void = () => {}
   dropForRetry = vi.fn()
   resumeNow = vi.fn()
@@ -521,7 +525,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
 // Stub browser globals BEFORE the store module evaluates (it touches
 // localStorage at import time, pulled in transitively by TerminalPane).
 installStubs()
-const { TerminalPane } = await import("./TerminalPane")
+const { TerminalPane, TerminalStack } = await import("./TerminalPane")
 // The compose drafts live in the real store, which is module state outliving one
 // test, so each test starts from a clean map. Imported here rather than at the
 // top of the file because the store touches `localStorage` at import time and
@@ -3459,7 +3463,9 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
       .closest(".group")!
     const column = view.container.firstElementChild
 
-    expect(terminalPane.parentElement).toBe(column)
+    // The terminal sits in the stack's box (the one the overlay layer covers),
+    // which shares the column with the input rows.
+    expect(terminalPane.parentElement?.parentElement).toBe(column)
     expect(column?.className).toContain("flex-col")
     expect(composeUp()).toBe(false)
     expect(accessoryUp()).toBe(false)
@@ -3472,7 +3478,9 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
       .closest(".group")!
     const column = view.container.firstElementChild
 
-    expect(terminalPane.parentElement).toBe(column)
+    // The terminal sits in the stack's box (the one the overlay layer covers),
+    // which shares the column with the input rows.
+    expect(terminalPane.parentElement?.parentElement).toBe(column)
     expect(column?.className).toContain("flex-col")
     expect(terminalPane.className).toContain("flex-1")
     expect(composeUp()).toBe(true)
@@ -5561,5 +5569,221 @@ describe("TerminalPane publishes its macro target", () => {
     expect(paneMacroTargetFor("s1")).not.toBeNull()
     unmount()
     expect(paneMacroTargetFor("s1")).toBeNull()
+  })
+})
+
+// AN AGENT AND ITS DOCKED TERMINAL AS ONE STACK: two live parts, each with its
+// own socket and ownership, one input area under them, and one part typing goes
+// to. The stack is in front of every terminal screen with one part today; these
+// pin what changes once it has two.
+describe("TerminalStack with two parts", () => {
+  let pointerStub: MatchMediaStub | null = null
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+  })
+  const agent = { kind: "agent" as const, id: "s1", sessionId: "s1" }
+  const dock = {
+    kind: "terminal" as const,
+    id: "t1",
+    owner: { kind: "session" as const, session_id: "s1" },
+  }
+  const composeBox = () =>
+    screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+  const partBox = (index: number) =>
+    screen.getAllByTestId("terminal-container")[index].closest(".group")!
+  const ownBoth = () => {
+    // One page, one driver id, on both of its sockets.
+    for (const pty of FakePtySocket.instances) {
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("seat-1", "seat-1")
+      })
+    }
+  }
+
+  it("lets only the typing target take focus after its replay", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalStack parts={[agent, dock]} />)
+    const [agentPty, dockPty] = FakePtySocket.instances
+    const dockFocus = vi.spyOn(TermStub.instances[1], "focus")
+    ownBoth()
+    act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(document.activeElement).not.toBe(composeBox())
+    expect(dockFocus).not.toHaveBeenCalled()
+    act(() => agentPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(document.activeElement).toBe(composeBox())
+  })
+
+  it("moves the one input area, the tab-stop suspension and the drafts with the target", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalStack parts={[agent, dock]} />)
+    const [agentTerm, dockTerm] = TermStub.instances
+    ownBoth()
+    expect(screen.getAllByRole("textbox", { name: "Message" })).toHaveLength(1)
+    expect(composeBox().placeholder).toBe("Write a message to the agent…")
+    expect([agentTerm.textarea.tabIndex, dockTerm.textarea.tabIndex]).toEqual([-1, 0])
+    fireEvent.change(composeBox(), { target: { value: "for the agent" } })
+
+    fireEvent.pointerDown(partBox(1))
+    expect(composeBox().placeholder).toBe("Type a command…")
+    expect(composeBox().value).toBe("")
+    expect([agentTerm.textarea.tabIndex, dockTerm.textarea.tabIndex]).toEqual([0, -1])
+    fireEvent.change(composeBox(), { target: { value: "ls" } })
+
+    fireEvent.pointerDown(partBox(0))
+    expect(composeBox().value).toBe("for the agent")
+  })
+
+  it("owns the row when its page's claim is announced before its own handshake lands", () => {
+    // The dock opens on the page's shared driver id while the row is unclaimed;
+    // the agent part claims it, and that announcement overtakes the dock's own
+    // handshake, which was snapshotted before the claim.
+    resetPtyOwnerEpochs()
+    render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    const dockPty = FakePtySocket.instances[1]
+    act(() => dockPty.onOpen())
+    act(() => notifyPtyOwner("t1", "seat-1", 5))
+    act(() => dockPty.onConnected("seat-1", null, 4))
+    act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(dockPty.sendResize).toHaveBeenCalled()
+    expect(screen.queryByText("Active on another device")).toBeNull()
+  })
+
+  it("lets a part off screen ask for its row back with a self-succession", () => {
+    // Its handshake names this page's own previous connection, which still
+    // holds the row: the armed, flagged claim is what goes out, hidden or not.
+    vi.useFakeTimers()
+    try {
+      render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+      const dockPty = FakePtySocket.instances[1]
+      act(() => {
+        dockPty.onOpen()
+        dockPty.onConnected("old-1", "old-1")
+      })
+      act(() => dockPty.onReconnecting())
+      dockPty.sendResize.mockClear()
+      act(() => {
+        dockPty.onOpen()
+        dockPty.onConnected("new-1", "old-1")
+      })
+      act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(dockPty.sendResize).toHaveBeenCalledWith(24, 80, true, "old-1")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("sends a Send's Enter to the part the body went to after the target moved", () => {
+    vi.useFakeTimers()
+    try {
+      pointerStub = stubCoarsePointer(true)
+      render(<TerminalStack parts={[agent, dock]} />)
+      const [agentPty, dockPty] = FakePtySocket.instances
+      ownBoth()
+      fireEvent.change(composeBox(), { target: { value: "hello" } })
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Send" }))
+      fireEvent.pointerDown(partBox(1))
+      expect(composeBox().placeholder).toBe("Type a command…")
+      act(() => {
+        vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      })
+      const sent = agentPty.sendInput.mock.calls.map((call: unknown[]) =>
+        new TextDecoder().decode(call[0] as Uint8Array),
+      )
+      expect(sent).toEqual(["hello", "\r"])
+      expect(dockPty.sendInput).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("falls back to the part on screen when the chosen part goes off screen", () => {
+    pointerStub = stubCoarsePointer(true)
+    const { rerender } = render(<TerminalStack parts={[agent, dock]} />)
+    ownBoth()
+    fireEvent.pointerDown(partBox(1))
+    expect(composeBox().placeholder).toBe("Type a command…")
+    rerender(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    expect(composeBox().placeholder).toBe("Write a message to the agent…")
+  })
+
+  it("lands a click into the other part's terminal in the message box, now for that part", async () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalStack parts={[agent, dock]} />)
+    ownBoth()
+    const dockContainer = screen.getAllByTestId("terminal-container")[1]
+    // Not the target yet: the redirect is the target part's alone.
+    await act(async () => {
+      fireEvent.focusIn(dockContainer)
+      await Promise.resolve()
+    })
+    expect(document.activeElement).not.toBe(composeBox())
+    fireEvent.pointerDown(partBox(1))
+    await act(async () => {
+      fireEvent.focusIn(dockContainer)
+      await Promise.resolve()
+    })
+    expect(document.activeElement).toBe(composeBox())
+    expect(composeBox().placeholder).toBe("Type a command…")
+  })
+
+  it("keeps a part off screen in a real box, hidden rather than shrunk", () => {
+    render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    expect(partBox(1).className).toContain("absolute")
+    expect(partBox(1).className).toContain("inset-0")
+    expect(partBox(1).className).toContain("invisible")
+    expect(partBox(0).className).toContain("flex-1")
+  })
+
+  it("opens a part off screen as not viewed, and says when it comes on screen and leaves", () => {
+    const { rerender } = render(
+      <TerminalStack parts={[agent, { ...dock, onScreen: false }]} />,
+    )
+    const dockPty = FakePtySocket.instances[1]
+    expect(dockPty.onScreen()).toBe(false)
+    expect(FakePtySocket.instances[0].onScreen()).toBe(true)
+    rerender(<TerminalStack parts={[agent, { ...dock, onScreen: true }]} />)
+    expect(dockPty.onScreen()).toBe(true)
+    expect(dockPty.sendShown).toHaveBeenCalledTimes(1)
+    rerender(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    expect(dockPty.sendUnviewed).toHaveBeenCalledTimes(1)
+    expect(dockPty.sendShown).toHaveBeenCalledTimes(1)
+  })
+
+  it("never makes the first claim of a row from the part off screen", () => {
+    render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    const [agentPty, dockPty] = FakePtySocket.instances
+    for (const pty of [agentPty, dockPty]) {
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("seat-1", null)
+        pty.bytesCb?.(new Uint8Array([0x61]))
+      })
+    }
+    expect(agentPty.sendResize).toHaveBeenCalled()
+    expect(dockPty.sendResize).not.toHaveBeenCalled()
+    // A row nobody drives is not somebody else's: no card over the hidden part.
+    expect(screen.queryByText("Running in the background")).toBeNull()
+  })
+})
+
+// The overlay layer is the stack's, and a stack of one paints it exactly where
+// the lone pane always did, for every kind of terminal screen.
+describe("the stack's overlay layer over a lone terminal", () => {
+  const overlay = <div data-testid="pane-overlay" />
+  it.each([
+    ["a project terminal", { kind: "project" as const, project_id: "p1" }],
+    ["a standalone terminal", { kind: "standalone" as const }],
+  ])("paints the overlay over %s and withholds it under the take-over card", (_name, owner) => {
+    render(<TerminalPane kind="terminal" id="t9" owner={owner} overlay={overlay} />)
+    const layer = screen.getByTestId("pane-overlay").parentElement!
+    expect(layer.dataset.testid).toBe("pane-overlay-layer")
+    expect(layer.parentElement!.contains(screen.getByTestId("terminal-container"))).toBe(true)
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(screen.queryByTestId("pane-overlay-layer")).toBeNull()
   })
 })

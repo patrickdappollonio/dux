@@ -302,6 +302,30 @@ describe("Send", () => {
   })
 })
 
+// The delayed Enter belongs to the connection the body went down. The socket
+// object reconnects in place, so "the same socket and open" is not enough: a
+// reconnect inside the delay is a new connection, and the Enter is dropped.
+describe("Send's delayed Enter across a reconnect", () => {
+  it("is dropped when the socket reconnected before it was due", () => {
+    vi.useFakeTimers()
+    try {
+      const { view, sent, pty } = setup()
+      const socket = pty as typeof pty & { openSerial: number }
+      socket.openSerial = 1
+      act(() => {
+        view.result.current.sendCompose("hello")
+      })
+      socket.openSerial = 2
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      expect(sent).toEqual(["hello"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe("the draft", () => {
   it("splices inserted text at the caret and leaves nothing on the wire", () => {
     const { view, compose, sent } = setup({ composeActive: true })

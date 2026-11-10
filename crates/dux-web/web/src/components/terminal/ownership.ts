@@ -92,6 +92,11 @@ export type TerminalOwnership = {
   /// least once on this mount. Until it has, `isOwner` is only the foreground
   /// GUESS, which is not a good enough reason to raise a soft keyboard.
   handshakeSeen: boolean
+  /// Whether the server has named this pane's own driver id as the row's
+  /// owner on the current connection: the handshake or a `pty.owner` event. Until then an owner verdict over an unclaimed row is only the
+  /// foreground guess, which a pane off screen must not act on.
+  rowConfirmed: boolean
+  readRowConfirmed: () => boolean
   /// Whether this socket has given up for good.
   connectionLost: boolean
   setConnectionLost: (value: boolean) => void
@@ -129,6 +134,12 @@ export function useTerminalOwnership(
   )
 
   const myConnIdRef = useRef<string | null>(null)
+  const [rowConfirmed, setRowConfirmedState] = useState(false)
+  const rowConfirmedRef = useRef(false)
+  const setRowConfirmed = (confirmed: boolean) => {
+    rowConfirmedRef.current = confirmed
+    setRowConfirmedState(confirmed)
+  }
   // Every id this page has ever held (`rememberHeldConnId`), not merely this
   // pane's last: a returning owner recognises its own dead connection in the
   // next handshake (see the self-succession rule in `seedFromConnected`), a
@@ -156,6 +167,11 @@ export function useTerminalOwnership(
       read: () => myConnIdRef.current,
       write: (next) => {
         if (next !== null) rememberHeldConnId(next, currentRunStamp())
+        // A new connection has not been named the row's driver yet.
+        if (next !== myConnIdRef.current) {
+          rowConfirmedRef.current = false
+          setRowConfirmedState(false)
+        }
         myConnIdRef.current = next
       },
     }),
@@ -179,6 +195,10 @@ export function useTerminalOwnership(
   // A handshake superseded by that word, naming one of this page's own ghosts,
   // is a row the page let go of between the snapshot and the event.
   const newestEventFreedRef = useRef(false)
+  // The owner the newest applied `pty.owner` named, or null when it freed the
+  // row. A pane whose handshake is still in flight has no id to compare an
+  // event with, so the comparison is made again when the handshake lands.
+  const newestEventOwnerRef = useRef<string | null>(null)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
@@ -280,6 +300,7 @@ export function useTerminalOwnership(
       pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
       newestEventFreedRef.current = freed
+      newestEventOwnerRef.current = freed ? null : (ownerId ?? null)
       // A self-succession still waiting to be sent outlives its ghost letting
       // go: the row is free, and the server claims a free row for that frame
       // as it would for a plain resize, displacing nobody. Dropping the intent
@@ -290,6 +311,7 @@ export function useTerminalOwnership(
         return
       }
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
+      setRowConfirmed(mine)
       setOwnerPresent(!freed)
       // Through the channel, not an inline copy of its body: the verdict has
       // ONE write implementation, so anything the channel ever grows reaches
@@ -345,6 +367,8 @@ export function useTerminalOwnership(
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {
       setOwnerPresent(owner === undefined ? true : owner !== null)
+      // An old server that does not answer grants any claim, as it always has.
+      setRowConfirmed(owner === undefined || owner === myConnId)
     }
     // Self-succession, the blipped owner's half of "losing ownership is
     // sticky". The server reaps a dead connection by send failure, tens of
@@ -386,7 +410,16 @@ export function useTerminalOwnership(
       owner !== myConnId &&
       ownGhostOfThisRun(owner) &&
       isForeground()
+    // The page's other pane claimed the row on the driver id this socket was
+    // just seated on, and that claim reached this pane before its own
+    // handshake, which was snapshotted before it. Without this the pane stays a
+    // watcher of its own page's row, because a superseded handshake keeps the
+    // verdict the event left, and nothing later corrects it.
+    const eventNamedThisSeat =
+      superseded && newestEventOwnerRef.current === myConnId
+    if (eventNamedThisSeat) setRowConfirmed(true)
     const mine =
+      eventNamedThisSeat ||
       ghostLetGo ||
       seedVerdictFromConnected({
         owner,
@@ -481,6 +514,8 @@ export function useTerminalOwnership(
     takeoverLabel: deviceLabel(takeoverDevice),
     ownerPresent,
     handshakeSeen,
+    rowConfirmed,
+    readRowConfirmed: () => rowConfirmedRef.current,
     connectionLost,
     setConnectionLost,
     takeOver,

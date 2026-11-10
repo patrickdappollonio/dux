@@ -20,6 +20,11 @@
 //     `CONNECTION_ID_WAIT_MS` for one, so the tab is never in its own way, and
 //     this browser as `?browser=<id>`, so a socket the server cannot link to the
 //     tab (none yet, or one it no longer knows) still counts as this browser.
+//     It names this page as `?page=<id>`, so every terminal the page has open on
+//     one row is one driver of it, and adds `viewed=0` when its pane is off
+//     screen, so opening it does not count as looking at the tab.
+//   - client to server Text = `{"shown":true}` when a pane mounted off screen
+//     comes on screen, and `{"viewed":false}` the moment one goes off screen.
 //
 // Reconnect is the shared `ReconnectingSocket` base with three PTY-specific
 // policies: a hidden page schedules nothing, because a PTY nobody is looking at
@@ -35,6 +40,7 @@ import { assertNever } from "./assertNever"
 import { wsUrl } from "./apiBase"
 import { authPaused } from "./authGate"
 import { browserId } from "./browserId"
+import { pageSeatId } from "./pageSeat"
 import { awaitingConnectionId, getConnectionId, onConnectionIdSettled } from "./connection"
 import { ReconnectingSocket } from "./reconnectingSocket"
 import { ptyGridInBounds } from "./ptyGrid"
@@ -179,6 +185,10 @@ export class PtySocket extends ReconnectingSocket {
     const events = getConnectionId()
     if (events !== null) params.push(`events=${encodeURIComponent(events)}`)
     params.push(`browser=${encodeURIComponent(browserId())}`)
+    params.push(`page=${pageSeatId()}`)
+    // Read at each open, so a reconnect names the pane's visibility as it is
+    // then rather than as it was at mount.
+    if (!this.onScreen()) params.push("viewed=0")
     const separator = this.url.includes("?") ? "&" : "?"
     return `${this.url}${separator}${params.join("&")}`
   }
@@ -190,6 +200,10 @@ export class PtySocket extends ReconnectingSocket {
     this.unsubscribeGate()
     super.dispose()
   }
+
+  /// Whether the pane this socket feeds is on screen, read at every open. A
+  /// pane kept mounted off screen is not looking at its tab.
+  onScreen: () => boolean = () => true
 
   private bytesCb: (bytes: Uint8Array) => void = () => {}
   // This socket's server-assigned connection id, from the `connected` frame on
@@ -319,7 +333,17 @@ export class PtySocket extends ReconnectingSocket {
 
   // Nothing to resend on (re)open: the server replays this PTY's scrollback as the
   // first Binary frame after every open, so the byte feed rehydrates itself.
-  protected onSocketOpen(): void {}
+  // How many times this socket has opened. The object reconnects in place, so
+  // something that must reach the SAME connection (the delayed Enter of a
+  // compose Send) compares this rather than the object.
+  private opens = 0
+  get openSerial(): number {
+    return this.opens
+  }
+
+  protected onSocketOpen(): void {
+    this.opens += 1
+  }
 
   protected handleMessage(event: MessageEvent): void {
     if (event.data instanceof ArrayBuffer) {
@@ -468,6 +492,28 @@ export class PtySocket extends ReconnectingSocket {
           ? { rows, cols, takeover: true }
           : { rows, cols, takeover: true, expected_owner: expectedOwner }
         : { rows, cols }
+      this.ws.send(JSON.stringify(frame))
+      return true
+    }
+    return false
+  }
+
+  // The pane came on screen: `{"shown":true}`, the "looking at it" a socket
+  // opening on screen is, for one already open. Sent whoever owns the pty, and
+  // never echoed.
+  sendShown(): boolean {
+    return this.sendText({ shown: true })
+  }
+
+  // The pane went off screen: `{"viewed":false}` at once, rather than leaving
+  // the server believing it is watched until the next beat.
+  sendUnviewed(): boolean {
+    return this.sendText({ viewed: false })
+  }
+
+  private sendText(frame: object): boolean {
+    if (authPaused()) return false
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(frame))
       return true
     }

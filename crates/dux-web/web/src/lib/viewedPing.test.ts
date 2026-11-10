@@ -7,6 +7,11 @@ import {
 } from "./viewedPing"
 
 describe("shouldSendViewed", () => {
+  it("never says viewed for a pane kept mounted off screen, owner or not", () => {
+    expect(shouldSendViewed({ isOwner: true, visible: true, onScreen: false })).toBe(false)
+    expect(shouldSendViewed({ isOwner: true, visible: true, onScreen: true })).toBe(true)
+  })
+
   it("pings only when this device is the owner AND visible", () => {
     expect(shouldSendViewed({ isOwner: true, visible: true })).toBe(true)
     // A read-only observer must not suppress attention for everyone.

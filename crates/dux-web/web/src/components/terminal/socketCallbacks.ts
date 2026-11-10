@@ -38,12 +38,15 @@ type TerminalSocketCallbackOptions = {
   resetReplayWait: () => void
 }
 
+// `holder` is the socket the id was registered for: two panes of one page on
+// one row share an id, and retiring it for one must leave the other's.
 export function retireConnectionIdentity(
   connectionIdentity: ConnectionIdentity,
+  holder: unknown,
 ): boolean {
   const connectionId = connectionIdentity.read()
   if (connectionId === null) return false
-  noteOwnPtyConnection(connectionId, false)
+  noteOwnPtyConnection(connectionId, false, holder)
   connectionIdentity.write(null)
   return true
 }
@@ -72,7 +75,7 @@ export function registerTerminalSocketCallbacks(
 
   pty.onConnected = (connectionId, owner, ownerEpoch, ownerDevice) => {
     connId.write(connectionId)
-    noteOwnPtyConnection(connectionId, true)
+    noteOwnPtyConnection(connectionId, true, pty)
     seedOwnershipFromConnected(connectionId, owner, ownerEpoch, ownerDevice)
   }
 
@@ -86,7 +89,7 @@ export function registerTerminalSocketCallbacks(
   pty.onOpen = () => {
     // Each open gets a new server-side identity. The stale one must not answer
     // ownership questions while the next handshake is still in flight.
-    if (!retireConnectionIdentity(connId)) connId.write(null)
+    if (!retireConnectionIdentity(connId, pty)) connId.write(null)
     setReconnecting(false)
     noteSocketOpen()
 
@@ -100,7 +103,7 @@ export function registerTerminalSocketCallbacks(
 
   pty.onReconnecting = () => {
     setReconnecting(true)
-    retireConnectionIdentity(connId)
+    retireConnectionIdentity(connId, pty)
   }
 
   pty.onConn = (connectionState) => {

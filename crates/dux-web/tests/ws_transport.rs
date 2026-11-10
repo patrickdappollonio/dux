@@ -3048,6 +3048,71 @@ async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     );
 }
 
+/// A page is ONE driver of a row however many of its panes are open: the
+/// agent's pane and the terminal docked under it name the same page, share a
+/// driver id, and the second types into the row the first claimed. A second
+/// page is a second driver and watches. The row is let go of only when the
+/// page's last socket on it closes.
+#[tokio::test]
+async fn the_panes_of_one_page_drive_a_row_as_one_driver() {
+    async fn open(addr: SocketAddr, path: &str) -> (ClientWs, serde_json::Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{path}"))
+            .await
+            .expect("connect a pty socket");
+        let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(8))
+            .await
+            .expect("the connected handshake");
+        (ws, hello)
+    }
+    let page = "0123456789abcdef0123456789abcdef";
+    let other = "fedcba9876543210fedcba9876543210";
+    let (addr, _tmp) = boot().await;
+    let terminal = create_terminal_via_rest(addr, "s1").await;
+    let (mut agent, hello) = open(addr, &format!("/ws/sessions/s1/pty?page={page}")).await;
+    let driver = hello["id"].as_str().expect("an id").to_string();
+    agent
+        .send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+        .await
+        .unwrap();
+    next_event_frame(&mut agent, "size", Duration::from_secs(8))
+        .await
+        .expect("the agent pane claimed the row");
+
+    let dock_path = format!("/ws/sessions/s1/terminals/{terminal}/pty");
+    let (mut dock, hello) = open(addr, &format!("{dock_path}?page={page}")).await;
+    assert_eq!(
+        hello["id"].as_str(),
+        Some(driver.as_str()),
+        "one page, one driver"
+    );
+    assert_eq!(hello["owner"].as_str(), Some(driver.as_str()));
+    dock.send(Message::Binary(b"echo dux-seat-marker\n".to_vec().into()))
+        .await
+        .unwrap();
+    let echoed = accumulate_until(&mut dock, "dux-seat-marker", Duration::from_secs(8)).await;
+    assert!(
+        String::from_utf8_lossy(&echoed).contains("dux-seat-marker"),
+        "the docked terminal types into the row its page drives"
+    );
+
+    let (_watcher, hello) = open(addr, &format!("{dock_path}?page={other}")).await;
+    assert_ne!(hello["id"].as_str(), Some(driver.as_str()));
+    assert_eq!(
+        hello["owner"].as_str(),
+        Some(driver.as_str()),
+        "a second page watches"
+    );
+
+    drop(agent);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_again, hello) = open(addr, &format!("{dock_path}?page={other}")).await;
+    assert_eq!(
+        hello["owner"].as_str(),
+        Some(driver.as_str()),
+        "the page still drives the row through its open terminal"
+    );
+}
+
 /// The `connected` handshake also names the owner's DEVICE: the `User-Agent`
 /// the owning connection presented at its upgrade, recorded at claim time and
 /// read under the same owners-lock acquisition as `owner` and `owner_epoch`.

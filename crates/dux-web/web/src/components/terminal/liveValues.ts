@@ -58,6 +58,10 @@ export type TerminalLiveSettings = {
   /// Whether the compose bar is the typing surface. A mirror that lags the render
   /// by one commit; both mismatch directions degrade to a harmless focus call.
   composeActive: boolean
+  /// Whether the pane is on screen. A part of a stack kept mounted off screen
+  /// is not looking at its tab and never makes the first claim of a row.
+  /// Absent means on screen.
+  onScreen?: boolean
 }
 
 /// The read side of the container: a ref, so a call site reads one field without

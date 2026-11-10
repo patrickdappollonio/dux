@@ -73,7 +73,13 @@ function settleFirstFrame(
 }
 
 function setup(
-  opts: { owner?: boolean; wire?: boolean; flagged?: boolean } = {},
+  opts: {
+    owner?: boolean
+    wire?: boolean
+    flagged?: boolean
+    onScreen?: boolean
+    rowConfirmed?: boolean
+  } = {},
 ) {
   const term = new TermFake()
   const fit = new FitFake(term)
@@ -82,6 +88,8 @@ function setup(
   let owner = opts.owner ?? true
   let wire = opts.wire ?? true
   let flagged = opts.flagged ?? false
+  let onScreen = opts.onScreen ?? true
+  let rowConfirmed = opts.rowConfirmed ?? true
   const coord = createResizeCoordinator({
     term: term as unknown as Terminal,
     fit: fit as unknown as FitAddon,
@@ -93,6 +101,8 @@ function setup(
     isOwner: () => owner,
     lastSendWasFlagged: () => flagged,
     onViewerLayout: () => relayouts.push(1),
+    onScreen: () => onScreen,
+    rowConfirmed: () => rowConfirmed,
   })
   return {
     term,
@@ -108,6 +118,12 @@ function setup(
     },
     setFlagged: (v: boolean) => {
       flagged = v
+    },
+    setOnScreen: (v: boolean) => {
+      onScreen = v
+    },
+    setRowConfirmed: (v: boolean) => {
+      rowConfirmed = v
     },
   }
 }
@@ -885,5 +901,77 @@ describe("whether an open has asserted a size at all", () => {
     coord.noteOpen(false)
     coord.firstFrameLanded()
     expect(coord.sizeSentSinceOpen()).toBe(false)
+  })
+})
+
+// A part kept mounted off screen is a real pane with a real box: once its row is
+// this page's it fits and resizes like any owner, but it never makes the FIRST
+// claim of a row, because a resize frame is a claim and that claim belongs to
+// the part on screen.
+describe("a pane kept mounted off screen", () => {
+  it("fits its box and sends that grid when its row is this page's", () => {
+    const { coord, term, fit, sent } = setup({ onScreen: false, rowConfirmed: true })
+    coord.start(document.createElement("div"))
+    settleFirstFrame(coord, sent)
+    fit.next = { rows: 30, cols: 100 }
+    observers[0].fire()
+    vi.advanceTimersByTime(1000)
+    expect(term.rows).toBe(30)
+    expect(sent).toEqual([{ rows: 30, cols: 100 }])
+  })
+
+  it("sends a usable grid on its first frame when mounted hidden over its own row", () => {
+    const { coord, sent } = setup({ onScreen: false, rowConfirmed: true })
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    expect(sent).toEqual([{ rows: 24, cols: 80 }])
+  })
+
+  it("adopts the handshake and later size reports while it watches, hidden", () => {
+    const { coord, term } = setup({ owner: false, onScreen: false })
+    coord.start(document.createElement("div"))
+    coord.noteOpen(true)
+    coord.noteRemoteGrid({ rows: 40, cols: 120 }, true)
+    expect([term.rows, term.cols]).toEqual([40, 120])
+    coord.firstFrameLanded()
+    coord.noteRemoteGrid({ rows: 20, cols: 70 })
+    expect([term.rows, term.cols]).toEqual([20, 70])
+  })
+
+  it("sends no plain resize over a row nobody drives, and renders at the handshake grid", () => {
+    const { coord, term, fit, sent, setRowConfirmed } = setup({
+      onScreen: false,
+      rowConfirmed: false,
+    })
+    coord.start(document.createElement("div"))
+    coord.noteOpen(true)
+    coord.noteRemoteGrid({ rows: 40, cols: 120 }, true)
+    coord.firstFrameLanded()
+    observers[0].fire()
+    vi.advanceTimersByTime(1000)
+    expect(sent).toEqual([])
+    expect([term.rows, term.cols]).toEqual([40, 120])
+    const fitsWhileWatching = fit.fits
+
+    // The part on screen claims the row, which names this page's driver id.
+    setRowConfirmed(true)
+    fit.next = { rows: 30, cols: 100 }
+    coord.refitForFonts()
+    vi.advanceTimersByTime(1000)
+    expect(fit.fits).toBeGreaterThan(fitsWhileWatching)
+    expect(sent).toEqual([{ rows: 30, cols: 100 }])
+  })
+
+  it("claims through the ordinary plain resize once it comes on screen", () => {
+    const { coord, sent, setOnScreen } = setup({ onScreen: false, rowConfirmed: false })
+    coord.start(document.createElement("div"))
+    coord.noteOpen(false)
+    coord.firstFrameLanded()
+    expect(sent).toEqual([])
+    setOnScreen(true)
+    coord.resyncToForeground()
+    vi.advanceTimersByTime(1000)
+    expect(sent).toEqual([{ rows: 24, cols: 80 }])
   })
 })
