@@ -2061,9 +2061,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     stopped agent's running terminal) would leave the selection, the address, the
     typing target and the flap's Input group naming the agent while a terminal is on
     screen. So the view is read off the selection, and the store resolves an opening
-    to the right part before anything renders (`phoneOpeningTerminal` in
-    `selectSessionRoute`, which a restore reaches with `"replace"`, so a bare agent
-    address is rewritten rather than pushed); the switch is a selection too
+    to the right part before anything renders, and only for a request that
+    names no part (`phoneOpeningTerminal` in `selectSession`, a row of the list):
+    an address is a position, so a reload or link opens the part it names, a
+    bare agent address the agent; the switch is a selection too
     (`switchPhonePart`), which is what makes it a Back step. The screen mounts the
     agent and the dock's active terminal as one stack, the part off screen in a box
     the size of the stack's just below its edge, clipped, so flipping never

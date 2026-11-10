@@ -30,6 +30,9 @@ export interface AgentStackModel {
   dock: TerminalView[]
   /** The dock terminal in front, or null when the agent has none. */
   activeTerminal: string | null
+  /** A terminal selected the moment its create answered, before the workspace
+   * lists it, or null. */
+  unlistedTerminal: string | null
   layout: ComputerLayout
   /** The part a phone shows: the part the selection names, which on a phone is
    * the part on screen and the one typing goes to. */
@@ -163,6 +166,7 @@ export function agentStackModel(ctx: {
     slotTabId,
     dock,
     activeTerminal,
+    unlistedTerminal: unlisted,
     layout,
     view,
     openingToSettle:

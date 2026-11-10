@@ -3513,14 +3513,21 @@ describe("journeys a fuzzer found", () => {
 // the place it came from.
 describe("a seeded walk keeps the address and history true", () => {
   type Mod = Awaited<ReturnType<typeof loadStore>>
-  type World = { id: string; tabs: string[]; terminals: string[] }[]
+  type World = { id: string; tabs: string[]; terminals: string[]; status?: string }[]
   const SEEDS = 60
   const STEPS = 50
   const settle = async (n = 3) => {
     for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0))
   }
   const specs = (w: World): SessionSpec[] =>
-    w.map((s) => ({ id: s.id, project_id: "p1", tabs: [...s.tabs], terminals: [...s.terminals], live: true }))
+    w.map((s) => ({
+      id: s.id,
+      project_id: "p1",
+      tabs: [...s.tabs],
+      terminals: [...s.terminals],
+      live: s.status === undefined,
+      status: s.status,
+    }))
   // xorshift: the same seed walks the same steps on every machine.
   function rng(seed: number) {
     let x = seed * 2654435761 + 12345
@@ -3541,6 +3548,8 @@ describe("a seeded walk keeps the address and history true", () => {
     const w: World = [
       { id: "s1", tabs: ["b2", "b3"], terminals: ["t1", "t2"] },
       { id: "s2", tabs: ["c2"], terminals: ["u1"] },
+      // Stopped with a terminal left running, so a row tap opens the terminal.
+      { id: "s3", tabs: [], terminals: ["v1"], status: "detached" },
     ]
     const mem = new Map<string, string>()
     vi.stubGlobal("localStorage", {
@@ -3676,10 +3685,18 @@ describe("a seeded walk keeps the address and history true", () => {
       } else if (roll < 0.69) {
         const s = cur ?? pick(w)
         const t = `n${++n}`
-        log.push(`new terminal ${s.id} ${t}`)
+        // Half the time the create's answer arrives before the workspace that
+        // lists the terminal, which is the order a fast create usually takes.
+        const early = r() < 0.5
+        log.push(`new terminal ${s.id} ${t}${early ? " (before the workspace lists it)" : ""}`)
         s.terminals.push(t)
-        await pushSpine(mod, specs(w))
-        mod.selectTerminal(t, { kind: "session", sessionId: s.id })
+        if (early) {
+          mod.selectTerminal(t, { kind: "session", sessionId: s.id })
+          await pushSpine(mod, specs(w))
+        } else {
+          await pushSpine(mod, specs(w))
+          mod.selectTerminal(t, { kind: "session", sessionId: s.id })
+        }
       } else if (roll < 0.72) {
         const s = cur ?? pick(w)
         const t = `x${++n}`

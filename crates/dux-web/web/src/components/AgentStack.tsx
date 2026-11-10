@@ -125,6 +125,7 @@ export function AgentStack({
         sessionId={sessionId}
         terminals={dock}
         activeTerminal={model.activeTerminal}
+        unlisted={model.unlistedTerminal}
         layout={layout}
         onLayoutAction={onLayoutAction}
       />

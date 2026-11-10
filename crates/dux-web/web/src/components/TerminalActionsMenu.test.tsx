@@ -10,10 +10,16 @@ import type { TerminalOwnerRef } from "@/lib/store"
 
 const openEditorMock = vi.fn()
 const openDeleteTerminalMock = vi.fn()
+// The workspace lists the terminal unless a test says it has just been created.
+let listedTerminals = ["t7"]
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
+    useDux: () => ({
+      ...actual.getSnapshot(),
+      spine: { terminals: listedTerminals.map((id) => ({ id })) },
+    }),
     openEditor: openEditorMock,
     openDeleteTerminal: openDeleteTerminalMock,
   }
@@ -45,6 +51,7 @@ const {
 
 afterEach(() => {
   cleanup()
+  listedTerminals = ["t7"]
   openEditorMock.mockClear()
   openDeleteTerminalMock.mockClear()
   vi.unstubAllGlobals()
@@ -109,6 +116,14 @@ describe("the terminal's own actions", () => {
     await open({ kind: "standalone" })
     fireEvent.click(item("Close…"))
     expect(openDeleteTerminalMock).toHaveBeenCalledWith("t7")
+  })
+
+  // A terminal just created is on screen before the workspace lists it, and
+  // its confirm has nothing to confirm until then: no Close… that does nothing.
+  it("offers no Close… for a terminal the workspace does not list yet", async () => {
+    listedTerminals = []
+    await open({ kind: "session", sessionId: "s1" })
+    expect(screen.getAllByRole("menuitem").some((el) => el.textContent?.includes("Close"))).toBe(false)
   })
 
   // The in-app overlay is desktop-only, so on a phone its row would be a dead

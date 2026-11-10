@@ -85,7 +85,15 @@ const target = { kind: "agent" as const, sessionId: "s1", tabId: "s1" }
 
 function makeState(theater: boolean): DuxState {
   return {
-    spine: { projects: [{ id: "p1", name: "dux" }], sessions: [session()] },
+    spine: {
+      projects: [{ id: "p1", name: "dux" }],
+      sessions: [session()],
+      // Listed, so their Close… has a terminal to confirm.
+      terminals: [
+        { id: "t7", owner: { kind: "session", session_id: "s1" } },
+        { id: "t9", owner: { kind: "standalone" } },
+      ],
+    },
     bootstrap: {
       title: "dux",
       agent_tabs_max: 4,

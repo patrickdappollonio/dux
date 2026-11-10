@@ -4,6 +4,7 @@ import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from "
 import {
   carryCueClock,
   forgetCueClock,
+  holdCueClock,
   useWorkingCue,
   WORKING_PULSE_NAME,
   WORKING_BOUNCE_ANIMATION,
@@ -100,6 +101,9 @@ export function WorkingGlyph({
     setHeld(false)
   }
 
+  // Held before the effects below read it, so an instance mounted in the same
+  // commit as the one it replaces still finds that one's clock.
+  useLayoutEffect(() => (cueKey === undefined ? undefined : holdCueClock(cueKey)), [cueKey])
   // A cue running when the glyph mounts carries on from its other instance's
   // clock; one that starts under a mounted glyph (seen at rest since it
   // mounted) is a new one and starts at once, as the list's.
@@ -118,6 +122,8 @@ export function WorkingGlyph({
   const lookMounted = useRef(false)
   useLayoutEffect(() => {
     if (cueKey === undefined || frame === null) return
+    // A look that changes under a mounted glyph is a new episode of it.
+    if (lookMounted.current) forgetCueClock(cueKey)
     carryCueClock(frame, cueKey, !lookMounted.current)
     lookMounted.current = true
   }, [cueKey, shownNow, easedNow, frame])

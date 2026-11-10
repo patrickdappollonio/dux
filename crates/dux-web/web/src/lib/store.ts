@@ -166,7 +166,7 @@ import {
   ownerSessionId,
   type TerminalOwnerRef,
 } from "./terminalOwner"
-import { ownerHasTerminal } from "./terminals"
+import { ownerHasTerminal, spineListsTerminal } from "./terminals"
 import {
   layoutOnStart,
   resolvePhoneView,
@@ -2176,6 +2176,10 @@ function refreshAttentionChrome(): void {
 // by the server's `rev` below, since only the server knows which is later.
 let loadWorkspaceSeq = 0
 
+// How many workspace documents have been applied, so an operation can tell
+// whether one landed while it was in flight.
+let workspaceApplies = 0
+
 // Whether this server pushes the workspace document. Set by the first pushed
 // frame this client could actually process, never unset: until then (an older
 // server, or a server whose frames dux cannot read) the coarse pings keep
@@ -2259,6 +2263,7 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
   // older server that omits the field degrades to an empty strip rather than
   // throwing on the `session.tabs` derefs downstream.
   const spine = rawSpine
+  workspaceApplies += 1
   // The outgoing session list, captured before `setState` swaps the spine. A
   // vanished agent picks its replacement from this ordering (see
   // `navigateAfterVanish`), since the new list no longer holds its position.
@@ -5777,11 +5782,26 @@ function showAgentAfterDock(spine: Spine, sessionId: string): void {
 // fills in its label/status; focusing first is safe because the PTY socket only
 // needs the ids the create returned. A failure surfaces as a toast.
 export function createTerminal(sessionId: string): void {
+  const appliedAtStart = workspaceApplies
   terminalsApi
     .create(sessionId)
-    .then((created) =>
-      selectTerminal(created.terminal_id, { kind: "session", sessionId }),
-    )
+    .then(async (created) => {
+      const id = created.terminal_id
+      // A workspace that landed while the create was in flight and does not
+      // list the new terminal may already have seen it end, and nothing would
+      // clear a selection of a terminal that is gone. Ask the server again
+      // before opening it; when it cannot answer, open it as usual.
+      if (workspaceApplies !== appliedAtStart && !spineListsTerminal(state.spine?.terminals, id)) {
+        const fresh = await fetchWorkspace().catch(() => null)
+        if (fresh !== null && !spineListsTerminal(fresh.terminals, id)) {
+          notifyWarning(
+            "The new terminal ended before it opened, so you are still where you were. Its shell may have exited at once; check the agent's environment and try again.",
+          )
+          return
+        }
+      }
+      selectTerminal(id, { kind: "session", sessionId })
+    })
     .catch((e) =>
       notifyError(
         e instanceof Error ? e.message : "Could not create the terminal.",

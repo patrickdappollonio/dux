@@ -117,6 +117,18 @@ describe("DockStrip", () => {
     expect(selectTerminalMock).not.toHaveBeenCalled()
   })
 
+  it("gives a terminal the workspace does not list yet no menu, so no Close that does nothing", () => {
+    render(
+      <DockStrip
+        sessionId="s1"
+        terminals={[terminal("t1", 1), terminal("t9", 2)]}
+        activeTerminal="t9"
+        unlisted="t9"
+      />,
+    )
+    expect(screen.getAllByLabelText("Terminal actions")).toHaveLength(1)
+  })
+
   it("lifts every control on the strip to the touch floor under a finger", () => {
     render(strip([terminal("t1", 1)]))
     for (const label of ["New terminal", "Hide terminals", "Maximize terminal", "Terminal actions"]) {

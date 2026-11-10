@@ -414,6 +414,35 @@ describe("a working glyph without the bounce", () => {
     }
   })
 
+  // The layout pill's dot is gone while the agent is idle, so each working or
+  // needs-you spell mounts a new glyph: it must start that spell afresh, as the
+  // list's glyph does, never on the clock of a spell that already ended.
+  it.each([
+    ["a pulse", { working: true, look: undefined }, "working-pulse", "svg"],
+    [
+      "a needs-you blink",
+      { working: false, look: "text-cyan-100 motion-safe:animate-attention-pulse" },
+      "attention-pulse",
+      "[data-slot='working-glyph']",
+    ],
+  ] as const)("starts %s afresh after the glyph was gone between two spells", async (_what, props, name, part) => {
+    let t = 1000
+    const clocks = fakeCueClocks(() => (t += 1111))
+    try {
+      const first = render(<WorkingGlyph icon={Bot} bounce={false} cueKey="dot" {...props} />)
+      const firstStart = clocks.start(first.container.querySelector(part)!, name)
+      first.unmount()
+      await act(async () => {})
+      const second = render(<WorkingGlyph icon={Bot} bounce={false} cueKey="dot" {...props} />)
+      const own = t
+      const secondStart = clocks.start(second.container.querySelector(part)!, name)
+      expect(secondStart).toBe(own)
+      expect(secondStart).not.toBe(firstStart)
+    } finally {
+      clocks.restore()
+    }
+  })
+
   it("starts a new cue at once, as the list does, never waiting for another clock", async () => {
     let t = 1000
     const clocks = fakeCueClocks(() => (t += 1111))

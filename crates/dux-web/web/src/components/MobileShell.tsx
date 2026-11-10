@@ -506,6 +506,7 @@ function AgentTerminalScreen({
       sessionId={session.id}
       terminals={model.dock}
       activeTerminal={model.activeTerminal}
+      unlisted={model.unlistedTerminal}
     />
   )
 
