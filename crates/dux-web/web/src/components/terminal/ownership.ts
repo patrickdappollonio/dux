@@ -275,6 +275,15 @@ export function useTerminalOwnership(
       // spine. This event is the definitive word either way.
       pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
+      // A self-succession still waiting to be sent outlives its ghost letting
+      // go: the row is free, and the server claims a free row for that frame
+      // as it would for a plain resize, displacing nobody. Dropping the intent
+      // here left a page that switched from an agent's tab to its terminal
+      // watching a row it had just been driving.
+      if (freed && takeoverIntent.read() && takeoverIntent.expectedOwner() !== undefined) {
+        setOwnerPresent(false)
+        return
+      }
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setOwnerPresent(!freed)
       // Through the channel, not an inline copy of its body: the verdict has
@@ -295,8 +304,9 @@ export function useTerminalOwnership(
 
   // Publish this pane's verdict into the store ledger so surfaces outside the
   // pane (the agent ⋯ menu) can disable mutating actions while another device
-  // drives the agent. Agent PTYs only: a companion terminal taken over
-  // elsewhere says nothing about the agent. The verdict is the ledger's fast
+  // drives the agent. Agent PTYs only, because the ledger is keyed by tab; a
+  // device drives a whole row, so an agent tab's verdict already speaks for
+  // the agent's terminals too. The verdict is the ledger's fast
   // path in both directions, gating the menu when a handover lands and
   // un-gating it after a take-over, while the spine's `input_owner` still names
   // the previous owner until the refetch. A pane whose socket has failed for

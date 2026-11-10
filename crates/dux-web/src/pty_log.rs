@@ -18,7 +18,7 @@ pub enum ResizeRefusal {
     /// Ordinary, expected traffic: a watcher's window really does change size.
     NonOwnerPlainResize,
     /// The frame DID ask to take over, but named an expected predecessor that
-    /// no longer owns the pty (an unowned pty included). This is the delayed
+    /// no longer owns the pty while somebody else does. This is the delayed
     /// ghost-succession frame the compare-and-swap exists to refuse.
     ExpectedOwnerMismatch,
 }

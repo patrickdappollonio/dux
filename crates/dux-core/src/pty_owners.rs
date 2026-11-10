@@ -330,8 +330,8 @@ impl PtySizeOwners {
     ///   - owned by another, plain resize  -> REFUSED: nothing applied, nothing
     ///     broadcast
     ///   - a take-over whose `expected_owner` names anyone but the current
-    ///     owner (an unowned pty included) -> REFUSED exactly as a plain
-    ///     resize is
+    ///     owner -> REFUSED exactly as a plain resize is; against an unowned
+    ///     row it claims, as a plain resize does
     ///
     /// `expected_owner` is a compare-and-swap on a flagged claim, which only a
     /// take-over carries. `None` takes from whoever holds it,
@@ -378,14 +378,16 @@ impl PtySizeOwners {
             },
             Some(_) if intent == ResizeIntent::Plain => refused,
             // A flagged claim naming a predecessor must find exactly that
-            // predecessor recorded; anything else, an unowned pty included,
-            // means the client's premise was already overtaken.
-            current
+            // predecessor recorded when anybody holds the row: anyone else
+            // means the client's premise was already overtaken. An unowned
+            // row is claimed, as a plain resize claims it: the predecessor
+            // let go before the frame landed, and nobody is displaced.
+            Some(record)
                 if matches!(
                     intent,
                     ResizeIntent::TakeOver {
                         expected_owner: Some(expected)
-                    } if current.map(|r| r.conn_id) != Some(expected)
+                    } if record.conn_id != expected
                 ) =>
             {
                 refused
@@ -1825,40 +1827,40 @@ mod tests {
         assert!(owners.is_owner("p", a));
     }
 
-    /// An UNOWNED pty is a MISMATCH when an expectation was named, not a free
-    /// claim. The client said "I am succeeding connection N"; N is gone, so the
-    /// premise is false. Refusing costs nothing: the ordinary plain attach
-    /// claims the free pty a moment later with no flag at all, which is the
-    /// owner's rule working as intended.
+    /// A self-succession that finds the row UNOWNED claims it, exactly as a
+    /// plain resize would. The race it closes is an ordinary switch: a page
+    /// leaves the agent's tab for its terminal, the terminal's handshake still
+    /// names the tab's connection, and the tab's close frees the row before
+    /// the terminal's flagged frame lands. Refusing there left the pane a
+    /// watcher of a row nobody drives, which nothing passive ever corrects.
+    /// It still never takes the row from anybody else who holds it.
     #[test]
-    fn an_unowned_pty_is_a_mismatch_for_a_named_expected_owner() {
+    fn a_self_succession_claims_a_row_its_ghost_already_let_go() {
         let owners = PtySizeOwners::default();
-        let ghost = owners.next_conn_id();
-        let returning = owners.next_conn_id();
+        owners.join_row("s1-slot", RowKey::Agent("s1".to_string()));
+        owners.join_row("term-1", RowKey::Agent("s1".to_string()));
+        let tab = owners.next_conn_id();
+        let terminal = owners.next_conn_id();
+        let other = owners.next_conn_id();
+        assert!(owners.claim("s1-slot", tab).is_some());
+        let succession = ResizeIntent::TakeOver {
+            expected_owner: Some(tab),
+        };
 
-        let (out, applied) = claim_resize(
-            &owners,
-            "p",
-            returning,
-            ResizeIntent::TakeOver {
-                expected_owner: Some(ghost),
-            },
+        // The tab's close is processed first.
+        assert!(owners.release("s1-slot", tab).is_some());
+        let (out, applied) = claim_resize(&owners, "term-1", terminal, succession);
+        assert!(out.apply && applied && out.epoch.is_some());
+        assert!(
+            owners.is_owner("s1-slot", terminal),
+            "the whole row is claimed"
         );
-        assert_eq!(
-            out,
-            ResizeClaim {
-                apply: false,
-                epoch: None,
-                seq: None
-            }
-        );
-        assert!(!applied);
-        assert!(owners.current_owner("p").0.is_none());
 
-        // And the plain attach that follows claims it, unflagged.
-        let (out, applied) = claim_resize(&owners, "p", returning, ResizeIntent::Plain);
-        assert!(out.apply && out.epoch.is_some());
-        assert!(applied);
+        // Somebody else holding the row is never displaced by it.
+        assert!(owners.claim("s1-slot", other).is_some());
+        let (out, applied) = claim_resize(&owners, "term-1", tab, succession);
+        assert!(!out.apply && !applied);
+        assert!(owners.is_owner("term-1", other));
     }
 
     /// The owner's write must be decided and enqueued under one lock, or a

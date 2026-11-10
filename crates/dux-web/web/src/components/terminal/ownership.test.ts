@@ -478,6 +478,22 @@ describe("self-succession after a blipped socket", () => {
     expect(view.result.current.takeoverIntent.read()).toBe(true)
   })
 
+  // A switch from an agent's tab to its terminal: the terminal's handshake
+  // names the tab's connection, and the tab's close frees the row before the
+  // terminal's flagged frame goes out. The succession still goes out, and the
+  // server claims the free row for it.
+  it("keeps a waiting succession when its ghost frees the row first", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 3))
+    act(() => notifyPtyOwner("p1", undefined, 4, undefined))
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+    expect(view.result.current.takeoverIntent.expectedOwner()).toBe("conn-a")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
   it("does NOT self-succeed while the page is backgrounded", () => {
     const { view } = setup()
     act(() => view.result.current.connId.write("conn-a"))
