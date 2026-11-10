@@ -173,6 +173,7 @@ import {
   type ComputerLayout,
 } from "./layoutModel"
 import { readStackMemory, writeStackMemory } from "./stackMemory"
+import { agentStackModel } from "@/components/agentStackModel"
 import { holdLayoutForGesture } from "./layoutGesture"
 import { closeModals, onModalsChange, openModals, spendModals } from "./modalHistory"
 import {
@@ -2572,7 +2573,7 @@ function pruneSelectionIfGone(
       target.terminalId,
     )
     if (neighbour !== null) {
-      selectTerminal(neighbour, owner, { urlMode: "replace" })
+      fallBackTo(() => selectTerminal(neighbour, owner, { urlMode: "replace" }))
       return
     }
     fallBackTo(() => showAgentAfterDock(spine, dockSession))
@@ -3796,6 +3797,22 @@ function fallBackTo(navigate: () => void): void {
   }
 }
 
+// Leave an entry whose subject went away. Arrived at by Forward, the page moves
+// on to the entry ahead by its exact key, the way the user was going, so a
+// place past it stays reachable. Otherwise it falls back: onto the entry
+// behind when that already names the destination, else by rewriting this one.
+function leaveTakenAwayEntry(fallback: () => void): void {
+  if (landing === "forward") {
+    const nav = navigationApi()
+    const here = nav?.currentEntry
+    const ahead = here ? nav?.entries().find((entry) => entry.index === here.index + 1) : undefined
+    if (nav && ahead && !nav.transition) {
+      if (traverseExactly(nav, ahead.key, { newerIntent: false }, () => fallBackTo(fallback))) return
+    }
+  }
+  fallBackTo(fallback)
+}
+
 // The one history move the app makes that is not a write: going back to the
 // entry immediately behind, when this page labelled it and it holds `key`. It
 // is never relative. It names that entry's own slot through the Navigation
@@ -4121,9 +4138,16 @@ function retireModalEntries(entries: readonly ModalEntry[]): void {
 let lastEntryIndex: number | null = null
 
 function rememberEntryIndex(): void {
-  const here = navigationApi()?.currentEntry
+  const nav = navigationApi()
+  const here = nav?.currentEntry
   if (here) lastEntryIndex = here.index
+  for (const entry of nav?.entries() ?? []) knownEntryKeys.add(entry.key)
 }
+
+// Every entry the browser has listed while this page was loaded, by Navigation
+// API key, so a landing can tell an entry it already had (Back or Forward) from
+// a new one (a link, an address typed into the bar).
+const knownEntryKeys = new Set<string>()
 
 // A traversal landed on a modal entry that holds no open modal: one this page
 // retired, or one an earlier load of the page left behind. It moves on, by
@@ -4269,16 +4293,30 @@ function applyUrlRoute(): void {
     selectSessionRoute(null)
     return
   }
-  // An entry this page labelled is one Back or Forward landed on; a link or an
-  // address typed into the bar arrives on a fresh entry with no label, and
-  // resolves the way a boot does.
-  traversing = ownLabel(history.state) !== null
+  // Back and Forward land on an entry the browser already had; a link or an
+  // address typed into the bar arrives on a new one, and resolves the way a
+  // boot does.
+  landing = landingKind()
+  traversing = landing !== "new"
   try {
     resolveRoute(spine, route)
   } finally {
     traversing = false
+    landing = "new"
   }
 }
+
+// How the page arrived at the entry it is on: back or forward onto one it
+// already had, or onto a new one. Without the Navigation API an entry this page
+// labelled is the only sign of a traversal, and its direction is unknown.
+function landingKind(): "back" | "forward" | "new" {
+  const here = navigationApi()?.currentEntry
+  if (!here) return ownLabel(history.state) !== null ? "back" : "new"
+  if (!knownEntryKeys.has(here.key)) return "new"
+  return lastEntryIndex !== null && here.index > lastEntryIndex ? "forward" : "back"
+}
+
+let landing: "back" | "forward" | "new" = "new"
 
 // Set while a route Back or Forward landed on is being resolved. That entry was
 // a position the user was on, so a bare agent address there means its first
@@ -4436,7 +4474,7 @@ function resolveRoute(spine: Spine, route: Route): void {
   // the override armed for the next selection.
   pendingTheater = route.theater
   try {
-    resolveRouteTarget(spine, route.target, route.changes, route.stack ?? null)
+    resolveRouteTarget(spine, route.target, route.changes, route.stack ?? null, route.editor !== null)
   } finally {
     pendingTheater = undefined
   }
@@ -4483,6 +4521,7 @@ function resolveRouteTarget(
   target: SelectedTarget,
   changes: boolean,
   stack: AgentAddress | null,
+  withEditor = false,
 ): void {
   let sessionId: string
   if (target.kind === "terminal") {
@@ -4530,6 +4569,14 @@ function resolveRouteTarget(
   // asked for it, on every arrival, Back included, never quietly swapped for
   // another part of the agent.
   if (target.kind === "terminal" && !ownerHasTerminal(spine.terminals, target.owner, target.terminalId)) {
+    // An editor address is about the agent's worktree, which is still there:
+    // the terminal it passed through is incidental, so the agent opens with its
+    // editor and the address drops the terminal.
+    if (withEditor) {
+      const agent = sessionId
+      leaveTakenAwayEntry(() => selectSessionRoute(agent, "replace", changes))
+      return
+    }
     setTerminalNotFound(target.terminalId, target.owner)
     return
   }
@@ -4709,10 +4756,11 @@ function applyDeepLinkSelection(
     return
   }
   if (!isFirstTab(session, target.tabId) && !isSlotTabOf(target.sessionId, target.tabId)) {
-    // The tab the address names has closed, here or on another device: fall
-    // back to the agent out loud, onto the entry behind when it already names
-    // where this lands.
-    fallBackTo(() =>
+    // The tab the address names has closed, here or on another device.
+    notifyWarning(
+      "That tab has closed, so its place in your history is gone. You are on the agent's first tab.",
+    )
+    leaveTakenAwayEntry(() =>
       selectTab(target.sessionId, session.slot_tab_id, {
         persist: false,
         urlMode: "replace",
@@ -5360,7 +5408,42 @@ export function setStackLayout(sessionId: string, layout: ComputerLayout): void 
   if (state.stackLayouts[sessionId] === layout) return
   holdLayoutForGesture(0)
   writeStackMemory(sessionId, { layout })
-  setState({ stackLayouts: { ...state.stackLayouts, [sessionId]: layout } })
+  const stackLayouts = { ...state.stackLayouts, [sessionId]: layout }
+  // A layout the user chose that folds away the part typing goes to moves
+  // typing to the part left on screen, and the address, which names that part,
+  // follows: a press, with no dialog up. The layout itself rides no address.
+  const typing = typingAfterLayout(sessionId, stackLayouts)
+  const moved = typing === null ? null : stackPartPatch(sessionId, typing)
+  setState({ stackLayouts, ...(moved ?? {}) })
+  if (moved !== null) fallBackTo(() => syncUrl("replace"))
+}
+
+// The part typing goes to once the selected agent's stack is in `stackLayouts`,
+// read off the same model the stack draws from, or null when it is not on
+// screen here.
+function typingAfterLayout(
+  sessionId: string,
+  stackLayouts: DuxState["stackLayouts"],
+): string | null {
+  const target = state.selectedTarget
+  const session = state.spine?.sessions.find((s) => s.id === sessionId)
+  if (target === null || session === undefined || state.selectedSessionId !== sessionId) return null
+  if (isMobileViewport()) return null
+  return agentStackModel({
+    target,
+    session,
+    terminals: state.spine?.terminals ?? [],
+    stackLayouts,
+    stackTerminals: state.stackTerminals,
+    stackTabs: state.stackTabs,
+    memory: readStackMemory(sessionId),
+    startedDormantTabs: state.startedDormantTabs,
+    pendingSlotTab: state.pendingSlotTab,
+    endedInViewTab: state.endedInViewTab,
+    pendingTerminalOrder: state.pendingTerminalOrder,
+    alwaysShowTabStrip: state.bootstrap?.always_show_tab_strip ?? false,
+    theater: state.theater,
+  }).typingPtyId
 }
 
 // Record the layout an agent opened in, so it holds while the user works in
@@ -5381,7 +5464,9 @@ export function chooseStackPart(sessionId: string, ptyId: string): void {
   const patch = stackPartPatch(sessionId, ptyId)
   if (patch === null) return
   setState(patch)
-  syncUrl("replace")
+  // Through the fallback's collapse: when the entry behind already names the
+  // part pressed into, the page goes back onto it rather than writing a copy.
+  fallBackTo(() => syncUrl("replace"))
 }
 
 // The store's half of moving typing to one part of an agent's stack, or null
@@ -5709,7 +5794,17 @@ export function closeTab(
         target?.kind === "agent" &&
         target.sessionId === sessionId &&
         target.tabId === tabId
-      if (!focused) return
+      if (!focused) {
+        // Typing is in the dock, but the closed tab was the one on top of it,
+        // and the address names it: both move to the neighbour.
+        if (state.selectedSessionId === sessionId && shownStackTab(sessionId) === tabId) {
+          const onTop = neighbour ?? slotTabIdFor(sessionId)
+          writeStackMemory(sessionId, { tab: onTop })
+          setState({ stackTabs: { ...state.stackTabs, [sessionId]: onTop } })
+          fallBackTo(() => syncUrl("replace"))
+        }
+        return
+      }
       // Land on the tab beside the closed one, like a browser tab, DIRECTLY via
       // `selectTab`, not `selectSession`: the spine may still be stale at this
       // point (no `sessions.changed` refetch has pruned it yet), and

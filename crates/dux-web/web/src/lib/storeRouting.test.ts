@@ -197,6 +197,8 @@ interface SessionSpec {
   working?: boolean
   // The tab the server remembers as last focused.
   focused?: string
+  // Its tabs have a running process.
+  live?: boolean
 }
 
 function makeSpine(
@@ -234,7 +236,9 @@ function makeSpine(
       // the session id, so a URL that names the agent by the bare form has to
       // come from the pointer rather than from the two strings matching.
       slot_tab_id: `${s.id}-slot`,
-      tabs: [{ id: `${s.id}-slot` }, ...(s.tabs ?? []).map((id) => ({ id }))],
+      tabs: [{ id: `${s.id}-slot` }, ...(s.tabs ?? []).map((id) => ({ id }))].map((tab) =>
+        s.live ? { ...tab, has_live_process: true } : tab,
+      ),
     })) as unknown as Spine["sessions"],
     // Every terminal, of every owner, in one flat owner-tagged collection: the
     // sessions' terminals in session order, then the projects' in project order.
@@ -699,8 +703,9 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(index).toBe(depth + 1)
     mod.chooseStackPart("s1", "s1-slot")
     expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
-    // The address names the part typing goes to, rewritten in place.
-    expect(index).toBe(depth + 1)
+    // The address names the part typing goes to, and the entry behind already
+    // named the agent, so the page goes back onto it rather than copying it.
+    await vi.waitFor(() => expect(index).toBe(depth))
     expect(loc.hash).toBe("#/agent/s1")
   })
 
@@ -2294,7 +2299,7 @@ describe("the editor rides the URL", () => {
     // anyone's bookmark: a terminal spawned in the agent's worktree opens the
     // agent's editor, with its tabs, its diff mode and its changed files.
     const mod = await loadStore("#/agent/s1/terminal/t9/editor", [
-      { id: "s1", project_id: "p1", terminals: ["t9"] },
+      { id: "s1", project_id: "p1" },
     ])
     expect(mod.getSnapshot().editorTarget?.root).toEqual({
       kind: "agent",
@@ -2302,15 +2307,12 @@ describe("the editor rides the URL", () => {
     })
   })
 
-  it("shows no editor over a closed terminal's not-found screen, and keeps its address", async () => {
-    const mod = await loadStore("#/agent/s1/terminal/t1/editor/file/x", [
-      { id: "s1", project_id: "p1" },
-    ])
-    expect(mod.getSnapshot().routeNotFound).toMatchObject({ kind: "terminal", terminalId: "t1" })
+  it("shows no editor over a missing agent's not-found screen, and keeps its address", async () => {
+    const mod = await loadStore("#/agent/gone/editor/file/x", [{ id: "s1", project_id: "p1" }])
+    expect(mod.getSnapshot().routeNotFound).toEqual({ kind: "agent", sessionId: "gone" })
     expect(mod.getSnapshot().editorTarget).toBeNull()
     expect(mod.getSnapshot().editorRoute).toBeNull()
-    expect(loc.hash).toBe("#/agent/s1/terminal/t1/editor/file/x")
-    expect(index).toBe(DUX_ENTRY_INDEX)
+    expect(loc.hash).toBe("#/agent/gone/editor/file/x")
   })
 
   it("normalizes the shapes the standalone grammar cannot carry", async () => {
@@ -3037,5 +3039,156 @@ describe("the editor's view of its file rides the URL", () => {
     // Reporting the same file again keeps what the address already says.
     mod.editorSyncActiveTab(agentRoot("s1"), "file", "b.ts", view({ language: "toml" }))
     expect(loc.hash).toBe("#/editor/agent/s1/file/b.ts")
+  })
+})
+
+// Back and Forward never stop twice on what looks like the same place, and an
+// entry whose tab has closed is walked past the way the user was going.
+describe("entries that went away, and identical neighbours", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+  function expectNoIdenticalNeighbours() {
+    const live = entries.slice(DUX_ENTRY_INDEX)
+    for (let i = 1; i < live.length; i++) expect(live[i]).not.toBe(live[i - 1])
+  }
+
+  it("goes back onto the agent's entry when a press follows a terminal pill", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    mod.chooseStackPart("s1", "s1-slot")
+    await settle()
+    expect(loc.hash).toBe("#/agent/s1")
+    expect(index).toBe(DUX_ENTRY_INDEX + 1)
+    expectNoIdenticalNeighbours()
+  })
+
+  it("rewrites in place when the press lands somewhere the entry behind is not", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1", "t2"] }])
+    mod.selectSession("s1")
+    mod.chooseStackPart("s1", "t1")
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    mod.chooseStackPart("s1", "s1-slot")
+    await settle()
+    expect(loc.hash).toBe("#/agent/s1")
+    expectNoIdenticalNeighbours()
+  })
+
+  it("goes back onto the neighbour's entry when the terminal in front closes", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1", "t2"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t2"] }])
+    await vi.waitFor(() => expect(loc.hash).toBe("#/agent/s1/terminal/t2"))
+    expectNoIdenticalNeighbours()
+  })
+
+  it("stops naming a tab closed while typing goes to the dock", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.chooseStackPart("s1", "t1")
+    expect(loc.hash).toBe("#/agent/s1/tab/b2/terminal/t1")
+    await mod.closeTab("s1", "b2")
+    await vi.waitFor(() => expect(loc.hash).toBe("#/agent/s1/terminal/t1"))
+    expect(mod.getSnapshot().stackTabs.s1).toBe("s1-slot")
+    expectNoIdenticalNeighbours()
+  })
+
+  it("says out loud that a tab Back landed on has closed", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.selectSession("s2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    const before = warnings.length
+    history.back()
+    await settle()
+    expect(warnings.slice(before).join(" ")).toMatch(/tab/i)
+  })
+
+  it("walks Forward past a closed tab's entry to the place after it", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.selectSession("s2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    history.back()
+    await settle()
+    expect(loc.hash).toBe("#/agent/s1")
+    history.forward()
+    await settle()
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedSessionId).toBe("s2"))
+    expect(loc.hash).toBe("#/agent/s2")
+  })
+
+  it("rewrites the address when a fold the user pressed moves typing, so a reload keeps the fold", async () => {
+    const mem = new Map<string, string>()
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+    })
+    const first = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"], live: true }])
+    first.selectSession("s1")
+    first.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    first.setStackLayout("s1", "agent")
+    await settle()
+    expect(first.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
+    expect(loc.hash).toBe("#/agent/s1")
+    expectNoIdenticalNeighbours()
+    // A reload of that address opens the agent alone, as it was left.
+    popstateListeners = []
+    hashchangeListeners = []
+    first.eventsSocket.dispose()
+    vi.resetModules()
+    const mod = await import("./store")
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedTarget?.kind).toBe("agent"))
+    const { readStackMemory } = await import("./stackMemory")
+    expect(readStackMemory("s1").layout).toBe("agent")
+  })
+
+  it("opens the agent with its editor when the terminal an editor address passed through is gone", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    mod.openEditor(agentRoot("s1"))
+    await settle()
+    mod.selectSession("s2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    history.back()
+    await settle()
+    expect(mod.getSnapshot().routeNotFound).toBeNull()
+    expect(mod.getSnapshot().editorTarget?.root).toEqual({ kind: "agent", sessionId: "s1" })
+    expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+  })
+
+  it("treats Back onto an entry from before a reload as Back, not as a link", async () => {
+    // The history a reload left behind: the agent's first tab, then its extra
+    // tab, both written by the page before this one.
+    const foreign = (id: number) => ({ duxRoute: "", duxEntry: { session: "older-load", id, key: "k", prev: null } })
+    entries = [OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1/tab/b2"]
+    entryStates = [null, foreign(1), foreign(2)]
+    entryKeys = [mintKey(), mintKey(), mintKey()]
+    index = 2
+    loc = { protocol: "http:", host: "localhost:0", hash: "#/agent/s1/tab/b2", pathname: "/", search: "" }
+    vi.stubGlobal("location", loc)
+    spineBody = makeSpine([{ id: "s1", project_id: "p1", tabs: ["b2"], focused: "b2" }])
+    const mod = await import("./store")
+    await vi.waitFor(() => expect(mod.getSnapshot().selectedTarget).toMatchObject({ tabId: "b2" }))
+    await settle()
+    history.back()
+    await settle()
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "s1-slot" })
+    expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1/tab/b2"])
   })
 })
