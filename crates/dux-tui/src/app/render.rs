@@ -4519,9 +4519,13 @@ impl App {
     /// `Theme`, reusing `nudge_border`.
     pub(crate) fn scroll_mode_cue_line(&self, width: u16) -> Line<'static> {
         let warn_style = Style::default().fg(self.theme.nudge_border);
-        let target = match self.session_surface {
-            SessionSurface::Agent => "agent",
-            SessionSurface::Terminal => "terminal",
+        // The card is about the row, whichever part has focus: an agent's
+        // stack is the agent's, and a terminal's row is the terminal's.
+        let target = if self.selected_terminal_row().is_some() || self.selected_session().is_none()
+        {
+            "terminal"
+        } else {
+            "agent"
         };
         let live_edge = self.bindings.labels_for(Action::ScrollToBottom);
         let scroll_up = self.bindings.labels_for(Action::ScrollPageUp);
@@ -5441,11 +5445,15 @@ impl App {
         }
 
         // Paint the card last over the grid only; tab, PR, and hint lanes remain
-        // visible siblings, matching the web pane geometry.
-        if let Some(card) = takeover_card {
-            self.render_takeover_card(frame, term_area, &card);
-        } else {
-            self.mouse_layout.takeover_button = None;
+        // visible siblings, matching the web pane geometry. Inside an agent's
+        // stack the row has one driver, so the stack paints one card over all
+        // of it instead (see `render_agent_stack`).
+        if !self.drawing_agent_stack() {
+            if let Some(card) = takeover_card {
+                self.render_takeover_card(frame, term_area, &card);
+            } else {
+                self.mouse_layout.takeover_button = None;
+            }
         }
 
         // Macro bar overlays the hint area when active.
@@ -17876,9 +17884,11 @@ mod tests {
         let rendered = terminal_row_line(&mut app);
         assert!(rendered.contains("· 1 browser"), "{rendered}");
 
+        // The caption names the terminal, which a hidden strip cannot.
+        let label = app.engine.companion_terminals[&terminal_id].label.clone();
         app.session_surface = SessionSurface::Terminal;
         app.active_terminal_id = Some(terminal_id);
-        assert_eq!(app.dock_caption(), " Terminal · 1 browser ");
+        assert_eq!(app.dock_caption(), format!(" {label} · 1 browser "));
     }
 
     /// An agent's terminal is part of the agent's row: a browser on it is

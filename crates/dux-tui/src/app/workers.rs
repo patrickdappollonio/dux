@@ -1565,6 +1565,14 @@ impl App {
         let shown = self.active_terminal_id.as_deref() == Some(view.terminal_id.as_str());
         self.rebuild_left_items();
         if shown {
+            // Whatever was typing into it stops with it: keys never carry over
+            // to the neighbour or the agent the view lands on.
+            if self.input_target == InputTarget::Terminal {
+                self.input_target = InputTarget::None;
+            }
+            if self.fullscreen_overlay == FullscreenOverlay::Terminal {
+                self.fullscreen_overlay = FullscreenOverlay::None;
+            }
             self.land_beside_a_closed_terminal(&view.terminal_id);
         }
         if let Some(label) = view.label {

@@ -26,6 +26,10 @@ use ratatui::widgets::Paragraph;
 use super::components;
 use super::components::{CardContent, PaneCardBlock};
 
+/// What stopping a terminal says, from the tab key and the palette alike.
+pub(crate) const TERMINAL_STOP_REFUSAL: &str = "A terminal is closed rather than stopped: close it \
+     with close-tab, or press Ctrl-C in it to stop what is running there and keep the shell.";
+
 /// The words the layout control shows, in cycle order.
 const LAYOUTS: [DockLayout; 3] = [DockLayout::Agent, DockLayout::Split, DockLayout::Term];
 
@@ -277,8 +281,8 @@ impl App {
     }
 
     /// The selected agent's center pane: the agent, its dock, or both, as its
-    /// layout says, with the layout control where the plan for each layout puts
-    /// it.
+    /// layout says, with the layout control on the dock's strip, the agent's
+    /// strip when the dock is hidden, or a title row when the strips are.
     pub(super) fn render_agent_stack(
         &mut self,
         frame: &mut Frame<'_>,
@@ -336,6 +340,53 @@ impl App {
                 let dock_focus = part_focus(self, CenterPart::Dock);
                 self.render_dock_part(frame, rest, dock_focus, &dock);
             }
+        }
+        self.render_stack_takeover_card(frame);
+    }
+
+    /// Whether the frame is drawing an agent's stack in the center pane, where
+    /// one take-over card covers every part at once.
+    pub(super) fn drawing_agent_stack(&self) -> bool {
+        self.mouse_layout.center_stack.is_some()
+            && matches!(self.fullscreen_overlay, FullscreenOverlay::None)
+    }
+
+    /// Whether a take-over card is over the center pane: over the one part a
+    /// fullscreen view or a terminal's row shows, or over any part of an
+    /// agent's stack, which all belong to one row with one driver.
+    pub(crate) fn card_covers_center(&self) -> bool {
+        if self.drawing_agent_stack() {
+            return self
+                .layout_parts()
+                .into_iter()
+                .any(|part| self.part_takeover_card(part).is_some());
+        }
+        self.focused_pty_is_covered_by_card()
+    }
+
+    /// The card over the stack, when the row is not this surface's: one card
+    /// across every grid the layout draws, the dock's strip between them
+    /// included, while the agent's strip above and the hint lanes stay visible
+    /// as they do over a single pane.
+    fn render_stack_takeover_card(&mut self, frame: &mut Frame<'_>) {
+        self.mouse_layout.takeover_button = None;
+        let grids = [self.mouse_layout.focused_term, self.mouse_layout.other_term];
+        let Some(area) = grids.into_iter().flatten().reduce(Rect::union) else {
+            return;
+        };
+        let card = self
+            .layout_parts()
+            .into_iter()
+            .find_map(|part| self.part_takeover_card(part));
+        if let Some(card) = card {
+            if self.part_scroll_mode_active(CenterPart::Main) {
+                self.reset_part_scrollback(CenterPart::Main);
+            }
+            if self.part_scroll_mode_active(CenterPart::Dock) {
+                self.reset_part_scrollback(CenterPart::Dock);
+            }
+            self.mouse_layout.card_cover = Some(area);
+            self.render_takeover_card(frame, area, &card);
         }
     }
 
@@ -476,6 +527,7 @@ impl App {
             dux_core::tab_verdict::ending_sentence(&verdict.ending, verdict.ended_seconds_ago())
         });
         let start = self.bindings.label_for(Action::ReconnectAgent);
+        let layout_key = self.bindings.label_for(Action::CycleTerminalLayout);
         let label = "Start";
         let button_width = u16::try_from(display_width(label)).unwrap_or(0) + 6;
         let [text_area, button_area] = Layout::default()
@@ -483,18 +535,28 @@ impl App {
             .constraints([Constraint::Min(1), Constraint::Length(button_width)])
             .areas(area);
         let text = Style::default().fg(self.theme.hint_desc_fg);
+        let badge = |key: &str| -> Vec<Span<'static>> {
+            self.theme
+                .dim_key_badge_default(key)
+                .into_iter()
+                .map(|span| Span::styled(span.content.into_owned(), span.style))
+                .collect()
+        };
         let mut spans = vec![Span::styled(format!(" {provider} isn't running."), text)];
+        let crashed = ending.is_some();
         if let Some(ending) = ending {
             spans.push(Span::styled(format!(" {ending}"), text));
         }
         spans.push(Span::styled(" Press ", text));
-        spans.extend(
-            self.theme
-                .dim_key_badge_default(&start)
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style)),
-        );
+        spans.extend(badge(&start));
         spans.push(Span::styled(" to start it.", text));
+        // The run's last output is on the agent's own card, which the next
+        // layout shows; a band has no room for it.
+        if crashed && !layout_key.is_empty() {
+            spans.push(Span::styled(" Press ", text));
+            spans.extend(badge(&layout_key));
+            spans.push(Span::styled(" to see its last output.", text));
+        }
         Paragraph::new(Line::from(spans)).render(
             Rect {
                 y: text_area.y + text_area.height / 2,
@@ -589,12 +651,17 @@ impl App {
     /// The caption over a shown terminal, with how many browsers have that
     /// terminal open, as the agent's caption counts the tab it shows.
     pub(crate) fn dock_caption(&self) -> String {
-        let remote = self
-            .part_pty_id(CenterPart::Dock)
+        let id = self.part_pty_id(CenterPart::Dock);
+        // Named, so with the strips hidden the caption still says which one.
+        let label = id
+            .as_ref()
+            .and_then(|id| self.engine.companion_terminals.get(id))
+            .map_or_else(|| "Terminal".to_string(), |t| t.label.clone());
+        let remote = id
             .and_then(|id| super::render::remote_viewers_segment(self.pty_browser_count(&id)))
             .map(|segment| format!(" · {segment}"))
             .unwrap_or_default();
-        format!(" Terminal{remote} ")
+        format!(" {label}{remote} ")
     }
 
     /// A press on the dock's chrome: a word of the layout control, or a dock
@@ -888,10 +955,7 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
         app.handle_key(ctrl_d).unwrap();
         assert!(
-            !matches!(
-                app.prompt,
-                PromptState::ConfirmDeleteTerminal { .. } | PromptState::None
-            ),
+            matches!(app.prompt, PromptState::ConfirmDeleteAgent { .. }),
             "with the agent focused the key deletes the agent: {:?}",
             app.prompt
         );
@@ -920,7 +984,11 @@ mod tests {
         app.handle_key(key(KeyCode::Right, KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(app.active_terminal_id.as_ref(), Some(&ids[1]));
-        app.focus_dock_index(2);
+        // Back past the first pill wraps to the last.
+        app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL))
+            .unwrap();
+        app.handle_key(key(KeyCode::Left, KeyModifiers::CONTROL))
+            .unwrap();
         assert_eq!(app.active_terminal_id.as_ref(), Some(&ids[2]));
         assert_eq!(
             app.focused_tab_id(&app.engine.sessions[0].id.clone()),
@@ -1164,5 +1232,397 @@ mod tests {
             CenterPart::Main,
             "focus stayed on the agent"
         );
+    }
+
+    fn draw_to_string(app: &mut App) -> String {
+        screen(&draw(app))
+    }
+
+    /// The sidebar's interact key on an agent whose dock had focus hands the
+    /// keyboard to the agent it puts fullscreen, so keys never land in the shell.
+    #[test]
+    fn interacting_with_the_agent_from_the_sidebar_sends_keys_to_the_agent() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        let tab = key(KeyCode::Tab, KeyModifiers::NONE);
+        app.handle_key(tab).unwrap();
+        assert_eq!(app.focused_part(), CenterPart::Dock);
+        app.handle_key(tab).unwrap();
+        app.handle_key(tab).unwrap();
+        assert_eq!(app.focus, FocusPane::Left);
+        app.handle_key(key(KeyCode::Char('i'), KeyModifiers::NONE))
+            .unwrap();
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        assert_eq!(app.selected_terminal_surface_id(), Some(slot));
+        assert_eq!(app.drawn_parts(), vec![CenterPart::Main]);
+    }
+
+    /// Whatever the pane focus says, the part being typed into or shown
+    /// fullscreen is the part that receives bytes.
+    #[test]
+    fn the_typing_target_always_names_the_part_that_receives_bytes() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.session_surface = SessionSurface::Terminal;
+        app.input_target = InputTarget::Agent;
+        assert_eq!(app.focused_part(), CenterPart::Main);
+        app.session_surface = SessionSurface::Agent;
+        app.input_target = InputTarget::None;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        assert_eq!(app.focused_part(), CenterPart::Dock);
+    }
+
+    /// Closing the terminal being typed into fullscreen, from anywhere, leaves
+    /// nothing typing: keys do not move on to the neighbour the view lands on.
+    #[test]
+    fn a_closed_terminal_being_typed_into_stops_the_typing() {
+        let mut app = app_with_a_dock(2, Agent::Running);
+        draw(&mut app);
+        let ids = dock_ids(&app);
+        app.session_surface = SessionSurface::Terminal;
+        app.input_target = InputTarget::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        assert_eq!(app.do_delete_terminal(&ids[0]), None);
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+        assert_eq!(
+            app.active_terminal_id.as_ref(),
+            Some(&ids[1]),
+            "the neighbour"
+        );
+    }
+
+    /// The terminal on screen ending hands the dock to the one to its right,
+    /// or the left when it was the last.
+    #[test]
+    fn a_closed_terminal_hands_the_dock_to_its_neighbour() {
+        let mut app = app_with_a_dock(3, Agent::Running);
+        draw(&mut app);
+        let ids = dock_ids(&app);
+        app.show_dock_terminal(&ids[1]);
+        draw(&mut app);
+        assert_eq!(app.do_delete_terminal(&ids[1]), None);
+        assert_eq!(app.active_terminal_id.as_ref(), Some(&ids[2]));
+        assert_eq!(app.do_delete_terminal(&ids[2]), None);
+        assert_eq!(app.active_terminal_id.as_ref(), Some(&ids[0]));
+    }
+
+    /// Looking at the agent part clears its attention and lets its clipboard
+    /// through, though its dock has terminals; looking at the dock does neither.
+    #[test]
+    fn attention_and_the_clipboard_follow_the_part_with_focus() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.engine.config.ui.attention_grace_seconds = 0;
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        assert_eq!(app.focused_host_passthrough_tab(), Some(slot.clone()));
+        app.engine.needs_attention.insert(TabId::new(slot.clone()));
+        app.note_focused_agent_viewed();
+        assert!(!app.engine.tab_needs_attention(&slot));
+
+        app.session_surface = SessionSurface::Terminal;
+        assert_eq!(app.focused_host_passthrough_tab(), None);
+        app.engine.needs_attention.insert(TabId::new(slot.clone()));
+        app.note_focused_agent_viewed();
+        assert!(app.engine.tab_needs_attention(&slot));
+    }
+
+    /// An agent started elsewhere while its terminal is being typed into does
+    /// not take the keyboard by bringing back a layout that hides the dock.
+    #[test]
+    fn starting_a_stopped_agent_elsewhere_keeps_the_keyboard_on_its_terminal() {
+        let mut app = app_with_a_dock(1, Agent::Stopped);
+        let session_id = app.engine.sessions[0].id.clone();
+        app.dock_layouts.insert(session_id, DockLayout::Agent);
+        assert_eq!(app.focused_part(), CenterPart::Dock);
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        app.engine.providers.insert(TabId::new(slot), sleeper());
+        app.reconcile_center_target();
+        assert_eq!(app.focused_part(), CenterPart::Dock);
+        assert!(app.layout_parts().contains(&CenterPart::Dock));
+        // Once focus leaves the center, the remembered layout applies.
+        app.focus = FocusPane::Left;
+        app.reconcile_center_target();
+        assert_eq!(app.selected_dock_layout(), DockLayout::Agent);
+    }
+
+    #[test]
+    fn tab_reaches_a_dock_terminal_being_typed_into() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.engine.config.ui.tab_reaches_agent = true;
+        app.session_surface = SessionSurface::Terminal;
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.focus, FocusPane::Center);
+        assert_eq!(
+            app.focused_part(),
+            CenterPart::Dock,
+            "Tab went to the shell"
+        );
+    }
+
+    #[test]
+    fn the_tab_commands_act_on_the_dock_while_it_has_focus() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.session_surface = SessionSurface::Terminal;
+        app.execute_command("new-agent-tab").unwrap();
+        assert_eq!(
+            dock_ids(&app).len(),
+            2,
+            "a new terminal, not a provider tab"
+        );
+        app.focus = FocusPane::Center;
+        app.session_surface = SessionSurface::Terminal;
+        app.execute_command("close-tab").unwrap();
+        assert!(matches!(
+            app.prompt,
+            PromptState::ConfirmDeleteTerminal { .. }
+        ));
+        app.prompt = PromptState::None;
+        app.execute_command("stop-agent-tab").unwrap();
+        let (_, message) = app.status.most_recent_tui().expect("a status");
+        assert_eq!(message, TERMINAL_STOP_REFUSAL);
+    }
+
+    #[test]
+    fn a_mouse_drag_reorders_the_dock_pills() {
+        let mut app = app_with_a_dock(2, Agent::Running);
+        draw(&mut app);
+        let ids = dock_ids(&app);
+        let rect = |id: &str, app: &App| {
+            app.mouse_layout
+                .dock_pills
+                .iter()
+                .find(|(pill, _)| pill == id)
+                .map(|(_, rect)| *rect)
+                .expect("the pill is drawn")
+        };
+        let (from, to) = (rect(&ids[0], &app), rect(&ids[1], &app));
+        let at = |kind, rect: Rect| MouseEvent {
+            kind,
+            column: rect.x + 2,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(at(MouseEventKind::Down(MouseButton::Left), from));
+        app.handle_mouse(at(MouseEventKind::Drag(MouseButton::Left), to));
+        app.handle_mouse(at(MouseEventKind::Up(MouseButton::Left), to));
+        assert_eq!(dock_ids(&app), vec![ids[1].clone(), ids[0].clone()]);
+    }
+
+    /// The dock's selection and link tests read the dock's own grid, not the
+    /// agent's.
+    #[test]
+    fn the_dock_reads_its_own_snapshot() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.part_snapshots.dock.buf.scrollback_offset = 7;
+        app.part_snapshots.main.buf.scrollback_offset = 0;
+        app.session_surface = SessionSurface::Terminal;
+        assert_eq!(app.snapshot_selection_origin().scrollback_offset, 7);
+        app.session_surface = SessionSurface::Agent;
+        assert_eq!(app.snapshot_selection_origin().scrollback_offset, 0);
+    }
+
+    /// The control sits on the dock's strip, on the agent's strip when the
+    /// dock is hidden, and on a title row when the strips are.
+    #[test]
+    fn the_layout_control_moves_with_the_strips_and_the_dock() {
+        let control_row = |app: &App| {
+            app.mouse_layout
+                .layout_control
+                .first()
+                .map(|(_, rect)| rect.y)
+                .expect("the control is drawn")
+        };
+        let mut app = app_with_a_dock(2, Agent::Running);
+        draw(&mut app);
+        let pill = app.mouse_layout.dock_pills[0].1;
+        assert_eq!(control_row(&app), pill.y + 1, "on the dock's strip");
+
+        let session_id = app.engine.sessions[0].id.clone();
+        app.set_dock_layout(&session_id, DockLayout::Agent);
+        draw(&mut app);
+        let tab = app.agent_tab_regions[0].1;
+        assert_eq!(control_row(&app), tab.y + 1, "on the agent's strip");
+
+        let mut app = app_with_a_dock(1, Agent::Running);
+        app.session_surface = SessionSurface::Terminal;
+        draw(&mut app);
+        let grid = app.mouse_layout.focused_term.expect("the dock's grid");
+        assert_eq!(control_row(&app), grid.y - 1, "on the dock's title row");
+    }
+
+    #[test]
+    fn the_strips_show_and_hide_together() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        draw(&mut app);
+        assert!(app.agent_tab_regions.is_empty() && app.mouse_layout.dock_pills.is_empty());
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine
+            .create_companion_terminal(&session_id, 24, 80)
+            .expect("a second terminal");
+        draw(&mut app);
+        assert_eq!(app.agent_tab_regions.len(), 1, "the lone tab's strip shows");
+        assert_eq!(app.mouse_layout.dock_pills.len(), 2);
+    }
+
+    #[test]
+    fn a_stopped_agent_in_the_split_shows_the_short_card() {
+        let mut app = app_with_a_dock(1, Agent::Stopped);
+        let session_id = app.engine.sessions[0].id.clone();
+        app.set_dock_layout(&session_id, DockLayout::Split);
+        let text = draw_to_string(&mut app);
+        assert!(text.contains("isn't running. Start picks up"), "{text}");
+        assert!(text.contains("Start"), "{text}");
+        assert!(app.mouse_layout.dormant_tab_button.is_some());
+    }
+
+    #[test]
+    fn a_terminal_rows_header_names_the_terminal() {
+        let mut app = app_with_a_dock(0, Agent::Running);
+        app.engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone");
+        app.rebuild_left_items();
+        let row = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Terminal(_)))
+            .expect("the terminal's row");
+        app.select_left_agent_item(row);
+        let text = draw_to_string(&mut app);
+        let header = text.lines().next().unwrap_or_default();
+        assert!(header.contains("terminal: Terminal"), "{header}");
+    }
+
+    /// The layout is remembered per agent across moving to another row and
+    /// back.
+    #[test]
+    fn the_layout_survives_a_trip_to_another_row() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        let session_id = app.engine.sessions[0].id.clone();
+        app.set_dock_layout(&session_id, DockLayout::Term);
+        app.engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone");
+        app.rebuild_left_items();
+        let terminal_row = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Terminal(_)))
+            .expect("the terminal's row");
+        app.select_left_agent_item(terminal_row);
+        let agent_row = app
+            .left_items()
+            .iter()
+            .position(|item| matches!(item, LeftItem::Session(_)))
+            .expect("the agent's row");
+        app.select_left_agent_item(agent_row);
+        assert_eq!(app.selected_dock_layout(), DockLayout::Term);
+    }
+
+    /// A rebuild keeps the cursor on a terminal's ROW, found by id, when a new
+    /// row lands above it.
+    #[test]
+    fn a_rebuild_keeps_the_cursor_on_its_terminal_row() {
+        let mut app = app_with_a_dock(0, Agent::Running);
+        app.engine.set_agent_sort("name");
+        let (kept, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone");
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&kept);
+        let (other, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("another");
+        // Opened with a name that sorts first.
+        app.engine
+            .companion_terminals
+            .get_mut(&other)
+            .expect("the new terminal")
+            .label = "A first".to_string();
+        app.rebuild_left_items();
+        assert_eq!(app.selected_terminal_row(), Some(kept));
+    }
+
+    /// A step past a row the list does not show moves nothing on screen, so the
+    /// move goes on past it, or says nothing moved.
+    #[test]
+    fn moving_a_terminal_past_a_hidden_row_moves_it_on_screen_or_says_so() {
+        let mut app = app_with_a_dock(0, Agent::Running);
+        app.engine.sessions[0].status = crate::model::SessionStatus::Active;
+        let mut quiet = app.engine.sessions[0].clone();
+        quiet.id = "quiet-agent".to_string();
+        quiet.status = crate::model::SessionStatus::Exited;
+        app.engine.sessions.push(quiet);
+        app.engine.set_agent_sort("manual");
+        let (terminal, _) = app
+            .engine
+            .create_standalone_terminal(24, 80)
+            .expect("standalone");
+        // After the quiet agent, which the collapsed tail hides.
+        app.engine
+            .place_terminal_in_list(&terminal, Some("quiet-agent".to_string()));
+        app.inactive_tail.overridden = true;
+        app.inactive_tail.collapsed = true;
+        app.rebuild_left_items();
+        app.reselect_left_terminal(&terminal);
+        let before: Vec<_> = app.left_rows.clone();
+        app.move_selected_terminal(super::super::reorder::MoveDir::Up);
+        assert_ne!(
+            app.left_rows, before,
+            "the row moved above the visible agent"
+        );
+        assert_eq!(
+            app.left_rows.first(),
+            Some(&crate::app::LeftRow::Terminal(terminal))
+        );
+    }
+
+    /// The painted cells of the part without focus are grey and faded, text in
+    /// the terminal's default colour included, which greys from the theme's
+    /// body text; with focus outside the center they are drawn as the child
+    /// sent them.
+    #[test]
+    fn the_unfocused_parts_painted_cells_are_grey_and_faded() {
+        let mut app = app_with_a_dock(1, Agent::Running);
+        let slot = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        app.engine.providers.insert(
+            TabId::new(slot),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "printf GREYME; sleep 30".to_string()],
+                std::path::Path::new("."),
+                10,
+                40,
+                100,
+            )
+            .expect("spawn pty"),
+        );
+        app.session_surface = SessionSurface::Terminal;
+        let marker_cell = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height).find_map(|y| {
+                (0..buffer.area.width.saturating_sub(5)).find_map(|x| {
+                    let word: String = (0..6).map(|i| buffer[(x + i, y)].symbol()).collect();
+                    (word == "GREYME").then(|| buffer[(x, y)].clone())
+                })
+            })
+        };
+        let mut cell = None;
+        for _ in 0..300 {
+            if let Some(found) = marker_cell(&draw(&mut app)) {
+                cell = Some(found);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let cell = cell.expect("the agent's output is on screen");
+        let expected = crate::theme::unfocused_part_color(app.theme.text_fg, app.theme.app_bg)
+            .expect("the theme's text has channels");
+        assert_eq!(cell.fg, expected, "default-colour text greys and fades");
+
+        app.focus = FocusPane::Left;
+        let cell = marker_cell(&draw(&mut app)).expect("still on screen");
+        assert_eq!(cell.fg, ratatui::style::Color::Reset, "full colour again");
     }
 }

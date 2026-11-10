@@ -2576,6 +2576,106 @@ mod tests {
         );
     }
 
+    /// An agent with a terminal docked under it, the row driven by a browser:
+    /// the stack is drawn in the split with the dock focused.
+    fn a_browser_driving_a_docked_row() -> (App, TuiOwnership, String) {
+        let (mut app, _recorded, seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let (terminal_id, _) = app
+            .engine
+            .create_companion_terminal("session-1", 24, 80)
+            .expect("companion terminal");
+        app.focus = FocusPane::Center;
+        app.reconcile_center_target();
+        app.session_surface = SessionSurface::Terminal;
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                dux_core::pty_owners::ResizeIntent::Plain,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
+            .epoch
+            .expect("the browser claimed the row");
+        let _ = render_rows(&mut app, 160, 40);
+        (app, seat, terminal_id)
+    }
+
+    /// One card covers the agent and its dock together, with one button, and
+    /// nothing under it can be focused, scrolled or selected.
+    #[test]
+    fn one_take_over_card_covers_the_whole_stack_and_swallows_the_pointer() {
+        let (mut app, _seat, _terminal) = a_browser_driving_a_docked_row();
+        let rows = render_rows(&mut app, 160, 40);
+        let buttons = rows.iter().filter(|row| row.contains("Take over")).count();
+        assert_eq!(buttons, 1, "{}", rows.join("\n"));
+        let stack = app.mouse_layout.center_stack.expect("the stack");
+        let button = app.mouse_layout.takeover_button.expect("one button");
+        assert!(stack.contains(button.as_position()));
+
+        // A press on the covered agent part neither moves focus off the dock
+        // nor starts a selection; a wheel scrolls nothing.
+        let agent_point = (stack.x + 2, stack.y + 2);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.focused_part(), crate::app::CenterPart::Dock);
+        assert!(app.terminal_selection.is_none());
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.scroll_mode.is_empty(), "nothing under the card scrolls");
+
+        // The button claims the row, and the next frame's resize of a part of
+        // it spends the intent.
+        let press = |kind| MouseEvent {
+            kind,
+            column: button.x + 1,
+            row: button.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(press(MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(press(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(app.pending_pty_takeover, None, "spent by the row's resize");
+        assert!(
+            app.focused_pty_takeover_card().is_none(),
+            "the row is this surface's"
+        );
+    }
+
+    /// The intent is spent by a resize of the DOCK's pty just as by the
+    /// agent's: both belong to the row.
+    #[test]
+    fn a_take_over_intent_is_spent_by_the_docks_resize() {
+        let (mut app, seat, terminal) = a_browser_driving_a_docked_row();
+        app.take_over_focused_pty();
+        app.pty_sizes.clear();
+        assert!(app.resize_pty_if_permitted(&terminal, 20, 70));
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
+    }
+
     /// Ctrl-g in interactive mode: the default `ToggleFullscreen` binding, which
     /// leaves fullscreen and writes NOTHING to the child.
     const TOGGLE_FULLSCREEN_BYTES: &[u8] = &[0x07];

@@ -3411,21 +3411,21 @@ mod tests {
         assert_eq!(late_default_warnings(&keys), Vec::<String>::new());
     }
 
-    /// The help overlay names the layout key, and the retired name of the close
-    /// action binds nothing.
+    /// The help overlay names the layout key, and typing in interactive mode
+    /// keeps Ctrl-e for the child.
     #[test]
-    fn the_layout_key_is_in_the_help_and_delete_terminal_is_not_an_action() {
+    fn the_layout_key_is_in_the_help_and_never_taken_from_a_typing_child() {
         let sections = default_bindings().help_sections();
         assert!(
             sections.iter().any(|(name, rows)| *name == "Agent pane"
                 && rows.iter().any(|(_, text)| text.contains("terminal dock"))),
             "{sections:?}"
         );
-        let mut keys = crate::config::KeysConfig::default();
-        keys.bindings
-            .insert("delete_terminal".to_string(), vec!["ctrl-k".to_string()]);
-        assert!(crate::config::validate_keys(&keys).is_err());
-        assert_eq!(Action::CloseTerminal.config_name(), "close_terminal");
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(
+            default_bindings().lookup(&ctrl_e, BindingScope::Interactive),
+            None
+        );
     }
 
     #[test]

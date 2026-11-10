@@ -1,9 +1,11 @@
 //! The flat list's ordering decision, core-owned and mirrored by hand in the
 //! web's `crates/dux-web/web/src/lib/flatList.ts` and `sortSessions.ts`. The rule
-//! lives here; the two are pinned by shared test vectors, the agent-only ones
-//! duplicated in `flatList.test.ts` and `sortSessions.test.ts` and the ones with
-//! terminal rows in `tests/fixtures/flat_list_cross_language.json`, which both
-//! languages read, so an unmirrored comparator change fails a test.
+//! lives here. The agent-only rules are pinned by shared test vectors
+//! duplicated in `flatList.test.ts` and `sortSessions.test.ts`, so an unmirrored
+//! comparator change fails a test. The rows with terminals among the agents are
+//! pinned by `tests/fixtures/flat_list_cross_language.json`, written for both
+//! languages to read; the browser does not order terminals among agents yet, and
+//! its twin of that ordering is to read the same file.
 //!
 //! The list is a single globally-ordered list with no project grouping: active
 //! agents and project and standalone terminals form the main bucket, and
@@ -126,8 +128,8 @@ pub(crate) fn is_inactive(session: &AgentSession) -> bool {
 /// This is the list's question only. The pull-request poller asks
 /// [`is_inactive`], which judges the agent alone.
 ///
-/// The web's twin is `inInactiveTail` in `crates/dux-web/web/src/lib/flatList.ts`;
-/// both are held to the same answers by `tests/fixtures/flat_list_cross_language.json`.
+/// The browser still judges its tail by the agent alone; its twin of this rule
+/// is to be held to the same answers by `tests/fixtures/flat_list_cross_language.json`.
 pub fn in_inactive_tail(session: &AgentSession, own_terminals: OwnTerminals) -> bool {
     is_inactive(session) && own_terminals == OwnTerminals::NoneRunning
 }

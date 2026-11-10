@@ -131,11 +131,32 @@ impl App {
             self.set_info("Only one row in the list; nothing to reorder.");
             return;
         }
-        let Some(idx) = order.iter().position(|candidate| candidate == row) else {
-            return;
+        // A step past a row the list is not showing (a quiet agent in the
+        // collapsed tail, one a filter hides) moves nothing on screen, so the
+        // move carries on until it passes a row the user can see.
+        let shown = |order: &[LeftRow]| -> Vec<LeftRow> {
+            order
+                .iter()
+                .filter(|candidate| self.left_rows.contains(candidate))
+                .cloned()
+                .collect()
         };
-        let new_order = move_in_order(&order, idx, dir);
-        if new_order == order {
+        let before = shown(&order);
+        let mut new_order = order.clone();
+        loop {
+            let Some(idx) = new_order.iter().position(|candidate| candidate == row) else {
+                return;
+            };
+            let next = move_in_order(&new_order, idx, dir);
+            if next == new_order {
+                break;
+            }
+            new_order = next;
+            if shown(&new_order) != before {
+                break;
+            }
+        }
+        if shown(&new_order) == before {
             self.set_info(already_at_edge_message(kind, dir));
             return;
         }

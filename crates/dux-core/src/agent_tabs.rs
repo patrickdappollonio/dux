@@ -78,7 +78,8 @@ pub fn tab_after_close<'a>(strip: &'a [String], closed: &str) -> Option<&'a str>
 /// dock's, which always show and hide together. Both show while the agent has
 /// two or more tabs, or two or more terminals, or the user asked to always see
 /// them; otherwise neither does, and a lone tab and a lone terminal stand
-/// without one. Mirrors the web's `shouldShowTabStrip`.
+/// without one. The browser's `shouldShowTabStrip` still counts tabs alone;
+/// this is the rule it is to match.
 pub fn strips_shown(tab_count: usize, terminal_count: usize, setting: StripSetting) -> bool {
     setting == StripSetting::Always || tab_count >= 2 || terminal_count >= 2
 }

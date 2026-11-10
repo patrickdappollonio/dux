@@ -608,7 +608,9 @@ impl Action {
             Action::DeleteSession => {
                 "Delete the selected session and worktree; with an agent's terminal dock focused, or a terminal's row selected, close that terminal instead."
             }
-            Action::CloseTerminal => "Close the selected terminal.",
+            Action::CloseTerminal => {
+                "Close the selected terminal. A row under its old name, delete_terminal, is read as this one."
+            }
             Action::InteractAgent => {
                 "Open the selected agent fullscreen, where keys go to the agent verbatim."
             }

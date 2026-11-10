@@ -4392,6 +4392,8 @@ pub(crate) struct MouseLayoutState {
     /// The center pane between the header and the footer, as the dock divider
     /// measures its share against.
     pub(crate) center_stack: Option<Rect>,
+    /// What the take-over card over an agent's stack covers, while it is up.
+    pub(crate) card_cover: Option<Rect>,
     /// The `agent | split | term` control's three words, where it is drawn.
     pub(crate) layout_control: Vec<(DockLayout, Rect)>,
     /// The dock strip's pills, where they are drawn: (terminal id, cell rect).
@@ -4433,6 +4435,7 @@ impl MouseLayoutState {
         self.other_term = None;
         self.dock_divider = None;
         self.center_stack = None;
+        self.card_cover = None;
         self.layout_control.clear();
         self.dock_pills.clear();
         self.takeover_button = None;
@@ -5854,11 +5857,21 @@ impl App {
     }
 
     fn focused_host_passthrough_tab(&self) -> Option<String> {
-        if !matches!(self.center_mode, CenterMode::Agent) || self.active_terminal_id.is_some() {
+        if !matches!(self.center_mode, CenterMode::Agent) || !self.agent_part_has_focus() {
             return None;
         }
         self.selected_session()
             .map(|session| self.focused_tab_id(&session.id))
+    }
+
+    /// Whether the agent's own part is on screen with the keyboard: drawn by
+    /// the layout (or fullscreen), and the part focus is on. An agent's dock
+    /// terminal existing beside it does not take that away.
+    pub(crate) fn agent_part_has_focus(&self) -> bool {
+        self.selected_terminal_row().is_none()
+            && self.focused_part() == CenterPart::Main
+            && (self.fullscreen_overlay == FullscreenOverlay::Agent
+                || self.layout_parts().contains(&CenterPart::Main))
     }
 
     fn forward_host_passthrough(&mut self) {
@@ -6699,10 +6712,7 @@ impl App {
                 Ok(())
             }
             "stop-agent-tab" if self.dock_has_focus() => {
-                self.set_error(
-                    "A terminal is closed rather than stopped: run close-tab to close it, or press \
-                     Ctrl-C in it to stop what is running there and keep the shell.",
-                );
+                self.set_error(dock::TERMINAL_STOP_REFUSAL);
                 Ok(())
             }
             "stop-agent-tab" => {
@@ -8499,7 +8509,8 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Whether the selected agent's first tab has a live process.
+    /// Whether any of the selected agent's tabs has a live process, which is
+    /// what makes it running rather than stopped.
     pub(crate) fn selected_agent_running(&self) -> bool {
         self.selected_session().is_some_and(|session| {
             self.session_tab_ids(&session.id)
@@ -8519,11 +8530,13 @@ impl App {
         if self.dock_terminal_ids(&session.id).is_empty() {
             return DockLayout::Agent;
         }
+        if let Some((id, layout)) = &self.stopped_layout
+            && *id == session.id
+        {
+            return *layout;
+        }
         if !self.selected_agent_running() {
-            return match &self.stopped_layout {
-                Some((id, layout)) if *id == session.id => *layout,
-                _ => DockLayout::Term,
-            };
+            return DockLayout::Term;
         }
         self.dock_layouts
             .get(&session.id)
@@ -8596,13 +8609,27 @@ impl App {
             }
             return;
         };
+        // A stopped agent's layout is dropped once it runs, returning to the
+        // remembered one, but not while its terminal is the part with the
+        // keyboard: the remembered layout could hide it and move the keyboard
+        // onto the agent mid-keystroke. It applies once focus leaves the dock.
+        let typing_into_dock =
+            self.focus == FocusPane::Center && self.focused_part() == CenterPart::Dock;
         if self
             .stopped_layout
             .as_ref()
             .is_some_and(|(id, _)| *id != session_id)
-            || self.selected_agent_running()
+            || (self.selected_agent_running() && !typing_into_dock)
         {
             self.stopped_layout = None;
+        }
+        // A stopped agent beside its terminals opens on them, and that layout is
+        // held until it is dropped above.
+        if self.stopped_layout.is_none()
+            && !self.selected_agent_running()
+            && !self.dock_terminal_ids(&session_id).is_empty()
+        {
+            self.stopped_layout = Some((session_id.clone(), DockLayout::Term));
         }
         let dock = self.dock_terminal_ids(&session_id);
         let current_is_ours = self
@@ -8761,10 +8788,18 @@ impl App {
 
     /// The center part keyboard commands and typing act on: the dock while an
     /// agent's terminal has focus, the row's own terminal otherwise.
+    ///
+    /// The part being typed into, or shown fullscreen, always wins over the
+    /// pane focus, so the part that receives bytes is the part on screen with
+    /// the keyboard and the two can never disagree.
     pub(crate) fn focused_part(&self) -> CenterPart {
-        match self.session_surface {
-            SessionSurface::Agent => CenterPart::Main,
-            SessionSurface::Terminal => CenterPart::Dock,
+        match (self.fullscreen_overlay, self.input_target) {
+            (FullscreenOverlay::Agent, _) | (_, InputTarget::Agent) => CenterPart::Main,
+            (FullscreenOverlay::Terminal, _) | (_, InputTarget::Terminal) => CenterPart::Dock,
+            _ => match self.session_surface {
+                SessionSurface::Agent => CenterPart::Main,
+                SessionSurface::Terminal => CenterPart::Dock,
+            },
         }
     }
 

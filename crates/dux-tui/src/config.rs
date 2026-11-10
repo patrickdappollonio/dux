@@ -214,6 +214,9 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
 // action was merged into an action that still does its job, so its binding
 // survives under the new name instead of being thrown away.
 //
+// `delete_terminal` folds into `close_terminal`, its new name: the command
+// closes a terminal rather than deleting anything.
+//
 // `exit_interactive` folds into `toggle_fullscreen`, which now minimizes as
 // well as maximizes. Configs written by an older dux carry it as an active row
 // (dux stores resolved defaults as real values) with the same default ctrl-g
@@ -226,7 +229,10 @@ fn prune_retired_key_actions(doc: &mut DocumentMut) -> bool {
 /// moved to the new name on load (and the migrated document is persisted, like
 /// every other load migration) so the file converges and never has to be
 /// understood twice.
-const FOLDED_KEY_ACTIONS: &[(&str, &str)] = &[("exit_interactive", "toggle_fullscreen")];
+const FOLDED_KEY_ACTIONS: &[(&str, &str)] = &[
+    ("exit_interactive", "toggle_fullscreen"),
+    ("delete_terminal", "close_terminal"),
+];
 
 /// Read a `[keys]` value as a list of key strings. `None` for any other shape,
 /// which is left for `validate_keys` to report in its own words.
@@ -854,14 +860,14 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "always_show_tab_strip",
             comment: Some(CommentSource::Static(
-                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
+                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs. In the\n# terminal UI it covers the strip of an agent's terminal dock too: both show\n# together, also once the agent has two or more terminals.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
         },
         ConfigEntry::Field {
             key: "tab_reaches_agent",
             comment: Some(CommentSource::Static(
-                "# Send Tab and Shift-Tab to the agent in the center pane instead of moving\n# between panes with them. Default false: Tab has cycled panes since dux's\n# first version. Turn it on for agents that use Tab to autocomplete and\n# Shift-Tab to cycle modes. Panes still move either way, with the chords bound\n# under [keys] as focus_next and focus_prev (Ctrl-o and Ctrl-y by default).\n# Toggle at runtime from the TUI command palette, or the web UI's Preferences\n# dialog.",
+                "# Send Tab and Shift-Tab to the agent in the center pane instead of moving\n# between panes with them. Default false: Tab has cycled panes since dux's\n# first version. Turn it on for agents that use Tab to autocomplete and\n# Shift-Tab to cycle modes. In the terminal UI it also hands Tab to an agent's\n# docked terminal while you type into it. Panes still move either way, with the chords bound\n# under [keys] as focus_next and focus_prev (Ctrl-o and Ctrl-y by default).\n# Toggle at runtime from the TUI command palette, or the web UI's Preferences\n# dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.tab_reaches_agent),
         },
@@ -5370,6 +5376,19 @@ mod legacy_exit_interactive_tests {
             saved.contains("# A comment the user wrote themselves."),
             "the rewrite must preserve user comments:\n{saved}"
         );
+    }
+
+    /// A binding written under the close action's old name keeps starting dux
+    /// and keeps working under the new one.
+    #[test]
+    fn a_delete_terminal_row_becomes_close_terminal() {
+        let (_dir, _paths, config) = seeded_config("[keys]\ndelete_terminal = [\"ctrl-k\"]\n");
+        assert!(validate_keys(&config.keys).is_ok());
+        assert_eq!(
+            config.keys.bindings.get("close_terminal"),
+            Some(&vec!["ctrl-k".to_string()])
+        );
+        assert!(!config.keys.bindings.contains_key("delete_terminal"));
     }
 
     /// A CUSTOM exit key migrates, and gains the enter-fullscreen half: that is

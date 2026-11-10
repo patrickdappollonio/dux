@@ -1471,6 +1471,7 @@ impl App {
                     {
                         self.focus = FocusPane::Center;
                         self.center_mode = CenterMode::Agent;
+                        self.session_surface = SessionSurface::Agent;
                         self.input_target = InputTarget::Agent;
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
                         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
@@ -1728,10 +1729,7 @@ impl App {
             Action::PrevTab => self.focus_dock_relative(FocusStep::Backward),
             Action::NewTab => self.show_companion_terminal(),
             Action::CloseTab => self.confirm_close_focused_terminal(),
-            Action::StopTab => self.set_error(
-                "A terminal is closed rather than stopped: close it, or press Ctrl-C in it to \
-                 stop what is running there and keep the shell.",
-            ),
+            Action::StopTab => self.set_error(super::dock::TERMINAL_STOP_REFUSAL),
             Action::MoveTabLeft => self.move_dock_terminal(MoveDir::Up),
             Action::MoveTabRight => self.move_dock_terminal(MoveDir::Down),
             _ => return false,
@@ -4022,7 +4020,7 @@ impl App {
         }
         if self.focus == FocusPane::Center
             && matches!(self.center_mode, CenterMode::Agent)
-            && self.active_terminal_id.is_none()
+            && self.agent_part_has_focus()
             && let Some(session_id) = self.selected_session().map(|s| s.id.clone())
         {
             let tab_id = self.focused_tab_id(&session_id);
@@ -11201,6 +11199,10 @@ impl App {
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
                 self.focus = FocusPane::Center;
+                // Activating the agent's row is about the agent, so the agent
+                // part takes the keyboard (the layout hands it back to the dock
+                // when the agent part is not drawn).
+                self.session_surface = SessionSurface::Agent;
                 self.reload_changed_files();
                 if self
                     .selected_session()
@@ -12699,7 +12701,7 @@ impl App {
     /// An in-flight press is tracked wherever the pointer goes, so a drag that
     /// leaves the pane still ends in a released button rather than a stuck one.
     pub(crate) fn handle_takeover_card_mouse(&mut self, mouse: MouseEvent) -> bool {
-        if !self.focused_pty_is_covered_by_card() {
+        if !self.card_covers_center() {
             // The card can vanish under the pointer: this surface takes over, or
             // a launch started here claims the pty, between press and release.
             self.takeover_press = None;
@@ -12746,10 +12748,16 @@ impl App {
                     // marked as dragging.
                     self.terminal_selection = None;
                 }
-                let covered = self
-                    .mouse_layout
-                    .focused_term
-                    .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
+                // Over an agent's stack the card covers every part of it, so
+                // nothing under it can be focused, selected, scrolled or
+                // followed.
+                let covered_area = if self.drawing_agent_stack() {
+                    self.mouse_layout.card_cover
+                } else {
+                    self.mouse_layout.focused_term
+                };
+                let covered =
+                    covered_area.is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
                 if covered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     // A click on a pane still focuses it, which is the one thing
                     // a click on the covered area may still do.
@@ -24083,6 +24091,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         // A companion terminal is focused, not the agent PTY.
         app.active_terminal_id = Some("term-1".to_string());
+        app.session_surface = SessionSurface::Terminal;
 
         app.note_focused_agent_viewed();
 
