@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react"
-
 import { Button } from "@/components/ui/button"
+import { useSecondTicks } from "@/hooks/use-second-ticks"
 import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startDormantTab } from "@/lib/store"
 import { genericEndingSentence, verdictSentenceNow } from "@/lib/tabVerdict"
@@ -94,15 +93,4 @@ export function DormantTabCard({
       </Button>
     </div>
   )
-}
-
-// Re-render once a second while `active`, so the verdict's age keeps moving on
-// a document the server has no reason to send again.
-function useSecondTicks(active: boolean): void {
-  const [, setTicks] = useState(0)
-  useEffect(() => {
-    if (!active) return
-    const timer = setInterval(() => setTicks((n) => n + 1), 1000)
-    return () => clearInterval(timer)
-  }, [active])
 }

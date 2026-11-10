@@ -16,14 +16,13 @@ it: pick a sort mode and let dux keep the list in order, or place things by hand
 
 Dormant agents fold away into a collapsible "Inactive" tail at the bottom.
 
-- **Terminal UI:** one list, titled **Agents & Terminals** with a count of each. Project and
-  standalone terminals are rows of it, sorted together with the agents. An agent's own
+- **Both surfaces:** one list, titled **Agents & Terminals** with a count of each. Project
+  and standalone terminals are rows of it, sorted together with the agents. An agent's own
   terminals are not rows: they dock under the agent in the center pane (see
-  [Terminals beside their agent](#terminals-beside-their-agent)). An agent you stopped while
+  [Terminals beside their agent](#terminals-beside-their-agent), and in the browser
+  [the terminal dock](/docs/web-workspace#the-terminal-dock)). An agent you stopped while
   one of its terminals keeps running stays in the list, out of the Inactive tail, until its
   last terminal ends, and terminals are never in the tail.
-- **Web:** agents up top, and terminals in a labelled group of their own below them. The
-  Terminals group is collapsible and sits above the Inactive tail.
 - **Every row** is two lines: the name, then who it belongs to and what it is doing.
 
 The terminal UI looks like this (the `※` before a project name marks the project, and the
@@ -67,16 +66,11 @@ On the web, use the **Sort** dropdown above the agent list. In the terminal UI, 
   does not include it, since it is what you get by placing a row by hand. The web dropdown
   lists it as **Manual order**.
 
-Terminals follow the same choice.
-
-- **Terminal UI:** terminals sort among the agents. By name, a terminal uses the name it
-  was opened with (`Terminal 3`), never what is running in it, so a program starting does
-  not move the row. By activity, a terminal running something counts as busy. By updated,
-  its last output counts. In manual order it keeps the place you put it in among the agents
-  until dux restarts.
-- **Web:** terminals sort within their own group. By name they sort by their foreground
-  command (or their label when nothing is running in the foreground); pick manual and each
-  holds the spot you put it in.
+Terminals follow the same choice, on both surfaces, sorting among the agents. By name, a
+terminal uses the name it was opened with (`Terminal 3`), never what is running in it, so a
+program starting does not move the row. By activity, a terminal running something counts as
+busy. By updated, its last output counts. In manual order it keeps the place you put it in
+among the agents until dux restarts.
 
 > [!NOTE]
 > The web's cog menu also has **Sort agents by** (Recently updated, Created, Name). That is
@@ -87,9 +81,8 @@ Terminals follow the same choice.
 
 **Drag it, on either surface.** Grab a row with the mouse and drop it where you want,
 in the browser or in the terminal UI. Agents move freely across projects, because the
-order is one list rather than one list per project. In the terminal UI a project or
-standalone terminal row can be dropped between agent rows, since it is a row of the same
-list; in the browser agents reorder among agents and terminals among terminals.
+order is one list rather than one list per project. A project or standalone terminal row
+can be dropped between agent rows, since it is a row of the same list.
 
 In the terminal UI:
 
@@ -125,11 +118,14 @@ order until you rearrange them. The same goes for the order of an agent's termin
 
 ## Terminals beside their agent
 
-In the terminal UI an agent's own terminals are not rows of the list: they dock under the
-agent in the center pane, each with a numbered pill in the dock's strip, and the agent's
-row stands for all of them.
+An agent's own terminals are not rows of the list: they dock under the agent in the center
+pane, on both surfaces, each with a pill in the dock's strip, and the agent's row stands for
+all of them. The browser's dock is described in [the terminal dock](/docs/web-workspace#the-terminal-dock);
+this is the terminal UI's, where the pills are numbered:
 
-![The terminal UI with an agent on top of the center pane and its two terminals docked below it, each with a numbered pill, the agent | split | term control at the right of the dock's strip, and the list titled Agents & Terminals.](/screens/tui-terminal-dock.png) Reorder them along the dock by dragging a pill with the mouse,
-or with the `move-tab-left` and `move-tab-right` palette commands while the dock has focus.
-The agent's first tab keeps its place as the tab that starts whatever order its strip is
-in, and nothing about the dock's order is kept across a restart.
+![The terminal UI with an agent on top of the center pane and its two terminals docked below it, each with a numbered pill, the agent | split | term control at the right of the dock's strip, and the list titled Agents & Terminals.](/screens/tui-terminal-dock.png)
+
+Reorder them along the dock by dragging a pill with the mouse, on either surface, or in the
+terminal UI with the `move-tab-left` and `move-tab-right` palette commands while the dock
+has focus. The agent's first tab keeps its place as the tab that starts whatever order its
+strip is in, and nothing about the dock's order is kept across a restart.

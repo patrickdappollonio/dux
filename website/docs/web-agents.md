@@ -289,8 +289,10 @@ These entries are about a branch dux manages, so a standalone agent does not get
 ## Provider tabs
 
 An agent can run more than one provider session in its single shared worktree, as **tabs**.
-With two or more, a strip of pills appears atop the terminal, each a live provider session
-against the same files.
+With two or more (or two or more [docked terminals](/docs/web-workspace#the-terminal-dock)),
+a strip of pills appears atop the terminal, each a live provider session against the same
+files. With the strip hidden, the floating pill's **+** opens a small dialog that adds
+a tab on the default provider or a new terminal.
 
 - **Add** one with the split **+** button: the main button uses the project's default
   provider, the caret lets you pick.
@@ -319,7 +321,9 @@ process behind it.
 - **An extra tab** shows a card saying it is not running, with a **Start session** button,
   and nothing launches until you ask.
 - **The agent's first tab** is the exception: selecting the agent starts it, because asking
-  for the agent is asking for that tab.
+  for the agent is asking for that tab. Not while one of the agent's terminals is running,
+  though: then it opens on that terminal with a **Start** button, since an agent stopped
+  with its terminals left going was stopped on purpose.
 - **A tab whose last run ended badly** (it failed to launch, or the provider exited with an
   error) waits for you too, first tab included. It shows the same card, and only **Start
   session** retries it. That is deliberate, so a tab that cannot come up does not relaunch

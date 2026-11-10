@@ -32,6 +32,12 @@ export function usePaneCoverOwned(ptyId: string | null): boolean {
   return paneCoverOwnedFor(ptyId)
 }
 
+/** Does a full-pane cover own any of these ptys' panes? */
+export function useAnyPaneCoverOwned(ptyIds: readonly string[]): boolean {
+  covers.useVersion()
+  return ptyIds.some((id) => paneCoverOwnedFor(id))
+}
+
 /**
  * Has the pane behind this id published a verdict at all? "Uncovered" and "no
  * pane has answered yet" read the same through `usePaneCoverOwned`, and chrome

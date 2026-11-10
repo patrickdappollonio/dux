@@ -171,6 +171,8 @@ export const DIVIDER_DRAG_THRESHOLD_PX = 3
 export const DIVIDER_STORAGE_KEYS = {
   sidebarWidth: "dux:sidebar-width",
   changesPanePercent: "dux:changes-pane-percent",
+  // The agent part's share of an agent's stack, one value for every agent.
+  stackAgentPercent: "dux:stack-agent-percent",
 } as const
 
 // Every localStorage touch here is guarded: private mode, blocked site data or a

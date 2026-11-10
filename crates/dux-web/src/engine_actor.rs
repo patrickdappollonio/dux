@@ -8456,6 +8456,7 @@ mod tests {
             typing: false,
             foreground_cmd: None,
             sort_order: 1,
+            list_after: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

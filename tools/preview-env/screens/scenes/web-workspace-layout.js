@@ -24,7 +24,6 @@ module.exports = {
     await freshen(by["fix-login-redirect"].id, 5)
     await goto(page, `#/agent/${by["fix-login-redirect"].id}`)
     await takeOver(page)
-    await setTerminalsExpanded(page, true)
     await sleep(2500)
     await clearToasts(page)
     // All three panes the caption names: the six rows on the left, a terminal
@@ -39,14 +38,3 @@ module.exports = {
   },
 }
 
-// The Terminals divider defaults open; a run that collapsed it must put it back.
-async function setTerminalsExpanded(page, wantOpen) {
-  await page.evaluate((open) => {
-    const btn = [...document.querySelectorAll("button")].find((b) =>
-      /^\s*Terminals/.test(b.textContent || ""),
-    )
-    if (!btn) return
-    if ((btn.getAttribute("aria-expanded") === "true") !== open) btn.click()
-  }, wantOpen)
-  await sleep(400)
-}

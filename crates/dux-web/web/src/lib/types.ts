@@ -188,10 +188,11 @@ export interface TerminalView {
    * itself is idle; refreshed by the engine at most every ~2s. The displayed
    * title follows it when present, falling back to `label` (`terminalTitle`). */
   foreground_cmd: string | null
-  /** The terminal's manual (drag) display position within the flat Terminals
-   * section, ascending. Stamped at spawn so the default equals creation order,
-   * rewritten only by a reorder. Runtime only: never persisted, and it resets to
-   * creation order on restart. Missing normalizes to `0`. */
+  /** The terminal's manual (drag) position among all terminals, ascending: it
+   * orders an agent's own terminals, and list terminals sharing a
+   * `list_after`. Stamped at spawn so the default equals creation order,
+   * rewritten only by a reorder. Runtime only: never persisted, and it resets
+   * to creation order on restart. Missing normalizes to `0`. */
   sort_order: number
   /** RFC 3339 spawn time, immutable after spawn, in the same representation as
    * `SessionView`'s timestamps. Missing normalizes to "". */
@@ -199,6 +200,11 @@ export interface TerminalView {
   /** RFC 3339 timestamp of the terminal's last PTY activity, falling back to the
    * spawn time when there has been none. Missing normalizes to "". */
   updated_at: string
+  /** A project or standalone terminal's manual place in the agents list: the
+   * agent its row sits right after in the stored agent order, null for the top
+   * (and for an agent's own terminal, which is not a list row). Runtime only.
+   * Missing normalizes to null. */
+  list_after: string | null
 }
 
 export interface SessionView {

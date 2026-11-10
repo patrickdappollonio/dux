@@ -6,3 +6,8 @@ import { lazy } from "react"
 export const LazyTerminalPane = lazy(() =>
   import("@/components/TerminalPane").then((m) => ({ default: m.TerminalPane })),
 )
+
+// The same chunk's stack, for an agent laid out with its terminal dock.
+export const LazyTerminalStack = lazy(() =>
+  import("@/components/TerminalPane").then((m) => ({ default: m.TerminalStack })),
+)

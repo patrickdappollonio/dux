@@ -107,6 +107,9 @@ export function slotTabIdOf(
 //   dormant slot tab whose      card (the idle screen): the user just quit it,
 //     run ended while on        so staying on the agent is not asking for it
 //     screen (`endedInViewTabId`) again
+//   dormant slot tab while one  card: an agent stopped with its terminals left
+//     of the agent's terminals  going was stopped on purpose, so nothing that
+//     runs (`terminalRunning`)  opens it starts it; only its Start does
 //   started by this client      no card: the press is sent and the spine has not
 //     (`startedDormantTabs`)    caught up (see `startDormantTab`)
 //   no session                  card: defensive only, since callers derive
@@ -122,6 +125,7 @@ export function dormantTabNeedsCard(
   startedDormantTabs: string[],
   slotTabId?: string,
   endedInViewTabId?: string | null,
+  terminalRunning = false,
 ): boolean {
   if (!target || target.kind !== "agent") return false
   if (!focusedTab || focusedTab.has_live_process) return false
@@ -129,7 +133,7 @@ export function dormantTabNeedsCard(
   if (focusedTab.id === endedInViewTabId) return true
   const slot = slotTabId ?? session?.slot_tab_id
   if (!session || focusedTab.id !== slot) return true
-  return focusedTab.last_run_failed === true
+  return focusedTab.last_run_failed === true || terminalRunning
 }
 
 // Whether the slot tab's run just ended cleanly under this pane, which is what

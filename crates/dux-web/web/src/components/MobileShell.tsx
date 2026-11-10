@@ -602,6 +602,11 @@ function AgentTerminalScreen({
             startedDormantTabs,
             slotTabId,
             endedInViewTab,
+            // An agent stopped with a terminal of its own still running was
+            // stopped on purpose: opening it must not start it.
+            (spine?.terminals ?? []).some(
+              (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
+            ),
           )}
           paneKey={paneKey}
           targetId={targetId}

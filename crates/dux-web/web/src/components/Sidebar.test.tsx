@@ -344,11 +344,10 @@ describe("AppSidebar agent ⋯ menu: Add tab", () => {
   })
 })
 
-describe("AppSidebar flat Terminals section", () => {
-  // A session that owns a companion terminal which is currently "typing": it must
-  // render in the flat Terminals section (not nested under the agent), under the
-  // "Terminals" header, showing the running command, the owner (agent) label, and
-  // the violet "Typing" state word.
+describe("AppSidebar agent's own terminals", () => {
+  // A session that owns a terminal which is currently "typing": an agent's own
+  // terminals live with the agent, so the list shows neither a row for it nor a
+  // Terminals section.
   function typingTerminalSpine(): DuxState["spine"] {
     return {
       projects: [
@@ -404,7 +403,7 @@ describe("AppSidebar flat Terminals section", () => {
     } as unknown as DuxState["spine"]
   }
 
-  it("renders a companion terminal in the flat Terminals section with owner label and Typing state", () => {
+  it("lists no row for an agent's own terminal, in the list or on the rail", () => {
     mockState = makeState({
       spine: typingTerminalSpine(),
       bootstrap: { title: "dux", dux_version: "v1" },
@@ -414,19 +413,12 @@ describe("AppSidebar flat Terminals section", () => {
         <AppSidebar />
       </SidebarProvider>,
     )
-    // The section header.
-    expect(screen.getByText("Terminals")).toBeTruthy()
-    // Row 1 primary label = the running foreground command. The collapsed
-    // rail's tooltip (rendered inline by the mock, hidden by CSS) names it too.
-    expect(screen.getAllByText("vim").length).toBeGreaterThan(0)
-    // Row 2: the owner label repeats the agent name (the agent row plus the
-    // terminal's ↳ owner tag, and the vitals tooltips), so it appears more than
-    // once, proving the terminal carries its owner label.
-    expect(screen.getAllByText("Login flow").length).toBeGreaterThan(1)
-    // The terminal's Typing word (the agent row shows Idle since the session
-    // itself is not typing), styled through the violet typing token.
-    const word = screen.getByText("Typing")
-    expect(word.className).toContain("text-dux-typing")
+    expect(screen.queryByText("Terminals")).toBeNull()
+    expect(screen.queryByText("vim")).toBeNull()
+    expect(screen.queryByText("Typing")).toBeNull()
+    expect(screen.getByText("Agents & Terminals").nextElementSibling!.textContent).toBe(
+      "(1 + 0)",
+    )
   })
 })
 
@@ -2093,8 +2085,9 @@ describe("AppSidebar collapsed rail lists live work only", () => {
   const labels = () =>
     [...rail().querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))
 
-  // Two idle terminals, then a running one: under the default "active first"
-  // sort the running one floats to the head of the terminals.
+  // An idle standalone terminal, a running project one and an agent's own: under
+  // the default "active first" sort the running one floats to the head of the
+  // list, and the agent's own is never on the rail.
   function terminals(): unknown[] {
     return [
       {
@@ -2109,13 +2102,23 @@ describe("AppSidebar collapsed rail lists live work only", () => {
       },
       {
         id: "t-busy",
-        owner: { kind: "session", session_id: "s1" },
+        owner: { kind: "project", project_id: "p1" },
         label: "Terminal 2",
         has_output: true,
         working: true,
         typing: false,
         foreground_cmd: "vim",
         sort_order: 1,
+      },
+      {
+        id: "t-own",
+        owner: { kind: "session", session_id: "s1" },
+        label: "Terminal 3",
+        has_output: true,
+        working: true,
+        typing: false,
+        foreground_cmd: "htop",
+        sort_order: 2,
       },
     ]
   }
@@ -2138,20 +2141,16 @@ describe("AppSidebar collapsed rail lists live work only", () => {
     expect(labels()).toEqual(["main (Repo)"])
   })
 
-  it("lists terminals after the agents in the Terminals section's order", () => {
+  it("lists the terminals among the agents in the list's order", () => {
     mockState = stateWith()
     render(tree())
-    expect(labels()).toEqual([
-      "main (Repo)",
-      "vim (main@Repo)",
-      "Terminal (~/work)",
-    ])
+    expect(labels()).toEqual(["vim (Repo)", "Terminal (~/work)", "main (Repo)"])
   })
 
   it("selects a terminal the way its expanded row does", () => {
     mockState = stateWith()
     render(tree())
-    fireEvent.click(rail().querySelectorAll("button")[2])
+    fireEvent.click(rail().querySelectorAll("button")[1])
     expect(selectTerminalMock).toHaveBeenCalledWith("t-idle", {
       kind: "standalone",
     })
@@ -2162,13 +2161,13 @@ describe("AppSidebar collapsed rail lists live work only", () => {
       selectedTarget: {
         kind: "terminal",
         terminalId: "t-busy",
-        owner: { kind: "session", sessionId: "s1" },
+        owner: { kind: "project", projectId: "p1" },
       },
     } as Partial<DuxState>)
     render(tree())
     const buttons = rail().querySelectorAll("button")
-    expect(buttons[0].hasAttribute("data-active")).toBe(false)
-    expect(buttons[1].hasAttribute("data-active")).toBe(true)
+    expect(buttons[0].hasAttribute("data-active")).toBe(true)
+    expect(buttons[1].hasAttribute("data-active")).toBe(false)
     expect(buttons[2].hasAttribute("data-active")).toBe(false)
   })
 
@@ -2176,8 +2175,8 @@ describe("AppSidebar collapsed rail lists live work only", () => {
     mockState = stateWith()
     render(tree())
     const tips = rail().querySelectorAll('[data-testid="tooltip-content"]')
-    expect(tips[2].textContent).toContain("Terminal")
-    expect(tips[2].textContent).toContain("~/work")
+    expect(tips[1].textContent).toContain("Terminal")
+    expect(tips[1].textContent).toContain("~/work")
   })
 
   it("does not show a selected agent that is inactive", () => {
@@ -2206,7 +2205,7 @@ describe("AppSidebar collapsed rail lists live work only", () => {
     mockState = stateWith()
     const { rerender } = render(tree())
     const glyph = () =>
-      rail().querySelectorAll("button")[1].querySelector("svg")!
+      rail().querySelectorAll("button")[0].querySelector("svg")!
     const frame = () => glyph().closest("[data-slot='working-glyph']")!
     expect(frame().getAttribute("class")).toContain(
       "motion-safe:animate-working-bounce",
@@ -2225,8 +2224,8 @@ describe("AppSidebar collapsed rail lists live work only", () => {
       createTabInFlight: [],
     })
     rerender(tree())
-    // The stop re-sorts the terminals ("active first"), so find the glyph again
-    // by its owner: the session terminal is the first terminal button.
+    // The stop re-sorts the list ("active first"), so find the glyph again by
+    // its name.
     const vim = () => rail().querySelector("[aria-label^='vim']")!.querySelector("svg")!
     const vimFrame = () => vim().closest("[data-slot='working-glyph']")!
     expect(vimFrame().getAttribute("class")).toContain(
@@ -2244,12 +2243,16 @@ describe("AppSidebar collapsed rail lists live work only", () => {
     }
     spine.sessions[0].status = "detached"
     mockState = makeState({
-      spine: { ...spine, terminals: terminals() } as unknown as DuxState["spine"],
+      // Without its own terminal, which would keep the stopped agent listed.
+      spine: {
+        ...spine,
+        terminals: terminals().slice(0, 2),
+      } as unknown as DuxState["spine"],
       bootstrap: boot,
       createTabInFlight: [],
     })
     render(tree())
-    expect(labels()).toEqual(["vim (main@Repo)", "Terminal (~/work)"])
+    expect(labels()).toEqual(["vim (Repo)", "Terminal (~/work)"])
   })
 })
 

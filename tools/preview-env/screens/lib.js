@@ -185,6 +185,29 @@ async function goto(page, hash, { keepNoPasswordBanner = false } = {}) {
   if (dismissed) await sleep(500)
 }
 
+// Give an agent exactly `count` terminals of its own, docked under it, and hand
+// back a hook that closes the ones this added. A scene that docks terminals puts
+// the agent back afterwards, or every later shot of it grows a dock.
+async function dockTerminals(sessionId, count) {
+  const own = async () =>
+    ((await get("/api/v1/workspace")).terminals || []).filter(
+      (t) => t.owner.kind === "session" && t.owner.session_id === sessionId,
+    )
+  const before = (await own()).map((t) => t.id)
+  for (let i = before.length; i < count; i++) {
+    await api("POST", `/api/v1/sessions/${sessionId}/terminals`)
+    await sleep(800)
+  }
+  const added = (await own()).map((t) => t.id).filter((id) => !before.includes(id))
+  return async () => {
+    for (const id of added) {
+      await api("DELETE", `/api/v1/sessions/${sessionId}/terminals/${id}?force_connected=true`).catch(
+        () => {},
+      )
+    }
+  }
+}
+
 // A capture opens a real connection to the PTY, so it arrives as a watcher and
 // the full-pane card covers the terminal until this presses its button.
 async function takeOver(page) {
@@ -983,6 +1006,7 @@ async function expectDialogOpen(page, title) {
 }
 
 module.exports = {
+  dockTerminals,
   ATTENTION_AGENT,
   ATTENTION_WORD,
   BASE,

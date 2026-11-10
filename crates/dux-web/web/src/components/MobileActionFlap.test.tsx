@@ -271,7 +271,13 @@ describe("the docked action flap", () => {
     // are compared directly and the later element in the document wins a tie.
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const flapZ = zLevel(screen.getByTestId("mobile-action-flap").className)
-    const pane = readFileSync("src/components/TerminalPane.tsx", "utf8")
+    // The stack paints the overlay layer and the part paints its covers.
+    const pane = [
+      "src/components/TerminalStack.tsx",
+      "src/components/terminal/partPieces.tsx",
+    ]
+      .map((path) => readFileSync(path, "utf8"))
+      .join("\n")
     // The pane's floating-overlay layer is the one exemption: it is not a
     // cover, and the pane withholds it whenever a cover owns the pane. Exempted
     // by its own marker, so any other layer above the flap is still caught.

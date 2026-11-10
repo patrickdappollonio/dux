@@ -24,6 +24,16 @@ vi.mock("@/lib/store", async (importOriginal) => {
 })
 
 function installBootStubs() {
+  // An agent's stack lays its parts out in a resizable panel group, which
+  // observes its panels.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
   const mem = new Map<string, string>()
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => mem.get(k) ?? null,
@@ -60,6 +70,19 @@ function installBootStubs() {
 vi.mock("@/components/LazyTerminalPane", () => ({
   LazyTerminalPane: ({ overlay }: { overlay?: React.ReactNode }) => (
     <div data-testid="pane-stub">{overlay}</div>
+  ),
+  // An agent's screen is its stack, the same stand-in with the same overlay.
+  LazyTerminalStack: ({
+    overlay,
+    arrange,
+  }: {
+    overlay?: React.ReactNode
+    arrange?: (parts: Record<string, React.ReactNode>, target: string | null) => React.ReactNode
+  }) => (
+    <div data-testid="pane-stub">
+      {arrange?.({}, null)}
+      {overlay}
+    </div>
   ),
 }))
 installBootStubs()
@@ -116,6 +139,10 @@ function makeState(theater: boolean): DuxState {
     pendingSlotTab: {},
     routeNotFound: null,
     createTabInFlight: [],
+    stackLayouts: {},
+    stackTerminals: {},
+    stackTabs: {},
+    pendingTerminalOrder: null,
     pendingTabOrder: {},
     mobileScreen: "terminal",
     changes: { bySession: {} },

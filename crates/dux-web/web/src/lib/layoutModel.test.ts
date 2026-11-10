@@ -77,11 +77,14 @@ describe("shouldPersistDividerRatio", () => {
 })
 
 describe("shouldShowStackStrips", () => {
+  // The same cases the terminal UI's `agent_tabs::strips_shown` is held to.
   it.each([
+    [1, 0, false, false],
     [1, 1, false, false],
     [2, 0, false, true],
     [1, 2, false, true],
     [1, 0, true, true],
+    [1, 1, true, true],
   ])(
     "%i tabs, %i terminals, always %s -> %s",
     (tabCount, terminals, always, expected) => {

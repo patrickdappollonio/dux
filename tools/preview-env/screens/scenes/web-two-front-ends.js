@@ -23,28 +23,6 @@ module.exports = {
     await freshen(by["add-rate-limits"].id, 0)
     await goto(page, `#/agent/${by["add-rate-limits"].id}`)
     await takeOver(page)
-    // The Terminals section is collapsed here so all six agents fit the pane,
-    // which is what the caption counts. Pressed until the divider says it is
-    // closed rather than once: the divider is rendered from the live view model,
-    // so a single click aimed at it before the terminals have arrived presses
-    // nothing at all and the section is still open at the shutter, which is how
-    // this picture came back carrying two terminal rows the caption never
-    // mentions.
-    let closed = false
-    for (let i = 0; i < 20 && !closed; i++) {
-      const state = await page.evaluate(() => {
-        const btn = [...document.querySelectorAll("button")].find((b) =>
-          /^\s*Terminals/.test(b.textContent || ""),
-        )
-        if (!btn) return "absent"
-        if (btn.getAttribute("aria-expanded") === "false") return "closed"
-        btn.click()
-        return "clicked"
-      })
-      closed = state === "closed"
-      if (!closed) await sleep(500)
-    }
-    if (!closed) throw new Error("the Terminals section never closed")
     await sleep(2500)
     await clearToasts(page)
     // The six rows the caption counts beside its terminal UI twin, and the one

@@ -15,13 +15,13 @@ On a desktop-width screen it is three panes.
 
 ![The dux web workspace on a desktop screen: the sidebar of agents and terminals on the left, the running agent's terminal in the middle, and the list of changed files on the right.](/screens/web-workspace-layout.png#full)
 
-**The collapsible left sidebar** lists your agents in a single flat list, with the dormant ones tucked into a collapsible Inactive tail. Toggle it with `Ctrl-b` (`Cmd-b` on a Mac). It carries:
+**The collapsible left sidebar** lists your agents and your project and standalone terminals in one list, titled **Agents & Terminals**, with the dormant agents tucked into a collapsible Inactive tail. Toggle it with `Ctrl-b` (`Cmd-b` on a Mac). It carries:
 
 - A sort control (Active first by default, or by recently updated, recently created, name, or a manual drag order). Drag rows to arrange them by hand.
 - A search box that filters the list.
 - The launcher at the bottom: **New agent…**, with a **▾** beside it that lists every other way to create something, grouped into agents, terminals and projects. See [Agents from the browser](/docs/web-agents#creating-an-agent).
 
-**The center pane** is the focused agent's live terminal, or a welcome screen when nothing is selected.
+**The center pane** is the focused agent's live terminal, with its own terminals docked underneath it (see [Companion terminals](#companion-terminals)), or a welcome screen when nothing is selected.
 
 **The right Changes pane** shows what the focused agent has changed. Resize the split, or hide the pane entirely; dragging the split shut and letting go also hides it, and the header grows a button to bring it back. See [Git without leaving the browser](/docs/web-git).
 
@@ -40,7 +40,7 @@ Only a real drag counts: tapping near a divider, or starting a drag the browser 
 
 Drag the sidebar narrow enough and it snaps to its icon rail, which you reopen by clicking the same edge.
 
-- **What it shows.** The rail is for what is alive: your active agents, then your terminals, one icon each. Agents in the Inactive tail sit it out until you wake them.
+- **What it shows.** The rail is for what is alive: your active agents and your project and standalone terminals, in the list's order, one icon each. Agents in the Inactive tail sit it out until you wake them.
 - **Peek.** Rest your mouse on a rail icon and the whole sidebar slides out over the page, Inactive tail and all, without nudging your terminal an inch. Pick something and it tucks itself away again.
 - **Touch.** On a touchscreen a tap still just picks the icon.
 
@@ -407,15 +407,14 @@ mid-composition, so it will not mangle a CJK input method's confirm keystroke.
 
 ## Companion terminals
 
-Three kinds of plain shell live in their own collapsible **Terminals** section in the
-sidebar:
+There are three kinds of plain shell:
 
-- A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. Its row names the owning agent, and the title tracks whatever is in the foreground ("vim", "htop").
-  - Open one from the agent's `⋯` menu, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
-- A **project terminal** opens at the project's repo root with no agent attached. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
+- A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. It lives in the agent's **terminal dock**, under the agent, and has no row of its own in the sidebar: the agent's row stands for it. See [The terminal dock](#the-terminal-dock) below.
+  - Open one from the agent's `⋯` menu, from the dock's **+**, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
+- A **project terminal** opens at the project's repo root with no agent attached. It is a row of the sidebar's one list, sorted with your agents. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
   - Spawn one from the project's `⋯` menu ("New terminal at the project root").
   - It shows up in the Task Manager and is destroyed on close.
-- A **standalone terminal** opens in your home directory with no agent and no project, so you can reach for one before you have added a single project.
+- A **standalone terminal** opens in your home directory with no agent and no project, so you can reach for one before you have added a single project. It is a row of the one list too.
   - Open one from the **Terminals** group of the launcher's **▾** menu, or from the cog menu's **New** submenu.
   - Its row shows the directory it opened in, shortened with `~` and marked with the `✷` standalone star, so the sidebar search finds it by path.
   - The other two show the `↳` arrow and their owner. The star always means the same thing: this one lives in your folder, not a working copy dux manages.
@@ -423,6 +422,21 @@ sidebar:
 ![New terminal for an agent: a search box over every agent, grouped under its project with the standalone ones last, each row naming its state and the folder the terminal will open in.](/screens/new-terminal-for-agent.png)
 
 ![A standalone agent in the sidebar wearing the star over the folder it runs in, with the changes panel saying the folder has no git repository.](/screens/sidebar-standalone.png)
+
+### The terminal dock
+
+When an agent has a terminal of its own, the center pane splits: the agent and its tab strip on top, the dock below with a strip of its own, one pill per terminal.
+
+![An agent on top of the center pane and its two terminals docked below it, each terminal with its own pill in the dock's strip, and the layout buttons at the strip's right end.](/screens/web-terminal-dock.png#full)
+
+- **Pick a terminal** by clicking its pill. Its glyph pulses and bounces while something runs in it, like a tab pill's. Drag a pill along the strip to reorder the dock; the order lasts until dux restarts. A pill's `⋯` closes that terminal. When the terminal in front ends, the dock shows the one to its right, or to its left when it was the last; with none left the dock goes and the agent shows alone.
+- **Type into either part** by clicking into it. The part you are not typing in turns grey and fades, so you can always tell where your keystrokes go; its strip stays as it is.
+- **Three layouts.** The dock strip's right end carries **Hide terminals** and **Maximize terminal**. Either one gives the whole height to one part and leaves the other its strip, with a button to bring the split back. Dragging the divider past a part's minimum folds that part away the same way. Each agent reopens in the layout you last left it in on that browser, and an agent you open with its terminal in front opens at least in the split.
+- **Strips show together.** Both strips appear once the agent has two tabs or two terminals, or while **Always show tab strip** is on. Otherwise neither does: the divider is a thin grip band, and a small floating pill on its right end carries the layout buttons and a **+** that asks whether you want a new agent tab (on the agent's default provider; pick another from the agent's `⋯`) or a new terminal. With the terminal maximized, the pill also carries a dot for what the agent is doing: green and pulsing while it works, cyan and blinking when it needs you.
+
+![The same agent with the strips hidden: a thin grip band between the agent and its terminal, and the floating pill at the band's right end.](/screens/web-terminal-dock-hidden-strips.png#full)
+
+**An agent you stopped while its terminals keep running** opens on its terminal, maximized, and nothing starts it behind your back. A band in place of its tab strip says it is not running and carries **Start**, which starts its first tab and puts the layout back the way you had it. If its last run ended badly, the band says how, with its last output a click away. While the agent shares the screen with its dock, its card is a short one: a line and **Start**. Such an agent stays in the main list until its last terminal ends, and if you are looking at it when that happens it stays stopped, on its idle screen with **Start session**.
 
 Every terminal row's `⋯` menu also carries **Open editor here** and **Open editor in new
 tab**, rooted at the directory that terminal opened in. A terminal that belongs to an

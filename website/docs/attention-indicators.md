@@ -18,7 +18,11 @@ looking.
   reads as "needs you," not just "busy."
 - **In the web UI**, the agent's icon turns cyan with the same rhythm, in the sidebar
   and in the mobile list, plus a small dot on the specific tab's pill when you are
-  running several tabs. Everything holds still if you have reduced-motion turned on.
+  running several tabs. With an agent's terminal maximized and its strips hidden, the
+  floating layout pill carries a dot that does the same: cyan and blinking when the agent
+  needs you, green and pulsing while it works. A docked terminal's pill pulses and bounces
+  while something runs in it, like a tab pill. Everything holds still if you have
+  reduced-motion turned on.
 - **The browser tab title** gains a count in front of your configured instance name:
   `(2) dux` when two agents are waiting. A backgrounded tab updates the count without
   you visiting it.

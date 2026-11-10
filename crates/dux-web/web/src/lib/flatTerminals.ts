@@ -1,9 +1,9 @@
-// Pure helpers backing the flat "Terminals" section of the sidebar, shared by the desktop
-// sidebar and the mobile hub so the two surfaces never drift. Every session-, project- and
-// standalone-owned terminal renders in that one section.
+// Pure helpers backing a terminal's row in the agents list, shared by the desktop sidebar,
+// the collapsed rail and the mobile hub so the surfaces never drift. Where a row sits is
+// `lib/flatList.ts`'s business; this decorates a terminal with what its row shows.
 
 import { assertNever } from "@/lib/assertNever"
-import type { FlatSortKey, StateWord } from "@/lib/flatList"
+import type { StateWord } from "@/lib/flatList"
 import {
   ownerKey,
   ownerRefFromWire,
@@ -11,9 +11,8 @@ import {
 } from "@/lib/terminalOwner"
 import type { ProjectView, SessionView, TerminalView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
-import { reorderById } from "@/lib/reorder"
 
-// One entry in the flat Terminals section. `siblings` is the set the same owner shares,
+// One terminal decorated for its row. `siblings` is the set the same owner shares,
 // so `terminalTitle` can disambiguate two terminals running the same app.
 export interface FlatTerminal {
   terminal: TerminalView
@@ -100,107 +99,4 @@ export function terminalStateWord(terminal: TerminalView): StateWord {
   if (terminal.typing) return { label: "Typing", className: "text-dux-typing" }
   if (terminal.working) return { label: "Running", className: "text-dux-working" }
   return { label: "Idle", className: "text-muted-foreground" }
-}
-
-// The name-sort key is the label the row shows, so the sort matches what the user reads:
-// `foreground_cmd` when non-empty else `label`, lowercased. Mirrors TUI `terminal_items`.
-function terminalNameKey(t: TerminalView): string {
-  const cmd = t.foreground_cmd
-  return (cmd && cmd.length > 0 ? cmd : t.label).toLowerCase()
-}
-
-// Parse an RFC 3339 timestamp to epoch ms, guarding NaN (an empty/unparseable
-// value from an older server sorts as 0). Matches `sortSessions.ts`'s `epoch`.
-function terminalEpoch(iso: string): number {
-  const ms = Date.parse(iso)
-  return Number.isNaN(ms) ? 0 : ms
-}
-
-// Iterate Unicode code points so the order matches Rust's `str::cmp` on the lowercased
-// key. Returns <0 / 0 / >0 ascending, like `sortSessions.ts`'s `compareName`.
-function compareTerminalName(a: TerminalView, b: TerminalView): number {
-  const ka = [...terminalNameKey(a)]
-  const kb = [...terminalNameKey(b)]
-  const len = Math.min(ka.length, kb.length)
-  for (let i = 0; i < len; i++) {
-    const ca = ka[i].codePointAt(0) ?? 0
-    const cb = kb[i].codePointAt(0) ?? 0
-    if (ca !== cb) return ca - cb
-  }
-  return ka.length - kb.length
-}
-
-// The complete displayed order, used as the terminal drag baseline. The input is already
-// in manual order and computed modes sort stably, so equal keys retain it.
-export function displayedTerminalOrder(
-  items: FlatTerminal[],
-  key: FlatSortKey,
-): string[] {
-  return sortFlatTerminals(items, key).map((item) => item.terminal.id)
-}
-
-export function sortFlatTerminals(
-  items: FlatTerminal[],
-  key: FlatSortKey,
-): FlatTerminal[] {
-  const sorted = items.slice()
-  switch (key) {
-    case "manual":
-      // Base order verbatim.
-      break
-    case "active": {
-      // Stable float: hot terminals first (keeping base order), then the rest.
-      const hot: FlatTerminal[] = []
-      const rest: FlatTerminal[] = []
-      for (const item of sorted) {
-        if (item.terminal.working || item.terminal.typing) hot.push(item)
-        else rest.push(item)
-      }
-      return [...hot, ...rest]
-    }
-    case "updated":
-      sorted.sort(
-        (a, b) => terminalEpoch(b.terminal.updated_at) - terminalEpoch(a.terminal.updated_at),
-      )
-      break
-    case "created":
-      sorted.sort(
-        (a, b) => terminalEpoch(b.terminal.created_at) - terminalEpoch(a.terminal.created_at),
-      )
-      break
-    case "name":
-      sorted.sort((a, b) => compareTerminalName(a.terminal, b.terminal))
-      break
-    case "name_desc":
-      sorted.sort((a, b) => -compareTerminalName(a.terminal, b.terminal))
-      break
-  }
-  return sorted
-}
-
-// The Terminals section's manual order, before the sort and any search: each
-// terminal's own position, with a drag in flight laid over it. The sidebar's list
-// and the collapsed rail both start from it, so the two can never list terminals
-// differently.
-export function overlaidFlatTerminals(input: {
-  terminals: readonly TerminalView[]
-  sessions: readonly SessionView[]
-  projects: readonly ProjectView[]
-  projectName: (id: string) => string
-  pendingOrder: string[] | null
-}): FlatTerminal[] {
-  const base = assembleFlatTerminals(
-    input.terminals,
-    input.sessions,
-    input.projects,
-    input.projectName,
-  )
-    .slice()
-    .sort((left, right) => left.terminal.sort_order - right.terminal.sort_order)
-  return input.pendingOrder
-    ? reorderById(
-        base.map((terminal) => ({ id: terminal.terminal.id, terminal })),
-        input.pendingOrder,
-      ).map((wrapped) => wrapped.terminal)
-    : base
 }

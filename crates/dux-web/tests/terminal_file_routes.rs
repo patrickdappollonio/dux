@@ -371,3 +371,65 @@ async fn an_unknown_terminal_id_is_a_404_in_both_namespaces() {
         assert_eq!(resp.status(), 404, "unknown terminal served at {prefix}");
     }
 }
+
+/// Wait for the published workspace to show `terminal_id`'s list anchor as
+/// `expected`: the workspace is a cached projection refreshed on the engine's
+/// tick, so a change lands on it shortly after the request that made it.
+async fn wait_for_list_after(addr: SocketAddr, terminal_id: &str, expected: serde_json::Value) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let body: serde_json::Value = reqwest::get(format!("http://{addr}/api/v1/workspace"))
+            .await
+            .expect("send the request")
+            .json()
+            .await
+            .expect("the response body is JSON");
+        let anchor = body["terminals"].as_array().and_then(|terminals| {
+            terminals
+                .iter()
+                .find(|terminal| terminal["id"] == terminal_id)
+                .map(|terminal| terminal["list_after"].clone())
+        });
+        if anchor.as_ref() == Some(&expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{terminal_id}'s list anchor never became {expected}; last seen {anchor:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn placing_a_terminal_in_the_list_moves_its_anchor_and_refuses_an_agents_own() {
+    let h = boot().await;
+    let terminal = create_project_terminal(h.addr, "p1").await;
+    // A new list row lands after the last agent.
+    wait_for_list_after(h.addr, &terminal, serde_json::json!("s1")).await;
+
+    let resp = post(
+        h.addr,
+        "/api/v1/terminals/place",
+        serde_json::json!({ "terminal_id": terminal, "after_agent": null }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    // The top of the list carries no anchor.
+    wait_for_list_after(h.addr, &terminal, serde_json::Value::Null).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/v1/sessions/s1/terminals", h.addr))
+        .send()
+        .await
+        .expect("send the request");
+    assert_eq!(resp.status(), 201);
+    let own: serde_json::Value = resp.json().await.expect("the response body is JSON");
+    let resp = post(
+        h.addr,
+        "/api/v1/terminals/place",
+        serde_json::json!({ "terminal_id": own["terminal_id"], "after_agent": "s1" }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+}

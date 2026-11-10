@@ -5396,6 +5396,8 @@ describe("a promoted-away slot tab hands its pane over", () => {
       ...base,
       spine: {
         ...base.spine!,
+        // No terminal of the agent's own, so its screen is the agent's tab alone.
+        terminals: [],
         sessions: [
           {
             ...session,
@@ -5416,6 +5418,10 @@ describe("a promoted-away slot tab hands its pane over", () => {
       createTabInFlight: [],
       pendingTabOrder: {},
       pendingSlotTab: {},
+      stackLayouts: {},
+      stackTerminals: {},
+      stackTabs: {},
+      pendingTerminalOrder: null,
       theater: false,
     } as unknown as DuxState
   }
@@ -5769,6 +5775,67 @@ describe("TerminalStack with two parts", () => {
     // A row nobody drives is not somebody else's: no card over the hidden part.
     expect(screen.queryByText("Running in the background")).toBeNull()
   })
+
+  it("gives no part focus or input rows while none of them is on screen", () => {
+    pointerStub = stubCoarsePointer(true)
+    render(
+      <TerminalStack
+        parts={[{ ...agent, onScreen: false }, { ...dock, onScreen: false }]}
+        typingTarget="s1"
+        onChooseTypingTarget={() => {}}
+      />,
+    )
+    const [agentPty, dockPty] = FakePtySocket.instances
+    ownBoth()
+    act(() => agentPty.bytesCb?.(new Uint8Array([0x61])))
+    act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  })
+
+  it("covers the whole stack with one take-over card when another device drives the row", () => {
+    render(<TerminalStack parts={[agent, dock]} />)
+    for (const pty of FakePtySocket.instances) {
+      act(() => pty.onConnected("seat-1", "seat-other"))
+    }
+    expect(screen.getAllByText("Active on another device")).toHaveLength(1)
+    expect(screen.getAllByText("Take over")).toHaveLength(1)
+    const area = screen.getByTestId("stack-cover-area")
+    expect(area.contains(screen.getByText("Take over"))).toBe(true)
+  })
+
+  it("takes a part whose own socket was lost out of the overlay's bounds", async () => {
+    // The dock part's box sits below the agent's in the stack's box.
+    const rects: Record<string, Partial<DOMRect>> = {
+      s1: { top: 100, left: 0, width: 800, height: 300 },
+      t1: { top: 400, left: 0, width: 800, height: 300 },
+    }
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        const part = this.dataset.stackPart
+        const r = part ? rects[part] : { top: 100, left: 0, width: 800, height: 600 }
+        return { bottom: 0, right: 0, x: 0, y: 0, toJSON: () => ({}), ...r } as DOMRect
+      })
+    try {
+      render(
+        <TerminalStack
+          parts={[agent, dock]}
+          overlay={<div data-testid="pane-overlay" />}
+        />,
+      )
+      ownBoth()
+      const layer = () => screen.getByTestId("pane-overlay-layer")
+      expect(layer().dataset.bounds).toBe("stack")
+      FakePtySocket.instances[1].emit("failed")
+      await passHandoffGrace()
+      expect(screen.getByText("Connection lost.")).toBeTruthy()
+      expect(layer().dataset.bounds).toBe("part")
+      expect([layer().style.top, layer().style.height]).toEqual(["0px", "300px"])
+    } finally {
+      rect.mockRestore()
+    }
+  })
+
 })
 
 // The overlay layer is the stack's, and a stack of one paints it exactly where

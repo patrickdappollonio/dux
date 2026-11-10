@@ -839,8 +839,9 @@ pub struct TerminalView {
     /// slowly and the coarse `sessions.changed` signal stays calm. The web UI
     /// shows this as the terminal's title when present, falling back to `label`.
     pub foreground_cmd: Option<String>,
-    /// The terminal's manual (drag) position within the flat Terminals section,
-    /// ascending. Projected verbatim from
+    /// The terminal's manual (drag) position among all terminals, ascending:
+    /// it orders an agent's own terminals and list terminals that share a
+    /// `list_after` anchor. Projected verbatim from
     /// [`crate::model::CompanionTerminal::sort_order`]; the base order both
     /// surfaces render before applying the active sort mode on top. Stamped at
     /// spawn from a monotonic counter (so it defaults to creation order) and
@@ -870,6 +871,12 @@ pub struct TerminalView {
     /// a fresh one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_owner: Option<String>,
+    /// A project or standalone terminal's manual place in the agents list: the
+    /// agent its row sits right after in the stored agent order, absent for the
+    /// top. Projected from [`crate::model::CompanionTerminal::list_after`]; an
+    /// agent's own terminals are not list rows and never carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_after: Option<String>,
 }
 
 /// The wire shape of [`crate::tab_verdict::TabRunVerdict`]: the enum flattened
@@ -1471,6 +1478,7 @@ impl Engine {
             typing: self.is_typing(id),
             foreground_cmd: t.foreground_cmd.clone(),
             sort_order: t.sort_order,
+            list_after: t.list_after.clone(),
             created_at: t.created_at.to_rfc3339(),
             // The wall-clock time of the last activity, recorded when it
             // happened, so the same activity reads the same on every rebuild,

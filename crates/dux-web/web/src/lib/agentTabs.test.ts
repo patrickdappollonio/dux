@@ -162,6 +162,19 @@ describe("dormantTabNeedsCard", () => {
     ).toBe(false)
   })
 
+  // An agent stopped with a terminal still running was stopped on purpose:
+  // opening it shows the terminal and a Start, and only that press starts it.
+  it("is true for a healthy dormant first tab while one of its terminals runs", () => {
+    const sessionSlot = { ...extraTab("s1", false), id: "s1" }
+    const target = agentTarget("s1", "s1")
+    expect(
+      dormantTabNeedsCard(target, slotSession, sessionSlot, [], undefined, null, true),
+    ).toBe(true)
+    expect(
+      dormantTabNeedsCard(target, slotSession, sessionSlot, ["s1"], undefined, null, true),
+    ).toBe(false)
+  })
+
   // A first tab whose run ended cleanly while the user watched rests on the
   // idle screen: the user just quit it, so staying on the agent must not start
   // it again. A press (the started latch) or a live process takes it off.

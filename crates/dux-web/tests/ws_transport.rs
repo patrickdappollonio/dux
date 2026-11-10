@@ -4438,11 +4438,19 @@ fn keys_of(value: &serde_json::Value) -> Vec<String> {
     keys
 }
 
-/// Assert `value` is a terminal entry with exactly the pinned key set.
+/// Assert `value` is a terminal entry with exactly the pinned key set. A
+/// project or standalone terminal is a row of the agents list and also carries
+/// its place there, `list_after`, whenever it sits after an agent; an agent's
+/// own terminal never does.
 fn assert_terminal_shape(value: &serde_json::Value, where_: &str) {
+    let mut expected: Vec<&str> = TERMINAL_KEYS.to_vec();
+    if value["owner"]["kind"] != "session" && value.get("list_after").is_some() {
+        expected.push("list_after");
+        expected.sort_unstable();
+    }
     assert_eq!(
         keys_of(value),
-        TERMINAL_KEYS,
+        expected,
         "the terminal entry on {where_} does not carry the documented key set"
     );
     // The owner tag itself is part of the documented shape: an internally tagged
@@ -4508,6 +4516,8 @@ async fn thin_reads_pin_the_exact_terminal_key_set() {
     assert_terminal_shape(project_entry, "GET /api/v1/projects");
     assert_eq!(project_entry["owner"]["kind"].as_str(), Some("project"));
     assert_eq!(project_entry["owner"]["project_id"].as_str(), Some("p1"));
+    // A new project terminal sits after the last agent in the list.
+    assert_eq!(project_entry["list_after"].as_str(), Some("s1"));
 
     // The per-session read and the list must serve the SAME object for the same
     // terminal: they are two ways of asking one question, and a shape that drifts

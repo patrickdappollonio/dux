@@ -45,6 +45,10 @@ vi.mock("@/components/LazyTerminalPane", () => ({
   LazyTerminalPane: ({ overlay }: { overlay?: ReactNode }) => (
     <div data-testid="pane-stub">{overlay}</div>
   ),
+  // An agent's screen is its stack, the same stand-in with the same overlay.
+  LazyTerminalStack: ({ overlay }: { overlay?: ReactNode }) => (
+    <div data-testid="pane-stub">{overlay}</div>
+  ),
 }))
 
 let mockState: DuxState
@@ -150,6 +154,10 @@ function makeState(
     pendingSlotTab: {},
     routeNotFound: null,
     createTabInFlight: [],
+    stackLayouts: {},
+    stackTerminals: {},
+    stackTabs: {},
+    pendingTerminalOrder: null,
     pendingTabOrder: {},
     mobileScreen: "terminal",
     changes: { bySession: {} },

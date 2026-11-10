@@ -647,6 +647,90 @@ describe("a deleted agent never throws the user out of dux", () => {
     expect(index).toBe(depth)
   })
 
+  it("shows the dock terminal to the right of the one that closed, else the one to its left", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t2", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2", "t3"] },
+    ])
+    const depth = index
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1", "t3"] }])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t3" })
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+    expect(index).toBe(depth)
+  })
+
+  it("leaves a stopped agent resting, not starting, when its last terminal closes under the user", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t1", [
+      { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
+    ])
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", status: "detached" }])
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "s1-slot",
+    })
+    expect(mod.getSnapshot().endedInViewTab).toBe("s1-slot")
+  })
+
+  it("pushes for a dock terminal brought to the front, and only rewrites for typing moving between parts", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2"] },
+    ])
+    const depth = index
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    expect(index).toBe(depth + 1)
+    mod.chooseStackPart("s1", "s1-slot")
+    expect(index).toBe(depth + 1)
+    expect(loc.hash).toBe("#/agent/s1")
+  })
+
+  it.each([
+    ["the agent", "#/agent/s1", "detached"],
+    ["its terminal", "#/agent/s1/terminal/t1", "detached"],
+    ["an active agent's dormant first tab", "#/agent/s1", "active"],
+  ])(
+    "holds the dormant first tab when the last terminal ends with %s on screen",
+    async (_what, hash, status) => {
+      const mod = await loadStore(hash, [
+        { id: "s1", project_id: "p1", status, tabs: ["b2"], terminals: ["t1"] },
+      ])
+      await pushSpine(mod, [{ id: "s1", project_id: "p1", status, tabs: ["b2"] }])
+      expect(mod.getSnapshot().endedInViewTab).toBe("s1-slot")
+    },
+  )
+
+  it("lets an explicit selection from the list start the agent again", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
+    ])
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", status: "detached" }])
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().endedInViewTab).toBeNull()
+  })
+
+  it("moves typing to a part on screen without touching the address or history", async () => {
+    const mod = await loadStore("#/agent/s1/tab/b2", [
+      { id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1"] },
+    ])
+    const depth = index
+    mod.reconcileStackPart("s1", "t1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(loc.hash).toBe("#/agent/s1/tab/b2")
+    expect(index).toBe(depth)
+    // The tab named by the link stays the one on top of the stack.
+    expect(mod.getSnapshot().stackTabs.s1).toBe("b2")
+  })
+
+  it("picks the neighbour by the dock as drawn, a drag still in flight included", async () => {
+    const mod = await loadStore("#/agent/s1/terminal/t2", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2", "t3"] },
+    ])
+    mod.reorderDock("s1", ["t3", "t2", "t1"])
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1", "t3"] }])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+  })
+
   it("goes home when a PROJECT terminal closes under the user", async () => {
     // A project terminal has no agent above it, so home is the only honest
     // destination.

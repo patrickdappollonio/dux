@@ -78,19 +78,21 @@ import {
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
 import {
-  displayedSessionOrder,
   FLAT_SORT_LABELS,
-  partitionQuiet,
+  flatRowKey,
+  isListTerminal,
+  isQuietSession,
+  listDragBaseline,
+  orderFlatRows,
+  overlaidListInputs,
+  planListDrop,
   quietTailForcedOpen,
-  sortMainSessions,
-  sortQuietTail,
   stateWord,
+  type FlatRow,
   type FlatSortKey,
 } from "@/lib/flatList"
 import {
-  displayedTerminalOrder,
-  overlaidFlatTerminals,
-  sortFlatTerminals,
+  assembleFlatTerminals,
   terminalStateWord,
   type FlatTerminal,
 } from "@/lib/flatTerminals"
@@ -105,7 +107,6 @@ import {
 import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
-import { moveItem, ordersMatch, reorderById } from "@/lib/reorder"
 import {
   sessionLabel,
   workingCopyMissing,
@@ -115,6 +116,7 @@ import {
   agentSortValue,
   openAddProject,
   openNewAgentPicker,
+  placeTerminalsInList,
   reorderAgents,
   reorderTerminals,
   setAgentSearch,
@@ -124,7 +126,7 @@ import {
 import { terminalForeground, terminalTitle } from "@/lib/terminals"
 import type { DuxState, SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import { matchOwner } from "@/lib/terminalOwner"
-import type { SessionView, TerminalView } from "@/lib/types"
+import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // How a flat row's tap resolves. Desktop just selects; mobile also drives the
@@ -276,7 +278,7 @@ function AgentFlatRow({
   const changesCount = changesCountFor(changes, session.id)
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: session.id })
+    useSortable({ id: agentRowKey(session.id) })
   const style: CSSProperties = {
     // Lock the drag to Y: the scroll container is overflow-x visible, so a
     // sideways drag flies the row out over the center pane.
@@ -455,10 +457,7 @@ function AgentFlatRow({
 // The two-line terminal row, mirroring the agent row's shape: line two is
 // `↳ {ownerLabel} · {stateWord}`, with the standalone star in place of the arrow.
 function TerminalFlatRow({
-  terminal,
-  siblings,
-  owner,
-  ownerLabel,
+  entry: { terminal, siblings, owner, ownerLabel },
   active,
   onSelect,
   sortable,
@@ -466,10 +465,7 @@ function TerminalFlatRow({
   pickId,
   picked = false,
 }: {
-  terminal: TerminalView
-  siblings: readonly TerminalView[]
-  owner: TerminalOwnerRef
-  ownerLabel: string
+  entry: FlatTerminal
   active: boolean
   onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
   sortable: boolean
@@ -506,7 +502,7 @@ function TerminalFlatRow({
   // activation keeps a plain click a select, and the wrapper is Y-locked.
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: terminal.id })
+    useSortable({ id: terminalRowKey(terminal.id) })
   const style: CSSProperties = {
     transform: transform
       ? `translate3d(0, ${Math.round(transform.y)}px, 0)`
@@ -612,91 +608,6 @@ function TerminalFlatRow({
           />
         </DropdownMenuContent>
       </DropdownMenu>
-    </div>
-  )
-}
-
-// The flat Terminals section, under a divider defaulting OPEN because a listed
-// terminal is a live PTY. Absent at zero terminals, so its + never creates the first.
-function TerminalsSection({
-  terminals,
-  selectedTarget,
-  onSelect,
-  sensors,
-  onDragEnd,
-  query,
-  open,
-  onToggle,
-  pickedKey,
-  pickId,
-}: {
-  terminals: FlatTerminal[]
-  selectedTarget: SelectedTarget | null
-  onSelect: (terminalId: string, owner: TerminalOwnerRef) => void
-  sensors: ReturnType<typeof useSensors>
-  onDragEnd: (event: DragEndEvent) => void
-  // The live search query, forwarded to each row's match highlight.
-  query: string
-  // Held by the list, which needs to know which rows the search can reach.
-  open: boolean
-  onToggle: () => void
-  pickedKey: string | null
-  pickId: (key: string) => string
-}) {
-  if (terminals.length === 0) return null
-  return (
-    <div className="mt-2 border-t border-border/50 pt-2">
-      {/* The whole label is what expands the section. It carries no + of its
-          own: creating lives behind the launcher corner. */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
-        >
-          <ChevronRight
-            className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")}
-          />
-          <span>Terminals</span>
-          <span className={SECTION_COUNT_PILL}>{terminals.length}</span>
-        </button>
-      </div>
-      {open ? (
-        // A separate DndContext holding ONLY terminal ids, so dnd-kit can never
-        // pick an agent row as a drop target for a terminal, or the reverse.
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={onDragEnd}
-        >
-          <SortableContext
-            items={terminals.map((ft) => ft.terminal.id)}
-            strategy={verticalListSortingStrategy}
-          >
-            <div className="mt-1 flex flex-col gap-1">
-              {terminals.map((ft) => (
-                <TerminalFlatRow
-                  key={ft.terminal.id}
-                  terminal={ft.terminal}
-                  siblings={ft.siblings}
-                  owner={ft.owner}
-                  ownerLabel={ft.ownerLabel}
-                  active={
-                    selectedTarget?.kind === "terminal" &&
-                    selectedTarget.terminalId === ft.terminal.id
-                  }
-                  onSelect={onSelect}
-                  sortable
-                  query={query}
-                  pickId={pickId(terminalRowKey(ft.terminal.id))}
-                  picked={pickedKey === terminalRowKey(ft.terminal.id)}
-                />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
-      ) : null}
     </div>
   )
 }
@@ -820,12 +731,12 @@ function useQuietTailOpen({
 // "active first"; "manual" is the only mode that enables drag-reorder.
 const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manual"]
 
-// One height token for every control in the Agents header, set explicitly rather
+// One height token for every control in the list's header, set explicitly rather
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
 
-// One counter pill for every section of the list: the count sits immediately
-// after the section word everywhere, and right edges carry controls only.
+// The Inactive divider's counter pill. Like the header's count, it sits right
+// after the section word, and right edges carry controls only.
 const SECTION_COUNT_PILL =
   "rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground"
 
@@ -872,21 +783,15 @@ function SortControl() {
   )
 }
 
-// The sessions a search query leaves on screen. Each is matched against its own
-// searchable location, so typing part of a project name or a standalone agent's
-// folder finds it.
-function matchingSessions(
-  sessions: SessionView[],
+// Whether a search query leaves this agent on screen. Each agent is matched
+// against its own searchable location, so typing part of a project name or a
+// standalone agent's folder finds it.
+function sessionMatches(
+  session: SessionView,
   projectName: (id: string) => string,
   query: string,
-): SessionView[] {
-  return sessions.filter((session) =>
-    matchesSessionQuery(
-      session,
-      agentSearchLocation(session, projectName),
-      query,
-    ),
-  )
+): boolean {
+  return matchesSessionQuery(session, agentSearchLocation(session, projectName), query)
 }
 
 // Which of the list's two blank screens is on, and what the onboarding one's
@@ -903,91 +808,100 @@ interface FlatListEmptyState {
 function flatListEmptyState(input: {
   // Null while the spine is unloaded, which is not yet a zero project count.
   projectCount: number | null
-  coreSessions: SessionView[]
-  quiet: SessionView[]
-  visibleMain: SessionView[]
-  visibleQuiet: SessionView[]
-  flatTerminals: FlatTerminal[]
+  agentCount: number
+  terminalCount: number
+  visibleRows: number
   query: string
 }): FlatListEmptyState {
-  const noTerminals = input.flatTerminals.length === 0
   return {
-    nothing:
-      input.coreSessions.length === 0 && noTerminals && input.quiet.length === 0,
-    nothingMatches:
-      input.query.trim() !== "" &&
-      input.visibleMain.length === 0 &&
-      input.visibleQuiet.length === 0 &&
-      noTerminals,
+    nothing: input.agentCount === 0 && input.terminalCount === 0,
+    nothingMatches: input.query.trim() !== "" && input.visibleRows === 0,
     emptyVerbIsAddProject: launcherVerb(input.projectCount) === "add-project",
   }
 }
 
+// The header's count: every agent and every project or standalone terminal,
+// and while a search is on, how many of each it leaves on screen.
+function listCountText(counts: {
+  agents: number
+  terminals: number
+  shownAgents: number
+  shownTerminals: number
+  searching: boolean
+}): { text: string; label: string } {
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
+  if (!counts.searching) {
+    return {
+      text: `(${counts.agents} + ${counts.terminals})`,
+      label: `${plural(counts.agents, "agent")} and ${plural(counts.terminals, "terminal")}`,
+    }
+  }
+  return {
+    text: `(${counts.shownAgents}/${counts.agents} + ${counts.shownTerminals}/${counts.terminals})`,
+    label: `${counts.shownAgents} of ${plural(counts.agents, "agent")} and ${counts.shownTerminals} of ${plural(counts.terminals, "terminal")} match`,
+  }
+}
+
 function flatAgentListModel(dux: DuxState) {
-  const {
-    spine,
-    selectedTarget,
-    agentSearch: rawAgentSearch,
-    pendingAgentOrder,
-    pendingTerminalOrder,
-  } = dux
+  const { spine, selectedTarget, agentSearch: rawAgentSearch } = dux
   const agentSort = agentSortValue(dux)
-  const agentSearch = rawAgentSearch ?? ""
+  const query = rawAgentSearch ?? ""
   const rawSessions = spine?.sessions ?? []
   const rawProjects = spine?.projects ?? []
-  const rawTerminals = spine?.terminals ?? []
-  const { projectName } = partitionProjects(
-    spine?.sidebar,
-    rawProjects,
-    rawSessions,
-  )
-  const coreSessions: SessionView[] = pendingAgentOrder
-    ? reorderById(rawSessions, pendingAgentOrder)
-    : rawSessions
-  const { main, quiet } = partitionQuiet(coreSessions)
-  const sortedMain = sortMainSessions(main, agentSort)
-  const sortedQuiet = sortQuietTail(quiet, agentSort)
-  const query = agentSearch
-  const visibleMain = matchingSessions(sortedMain, projectName, query)
-  const visibleQuiet = matchingSessions(sortedQuiet, projectName, query)
-  const overlaidTerminals = overlaidFlatTerminals({
-    terminals: rawTerminals,
-    sessions: coreSessions,
-    projects: rawProjects,
-    projectName,
-    pendingOrder: pendingTerminalOrder,
+  const { projectName } = partitionProjects(spine?.sidebar, rawProjects, rawSessions)
+  // Every drag still in flight laid over the spine, so the order on screen is
+  // the dropped one until the server confirms it.
+  const { sessions, terminals } = overlaidListInputs({
+    sessions: rawSessions,
+    terminals: spine?.terminals ?? [],
+    pendingAgentOrder: dux.pendingAgentOrder,
+    pendingTerminalOrder: dux.pendingTerminalOrder,
+    pendingTerminalPlacement: dux.pendingTerminalPlacement,
   })
-  const flatTerminals = sortFlatTerminals(overlaidTerminals, agentSort).filter(
-    (terminal) =>
-      matchesTerminalQuery(
-        terminal.terminal,
-        terminal.ownerLabel,
-        terminal.projectName,
-        query,
-      ),
+  const { main, inactive } = orderFlatRows(sessions, terminals, agentSort)
+  const decorated = new Map(
+    assembleFlatTerminals(terminals, sessions, rawProjects, projectName).map(
+      (entry) => [entry.terminal.id, entry],
+    ),
   )
-  const { nothing, nothingMatches, emptyVerbIsAddProject } =
-    flatListEmptyState({
-      projectCount: spine ? rawProjects.length : null,
-      coreSessions,
-      quiet,
-      visibleMain,
-      visibleQuiet,
-      flatTerminals,
-      query,
-    })
+  const rowMatches = (row: FlatRow) => {
+    if (row.kind === "agent") return sessionMatches(row.session, projectName, query)
+    const entry = decorated.get(row.terminal.id)!
+    return matchesTerminalQuery(entry.terminal, entry.ownerLabel, entry.projectName, query)
+  }
+  const visibleMain = main.filter(rowMatches)
+  const visibleQuiet = inactive.filter((session) =>
+    sessionMatches(session, projectName, query),
+  )
+  const agentCount = sessions.length
+  const terminalCount = terminals.filter(isListTerminal).length
+  const shownTerminals = visibleMain.filter((row) => row.kind === "terminal").length
+  const count = listCountText({
+    agents: agentCount,
+    terminals: terminalCount,
+    shownAgents: visibleMain.length - shownTerminals + visibleQuiet.length,
+    shownTerminals,
+    searching: normalizeQuery(query) !== "",
+  })
+  const { nothing, nothingMatches, emptyVerbIsAddProject } = flatListEmptyState({
+    projectCount: spine ? rawProjects.length : null,
+    agentCount,
+    terminalCount,
+    visibleRows: visibleMain.length + visibleQuiet.length,
+    query,
+  })
 
   return {
     selectedTarget,
     agentSort,
-    agentSearch,
-    coreSessions,
+    sessions,
+    terminals,
+    decorated,
     projectName,
-    main,
     visibleMain,
     visibleQuiet,
-    overlaidTerminals,
-    flatTerminals,
+    count,
+    hasRows: agentCount + terminalCount > 0,
     query,
     manual: agentSort === "manual",
     emptyVerbIsAddProject,
@@ -1006,20 +920,21 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   const {
     selectedTarget,
     agentSort,
-    agentSearch,
-    coreSessions,
+    sessions,
+    terminals,
+    decorated,
     projectName,
-    main,
     visibleMain,
     visibleQuiet,
-    overlaidTerminals,
-    flatTerminals,
+    count,
+    hasRows,
     query,
     manual,
     emptyVerbIsAddProject,
     nothing,
     nothingMatches,
   } = flatAgentListModel(dux)
+  const agentSearch = query
   // A newly selected row is scrolled into view, a just-created one as soon as
   // its row arrives, so a launch never happens out of sight below the fold.
   const listRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
@@ -1030,25 +945,27 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
   )
 
-  const [terminalsOpen, setTerminalsOpen] = useState(true)
   const quietTail = useQuietTailOpen({
     query,
     // A live query with a quiet hit derives the section open (see the
     // QuietTail doc); an empty query never forces anything.
     searchHit: query.trim() !== "" && visibleQuiet.length > 0,
-    // Keyed on the FULL list, not the filtered one: a search that hides every
-    // active agent must not resurrect the auto-open.
-    anyActive: main.length > 0,
+    // Keyed on every agent, not the filtered rows: a search that hides every
+    // active agent must not resurrect the auto-open. Agents alone, as in the
+    // terminal UI: a running terminal does not hide a dormant workspace.
+    anyActive: sessions.some((session) => !isQuietSession(session)),
   })
   // Enter in the search field selects a row the way a click would, so it walks
   // only the rows on screen, in the order they are shown.
   const searchPick = useSearchPick<SearchPickRow>({
     query,
     items: [
-      ...visibleMain.map((session) => ({ kind: "agent" as const, session })),
-      ...(terminalsOpen
-        ? flatTerminals.map((terminal) => ({ kind: "terminal" as const, terminal }))
-        : []),
+      ...visibleMain.map(
+        (row): SearchPickRow =>
+          row.kind === "agent"
+            ? row
+            : { kind: "terminal", terminal: decorated.get(row.terminal.id)! },
+      ),
       ...(quietTail.open
         ? visibleQuiet.map((session) => ({ kind: "agent" as const, session }))
         : []),
@@ -1063,30 +980,26 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         : handlers.onSelectTerminal(row.terminal.terminal.id, row.terminal.owner),
   })
 
-  // Move the dragged terminal to the slot the active sort DISPLAYS, over the
-  // complete order and never the filtered subset, then flip the sort to manual.
-  function handleTerminalDragEnd(event: DragEndEvent) {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
-    const fullOrder = displayedTerminalOrder(overlaidTerminals, agentSort)
-    const next = moveItem(fullOrder, String(active.id), String(over.id))
-    if (ordersMatch(fullOrder, next)) return
-    if (!manual) setAgentSort("manual")
-    reorderTerminals(next)
-  }
-
+  // Move the dragged row to the slot the active sort DISPLAYS, over the complete
+  // row order and never the search-filtered subset. An agent moves among the
+  // agents; a terminal is placed after the agent row above where it landed, or
+  // first. A drag is an explicit request for manual control, so a drop out of a
+  // computed sort flips the sort to manual and the dropped position sticks.
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event
-    if (!over || active.id === over.id) return
-    // Move the dragged agent to the slot the active sort DISPLAYS, over the
-    // complete session order and never the search-filtered subset.
-    const fullOrder = displayedSessionOrder(coreSessions, agentSort)
-    const next = moveItem(fullOrder, String(active.id), String(over.id))
-    if (ordersMatch(fullOrder, next)) return
-    // A drag is an explicit request for manual control, so a reorder out of a
-    // computed sort flips the sort to manual and the dropped position sticks.
+    if (!over) return
+    const plan = planListDrop(
+      listDragBaseline(sessions, terminals, agentSort),
+      String(active.id),
+      String(over.id),
+      sessions,
+      terminals,
+    )
+    if (!plan) return
     if (!manual) setAgentSort("manual")
-    reorderAgents(next)
+    if (plan.agentOrder) reorderAgents(plan.agentOrder)
+    if (Object.keys(plan.placements).length > 0) placeTerminalsInList(plan.placements)
+    if (plan.terminalOrder) reorderTerminals(plan.terminalOrder)
   }
 
   return (
@@ -1097,13 +1010,20 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           box and the agent rows share one inset and none of it hugs the edge. */}
       <div className="flex flex-col gap-2 px-2 pt-2 pb-3">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Agents</span>
-          <span className={SECTION_COUNT_PILL}>{coreSessions.length}</span>
-          {/* Sort rides the same gate as the list it sorts: with no agent
-              there is nothing to order, and the empty state below carries its
-              own hero button. Creating lives behind the launcher corner, so
-              the header carries no + of its own. */}
-          {coreSessions.length > 0 ? (
+          <span className="text-sm font-semibold">Agents &amp; Terminals</span>
+          {/* Right after the words, like every section count; while a search
+              is on it says how many of each the search leaves. */}
+          <span
+            aria-label={count.label}
+            className="text-xs tabular-nums text-muted-foreground"
+          >
+            {count.text}
+          </span>
+          {/* Sort rides the same gate as the list it sorts: with no row there
+              is nothing to order, and the empty state below carries its own
+              hero button. Creating lives behind the launcher corner, so the
+              header carries no + of its own. */}
+          {hasRows ? (
             <div className="ml-auto flex items-center gap-2">
               <SortControl />
             </div>
@@ -1170,52 +1090,53 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           </p>
         ) : (
           <>
+            {/* One context over every row of the main bucket, agents and
+                terminals alike: they sort together, so they drag together. */}
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
               onDragEnd={handleDragEnd}
             >
               <SortableContext
-                items={visibleMain.map((s) => s.id)}
+                items={visibleMain.map(flatRowKey)}
                 strategy={verticalListSortingStrategy}
               >
                 <div className="flex flex-col gap-1">
-                  {visibleMain.map((session) => (
-                    <AgentFlatRow
-                      key={session.id}
-                      session={session}
-                      projectName={projectName(
-                        workspaceProjectId(session.workspace) ?? "",
-                      )}
-                      selectedTarget={selectedTarget}
-                      handlers={handlers}
-                      sortable
-                      query={query}
-                      pickId={searchPick.rowId(agentRowKey(session.id))}
-                      picked={searchPick.activeKey === agentRowKey(session.id)}
-                    />
-                  ))}
+                  {visibleMain.map((row) => {
+                    const key = flatRowKey(row)
+                    return row.kind === "agent" ? (
+                      <AgentFlatRow
+                        key={key}
+                        session={row.session}
+                        projectName={projectName(
+                          workspaceProjectId(row.session.workspace) ?? "",
+                        )}
+                        selectedTarget={selectedTarget}
+                        handlers={handlers}
+                        sortable
+                        query={query}
+                        pickId={searchPick.rowId(key)}
+                        picked={searchPick.activeKey === key}
+                      />
+                    ) : (
+                      <TerminalFlatRow
+                        key={key}
+                        entry={decorated.get(row.terminal.id)!}
+                        active={
+                          selectedTarget?.kind === "terminal" &&
+                          selectedTarget.terminalId === row.terminal.id
+                        }
+                        onSelect={handlers.onSelectTerminal}
+                        sortable
+                        query={query}
+                        pickId={searchPick.rowId(key)}
+                        picked={searchPick.activeKey === key}
+                      />
+                    )
+                  })}
                 </div>
               </SortableContext>
             </DndContext>
-
-            {/* Terminals sit ABOVE the Inactive tail: a live terminal is worth
-                more prominence than dormant agents, and the default-open
-                Terminals section would otherwise render below a section that is
-                default-closed. Collapse defaults are unchanged (Terminals open,
-                Inactive closed, per the CLAUDE.md tenet). */}
-            <TerminalsSection
-              terminals={flatTerminals}
-              selectedTarget={selectedTarget}
-              onSelect={handlers.onSelectTerminal}
-              sensors={sensors}
-              onDragEnd={handleTerminalDragEnd}
-              query={query}
-              open={terminalsOpen}
-              onToggle={() => setTerminalsOpen((v) => !v)}
-              pickedKey={searchPick.activeKey}
-              pickId={searchPick.rowId}
-            />
 
             <QuietTail
               sessions={visibleQuiet}

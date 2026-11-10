@@ -801,7 +801,7 @@ surface they affect:
   and terminal keys, and whether dropped and pasted files stay hidden from git or long
   pastes become a file.
 - **Both surfaces**: status-message auto-clear, the attention indicator, its grace period
-  and the terminal bell, reopening agents on startup, the always-show-tab-strip preference,
+  and the terminal bell, reopening agents on startup, the always-show-tab-strip preference (which covers an agent's tab strip and its terminal dock's strip together),
   the PR banner position, clickable hyperlinks, GitHub integration, whether dux binds your
   Tailscale address, the welcome and what's-new screens, the default provider, and whether
   new agents start with a random pet name.

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { useEffect } from "react"
+import { fireAnimationStart } from "@/test/animationEvents"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
@@ -9,9 +11,28 @@ import type { DuxState } from "@/lib/store"
 // action (and nothing else) is what launches a dormant tab.
 let mockState: DuxState
 const startDormantTabMock = vi.fn()
+// The stack's own acts, as spies: what a control asks for is the contract here,
+// and the store's handling of each is pinned in the store's own tests.
+const setStackLayoutMock = vi.fn()
+const chooseStackPartMock = vi.fn()
+const reconcileStackPartMock = vi.fn()
+const startStoppedAgentMock = vi.fn()
+const addTabMock = vi.fn()
+const createTerminalMock = vi.fn()
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState, startDormantTab: startDormantTabMock }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    startDormantTab: startDormantTabMock,
+    setStackLayout: (...args: unknown[]) => setStackLayoutMock(...args),
+    settleStackOpening: () => {},
+    chooseStackPart: (...args: unknown[]) => chooseStackPartMock(...args),
+    reconcileStackPart: (...args: unknown[]) => reconcileStackPartMock(...args),
+    startStoppedAgent: (...args: unknown[]) => startStoppedAgentMock(...args),
+    addTab: (...args: unknown[]) => addTabMock(...args),
+    createTerminal: (...args: unknown[]) => createTerminalMock(...args),
+  }
 })
 
 // Replace the lazy terminal pane with a prop-recording stub: the owner-ref
@@ -20,7 +41,65 @@ vi.mock("@/lib/store", async (importOriginal) => {
 // cannot back. The dormant-gating tests never resolve the lazy chunk, so they
 // are unaffected.
 const paneProps: unknown[] = []
-vi.mock("@/components/LazyTerminalPane", () => ({
+// The stack the agent's screen mounts: one stub box for the whole stack, with
+// a stub per part laid out by the stack's own arrangement, and each part's
+// props recorded the way a lone pane's are.
+const stackProps: StackStubProps[] = []
+// Every part stub that mounted, by pty id: a part the layout remounts shows up
+// twice.
+const partMounts: string[] = []
+function PartStub({
+  id,
+  onScreen,
+  onPress,
+}: {
+  id: string
+  onScreen: boolean
+  onPress: () => void
+}) {
+  useEffect(() => {
+    partMounts.push(id)
+  }, [id])
+  return (
+    <div
+      data-testid="stack-part-stub"
+      data-pty={id}
+      data-on-screen={String(onScreen)}
+      onPointerDown={onPress}
+    />
+  )
+}
+type StackStubProps = {
+  parts: ({ slot?: string; instance?: string } & Record<string, unknown>)[]
+  overlay?: React.ReactNode
+  typingTarget?: string | null
+  onChooseTypingTarget?: (ptyId: string) => void
+  arrange?: (
+    parts: Record<string, React.ReactNode>,
+    typingTarget: string | null,
+  ) => React.ReactNode
+}
+// The stack's panel group, with its props captured: jsdom has no layout for the
+// panel library to drag in, so a test hands the group the layout a drag would
+// have ended on.
+let groupProps: { onLayoutChanged?: (layout: Record<string, number>) => void } | null = null
+vi.mock("@/components/ui/resizable", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/ui/resizable")>()
+  return {
+    ...actual,
+    ResizablePanelGroup: (props: Parameters<typeof actual.ResizablePanelGroup>[0]) => {
+      groupProps = props
+      return actual.ResizablePanelGroup(props)
+    },
+  }
+})
+vi.mock("@/components/LazyTerminalPane", async () => {
+  // The stack's own fallback, so a typing target the store names that is not a
+  // part on screen behaves here as it does in the real stack.
+  const { stackTypingTarget } = await vi.importActual<typeof import("@/lib/layoutModel")>(
+    "@/lib/layoutModel",
+  )
+  return {
   LazyTerminalPane: (props: unknown) => {
     paneProps.push(props)
     // The overlay is rendered rather than dropped: it is where the floating
@@ -29,7 +108,36 @@ vi.mock("@/components/LazyTerminalPane", () => ({
     const { overlay } = props as { overlay?: React.ReactNode }
     return <div data-testid="terminal-pane-stub">{overlay}</div>
   },
-}))
+  LazyTerminalStack: (props: StackStubProps) => {
+    stackProps.push(props)
+    const rendered: Record<string, React.ReactNode> = {}
+    for (const part of props.parts) {
+      const { slot, instance: _instance, ...rest } = part
+      paneProps.push(rest)
+      rendered[slot ?? ""] = (
+        <PartStub
+          key={`${slot}:${part.instance ?? ""}`}
+          id={String(rest.id)}
+          onScreen={rest.onScreen !== false}
+          onPress={() => props.onChooseTypingTarget?.(String(rest.id))}
+        />
+      )
+    }
+    const typing = stackTypingTarget(
+      props.parts.map((p) => ({ id: String(p.id), onScreen: p.onScreen !== false })),
+      props.typingTarget ?? null,
+    )
+    return (
+      <div data-testid="terminal-pane-stub">
+        {props.arrange
+          ? props.arrange(rendered, typing === null ? null : String(typing))
+          : Object.values(rendered)}
+        {props.overlay}
+      </div>
+    )
+  },
+  }
+})
 
 // A tracking WebSocket double: it proves a DORMANT tab never opens a PTY
 // socket (which would force-launch the provider) merely by being
@@ -79,6 +187,15 @@ function installBootStubs() {
   )
   TrackingWebSocket.instances = []
   vi.stubGlobal("WebSocket", TrackingWebSocket)
+  // The stack's divider is a resizable panel group, which observes its panels.
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
 }
 installBootStubs()
 // `TerminalArea` lives in its own module specifically so it can be mounted here
@@ -106,6 +223,10 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     pendingSlotTab: {},
     createTabInFlight: [],
     pendingTabOrder: {},
+    stackLayouts: {},
+    stackTerminals: {},
+    stackTabs: {},
+    pendingTerminalOrder: null,
     ...overrides,
   } as unknown as DuxState
 }
@@ -165,6 +286,18 @@ beforeEach(() => {
   installBootStubs()
   startDormantTabMock.mockClear()
   paneProps.length = 0
+  stackProps.length = 0
+  partMounts.length = 0
+  for (const mock of [
+    setStackLayoutMock,
+    chooseStackPartMock,
+    reconcileStackPartMock,
+    startStoppedAgentMock,
+    addTabMock,
+    createTerminalMock,
+  ]) {
+    mock.mockClear()
+  }
 })
 
 afterEach(() => {
@@ -302,7 +435,8 @@ describe("TerminalArea dormant-tab gating (G-T4)", () => {
     })
     rerender(<TerminalArea />)
     expect(await screen.findByText("Start session")).toBeTruthy()
-    expect(screen.queryByTestId("terminal-pane-stub")).toBeNull()
+    // The card sits in the agent's place in the stack, with no part behind it.
+    expect(screen.queryByTestId("stack-part-stub")).toBeNull()
   })
 
   // ...unless that tab's last run ENDED BADLY. Then the card is the diagnosis
@@ -461,6 +595,354 @@ describe("TerminalArea project terminals", () => {
 // The model is what the center pane is decided from; the render below it is a
 // layout. These cover the ids and the lanes directly, where the rendered tests
 // above cover the dormant-card rule through the real surface.
+// AN AGENT AND ITS TERMINAL DOCK. The agent's tab on top, its own terminals in
+// a dock below, laid out by the stack's split. The parts themselves are stubs;
+// what is pinned here is which parts mount, where they sit, what chrome frames
+// them and which controls each layout offers.
+describe("TerminalArea dock", () => {
+  type DockOpts = {
+    terminals?: number
+    tabs?: number
+    alwaysShow?: boolean
+    layout?: "agent" | "split" | "terminal"
+    stopped?: boolean
+    crashed?: boolean
+    target?: "agent" | "terminal"
+    working?: boolean
+  }
+  function dockState(opts: DockOpts = {}): DuxState {
+    const spine = dormantSpine()!
+    const session = spine.sessions[0]
+    const tabCount = opts.tabs ?? 1
+    session.tabs = session.tabs.slice(0, tabCount).map((tab) => ({
+      ...tab,
+      has_live_process: !opts.stopped,
+    }))
+    if (opts.stopped) {
+      session.status = "detached"
+      if (opts.crashed) {
+        session.tabs[0].last_run_failed = true
+        session.tabs[0].last_run_verdict = {
+          ending: "exited",
+          status: 1,
+          ended_at: "2026-11-10T00:00:00Z",
+          excerpt: ["panic: boom"],
+        } as never
+      }
+    }
+    session.working = opts.working ?? false
+    spine.terminals = Array.from({ length: opts.terminals ?? 1 }, (_, i) => ({
+      id: `t${i + 1}`,
+      owner: { kind: "session", session_id: "s1" },
+      label: `Terminal ${i + 1}`,
+      has_output: true,
+      working: false,
+      typing: false,
+      foreground_cmd: null,
+      sort_order: i + 1,
+      created_at: "",
+      updated_at: "",
+    }))
+    const base = makeState({
+      spine,
+      selectedSessionId: "s1",
+      selectedTarget:
+        opts.target === "terminal"
+          ? { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } }
+          : { kind: "agent", sessionId: "s1", tabId: "s1" },
+      stackLayouts: opts.layout ? { s1: opts.layout } : {},
+    } as unknown as Partial<DuxState>)
+    base.bootstrap = { ...base.bootstrap!, always_show_tab_strip: opts.alwaysShow ?? false }
+    return base
+  }
+  const box = (part: "agent" | "dock") => screen.getByTestId(`stack-${part}-box`)
+  const onScreen = (part: "agent" | "dock") => box(part).dataset.onScreen === "true"
+  const pillLabels = () =>
+    Array.from(
+      screen.getByTestId("stack-layout-pill").querySelectorAll("button"),
+    ).map((b) => b.getAttribute("aria-label"))
+
+  it("has no dock for an agent with no terminals of its own", async () => {
+    mockState = dockState({ terminals: 0 })
+    render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    expect(screen.queryByTestId("stack-dock-box")).toBeNull()
+    expect(screen.queryByRole("separator")).toBeNull()
+    // The strips are hidden, so the + floats alone at the agent's corner.
+    expect(pillLabels()).toEqual(["New agent tab or terminal…"])
+  })
+
+  it.each([
+    ["split", true, true],
+    ["agent", true, false],
+    ["terminal", false, true],
+  ] as const)("lays out the %s layout with both strips kept", async (layout, agent, dock) => {
+    mockState = dockState({ layout, alwaysShow: true })
+    render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    expect([onScreen("agent"), onScreen("dock")]).toEqual([agent, dock])
+    // A part folded away keeps its strip: the provider strip's + and the
+    // dock's are both there whichever part has the height.
+    expect(screen.getByLabelText("New tab")).toBeTruthy()
+    expect(screen.getByTestId("dock-strip")).toBeTruthy()
+    expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+    // Both parts stay mounted in every layout.
+    expect(paneProps.map((p) => (p as { id: string }).id)).toEqual(["s1", "t1"])
+  })
+
+  it.each([
+    ["split", ["New agent tab or terminal…", "Hide terminals", "Maximize terminal"]],
+    ["agent", ["New agent tab or terminal…", "Show terminals"]],
+    ["terminal", ["New agent tab or terminal…", "Restore the split"]],
+  ] as const)(
+    "with the strips hidden floats the %s layout's controls on the divider",
+    async (layout, labels) => {
+      mockState = dockState({ layout })
+      render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      expect(screen.queryByLabelText("New tab")).toBeNull()
+      expect(screen.queryByTestId("dock-strip")).toBeNull()
+      expect(screen.getByRole("separator")).toBeTruthy()
+      expect(pillLabels()).toEqual(labels)
+    },
+  )
+
+  it("reaches every layout from the controls of every other", async () => {
+    for (const [layout, label, next] of [
+      ["split", "Hide terminals", "agent"],
+      ["split", "Maximize terminal", "terminal"],
+      ["agent", "Show terminals", "split"],
+      ["terminal", "Restore the split", "split"],
+    ] as const) {
+      mockState = dockState({ layout, alwaysShow: true })
+      render(<TerminalArea />)
+      fireEvent.click(await screen.findByLabelText(label))
+      expect(setStackLayoutMock).toHaveBeenLastCalledWith("s1", next)
+      cleanup()
+    }
+  })
+
+  it("shows the agent's state on the pill while its terminal is maximized", async () => {
+    mockState = dockState({ layout: "terminal", working: true })
+    render(<TerminalArea />)
+    expect(await screen.findByLabelText("The agent is working")).toBeTruthy()
+  })
+
+  it("brings both strips back for a second terminal, or a second tab", async () => {
+    for (const opts of [{ terminals: 2 }, { tabs: 2 }]) {
+      mockState = dockState({ layout: "split", ...opts })
+      render(<TerminalArea />)
+      expect(await screen.findByLabelText("New tab")).toBeTruthy()
+      expect(screen.getByLabelText("New terminal")).toBeTruthy()
+      expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+      cleanup()
+    }
+  })
+
+  it("greys the terminal box of the part typing does not go to, never its strip", async () => {
+    mockState = dockState({ layout: "split", alwaysShow: true })
+    const { rerender } = render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    const grey = (el: HTMLElement) =>
+      el.classList.contains("grayscale") && el.classList.contains("opacity-80")
+    expect([grey(box("agent")), grey(box("dock"))]).toEqual([false, true])
+    expect(grey(screen.getByTestId("dock-strip"))).toBe(false)
+
+    mockState = dockState({ layout: "split", alwaysShow: true, target: "terminal" })
+    rerender(<TerminalArea />)
+    expect([grey(box("agent")), grey(box("dock"))]).toEqual([true, false])
+
+    // Folded away, the other part is not on screen to grey.
+    mockState = dockState({ layout: "agent", alwaysShow: true })
+    rerender(<TerminalArea />)
+    expect(grey(box("dock"))).toBe(false)
+  })
+
+  it("makes a press into a part the one typing goes to", async () => {
+    mockState = dockState({ layout: "split" })
+    render(<TerminalArea />)
+    const parts = await screen.findAllByTestId("stack-part-stub")
+    fireEvent.pointerDown(parts[1])
+    expect(chooseStackPartMock).toHaveBeenCalledWith("s1", "t1")
+  })
+
+  it("asks before adding: a tab on the default provider, or a terminal", async () => {
+    mockState = dockState({ layout: "split" })
+    render(<TerminalArea />)
+    fireEvent.click(await screen.findByLabelText("New agent tab or terminal…"))
+    const dialog = await screen.findByRole("dialog")
+    // The provider is named as a chip, never in quotes.
+    expect(dialog.querySelector("code")?.textContent).toBe("claude")
+    fireEvent.click(screen.getByText("New agent tab"))
+    expect(addTabMock).toHaveBeenCalledWith("s1")
+
+    fireEvent.click(screen.getByLabelText("New agent tab or terminal…"))
+    fireEvent.click(await screen.findByText("New terminal"))
+    expect(createTerminalMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("tells the store when typing has to move to a part on screen", async () => {
+    mockState = dockState({ layout: "split" })
+    const { rerender } = render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    expect(reconcileStackPartMock).not.toHaveBeenCalled()
+    // Maximizing the terminal folds the agent the store still names away.
+    mockState = dockState({ layout: "terminal" })
+    rerender(<TerminalArea />)
+    expect(reconcileStackPartMock).toHaveBeenLastCalledWith("s1", "t1")
+    // And back: hiding the terminals folds the dock the store names away.
+    mockState = dockState({ layout: "agent", target: "terminal" })
+    rerender(<TerminalArea />)
+    expect(reconcileStackPartMock).toHaveBeenLastCalledWith("s1", "s1")
+  })
+
+  it("names the dock as the typing target of a stopped agent opened from its row", async () => {
+    mockState = dockState({ stopped: true })
+    render(<TerminalArea />)
+    await screen.findByTestId("stopped-agent-band")
+    expect(reconcileStackPartMock).toHaveBeenCalledWith("s1", "t1")
+  })
+
+  it("never remounts a part when the layout changes", async () => {
+    mockState = dockState({ layout: "split" })
+    const { rerender } = render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    for (const layout of ["agent", "terminal", "split"] as const) {
+      mockState = dockState({ layout })
+      rerender(<TerminalArea />)
+    }
+    expect(partMounts.sort()).toEqual(["s1", "t1"])
+  })
+
+  it("folds the part a divider drag left below its minimum", async () => {
+    mockState = dockState({ layout: "split" })
+    render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    groupProps?.onLayoutChanged?.({ "stack-agent": 100, "stack-dock": 0 })
+    expect(setStackLayoutMock).toHaveBeenLastCalledWith("s1", "agent")
+    groupProps?.onLayoutChanged?.({ "stack-agent": 0, "stack-dock": 100 })
+    expect(setStackLayoutMock).toHaveBeenLastCalledWith("s1", "terminal")
+    setStackLayoutMock.mockClear()
+    groupProps?.onLayoutChanged?.({ "stack-agent": 40, "stack-dock": 60 })
+    expect(setStackLayoutMock).not.toHaveBeenCalled()
+  })
+
+  it("rests the pill on the divider in the split and tucks it inside a maximized layout", async () => {
+    const pill = () => screen.getByTestId("stack-layout-pill")
+    mockState = dockState({ layout: "split" })
+    const { rerender } = render(<TerminalArea />)
+    expect((await screen.findByTestId("stack-layout-pill")).style.top).toMatch(/^calc\(\d+% \+ 4px\)$/)
+    mockState = dockState({ layout: "agent" })
+    rerender(<TerminalArea />)
+    expect(pill().style.bottom).toBe("12px")
+    mockState = dockState({ layout: "terminal" })
+    rerender(<TerminalArea />)
+    expect(pill().style.top).toBe("12px")
+  })
+
+  it("puts the attention look on the pill's dot over the working one", async () => {
+    const state = dockState({ layout: "terminal", working: true })
+    state.spine!.sessions[0].needs_attention = true
+    mockState = state
+    render(<TerminalArea />)
+    const pill = await screen.findByTestId("stack-layout-pill")
+    expect(pill.querySelector("[aria-label='Needs attention']")).toBeTruthy()
+    expect(pill.querySelector("[aria-label='The agent is working']")).toBeNull()
+  })
+
+  it("keeps a running agent's dormant extra tab on its own card, whose Start is that tab's", async () => {
+    const state = dockState({ layout: "split", tabs: 2 })
+    state.spine!.sessions[0].tabs[1].has_live_process = false
+    state.selectedTarget = { kind: "agent", sessionId: "s1", tabId: "b2" }
+    mockState = state
+    render(<TerminalArea />)
+    fireEvent.click(await screen.findByText("Start session"))
+    expect(startDormantTabMock).toHaveBeenCalledWith("s1", "b2")
+    expect(startStoppedAgentMock).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("stopped-agent-short-card")).toBeNull()
+  })
+
+  it("leaves a stopped agent on its idle screen once its last terminal ends", async () => {
+    const state = dockState({ stopped: true, terminals: 0 })
+    state.endedInViewTab = "s1"
+    mockState = state
+    render(<TerminalArea />)
+    expect(await screen.findByText("Start session")).toBeTruthy()
+    expect(screen.queryByTestId("stack-part-stub")).toBeNull()
+  })
+
+  // Guards the user-locked bounce (CLAUDE.md "Locked by the user"): a working
+  // tab's pill must never be remounted by the screen below the strip changing,
+  // because a remount restarts its bounce mid-flight. Switching between a live
+  // tab and a dormant one swaps a terminal for a card under the same strip.
+  it("keeps the tab strip, and a working tab's bounce, mounted across a live and a dormant tab", async () => {
+    const state = (tabId: string) => {
+      const st = dockState({ terminals: 0, tabs: 2 })
+      const tabs = st.spine!.sessions[0].tabs
+      tabs[0] = { ...tabs[0], working: true }
+      tabs[1] = { ...tabs[1], has_live_process: false }
+      st.selectedTarget = { kind: "agent", sessionId: "s1", tabId }
+      return st
+    }
+    mockState = state("s1")
+    const { rerender } = render(<TerminalArea />)
+    const pill = (await screen.findAllByRole("tab"))[0]
+    const frame = pill.querySelector("[data-slot='working-glyph']")!
+    expect(frame.getAttribute("class")).toContain("motion-safe:animate-working-bounce")
+    fireAnimationStart(frame, "working-bounce")
+
+    mockState = state("b2")
+    rerender(<TerminalArea />)
+    expect(await screen.findByText("Start session")).toBeTruthy()
+    mockState = state("s1")
+    rerender(<TerminalArea />)
+
+    expect(screen.getAllByRole("tab")[0]).toBe(pill)
+    expect(pill.querySelector("[data-slot='working-glyph']")).toBe(frame)
+    expect(frame.getAttribute("class")).toContain("motion-safe:animate-working-bounce")
+  })
+
+  describe("a stopped agent with a running terminal", () => {
+    it("opens on its terminal with the band and never mounts the agent's tab", async () => {
+      mockState = dockState({ stopped: true })
+      render(<TerminalArea />)
+      const band = await screen.findByTestId("stopped-agent-band")
+      expect(band.textContent).toContain("isn’t running")
+      expect(onScreen("agent")).toBe(false)
+      expect(onScreen("dock")).toBe(true)
+      expect(paneProps.map((p) => (p as { id: string }).id)).toEqual(["t1"])
+      fireEvent.click(screen.getByRole("button", { name: "Start" }))
+      expect(startStoppedAgentMock).toHaveBeenCalledWith("s1", "s1")
+    })
+
+    it("opens on its terminal from an address naming the terminal too", async () => {
+      mockState = dockState({ stopped: true, target: "terminal" })
+      render(<TerminalArea />)
+      await screen.findByTestId("stopped-agent-band")
+      expect(onScreen("agent")).toBe(false)
+    })
+
+    it("shows the short card beside the dock, and the band leaves Start to it", async () => {
+      mockState = dockState({ stopped: true, layout: "split" })
+      render(<TerminalArea />)
+      const card = await screen.findByTestId("stopped-agent-short-card")
+      expect(card.textContent).toContain("Start picks up its last conversation.")
+      expect(screen.getAllByRole("button", { name: "Start" })).toHaveLength(1)
+      expect(screen.getByTestId("stopped-agent-band").querySelector("button")).toBeNull()
+      expect(paneProps.map((p) => (p as { id: string }).id)).toEqual(["t1"])
+    })
+
+    it("says how a crashed first tab ended, with its last output a click away", async () => {
+      mockState = dockState({ stopped: true, crashed: true })
+      render(<TerminalArea />)
+      const band = await screen.findByTestId("stopped-agent-band")
+      expect(band.textContent).toContain("Its last run")
+      fireEvent.click(screen.getByText("Last output"))
+      expect(await screen.findByText("panic: boom")).toBeTruthy()
+    })
+  })
+})
+
 describe("terminalAreaModel", () => {
   const model = (over: Record<string, unknown> = {}) =>
     terminalAreaModel({
