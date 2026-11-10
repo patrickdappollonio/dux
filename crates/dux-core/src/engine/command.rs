@@ -2043,7 +2043,15 @@ impl Engine {
             .into_iter()
             .map(TabId::into_string)
             .collect();
-        validate_reorder(&current, tab_ids, "tab")?;
+        if let Err(detail) = validate_reorder(&current, tab_ids, "tab") {
+            // The strip moved under the one that asked: a tab arrived or closed
+            // on another screen. The reason is for the log; the sentence is for
+            // the person.
+            crate::logger::warn(&format!(
+                "refused a tab reorder for agent {session_id}: {detail}"
+            ));
+            anyhow::bail!("The agent's tabs changed while you were moving one; try again.");
+        }
         if current == tab_ids {
             return Ok(());
         }

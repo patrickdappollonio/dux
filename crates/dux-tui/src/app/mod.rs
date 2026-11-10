@@ -753,6 +753,10 @@ pub(crate) struct App {
     /// `None`. Armed by a left press on a pill and retired on release, on a host
     /// resize, on focus loss, on any keystroke, and by the next press.
     pub(crate) tab_drag: Option<TabDragState>,
+    /// The selected agent's strip as it was last drawn. A tab another screen closes is already gone from the engine by the
+    /// time this surface notices, so the strip the user was looking at is the only
+    /// place the tab's neighbours are still written down.
+    pub(crate) last_tab_strip: Option<DrawnTabStrip>,
     /// A mouse button pressed inside the WINDOWED center pane that is being
     /// forwarded to a mouse-aware child: holds the SGR button
     /// code of the pressed button (0 left, 1 middle, 2 right) from press to
@@ -4733,6 +4737,15 @@ pub(crate) struct RowDragState {
     pub(crate) promoted: bool,
 }
 
+/// A strip as it was last drawn: whose it was, its tab ids in order, and the tab
+/// on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DrawnTabStrip {
+    pub(crate) session_id: String,
+    pub(crate) tabs: Vec<String>,
+    pub(crate) focused: String,
+}
+
 /// A drag-to-reorder gesture over a pill of a tab strip. It stays a plain click
 /// until the pointer reaches a different pill, so the press that focuses a tab
 /// is the same one that can pick it up.
@@ -5113,6 +5126,7 @@ impl App {
         let sessions = session_store.load_sessions()?;
         let agent_tabs = session_store.load_extra_agent_tabs()?;
         let slot_tab_positions = session_store.load_slot_tab_positions()?;
+        let slot_tab_created_ms = session_store.load_slot_tab_created_ms()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
@@ -5175,6 +5189,7 @@ impl App {
                 .map(|t| (TabId::new(t.id.clone()), t))
                 .collect(),
             slot_tab_positions,
+            slot_tab_created_ms,
             terminating_ptys: Vec::new(),
             process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
@@ -5378,6 +5393,7 @@ impl App {
             mouse_drag: None,
             row_drag: None,
             tab_drag: None,
+            last_tab_strip: None,
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,

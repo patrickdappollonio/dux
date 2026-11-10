@@ -4362,6 +4362,7 @@ impl App {
     fn render_agent_tab_strip_if_needed(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
         self.agent_tab_regions.clear();
 
+        self.land_beside_a_tab_closed_elsewhere();
         let Some(session) = self.selected_session() else {
             return area;
         };
@@ -4542,12 +4543,17 @@ impl App {
             .iter()
             .map(|id| self.tab_provider_label(session, id))
             .collect();
-        let labels: Vec<String> = tab_labels(
-            &providers
-                .iter()
-                .map(std::string::String::as_str)
-                .collect::<Vec<_>>(),
-        );
+        let keyed: Vec<(&str, i64)> = tab_ids
+            .iter()
+            .zip(&providers)
+            .map(|(id, provider)| {
+                (
+                    provider.as_str(),
+                    self.engine.tab_created_ms(session, TabIdRef::new(id)),
+                )
+            })
+            .collect();
+        let labels: Vec<String> = tab_labels(&keyed);
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
         let attention_on = self.engine.config.ui.attention_indicator && session_active;
         let glyph_tone = self.theme.session_dot(session.status).1;

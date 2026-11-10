@@ -300,7 +300,8 @@ against the same files.
   you on the tab to its right, or the one to its left when it was the last.
 
 There is no privileged "main" tab. The agent's first tab wears a small pin while there are
-two or more tabs: it is the tab that starts and resumes the agent, wherever you drag it.
+two or more tabs: it is the tab that starts when you open a stopped agent, wherever you
+drag it.
 Closing it hands its place to the leftmost remaining tab, and only an agent's very last tab
 refuses to close (detach the agent instead).
 

@@ -185,6 +185,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
     let sessions = session_store.load_sessions()?;
     let agent_tabs = session_store.load_extra_agent_tabs()?;
     let slot_tab_positions = session_store.load_slot_tab_positions()?;
+    let slot_tab_created_ms = session_store.load_slot_tab_created_ms()?;
     let projects = dux_core::project_browser::load_projects(
         &session_store.load_projects()?,
         &session_store.load_project_created_ats()?,
@@ -255,6 +256,7 @@ pub fn bootstrap_engine(paths: &DuxPaths) -> Result<Engine> {
             .map(|t| (TabId::new(t.id.clone()), t))
             .collect(),
         slot_tab_positions,
+        slot_tab_created_ms,
         terminating_ptys: Vec::new(),
         process_registry: dux_core::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),

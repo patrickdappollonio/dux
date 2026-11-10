@@ -129,6 +129,9 @@ export interface AgentTabView {
   id: string
   provider: string
   order: number
+  /** When the tab was created (ms since the epoch). Duplicate provider labels are
+   * numbered by it, so a tab keeps its name when dragged. Missing reads as `0`. */
+  created_at_ms?: number
   working: boolean
   /** This tab is streaming keystroke-level input, a finer cue than `working`.
    * Rolled up any-tab into `SessionView.typing`; missing normalizes to `false`. */

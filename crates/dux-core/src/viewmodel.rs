@@ -928,6 +928,10 @@ pub struct AgentTabView {
     /// only: no tab is privileged (resume is decided dynamically at launch by
     /// liveness, not by position).
     pub order: u32,
+    /// When the tab was created, in milliseconds since the epoch. Duplicate
+    /// provider labels are numbered by it, so a tab keeps its name when it is
+    /// dragged to another place.
+    pub created_at_ms: i64,
     /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
     pub working: bool,
     /// Whether the user is currently typing into this tab (a keystroke landed
@@ -1649,7 +1653,7 @@ impl Engine {
         for (i, t) in extras.iter().enumerate() {
             if i == slot_index {
                 let order = next_order(&tabs);
-                tabs.push(self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), order));
+                tabs.push(self.tab_view(s, s.slot_tab_id(), &self.running_provider_for(s), order));
             }
             let effective = self
                 .running_provider_pins
@@ -1657,24 +1661,31 @@ impl Engine {
                 .cloned()
                 .unwrap_or_else(|| t.provider.clone());
             let order = next_order(&tabs);
-            tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, order));
+            tabs.push(self.tab_view(s, TabIdRef::new(&t.id), &effective, order));
         }
         if slot_index >= extras.len() {
             let order = next_order(&tabs);
-            tabs.push(self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), order));
+            tabs.push(self.tab_view(s, s.slot_tab_id(), &self.running_provider_for(s), order));
         }
         tabs
     }
 
     /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.
     /// `order` is display position only; no tab is privileged.
-    fn tab_view(&self, id: &TabIdRef, provider: &ProviderKind, order: u32) -> AgentTabView {
+    fn tab_view(
+        &self,
+        s: &AgentSession,
+        id: &TabIdRef,
+        provider: &ProviderKind,
+        order: u32,
+    ) -> AgentTabView {
         AgentTabView {
             // The wire keeps plain strings: an id leaving the engine is bytes a
             // browser stores, not an id dux is still reasoning about.
             id: id.as_str().to_string(),
             provider: provider.as_str().to_string(),
             order,
+            created_at_ms: self.tab_created_ms(s, id),
             working: self.is_agent_streaming(id.as_str()),
             typing: self.is_typing(id.as_str()),
             needs_attention: self.tab_needs_attention(id.as_str()),

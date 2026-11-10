@@ -527,7 +527,7 @@ describe("store agent-tab lifecycle", () => {
     const mod = await loadStore()
 
     mod.reorderTabs("s1", ["t3", "t1", "t2"])
-    expect(mod.getSnapshot().pendingTabOrder).toEqual({ s1: ["t3", "t1", "t2"] })
+    expect(mod.getSnapshot().pendingTabOrder.s1.ids).toEqual(["t3", "t1", "t2"])
     expect(
       find((u, init) => u === "/api/v1/sessions/s1/tabs/reorder" && init?.method === "POST"),
     ).toBeDefined()
@@ -536,6 +536,53 @@ describe("store agent-tab lifecycle", () => {
     fireSessionsChanged()
     await vi.waitFor(() => {
       expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("an answered reorder yields to the next spine even when another screen ordered the tabs differently", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered).not.toBeNull()
+    })
+
+    // Somebody else's order, not ours: it must not stay hidden behind the overlay.
+    seedTabs("t1", ["t2", "t3", "t1"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("a refused reorder drops the overlay and says so", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    const realFetch = fetchMock.getMockImplementation()
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error("The agent's tabs changed while you were moving one; try again.")
+    })
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+    if (realFetch) fetchMock.mockImplementation(realFetch)
+  })
+
+  it("closing the focused tab lands beside it in the order on screen while a drag is unconfirmed", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    // Dragged to t3, t2, t1 and not confirmed yet: the tab to t2's right on
+    // screen is t1, not t3.
+    mod.reorderTabs("s1", ["t3", "t2", "t1"])
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t1",
     })
   })
 

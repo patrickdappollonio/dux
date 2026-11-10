@@ -29,10 +29,11 @@ import {
   ONLY_TAB_CLOSE_REFUSAL,
   defaultProviderForSession,
   isFirstTab,
+  sessionAsShown,
   tabLabels,
 } from "@/lib/agentTabs"
+import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
 import { usePillSort } from "@/hooks/use-pill-sort"
-import { reorderById } from "@/lib/reorder"
 import {
   addTab,
   clickTab,
@@ -48,7 +49,8 @@ import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
-const FIRST_TAB_HINT = "The agent's first tab: the one that starts and resumes the agent."
+const FIRST_TAB_HINT =
+  "The agent's first tab: the one that starts when you open a stopped agent."
 
 // The provider-tab strip at the top of the center pane, rendered by App only
 // when a session has two or more tabs. All tabs render uniformly: clicking a
@@ -66,12 +68,18 @@ export function AgentTabsStrip({
   activeTabId: string
   maxTabs?: number
 }) {
-  const { bootstrap, spine, createTabInFlight, pendingTabOrder } = useDux()
+  const { bootstrap, spine, createTabInFlight, pendingTabOrder, pendingSlotTab } =
+    useDux()
   const providers = bootstrap?.available_providers ?? []
   // The order just dragged shows at once; the server's answer replaces it.
-  const pending = pendingTabOrder[session.id]
-  const tabs = pending ? reorderById(session.tabs, pending) : session.tabs
+  const shown = sessionAsShown(
+    session,
+    pendingTabOrder[session.id],
+    pendingSlotTab[session.id],
+  )
+  const tabs = shown.tabs
   const labels = tabLabels(tabs)
+  const attachStrip = useKeepCueClocks(tabs.map((t) => t.id).join("\n"))
   const cap = maxTabs ?? DEFAULT_AGENT_TABS_MAX
   const atCap = tabs.length >= cap
   const creating = createTabInFlight.includes(session.id)
@@ -82,7 +90,10 @@ export function AgentTabsStrip({
     // `max-md:py-0.5` halves the strip's own vertical padding to go with the
     // shorter phone pill below: shrinking the pill alone would leave the strip
     // the same height. Desktop padding is unchanged.
-    <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5">
+    <div
+      ref={attachStrip}
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5"
+    >
       <SortableStrip
         ids={tabs.map((t) => t.id)}
         onReorder={(next) => reorderTabs(session.id, next)}
@@ -95,7 +106,7 @@ export function AgentTabsStrip({
             label={labels[i]}
             active={tab.id === activeTabId}
             providers={providers}
-            pinned={tabs.length >= 2 && isFirstTab(session, tab.id)}
+            pinned={tabs.length >= 2 && isFirstTab(shown, tab.id)}
           />
         ))}
       </SortableStrip>
@@ -194,6 +205,7 @@ function TabPill({
     <div
       ref={setNodeRef}
       style={style}
+      data-cue-key={tab.id}
       {...listeners}
       role="tab"
       aria-selected={active}
@@ -218,7 +230,7 @@ function TabPill({
       className={cn(
         // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
         // top of the 32px ⋯ hit area inside and overshoot the 36px again.
-        "group/tab flex shrink-0 cursor-pointer touch-manipulation items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0",
+        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0",
         isDragging && "relative z-10 shadow-lg",
         active
           ? "border-border bg-background text-foreground"

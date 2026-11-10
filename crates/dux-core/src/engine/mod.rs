@@ -530,6 +530,11 @@ pub struct Engine {
     /// new agent's strip starts. Seeded from
     /// `session_store.load_slot_tab_positions()` at construction.
     pub slot_tab_positions: HashMap<String, i64>,
+    /// When each agent's slot tab was created (milliseconds since the epoch), by
+    /// session id, where that differs from the agent's own creation: a tab
+    /// promoted into the slot keeps the age it had. Absent means the agent's own
+    /// `created_at`. Seeded from `session_store.load_slot_tab_created_ms()`.
+    pub slot_tab_created_ms: HashMap<String, i64>,
     /// Agent/terminal PTYs that have been `SIGTERMed` on an individual delete or
     /// close and are being given a grace period to exit before they are
     /// force-killed (SIGKILL): the non-blocking, per-PTY analogue of
@@ -7099,6 +7104,19 @@ impl Engine {
         true
     }
 
+    /// When one tab was created, in milliseconds since the epoch: the key
+    /// duplicate provider labels are numbered by.
+    pub fn tab_created_ms(&self, session: &AgentSession, tab_id: &TabIdRef) -> i64 {
+        match self.agent_tabs.get(tab_id) {
+            Some(tab) => tab.created_at.timestamp_millis(),
+            None => self
+                .slot_tab_created_ms
+                .get(&session.id)
+                .copied()
+                .unwrap_or_else(|| session.created_at.timestamp_millis()),
+        }
+    }
+
     /// Every tab of a session in strip order, paired with the label the strip
     /// shows for it: the tab's EFFECTIVE provider (a retarget-while-running pin
     /// wins over the row, exactly as the pill reads it) run through
@@ -7121,12 +7139,17 @@ impl Engine {
                     .to_string()
             })
             .collect();
-        let labels = crate::agent_tabs::tab_labels(
-            &providers
-                .iter()
-                .map(std::string::String::as_str)
-                .collect::<Vec<_>>(),
-        );
+        let keyed: Vec<(&str, i64)> = ids
+            .iter()
+            .zip(&providers)
+            .map(|(id, provider)| {
+                (
+                    provider.as_str(),
+                    self.tab_created_ms(session, id.as_ref_id()),
+                )
+            })
+            .collect();
+        let labels = crate::agent_tabs::tab_labels(&keyed);
         ids.into_iter().zip(labels).collect()
     }
 
@@ -7195,6 +7218,10 @@ impl Engine {
         if let Some(promoted) = self.agent_tabs.remove(&new_slot) {
             self.slot_tab_positions
                 .insert(session_id.as_str().to_string(), promoted.sort_order);
+            self.slot_tab_created_ms.insert(
+                session_id.as_str().to_string(),
+                promoted.created_at.timestamp_millis(),
+            );
         }
         if let Some(session) = self
             .sessions
@@ -14165,6 +14192,11 @@ mod tab_ops_tests {
     fn a_reorder_that_is_not_the_exact_set_of_tabs_is_refused() {
         let (mut engine, _tmp) = test_engine();
         agent_with_tabs(&mut engine, &[("t2", "codex")]);
+        let refusal = reorder(&mut engine, &["t2"]).unwrap_err().to_string();
+        assert_eq!(
+            refusal,
+            "The agent's tabs changed while you were moving one; try again."
+        );
 
         assert!(reorder(&mut engine, &["t2"]).is_err());
         assert!(reorder(&mut engine, &["t2", "t2"]).is_err());
@@ -14202,29 +14234,114 @@ mod tab_ops_tests {
     }
 
     #[test]
-    fn where_the_slot_tab_sits_changes_neither_its_resume_nor_the_tab_a_stopped_agent_starts() {
+    fn reconnecting_a_stopped_agent_launches_its_slot_tab_wherever_it_sits_and_resumes_it() {
+        let (mut engine, tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+        {
+            let session = &mut engine.sessions[0];
+            session.started_providers = vec![session.provider.as_str().to_string()];
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .worktree_path = tmp.path().to_string_lossy().to_string();
+        }
+        reorder(&mut engine, &["t2", "t3", "s1-slot"]).expect("reorder");
+
+        let plan = engine
+            .reconnect_plan("s1", crate::engine::ReconnectMode::Normal, (24, 80))
+            .expect("plan builds");
+
+        match plan {
+            ReconnectPlan::Launch {
+                resume, request, ..
+            } => {
+                assert_eq!(
+                    request.tab_id.as_str(),
+                    "s1-slot",
+                    "the slot tab is the one started, not the leftmost"
+                );
+                assert!(resume, "position does not take the slot tab's resume away");
+            }
+            other => panic!("expected a Launch plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_tab_after_a_reorder_joins_the_right_hand_end() {
         let (mut engine, _tmp) = test_engine();
         agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
-        engine.sessions[0].started_providers = vec!["claude".into()];
-        reorder(&mut engine, &["t2", "t3", "s1-slot"]).expect("reorder");
-        let session = engine.sessions[0].clone();
+        reorder(&mut engine, &["t3", "s1-slot", "t2"]).expect("reorder");
 
-        assert_eq!(
-            engine.first_live_tab("s1"),
-            None,
-            "a stopped agent has no live tab to land on, so the slot tab is the one it starts"
-        );
-        assert!(
+        // What `create_tab` stores for the next tab: one past the highest position.
+        let next = engine
+            .session_store
+            .max_tab_sort_order("s1")
+            .unwrap()
+            .unwrap_or(0)
+            + 1;
+        let mut tab = extra_tab("t4", "s1", "opencode");
+        tab.sort_order = next;
+        engine.session_store.insert_agent_tab(&tab).unwrap();
+        engine.agent_tabs.insert(TabId::new("t4"), tab);
+
+        assert_eq!(strip(&engine), vec!["t3", "s1-slot", "t2", "t4"]);
+    }
+
+    #[test]
+    fn a_reordered_strip_comes_back_the_same_after_a_restart() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "codex"), ("t3", "claude")]);
+        reorder(&mut engine, &["t3", "s1-slot", "t2"]).expect("reorder");
+
+        // A restart: a fresh connection to the same file, and an engine seeded
+        // the way startup seeds it.
+        let reopened =
+            crate::storage::SessionStore::open(&engine.paths.sessions_db_path).expect("reopen");
+        let (mut restarted, _tmp2) = test_engine();
+        restarted.sessions = reopened.load_sessions().unwrap();
+        restarted.agent_tabs = reopened
+            .load_extra_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .map(|t| (TabId::new(t.id.clone()), t))
+            .collect();
+        restarted.slot_tab_positions = reopened.load_slot_tab_positions().unwrap();
+
+        assert_eq!(strip(&restarted), vec!["t3", "s1-slot", "t2"]);
+    }
+
+    #[test]
+    fn dragging_a_tab_renames_no_label() {
+        let (mut engine, _tmp) = test_engine();
+        agent_with_tabs(&mut engine, &[("t2", "claude"), ("t3", "claude")]);
+        // Created in the order slot, t2, t3: the labels follow that.
+        let now = Utc::now();
+        engine.sessions[0].created_at = now - chrono::Duration::seconds(30);
+        engine
+            .agent_tabs
+            .get_mut(TabIdRef::new("t2"))
+            .unwrap()
+            .created_at = now - chrono::Duration::seconds(20);
+        engine
+            .agent_tabs
+            .get_mut(TabIdRef::new("t3"))
+            .unwrap()
+            .created_at = now - chrono::Duration::seconds(10);
+        engine.sessions[0].provider = ProviderKind::new("claude");
+        let labels = |engine: &Engine| -> std::collections::BTreeMap<String, String> {
             engine
-                .tab_resume_decision(
-                    &session,
-                    session.slot_tab_id(),
-                    &session.provider,
-                    crate::model::ConversationStart::Resume
-                )
-                .is_resume(),
-            "the slot tab resumes from the last place in the strip"
-        );
+                .tab_strip_labels(SessionIdRef::new("s1"))
+                .into_iter()
+                .map(|(id, label)| (id.into_string(), label))
+                .collect()
+        };
+        let before = labels(&engine);
+        assert_eq!(before["t3"], "claude 3");
+
+        reorder(&mut engine, &["t3", "t2", "s1-slot"]).expect("reorder");
+
+        assert_eq!(labels(&engine), before, "a reorder renames nothing");
     }
 
     #[test]

@@ -120,6 +120,8 @@ import {
 import { noteServerClock } from "./serverClock"
 import {
   type PendingSlotTab,
+  type PendingTabOrder,
+  sessionAsShown,
   isFirstTab,
   isSlotTabTarget,
   resolveFocusedTab,
@@ -790,7 +792,7 @@ export interface DuxState {
   // Optimistic overlay for an agent's tab strip, keyed by session id: the complete
   // list of its tab ids in the just-dragged order, cleared once the spine confirms
   // it (see `reorderTabs`).
-  pendingTabOrder: Record<string, string[]>
+  pendingTabOrder: Record<string, PendingTabOrder>
   // Optimistic overlay for a session's slot pointer, keyed by session id: the
   // tab a slot-tab close just promoted, and the tab that close destroyed. The
   // DELETE's answer is the only thing that knows this until the next spine, and
@@ -1363,6 +1365,7 @@ function applyPushedWorkspace(event: EventsServerMessage): void {
     applyWorkspace(
       withClock(normalizeWorkspace(event.workspace as RawWorkspace), event.clock),
       loadWorkspaceSeq,
+      true,
     )
     serverPushesWorkspace = true
   } catch (error) {
@@ -2146,7 +2149,7 @@ function loadWorkspace(): void {
 // `seq` is the `loadWorkspaceSeq` the originating `loadWorkspace` captured; a
 // stale result is discarded so a slow reply cannot overwrite a fresher spine or
 // re-run focus and prune against outdated data.
-function applyWorkspace(rawSpine: Spine, seq: number): void {
+function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
   if (seq < loadWorkspaceSeq) return
   // The server's ordering, applied to both delivery paths from one place. A
   // document with no revision at all comes from a server that predates the
@@ -2193,7 +2196,11 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
-    pendingTabOrder: reconcilePendingTabOrder(spine, state.pendingTabOrder),
+    pendingTabOrder: reconcilePendingTabOrder(spine, state.pendingTabOrder, {
+      seq,
+      pushed,
+      rev: rawSpine.rev,
+    }),
     pendingSlotTab: reconcilePendingSlotTab(spine, state.pendingSlotTab),
   })
   // Restore a boot-time deep-link before focus/prune: it selects only a session
@@ -2312,21 +2319,34 @@ function reconcilePendingTerminalOrder(
   return overlayShown(serverIds, pending) ? null : pending
 }
 
-// Drop each tab-strip overlay once the spine's strip shows it, or the agent is
-// gone. Same test as the agent and terminal overlays, per session.
+// Drop each tab-strip overlay once it has done its job: the spine's strip shows
+// it, the agent is gone, or the request was answered and this document was made
+// after that answer (whatever order it shows: another screen's reorder in
+// between must not stay hidden behind ours until a reload). A fetch is newer
+// when it started after the answer; a pushed document when its revision is
+// beyond the one applied at the time.
 function reconcilePendingTabOrder(
   spine: Spine,
-  pending: Record<string, string[]>,
-): Record<string, string[]> {
-  const entries = Object.entries(pending).filter(([sessionId, order]) => {
+  pending: Record<string, PendingTabOrder>,
+  doc: { seq: number; pushed: boolean; rev: number | undefined },
+): Record<string, PendingTabOrder> {
+  const entries = Object.entries(pending).filter(([sessionId, entry]) => {
     const session = spine.sessions.find((s) => s.id === sessionId)
-    return (
-      session !== undefined &&
-      !overlayShown(
+    if (session === undefined) return false
+    if (
+      overlayShown(
         session.tabs.map((t) => t.id),
-        order,
+        entry.ids,
       )
-    )
+    ) {
+      return false
+    }
+    const answered = entry.answered
+    if (answered === null) return true
+    const newer = doc.pushed
+      ? doc.rev === undefined || answered.rev === null || doc.rev > answered.rev
+      : doc.seq > answered.seq
+    return !newer
   })
   if (entries.length === Object.keys(pending).length) return pending
   return Object.fromEntries(entries)
@@ -5149,8 +5169,15 @@ export function closeTab(
 ): Promise<AttachedBlocker[] | null> {
   // The neighbour is read from the strip the user is looking at when they ask,
   // before the answer can change it.
+  const listed = state.spine?.sessions.find((s) => s.id === sessionId)
   const neighbour = tabAfterClose(
-    state.spine?.sessions.find((s) => s.id === sessionId)?.tabs ?? [],
+    listed
+      ? sessionAsShown(
+          listed,
+          state.pendingTabOrder[sessionId],
+          state.pendingSlotTab[sessionId],
+        ).tabs
+      : [],
     tabId,
   )
   const closing = tabsApi.remove(sessionId, tabId, accepted).then((closed) => {
@@ -5194,17 +5221,37 @@ export function closeTab(
 // clears when the next spine confirms the order, or on error. Which tab holds
 // the slot does not change.
 export function reorderTabs(sessionId: string, orderedIds: string[]): void {
-  setState({ pendingTabOrder: { ...state.pendingTabOrder, [sessionId]: orderedIds } })
-  tabsApi.reorder(sessionId, orderedIds).catch((e) => {
-    // A rejected reorder is never reconciled by a spine, so the overlay would
-    // linger forever. Only this request's own overlay: a later reorder that
-    // replaced it is still waiting on its own answer.
-    if (state.pendingTabOrder[sessionId] === orderedIds) {
-      const { [sessionId]: _dropped, ...rest } = state.pendingTabOrder
-      setState({ pendingTabOrder: rest })
-    }
-    notifyError(e instanceof Error ? e.message : "Could not reorder the tabs.")
-  })
+  const entry: PendingTabOrder = { ids: orderedIds, answered: null }
+  setState({ pendingTabOrder: { ...state.pendingTabOrder, [sessionId]: entry } })
+  const drop = () => {
+    // Only this request's own overlay: a later reorder that replaced it is still
+    // waiting on its own answer.
+    if (state.pendingTabOrder[sessionId] !== entry) return
+    const { [sessionId]: _dropped, ...rest } = state.pendingTabOrder
+    setState({ pendingTabOrder: rest })
+  }
+  tabsApi.reorder(sessionId, orderedIds).then(
+    () => {
+      // Answered: the overlay now only bridges the wait for a document made
+      // after this answer, which retires it whatever order it shows.
+      if (state.pendingTabOrder[sessionId] !== entry) return
+      setState({
+        pendingTabOrder: {
+          ...state.pendingTabOrder,
+          [sessionId]: {
+            ids: orderedIds,
+            answered: { seq: loadWorkspaceSeq, rev: appliedWorkspaceRev },
+          },
+        },
+      })
+    },
+    (e) => {
+      // A rejected reorder is never reconciled by a spine, so the overlay would
+      // linger forever.
+      drop()
+      notifyError(e instanceof Error ? e.message : "Could not reorder the tabs.")
+    },
+  )
 }
 
 // Retarget a tab's provider (effective on its next launch). Validated up front

@@ -36,10 +36,13 @@ agent's shared worktree, and they all behave the same. This is the strip in the 
 ![Three provider tabs on one agent, the first one active and wearing a small pin, with a plus button for adding another.](/screens/agent-tabs-strip.png)
 
 The one difference is a small pin after the first tab's name, shown whenever the agent has
-two or more tabs. It marks the tab that starts and resumes the agent: select a stopped
-agent and that tab is the one that comes up, wherever it sits in the strip. On the web
-the pin has a tooltip saying so, and the terminal UI draws it as `⚲`. The pin moves only
-when the first tab closes and its place passes on.
+two or more tabs. It marks the agent's first tab. On the web, selecting a stopped agent
+starts that tab, wherever it sits in the strip, and the pin's tooltip says so. The terminal
+UI draws the pin as `⚲`, and there nothing starts just because you looked at an agent, so
+the pin only says which tab is first. The pin moves only when the first tab closes and its
+place passes on.
+
+![The terminal UI tab strip with the first pill wearing the ⚲ pin after its name.](/screens/tui-tabs-strip-ordinals.png)
 
 - **On the web**, the `+` button on the strip adds a tab running the project's default
   provider immediately. The dropdown attached to it picks a different one.
@@ -115,8 +118,8 @@ and tell you when it is already at that end.
 
 - **New tabs** always join at the right-hand end.
 - **The order is kept** across restarts, and is shared between the terminal UI and the web.
-- **Order is only for looking at.** Moving the first tab does not change which tab starts
-  and resumes the agent, and resume never depends on position.
+- **Order is only for looking at.** Moving the first tab does not change which tab is the
+  agent's first, and resume never depends on position.
 - **A strip reorders within itself.** A tab never moves to another agent.
 
 dux also remembers, per agent, whichever tab you had focused last. Jump to a different

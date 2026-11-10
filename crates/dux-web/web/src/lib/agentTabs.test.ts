@@ -661,3 +661,23 @@ describe("tabAfterClose", () => {
     expect(tabAfterClose(strip, "z")).toBeUndefined()
   })
 })
+
+describe("tabLabels by creation order", () => {
+  const made = (id: string, created: number): AgentTabView => ({
+    ...tab("claude"),
+    id,
+    created_at_ms: created,
+  })
+
+  it("keeps a tab's number wherever it is dragged", () => {
+    const a = made("a", 10)
+    const b = made("b", 20)
+    const c = made("c", 30)
+    expect(tabLabels([a, b, c])).toEqual(["claude", "claude 2", "claude 3"])
+    expect(tabLabels([c, a, b])).toEqual(["claude 3", "claude", "claude 2"])
+  })
+
+  it("falls back to the strip order for tabs with no creation time", () => {
+    expect(tabLabels([tab("claude"), tab("claude")])).toEqual(["claude", "claude 2"])
+  })
+})

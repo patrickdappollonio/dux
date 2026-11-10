@@ -40,11 +40,21 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 impl PruneViewContext {
-    fn capture(app: &App) -> Self {
+    pub(super) fn capture(app: &App) -> Self {
         let selected_session = app.selected_session().map(|session| session.id.clone());
-        let focused_tab = selected_session
-            .as_ref()
-            .map(|session_id| app.focused_tab_id(session_id));
+        // The tab on screen when the strip was last drawn, if it has since been
+        // closed elsewhere: resolving the focus now would already have fallen
+        // back to another tab, and the close would look like one that was not
+        // on screen.
+        let focused_tab = selected_session.as_ref().map(|session_id| {
+            let now = app.session_tab_ids(session_id);
+            match &app.last_tab_strip {
+                Some(drawn) if drawn.session_id == *session_id && !now.contains(&drawn.focused) => {
+                    drawn.focused.clone()
+                }
+                _ => app.focused_tab_id(session_id),
+            }
+        });
         // Extra tabs only: a closed tab's sentence comes from the prune itself,
         // and the slot tab's own exit is the agent's notice rather than a tab's.
         let tab_providers: HashMap<String, String> = app
@@ -60,9 +70,14 @@ impl PruneViewContext {
                 .find(|session| &session.id == session_id)
                 .map(|session| session.slot_tab_id().as_str().to_string())
         });
+        // The strip as last drawn when it is this agent's: a tab another screen
+        // closed is already gone from the engine, but not from that drawing.
         let strip_before = selected_session
             .as_ref()
-            .map(|session_id| app.session_tab_ids(session_id))
+            .map(|session_id| match &app.last_tab_strip {
+                Some(drawn) if drawn.session_id == *session_id => drawn.tabs.clone(),
+                _ => app.session_tab_ids(session_id),
+            })
             .unwrap_or_default();
         Self {
             selected_session,
@@ -237,7 +252,11 @@ impl App {
         }
     }
 
-    fn apply_pruned_agent_tabs(&mut self, pruned: &[PrunedPty], context: &PruneViewContext) {
+    pub(super) fn apply_pruned_agent_tabs(
+        &mut self,
+        pruned: &[PrunedPty],
+        context: &PruneViewContext,
+    ) {
         let mut rebuild_needed = false;
         for pty in pruned.iter().filter(|pty| pty.kind == PrunedPtyKind::Agent) {
             rebuild_needed |= self.apply_pruned_agent_tab(pty, context);

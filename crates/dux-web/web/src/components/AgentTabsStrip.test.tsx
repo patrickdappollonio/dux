@@ -95,6 +95,7 @@ beforeEach(() => {
     },
     createTabInFlight: [],
     pendingTabOrder: {},
+    pendingSlotTab: {},
   } as unknown as DuxState
 })
 
@@ -235,7 +236,7 @@ describe("AgentTabsStrip", () => {
 })
 
 describe("AgentTabsStrip order and the first-tab pin", () => {
-  const PIN = "The agent's first tab: the one that starts and resumes the agent."
+  const PIN = "The agent's first tab: the one that starts when you open a stopped agent."
 
   function threeTabs(slot: string): SessionView {
     const base = session()
@@ -258,7 +259,10 @@ describe("AgentTabsStrip order and the first-tab pin", () => {
   })
 
   it("shows the order just dragged before the server confirms it", () => {
-    mockState = { ...mockState, pendingTabOrder: { s1: ["t3", "t1", "t2"] } }
+    mockState = {
+      ...mockState,
+      pendingTabOrder: { s1: { ids: ["t3", "t1", "t2"], answered: null } },
+    }
     render(<AgentTabsStrip session={threeTabs("t1")} activeTabId="t1" maxTabs={20} />)
     expect(sortableProps?.ids).toEqual(["t3", "t1", "t2"])
     const names = screen.getAllByRole("tab").map((tab) => tab.textContent)
@@ -281,6 +285,24 @@ describe("AgentTabsStrip order and the first-tab pin", () => {
     const tabs = screen.getAllByRole("tab")
     expect(within(tabs[0]).queryByLabelText(PIN)).toBeNull()
     expect(within(tabs[2]).queryByLabelText(PIN)).not.toBeNull()
+  })
+
+  it("never pins a tab that is on its way out: a promotion this client just made wins", () => {
+    mockState = {
+      ...mockState,
+      pendingSlotTab: { s1: { closedTabId: "t1", promotedTabId: "t2" } },
+    }
+    render(<AgentTabsStrip session={threeTabs("t1")} activeTabId="t2" maxTabs={20} />)
+    const tabs = screen.getAllByRole("tab")
+    expect(within(tabs[0]).queryByLabelText(PIN)).toBeNull()
+    expect(within(tabs[1]).queryByLabelText(PIN)).not.toBeNull()
+  })
+
+  it("keeps a long press from selecting the pill's text or raising the touch callout", () => {
+    render(<AgentTabsStrip session={threeTabs("t1")} activeTabId="t1" maxTabs={20} />)
+    const pill = screen.getAllByRole("tab")[0]
+    expect(pill.className).toContain("select-none")
+    expect(pill.className).toContain("[-webkit-touch-callout:none]")
   })
 
   it("shows no pin while the agent has a single tab", () => {

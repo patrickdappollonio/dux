@@ -9,7 +9,7 @@
 
 use super::input::contains_point;
 use super::reorder::{MoveDir, move_in_order, move_to_target};
-use super::{App, TabDragState};
+use super::{App, DrawnTabStrip, TabDragState};
 use crossterm::event::MouseEvent;
 use dux_core::engine::Command;
 use dux_core::ids::{SessionIdRef, TabIdRef};
@@ -108,6 +108,35 @@ impl App {
         self.apply_tab_order(&session_id, &tab_id, &order, moved);
     }
 
+    /// Move the view beside a focused tab that another screen closed.
+    ///
+    /// The close already happened in the shared engine, so the focus memory names
+    /// a tab that is gone and would fall back to the first tab. The strip as it
+    /// was last drawn still has the tab's neighbours, so the landing is the same
+    /// one a close made here gets. Then the drawn strip is remembered.
+    pub(super) fn land_beside_a_tab_closed_elsewhere(&mut self) {
+        let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
+            return;
+        };
+        let session_id = session_id.as_str();
+        let now = self.session_tab_ids(session_id);
+        let now = now.as_slice();
+        if let Some(drawn) = self.last_tab_strip.clone()
+            && drawn.session_id == session_id
+            && !now.contains(&drawn.focused)
+            && let Some(neighbour) =
+                dux_core::agent_tabs::tab_after_close(&drawn.tabs, &drawn.focused)
+            && now.iter().any(|id| id == neighbour)
+        {
+            self.set_focused_tab(session_id, neighbour);
+        }
+        self.last_tab_strip = Some(DrawnTabStrip {
+            session_id: session_id.to_string(),
+            tabs: now.to_vec(),
+            focused: self.focused_tab_id(session_id),
+        });
+    }
+
     /// Hand a new strip order to the engine, then confirm it: the pill moving is
     /// visible, but a small move in a long strip is easy to miss.
     fn apply_tab_order(
@@ -128,19 +157,18 @@ impl App {
         }) {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(err) => {
-                self.set_error(format!("Could not reorder the tabs: {err}"));
+                self.set_error(format!("Could not reorder the tabs. {err}"));
                 return;
             }
         }
         let label = self
             .engine
-            .tab_prose_label(SessionIdRef::new(session_id), TabIdRef::new(moved_id))
-            .unwrap_or_else(|| "The".to_string());
-        match place {
-            Some(place) => self.set_info(format!(
+            .tab_prose_label(SessionIdRef::new(session_id), TabIdRef::new(moved_id));
+        match (label, place) {
+            (Some(label), Some(place)) => self.set_info(format!(
                 "Moved the {label} tab to place {place} of {total} in the strip."
             )),
-            None => self.set_info("Reordered the tabs."),
+            _ => self.set_info("Reordered the tabs."),
         }
     }
 }
@@ -387,6 +415,70 @@ mod tests {
         close_focused(&mut app, "session-1-slot");
 
         assert_eq!(app.engine.sessions[0].slot_tab_id().as_str(), "tab-2");
+        assert_eq!(app.focused_tab_id("session-1"), "tab-3");
+    }
+
+    #[test]
+    fn a_tab_closed_from_another_screen_lands_beside_it_not_on_the_first_tab() {
+        let mut app = app_with_three_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
+        app.set_focused_tab("session-1", "tab-2");
+        draw(&mut app, &mut terminal);
+
+        // The browser or the command line closes it: the row is gone from the
+        // shared engine before this surface looks.
+        app.engine.close_tab("session-1", "tab-2").unwrap();
+        draw(&mut app, &mut terminal);
+
+        assert_eq!(app.focused_tab_id("session-1"), "tab-3");
+    }
+
+    #[test]
+    fn the_first_tab_closed_from_another_screen_lands_beside_it_too() {
+        let mut app = app_with_three_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
+        app.set_focused_tab("session-1", "session-1-slot");
+        app.move_focused_tab(MoveDir::Down);
+        draw(&mut app, &mut terminal);
+        assert_eq!(strip(&app), vec!["tab-2", "session-1-slot", "tab-3"]);
+
+        app.engine.close_tab("session-1", "session-1-slot").unwrap();
+        draw(&mut app, &mut terminal);
+
+        assert_eq!(app.focused_tab_id("session-1"), "tab-3");
+    }
+
+    #[test]
+    fn a_tab_that_exits_cleanly_while_on_screen_lands_beside_it() {
+        use dux_core::engine::{PrunedPty, PrunedPtyKind};
+        let mut app = app_with_three_tabs();
+        let mut terminal = Terminal::new(TestBackend::new(170, 30)).unwrap();
+        app.set_focused_tab("session-1", "tab-2");
+        draw(&mut app, &mut terminal);
+
+        // The row is already gone from the shared engine when this surface
+        // captures what it was looking at, as when the prune runs a moment after
+        // the exit.
+        app.engine.close_tab("session-1", "tab-2").unwrap();
+        let context = crate::app::PruneViewContext::capture(&app);
+        let exited = PrunedPty {
+            kind: PrunedPtyKind::Agent,
+            id: "tab-2".to_string(),
+            owner: Some(dux_core::model::TerminalOwner::Session(
+                "session-1".to_string(),
+            )),
+            agent_detached: false,
+            label: "claude".to_string(),
+            tab_closed: true,
+            exit_success: Some(true),
+            is_minimal: false,
+            output_excerpt: String::new(),
+            read_error: None,
+            refused_resume_excerpt: None,
+            closed_tab: None,
+        };
+        app.apply_pruned_agent_tabs(std::slice::from_ref(&exited), &context);
+
         assert_eq!(app.focused_tab_id("session-1"), "tab-3");
     }
 }

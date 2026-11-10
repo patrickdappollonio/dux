@@ -1509,6 +1509,30 @@ impl SessionStore {
         Ok(positions)
     }
 
+    /// When each session's slot tab was created, in milliseconds since the epoch,
+    /// by session id. Duplicate provider labels are numbered by creation, and the
+    /// slot tab's row is not in the engine's extras map.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
+    pub fn load_slot_tab_created_ms(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare(
+            "select t.session_id, t.created_at \
+             from agent_tabs t join agent_sessions s on s.id = t.session_id \
+             where t.id = s.slot_tab_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get::<_, String>(1)?)))?;
+        let mut created = HashMap::new();
+        for row in rows {
+            let (session, at): (String, String) = row?;
+            if let Some(at) = parse_time(&at) {
+                created.insert(session, at.timestamp_millis());
+            }
+        }
+        Ok(created)
+    }
+
     /// Repair a slot pointer that names no tab of its own session, out loud.
     ///
     /// "No tab of its own session" covers a row that is gone AND a row belonging
