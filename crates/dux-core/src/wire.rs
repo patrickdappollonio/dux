@@ -628,6 +628,15 @@ pub enum WireCommand {
         /// Every terminal, in the new order.
         terminal_ids: Vec<String>,
     },
+    /// Persist a new left-to-right order for one agent's provider tabs, the slot
+    /// tab included. `tab_ids` must list exactly the agent's tabs (the engine
+    /// validates strictly). Persisted, so the order survives a restart.
+    ReorderAgentTabs {
+        /// The agent whose strip reorders.
+        session_id: String,
+        /// Every tab of the agent, in the new order.
+        tab_ids: Vec<String>,
+    },
     /// Swap which CLI a session uses, mirroring the TUI palette's
     /// `change-agent-provider`. `provider` is validated server-side against the
     /// engine's configured provider list; the client's choice is never trusted.
@@ -5720,6 +5729,13 @@ impl Engine {
             WireCommand::ReorderTerminals { terminal_ids } => {
                 Command::ReorderTerminals { terminal_ids }
             }
+            WireCommand::ReorderAgentTabs {
+                session_id,
+                tab_ids,
+            } => Command::ReorderAgentTabs {
+                session_id,
+                tab_ids,
+            },
             WireCommand::WatchChangedFiles { session_id } => {
                 Command::WatchChangedFiles { session_id }
             }
@@ -5877,6 +5893,7 @@ impl Engine {
             | WireCommand::ReorderAgents { .. }
             | WireCommand::ReorderProjects { .. }
             | WireCommand::ReorderTerminals { .. }
+            | WireCommand::ReorderAgentTabs { .. }
             | WireCommand::WatchChangedFiles { .. } => {
                 unreachable!(
                     "changes commands are mapped before the remaining wire_to_command dispatch; rename/reconnect/rerun-startup-command/checkout-default-branch/add-project-checkout-default/change-provider/create-agent-from-pr/set-changes-pane-visible/set-instance-identity/set-settings/toggle-randomized-pet-name-default/toggle-pr-banner-position/set-agent-sort/toggle-copy-on-select/toggle-github-integration/toggle-always-show-tab-strip/toggle-tab-reaches-agent/kill-session-pty/detach-agent/recreate-working-copy/close-agent-tab/stop-agent-tab/change-agent-tab-provider/set-last-focused-tab are handled in apply_wire before wire_to_command"

@@ -128,6 +128,19 @@ pub const PALETTE_COMMANDS: &[PaletteCommand] = &[
         // Per-tab: the web has it as "Stop tab…" in each running tab's menu.
     },
     PaletteCommand {
+        action: Action::MoveTabLeft,
+        name: "move-tab-left",
+        description: "Move the focused tab of the selected agent one place left",
+        // Per-tab: the web reorders tabs by dragging a pill along the strip, so
+        // it gets no app-menu entry for this.
+    },
+    PaletteCommand {
+        action: Action::MoveTabRight,
+        name: "move-tab-right",
+        description: "Move the focused tab of the selected agent one place right",
+        // Per-tab: see move-tab-left.
+    },
+    PaletteCommand {
         action: Action::ChangeDefaultProvider,
         name: "change-default-provider",
         description: "Change the global default provider for new agents in projects without a project-specific override",

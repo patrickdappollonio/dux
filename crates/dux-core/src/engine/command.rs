@@ -12,6 +12,7 @@ use crate::engine::events::{
     WorktreeRemoval,
 };
 use crate::engine::{CommandWorkerSpec, Engine, InFlightKey};
+use crate::ids::{SessionIdRef, TabId, TabIdRef};
 use crate::model::Project;
 use crate::text::count_of;
 use crate::worker::{
@@ -321,6 +322,18 @@ pub enum Command {
     ReorderTerminals {
         /// Every terminal, in the new order.
         terminal_ids: Vec<String>,
+    },
+
+    /// Persist a new left-to-right order for ONE agent's provider tabs, the slot
+    /// tab included. `tab_ids` must be exactly the agent's current tabs; every
+    /// tab's position is rewritten in one transaction. Which tab holds the slot
+    /// does not change, and nothing about starting or resuming reads the order.
+    /// Silent success: the moved pill is the feedback.
+    ReorderAgentTabs {
+        /// The agent whose strip reorders.
+        session_id: String,
+        /// Every tab of the agent, in the new order.
+        tab_ids: Vec<String>,
     },
 
     /// Wholesale-replace the `[macros]` config and persist it. Adopts `macros`
@@ -793,6 +806,13 @@ impl Engine {
 
             Command::ReorderTerminals { terminal_ids } => self
                 .reorder_terminals(&terminal_ids)
+                .map(|()| EventReaction::Nothing),
+
+            Command::ReorderAgentTabs {
+                session_id,
+                tab_ids,
+            } => self
+                .reorder_agent_tabs(&session_id, &tab_ids)
                 .map(|()| EventReaction::Nothing),
 
             Command::ChangeConfigSet(change) => self.apply_config_set_change(change),
@@ -2006,6 +2026,37 @@ impl Engine {
             if let Some(terminal) = self.companion_terminals.get_mut(id) {
                 terminal.sort_order =
                     u64::try_from(index).expect("a terminal list index fits in u64");
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and apply a new tab order for one agent. See
+    /// [`Command::ReorderAgentTabs`]. Persist first: memory moves only once the
+    /// one transaction has landed.
+    fn reorder_agent_tabs(&mut self, session_id: &str, tab_ids: &[String]) -> anyhow::Result<()> {
+        if !self.sessions.iter().any(|s| s.id == session_id) {
+            anyhow::bail!("unknown agent {session_id}: its tabs cannot be reordered");
+        }
+        let current: Vec<String> = self
+            .ordered_tab_ids_for_session(SessionIdRef::new(session_id))
+            .into_iter()
+            .map(TabId::into_string)
+            .collect();
+        validate_reorder(&current, tab_ids, "tab")?;
+        if current == tab_ids {
+            return Ok(());
+        }
+
+        self.session_store.set_tab_positions(session_id, tab_ids)?;
+
+        for (index, id) in tab_ids.iter().enumerate() {
+            let position = i64::try_from(index).expect("a tab index fits in i64");
+            if let Some(tab) = self.agent_tabs.get_mut(TabIdRef::new(id)) {
+                tab.sort_order = position;
+            } else {
+                self.slot_tab_positions
+                    .insert(session_id.to_string(), position);
             }
         }
         Ok(())

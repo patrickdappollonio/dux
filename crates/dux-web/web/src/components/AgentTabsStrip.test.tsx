@@ -16,6 +16,21 @@ const addTabMock = vi.fn()
 const openCloseTabMock = vi.fn()
 const openStopTabMock = vi.fn()
 const clickTabMock = vi.fn()
+const reorderTabsMock = vi.fn()
+// The real strip, with its props captured: a drag cannot run under jsdom (the
+// pure part of it is in SortableStrip.test.tsx), so the tests hand the strip
+// the drop its drag would have produced.
+let sortableProps: { ids: string[]; onReorder: (next: string[]) => void } | null = null
+vi.mock("@/components/SortableStrip", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/SortableStrip")>()
+  return {
+    ...actual,
+    SortableStrip: (props: Parameters<typeof actual.SortableStrip>[0]) => {
+      sortableProps = props
+      return actual.SortableStrip(props)
+    },
+  }
+})
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
@@ -25,6 +40,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openCloseTab: (...args: unknown[]) => openCloseTabMock(...args),
     openStopTab: (...args: unknown[]) => openStopTabMock(...args),
     clickTab: (...args: unknown[]) => clickTabMock(...args),
+    reorderTabs: (...args: unknown[]) => reorderTabsMock(...args),
   }
 })
 
@@ -71,12 +87,14 @@ beforeEach(() => {
   openCloseTabMock.mockClear()
   openStopTabMock.mockClear()
   clickTabMock.mockClear()
+  reorderTabsMock.mockClear()
   mockState = {
     bootstrap: { available_providers: ["claude", "codex", "opencode"] },
     spine: {
       projects: [{ id: "p1", default_provider: "codex" }],
     },
     createTabInFlight: [],
+    pendingTabOrder: {},
   } as unknown as DuxState
 })
 
@@ -213,6 +231,63 @@ describe("AgentTabsStrip", () => {
   it("renders no attention dot when no tab needs attention", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     expect(screen.queryByLabelText("Needs attention")).toBeNull()
+  })
+})
+
+describe("AgentTabsStrip order and the first-tab pin", () => {
+  const PIN = "The agent's first tab: the one that starts and resumes the agent."
+
+  function threeTabs(slot: string): SessionView {
+    const base = session()
+    return {
+      ...base,
+      slot_tab_id: slot,
+      tabs: [
+        { ...base.tabs[0], id: "t1" },
+        { ...base.tabs[1], id: "t2" },
+        { ...base.tabs[1], id: "t3", provider: "opencode" },
+      ],
+    }
+  }
+
+  it("a drop reports the new order for the agent, the slot tab included", () => {
+    render(<AgentTabsStrip session={threeTabs("t1")} activeTabId="t1" maxTabs={20} />)
+    expect(sortableProps?.ids).toEqual(["t1", "t2", "t3"])
+    sortableProps?.onReorder(["t2", "t3", "t1"])
+    expect(reorderTabsMock).toHaveBeenCalledWith("s1", ["t2", "t3", "t1"])
+  })
+
+  it("shows the order just dragged before the server confirms it", () => {
+    mockState = { ...mockState, pendingTabOrder: { s1: ["t3", "t1", "t2"] } }
+    render(<AgentTabsStrip session={threeTabs("t1")} activeTabId="t1" maxTabs={20} />)
+    expect(sortableProps?.ids).toEqual(["t3", "t1", "t2"])
+    const names = screen.getAllByRole("tab").map((tab) => tab.textContent)
+    expect(names[0]).toContain("opencode")
+  })
+
+  it("pins the slot tab wherever it sits, and only that one", () => {
+    render(<AgentTabsStrip session={threeTabs("t2")} activeTabId="t2" maxTabs={20} />)
+    const pinned = screen.getAllByRole("tab").filter((tab) => within(tab).queryByLabelText(PIN))
+    expect(pinned).toHaveLength(1)
+    expect(pinned[0].getAttribute("aria-selected")).toBe("true")
+  })
+
+  it("moves the pin when the slot passes on", () => {
+    const { rerender } = render(
+      <AgentTabsStrip session={threeTabs("t1")} activeTabId="t1" maxTabs={20} />,
+    )
+    expect(within(screen.getAllByRole("tab")[0]).queryByLabelText(PIN)).not.toBeNull()
+    rerender(<AgentTabsStrip session={threeTabs("t3")} activeTabId="t1" maxTabs={20} />)
+    const tabs = screen.getAllByRole("tab")
+    expect(within(tabs[0]).queryByLabelText(PIN)).toBeNull()
+    expect(within(tabs[2]).queryByLabelText(PIN)).not.toBeNull()
+  })
+
+  it("shows no pin while the agent has a single tab", () => {
+    const base = session()
+    const single = { ...base, tabs: [base.tabs[0]] }
+    render(<AgentTabsStrip session={single} activeTabId="s1" maxTabs={20} />)
+    expect(screen.queryByLabelText(PIN)).toBeNull()
   })
 })
 

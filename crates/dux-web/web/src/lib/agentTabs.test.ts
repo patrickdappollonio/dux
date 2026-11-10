@@ -8,6 +8,7 @@ import {
   closeDetachesAgent,
   closeTabConsequences,
   slotSuccessorLabel,
+  tabAfterClose,
   defaultProviderForSession,
   dormantTabNeedsCard,
   slotTabEndedInView,
@@ -604,6 +605,12 @@ describe("slotSuccessorLabel", () => {
     expect(slotSuccessorLabel(session, slot)).toBe("Codex 2")
   })
 
+  it("names the leftmost other tab when the slot tab sits in the middle", () => {
+    const slot = extraTab("t2", true)
+    const session = sessionWithSlot("t2", [extraTab("t1", true), slot, extraTab("t3", true)])
+    expect(slotSuccessorLabel(session, slot)).toBe("Codex")
+  })
+
   it("names nobody when an extra tab closes", () => {
     const extra = extraTab("t2", true)
     const session = sessionWithSlot("t1", [extraTab("t1", true), extra])
@@ -634,5 +641,23 @@ describe("slotTabEndedInView", () => {
     expect(slotTabEndedInView(true, false, "detached", false)).toBe(false)
     expect(slotTabEndedInView(true, true, "active", false)).toBe(false)
     expect(slotTabEndedInView(true, true, undefined, false)).toBe(false)
+  })
+})
+
+describe("tabAfterClose", () => {
+  const strip = ["a", "b", "c"].map((id) => ({ ...tab("codex"), id }))
+
+  it("lands on the tab to the right", () => {
+    expect(tabAfterClose(strip, "a")).toBe("b")
+    expect(tabAfterClose(strip, "b")).toBe("c")
+  })
+
+  it("lands on the tab to the left when the closed one was last", () => {
+    expect(tabAfterClose(strip, "c")).toBe("b")
+  })
+
+  it("names nobody for the only tab or a tab that is not in the strip", () => {
+    expect(tabAfterClose(strip.slice(0, 1), "a")).toBeUndefined()
+    expect(tabAfterClose(strip, "z")).toBeUndefined()
   })
 })

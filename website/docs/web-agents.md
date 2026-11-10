@@ -294,11 +294,15 @@ against the same files.
 - **Add** one with the split **+** button: the main button uses the project's default
   provider, the caret lets you pick.
 - **Switch** with a click.
-- **Retarget or close** from a pill's `⋯` menu.
+- **Reorder** by dragging a pill along the strip, or with a press and hold on a touch
+  screen. New tabs join at the right-hand end, and the order is kept across restarts.
+- **Retarget or close** from a pill's `⋯` menu. Closing the tab you are looking at lands
+  you on the tab to its right, or the one to its left when it was the last.
 
-There is no privileged "main" tab: closing the agent's first tab hands its place to the next
-tab in the strip, and only an agent's very last tab refuses to close (detach the agent
-instead).
+There is no privileged "main" tab. The agent's first tab wears a small pin while there are
+two or more tabs: it is the tab that starts and resumes the agent, wherever you drag it.
+Closing it hands its place to the leftmost remaining tab, and only an agent's very last tab
+refuses to close (detach the agent instead).
 
 Resume is automatic and decided per provider, never a toggle: a Claude tab and an OpenCode
 tab can both resume side by side, while two Claude tabs would not collide. Copilot is

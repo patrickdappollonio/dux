@@ -5595,6 +5595,7 @@ describe("a promoted-away slot tab hands its pane over", () => {
       },
       startedDormantTabs: [],
       createTabInFlight: [],
+      pendingTabOrder: {},
       pendingSlotTab: {},
       theater: false,
     } as unknown as DuxState

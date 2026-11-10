@@ -47,7 +47,7 @@ export const tabsApi = {
       provider === undefined ? {} : { provider },
     ),
   // Close a tab. The agent detaches when it was the last live one, and closing the slot tab
-  // promotes the next tab in strip order; the 200 body carries both outcomes. The agent's
+  // promotes the leftmost other tab; the 200 body carries both outcomes. The agent's
   // only tab is refused with a 400, because an agent always has a slot.
   remove: (sessionId: string, tabId: string, accepted: readonly string[] | null = null) =>
     request<ClosedTab | undefined>(
@@ -70,6 +70,14 @@ export const tabsApi = {
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/stop` +
         forceConnectedQuery(accepted, true),
+    ),
+  // Persist a new left-to-right order for the agent's tabs, the slot tab included. `tabIds`
+  // must be the complete set. Which tab holds the slot does not change.
+  reorder: (sessionId: string, tabIds: string[]) =>
+    request<void>(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/tabs/reorder`,
+      { tab_ids: tabIds },
     ),
   // Retarget a tab's provider (effective on its next launch).
   patch: (sessionId: string, tabId: string, provider: string) =>

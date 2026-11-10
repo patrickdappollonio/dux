@@ -709,9 +709,9 @@ pub struct SessionView {
     /// whose launch has not produced a PTY yet has no process to ask anything
     /// of.
     pub detachable: bool,
-    /// Provider tabs for this session: the session-slot tab (`tabs[0]`, the one
-    /// named by `slot_tab_id`) first, then extra tabs in creation order. Always
-    /// non-empty. The client shows the tab strip only when `tabs.len() >= 2`.
+    /// Provider tabs for this session in strip order, the session-slot tab (the
+    /// one named by `slot_tab_id`) wherever the user left it. Always non-empty.
+    /// The client shows the tab strip only when `tabs.len() >= 2`.
     pub tabs: Vec<AgentTabView>,
     /// Whether the session's PTY has emitted any output yet. The web UI shows a
     /// readiness spinner until this is true.
@@ -907,9 +907,9 @@ impl TabRunVerdictView {
     }
 }
 
-/// One provider tab of an agent, projected for the tab strip. `order == 0` is
-/// the session-slot tab, the one named by `SessionView::slot_tab_id`. Closing it
-/// hands the slot to the next tab in strip order, and no tab is privileged for
+/// One provider tab of an agent, projected for the tab strip. The session-slot
+/// tab is the one named by `SessionView::slot_tab_id`, wherever it sits. Closing
+/// it hands the slot to the leftmost other tab, and no tab is privileged for
 /// resume, which is decided per provider by liveness at launch (see
 /// `Engine::tab_resume_decision`) rather than by position.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -923,9 +923,10 @@ pub struct AgentTabView {
     /// Effective provider name (the running pin if a swap happened while live,
     /// otherwise the tab's configured provider).
     pub provider: String,
-    /// Position in the strip: 0 = session-slot tab, 1..N = extra tabs in creation
-    /// order. Display ordering only: no tab is privileged (resume is decided
-    /// dynamically at launch by liveness, not by position).
+    /// Position in the strip, counting from 0 on the left. The session-slot tab
+    /// can be anywhere, named by `SessionView::slot_tab_id`. Display ordering
+    /// only: no tab is privileged (resume is decided dynamically at launch by
+    /// liveness, not by position).
     pub order: u32,
     /// Whether this tab's PTY is actively streaming (per-tab hysteresis boolean).
     pub working: bool,
@@ -1571,22 +1572,7 @@ impl Engine {
         let needs_attention = std::iter::once(s.slot_tab_id())
             .chain(extra_tabs.iter().map(|t| TabIdRef::new(&t.id)))
             .any(|id| self.tab_needs_attention(id.as_str()));
-        // Tabs, session-slot first, then extras in creation order.
-        let mut tabs = vec![self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), 0)];
-        let mut extras: Vec<_> = extra_tabs.to_vec();
-        extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
-        for (i, t) in extras.into_iter().enumerate() {
-            let effective = self
-                .running_provider_pins
-                .get(TabIdRef::new(&t.id))
-                .cloned()
-                .unwrap_or_else(|| t.provider.clone());
-            tabs.push(self.tab_view(
-                TabIdRef::new(&t.id),
-                &effective,
-                u32::try_from(i + 1).expect("an agent has far fewer than 2^32 tabs"),
-            ));
-        }
+        let tabs = self.strip_tab_views(s, extra_tabs);
         let conversation = if crate::config::provider_config(&self.config, &s.provider)
             .supports_session_resume()
         {
@@ -1643,6 +1629,41 @@ impl Engine {
             updated_at: s.updated_at.to_rfc3339(),
             last_focused_tab: s.last_focused_tab.clone(),
         }
+    }
+
+    /// An agent's tabs in strip order: every tab by its position, the slot tab
+    /// wherever the user left it. Each carries its index as `order`.
+    fn strip_tab_views(
+        &self,
+        s: &AgentSession,
+        extra_tabs: &[&crate::model::AgentTab],
+    ) -> Vec<AgentTabView> {
+        let mut extras: Vec<_> = extra_tabs.to_vec();
+        extras.sort_by(|a, b| crate::model::tab_display_order(a, b));
+        let slot_position = self.slot_tab_positions.get(&s.id).copied().unwrap_or(0);
+        let slot_index = crate::model::slot_tab_index(&extras, slot_position);
+        let mut tabs: Vec<AgentTabView> = Vec::with_capacity(extras.len() + 1);
+        let next_order = |tabs: &Vec<AgentTabView>| {
+            u32::try_from(tabs.len()).expect("an agent has far fewer than 2^32 tabs")
+        };
+        for (i, t) in extras.iter().enumerate() {
+            if i == slot_index {
+                let order = next_order(&tabs);
+                tabs.push(self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), order));
+            }
+            let effective = self
+                .running_provider_pins
+                .get(TabIdRef::new(&t.id))
+                .cloned()
+                .unwrap_or_else(|| t.provider.clone());
+            let order = next_order(&tabs);
+            tabs.push(self.tab_view(TabIdRef::new(&t.id), &effective, order));
+        }
+        if slot_index >= extras.len() {
+            let order = next_order(&tabs);
+            tabs.push(self.tab_view(s.slot_tab_id(), &self.running_provider_for(s), order));
+        }
+        tabs
     }
 
     /// Project one tab id into an [`AgentTabView`] from the tab-keyed runtime maps.
@@ -2619,7 +2640,7 @@ mod tests {
             "activity on any tab must light the sidebar"
         );
 
-        // Tabs: session-slot first, then the extra tab, each with its own flags.
+        // Tabs: the session-slot tab first (nothing has been reordered), then the extra tab.
         assert_eq!(session.tabs.len(), 2);
         assert_eq!(session.tabs[0].id, "s1-slot");
         assert_eq!(session.tabs[0].order, 0);
@@ -2716,6 +2737,39 @@ mod tests {
             published[1..],
             ["tab-early", "tab-late", "tab-a", "tab-z"].map(String::from)
         );
+    }
+
+    #[test]
+    fn the_published_tabs_follow_the_strip_with_the_slot_tab_anywhere() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        let session = sample_session("s1", "p1", "feature");
+        engine.session_store.create_session(&session).unwrap();
+        engine.sessions.push(session);
+        for id in ["t2", "t3"] {
+            let tab = crate::model::AgentTab {
+                id: id.to_string(),
+                session_id: "s1".to_string(),
+                provider: ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            };
+            engine.session_store.insert_agent_tab(&tab).unwrap();
+            engine.agent_tabs.insert(TabId::new(id), tab);
+        }
+        engine
+            .apply(crate::engine::Command::ReorderAgentTabs {
+                session_id: "s1".to_string(),
+                tab_ids: ["t3", "s1-slot", "t2"].map(String::from).to_vec(),
+            })
+            .expect("reorder");
+
+        let view = &engine.spine().sessions[0];
+
+        let published: Vec<(&str, u32)> =
+            view.tabs.iter().map(|t| (t.id.as_str(), t.order)).collect();
+        assert_eq!(published, vec![("t3", 0), ("s1-slot", 1), ("t2", 2)]);
+        assert_eq!(view.slot_tab_id, "s1-slot");
     }
 
     #[test]

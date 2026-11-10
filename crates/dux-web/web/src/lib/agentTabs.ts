@@ -215,12 +215,25 @@ export function closeDetachesAgent(
   return (tab?.has_live_process ?? false) ? liveTabs <= 1 : liveTabs === 0
 }
 
+// The tab the view lands on when the one on screen closes, like a browser tab:
+// the tab to its right, or the one to its left when it was the last. `tabs` is
+// the strip as it stood BEFORE the close. Absent when the closed tab was the
+// only one, or is not in the strip.
+export function tabAfterClose(
+  tabs: readonly AgentTabView[],
+  closedTabId: string,
+): string | undefined {
+  const index = tabs.findIndex((t) => t.id === closedTabId)
+  if (index === -1) return undefined
+  return (tabs[index + 1] ?? tabs[index - 1])?.id
+}
+
 // The prose name of the tab that takes the session slot, absent unless the slot
 // tab is the one closing.
 //
-// The successor is the first tab that is not this one, which relies on
-// `SessionView.tabs` arriving slot-tab-first then extras in strip order (its
-// contract in `lib/types.ts`), the same ordering the engine promotes by.
+// The successor is the first tab that is not this one: the leftmost, because
+// `SessionView.tabs` arrives in strip order (its contract in `lib/types.ts`),
+// the same ordering the engine promotes by.
 export function slotSuccessorLabel(
   session: SessionView | undefined,
   tab: AgentTabView | undefined,

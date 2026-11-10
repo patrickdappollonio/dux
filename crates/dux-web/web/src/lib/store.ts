@@ -126,6 +126,7 @@ import {
   shouldRefireFocusPut,
   slotTabIdOf,
   slotTabTargetId,
+  tabAfterClose,
 } from "./agentTabs"
 import {
   activateTab as editorActivateTabPure,
@@ -478,7 +479,7 @@ export interface DuxState {
   deleteTerminalTarget: string | null
   // The tab pending close confirmation, or null. Closing always confirms.
   // Closing a tab ends it, closing the tab in the session slot hands the slot
-  // to the next tab in strip order, and closing the agent's last live tab
+  // to the leftmost other tab, and closing the agent's last live tab
   // detaches the agent (which stays in Projects, reopenable).
   closeTabTarget: { sessionId: string; tabId: string } | null
   // The tab pending stop confirmation, or null. Stopping keeps the tab, dormant;
@@ -786,6 +787,10 @@ export interface DuxState {
   // list of terminal ids (any owner) in the just-dragged order, cleared once the
   // spine confirms it. Mirrors `pendingAgentOrder` exactly (see `reorderTerminals`).
   pendingTerminalOrder: string[] | null
+  // Optimistic overlay for an agent's tab strip, keyed by session id: the complete
+  // list of its tab ids in the just-dragged order, cleared once the spine confirms
+  // it (see `reorderTabs`).
+  pendingTabOrder: Record<string, string[]>
   // Optimistic overlay for a session's slot pointer, keyed by session id: the
   // tab a slot-tab close just promoted, and the tab that close destroyed. The
   // DELETE's answer is the only thing that knows this until the next spine, and
@@ -1216,6 +1221,7 @@ let state: DuxState = {
   routeNotFound: null,
   pendingAgentOrder: null,
   pendingTerminalOrder: null,
+  pendingTabOrder: {},
   pendingSlotTab: {},
   pendingCreateFocus: null,
   projectOpen: {},
@@ -2187,6 +2193,7 @@ function applyWorkspace(rawSpine: Spine, seq: number): void {
     composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
+    pendingTabOrder: reconcilePendingTabOrder(spine, state.pendingTabOrder),
     pendingSlotTab: reconcilePendingSlotTab(spine, state.pendingSlotTab),
   })
   // Restore a boot-time deep-link before focus/prune: it selects only a session
@@ -2305,6 +2312,26 @@ function reconcilePendingTerminalOrder(
   return overlayShown(serverIds, pending) ? null : pending
 }
 
+// Drop each tab-strip overlay once the spine's strip shows it, or the agent is
+// gone. Same test as the agent and terminal overlays, per session.
+function reconcilePendingTabOrder(
+  spine: Spine,
+  pending: Record<string, string[]>,
+): Record<string, string[]> {
+  const entries = Object.entries(pending).filter(([sessionId, order]) => {
+    const session = spine.sessions.find((s) => s.id === sessionId)
+    return (
+      session !== undefined &&
+      !overlayShown(
+        session.tabs.map((t) => t.id),
+        order,
+      )
+    )
+  })
+  if (entries.length === Object.keys(pending).length) return pending
+  return Object.fromEntries(entries)
+}
+
 // Drop a promoted-slot overlay once the spine has caught up with the close it
 // covers, or the session is gone. The overlay only covers the window between
 // the close's answer and the spine confirming it.
@@ -2378,11 +2405,26 @@ function pruneSelectionIfGone(spine: Spine, previous: SessionView[]): void {
       // the tab, so pushing would leave the dead tab's entry underneath. The
       // `changes` flag is carried across because changed files are
       // session-scoped, so the screen being read survives the tab going away.
-      selectSessionRoute(
-        target.sessionId,
-        "replace",
-        state.mobileScreen === "changes",
+      //
+      // The landing is the neighbour the strip showed before the tab went, like
+      // a browser tab, whoever closed it. A neighbour that is gone too, or a
+      // tab this client never saw, falls back to the slot tab.
+      const neighbour = tabAfterClose(
+        previous.find((s) => s.id === target.sessionId)?.tabs ?? [],
+        target.tabId,
       )
+      if (neighbour !== undefined && session.tabs.some((t) => t.id === neighbour)) {
+        selectTab(target.sessionId, neighbour, {
+          urlMode: "replace",
+          changes: state.mobileScreen === "changes",
+        })
+      } else {
+        selectSessionRoute(
+          target.sessionId,
+          "replace",
+          state.mobileScreen === "changes",
+        )
+      }
     }
     return
   }
@@ -2705,6 +2747,7 @@ function clearPendingOrders(): Partial<DuxState> {
   return {
     pendingAgentOrder: null,
     pendingTerminalOrder: null,
+    pendingTabOrder: {},
   }
 }
 
@@ -5104,6 +5147,12 @@ export function closeTab(
   tabId: string,
   accepted: readonly string[] | null = null,
 ): Promise<AttachedBlocker[] | null> {
+  // The neighbour is read from the strip the user is looking at when they ask,
+  // before the answer can change it.
+  const neighbour = tabAfterClose(
+    state.spine?.sessions.find((s) => s.id === sessionId)?.tabs ?? [],
+    tabId,
+  )
   const closing = tabsApi.remove(sessionId, tabId, accepted).then((closed) => {
       dropTabStarted(tabId)
       // Record the promotion before anything reads the slot: the spine is still
@@ -5126,17 +5175,36 @@ export function closeTab(
         target.sessionId === sessionId &&
         target.tabId === tabId
       if (!focused) return
-      // Focus whichever tab holds the slot NOW (the promoted one after a slot
-      // close, the unchanged one after an extra tab's) DIRECTLY via
+      // Land on the tab beside the closed one, like a browser tab, DIRECTLY via
       // `selectTab`, not `selectSession`: the spine may still be stale at this
       // point (no `sessions.changed` refetch has pruned it yet), and
       // `selectSession` would resolve the remembered tab against that stale
-      // spine, which can still name the tab we just deleted.
-      selectTab(sessionId, slotTabIdFor(sessionId))
+      // spine, which can still name the tab we just deleted. With no neighbour
+      // to name, whichever tab holds the slot NOW (the promoted one after a
+      // slot close) is the answer.
+      selectTab(sessionId, neighbour ?? slotTabIdFor(sessionId))
     })
   return guardedChange(closing, (e) =>
     notifyError(e instanceof Error ? e.message : "Could not close the tab."),
   )
+}
+
+// Reorder one agent's tab strip. `orderedIds` must be the complete set of its tab
+// ids, validated server-side as a strict permutation. The optimistic overlay
+// clears when the next spine confirms the order, or on error. Which tab holds
+// the slot does not change.
+export function reorderTabs(sessionId: string, orderedIds: string[]): void {
+  setState({ pendingTabOrder: { ...state.pendingTabOrder, [sessionId]: orderedIds } })
+  tabsApi.reorder(sessionId, orderedIds).catch((e) => {
+    // A rejected reorder is never reconciled by a spine, so the overlay would
+    // linger forever. Only this request's own overlay: a later reorder that
+    // replaced it is still waiting on its own answer.
+    if (state.pendingTabOrder[sessionId] === orderedIds) {
+      const { [sessionId]: _dropped, ...rest } = state.pendingTabOrder
+      setState({ pendingTabOrder: rest })
+    }
+    notifyError(e instanceof Error ? e.message : "Could not reorder the tabs.")
+  })
 }
 
 // Retarget a tab's provider (effective on its next launch). Validated up front

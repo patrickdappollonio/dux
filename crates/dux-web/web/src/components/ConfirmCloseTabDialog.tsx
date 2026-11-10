@@ -21,7 +21,7 @@ import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. The agent's first tab reaches this dialog
 // like any other: the session slot is a pointer, so closing the tab holding it
-// hands the slot to the next tab in strip order rather than being refused.
+// hands the slot to the leftmost other tab rather than being refused.
 //
 // Two gestures deliberately do not come here. An agent's only tab has no
 // successor, so the strip's menu item is disabled with the reason rather than

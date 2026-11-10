@@ -132,6 +132,9 @@ pub(crate) struct Glyphs {
     pub serving: &'static str,
     /// The header's running-terminals chip.
     pub terminals: &'static str,
+    /// The pin on the agent's first tab: the tab that starts and resumes the
+    /// agent.
+    pub pin: &'static str,
 }
 
 /// Which glyph set the terminal UI draws its icons from (`[ui] nerd_font_icons`).
@@ -167,6 +170,9 @@ impl Glyphs {
         monitor_expanded: "\u{25BC}",
         serving: DOT_GLYPH,
         terminals: DOT_GLYPH,
+        // U+26B2 NEUTER: a small ring with a stem, which reads as a pin and
+        // stays one cell.
+        pin: "\u{26B2}",
     };
 
     /// The opt-in Nerd Font set (Nerd Fonts v3). Each codepoint is named after
@@ -195,6 +201,8 @@ impl Glyphs {
         serving: "\u{F233}",
         // nf-oct-terminal
         terminals: "\u{F489}",
+        // nf-md-pin
+        pin: "\u{F0403}",
     };
 
     /// The set the live `[ui] nerd_font_icons` value selects.
@@ -208,7 +216,7 @@ impl Glyphs {
 
     /// Every glyph in the set, labelled, for tests that must cover them all.
     #[cfg(test)]
-    pub(crate) fn all(&self) -> [(&'static str, &'static str); 12] {
+    pub(crate) fn all(&self) -> [(&'static str, &'static str); 13] {
         [
             ("project", self.project),
             ("standalone", self.standalone),
@@ -222,6 +230,7 @@ impl Glyphs {
             ("monitor_expanded", self.monitor_expanded),
             ("serving", self.serving),
             ("terminals", self.terminals),
+            ("pin", self.pin),
         ]
     }
 }

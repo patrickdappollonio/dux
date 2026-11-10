@@ -55,9 +55,39 @@ pub fn branch_drifted(current: &str, initial: &str) -> bool {
     !initial.is_empty() && current != initial
 }
 
+/// The tab the view lands on when the one on screen closes, like a browser tab:
+/// the tab to its right, or the one to its left when it was the last. `strip` is
+/// the strip as it stood BEFORE the close. `None` when the closed tab was the
+/// only one, or is not in the strip. Mirrors the web's `tabAfterClose`.
+pub fn tab_after_close<'a>(strip: &'a [String], closed: &str) -> Option<&'a str> {
+    let index = strip.iter().position(|id| id == closed)?;
+    strip
+        .get(index + 1)
+        .or_else(|| index.checked_sub(1).and_then(|left| strip.get(left)))
+        .map(String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    #[test]
+    fn closing_a_tab_lands_on_the_one_to_its_right_or_the_left_when_it_was_last() {
+        let tabs = strip(&["a", "b", "c"]);
+        assert_eq!(tab_after_close(&tabs, "a"), Some("b"));
+        assert_eq!(tab_after_close(&tabs, "b"), Some("c"));
+        assert_eq!(tab_after_close(&tabs, "c"), Some("b"));
+    }
+
+    #[test]
+    fn closing_the_only_tab_or_one_not_in_the_strip_lands_nowhere() {
+        assert_eq!(tab_after_close(&strip(&["a"]), "a"), None);
+        assert_eq!(tab_after_close(&strip(&["a", "b"]), "z"), None);
+    }
 
     // ── SHARED VECTORS with agentTabs.test.ts `tabLabels` ──────────────────────
     #[test]

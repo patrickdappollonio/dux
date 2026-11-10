@@ -124,6 +124,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     bootstrap: { title: "dux #1", dux_version: "v9.9.9" },
     selectedTarget: null,
     createTabInFlight: [],
+    pendingTabOrder: {},
     mobileScreen: "home",
     ...overrides,
   } as unknown as DuxState

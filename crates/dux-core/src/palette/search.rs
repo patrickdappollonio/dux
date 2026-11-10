@@ -392,6 +392,8 @@ mod tests {
                 "stop-agent-tab",
                 "toggle-tab-to-agent",
                 "close-tab",
+                "move-tab-left",
+                "move-tab-right",
                 "toggle-always-show-tabs"
             ]
         );
@@ -432,6 +434,8 @@ mod tests {
                 "toggle-project-auto-reopen-agents",
                 "sort-agents",
                 "close-tab",
+                "move-tab-left",
+                "move-tab-right",
                 "read-startup-command-logs",
                 "clone-project",
                 "recreate-working-copy",

@@ -116,8 +116,8 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       ? !session.tabs.some((t) => t.id !== tid && t.has_live_process)
       : true
     // Mirror the real route's promotion: closing the tab the session's pointer
-    // names hands the slot to the next tab in strip order, and the body says
-    // which one took it.
+    // names hands the slot to the leftmost other tab, and the body says which
+    // one took it.
     const promoted =
       session && (session.slot_tab_id ?? session.id) === tid
         ? session.tabs.find((t) => t.id !== tid)?.id
@@ -461,6 +461,82 @@ describe("store agent-tab lifecycle", () => {
         u === "/api/v1/sessions/s1/tabs/t1" && init?.method === "DELETE",
     )
     expect(del).toBeDefined()
+  })
+
+  // ── Closing the tab on screen lands beside it, like a browser tab ────────
+
+  it("closing the focused tab lands on the tab to its right", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t3",
+    })
+  })
+
+  it("closing the focused last tab lands on the one to its left, not on the first", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t3")
+    mod.closeTab("s1", "t3")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t2",
+    })
+  })
+
+  it("closing the first tab placed in the middle lands on the right neighbour, whoever takes the slot", async () => {
+    // The slot passes to the leftmost tab (t1), but the view lands beside the
+    // tab that was closed.
+    seedTabs("t2", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t3",
+    })
+  })
+
+  it("a tab closed by another client lands beside where it was", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+
+    seedTabs("t1", ["t1", "t3"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "agent",
+        sessionId: "s1",
+        tabId: "t3",
+      })
+    })
+  })
+
+  it("a reorder shows at once and its overlay retires when the spine shows it", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    expect(mod.getSnapshot().pendingTabOrder).toEqual({ s1: ["t3", "t1", "t2"] })
+    expect(
+      find((u, init) => u === "/api/v1/sessions/s1/tabs/reorder" && init?.method === "POST"),
+    ).toBeDefined()
+
+    seedTabs("t1", ["t3", "t1", "t2"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
   })
 
   // ── The promotion overlay's lifecycle ────────────────────────────────────

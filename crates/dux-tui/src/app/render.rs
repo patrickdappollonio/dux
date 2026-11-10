@@ -353,6 +353,30 @@ fn tab_strip_segments(
     (seg_content, seg_ord_w, seg_w)
 }
 
+/// Truncate the focused pill's label cell to fit `avail` when it alone is wider
+/// than the strip, returning its index when it was squeezed.
+///
+/// Truncation applies to the LABEL cell only: the ordinal segment always renders
+/// whole (it is the switch-key address). Reserve the ordinal cell, the box's 2
+/// border columns, the divider and the inter-box gap; fit the rest of the
+/// content (activity slot + label + padding) into what remains.
+fn squeeze_focused_segment(
+    (seg_content, seg_w): (&mut [String], &mut [u16]),
+    seg_ord_w: &[u16],
+    focused_idx: usize,
+    avail: u16,
+) -> Option<usize> {
+    let focused_w = seg_w.get(focused_idx).copied()?;
+    if focused_w <= avail {
+        return None;
+    }
+    let budget = avail.saturating_sub(seg_ord_w[focused_idx] + 4);
+    seg_content[focused_idx] = truncate_to_width(&seg_content[focused_idx], usize::from(budget));
+    seg_w[focused_idx] =
+        seg_content[focused_idx].as_str().cell_width() + seg_ord_w[focused_idx] + 4;
+    Some(focused_idx)
+}
+
 /// Paint every cell of `area` blank in `style`, so leftover buffer cells never
 /// bleed through.
 fn fill_blank(buf: &mut ratatui::buffer::Buffer, area: Rect, style: Style) {
@@ -681,6 +705,8 @@ struct TabStripItem {
     /// `session_attention`, so a focused working pill and a flagged one would
     /// render the same color and the attention dot would lose its exclusivity.
     glyph_tone: Color,
+    /// The agent's first tab while it has two or more: the pill wears the pin.
+    pinned: bool,
 }
 
 impl TabStripItem {
@@ -4401,20 +4427,12 @@ impl App {
         // the inner loop always yields `count == 0` at `start == focused_idx`)
         // and `start` walks straight past it, leaving the focused tab
         // entirely off-screen.
-        if let Some(focused_w) = seg_w.get(focused_idx).copied()
-            && focused_w > avail
-        {
-            // Truncation applies to the LABEL cell only: the ordinal segment
-            // always renders whole (it is the switch-key address). Reserve
-            // the ordinal cell, the box's 2 border columns, the divider and
-            // the inter-box gap; fit the rest of the content (activity slot +
-            // label + padding) into what remains.
-            let budget = avail.saturating_sub(seg_ord_w[focused_idx] + 4);
-            seg_content[focused_idx] =
-                truncate_to_width(&seg_content[focused_idx], usize::from(budget));
-            seg_w[focused_idx] =
-                seg_content[focused_idx].as_str().cell_width() + seg_ord_w[focused_idx] + 4;
-        }
+        let squeezed_idx = squeeze_focused_segment(
+            (&mut seg_content, &mut seg_w),
+            &seg_ord_w,
+            focused_idx,
+            avail,
+        );
 
         let start = tab_strip_start_index(&seg_w, avail, focused_idx);
 
@@ -4455,7 +4473,7 @@ impl App {
             } else {
                 FocusState::Unfocused
             };
-            let border_style = self.theme.border_style(active);
+            let border_style = self.tab_border_style(&items[i], active);
             let label_style = self.theme.title_style(active);
             // The pill is two cells behind one frame: the ordinal cell, a
             // full-height divider joined to the frame with light-set tees
@@ -4490,6 +4508,9 @@ impl App {
                     label_style,
                 );
             }
+            let pin_at = (items[i].pinned && squeezed_idx != Some(i) && label_w >= 4)
+                .then_some((x + 2 + ord_w + label_w - 2, mid_y));
+            self.paint_tab_pin(buf, pin_at);
             buf[(x + 2 + ord_w + label_w, mid_y)]
                 .set_symbol(corners.vertical_right)
                 .set_style(border_style);
@@ -4530,17 +4551,47 @@ impl App {
         let session_active = matches!(session.status, crate::model::SessionStatus::Active);
         let attention_on = self.engine.config.ui.attention_indicator && session_active;
         let glyph_tone = self.theme.session_dot(session.status).1;
+        let session_ref = SessionIdRef::new(&session.id);
         tab_ids
             .iter()
             .zip(labels)
             .map(|(id, label)| TabStripItem {
                 working: session_active && self.engine.is_agent_streaming(id),
                 needs_attention: attention_on && self.engine.tab_needs_attention(id),
+                pinned: tab_ids.len() >= 2
+                    && self.engine.is_slot_tab_of(session_ref, TabIdRef::new(id)),
                 id: id.clone(),
                 label,
                 glyph_tone,
             })
             .collect()
+    }
+
+    /// A pill's border style: its focus state, except that while a pill is being
+    /// dragged the one the pointer is over takes the focused border, because it
+    /// is where the drop would land.
+    fn tab_border_style(&self, item: &TabStripItem, active: FocusState) -> Style {
+        let drop_target = self
+            .tab_drag
+            .as_ref()
+            .and_then(|drag| drag.hover_id.as_deref())
+            == Some(item.id.as_str());
+        self.theme.border_style(if drop_target {
+            FocusState::Focused
+        } else {
+            active
+        })
+    }
+
+    /// Paint the pin into the label cell's trailing slot, mirroring the activity
+    /// glyph's leading one, so wearing it never changes a pill's width. A
+    /// squeezed label has no slot left to spare, which the caller checks.
+    fn paint_tab_pin(&self, buf: &mut ratatui::buffer::Buffer, at: Option<(u16, u16)>) {
+        if let Some(at) = at {
+            buf[at]
+                .set_symbol(self.glyphs().pin)
+                .set_style(Style::default().fg(self.theme.hint_dim_desc_fg));
+        }
     }
 
     /// Paint a pill's activity slot: the label cell's second column, right
@@ -19747,15 +19798,16 @@ mod tests {
         // left of the label, behind a full-height divider: session-slot
         // "codex" is position 1, the extra "claude" tab position 2. The label
         // cell keeps its symmetric padding (the right margin mirrors the
-        // left: space + activity slot + space), and an idle tab's slot is
-        // blank whether or not it is the focused one.
+        // left: space + trailing slot + space). An idle tab's activity slot is
+        // blank whether or not it is the focused one, and the trailing slot
+        // holds the pin on the agent's first tab.
         assert!(
             labels.contains("│ 2 │   claude   │"),
             "the focused pill must carry its ordinal segment and padded label, got: {labels}"
         );
         assert!(
-            labels.contains("│ 1 │   codex   │"),
-            "the unfocused pill must carry its ordinal segment and padded label, got: {labels}"
+            labels.contains("│ 1 │   codex ⚲ │"),
+            "the unfocused pill must carry its ordinal segment, padded label and the first tab's pin, got: {labels}"
         );
 
         // The divider is JOINED to the frame: each pill's top border carries a
@@ -20244,6 +20296,7 @@ mod tests {
                 working,
                 needs_attention,
                 glyph_tone: Color::Reset,
+                pinned: false,
             };
             tab_activity_glyph(item.cue(), blink, 3)
         };
@@ -25022,6 +25075,8 @@ mod tests {
                 "toggle-always-show-tabs",
                 "toggle-tab-to-agent",
                 "close-tab",
+                "move-tab-left",
+                "move-tab-right",
             ],
             "rendered palette rows"
         );

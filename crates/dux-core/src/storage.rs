@@ -1,7 +1,7 @@
 //! The SQLite session database (sessions.sqlite3): projects, agent sessions,
 //! tabs and pull-request associations, with its migrations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -47,6 +47,9 @@ const LAST_SEEN_VERSION_KEY: &str = "last_seen_version";
 /// The `app_state` key holding this dux's instance id; see
 /// [`SessionStore::instance_id`].
 const INSTANCE_ID_KEY: &str = "instance_id";
+
+/// The `app_state` key recording that the one-time tab position migration ran.
+const TAB_POSITIONS_KEY: &str = "tab_positions_renumbered";
 
 /// The open session database: the one connection dux reads and writes `sessions.sqlite3` through.
 #[derive(Debug)]
@@ -267,6 +270,7 @@ impl SessionStore {
         self.sweep_orphan_pull_request_rows()?;
         self.backfill_slot_tabs()?;
         self.heal_slot_tab_pointers()?;
+        self.renumber_tab_positions()?;
         Ok(())
     }
 
@@ -1313,11 +1317,9 @@ impl SessionStore {
     /// rather than adopted from the session's existing tabs: adopting one would
     /// silently turn tab 2 into tab 1 and lose a tab.
     ///
-    /// The minted row sits one below the session's current minimum `sort_order`.
-    /// Nothing reads that today (both surfaces render the slot tab from the
-    /// pointer, then the extras by `(sort_order, created_at)`), but once the slot
-    /// is PROMOTED elsewhere the row's own position orders it, and a first tab
-    /// stamped above its successors would jump.
+    /// The minted row sits one below the session's current minimum `sort_order`,
+    /// so the first tab leads the strip it joins; [`Self::renumber_tab_positions`]
+    /// then turns every session's positions into `0..n`.
     ///
     /// Idempotent: a session with a pointer is not touched.
     fn backfill_slot_tabs(&self) -> Result<()> {
@@ -1372,6 +1374,139 @@ impl SessionStore {
             count_of(count, "session")
         ));
         Ok(())
+    }
+
+    /// Turn every session's tab `sort_order` values into the positions
+    /// `0..n`, in the order the strip showed before positions existed (the slot
+    /// tab first, then the rest by [`crate::model::tab_display_order`]), so every
+    /// agent's strip looks the same after the upgrade and no two tabs share one.
+    ///
+    /// Runs once per database, recorded in `app_state`: a strip the user has
+    /// reordered can have its slot tab anywhere, and a pass that put the slot
+    /// first again on every open would undo that. Closing a tab leaves a gap in
+    /// the positions, which order the same as a gap-free run, so nothing needs to
+    /// compact them.
+    fn renumber_tab_positions(&self) -> Result<()> {
+        // Read inside the write transaction, like the other passes, because
+        // another connection may be migrating the same file right now.
+        let tx = immediate_tx(&self.conn).context("failed to start the tab position migration")?;
+        let done: Option<String> = tx
+            .query_row(
+                "select value from app_state where key = ?1",
+                params![TAB_POSITIONS_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if done.is_some() {
+            return Ok(());
+        }
+        let slots: HashMap<String, String> = {
+            let mut stmt = tx.prepare(
+                "select id, slot_tab_id from agent_sessions \
+                 where slot_tab_id is not null",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let mut slots = HashMap::new();
+            for row in rows {
+                let (session, slot): (String, String) = row?;
+                slots.insert(session, slot);
+            }
+            slots
+        };
+        let tabs: Vec<AgentTab> = {
+            let mut stmt = tx.prepare(
+                "select id, session_id, provider, sort_order, created_at from agent_tabs",
+            )?;
+            let rows = stmt.query_map([], read_agent_tab)?;
+            let mut tabs = Vec::new();
+            for row in rows {
+                tabs.push(row?);
+            }
+            tabs
+        };
+        let mut by_session: HashMap<&str, Vec<&AgentTab>> = HashMap::new();
+        for tab in &tabs {
+            by_session
+                .entry(tab.session_id.as_str())
+                .or_default()
+                .push(tab);
+        }
+        for (session_id, mut strip) in by_session {
+            let slot = slots.get(session_id).map(String::as_str);
+            strip.sort_by(|a, b| {
+                (Some(b.id.as_str()) == slot)
+                    .cmp(&(Some(a.id.as_str()) == slot))
+                    .then_with(|| crate::model::tab_display_order(a, b))
+            });
+            for (position, tab) in strip.iter().enumerate() {
+                tx.execute(
+                    "update agent_tabs set sort_order = ?2 where id = ?1",
+                    params![tab.id, i64::try_from(position).unwrap_or(i64::MAX)],
+                )
+                .with_context(|| format!("failed to renumber the tabs of session {session_id}"))?;
+            }
+        }
+        tx.execute(
+            "insert into app_state(key, value) values(?1, '1')",
+            params![TAB_POSITIONS_KEY],
+        )?;
+        tx.commit()
+            .context("failed to commit the tab position migration")?;
+        Ok(())
+    }
+
+    /// Rewrite one session's tab positions to `0..n` in the order of
+    /// `ordered_tab_ids`, in ONE transaction: a reorder that lands half-way would
+    /// leave two tabs sharing a position.
+    ///
+    /// Every id must be a tab of `session_id`; one that is not rolls the whole
+    /// write back.
+    pub(crate) fn set_tab_positions(
+        &self,
+        session_id: &str,
+        ordered_tab_ids: &[String],
+    ) -> Result<()> {
+        let tx = immediate_tx(&self.conn).context("failed to start reordering the agent's tabs")?;
+        for (position, tab_id) in ordered_tab_ids.iter().enumerate() {
+            let changed = tx.execute(
+                "update agent_tabs set sort_order = ?3 where id = ?1 and session_id = ?2",
+                params![
+                    tab_id,
+                    session_id,
+                    i64::try_from(position).unwrap_or(i64::MAX)
+                ],
+            )?;
+            if changed == 0 {
+                anyhow::bail!(
+                    "tab {tab_id} is not a tab of agent {session_id}, so it cannot be placed"
+                );
+            }
+        }
+        tx.commit()
+            .context("failed to commit the agent's new tab order")?;
+        Ok(())
+    }
+
+    /// Each session's slot tab position, by session id. The engine keeps the
+    /// extras' positions on their rows in memory and the slot tab's beside them,
+    /// because the slot tab has no entry in that map.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database read fails.
+    pub fn load_slot_tab_positions(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare(
+            "select t.session_id, t.sort_order \
+             from agent_tabs t join agent_sessions s on s.id = t.session_id \
+             where t.id = s.slot_tab_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut positions = HashMap::new();
+        for row in rows {
+            let (session, position): (String, i64) = row?;
+            positions.insert(session, position);
+        }
+        Ok(positions)
     }
 
     /// Repair a slot pointer that names no tab of its own session, out loud.
@@ -2161,8 +2296,8 @@ impl SessionStore {
     /// alone leaves a tab in the strip whose PTY is being torn down, and a
     /// deletion alone leaves the agent naming a row that no longer exists.
     ///
-    /// The promoted row keeps its `sort_order`: it changes role, not shape, and
-    /// both surfaces render the slot tab from the pointer rather than the order.
+    /// The promoted row keeps its `sort_order`: it changes role, not place, so the
+    /// survivors do not move.
     ///
     /// Refuses when `new_slot_tab_id` is not a tab of `session_id` (absent rows
     /// included), because a pointer at a foreign or absent row is the one state
@@ -2254,8 +2389,8 @@ impl SessionStore {
         Ok(())
     }
 
-    /// The largest `sort_order` among a session's extra tabs, if any, used to
-    /// append a new tab after the existing ones.
+    /// The largest position among a session's tabs, if any, used to append a new
+    /// tab after the existing ones.
     pub(crate) fn max_tab_sort_order(&self, session_id: &str) -> Result<Option<i64>> {
         let value: Option<i64> = self.conn.query_row(
             "select max(sort_order) from agent_tabs where session_id = ?1",
@@ -2942,8 +3077,8 @@ impl SessionStore {
     /// Every tab is a row, so a session and its first tab are created together
     /// or not at all: a session row with no slot tab names a PTY address nothing
     /// resolves, and a tab row with no session is an orphan the next load sweeps
-    /// away. The slot row sorts at 0, below the 1-based `sort_order` every extra
-    /// tab is appended at, so the first tab leads the strip.
+    /// away. The slot row sits at position 0, and every extra tab is appended
+    /// after the highest position, so the first tab leads a new strip.
     ///
     /// Existing sessions keep going through [`Self::upsert_session`], which is
     /// the hot path status churn takes and which never touches `agent_tabs`.
@@ -4867,6 +5002,109 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(ids, vec![pointer, "t2".to_string(), "t3".to_string()]);
+    }
+
+    fn positions(store: &SessionStore, session: &str) -> Vec<(String, i64)> {
+        let mut tabs: Vec<_> = store
+            .load_agent_tabs()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.session_id == session)
+            .map(|t| (t.id, t.sort_order))
+            .collect();
+        tabs.sort_by_key(|(_, position)| *position);
+        tabs
+    }
+
+    #[test]
+    fn position_migration_renumbers_each_strip_in_the_order_it_showed_before() {
+        let store = test_store();
+        let now = Utc::now();
+        // A strip whose slot row kept a high stamp after a past promotion, and
+        // whose extras carry gaps: the slot tab still showed first.
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store
+            .conn
+            .execute(
+                "update agent_tabs set sort_order = 9 where id = 'slot-1'",
+                [],
+            )
+            .unwrap();
+        store.insert_agent_tab(&test_tab("t3", "s1", 7)).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 2)).unwrap();
+        let mut other = test_session("s2", now, now);
+        other.slot_tab_id = "slot-2".to_string();
+        store.create_session(&other).unwrap();
+        store.insert_agent_tab(&test_tab("u2", "s2", 1)).unwrap();
+        store
+            .conn
+            .execute(
+                "delete from app_state where key = ?1",
+                params![TAB_POSITIONS_KEY],
+            )
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            positions(&store, "s1"),
+            vec![
+                ("slot-1".to_string(), 0),
+                ("t2".to_string(), 1),
+                ("t3".to_string(), 2)
+            ]
+        );
+        assert_eq!(
+            positions(&store, "s2"),
+            vec![("slot-2".to_string(), 0), ("u2".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn position_migration_runs_once_so_a_hand_placed_slot_tab_stays_put() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        store
+            .set_tab_positions("s1", &["t2".to_string(), "slot-1".to_string()])
+            .unwrap();
+
+        store.migrate().unwrap();
+
+        assert_eq!(
+            positions(&store, "s1"),
+            vec![("t2".to_string(), 0), ("slot-1".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn set_tab_positions_writes_every_position_or_none() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut session = test_session("s1", now, now);
+        session.slot_tab_id = "slot-1".to_string();
+        store.create_session(&session).unwrap();
+        store.insert_agent_tab(&test_tab("t2", "s1", 1)).unwrap();
+        let mut other = test_session("s2", now, now);
+        other.slot_tab_id = "slot-2".to_string();
+        store.create_session(&other).unwrap();
+
+        let err = store.set_tab_positions(
+            "s1",
+            &["t2".to_string(), "slot-1".to_string(), "slot-2".to_string()],
+        );
+
+        assert!(err.is_err(), "another agent's tab cannot be placed");
+        assert_eq!(
+            positions(&store, "s1"),
+            vec![("slot-1".to_string(), 0), ("t2".to_string(), 1)],
+            "the failed write rolled the earlier positions back"
+        );
     }
 
     #[test]
