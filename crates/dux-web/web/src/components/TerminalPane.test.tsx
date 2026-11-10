@@ -636,9 +636,9 @@ function installStubs() {
   )
 }
 
-// An agent tab's failed socket holds its picture for `HANDOFF_GRACE_MS` in case
-// a promotion is about to take the pane away, so a test about the box waits that
-// window out. A terminal has no such hold and never needs this.
+// A failed socket holds its picture for `HANDOFF_GRACE_MS` in case the pane is
+// about to go (a promotion, a closed terminal, a shell that exited), so a test
+// about the box waits that window out.
 async function passHandoffGrace(): Promise<void> {
   const past = HANDOFF_GRACE_MS + 50
   if (vi.isFakeTimers()) {
@@ -5645,6 +5645,34 @@ describe("a promoted-away slot tab hands its pane over", () => {
     expect(first.dispose).toHaveBeenCalled()
     expect(TermStub.instances.length).toBe(terminals + 1)
     expect(second.connect).toHaveBeenCalled()
+  })
+})
+
+// A terminal's socket also fails when the terminal is closed or its shell
+// exits, and the spine's update that removes the pane follows by a moment.
+describe("TerminalPane terminal socket handover", () => {
+  const owner = { kind: "session", sessionId: "s1" } as const
+
+  it("holds the Reconnect box through the grace, then paints it", async () => {
+    render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    last().emit("failed")
+    expect(screen.queryByText("Connection lost.")).toBeNull()
+    await passHandoffGrace()
+    expect(screen.getByText("Connection lost.")).toBeTruthy()
+  })
+
+  it("stops retrying once the spine no longer lists the terminal", () => {
+    const view = render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    const pty = last()
+    expect(pty.shouldRetry()).toBe(true)
+
+    mockState = {
+      ...mockState,
+      spine: { ...mockState.spine!, terminals: [] },
+    } as DuxState
+    view.rerender(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+
+    expect(pty.shouldRetry()).toBe(false)
   })
 })
 

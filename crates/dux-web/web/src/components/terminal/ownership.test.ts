@@ -2,7 +2,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, renderHook } from "@testing-library/react"
 
-import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
+import {
+  forgetHeldConnIds,
+  notifyPtyOwner,
+  resetPtyOwnerEpochs,
+} from "@/lib/ptyOwnership"
 import { noteServerRunProbe } from "@/lib/serverRun"
 import type { PtySocket } from "@/lib/ptySocket"
 
@@ -71,6 +75,7 @@ function setup(
 beforeEach(() => {
   ledger.length = 0
   resetPtyOwnerEpochs()
+  forgetHeldConnIds()
   setVisibility("visible")
   // The run-identity fan-out is module state shared by every test in this file,
   // and self-succession now depends on it. Start each test from the state a
@@ -458,6 +463,18 @@ describe("self-succession after a blipped socket", () => {
     expect(view.result.current.isOwner).toBe(true)
     // Flagged, because the server grants a flagged claim against ANY owner and
     // the owner being displaced here is our own ghost. Nothing is stolen.
+    expect(view.result.current.takeoverIntent.read()).toBe(true)
+  })
+
+  // A device drives a whole row, so the connection this page held on the tab
+  // it just left is this device's ghost on the next tab of the same agent too.
+  it("claims back a row the handshake says another pane of this page owned", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a"))
+    expect(view.result.current.isOwner).toBe(true)
     expect(view.result.current.takeoverIntent.read()).toBe(true)
   })
 

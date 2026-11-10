@@ -493,9 +493,12 @@ export function TerminalPane(props: TerminalPaneProps) {
   // There is one periodic client frame and one timer behind it (`lib/heartbeat.ts`);
   // gaining ownership retimes that timer rather than adding a second sender.
 
-  // Only an agent tab can be handed over; a terminal's socket failing is only
-  // ever a fault, so its box goes up at once.
-  const handoffGrace = useHandoffGrace(kind === "agent" && connectionLost)
+  // A failed socket may mean the pane is about to leave rather than that the
+  // connection is at fault: an agent tab's provider exiting hands its slot to a
+  // sibling, and a terminal's shell exiting or its being closed elsewhere takes
+  // the terminal and this pane with it. Either way the spine's update follows
+  // the socket's failure by a moment, so the box waits for it.
+  const handoffGrace = useHandoffGrace(connectionLost)
   const cover = attachCover({
     socket: connectionLost ? "failed" : reconnecting ? "connecting" : "open",
     replayApplied,
@@ -810,9 +813,10 @@ function terminalInputLayout(input: TerminalInputLayoutInputs) {
   }
 }
 
-// Whether a just-failed agent socket is still inside the window a promotion
-// would land in. Armed during render, so the box never paints for one frame on
-// its way to being held, and released by the clock or by the socket coming back.
+// Whether a just-failed socket is still inside the window in which the spine
+// removes its pane (a promotion, a closed terminal). Armed during render, so the
+// box never paints for one frame on its way to being held, and released by the
+// clock or by the socket coming back.
 function useHandoffGrace(failing: boolean): boolean {
   const [holding, setHolding] = useState(false)
   const [wasFailing, setWasFailing] = useState(failing)
@@ -837,6 +841,7 @@ function useEverReady(hasOutput: boolean): boolean {
 function terminalLiveSettings(
   preferences: TerminalPreferences,
   target: ReturnType<typeof terminalTargetView>,
+  spine: DuxState["spine"],
   viewerOverflow: boolean,
   composeBarEnabled: boolean,
 ): TerminalLiveSettings {
@@ -856,6 +861,7 @@ function terminalLiveSettings(
     configuredDropPaste: preferences.configuredDropPaste,
     launchedDropPaste: target.focusedTab?.drop_paste,
     sessionTabs: target.session?.tabs,
+    spineTerminals: spine?.terminals,
     viewerOverflow,
     composeActive: composeBarEnabled,
   }
@@ -888,7 +894,7 @@ function useTerminalPaneSetup(props: TerminalPaneProps) {
   // Built here and published in the component body: whether the message box is
   // the typing surface depends on ownership, which resolves after this hook.
   const liveSettingsFor = (composeActive: boolean) =>
-    terminalLiveSettings(preferences, target, viewerOverflow, composeActive)
+    terminalLiveSettings(preferences, target, spine, viewerOverflow, composeActive)
 
   return {
     hostRef,

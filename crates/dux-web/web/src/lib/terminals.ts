@@ -139,3 +139,17 @@ export function terminalTitle(
   const n = terminalNumber(t.label)
   return n != null ? `${cmd} (#${n})` : `${cmd} (${t.label})`
 }
+
+// Whether a terminal's PTY socket must stop reconnecting: the spine knows the
+// terminals and this one is not among them, so the route will keep 404ing.
+//
+// Unlike an agent's tab list, an empty list after the spine loaded is a real
+// answer (the last terminal was closed), so only an absent list, a spine that
+// has not arrived, reads as "not gone".
+export function terminalSocketGone(
+  terminals: readonly TerminalView[] | undefined,
+  terminalId: string,
+): boolean {
+  if (terminals === undefined) return false
+  return !terminals.some((t) => t.id === terminalId)
+}

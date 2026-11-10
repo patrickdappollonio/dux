@@ -165,3 +165,28 @@ export function notifyPtyOwner(
   // live iteration.
   for (const cb of [...ptyOwnerListeners]) cb(ptyId, ownerId, device)
 }
+
+// Every PTY connection id this page has held, each stamped with the server run
+// it was learned under. Page-wide rather than per pane because a device drives a
+// whole row of the agents list: the agent's tabs and its terminals change hands
+// together, so the owner a pane meets in its handshake can be a connection this
+// page opened on another pane of the same row (the tab it just switched away
+// from), and that connection is this device's ghost exactly as the pane's own
+// previous connection is. A pane only ever meets owners of its own row, so the
+// page-wide set answers nothing a per-row set would not.
+const heldConnIds = new Map<string, number>()
+
+export function rememberHeldConnId(id: string, runStamp: number): void {
+  heldConnIds.set(id, runStamp)
+}
+
+// The run stamp a held id was learned under, or undefined for an id this page
+// never held.
+export function heldConnIdStamp(id: string): number | undefined {
+  return heldConnIds.get(id)
+}
+
+// Ids do not survive a server restart, which mints them from zero again.
+export function forgetHeldConnIds(): void {
+  heldConnIds.clear()
+}
