@@ -274,15 +274,15 @@ function PartSwitchButton({
         onClick={() => switchPhonePart(session.id)}
       >
         {/* The working glyph without its bounce: a hand-over to needs-you
-          * lets the pulse land before the attention look eases in, and both
-          * ride the shared clock's phase, so the flap and the pill it flies
-          * into pulse as one. */}
+          * lets the pulse land before the attention look eases in, as on the
+          * list, and the flap and the pill it flies into share one clock, so
+          * they pulse as one. */}
         <WorkingGlyph
           icon={Icon}
           working={shown.cue === "working"}
           look={PART_CUE_LOOK[shown.cue]}
           bounce={false}
-          onCueClock
+          cueKey={`part-switch:${session.id}`}
         />
         {toTerminals ? <span className="text-sm">{shown.count}</span> : null}
       </Button>

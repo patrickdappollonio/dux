@@ -111,8 +111,7 @@ function placementStyle(placement: LayoutPillPlacement): React.CSSProperties {
 // attention look when it needs you, the working pulse while it works, nothing
 // when it is idle. Needs-you outranks working, as on its row. It is the working
 // glyph drawn as a dot, without the bounce: a hand-over to needs-you lets the
-// pulse land before the attention look eases in, and both ride the shared
-// clock's phase.
+// pulse land before the attention look eases in, as on the list.
 export function AgentStateDot({ session }: { session: SessionView }) {
   const attention = session.needs_attention
   const working = !attention && session.status === "active" && session.working && !session.typing
@@ -131,7 +130,7 @@ export function AgentStateDot({ session }: { session: SessionView }) {
                 : "text-dux-working"
             }
             bounce={false}
-            onCueClock
+            cueKey={`layout-dot:${session.id}`}
             className="size-2 fill-current stroke-none"
           />
         </span>

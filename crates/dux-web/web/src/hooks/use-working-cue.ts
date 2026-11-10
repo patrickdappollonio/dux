@@ -198,37 +198,42 @@ export function useWorkingCue<B extends Element, G extends Element>(
   }
 }
 
+// When each keyed cue's animations began their active time, by key and
+// animation name, so a glyph remounted elsewhere picks the cue up where its
+// other instance had it rather than restarting it.
+const cueClocks = new Map<string, number>()
+
 /**
- * The start time that puts a looping cue animation on the shared clock's
- * phase: its active time begins on a whole number of periods since the
- * document timeline's origin, so every element anchored this way is in step
- * however and whenever it was mounted, and a cue that is remounted elsewhere
- * (the phone's flap flying into the floating pill) carries on where it was.
- * A `fresh` cue (one that has just started, rather than a mounted element
- * picking up a cue already running) waits for the next period boundary after
- * its own delay instead of starting mid-cycle with a jump.
+ * Carries a keyed cue's clock across remounts, the way the tab strips keep
+ * their pills' clocks across a reorder. A cue that starts under a mounted glyph
+ * starts as the list's does, at once, and its clock is recorded; a glyph that
+ * mounts with the cue already running (the phone's flap flying into the
+ * floating pill, two instances of one control) takes the recorded clock, so
+ * the two show the same frame at the hand-over. Times are kept as the start
+ * of the active phase, because the look a glyph lands into carries a delay and
+ * the same look mounted afresh does not.
  */
-export function cueEpochStartTime(timing: {
-  now: number
-  period: number
-  delay: number
-  fresh: boolean
-}): number {
-  const { now, period, delay, fresh } = timing
-  if (!fresh || period <= 0) return -delay
-  return Math.ceil((now + delay) / period) * period - delay
+export function carryCueClock(el: Element | null, key: string, carry: boolean): void {
+  if (!el || typeof el.getAnimations !== "function") return
+  for (const animation of el.getAnimations()) {
+    const name = (animation as CSSAnimation).animationName
+    if (name === WORKING_BOUNCE_NAME) continue
+    const slot = `${key}|${name}`
+    const delay = Number(animation.effect?.getComputedTiming().delay ?? 0)
+    const recorded = cueClocks.get(slot)
+    if (carry && recorded !== undefined) {
+      const start = recorded - delay
+      if (animation.startTime !== start) animation.startTime = start
+    }
+    const record = () => {
+      if (animation.startTime !== null) cueClocks.set(slot, Number(animation.startTime) + delay)
+    }
+    if (animation.startTime !== null) record()
+    else animation.ready?.then(record, () => {})
+  }
 }
 
-/** Puts every looping animation on `el` other than the bounce on the shared
- * clock's phase (see `cueEpochStartTime`). */
-export function anchorCueAnimations(el: Element | null, fresh: boolean): void {
-  if (!el || typeof el.getAnimations !== "function") return
-  const now = Number(document.timeline?.currentTime ?? performance.now())
-  for (const animation of el.getAnimations()) {
-    if ((animation as CSSAnimation).animationName === WORKING_BOUNCE_NAME) continue
-    const timing = animation.effect?.getComputedTiming()
-    const period = Number(timing?.duration ?? 0)
-    const start = cueEpochStartTime({ now, period, delay: Number(timing?.delay ?? 0), fresh })
-    if (animation.startTime !== start) animation.startTime = start
-  }
+/** Forgets a keyed cue's clocks once it has stopped, so a later start is new. */
+export function forgetCueClock(key: string, name: string): void {
+  cueClocks.delete(`${key}|${name}`)
 }

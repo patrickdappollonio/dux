@@ -2,8 +2,10 @@ import type { LucideIcon } from "lucide-react"
 import { type RefObject, useCallback, useLayoutEffect, useRef, useState } from "react"
 
 import {
-  anchorCueAnimations,
+  carryCueClock,
+  forgetCueClock,
   useWorkingCue,
+  WORKING_PULSE_NAME,
   WORKING_BOUNCE_ANIMATION,
   WORKING_PULSE_ANIMATION,
 } from "@/hooks/use-working-cue"
@@ -44,7 +46,7 @@ export function WorkingGlyph({
   frameClassName,
   frameRef,
   bounce = true,
-  onCueClock = false,
+  cueKey,
 }: {
   icon: LucideIcon
   working: boolean
@@ -55,10 +57,9 @@ export function WorkingGlyph({
   /** False for a glyph that reports a part rather than names it, which pulses
    * and lands but never bounces. */
   bounce?: boolean
-  /** Put the pulse and the look's own animation on the shared clock's phase,
-   * so a glyph remounted elsewhere carries on in step (see
-   * `cueEpochStartTime`). */
-  onCueClock?: boolean
+  /** Names the cue this glyph shows, so another instance of it mounted
+   * elsewhere carries on from the same frame (see `carryCueClock`). */
+  cueKey?: string
 }) {
   const { bouncing, pulsing, landing, attachBounce, attachPulse, handlers } =
     useWorkingCue<HTMLSpanElement, SVGSVGElement>(working, { bounce })
@@ -99,25 +100,27 @@ export function WorkingGlyph({
     setHeld(false)
   }
 
-  // A cue running when the glyph mounts carries on in phase; one that starts
-  // under a mounted glyph waits for the clock's next period.
+  // A cue running when the glyph mounts carries on from its other instance's
+  // clock; one that starts under a mounted glyph (seen at rest since it
+  // mounted) is a new one and starts at once, as the list's.
   const pulseFresh = useRef(false)
   useLayoutEffect(() => {
-    if (!onCueClock) return
+    if (cueKey === undefined) return
     if (!pulsing) {
+      if (!pulseFresh.current) forgetCueClock(cueKey, WORKING_PULSE_NAME)
       pulseFresh.current = true
       return
     }
     if (icon === null) return
-    anchorCueAnimations(icon, pulseFresh.current)
+    carryCueClock(icon, cueKey, !pulseFresh.current)
     pulseFresh.current = false
-  }, [onCueClock, pulsing, icon])
-  const lookFresh = useRef(false)
+  }, [cueKey, pulsing, icon])
+  const lookMounted = useRef(false)
   useLayoutEffect(() => {
-    if (!onCueClock || frame === null) return
-    anchorCueAnimations(frame, lookFresh.current)
-    lookFresh.current = true
-  }, [onCueClock, shownNow, easedNow, frame])
+    if (cueKey === undefined || frame === null) return
+    carryCueClock(frame, cueKey, !lookMounted.current)
+    lookMounted.current = true
+  }, [cueKey, shownNow, easedNow, frame])
 
   return (
     <span
