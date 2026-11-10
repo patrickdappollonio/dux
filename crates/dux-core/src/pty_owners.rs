@@ -67,6 +67,10 @@ pub struct OwnersState {
     /// change of the row announces. Never shrinks, like the per-pty sequences
     /// below, because a pty never changes rows.
     pub members: std::collections::HashMap<RowKey, std::collections::BTreeSet<String>>,
+    /// row -> the connection that held it when it was last released. A free
+    /// row may be claimed by a self-succession only when this names the ghost
+    /// the succession expects, so a row another device held since stays lost.
+    pub last_holder: std::collections::HashMap<RowKey, u64>,
     /// Bumped on every ownership change, a release included, and stamped onto
     /// the emitted `pty.owner` so clients order arrivals by it. Never decreases.
     pub epoch: u64,
@@ -331,7 +335,8 @@ impl PtySizeOwners {
     ///     broadcast
     ///   - a take-over whose `expected_owner` names anyone but the current
     ///     owner -> REFUSED exactly as a plain resize is; against an unowned
-    ///     row it claims, as a plain resize does
+    ///     row it claims, as a plain resize does, only when the named owner
+    ///     was the last to hold the row, and is REFUSED otherwise
     ///
     /// `expected_owner` is a compare-and-swap on a flagged claim, which only a
     /// take-over carries. `None` takes from whoever holds it,
@@ -379,9 +384,7 @@ impl PtySizeOwners {
             Some(_) if intent == ResizeIntent::Plain => refused,
             // A flagged claim naming a predecessor must find exactly that
             // predecessor recorded when anybody holds the row: anyone else
-            // means the client's premise was already overtaken. An unowned
-            // row is claimed, as a plain resize claims it: the predecessor
-            // let go before the frame landed, and nobody is displaced.
+            // means the client's premise was already overtaken.
             Some(record)
                 if matches!(
                     intent,
@@ -389,6 +392,19 @@ impl PtySizeOwners {
                         expected_owner: Some(expected)
                     } if record.conn_id != expected
                 ) =>
+            {
+                refused
+            }
+            // A free row is claimed for it, as a plain resize claims one, only
+            // when the predecessor itself was the last to hold it: it let go
+            // before the frame landed and nobody is displaced. A row somebody
+            // else held since was lost to them, and losing is sticky.
+            None if matches!(
+                intent,
+                ResizeIntent::TakeOver {
+                    expected_owner: Some(expected)
+                } if owners.last_holder.get(&row) != Some(&expected)
+            ) =>
             {
                 refused
             }
@@ -586,6 +602,7 @@ impl PtySizeOwners {
             return None;
         }
         owners.map.remove(&row);
+        owners.last_holder.insert(row, conn_id);
         owners.epoch += 1;
         owners.generation += 1;
         Some(owners.epoch)
@@ -618,6 +635,7 @@ impl PtySizeOwners {
         let mut released = Vec::new();
         for row in held {
             owners.map.remove(&row);
+            owners.last_holder.insert(row.clone(), conn_id);
             owners.epoch += 1;
             owners.generation += 1;
             let epoch = owners.epoch;
@@ -1861,6 +1879,33 @@ mod tests {
         let (out, applied) = claim_resize(&owners, "term-1", tab, succession);
         assert!(!out.apply && !applied);
         assert!(owners.is_owner("term-1", other));
+    }
+
+    /// Losing a row is sticky, even through a free row: a succession naming
+    /// its ghost claims a free row only when that ghost was the last to hold
+    /// it. A row another device took over and then let go is not the ghost's
+    /// to come back to without a press.
+    #[test]
+    fn a_self_succession_never_reclaims_a_row_another_device_held_since() {
+        let owners = PtySizeOwners::default();
+        owners.join_row("s1-slot", RowKey::Agent("s1".to_string()));
+        owners.join_row("term-1", RowKey::Agent("s1".to_string()));
+        let ghost = owners.next_conn_id();
+        let device = owners.next_conn_id();
+        let returning = owners.next_conn_id();
+        assert!(owners.claim("s1-slot", ghost).is_some());
+        assert!(owners.claim("s1-slot", device).is_some(), "taken over");
+        assert!(owners.release("s1-slot", device).is_some());
+
+        let succession = ResizeIntent::TakeOver {
+            expected_owner: Some(ghost),
+        };
+        let (out, applied) = claim_resize(&owners, "term-1", returning, succession);
+        assert!(
+            !out.apply && !applied,
+            "the ghost lost this row to another device"
+        );
+        assert!(owners.current_owner("s1-slot").0.is_none());
     }
 
     /// The owner's write must be decided and enqueued under one lock, or a

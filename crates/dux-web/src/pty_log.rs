@@ -18,8 +18,9 @@ pub enum ResizeRefusal {
     /// Ordinary, expected traffic: a watcher's window really does change size.
     NonOwnerPlainResize,
     /// The frame DID ask to take over, but named an expected predecessor that
-    /// no longer owns the pty while somebody else does. This is the delayed
-    /// ghost-succession frame the compare-and-swap exists to refuse.
+    /// neither holds the row nor, with the row free, was the last to hold it.
+    /// This is the delayed ghost-succession frame the compare-and-swap exists
+    /// to refuse.
     ExpectedOwnerMismatch,
 }
 
@@ -67,7 +68,10 @@ pub fn describe_claim_granted(
         ResizeIntent::TakeOver {
             expected_owner: Some(ghost),
         } => {
-            format!("a self-succession over its own dead connection {ghost}")
+            format!(
+                "a self-succession of its own earlier connection {ghost}, taking the row \
+                 from it or claiming the row after it let go"
+            )
         }
         ResizeIntent::TakeOver {
             expected_owner: None,
@@ -98,8 +102,8 @@ pub fn describe_claim_refused(
             "the frame did not ask to take over, and attaching never steals"
         }
         ResizeRefusal::ExpectedOwnerMismatch => {
-            "the take-over named a predecessor that no longer owns the pty, so it \
-             was superseded before it arrived"
+            "the take-over named a predecessor that neither holds the row nor was the \
+             last to hold it, so it was superseded before it arrived"
         }
     };
     format!(
@@ -197,7 +201,8 @@ mod tests {
                 }
             ),
             "PTY s1: input and sizing ownership granted to connection 7 (Chrome UA) \
-             by a self-succession over its own dead connection 4"
+             by a self-succession of its own earlier connection 4, taking the row from \
+             it or claiming the row after it let go"
         );
     }
 
@@ -213,15 +218,15 @@ mod tests {
             describe_claim_refused("s1", 9, Some(4), ResizeRefusal::ExpectedOwnerMismatch),
             "PTY s1: resize from connection 9 refused whole, nothing applied and \
              nothing broadcast; connection 4 currently owns it and the take-over named \
-             a predecessor that no longer owns the pty, so it was superseded before it \
-             arrived"
+             a predecessor that neither holds the row nor was the last to hold it, so it \
+             was superseded before it arrived"
         );
         assert_eq!(
             describe_claim_refused("s1", 9, None, ResizeRefusal::ExpectedOwnerMismatch),
             "PTY s1: resize from connection 9 refused whole, nothing applied and \
              nothing broadcast; nobody currently owns it and the take-over named a \
-             predecessor that no longer owns the pty, so it was superseded before it \
-             arrived"
+             predecessor that neither holds the row nor was the last to hold it, so it \
+             was superseded before it arrived"
         );
     }
 
