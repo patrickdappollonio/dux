@@ -14,13 +14,16 @@ it: pick a sort mode and let dux keep the list in order, or place things by hand
 
 ## The sidebar, top to bottom
 
-Agents sit up top; terminals get their own section below them. Dormant agents fold away
-into a collapsible "Inactive" tail.
+Dormant agents fold away into a collapsible "Inactive" tail at the bottom.
 
-- **Terminal UI:** two panes. The Agents pane ends with the Inactive tail, and Terminals is
-  its own pane below.
-- **Web:** two labelled groups. The Terminals group is collapsible and sits above the
-  Inactive tail.
+- **Terminal UI:** one list, titled **Agents & Terminals** with a count of each. Project and
+  standalone terminals are rows of it, sorted together with the agents. An agent's own
+  terminals are not rows: they dock under the agent in the center pane (see
+  [Terminals beside their agent](#terminals-beside-their-agent)). An agent you stopped while
+  one of its terminals keeps running stays in the list, out of the Inactive tail, until its
+  last terminal ends, and terminals are never in the tail.
+- **Web:** agents up top, and terminals in a labelled group of their own below them. The
+  Terminals group is collapsible and sits above the Inactive tail.
 - **Every row** is two lines: the name, then who it belongs to and what it is doing.
 
 The terminal UI looks like this (the `※` before a project name marks the project, and the
@@ -28,15 +31,16 @@ spinner glyph animates while an agent works):
 
 ![The terminal UI sidebar: three active agents, one of them running three tabs, and a collapsed Inactive tail.](/screens/tui-agent-list-two-line.png)
 
-A terminal's second line names its owner as `agent@project`, or just the project for a
-project terminal. A standalone terminal has no owner, so it names the directory it
-opened in instead, shortened with `~`. Whichever it shows is what the sidebar search
-matches on.
+A terminal's second line names its owner: the project for a project terminal, or
+`agent@project` for an agent's terminal in the browser's list. A standalone terminal has no
+owner, so it names the directory it opened in instead, shortened with `~`. Whichever it
+shows is what the sidebar search matches on.
 
 Typing in the filter narrows the list to the rows that match, with the matching text
-picked out, and the pane title counts what survived.
+picked out, and the pane title counts what survived out of how many, for agents and
+terminals each.
 
-![The same sidebar filtered by the word retry: the title reads Agents 2 of 5 and only the two matching agents remain.](/screens/tui-sidebar-search.png)
+![The same sidebar filtered by the word retry: the title reads Agents & Terminals, 2 of 5 agents and 0 of 0 terminals, and only the two matching agents remain.](/screens/tui-sidebar-search.png)
 
 The `✷` star means the same thing wherever you see it: this one lives in your own folder,
 not in a working copy dux manages. A
@@ -63,9 +67,16 @@ On the web, use the **Sort** dropdown above the agent list. In the terminal UI, 
   does not include it, since it is what you get by placing a row by hand. The web dropdown
   lists it as **Manual order**.
 
-Terminals follow the same choice. Sort by name and terminals sort by their foreground command
-(or their label when nothing is running in the foreground); pick manual and each holds the
-spot you put it in.
+Terminals follow the same choice.
+
+- **Terminal UI:** terminals sort among the agents. By name, a terminal uses the name it
+  was opened with (`Terminal 3`), never what is running in it, so a program starting does
+  not move the row. By activity, a terminal running something counts as busy. By updated,
+  its last output counts. In manual order it keeps the place you put it in among the agents
+  until dux restarts.
+- **Web:** terminals sort within their own group. By name they sort by their foreground
+  command (or their label when nothing is running in the foreground); pick manual and each
+  holds the spot you put it in.
 
 > [!NOTE]
 > The web's cog menu also has **Sort agents by** (Recently updated, Created, Name). That is
@@ -75,9 +86,10 @@ spot you put it in.
 ## Hand-ordering
 
 **Drag it, on either surface.** Grab a row with the mouse and drop it where you want,
-in the browser or in the terminal UI. Agents reorder among agents and terminals among
-terminals; a terminal never jumps into the agent list, and vice versa. Agents move
-freely across projects, because the order is one list rather than one list per project.
+in the browser or in the terminal UI. Agents move freely across projects, because the
+order is one list rather than one list per project. In the terminal UI a project or
+standalone terminal row can be dropped between agent rows, since it is a row of the same
+list; in the browser agents reorder among agents and terminals among terminals.
 
 In the terminal UI:
 
@@ -93,7 +105,9 @@ In the terminal UI:
 **In the terminal UI you can also move a row without a mouse.** The command palette
 carries `move-agent-up`, `move-agent-down`, `move-agent-top`, and `move-agent-bottom`,
 plus the matching `move-terminal-*` set. Each moves the selected row. The terminal
-commands appear only when you have a terminal to move; the agent ones are always there.
+commands move a project or standalone terminal's row and refuse, saying so, when the
+selected row is not one. The terminal commands appear only when you have a terminal to
+move; the agent ones are always there.
 
 > [!IMPORTANT]
 > Dragging or moving a row switches the sort to **manual**, for the whole list, agents
@@ -107,4 +121,15 @@ order you left them. So is the order of each agent's [provider tabs](/docs/agent
 
 Your **terminal** order is not, because terminals themselves do not survive a restart.
 A terminal is a live shell; when dux stops, it is gone. New terminals start in creation
-order until you rearrange them.
+order until you rearrange them. The same goes for the order of an agent's terminal dock.
+
+## Terminals beside their agent
+
+In the terminal UI an agent's own terminals are not rows of the list: they dock under the
+agent in the center pane, each with a numbered pill in the dock's strip, and the agent's
+row stands for all of them.
+
+![The terminal UI with an agent on top of the center pane and its two terminals docked below it, each with a numbered pill, the agent | split | term control at the right of the dock's strip, and the list titled Agents & Terminals.](/screens/tui-terminal-dock.png) Reorder them along the dock by dragging a pill with the mouse,
+or with the `move-tab-left` and `move-tab-right` palette commands while the dock has focus.
+The agent's first tab keeps its place as the tab that starts whatever order its strip is
+in, and nothing about the dock's order is kept across a restart.

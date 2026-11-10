@@ -34,7 +34,7 @@ module.exports = async ({
   sendKeys("/")
   // The pane title counts the filter's matches the moment it opens, which is how
   // this knows the field is there to type into.
-  await waitFor("/5)", 10000)
+  await waitFor("/5 +", 10000)
   sendText("retry")
   await sleep(800)
   // The filter leaves the selection where it was; the shot is of the second

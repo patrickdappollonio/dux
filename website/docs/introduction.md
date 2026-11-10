@@ -64,12 +64,17 @@ reconnect later.
 Both front ends lay the workspace out the same way:
 
 - The **left pane** lists your agents in a single flat list, most-active first, with a
-  search filter and a project chooser.
+  search filter and a project chooser. In the terminal UI it lists your project and
+  standalone terminals in the same list, sorted with the agents.
 - The **center pane** shows the focused agent's live terminal, and it is a real typing
   surface on both front ends: focus it and your keystrokes go to the agent, while dux's
   own shortcuts keep working around them.
   - The terminal UI adds a fullscreen toggle that passes input through verbatim, and its
     center pane doubles as the diff view.
+  - In the terminal UI an agent's companion terminals dock under it in the same pane. A
+    layout key cycles between the agent alone, the agent and its terminals split, and the
+    terminals alone; the focus keys visit the dock as a pane of its own, and in the split
+    the part without focus is drawn grey and faded.
   - In the browser a diff opens in the file-editor overlay instead.
 - The **right pane** shows the files an agent has changed, with diffs.
 

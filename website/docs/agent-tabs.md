@@ -13,7 +13,9 @@ Tabs live in a strip at the top of the agent's terminal. A brand-new agent has e
 one tab, and the strip stays hidden until you add a second. Turn on **Always show tab
 strip** (a Preferences row on the web, `toggle-always-show-tabs` in the terminal UI's
 palette, or `always_show_tab_strip` under `[ui]`) if you would rather see it from the first
-tab on.
+tab on. In the terminal UI an agent's terminal dock has a strip of its own, and the two show
+and hide together: both appear once the agent has a second tab or a second terminal, or
+while the setting is on.
 
 > [!NOTE]
 > The browser's [theater mode](/docs/web-workspace#theater-mode-one-pane-no-chrome) takes
@@ -146,6 +148,9 @@ in-app help overlay shows your current bindings.
   list uses: a spinner while that tab's provider is working, and a blinking dot when it
   wants you.
 - **Highlight:** the pill you are looking at is the highlighted one.
+- **The dock:** while an agent's [terminal dock](/docs/ordering-the-sidebar#terminals-beside-their-agent)
+  has focus, the next and previous tab keys, the switch-by-number keys and the move-tab
+  commands act on its terminals instead, whose pills are numbered the same way.
 
 This is the terminal UI strip: the third pill is highlighted because it is the tab on
 screen.
