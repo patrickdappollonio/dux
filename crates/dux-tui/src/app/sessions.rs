@@ -5,9 +5,9 @@ use super::{
     ChangeDefaultProviderPrompt, ChangeProjectDefaultProviderOption,
     ChangeProjectDefaultProviderPrompt, ChangeThemePrompt, CloneDraft, CloneProjectFocus,
     ConfigureFieldFocus, ConfirmFocus, ConfirmKillRunningPrompt, ConfirmNonDefaultBranchFocus,
-    DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, FocusPane, FullscreenOverlay, InputTarget,
-    KillRunningAction, KillRunningFocus, KillRunningPrompt, KillableRuntime, KillableRuntimeKind,
-    LaunchView, LeftItem, NameNewAgentFocus, PendingDiff, PersistFinalOutcome,
+    DIFF_STATUS_KEY, DeleteAgentFocus, DeleteReport, DockLayout, FocusPane, FullscreenOverlay,
+    InputTarget, KillRunningAction, KillRunningFocus, KillRunningPrompt, KillableRuntime,
+    KillableRuntimeKind, LaunchView, LeftItem, NameNewAgentFocus, PendingDiff, PersistFinalOutcome,
     PickProjectWorktreePrompt, PrLookupFinalOutcome, ProjectAction, ProjectActionsPrompt,
     ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent, PromptState,
     PullRequestInputFocus, RecreateWorkingCopyFocus, ReviewCopyQuestion, RuntimeTargetId,
@@ -1727,10 +1727,9 @@ impl App {
     }
 
     pub(crate) fn pty_size_for_launch(&self) -> (u16, u16) {
-        if self.last_pty_size == (0, 0) {
-            (24, 80)
-        } else {
-            self.last_pty_size
+        match self.focused_pty_size() {
+            (0, 0) => (24, 80),
+            sent => sent,
         }
     }
 
@@ -2048,21 +2047,54 @@ impl App {
         }
     }
 
-    pub(crate) fn show_companion_terminal_surface(&mut self) {
+    /// Show `terminal_id` in the center pane with focus on it: an agent's
+    /// terminal in that agent's dock, at least in the split, and a project or
+    /// standalone terminal for its own row of the list.
+    pub(crate) fn show_terminal_in_center(&mut self, terminal_id: &str) {
+        let owner = match self.engine.companion_terminals.get(terminal_id) {
+            Some(terminal) => terminal.owner.clone(),
+            None => return,
+        };
+        match owner {
+            TerminalOwner::Session(session_id) => {
+                if self.selected_session().map(|s| s.id.as_str()) != Some(session_id.as_str()) {
+                    self.reselect_left_session(&session_id);
+                    self.close_diff_view();
+                    self.reload_changed_files();
+                }
+                self.dock_active
+                    .insert(session_id.clone(), terminal_id.to_string());
+                if self
+                    .dock_layouts
+                    .get(&session_id)
+                    .is_none_or(|layout| *layout == DockLayout::Agent)
+                {
+                    self.dock_layouts.insert(session_id, DockLayout::Split);
+                }
+            }
+            TerminalOwner::Project(_) | TerminalOwner::Standalone => {
+                self.rebuild_left_items();
+                self.reselect_left_terminal(terminal_id);
+                self.close_diff_view();
+            }
+        }
+        self.active_terminal_id = Some(terminal_id.to_string());
         self.session_surface = SessionSurface::Terminal;
-        self.fullscreen_overlay = FullscreenOverlay::Terminal;
+        self.center_mode = CenterMode::Agent;
+        self.focus = FocusPane::Center;
+        self.fullscreen_overlay = FullscreenOverlay::None;
+        self.reconcile_center_target();
     }
 
-    /// Claim and focus a terminal whose PTY was just created synchronously.
-    /// Keep this ordering aligned with ownership presentation: claiming before
-    /// opening the surface prevents the newly launched terminal from briefly
-    /// appearing behind the takeover card.
-    fn activate_new_terminal(&mut self, terminal_id: String) {
-        self.claim_launched_pty(&terminal_id);
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = true;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
+    /// Claim and focus a terminal whose PTY was just created synchronously,
+    /// landing focused but windowed, so typing reaches it the way it reaches a
+    /// freshly launched agent. Keep this ordering aligned with ownership
+    /// presentation: claiming before opening the surface prevents the newly
+    /// launched terminal from briefly appearing behind the takeover card.
+    fn activate_new_terminal(&mut self, terminal_id: &str) {
+        self.claim_launched_pty(terminal_id);
+        self.show_terminal_in_center(terminal_id);
+        self.input_target = InputTarget::None;
     }
 
     /// Always spawns a new companion terminal for the selected session.
@@ -2097,7 +2129,7 @@ impl App {
         };
         // No confirmation: the centre pane launches the shell and streams its
         // prompt, which is the big and unmistakable change the tenet exempts.
-        self.activate_new_terminal(terminal_id);
+        self.activate_new_terminal(&terminal_id);
     }
 
     /// Always spawns a new project terminal at the given project's repo root.
@@ -2132,7 +2164,7 @@ impl App {
                 return;
             }
         };
-        self.activate_new_terminal(terminal_id);
+        self.activate_new_terminal(&terminal_id);
         // A project terminal keeps its project above the "no agents" separator,
         // so the sidebar grouping may have changed.
         self.rebuild_left_items();
@@ -2164,7 +2196,7 @@ impl App {
         };
         let where_it_is =
             dux_core::home_path::shorten_home(&dux_core::home_path::standalone_terminal_dir());
-        self.activate_new_terminal(terminal_id);
+        self.activate_new_terminal(&terminal_id);
         // dux's own shutdown closes every terminal. What is special about this
         // kind is that no other event does: removing a project or deleting an
         // agent closes their terminals and leaves this one alone.
@@ -2187,23 +2219,21 @@ impl App {
         let owner = TerminalOwner::Session(session.id.clone());
 
         let first = self
-            .engine
-            .companion_terminals
-            .iter()
-            .filter(|(_, t)| t.owner == owner)
-            .min_by_key(|(id, _)| {
-                id.strip_prefix("term-")
-                    .and_then(|n| n.parse::<u64>().ok())
-                    .unwrap_or(u64::MAX)
+            .dock_active
+            .get(&session.id)
+            .filter(|id| {
+                self.engine
+                    .companion_terminals
+                    .get(id.as_str())
+                    .is_some_and(|t| t.owner == owner)
             })
-            .map(|(id, _)| id.clone());
+            .cloned()
+            .or_else(|| self.dock_terminal_ids(&session.id).into_iter().next());
 
         if let Some(terminal_id) = first {
-            self.active_terminal_id = Some(terminal_id);
-            self.terminal_return_to_list = false;
-            self.show_companion_terminal_surface();
-            self.input_target = InputTarget::Terminal;
-            // No confirmation: the whole centre pane becomes that terminal.
+            self.show_terminal_in_center(&terminal_id);
+            self.input_target = InputTarget::None;
+            // No confirmation: the dock opens on that terminal.
             return;
         }
         {
@@ -2211,16 +2241,17 @@ impl App {
         }
     }
 
-    /// Spawns a new companion terminal for the owner (agent session or
-    /// project) of the currently selected terminal in the terminals list.
+    /// Spawns a new terminal for the owner (project, or none) of the terminal
+    /// whose row is selected in the agents list.
     pub(crate) fn spawn_terminal_for_selected_terminal(&mut self) {
-        let items = self.terminal_items();
-        let Some(&(_, terminal)) = items.get(self.selected_terminal_index) else {
+        let Some(owner) = self
+            .selected_terminal_row()
+            .and_then(|id| self.engine.companion_terminals.get(&id))
+            .map(|terminal| terminal.owner.clone())
+        else {
             self.set_warning("No terminal selected.");
             return;
         };
-        let owner = terminal.owner.clone();
-        drop(items);
 
         let session_id = match owner {
             TerminalOwner::Session(session_id) => session_id,
@@ -2282,7 +2313,7 @@ impl App {
         };
         // No confirmation, for the same reason as the first terminal: the pane
         // launches and streams.
-        self.activate_new_terminal(terminal_id);
+        self.activate_new_terminal(&terminal_id);
     }
 
     /// Palette command (`new-terminal-for-agent`): spawns a new companion
@@ -2300,36 +2331,14 @@ impl App {
         );
     }
 
-    /// Opens the terminal overlay for the terminal selected in the terminals list.
-    pub(crate) fn open_terminal_from_terminal_list(&mut self) {
-        let items = self.terminal_items();
-        let Some(&(terminal_id, terminal)) = items.get(self.selected_terminal_index) else {
+    /// Focus the terminal whose row is selected in the agents list, windowed
+    /// and typeable, the way activating an agent row focuses the agent.
+    pub(crate) fn open_selected_terminal_row(&mut self) {
+        let Some(terminal_id) = self.selected_terminal_row() else {
             return;
         };
-        let terminal_id = terminal_id.clone();
-        let owner = terminal.owner.clone();
-        drop(items);
-
-        // Select this terminal's owner (session or project) in the left pane.
-        let pos = match &owner {
-            TerminalOwner::Session(session_id) => self.left_items().iter().position(
-                |item| matches!(item, LeftItem::Session(idx) if self.engine.sessions.get(*idx).map(|s| s.id.as_str()) == Some(session_id.as_str())),
-            ),
-            // The flat agent list has no project rows, so a project terminal has no
-            // left-pane row to move the cursor onto. A standalone terminal has no
-            // owner at all, so it has none either.
-            TerminalOwner::Project(_) | TerminalOwner::Standalone => None,
-        };
-        if let Some(pos) = pos {
-            self.selected_left = pos;
-        }
-        self.reload_changed_files();
-
-        self.active_terminal_id = Some(terminal_id);
-        self.terminal_return_to_list = false;
-        self.show_companion_terminal_surface();
-        self.input_target = InputTarget::Terminal;
-        // No confirmation: the whole centre pane becomes that terminal.
+        self.show_terminal_in_center(&terminal_id);
+        self.input_target = InputTarget::None;
     }
 
     /// `pull-project`: pull the selected agent's project, or pick one from the
@@ -2744,15 +2753,19 @@ impl App {
         }
     }
 
-    pub(crate) fn confirm_delete_selected_terminal(&mut self) {
-        let items = self.terminal_items();
-        let Some((terminal_id, terminal)) = items.get(self.selected_terminal_index) else {
+    /// Open the close confirm for the terminal the close binding means: the
+    /// selected terminal row's, or the dock's active one while it has focus.
+    pub(crate) fn confirm_close_focused_terminal(&mut self) {
+        let Some((terminal_id, terminal)) = self
+            .focused_terminal_to_close()
+            .and_then(|id| self.engine.companion_terminals.get_key_value(&id))
+        else {
             self.set_error("Select a terminal first.");
             return;
         };
         self.prompt = PromptState::ConfirmDeleteTerminal {
             attached: Vec::new(),
-            terminal_id: (*terminal_id).clone(),
+            terminal_id: terminal_id.clone(),
             terminal_label: terminal.label.clone(),
             foreground_cmd: terminal.foreground_cmd.clone(),
             focus: ConfirmFocus::Cancel, // Cancel is default
@@ -4869,7 +4882,10 @@ impl App {
         // The UNFILTERED list: the kill overlay is its own surface with its own
         // filter row, so a query typed into the sidebar must not decide which
         // processes it offers to stop.
-        for (terminal_id, terminal) in self.sorted_terminal_items() {
+        let mut terminals: Vec<(&String, &CompanionTerminal)> =
+            self.engine.companion_terminals.iter().collect();
+        terminals.sort_by_key(|(_, terminal)| terminal.sort_order);
+        for (terminal_id, terminal) in terminals {
             let context_owner = self.terminal_runtime_context(terminal);
             // Normalize the foreground through the shared core rule (trim + strip
             // "TERM "/"term "; None when blank), so the kill overlay, the sidebar,
@@ -5152,14 +5168,14 @@ impl App {
 
         if active_terminal_killed {
             self.active_terminal_id = None;
-            if self.session_surface == SessionSurface::Terminal {
+            if self.focused_surface() == SessionSurface::Terminal {
                 self.input_target = InputTarget::None;
                 self.fullscreen_overlay = FullscreenOverlay::None;
                 self.session_surface = SessionSurface::Agent;
             }
         }
 
-        if selected_agent_killed && self.session_surface == SessionSurface::Agent {
+        if selected_agent_killed && self.focused_surface() == SessionSurface::Agent {
             self.input_target = InputTarget::None;
             self.fullscreen_overlay = FullscreenOverlay::None;
             self.focus = FocusPane::Left;
@@ -5569,8 +5585,11 @@ mod tests {
             palette_hint_gen: None,
             palette_opened_over: PaletteOpenedOver::NotRecorded,
             selected_left: 0,
-            left_section: crate::app::LeftSection::Projects,
-            selected_terminal_index: 0,
+            left_terminals: Vec::new(),
+            dock_layouts: std::collections::HashMap::new(),
+            dock_active: std::collections::HashMap::new(),
+            stopped_layout: None,
+            last_dock_strip: None,
             right_section: RightSection::Unstaged,
             files_index: 0,
             files_search: TextInput::new(),
@@ -5581,7 +5600,7 @@ mod tests {
             pending_commit: None,
             left_width_pct: 20,
             right_width_pct: 23,
-            terminal_pane_height_pct: 35,
+            terminal_dock_pct: 35,
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
             focus: FocusPane::Left,
@@ -5625,16 +5644,14 @@ mod tests {
             host_forward_carry: Vec::new(),
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
-            terminal_return_to_list: false,
-            last_pty_size: (0, 0),
-            last_pty_resize_target: None,
+            pty_sizes: std::collections::HashMap::new(),
+            part_targets: crate::app::PartTargets::default(),
             tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
-            grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -5675,8 +5692,7 @@ mod tests {
             pending_diff: None,
             changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
-            snapshot_buf: crate::pty::TerminalSnapshot::empty(),
-            last_snapshot_id: None,
+            part_snapshots: crate::app::PartSnapshots::default(),
             terminal_selection: None,
             pending_link_click: None,
             pending_pr_banner_press: None,
@@ -5689,7 +5705,6 @@ mod tests {
             published_ptys: None,
             companion: None,
             left_rows: Vec::new(),
-            terminal_cursor: None,
             tui_fallback_tabs: HashSet::default(),
             pending_background_server_start: None,
             pending_tailscale_mode_op: None,
@@ -9506,13 +9521,13 @@ mod tests {
         );
     }
 
-    // ---- terminal_items sort-mode coverage ------------------------------------
+    // ---- terminal rows under each sort mode ------------------------------------
     //
-    // These mirror the agent-list sort tests above but over the flat Terminals
-    // section, and must stay in lockstep with the web `sortFlatTerminals` tests.
+    // A standalone terminal is a row of the agents list and sorts with the agents
+    // under every mode; these pin the terminal rows' relative order.
 
-    /// Insert a companion terminal with fully controlled sort keys. Spawns a cheap
-    /// throwaway PTY (`echo`) for `client`; `terminal_items` never reads it.
+    /// Insert a standalone terminal with fully controlled sort keys. Spawns a
+    /// cheap throwaway PTY (`echo`) for `client`; the list never reads it.
     fn insert_test_terminal(
         app: &mut App,
         id: &str,
@@ -9527,7 +9542,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             id.to_string(),
             CompanionTerminal {
-                owner: TerminalOwner::Session("s1".to_string()),
+                owner: TerminalOwner::Standalone,
                 label: label.to_string(),
                 foreground_cmd: foreground_cmd.map(std::string::ToString::to_string),
                 client,
@@ -9544,10 +9559,15 @@ mod tests {
         test_app_with_sessions(vec![session], vec![project])
     }
 
-    fn terminal_order(app: &App) -> Vec<String> {
-        app.terminal_items()
-            .into_iter()
-            .map(|(id, _)| id.clone())
+    /// The terminal rows of the agents list, top to bottom.
+    fn terminal_order(app: &mut App) -> Vec<String> {
+        app.rebuild_left_items();
+        app.left_rows
+            .iter()
+            .filter_map(|row| match row {
+                crate::app::LeftRow::Terminal(id) => Some(id.clone()),
+                crate::app::LeftRow::Agent(_) | crate::app::LeftRow::InactiveToggle => None,
+            })
             .collect()
     }
 
@@ -9559,8 +9579,9 @@ mod tests {
         insert_test_terminal(&mut app, "term-a", 0, Utc::now(), "Terminal 1", None);
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
-        app.selected_terminal_index = 0;
-        app.open_terminal_from_terminal_list();
+        app.rebuild_left_items();
+        app.reselect_left_terminal("term-a");
+        app.open_selected_terminal_row();
 
         assert_eq!(app.active_terminal_id.as_deref(), Some("term-a"));
         assert_eq!(
@@ -9571,11 +9592,16 @@ mod tests {
     }
 
     /// The other route onto an existing terminal, from the selected agent
-    /// rather than the terminals list, is quiet for the same reason.
+    /// rather than a terminal row, is quiet for the same reason.
     #[test]
     fn reopening_an_agents_first_terminal_announces_nothing() {
         let mut app = app_with_one_session();
         insert_test_terminal(&mut app, "term-a", 0, Utc::now(), "Terminal 1", None);
+        app.engine
+            .companion_terminals
+            .get_mut("term-a")
+            .expect("inserted")
+            .owner = TerminalOwner::Session("s1".to_string());
         let before = app.status.most_recent_tui().map(|(_, text)| text);
 
         app.selected_left = app
@@ -9656,7 +9682,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_items_manual_orders_by_sort_order() {
+    fn terminal_rows_in_manual_order_follow_sort_order() {
         let mut app = app_with_one_session();
         app.engine.config.ui.agent_sort = "manual".to_string();
         let now = Utc::now();
@@ -9665,11 +9691,11 @@ mod tests {
         insert_test_terminal(&mut app, "term-a", 0, now, "mmm", None);
         insert_test_terminal(&mut app, "term-b", 1, now, "aaa", None);
 
-        assert_eq!(terminal_order(&app), vec!["term-a", "term-b", "term-c"]);
+        assert_eq!(terminal_order(&mut app), vec!["term-a", "term-b", "term-c"]);
     }
 
     #[test]
-    fn terminal_items_created_orders_newest_first() {
+    fn terminal_rows_in_created_order_put_the_newest_first() {
         let mut app = app_with_one_session();
         app.engine.config.ui.agent_sort = "created".to_string();
         let t0 = Utc::now();
@@ -9692,11 +9718,11 @@ mod tests {
         );
 
         // Newest created first.
-        assert_eq!(terminal_order(&app), vec!["term-c", "term-b", "term-a"]);
+        assert_eq!(terminal_order(&mut app), vec!["term-c", "term-b", "term-a"]);
     }
 
     #[test]
-    fn terminal_items_updated_orders_by_recent_pty_activity() {
+    fn terminal_rows_in_updated_order_follow_recent_pty_activity() {
         let mut app = app_with_one_session();
         app.engine.config.ui.agent_sort = "updated".to_string();
         let now = Utc::now();
@@ -9722,35 +9748,35 @@ mod tests {
             .pty_activity
             .insert("term-b".to_string(), std::time::Instant::now());
 
-        assert_eq!(terminal_order(&app), vec!["term-b", "term-c", "term-a"]);
+        assert_eq!(terminal_order(&mut app), vec!["term-b", "term-c", "term-a"]);
     }
 
     #[test]
-    fn terminal_items_name_uses_displayed_label_and_reverses() {
+    fn terminal_rows_sort_by_the_name_they_were_opened_with_and_reverse() {
         let mut app = app_with_one_session();
         let now = Utc::now();
-        // Displayed name = foreground_cmd when present/non-empty, else label. The
-        // sort_order is deliberately anti-alphabetical to prove name wins.
-        insert_test_terminal(&mut app, "term-vim", 0, now, "shell", Some("vim"));
-        insert_test_terminal(&mut app, "term-bash", 1, now, "bash", None);
-        insert_test_terminal(&mut app, "term-htop", 2, now, "shell", Some("htop"));
+        // The foreground programs sort the other way round, and the sort_order is
+        // anti-alphabetical too: only the opened-with label can produce this
+        // order, so a program renaming its window never moves the row.
+        insert_test_terminal(&mut app, "term-zsh", 0, now, "zsh", Some("aaa"));
+        insert_test_terminal(&mut app, "term-fish", 1, now, "fish", Some("mmm"));
+        insert_test_terminal(&mut app, "term-bash", 2, now, "bash", Some("zzz"));
 
         app.engine.config.ui.agent_sort = "name".to_string();
-        // bash < htop < vim
         assert_eq!(
-            terminal_order(&app),
-            vec!["term-bash", "term-htop", "term-vim"]
+            terminal_order(&mut app),
+            vec!["term-bash", "term-fish", "term-zsh"]
         );
 
         app.engine.config.ui.agent_sort = "name_desc".to_string();
         assert_eq!(
-            terminal_order(&app),
-            vec!["term-vim", "term-htop", "term-bash"]
+            terminal_order(&mut app),
+            vec!["term-zsh", "term-fish", "term-bash"]
         );
     }
 
     #[test]
-    fn terminal_items_active_floats_working_or_typing_to_top() {
+    fn terminal_rows_in_active_order_float_working_or_typing_to_the_top() {
         let mut app = app_with_one_session();
         app.engine.config.ui.agent_sort = "active".to_string();
         let now = Utc::now();
@@ -9770,7 +9796,7 @@ mod tests {
         // Hot terminals float up keeping base sort_order order (b before c), then
         // the idle rest in base order (a, d).
         assert_eq!(
-            terminal_order(&app),
+            terminal_order(&mut app),
             vec!["term-b", "term-c", "term-a", "term-d"]
         );
     }

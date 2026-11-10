@@ -1775,8 +1775,9 @@ pub struct UiConfig {
     pub left_width_pct: u16,
     /// The right (files and diff) pane's initial width, as a percentage of the terminal.
     pub right_width_pct: u16,
-    /// The most of the left pane's height the companion terminals list may take, as a percentage.
-    pub terminal_pane_height_pct: u16,
+    /// The share of the center pane's height an agent's terminal dock takes in the split, as a
+    /// percentage.
+    pub terminal_dock_pct: u16,
     /// The project count at which projects with no agents move below their own divider; 0 disables
     /// it.
     pub empty_project_separator_min_projects: u16,
@@ -2439,7 +2440,7 @@ impl Default for UiConfig {
             // reports a width the user never wrote as changed.
             left_width_pct: 20,
             right_width_pct: 23,
-            terminal_pane_height_pct: 35,
+            terminal_dock_pct: 50,
             empty_project_separator_min_projects: 5,
             staged_pane_height_pct: 50,
             commit_pane_height_pct: 40,
@@ -3202,7 +3203,7 @@ impl Default for Config {
             ui: UiConfig {
                 left_width_pct: 20,
                 right_width_pct: 23,
-                terminal_pane_height_pct: 35,
+                terminal_dock_pct: 50,
                 empty_project_separator_min_projects: 5,
                 staged_pane_height_pct: 50,
                 commit_pane_height_pct: 40,
@@ -10027,6 +10028,16 @@ mod agent_tabs_cap_tests {
     #[test]
     fn a_leftover_mobile_top_bar_line_is_ignored_rather_than_failing_the_load() {
         let parsed: Config = toml::from_str("[ui]\nmobile_top_bar = false\n")
+            .expect("a retired key must not fail the whole config load");
+        assert_eq!(parsed.ui, UiConfig::default());
+    }
+
+    // `ui.terminal_pane_height_pct` capped the left pane's companion terminals
+    // list, which is gone: an agent's terminals dock under it in the center
+    // pane, sized by `terminal_dock_pct`. Same treatment as the keys above.
+    #[test]
+    fn a_leftover_terminal_pane_height_pct_line_is_ignored_rather_than_failing_the_load() {
+        let parsed: Config = toml::from_str("[ui]\nterminal_pane_height_pct = -1\n")
             .expect("a retired key must not fail the whole config load");
         assert_eq!(parsed.ui, UiConfig::default());
     }

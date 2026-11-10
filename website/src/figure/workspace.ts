@@ -107,6 +107,7 @@ function terminal(
     typing: false,
     foreground_cmd: null,
     sort_order: 0,
+    list_after: null,
     created_at: CREATED,
     updated_at: UPDATED,
     ...over,
@@ -222,8 +223,8 @@ const sessions: SessionView[] = [
 ]
 
 // Terminals travel as ONE flat list, each carrying its owner, which is what the
-// browser reads; nested under their owners the sidebar's terminals section
-// renders empty.
+// browser reads: a project's or a standalone terminal is a row of the agents
+// list, and an agent's own terminal sits in that agent's dock.
 const terminals: TerminalView[] = [
   { ...devServer, owner: { kind: "project", project_id: STOREFRONT } },
   {

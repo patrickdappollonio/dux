@@ -9,7 +9,7 @@
 
 use super::input::contains_point;
 use super::reorder::{MoveDir, move_in_order, move_to_target};
-use super::{App, DrawnTabStrip, TabDragState};
+use super::{App, DrawnTabStrip, PillStrip, TabDragState};
 use crossterm::event::MouseEvent;
 use dux_core::engine::Command;
 use dux_core::ids::{SessionIdRef, TabIdRef};
@@ -19,10 +19,17 @@ impl App {
     /// one when the pointer reaches a different pill, so a press that releases
     /// where it landed stays the plain click that focuses the tab.
     pub(super) fn arm_tab_drag(&mut self, tab_id: &str) {
+        self.arm_strip_drag(PillStrip::Tabs, tab_id);
+    }
+
+    /// Arm a drag on a pill of either of the selected agent's strips.
+    pub(super) fn arm_strip_drag(&mut self, strip: PillStrip, pill_id: &str) {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return;
         };
+        let tab_id = pill_id;
         self.tab_drag = Some(TabDragState {
+            strip,
             session_id,
             source_id: tab_id.to_string(),
             hover_id: None,
@@ -30,9 +37,15 @@ impl App {
         });
     }
 
-    /// The pill the pointer is over, or `None` between pills and off the strip.
-    fn tab_under_pointer(&self, mouse: MouseEvent) -> Option<String> {
-        self.agent_tab_regions
+    /// The pill of `strip` the pointer is over, or `None` between pills and off
+    /// the strip. A drag only ever asks about its own strip, so a pill of the
+    /// other one is never a drop target.
+    fn tab_under_pointer(&self, strip: PillStrip, mouse: MouseEvent) -> Option<String> {
+        let regions = match strip {
+            PillStrip::Tabs => &self.agent_tab_regions,
+            PillStrip::Dock => &self.mouse_layout.dock_pills,
+        };
+        regions
             .iter()
             .find(|(_, rect)| contains_point(*rect, mouse.column, mouse.row))
             .map(|(id, _)| id.clone())
@@ -45,7 +58,7 @@ impl App {
         let Some(mut drag) = self.tab_drag.take() else {
             return;
         };
-        let over = self.tab_under_pointer(mouse);
+        let over = self.tab_under_pointer(drag.strip, mouse);
         if !drag.promoted && over.as_deref().is_none_or(|id| id == drag.source_id) {
             self.tab_drag = Some(drag);
             return;
@@ -70,6 +83,15 @@ impl App {
             return;
         };
         if self.selected_session().map(|s| s.id.as_str()) != Some(drag.session_id.as_str()) {
+            return;
+        }
+        if drag.strip == PillStrip::Dock {
+            let order = self.dock_terminal_ids(&drag.session_id);
+            if !order.contains(&drag.source_id) || !order.contains(&target) {
+                return;
+            }
+            let moved = move_to_target(&order, &drag.source_id, &target);
+            self.apply_dock_order(&drag.source_id, &order, &moved);
             return;
         }
         let order = self.session_tab_ids(&drag.session_id);

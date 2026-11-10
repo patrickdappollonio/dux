@@ -73,7 +73,7 @@
 
 use dux_core::background_serve::{PtyOwnershipEvent, TUI_DEVICE_LABEL, TuiOwnership};
 
-use super::App;
+use super::{App, CenterPart};
 use crate::pty::PtyClient;
 use dux_core::ids::TabIdRef;
 
@@ -202,19 +202,19 @@ impl App {
     /// Asked of the live registry on every frame rather than of a latched flag:
     /// ownership moves between devices while nothing on this surface happens.
     pub(crate) fn focused_pty_takeover_card(&self) -> Option<PtyTakeoverCard> {
+        self.part_takeover_card(self.focused_part())
+    }
+
+    /// Which card, if any, is over `part`. Both parts of the center belong to
+    /// one row, and a row has one driver, so the two always agree.
+    pub(crate) fn part_takeover_card(&self, part: CenterPart) -> Option<PtyTakeoverCard> {
         self.pty_ownership()?;
-        let pty_id = self.selected_terminal_surface_id()?;
+        let pty_id = self.part_pty_id(part)?;
         match self.pty_driver(&pty_id) {
             PtyDriver::Mine => None,
             PtyDriver::Free => Some(PtyTakeoverCard::Free),
             PtyDriver::Elsewhere { device } => Some(PtyTakeoverCard::Elsewhere { device }),
         }
-    }
-
-    /// The same question with the sentence thrown away, for the gates that only
-    /// need to know whether the card is between the keyboard and the child.
-    pub(crate) fn focused_pty_is_covered_by_card(&self) -> bool {
-        self.focused_pty_takeover_card().is_some()
     }
 
     /// The typing chokepoint: may this surface write to the focused terminal
@@ -339,7 +339,7 @@ impl App {
         // re-gridded keeps that grid indefinitely: the dedupe sees the same pane
         // size against the same target and sends nothing, and the card that
         // would have said so is gone once the claim succeeds.
-        self.last_pty_resize_target = None;
+        self.forget_sent_pty_sizes();
         self.publish_ownership(claimed);
     }
 
@@ -374,16 +374,14 @@ impl App {
             }
             return true;
         };
-        // An arm for a DIFFERENT pty is spent-or-dropped here as well, so an
-        // intent cannot sit around while the user looks somewhere else and then
-        // fire minutes later on a pane they were not thinking about.
-        self.expire_stale_pty_takeover(Some(pty_id));
-        // An armed take-over is spent here, whether or not it is granted, so a
-        // stale intent cannot sit around and surprise a later resize.
+        // An armed take-over is spent by the resize of any pty in its row,
+        // whether or not it is granted, so a stale intent cannot sit around and
+        // surprise a later resize. One armed for another row is left for the
+        // end of the frame to judge, because the frame may yet draw it.
         let takeover = self
             .pending_pty_takeover
-            .as_deref()
-            .is_some_and(|armed| armed == pty_id);
+            .as_ref()
+            .is_some_and(|armed| *armed == self.engine.pty_row(pty_id));
         if takeover {
             self.pending_pty_takeover = None;
         }
@@ -529,20 +527,24 @@ impl App {
             })
     }
 
-    /// Drop an armed take-over that is no longer about the pane in front of the
-    /// user, quietly.
+    /// Drop an armed take-over that is no longer about anything on screen,
+    /// with a sentence saying so.
     ///
     /// An arm carries no geometry of its own: it waits for the render pass that
-    /// measures the pane, so it must be spent or dropped at the first render
-    /// after arming, or it survives a change of selection and fires later on a
-    /// pty the user has stopped thinking about. `rendered` is the target that
-    /// render pass is about, `None` when the center pane shows something with no
-    /// pty behind it at all.
-    pub(crate) fn expire_stale_pty_takeover(&mut self, rendered: Option<&str>) {
-        let Some(armed) = self.pending_pty_takeover.as_deref() else {
+    /// measures a pane of its row, so it must be spent or dropped at the end of
+    /// the first frame after arming, or it survives a change of selection and
+    /// fires later on a row the user has stopped thinking about. Judged at the
+    /// end of the frame, against every pty that frame drew, so drawing one part
+    /// of a row before the other never drops an intent the other was about to
+    /// spend.
+    pub(crate) fn expire_stale_pty_takeover(&mut self, drawn: &[String]) {
+        let Some(armed) = self.pending_pty_takeover.as_ref() else {
             return;
         };
-        if rendered == Some(armed) {
+        if drawn
+            .iter()
+            .any(|pty_id| self.engine.pty_row(pty_id) == *armed)
+        {
             return;
         }
         self.pending_pty_takeover = None;
@@ -558,10 +560,10 @@ impl App {
     /// now on, and whichever device was driving becomes a watcher.
     ///
     /// Arms the claim rather than making it, because the claim has to carry this
-    /// pane's real geometry and the render pass is what measures that. Clearing
-    /// `last_pty_resize_target` is the other half: without it a take-over of a
-    /// pty whose pane measures exactly what it measured last time is deduped
-    /// away, and the claim is never sent at all.
+    /// pane's real geometry and the render pass is what measures that.
+    /// Forgetting the row's sent geometry is the other half: without it a
+    /// take-over of a pty whose pane measures exactly what it measured last time
+    /// is deduped away, and the claim is never sent at all.
     ///
     /// Only the card's button reaches this, and the card is on screen exactly
     /// while the shown pty is not this surface's, so a pty this surface already
@@ -572,13 +574,11 @@ impl App {
     /// against the registry: a flagged claim, which an unowned pty grants
     /// outright and an owned one transfers. Only the sentence differs.
     pub(crate) fn take_over_focused_pty(&mut self) {
-        let Some(card) = self.focused_pty_takeover_card() else {
+        let Some((card, pty_id)) = self.covering_card() else {
             return;
         };
-        let Some(pty_id) = self.selected_terminal_surface_id() else {
-            return;
-        };
-        if self.pending_pty_takeover.as_deref() == Some(pty_id.as_str()) {
+        let row = self.engine.pty_row(&pty_id);
+        if self.pending_pty_takeover.as_ref() == Some(&row) {
             // Already asked for, and the arm is spent by the very next render.
             // A second message would be dux reporting one act twice at a user
             // who pressed a button that has not visibly done anything yet.
@@ -602,8 +602,8 @@ impl App {
                 .to_string(),
         };
         self.set_info(message);
-        self.pending_pty_takeover = Some(pty_id);
-        self.last_pty_resize_target = None;
+        self.pending_pty_takeover = Some(row);
+        self.forget_row_pty_sizes(&pty_id);
     }
 
     /// Let go of every pty this surface is driving, and say so to the browsers.
@@ -627,6 +627,15 @@ impl App {
             .map(|(pty_id, epoch)| PtyOwnershipEvent::Released { pty_id, epoch })
             .collect();
         self.publish_ownership(&events);
+    }
+
+    /// Forget the geometry sent to every pty in `pty_id`'s row, so the next
+    /// frame sends each drawn part of the row its size again.
+    fn forget_row_pty_sizes(&mut self, pty_id: &str) {
+        let row = self.engine.pty_row(pty_id);
+        let engine = &self.engine;
+        self.pty_sizes.retain(|sent, _| engine.pty_row(sent) != row);
+        self.part_targets = crate::app::PartTargets::default();
     }
 
     /// Hand ownership facts to the companion, which is the only thing that can
@@ -879,14 +888,12 @@ mod tests {
 
         // The pane has already been sized for this pty, so without the clear the
         // take-over's resize would be deduped away.
-        app.last_pty_resize_target = Some("s1".to_string());
-        app.last_pty_size = (24, 80);
+        app.pty_sizes.insert("s1".to_string(), (24, 80));
         app.session_surface = SessionSurface::Agent;
 
         // Arm it directly: `take_over_focused_pty` resolves the focused surface,
         // which needs a live PTY, and what is under test here is the claim.
-        app.pending_pty_takeover = Some("s1".to_string());
-        app.last_pty_resize_target = None;
+        app.pending_pty_takeover = Some(app.engine.pty_row("s1"));
 
         assert!(
             app.resize_pty_if_permitted("s1", 24, 80),
@@ -896,10 +903,6 @@ mod tests {
         assert_eq!(
             app.pending_pty_takeover, None,
             "the armed take-over is spent by the resize that carried it"
-        );
-        assert_eq!(
-            app.last_pty_resize_target, None,
-            "the dedupe was cleared, which is what let the resize through"
         );
 
         let published = recorded.lock().expect("not poisoned").published.clone();
@@ -933,7 +936,7 @@ mod tests {
         );
 
         // The explicit action is the way back.
-        app.pending_pty_takeover = Some("s1".to_string());
+        app.pending_pty_takeover = Some(app.engine.pty_row("s1"));
         assert!(app.resize_pty_if_permitted("s1", 40, 120));
         assert!(seat.owners.is_owner("s1", seat.conn_id));
     }
@@ -962,7 +965,7 @@ mod tests {
             .expect("the browser's claim applied");
 
         // This surface takes over and applies immediately.
-        app.pending_pty_takeover = Some("s1".to_string());
+        app.pending_pty_takeover = Some(app.engine.pty_row("s1"));
         assert!(app.resize_pty_if_permitted("s1", 50, 150));
 
         assert!(
@@ -1510,7 +1513,7 @@ mod tests {
             "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; sleep 5",
         );
         app.focus = FocusPane::Center;
-        app.last_pty_size = (10, 10);
+        app.set_focused_pty_size((10, 10));
         crate::app::test_support::enter_scroll_mode(&mut app, 5);
         assert!(app.scroll_mode_active(), "test setup: scrolled back");
 
@@ -1549,7 +1552,7 @@ mod tests {
         // pressed.
         assert!(seat.owners.release("session-1-slot", browser).is_some());
         assert!(
-            app.focused_pty_is_covered_by_card(),
+            app.card_covers_center(),
             "a pty nobody drives is still covered"
         );
         app.claim_launched_pty("session-1-slot");
@@ -1633,7 +1636,7 @@ mod tests {
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         // Driving it, so there is an uncovered pane to start the drag on.
         app.claim_launched_pty("session-1-slot");
 
@@ -1681,7 +1684,7 @@ mod tests {
         app.mouse_layout.left = Rect::new(0, 1, 20, 20);
         app.mouse_layout.center = Rect::new(20, 1, 60, 20);
         app.mouse_layout.right = Rect::new(80, 1, 20, 20);
-        app.mouse_layout.agent_term = Some(Rect::new(21, 2, 58, 18));
+        app.mouse_layout.focused_term = Some(Rect::new(21, 2, 58, 18));
         let at = |kind, column| MouseEvent {
             kind,
             column,
@@ -1712,7 +1715,10 @@ mod tests {
         let (mut app, _recorded, _seat) = app_with_the_card_up();
 
         app.take_over_focused_pty();
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
 
         // The first press's message is NEWS (a terminal changed hands), not a
         // hint about what is on screen, so the queue is right to still be showing
@@ -1727,7 +1733,10 @@ mod tests {
             message, "a marker nothing else writes",
             "the second press must not write a second status: {message}"
         );
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
     }
 
     // ── The card's keys and its button ──────────────────────────────────────
@@ -1797,7 +1806,7 @@ mod tests {
             .expect("render frame");
 
         assert!(
-            app.focused_pty_is_covered_by_card(),
+            app.card_covers_center(),
             "test setup: the card is between this surface and the child"
         );
         let band = app
@@ -1841,8 +1850,8 @@ mod tests {
             let (mut app, _recorded, _seat) = app_with_the_card_up();
             app.handle_key(key).expect("the key is handled");
             assert_eq!(
-                app.pending_pty_takeover.as_deref(),
-                Some("session-1-slot"),
+                app.pending_pty_takeover,
+                Some(app.engine.pty_row("session-1-slot")),
                 "{key:?} must arm the take-over the card's button arms"
             );
             assert!(
@@ -1970,8 +1979,8 @@ mod tests {
         app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
-            app.pending_pty_takeover.as_deref(),
-            Some("session-1-slot"),
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot")),
             "the raw path must reach the same take-over the windowed key does"
         );
         assert!(
@@ -2008,8 +2017,8 @@ mod tests {
             app.process_raw_input_bytes(b" ");
 
             assert_eq!(
-                app.pending_pty_takeover.as_deref(),
-                Some("session-1-slot"),
+                app.pending_pty_takeover,
+                Some(app.engine.pty_row("session-1-slot")),
                 "Space must press the card's button here as it does in the \
                  windowed pane (driven elsewhere: {driven_elsewhere})"
             );
@@ -2070,7 +2079,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let (mut app, _recorded, _seat) = app_with_the_card_up();
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
 
         // Outside the button: no take-over, and the press is not armed.
@@ -2106,7 +2115,10 @@ mod tests {
             row: 11,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
         assert_eq!(
             app.takeover_press, None,
             "the press is spent by the release"
@@ -2122,12 +2134,12 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (mut app, _recorded, _seat) = app_with_the_card_up();
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
-        app.snapshot_buf.rows = 20;
-        app.snapshot_buf.cols = 80;
-        app.snapshot_buf.links = vec!["https://example.com/pr/1".to_string()];
-        app.snapshot_buf.cells = vec![crate::pty::SnapshotCell {
+        app.part_snapshots.main.buf.rows = 20;
+        app.part_snapshots.main.buf.cols = 80;
+        app.part_snapshots.main.buf.links = vec!["https://example.com/pr/1".to_string()];
+        app.part_snapshots.main.buf.cells = vec![crate::pty::SnapshotCell {
             row: 5,
             col: 5,
             symbol: "P".into(),
@@ -2165,7 +2177,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let (mut app, _recorded, _seat) = app_with_the_card_up();
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
 
         app.handle_mouse(MouseEvent {
@@ -2216,7 +2228,7 @@ mod tests {
         app.selected_left = 0;
         app.mouse_layout.left_list = Rect::new(0, 0, 20, 10);
         app.mouse_layout.left_row_to_item = (0..10usize).collect();
-        app.mouse_layout.agent_term = Some(Rect::new(21, 1, 40, 10));
+        app.mouse_layout.focused_term = Some(Rect::new(21, 1, 40, 10));
         app.mouse_layout.unstaged_list = Some(Rect::new(70, 1, 20, 5));
 
         // Another device drives the pty, so the card covers the center pane.
@@ -2224,7 +2236,7 @@ mod tests {
         seat.owners
             .claim("session-1-slot", browser)
             .expect("claimed");
-        assert!(app.focused_pty_is_covered_by_card(), "the card is up");
+        assert!(app.card_covers_center(), "the card is up");
 
         let press = |kind, column, row| MouseEvent {
             kind,
@@ -2268,7 +2280,7 @@ mod tests {
             app.focus = FocusPane::Center;
             app.input_target = InputTarget::Agent;
             app.fullscreen_overlay = FullscreenOverlay::Agent;
-            app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+            app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
             app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
             if card_up {
                 let browser = seat.owners.next_conn_id();
@@ -2456,12 +2468,17 @@ mod tests {
             )
             .epoch
             .expect("the browser claimed the pty");
-        app.last_pty_resize_target = Some("session-1-slot".to_string());
+        app.pty_sizes.insert("session-1-slot".to_string(), (24, 80));
+        app.part_targets.main = Some("session-1-slot".to_string());
 
         app.take_over_focused_pty();
 
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
-        assert_eq!(app.last_pty_resize_target, None);
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
+        assert!(app.pty_sizes.is_empty());
+        assert_eq!(app.part_targets.main, None);
         let (_, message) = app.status.most_recent_tui().expect("a status was set");
         assert!(
             message.contains("Chrome on macOS"),
@@ -2494,14 +2511,17 @@ mod tests {
             .claim("session-1-slot", browser)
             .expect("claimed");
         app.take_over_focused_pty();
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
 
-        // The render pass is about a different pty now. Both messages here are
+        // The frame drew a different pty now. Both messages here are
         // NEWS rather than hints, so the queue is right to hold the first one and
         // the pre-clear stays: it is how the drop's own message can be read
         // without waiting out the take-over message's window.
         app.set_info(String::new());
-        app.expire_stale_pty_takeover(Some("session-2-slot"));
+        app.expire_stale_pty_takeover(&["session-2-slot".to_string()]);
         assert_eq!(
             app.pending_pty_takeover, None,
             "an arm for a pane the user left must not survive to fire later"
@@ -2512,11 +2532,182 @@ mod tests {
             "the drop must point at the button that asks again: {message}"
         );
 
-        // And a render pass about the armed pty leaves it alone, or the intent
+        // And a frame that drew the armed pty leaves it alone, or the intent
         // could never be spent at all.
-        app.pending_pty_takeover = Some("session-1-slot".to_string());
-        app.expire_stale_pty_takeover(Some("session-1-slot"));
-        assert_eq!(app.pending_pty_takeover.as_deref(), Some("session-1-slot"));
+        app.pending_pty_takeover = Some(app.engine.pty_row("session-1-slot"));
+        app.expire_stale_pty_takeover(&["session-1-slot".to_string()]);
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
+    }
+
+    /// The intent is the ROW's: a frame that drew only another pty of the same
+    /// row (the agent's terminal in its dock) keeps it, so drawing one part of a
+    /// row before the other never drops what the other was about to spend.
+    #[test]
+    fn an_armed_take_over_survives_a_frame_that_drew_another_part_of_its_row() {
+        let (mut app, _recorded, seat) = app_with_a_live_pty();
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let (terminal_id, _) = app
+            .engine
+            .create_companion_terminal("session-1", 24, 80)
+            .expect("companion terminal");
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim("session-1-slot", browser)
+            .expect("claimed");
+        app.take_over_focused_pty();
+
+        app.expire_stale_pty_takeover(std::slice::from_ref(&terminal_id));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
+    }
+
+    /// An agent with a terminal docked under it, the row driven by a browser:
+    /// the stack is drawn in the split with the dock focused.
+    fn a_browser_driving_a_docked_row() -> (App, TuiOwnership, String) {
+        let (mut app, _recorded, seat) =
+            app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
+        app.engine.config.terminal.command = "cat".to_string();
+        app.engine.config.terminal.args = Vec::new();
+        let (terminal_id, _) = app
+            .engine
+            .create_companion_terminal("session-1", 24, 80)
+            .expect("companion terminal");
+        app.focus = FocusPane::Center;
+        app.reconcile_center_target();
+        app.session_surface = SessionSurface::Terminal;
+        let browser = seat.owners.next_conn_id();
+        seat.owners
+            .claim_for_resize(
+                "session-1-slot",
+                browser,
+                dux_core::pty_owners::ResizeIntent::Plain,
+                Some(REAL_CHROME_UA),
+                |_| {},
+            )
+            .epoch
+            .expect("the browser claimed the row");
+        let _ = render_rows(&mut app, 160, 40);
+        (app, seat, terminal_id)
+    }
+
+    /// One card covers the agent and its dock together, with one button, and
+    /// nothing under it can be focused, scrolled or selected.
+    #[test]
+    fn one_take_over_card_covers_the_whole_stack_and_swallows_the_pointer() {
+        let (mut app, _seat, _terminal) = a_browser_driving_a_docked_row();
+        let rows = render_rows(&mut app, 160, 40);
+        let buttons = rows.iter().filter(|row| row.contains("Take over")).count();
+        assert_eq!(buttons, 1, "{}", rows.join("\n"));
+        let stack = app.mouse_layout.center_stack.expect("the stack");
+        let button = app.mouse_layout.takeover_button.expect("one button");
+        assert!(stack.contains(button.as_position()));
+
+        // A press on the covered agent part neither moves focus off the dock
+        // nor starts a selection; a wheel scrolls nothing.
+        let agent_point = (stack.x + 2, stack.y + 2);
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.focused_part(), crate::app::CenterPart::Dock);
+        assert!(app.terminal_selection.is_none());
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: agent_point.0,
+            row: agent_point.1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.scroll_mode.is_empty(), "nothing under the card scrolls");
+
+        // The button claims the row, and the next frame's resize of a part of
+        // it spends the intent.
+        let press = |kind| MouseEvent {
+            kind,
+            column: button.x + 1,
+            row: button.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(press(MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse(press(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot"))
+        );
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(app.pending_pty_takeover, None, "spent by the row's resize");
+        assert!(
+            app.focused_pty_takeover_card().is_none(),
+            "the row is this surface's"
+        );
+    }
+
+    /// With the agent part focused on a dormant tab, the row is still taken
+    /// over through the docked terminal's pty, and neither Space nor the focus
+    /// key reaches the covered agent part to launch the dormant tab.
+    #[test]
+    fn the_card_takes_the_row_over_through_any_drawn_part() {
+        let (mut app, _seat, _terminal) = a_browser_driving_a_docked_row();
+        let session_id = app.engine.sessions[0].id.clone();
+        app.engine.agent_tabs.insert(
+            TabId::new("dormant-tab"),
+            dux_core::model::AgentTab {
+                id: "dormant-tab".to_string(),
+                session_id: session_id.clone(),
+                provider: dux_core::model::ProviderKind::new("codex"),
+                sort_order: 1,
+                created_at: chrono::Utc::now(),
+            },
+        );
+        app.set_focused_tab(&session_id, "dormant-tab");
+        app.session_surface = SessionSurface::Agent;
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.card_covers_center());
+
+        for key in [
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            app.pending_pty_takeover = None;
+            app.handle_key(key).unwrap();
+            assert_eq!(
+                app.pending_pty_takeover,
+                Some(app.engine.pty_row("session-1-slot")),
+                "{key:?} presses the card's button"
+            );
+            assert!(
+                !app.engine
+                    .providers
+                    .contains_key(TabIdRef::new("dormant-tab"))
+                    && !app.tui_launched_ptys.contains("dormant-tab"),
+                "{key:?} launched the dormant tab under the card"
+            );
+        }
+    }
+
+    /// The intent is spent by a resize of the DOCK's pty just as by the
+    /// agent's: both belong to the row.
+    #[test]
+    fn a_take_over_intent_is_spent_by_the_docks_resize() {
+        let (mut app, seat, terminal) = a_browser_driving_a_docked_row();
+        app.take_over_focused_pty();
+        app.pty_sizes.clear();
+        assert!(app.resize_pty_if_permitted(&terminal, 20, 70));
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
     }
 
     /// Ctrl-g in interactive mode: the default `ToggleFullscreen` binding, which
@@ -2556,7 +2747,7 @@ mod tests {
         let (mut app, recorded, seat) = app_with_a_live_pty();
         app.input_target = InputTarget::Agent;
         // The local scroll needs a page height to scroll by.
-        app.last_pty_size = (10, 10);
+        app.set_focused_pty_size((10, 10));
 
         app.process_raw_input_bytes(PAGE_UP_BYTES);
 
@@ -2616,7 +2807,7 @@ mod tests {
         for demoted in [true, false] {
             let (mut app, _recorded, seat) = app_with_a_live_pty_running("sleep 5");
             app.input_target = InputTarget::Agent;
-            app.last_pty_size = (10, 10);
+            app.set_focused_pty_size((10, 10));
             if demoted {
                 let browser = seat.owners.next_conn_id();
                 seat.owners
@@ -2655,7 +2846,7 @@ mod tests {
                 "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; sleep 5",
             );
             app.input_target = InputTarget::Agent;
-            app.last_pty_size = (10, 10);
+            app.set_focused_pty_size((10, 10));
             // This provider forwards page keys unconditionally, which is the one
             // setting under which the forward site is reached at all.
             let mut provider = dux_core::config::ProviderCommandConfig {
@@ -2855,9 +3046,7 @@ mod tests {
     }
 
     /// A companion terminal's card says "terminal" where an agent's says
-    /// "agent", the same word swap the web makes. Drawn through the terminal's
-    /// own surface, which is an overlay: the windowed center pane is always the
-    /// agent's.
+    /// "agent", the same word swap the web makes.
     #[test]
     fn a_free_companion_terminals_card_names_a_terminal() {
         let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
@@ -2867,7 +3056,7 @@ mod tests {
         app.engine.companion_terminals.insert(
             "term-1".to_string(),
             dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("session-1-slot".to_string()),
+                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
                 label: "shell".to_string(),
                 foreground_cmd: None,
                 client: crate::pty::PtyClient::spawn(
@@ -2911,8 +3100,8 @@ mod tests {
 
         app.take_over_focused_pty();
         assert_eq!(
-            app.pending_pty_takeover.as_deref(),
-            Some("session-1-slot"),
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot")),
             "the press arms the claim; the render pass carries it"
         );
 
@@ -3121,8 +3310,8 @@ mod tests {
         app.process_raw_input_bytes(&bytes);
 
         assert_eq!(
-            app.pending_pty_takeover.as_deref(),
-            Some("session-1-slot"),
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot")),
             "the raw path must reach the same take-over the windowed key does"
         );
         assert!(
@@ -3138,7 +3327,7 @@ mod tests {
         use ratatui::layout::Rect;
 
         let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app.mouse_layout.takeover_button = Some(Rect::new(30, 10, 16, 3));
 
         app.handle_mouse(MouseEvent {
@@ -3155,8 +3344,8 @@ mod tests {
         });
 
         assert_eq!(
-            app.pending_pty_takeover.as_deref(),
-            Some("session-1-slot"),
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot")),
             "a press and release inside the button takes the pty over"
         );
     }
@@ -3660,8 +3849,8 @@ mod tests {
             .expect("live child")
             .resize(10, 10)
             .expect("re-grid the child");
-        app.last_pty_resize_target = Some("session-1-slot".to_string());
-        app.last_pty_size = sized;
+        app.part_targets.main = Some("session-1-slot".to_string());
+        app.pty_sizes.insert("session-1-slot".to_string(), sized);
 
         app.start_background_server(BackgroundServerStart::UserRequest);
         finish_a_start(&mut app, None);
