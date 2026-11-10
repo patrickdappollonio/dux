@@ -184,7 +184,18 @@ pub(crate) enum EngineRequest {
     /// nobody has been told yet", which a take cannot be used to ask because
     /// asking would be the telling.
     LateStatusFinalsWaiting(oneshot::Sender<usize>),
-    SubscribePty(String, oneshot::Sender<Result<PtySubscription, String>>),
+    /// Subscribe to a tab's PTY, launching it when dormant. The flag says
+    /// whether the pane opening it is on screen: only a pane on screen counts
+    /// as looking at the tab (see [`note_tab_looked_at`]).
+    SubscribePty(
+        String,
+        bool,
+        oneshot::Sender<Result<PtySubscription, String>>,
+    ),
+    /// A pane that was mounted off screen came on screen: the same "looking at
+    /// it" a subscribe from a pane on screen is, for a tab already subscribed.
+    /// Fire-and-forget; an id that names no agent tab is a no-op.
+    PtyShown(String),
     WritePty(String, Vec<u8>),
     /// Resize a PTY: id, rows, cols, and the apply-order seq the owners lock
     /// stamped. The seq travels because this resize applies whenever the queue is
@@ -1458,10 +1469,11 @@ impl EngineHandle {
     pub(crate) async fn subscribe_pty(
         &self,
         session_id: String,
+        viewed: bool,
     ) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::SubscribePty(session_id, tx))
+            .send(EngineRequest::SubscribePty(session_id, viewed, tx))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1498,6 +1510,12 @@ impl EngineHandle {
             .await
             .ok()?;
         rx.await.ok().flatten()
+    }
+
+    /// A pane mounted off screen has come on screen. `try_send`: like a viewed
+    /// ping it is a hint, and the next coming on screen sends another.
+    pub(crate) fn pty_shown(&self, pty_id: String) {
+        let _ = self.req_tx.try_send(EngineRequest::PtyShown(pty_id));
     }
 
     pub(crate) fn note_viewed(&self, pty_id: String) {
@@ -2529,6 +2547,9 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         EngineRequest::ApplyWire(..)
         | EngineRequest::ReloadAfterOwnConfigWrite(..)
         | EngineRequest::SubscribePty(..)
+        // Clears attention and starts a pull-request check, as a subscribe
+        // from a pane on screen does.
+        | EngineRequest::PtyShown(..)
         | EngineRequest::CreateTerminal(..)
         | EngineRequest::CreateProjectTerminal(..)
         | EngineRequest::CreateStandaloneTerminal(..)
@@ -3573,15 +3594,18 @@ impl EngineService {
             // over-broad `true` only costs a serialize.
             let moves_spine = request_mutates_spine(&req);
             match req {
-                EngineRequest::SubscribePty(tab_id, reply) => {
+                EngineRequest::SubscribePty(tab_id, viewed, reply) => {
                     handle_subscribe(
                         engine,
                         &mut self.pending,
                         &mut self.last_pr_foregrounded,
                         &mut self.status,
-                        tab_id,
+                        Subscribe { tab_id, viewed },
                         reply,
                     );
+                }
+                EngineRequest::PtyShown(tab_id) => {
+                    note_tab_looked_at(engine, &mut self.last_pr_foregrounded, &tab_id);
                 }
                 EngineRequest::SpineJson(reply) => {
                     // Serve the loop-local cache (handled here, not in
@@ -4726,8 +4750,10 @@ fn handle_request(
         EngineRequest::AttachPullRequest(session_id, raw, origin, reply) => {
             handle_attach_pull_request(engine, &session_id, &raw, origin, reply, status_tx);
         }
-        // SubscribePty is handled inline in the loop (it needs `&mut pending`).
-        EngineRequest::SubscribePty(_, _) => unreachable!("SubscribePty handled in the loop"),
+        // SubscribePty is handled inline in the loop (it needs `&mut pending`),
+        // and PtyShown with it (it needs the loop's foreground memory).
+        EngineRequest::SubscribePty(..) => unreachable!("SubscribePty handled in the loop"),
+        EngineRequest::PtyShown(_) => unreachable!("PtyShown handled in the loop"),
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => handle_pty_write(engine, &id, &bytes),
@@ -5367,37 +5393,71 @@ fn last_run_failed_refusal() -> String {
 /// Handle a `SubscribePty` request. If the provider already exists, reply
 /// immediately. Otherwise launch/resume the real agent provider and defer the
 /// reply via a `PendingSubscribe` until the provider comes up (or times out).
+/// What a `SubscribePty` asks for: the tab, and whether the pane opening it
+/// is on screen.
+struct Subscribe {
+    tab_id: String,
+    viewed: bool,
+}
+
+/// Which pull-request check looking at a tab started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookedAtCheck {
+    /// The tight foreground refresh, for a genuine change of focus.
+    Foreground,
+    /// The normal background cadence, for the agent already in focus.
+    Cadence,
+}
+
+/// A tab is being looked at: a pane on screen subscribed to it, or a pane
+/// mounted off screen came on screen. Answers which pull-request check it
+/// started, or `None` for an id that names no agent tab (a terminal).
+///
+/// Looking at an agent's PTY foregrounds it, so its PR status is refreshed.
+/// What is looked at is always a TAB id (a slot tab's or an extra tab's), never
+/// a session id, so the owning session is resolved first. Only a GENUINE focus
+/// change gets the tight foreground refresh; a reconnect/remount of the
+/// already-focused agent falls back to the normal background cadence, so socket
+/// blips don't re-poll `gh` (mirrors the TUI's `previously_watched` gate).
+///
+/// It is also the web's "looking at it" signal for attention: the flag is
+/// cleared and briefly suppressed, stamped on the TAB id, not the owning
+/// session, and gated on the id resolving to a real tab so a stale deep link, a
+/// race, or a retry can never leak an `agent_viewed` entry that is never
+/// cleaned up. Typing then keeps it cleared via `note_pty_input` on `WritePty`,
+/// and the client's periodic viewed ping keeps it down while foregrounded.
+fn note_tab_looked_at(
+    engine: &mut Engine,
+    last_pr_foregrounded: &mut Option<String>,
+    tab_id: &str,
+) -> Option<LookedAtCheck> {
+    let owner = engine.owning_session_for_tab(tab_id)?;
+    let check = if last_pr_foregrounded.as_deref() == Some(owner.as_str()) {
+        engine.spawn_pr_check_for_session(&owner, dux_core::engine::PR_CHECK_MIN_INTERVAL);
+        LookedAtCheck::Cadence
+    } else {
+        engine.spawn_foreground_pr_check(&owner);
+        LookedAtCheck::Foreground
+    };
+    *last_pr_foregrounded = Some(owner);
+    engine.note_agent_viewed_if_known(tab_id);
+    Some(check)
+}
+
 fn handle_subscribe(
     engine: &mut Engine,
     pending: &mut Vec<PendingSubscribe>,
     last_pr_foregrounded: &mut Option<String>,
     status_tx: &mut StatusEmitter,
-    tab_id: String,
+    Subscribe { tab_id, viewed }: Subscribe,
     reply: oneshot::Sender<Result<PtySubscription, String>>,
 ) {
-    // Opening an agent's PTY foregrounds it, so refresh its PR status. What is
-    // subscribed is always a TAB id (a slot tab's or an extra tab's), never a
-    // session id, so resolve the owning session first. Only a GENUINE focus
-    // change gets the tight foreground refresh; a reconnect/remount of the
-    // already-focused agent falls back to the normal background cadence, so
-    // socket blips don't re-poll `gh` (mirrors the TUI's `previously_watched`
-    // gate).
-    if let Some(owner) = engine.owning_session_for_tab(&tab_id) {
-        if last_pr_foregrounded.as_deref() == Some(owner.as_str()) {
-            engine.spawn_pr_check_for_session(&owner, dux_core::engine::PR_CHECK_MIN_INTERVAL);
-        } else {
-            engine.spawn_foreground_pr_check(&owner);
-        }
-        *last_pr_foregrounded = Some(owner);
+    // A pane mounted off screen is not looking at its tab: it must neither
+    // clear the tab's attention nor pull it into the foreground PR cadence,
+    // here or on any of its reconnects. Coming on screen is `PtyShown`.
+    if viewed {
+        note_tab_looked_at(engine, last_pr_foregrounded, &tab_id);
     }
-    // Opening a tab's live view is the web's "looking at it" signal: clear and
-    // briefly suppress its attention flag. Stamp the subscribed TAB id, not the
-    // owning session. Gated on the id resolving to a real tab so a stale deep
-    // link, a race, or a retry can never leak an `agent_viewed` entry that is
-    // never cleaned up. Typing then keeps it cleared via `note_pty_input` on
-    // `WritePty`, and the client's periodic viewed ping keeps it down while
-    // foregrounded.
-    engine.note_agent_viewed_if_known(&tab_id);
     if let Some(client) = engine.providers.get(TabIdRef::new(&tab_id)) {
         let _ = reply.send(Ok(client.subscribe_with_repaint()));
         return;
@@ -6484,7 +6544,10 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            slot.as_str().to_string(),
+            Subscribe {
+                tab_id: slot.as_str().to_string(),
+                viewed: true,
+            },
             tx,
         );
 
@@ -6534,7 +6597,10 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            slot.as_str().to_string(),
+            Subscribe {
+                tab_id: slot.as_str().to_string(),
+                viewed: true,
+            },
             tx,
         );
         assert!(pending.is_empty(), "no launch may be waited on");
@@ -6546,6 +6612,95 @@ mod tests {
             Ok(_) => panic!("subscribing a held tab must be refused"),
             Err(err) => assert!(err.contains("op-held"), "{err}"),
         }
+    }
+
+    /// A pane mounted off screen opens its socket naming itself not viewed:
+    /// that subscribe leaves the tab's attention flag up, stamps nothing and
+    /// starts no foreground check, while a subscribe with the flag behaves as
+    /// every subscribe always has. (The tab's last run failed so neither
+    /// subscribe launches anything; looking at it is decided first.)
+    #[test]
+    fn only_a_subscribe_from_a_pane_on_screen_counts_as_looking_at_the_tab() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        let slot = engine.sessions[0].slot_tab_id().to_string();
+        engine.mark_tab_run_failed(
+            dux_core::ids::TabIdRef::new(&slot),
+            dux_core::tab_verdict::TabRunEnding::ExitedWithStatus { status: 1 },
+            Vec::new(),
+        );
+        engine.needs_attention.insert(TabId::new(slot.clone()));
+        let mut pending = Vec::new();
+        let mut last_pr = None;
+        let (status_tx, _status_rx) = broadcast::channel(8);
+        let (clear_tx, _clear_rx) = broadcast::channel(8);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Vec::new());
+        let mut status = StatusEmitter::new(
+            status_tx,
+            clear_tx,
+            snapshot_tx,
+            Arc::new(AtomicUsize::new(1)),
+            dux_core::statusline::LiveStatusKeys::default(),
+            dux_core::operations::Operations::default(),
+        );
+        let mut subscribe = |engine: &mut Engine, last_pr: &mut Option<String>, viewed| {
+            let (tx, _rx) = oneshot::channel();
+            handle_subscribe(
+                engine,
+                &mut pending,
+                last_pr,
+                &mut status,
+                Subscribe {
+                    tab_id: slot.clone(),
+                    viewed,
+                },
+                tx,
+            );
+        };
+
+        subscribe(&mut engine, &mut last_pr, false);
+        assert!(
+            engine.tab_needs_attention(&slot),
+            "a hidden pane leaves the flag up"
+        );
+        assert!(!engine.agent_viewed.contains_key(TabIdRef::new(&slot)));
+        assert_eq!(last_pr, None, "and starts no foreground check");
+
+        subscribe(&mut engine, &mut last_pr, true);
+        assert!(!engine.tab_needs_attention(&slot));
+        assert!(engine.agent_viewed.contains_key(TabIdRef::new(&slot)));
+        assert_eq!(last_pr.as_deref(), Some("s1"));
+    }
+
+    /// Coming on screen is looking at the tab, whoever owns its pty: it
+    /// clears the flag, re-arms the suppression and starts the foreground
+    /// check; coming on screen again for the agent already in focus gets the
+    /// ordinary cadence; a terminal id is a no-op.
+    #[test]
+    fn coming_on_screen_is_looking_at_the_tab() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let mut engine = bootstrap_engine(&paths).expect("bootstrap");
+        let slot = engine.sessions[0].slot_tab_id().to_string();
+        engine.needs_attention.insert(TabId::new(slot.clone()));
+        let mut last_pr = None;
+
+        assert_eq!(
+            note_tab_looked_at(&mut engine, &mut last_pr, &slot),
+            Some(LookedAtCheck::Foreground)
+        );
+        assert!(!engine.tab_needs_attention(&slot));
+        assert!(engine.agent_viewed.contains_key(TabIdRef::new(&slot)));
+        assert_eq!(
+            note_tab_looked_at(&mut engine, &mut last_pr, &slot),
+            Some(LookedAtCheck::Cadence)
+        );
+        assert_eq!(
+            note_tab_looked_at(&mut engine, &mut last_pr, "term-1"),
+            None
+        );
+        assert_eq!(last_pr.as_deref(), Some("s1"));
     }
 
     /// A tab a working-copy recreate is restarting is dormant while its old
@@ -6623,7 +6778,10 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            slot.as_str().to_string(),
+            Subscribe {
+                tab_id: slot.as_str().to_string(),
+                viewed: true,
+            },
             tx,
         );
         let said = "is being restarted after its working copy was recreated";
@@ -6737,7 +6895,10 @@ mod tests {
             &mut pending,
             &mut last_pr,
             &mut status,
-            "t2".to_string(),
+            Subscribe {
+                tab_id: "t2".to_string(),
+                viewed: true,
+            },
             tx,
         );
 
@@ -9515,7 +9676,7 @@ mod tests {
             ),
             (
                 "SubscribePty",
-                EngineRequest::SubscribePty("s1".into(), dead_reply()),
+                EngineRequest::SubscribePty("s1".into(), true, dead_reply()),
                 true,
             ),
             (
@@ -9534,6 +9695,7 @@ mod tests {
                 false,
             ),
             ("NoteViewed", EngineRequest::NoteViewed("s1".into()), true),
+            ("PtyShown", EngineRequest::PtyShown("s1".into()), true),
             (
                 "SubscribeTerminal",
                 EngineRequest::SubscribeTerminal("t1".into(), dead_reply()),

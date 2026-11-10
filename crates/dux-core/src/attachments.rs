@@ -1348,6 +1348,52 @@ mod tests {
         }
     }
 
+    /// A page showing one part of a row and keeping the other mounted off
+    /// screen has one attachment looked at and one not. Losing both sockets
+    /// keeps the whole row protected for the grace through the looked-at one,
+    /// the hidden part's terminal included, because attachment is judged per
+    /// row.
+    #[test]
+    fn a_row_stays_protected_through_its_looked_at_part_when_both_sockets_are_lost() {
+        let beat = Instant::now();
+        let attachments = Attachments::default();
+        attachments.register(
+            "phone",
+            browser("100.64.0.9", "Safari"),
+            Some(Heard::at(beat)),
+        );
+        let shown = attachments
+            .attach("phone", tab("s1-slot", "s1"), None, None)
+            .unwrap();
+        let hidden = attachments
+            .attach(
+                "phone",
+                Target {
+                    kind: TargetKind::Terminal,
+                    id: "term-1".to_string(),
+                    agent: Some("s1".to_string()),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        attachments.note_viewed(shown, beat);
+        attachments.note_unviewed(hidden);
+        let lost_at = beat + Duration::from_secs(10);
+        lose(&attachments, hidden, lost_at);
+        lose(&attachments, shown, lost_at);
+        let closing_the_terminal = Scope {
+            ptys: ["term-1".to_string()].into(),
+            agents: ["s1".to_string()].into(),
+        };
+        assert!(
+            !attachments
+                .blockers(&closing_the_terminal, None, beat + Duration::from_secs(60))
+                .is_empty(),
+            "the row is still somebody's for the grace"
+        );
+    }
+
     /// Remote viewers are browser connections, not attachments: one tab
     /// streaming two of an agent's terminals is one viewer, and the terminal
     /// UI drawing the agent is none.

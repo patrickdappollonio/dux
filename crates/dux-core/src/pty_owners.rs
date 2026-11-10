@@ -82,6 +82,9 @@ pub struct OwnersState {
     /// so receivers can drop a grid broadcast the runtime published out of order
     /// after the lock released. Never decreases within a process.
     pub grid_seq: std::collections::HashMap<String, u64>,
+    /// (page, row) -> the driver id that page's sockets on that row share, and
+    /// how many of them are open. See [`PtySizeOwners::take_seat`].
+    pub seats: std::collections::HashMap<(PageId, RowKey), SeatEntry>,
     /// Per-pty high-water mark of the resize that actually REACHED the child,
     /// with the geometry it carried. The accept and the `TIOCSWINSZ` are not one
     /// critical section (see [`PtySizeOwners::accept_grid_apply`]), so an
@@ -123,6 +126,23 @@ impl OwnersState {
         self.epoch
     }
 
+    /// Let go of `row` if `conn_id` still holds it, remembering it as the
+    /// row's last holder, and report the release's epoch.
+    fn release_row(&mut self, row: RowKey, conn_id: u64) -> Option<u64> {
+        if self
+            .map
+            .get(&row)
+            .is_none_or(|record| record.conn_id != conn_id)
+        {
+            return None;
+        }
+        self.map.remove(&row);
+        self.last_holder.insert(row, conn_id);
+        self.epoch += 1;
+        self.generation += 1;
+        Some(self.epoch)
+    }
+
     /// Every pty known to be in `row`, sorted.
     fn members_of(&self, row: &RowKey) -> Vec<String> {
         self.members
@@ -142,6 +162,62 @@ pub struct AppliedGrid {
     pub rows: u16,
     /// The width it carried, in columns.
     pub cols: u16,
+}
+
+/// One browser page, as its terminal sockets name it when they open.
+///
+/// A page is ONE driver of a row however many of its terminals are mounted:
+/// an agent and the terminal docked under it are two sockets, and without a
+/// shared driver the second would be refused as another device. The id is
+/// minted once per page load, so a reload, a second tab or a second window is
+/// another driver, and it is never the events id, which changes whenever the
+/// events socket reconnects. It decides who may drive, so it is a capability
+/// rather than a label: only a long random token is taken, and the server
+/// never repeats it to anybody.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageId(String);
+
+impl PageId {
+    /// The id when `raw` is 32 to 64 ASCII letters, digits, `-` or `_`;
+    /// anything else is no page, and its socket drives on its own.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let shaped = (32..=64).contains(&raw.len())
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        shaped.then(|| Self(raw.to_string()))
+    }
+}
+
+/// A page's seat at one row: the driver id its sockets on the row share, and
+/// how many of them are open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeatEntry {
+    id: u64,
+    sockets: usize,
+}
+
+/// One terminal socket's place at its page's seat. Its [`Seat::id`] is the
+/// driver id the socket claims, resizes and writes as, and the id its
+/// handshake hands the browser.
+#[derive(Debug)]
+pub struct Seat {
+    id: u64,
+    pty_id: String,
+    key: Option<(PageId, RowKey)>,
+    left: std::sync::atomic::AtomicBool,
+}
+
+impl Seat {
+    /// The driver id this socket acts as.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The pty the socket is attached to.
+    pub fn pty_id(&self) -> &str {
+        &self.pty_id
+    }
 }
 
 /// Result of applying a stamped PTY grid through the shared cross-surface
@@ -241,6 +317,82 @@ impl PtySizeOwners {
     /// from [`NEXT_CONN_ID`], so ids stay unique across serve cycles.
     pub fn next_conn_id(&self) -> u64 {
         NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Seat a freshly attached terminal socket for `pty_id`, which must already
+    /// have joined its row.
+    ///
+    /// A socket naming a page shares the driver id of that page's other open
+    /// sockets on the same row, so the page drives the row as one: an agent
+    /// and its docked terminal never refuse each other, and a take-over
+    /// through either brings both. With none open the page gets a fresh id,
+    /// which keeps the ghost rule meaningful: a page that let go of a row
+    /// comes back as a new connection that may succeed its own ghost. A
+    /// socket naming no page drives on its own, as every socket once did.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
+    pub fn take_seat(&self, page: Option<&PageId>, pty_id: &str) -> Seat {
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
+        let key = page.map(|page| (page.clone(), owners.row_noting(pty_id)));
+        let id = match &key {
+            Some(key) => {
+                let entry = owners
+                    .seats
+                    .entry(key.clone())
+                    .or_insert_with(|| SeatEntry {
+                        id: self.next_conn_id(),
+                        sockets: 0,
+                    });
+                entry.sockets += 1;
+                entry.id
+            }
+            None => self.next_conn_id(),
+        };
+        Seat {
+            id,
+            pty_id: pty_id.to_string(),
+            key,
+            left: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// The socket behind `seat` has ended. Once per seat however often it is
+    /// asked, because the quiet watchdog and the socket's own guard both ask.
+    ///
+    /// The row is let go of only when this was the page's last open socket on
+    /// it, in the same critical section that counts the socket out, so a
+    /// sibling opening at that moment either shares the seat and keeps the row
+    /// or arrives after the release on a fresh one. `Some(epoch)` means an
+    /// owner really was cleared, exactly as [`Self::release`] reports it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
+    pub fn leave_seat(&self, seat: &Seat) -> Option<u64> {
+        if seat.left.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return None;
+        }
+        let mut owners = self
+            .owners
+            .lock()
+            .expect("the pty owners lock is not poisoned");
+        if let Some(key) = &seat.key
+            && let Some(entry) = owners.seats.get_mut(key)
+            && entry.id == seat.id
+        {
+            entry.sockets = entry.sockets.saturating_sub(1);
+            if entry.sockets > 0 {
+                return None;
+            }
+            owners.seats.remove(key);
+        }
+        let row = owners.row_noting(&seat.pty_id);
+        owners.release_row(row, seat.id)
     }
 
     /// Place `pty_id` in `row`. Idempotent, and first placement wins, because
@@ -594,18 +746,7 @@ impl PtySizeOwners {
             .lock()
             .expect("the pty owners lock is not poisoned");
         let row = owners.row_noting(pty_id);
-        if owners
-            .map
-            .get(&row)
-            .is_none_or(|record| record.conn_id != conn_id)
-        {
-            return None;
-        }
-        owners.map.remove(&row);
-        owners.last_holder.insert(row, conn_id);
-        owners.epoch += 1;
-        owners.generation += 1;
-        Some(owners.epoch)
+        owners.release_row(row, conn_id)
     }
 
     /// Release every row `conn_id` still owns, each of its ptys paired with the
@@ -983,6 +1124,164 @@ mod tests {
         let (out, applied) = claim_resize(&owners, "s1-slot", ghost, late);
         assert!(!out.apply && !applied, "another driver holds the row now");
         assert!(owners.is_owner("term-1", other));
+    }
+
+    fn page(raw: &str) -> PageId {
+        PageId::parse(raw).expect("a well-formed page id")
+    }
+
+    const PAGE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PAGE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// One page is one driver of a row however many of its panes are open:
+    /// two sockets of one page on the same row act as one driver, so a claim
+    /// through either makes the other an owner too, while a second page is a
+    /// second driver whose plain resize is refused.
+    #[test]
+    fn two_sockets_of_one_page_on_one_row_are_one_driver() {
+        let owners = PtySizeOwners::default();
+        agent_row(&owners);
+        let agent = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        let dock = owners.take_seat(Some(&page(PAGE_A)), "term-1");
+        assert_eq!(agent.id(), dock.id(), "one page, one seat");
+
+        let (out, _) = claim_resize(&owners, "s1-slot", agent.id(), ResizeIntent::Plain);
+        assert!(out.apply && out.epoch.is_some());
+        let (out, applied) = claim_resize(&owners, "term-1", dock.id(), ResizeIntent::Plain);
+        assert!(
+            out.apply && applied && out.epoch.is_none(),
+            "the sibling resizes as the owner, with no handover"
+        );
+        assert!(owners.may_write("term-1", dock.id(), None, || {}).allowed);
+
+        let other = owners.take_seat(Some(&page(PAGE_B)), "term-1");
+        assert_ne!(other.id(), agent.id(), "two windows stay two drivers");
+        let (out, applied) = claim_resize(&owners, "term-1", other.id(), ResizeIntent::Plain);
+        assert!(!out.apply && !applied);
+    }
+
+    /// The row is let go of when the page's LAST socket on it ends, never while
+    /// a sibling is still open, and it is let go of under the seat's id, so the
+    /// ghost rule still recognises it.
+    #[test]
+    fn a_page_lets_go_of_a_row_only_when_its_last_socket_on_it_ends() {
+        let owners = PtySizeOwners::default();
+        agent_row(&owners);
+        let agent = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        let dock = owners.take_seat(Some(&page(PAGE_A)), "term-1");
+        let driver = agent.id();
+        assert!(owners.claim("s1-slot", driver).is_some());
+
+        assert_eq!(owners.leave_seat(&agent), None, "the dock still holds it");
+        assert!(owners.is_owner("s1-tab2", driver));
+        let released = owners.leave_seat(&dock).expect("the last socket frees it");
+        assert_eq!(owners.current_owner("s1-slot"), (None, released, None));
+
+        let succession = ResizeIntent::TakeOver {
+            expected_owner: Some(driver),
+        };
+        let returning = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        assert_ne!(
+            returning.id(),
+            driver,
+            "a page that let go of a row comes back on a fresh seat"
+        );
+        let (out, _) = claim_resize(&owners, "s1-slot", returning.id(), succession);
+        assert!(out.apply, "and succeeds its own ghost as before");
+    }
+
+    /// Leaving twice (the quiet watchdog, then the socket's own guard) counts
+    /// once, so a sibling's hold on the row is never taken by a double count.
+    #[test]
+    fn leaving_a_seat_twice_counts_once() {
+        let owners = PtySizeOwners::default();
+        agent_row(&owners);
+        let one = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        let two = owners.take_seat(Some(&page(PAGE_A)), "s1-tab2");
+        assert!(owners.claim("s1-slot", one.id()).is_some());
+        assert_eq!(owners.leave_seat(&one), None);
+        assert_eq!(owners.leave_seat(&one), None);
+        assert!(
+            owners.is_owner("s1-slot", two.id()),
+            "the sibling still drives"
+        );
+        assert!(owners.leave_seat(&two).is_some());
+    }
+
+    /// A page's seats are per row: leaving the last socket on one row frees
+    /// that row and leaves the page's other row alone.
+    #[test]
+    fn a_pages_seats_are_per_row() {
+        let owners = PtySizeOwners::default();
+        agent_row(&owners);
+        owners.join_row("s2-slot", RowKey::Agent("s2".to_string()));
+        let first = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        let second = owners.take_seat(Some(&page(PAGE_A)), "s2-slot");
+        assert_ne!(first.id(), second.id());
+        assert!(owners.claim("s1-slot", first.id()).is_some());
+        assert!(owners.claim("s2-slot", second.id()).is_some());
+        assert!(owners.leave_seat(&first).is_some());
+        assert!(owners.is_owner("s2-slot", second.id()));
+    }
+
+    /// A socket that names no page (an older page) is a driver of its own, as
+    /// every socket was before pages had seats.
+    #[test]
+    fn a_socket_naming_no_page_is_a_driver_of_its_own() {
+        let owners = PtySizeOwners::default();
+        agent_row(&owners);
+        let one = owners.take_seat(None, "s1-slot");
+        let two = owners.take_seat(None, "term-1");
+        assert_ne!(one.id(), two.id());
+        assert!(owners.claim("s1-slot", one.id()).is_some());
+        let (out, _) = claim_resize(&owners, "term-1", two.id(), ResizeIntent::Plain);
+        assert!(!out.apply);
+        assert!(owners.leave_seat(&one).is_some());
+    }
+
+    /// The race the seat exists to survive: a page's sockets on one row come
+    /// and go on many threads while one of them stays open the whole time. The
+    /// row must still be the page's at the end, and a second page hammering
+    /// plain resizes must never have got in.
+    #[test]
+    fn a_row_is_never_let_go_while_any_socket_of_its_page_is_open() {
+        let owners = std::sync::Arc::new(PtySizeOwners::default());
+        agent_row(&owners);
+        let anchor = owners.take_seat(Some(&page(PAGE_A)), "s1-slot");
+        assert!(owners.claim("s1-slot", anchor.id()).is_some());
+        let intruder = owners.take_seat(Some(&page(PAGE_B)), "s1-slot");
+        let threads: Vec<_> = (0..8)
+            .map(|n| {
+                let owners = std::sync::Arc::clone(&owners);
+                let intruder = intruder.id();
+                std::thread::spawn(move || {
+                    let pty = ["s1-slot", "s1-tab2", "term-1"][n % 3];
+                    for _ in 0..500 {
+                        let seat = owners.take_seat(Some(&page(PAGE_A)), pty);
+                        let (out, _) = claim_resize(&owners, pty, seat.id(), ResizeIntent::Plain);
+                        assert!(out.apply && out.epoch.is_none());
+                        assert!(owners.leave_seat(&seat).is_none());
+                        let (out, _) = claim_resize(&owners, pty, intruder, ResizeIntent::Plain);
+                        assert!(!out.apply);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("no thread panicked");
+        }
+        assert!(owners.is_owner("term-1", anchor.id()));
+        assert!(owners.leave_seat(&anchor).is_some());
+    }
+
+    /// The page id is a capability, so only a long random-looking token is
+    /// taken; anything else is no page, and its socket a driver of its own.
+    #[test]
+    fn a_page_id_must_be_a_long_token() {
+        assert!(PageId::parse(PAGE_A).is_some());
+        assert!(PageId::parse("short").is_none());
+        assert!(PageId::parse(&"a".repeat(65)).is_none());
+        assert!(PageId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!").is_none());
     }
 
     /// Two serve cycles must not reuse connection ids.
