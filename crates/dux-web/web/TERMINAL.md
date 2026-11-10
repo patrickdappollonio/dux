@@ -827,11 +827,11 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance, not the
     take-over card, on a dead socket".
 
-13. **Typing surfaces, and the input ⋯ that hangs off them, render only for the owner.**
-    A viewer owns no input, so it has no surface to reach and nothing to anchor a menu
-    to; what a viewer might still want (the way out of theater) lives in the top menu
-    every surface has. Pinned: `components/TerminalPane.test.tsx` "hides the compose bar
-    AND the accessory bar for a non-owner viewer" and "TerminalPane input menu for a
+13. **Typing surfaces render only for the owner.**
+    A viewer owns no input, so it has no surface to reach and publishes no input group;
+    what a viewer might still want (the way out of theater) lives in the top menu every
+    surface has. Pinned: `components/TerminalPane.test.tsx` "hides the compose bar
+    AND the accessory bar for a non-owner viewer" and "TerminalPane input group for a
     non-owner" suite.
 
 14. **REWRITTEN at the take-over arc: EVERY send now goes through the coordinator, claims
@@ -1558,23 +1558,24 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `src/lib/composebar.test.ts` "keeps the keys on a phone that chose direct typing" and
     "spans the four states the two surfaces can be in";
     `components/TerminalPane.test.tsx` "reaches every combination of the two rows, each
-    with one way back", which also pins which menu holds the way back in each of them.
+    with its way back", which also pins that the pane publishes the way back in each of
+    them.
 
-4. **ONE HOME AT A TIME for the surface switch, and the pane decides which.** The bottom
-    ⋯ hangs off whatever row is under the terminal, so it exists while EITHER row is up
-    and carries both directions; the pane publishes the way BACK to the top menu's INPUT
-    group only once nothing is left below. The same fact gates the one-time hint, which
-    would otherwise point at another menu while the way back was visible on screen. THE
-    KEYS TOGGLE IS THE OTHER DOOR: hiding the last row raises the same hint, off the same
-    once-per-device latch, and the pane answers that question too. Fix:
-    `src/lib/composebar.ts` (`bottomBarSurvivesDirect`), `terminalInputLayout` in
-    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `switchTypingSurface` and
-    `hideTerminalKeysHint` in `src/lib/typingSurface.ts`. Pinned:
-    `components/TerminalPane.test.tsx` "keeps the terminal keys when the message box
-    goes", "says what hiding the keys would leave behind", and the "TerminalPane input
-    group for the top menu" suite; `src/lib/typingSurface.test.ts` "stays quiet while a
-    row is left under the terminal" and "fires when hiding the keys takes the last row
-    away"; `components/inputWayBack.test.tsx`.
+4. **ONE HOME for each input control, and it never moves.** The surface switch is a row
+    of the top menu's INPUT group, always, in both directions where `compose_bar` is
+    `auto`; the terminal-keys toggle is a row of that group on a computer and a button in
+    the action cluster on a phone (flap and pill). Nothing hangs off the input rows, and
+    there is no one-time hint about where a control went, because it never goes anywhere.
+    The pane publishes `{surfaceSwitch, composeSurface, keysToggle}` for its owner and
+    the group and the cluster read it. Fix: `src/lib/composebar.ts`
+    (`terminalKeysApply`, `inputMenuSurfaceSwitchOffered`), `terminalInputLayout` in
+    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `src/components/PaneInputGroup.tsx`,
+    `KeysToggleButton` in `src/components/PaneActionCluster.tsx`, `switchTypingSurface`
+    in `src/lib/typingSurface.ts`. Pinned: `components/TerminalPane.test.tsx`
+    "TerminalPane publishes its input group" (the table) and "TerminalPane typing-surface
+    toggle"; `components/PaneMenu.test.tsx` "the input group's rows";
+    `components/MobileActionFlap.test.tsx` "the keys toggle in the docked flap";
+    `src/lib/typingSurface.test.ts` "switchTypingSurface".
 
 5. **The compose DRAFT lives in the pane's state, not in ComposeBar.** Trap: a
     preference flip or rotation past the breakpoint unmounts the bar; the draft must
@@ -1693,24 +1694,21 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     key row honors the same contract (arrows and page scroll included)";
     `components/TerminalPane.test.tsx` keyboard-state suite.
 
-19. **The input ⋯ menu: items computed before the trigger exists, exactly one instance on
-    screen, and NO row of its own.** Trap: an ⋯ opening an empty popup is reachable (fine
-    pointer, uploads off); the state "keys up, box off" used to render two menus. The
-    third anchor, a minimal row kept alive purely to hold the trigger, is GONE: it
-    existed so the menu could be reached in every bar state, and that guarantee moved to
-    the top menu, which outlives the bar. Fix: `terminalInputLayout` in
-    `TerminalPane.tsx`, `src/lib/inputMenu.ts`, `src/components/PaneInputGroup.tsx`.
-    Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" suite
-    ("renders exactly one menu with the keys up and the box off",
-    "renders nothing at all when neither bar is up") and "carries nothing about theater
-    and nothing about the top bar".
+19. **No menu under the terminal: the rows carry the message box and the terminal keys
+    and nothing else.** Trap: a `⋯` opening an empty popup, and the state "keys up, box
+    off" once rendering two menus; both went when the menu did. The controls moved to
+    the top menu's INPUT group and, on a phone, the action cluster, which outlive the
+    rows. Fix: `terminalInputLayout` in `TerminalPane.tsx`,
+    `src/components/PaneInputGroup.tsx`. Pinned: `components/TerminalPane.test.tsx`
+    "TerminalPane has no menu under the terminal" (the row's buttons are exactly the
+    keys, or exactly Send) and "TerminalPane input group for the top menu".
 
 20. **A non-owner gets no input row at all.** Attach and the surface switch are input;
     the keys toggle would be a write with no visible effect on the viewer's screen that
     re-hides the OWNER's keys. The row it used to get carried the retired top-bar
     toggle, which was the one thing a viewer could act on; theater hides that chrome
     now and the pill carries the way back. Fix: TP:457-471.
-    Pinned: `components/TerminalPane.test.tsx` "TerminalPane input menu for a non-owner"
+    Pinned: `components/TerminalPane.test.tsx` "TerminalPane input group for a non-owner"
     suite.
 
 21. **The accessory bar is additionally gated on `ui.mobile_accessory_bar` with
@@ -1753,9 +1751,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     theater toggle on a phone, its exit button on a computer, and Leave theater mode in
     the one ⋯ it opens), while the preference had no way back of its own, and two flows
     for hiding one thing could disagree about what was on screen. The way back is the
-    PILL rather than the input menu, on every screen: that menu belongs to the virtual
-    input and goes down with it, so a pane the user is typing directly into would have
-    had none. (The phone's project and standalone terminal screens painted a pill with
+    PILL and the top menu, on every screen: nothing under the terminal carries one, so a
+    pane the user is typing directly into has the same way back as any other. (The phone's project and standalone terminal screens painted a pill with
     no flight for one arc, having no flap to fly one out of; they have a flap now, so
     their pill flies like the agent screen's. See H28.)
     NEVER SHIPPED, so nothing migrates: the key was added on `server-mode` and is
@@ -1787,12 +1784,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `set_settings_applies_every_field_when_sent_alone` (the row count);
     `src/lib/settingsDescriptors.test.ts` "offers no preference for hiding the
     phone top bar"; `src/lib/storeMobileBars.test.ts` "the store publishes no
-    top-bar preference at all"; `components/InputMenu.test.tsx` "carries no
-    top-bar toggle whatever the caller asks for";
-    `components/MobileShell.test.tsx` "ignores a stored mobile_top_bar preference
+    top-bar preference at all";     `components/MobileShell.test.tsx` "ignores a stored mobile_top_bar preference
     entirely" / "there too"; `components/PaneMenu.test.tsx` (no top-bar item
     in the merged menu); `components/TerminalPane.test.tsx` "TerminalPane input
-    menu for a non-owner" suite (no viewer row).
+    group for a non-owner" suite (no viewer row).
 
 28. **ONE pane menu, four anchors, one body per kind of pane; and the desktop pane
     header is the computer's anchor.** The merged body (`PaneMenuBody` in
@@ -1818,7 +1813,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     can answer this, because nothing inside the menu can see the chrome around it.
     THE INPUT GROUP'S ONE-HOME RULE IS UNAFFECTED: what the group holds is the pane's
     published answer (`lib/paneInputGroup.ts`), so two anchors of the same menu show the
-    same rows and the split that matters is still top menu versus the input `⋯`. WHICH
+    same rows and the split that matters is still just the one top menu. WHICH
     pane's answer is the one thing an anchor hands over (`PaneMenuPane`, the target it is
     painted over): a companion terminal's pane registers under the TERMINAL's id while
     the menu over it is the agent's, so deriving the ids from the subject scanned the
@@ -1851,7 +1846,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `components/MobileActionFlap.test.tsx` "the docked action flap over a terminal"
     suite; `components/MobileShell.test.tsx` "hangs the flap off the band and leaves the
     header to Back and identity" / "opens the terminal's own menu from the flap, not an
-    agent's"; `components/inputWayBack.test.tsx` (both subjects);
+    agent's"; `components/PaneMenu.test.tsx` "reads the pane on screen over a companion terminal, not a sibling's";
     `components/FlatAgentList.test.tsx` "opens the merged pane menu, leaving the app
     menu to the cog above it"; `components/PaneMenu.test.tsx` "the Settings drill, per
     anchor" (parameterized, one case per anchor).
@@ -2311,19 +2306,19 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Pinned: `components/TerminalPane.test.tsx` "shows the Reconnect affordance on
     'failed' without doubling the spinner" and C12's test.
 
-9. **There is no third anchor row, and the key row carries terminal keys ONLY.** The
-    pane column is the terminal plus whichever of the two input rows the OWNER has up, so
-    only hiding both leaves nothing under the terminal. The old `inColumn` flag and the
-    minimal row it kept alive for the input ⋯ are gone: the trigger has no permanent home
-    to be given, and what had to outlive both rows moved to the top menu's INPUT group.
-    The key row's "Box"/"Direct" cap is gone with them: a control that changes what the
-    typing surface IS, one cell wide among keys that merely type, is not something a
-    thumb reaching for the newline should be able to hit, and the action lives in the ⋯
-    beside it. Bars still take height OUT of the terminal in the
-    desktop shell (panel geometry untouched) and the pane's own RO reports the reflow.
-    Fix: `terminalInputLayout` and `TerminalPaneLayout` in `TerminalPane.tsx`. Pinned:
-    `components/TerminalPane.test.tsx` "TerminalPane input menu anchors" and "TerminalPane
-    input group for the top menu" suites.
+9. **There is no anchor row, and the key row carries terminal keys ONLY.** The pane
+    column is the terminal plus whichever of the two input rows the OWNER has up, so only
+    hiding both leaves nothing under the terminal. The old `inColumn` flag and the
+    minimal row it kept alive for a menu trigger are gone, and with the menu itself:
+    what had to outlive both rows lives in the top menu's INPUT group and the phone's
+    action cluster. The key row's "Box"/"Direct" cap is gone too: a control that changes
+    what the typing surface IS, one cell wide among keys that merely type, is not
+    something a thumb reaching for the newline should be able to hit, and the action
+    lives in the INPUT group, which is a menu and says what it does. Bars still take
+    height OUT of the terminal in the desktop shell (panel geometry untouched) and the
+    pane's own RO reports the reflow. Fix: `terminalInputLayout` and `TerminalPaneLayout`
+    in `TerminalPane.tsx`. Pinned: `components/TerminalPane.test.tsx` "TerminalPane has no
+    menu under the terminal" and "TerminalPane input group for the top menu" suites.
 
 10. **Both hint latches are MODULE scope: once per page session, surviving the pane
     remounts every agent/tab switch causes.** Fix: src/components/terminal/pageSessionHints.ts:18-19 + src/components/terminal/constants.ts:8-12.

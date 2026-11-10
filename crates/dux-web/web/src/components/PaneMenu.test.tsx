@@ -51,12 +51,8 @@ const { TheaterPill } = await import("./TheaterPill")
 const { PaneMenu, PaneMenuBody, PANE_MENU_AGENT_LABEL } = await import(
   "./PaneMenu"
 )
-const { TERMINAL_MENU_GROUP_LABEL: PANE_MENU_TERMINAL_GROUP_LABEL } =
-  await import("./TerminalActionsMenu")
-const { AGENT_MENU_GROUP_LABELS } = await import("@/lib/agentMenuGroups")
 const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } =
   await import("./ui/dropdown-menu")
-const { PANE_INPUT_GROUP_LABEL } = await import("./PaneInputGroup")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
 )
@@ -217,7 +213,7 @@ describe("the phone's one pane menu", () => {
     expect(items[0]).toContain("Attach a file…")
     expect(items[1]).toContain("Use virtual input")
     // The heading is above the agent's actions.
-    const group = screen.getByText(PANE_INPUT_GROUP_LABEL)
+    const group = screen.getByText("Input")
     const rename = screen
       .getAllByRole("menuitem")
       .find((el) => el.textContent?.includes("Rename agent…"))!
@@ -234,7 +230,7 @@ describe("the phone's one pane menu", () => {
   it("has no INPUT group at all when the pane publishes nothing", async () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
-    expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
+    expect(screen.queryByText("Input")).toBeNull()
     expect(labels().some((t) => t?.includes("Attach a file…"))).toBe(false)
     expect(labels().some((t) => t?.includes("Use virtual input"))).toBe(false)
   })
@@ -269,7 +265,7 @@ describe("an agent's menu over one of its companion terminals", () => {
     expect(items.some((t) => t?.includes("Close…"))).toBe(true)
     expect(items.some((t) => t?.includes("Open editor in new tab"))).toBe(true)
     // Labelled, so Close… cannot read as one more agent action.
-    const heading = screen.getByText(PANE_MENU_TERMINAL_GROUP_LABEL)
+    const heading = screen.getByText("Terminal")
     const remove = screen
       .getAllByRole("menuitem")
       .find((el) => el.textContent?.includes("Delete agent…"))!
@@ -291,7 +287,7 @@ describe("an agent's menu over one of its companion terminals", () => {
       />,
     )
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
-    expect(screen.queryByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeNull()
+    expect(screen.queryByText("Terminal")).toBeNull()
     expect(labels().some((t) => t?.includes("Close…"))).toBe(false)
   })
 
@@ -314,7 +310,7 @@ describe("an agent's menu over one of its companion terminals", () => {
     )
     await openFrom(screen.getByLabelText("Terminal actions"))
     expect(labels().some((t) => t?.includes("Close…"))).toBe(true)
-    expect(screen.getByText(PANE_MENU_TERMINAL_GROUP_LABEL)).toBeTruthy()
+    expect(screen.getByText("Terminal")).toBeTruthy()
   })
 })
 
@@ -322,13 +318,13 @@ describe("an agent's menu over one of its companion terminals", () => {
 // it is about, in menu order; a group that renders nothing renders no heading.
 describe("the headings of the agent's menu", () => {
   const ORDER = [
-    PANE_INPUT_GROUP_LABEL,
-    AGENT_MENU_GROUP_LABELS.tabsAndProject,
-    AGENT_MENU_GROUP_LABELS.running,
-    AGENT_MENU_GROUP_LABELS.agent,
-    AGENT_MENU_GROUP_LABELS.startup,
-    AGENT_MENU_GROUP_LABELS.worktree,
-    AGENT_MENU_GROUP_LABELS.remove,
+    "Input",
+    "Tabs and project",
+    "Running",
+    "Agent",
+    "Startup",
+    "Worktree",
+    "Remove",
   ]
 
   // The group labels, in document order, as the primitive paints them.
@@ -379,11 +375,24 @@ describe("the headings of the agent's menu", () => {
     )
     await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
     // No input published and a folder has no startup command: neither heading.
-    expect(headings()).toEqual(
-      ORDER.filter(
-        (h) => h !== PANE_INPUT_GROUP_LABEL && h !== AGENT_MENU_GROUP_LABELS.startup,
-      ),
+    // A folder has no project and no worktree, and its headings say so.
+    expect(headings()).toEqual(["Tabs", "Running", "Agent", "Folder", "Remove"])
+  })
+
+  // The whole menu is headed, not just the two bodies: the theater exit and the
+  // Settings drill are groups of their own.
+  it("heads the theater exit and the Settings drill too", async () => {
+    mockState = makeState(true)
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={target}
+        appearance="header"
+        settingsDrill
+      />,
     )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(headings().slice(-2)).toEqual(["Theater", "App"])
   })
 
   // The sidebar row is a fourth anchor on the SAME body, so it cannot drift into
@@ -524,10 +533,6 @@ describe("the input group's rows", () => {
     expect(labels()).toContain("Use virtual input")
   })
 
-  it("renders nothing for a pane that published nothing, as a non-owner does", async () => {
-    await openHeader()
-    expect(screen.queryByText(PANE_INPUT_GROUP_LABEL)).toBeNull()
-  })
 })
 
 // THE COMPUTER'S ANCHORS. The desktop pane header's `⋯` is the same menu the
@@ -570,7 +575,7 @@ describe("the pane menu at the computer's anchors", () => {
     // Everything except the drill: the cog is in this very header, so the whole
     // menu here is the whole PANE menu and not a second copy of the app's.
     expect(items.some((t) => t?.includes("Settings"))).toBe(false)
-    expect(screen.getByText(PANE_INPUT_GROUP_LABEL)).toBeTruthy()
+    expect(screen.getByText("Input")).toBeTruthy()
   })
 
   it("names itself what every other anchor names itself", () => {

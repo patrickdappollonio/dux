@@ -744,7 +744,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "mobile_accessory_bar",
             comment: Some(CommentSource::Static(
-                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring it back from the\n# input ... menu below the terminal, or from the web UI's Preferences\n# dialog.",
+                "# Web UI only: on a phone, show the terminal-keys bar (Esc, Tab, Ctrl,\n# Alt, the arrows and paging keys) above the compose box. Set to false to\n# hide it and give those rows back to the terminal. Bring it back from the\n# keys button in a phone's action flap, from the Input group of the pane's\n# top ... menu on a computer, or from the web UI's Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.mobile_accessory_bar),
         },

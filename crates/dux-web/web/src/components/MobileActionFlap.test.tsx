@@ -405,7 +405,8 @@ describe("the keys toggle in the docked flap", () => {
         return
       }
       expect(button?.getAttribute("aria-label")).toBe(label)
-      // On the same 40px floor as its neighbours.
+      // The 40px floor is a utility class: jsdom lays nothing out, so the class
+      // is the only handle on it, and the neighbours are held to the same one.
       expect(button?.className).toContain("size-10")
     })
   }

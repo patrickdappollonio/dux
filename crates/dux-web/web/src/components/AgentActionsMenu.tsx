@@ -42,7 +42,11 @@ import {
 } from "@/lib/agentWorkspace"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { agentIsDetachable } from "@/lib/detachAgent"
-import { AGENT_MENU_GROUP_LABELS } from "@/lib/agentMenuGroups"
+import {
+  MENU_GROUP_LABELS,
+  locationGroupLabel,
+  tabsGroupLabel,
+} from "@/lib/menuGroupLabels"
 import { canRecreateWorkingCopy } from "@/lib/recreateWorkingCopy"
 import { agentRoot } from "@/lib/editorRoot"
 import { clipboardWorktree } from "@/lib/flatClipboard"
@@ -122,7 +126,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         * `PaneMenu`, the one menu every surface opens, which renders this body
         * as its agent group with the pane's input group above it. */}
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.tabsAndProject}</DropdownMenuLabel>
+        <DropdownMenuLabel>{tabsGroupLabel(session.workspace)}</DropdownMenuLabel>
         <AgentTabSubmenu
           sessionId={session.id}
           providers={providers}
@@ -135,7 +139,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.running}</DropdownMenuLabel>
+        <DropdownMenuLabel>{MENU_GROUP_LABELS.running}</DropdownMenuLabel>
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => openForceReconnect(session.id)}
@@ -181,7 +185,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.agent}</DropdownMenuLabel>
+        <DropdownMenuLabel>{MENU_GROUP_LABELS.agent}</DropdownMenuLabel>
         <DropdownMenuItem
           disabled={activeElsewhere}
           onClick={() => openRename(session.id)}
@@ -203,7 +207,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.worktree}</DropdownMenuLabel>
+        <DropdownMenuLabel>{locationGroupLabel(session.workspace)}</DropdownMenuLabel>
         {/* Two editor entries, named for their surfaces. The in-app overlay
           * cannot open on a phone, so its item is CSS-hidden there rather than
           * left a dead no-op, and the new-tab item is the only one on phones. */}
@@ -245,7 +249,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.remove}</DropdownMenuLabel>
+        <DropdownMenuLabel>{MENU_GROUP_LABELS.remove}</DropdownMenuLabel>
         {/* The one deliberate red-tinted destructive menu item (dim at rest, bright
             on hover), per the CLAUDE.md web-UI menu tenet; the confirm dialog gates it. */}
         <DropdownMenuItem
@@ -378,23 +382,23 @@ function AgentIdentityItems({
 function AgentStartupItems({ sessionId }: { sessionId: string }) {
   return (
     <DropdownMenuGroup>
-      <DropdownMenuLabel>{AGENT_MENU_GROUP_LABELS.startup}</DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
-          <SquareChevronRight />
-          Configure startup command…
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
-          <Variable />
-          Configure environment variables…
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
-          <Play />
-          Rerun startup command
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
-          <ScrollText />
-          Startup command logs…
-        </DropdownMenuItem>
-      </DropdownMenuGroup>
-    )
-  }
+      <DropdownMenuLabel>{MENU_GROUP_LABELS.startup}</DropdownMenuLabel>
+      <DropdownMenuItem onClick={() => openAgentStartupCommand(sessionId)}>
+        <SquareChevronRight />
+        Configure startup command…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openAgentEnv(sessionId)}>
+        <Variable />
+        Configure environment variables…
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
+        <Play />
+        Rerun startup command
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => openStartupLogs(sessionId)}>
+        <ScrollText />
+        Startup command logs…
+      </DropdownMenuItem>
+    </DropdownMenuGroup>
+  )
+}

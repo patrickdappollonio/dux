@@ -257,7 +257,7 @@ drive the same rules.
 An agent's `⋯` menu is where the rest lives. It opens with the **Input** group (**Attach a
 file…**, the typing-surface switch, and on a computer the terminal-keys row), which is the same
 group the pane's own `⋯` carries. The agent's actions sit below it, each group under its own
-heading: **Tabs and project**, **Running**, **Agent**, **Startup**, **Worktree** and **Remove**:
+heading: **Tabs and project**, **Running**, **Agent**, **Startup**, **Worktree** and **Remove**. A standalone agent has no project, no startup command and no worktree, so its groups read **Tabs**, **Running**, **Agent**, **Folder** and **Remove**:
 
 - **Rename agent…** renames it, and its git branch too if you tick the box, exactly as in the
   terminal UI; see [renaming an agent](/docs/creating-agents#renaming-an-agent).

@@ -2519,12 +2519,9 @@ describe("TerminalPane has no menu under the terminal", () => {
     mod.setTypingSurface(null)
   })
 
-  const noMenu = () => screen.queryByRole("button", { name: "Input options" })
-
   it("leaves the compose row to the box and Send", () => {
     goMobile()
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    expect(noMenu()).toBeNull()
     const row = screen.getByRole("button", { name: "Send" }).parentElement!
     expect(row.querySelectorAll("button")).toHaveLength(1)
   })
@@ -2537,7 +2534,6 @@ describe("TerminalPane has no menu under the terminal", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
-    expect(noMenu()).toBeNull()
     const row = screen.getByRole("button", { name: "Esc" }).parentElement!
     expect(
       Array.from(row.querySelectorAll("button")).map((b) =>
@@ -2558,7 +2554,6 @@ describe("TerminalPane has no menu under the terminal", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(noMenu()).toBeNull()
   })
 })
 
@@ -3429,7 +3424,6 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
     expect(column?.className).toContain("flex-col")
     expect(composeUp()).toBe(false)
     expect(accessoryUp()).toBe(false)
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 
   it("puts the terminal pane and touch rows under one column on a coarse desktop", () => {
@@ -3647,10 +3641,6 @@ describe("TerminalPane publishes its input group", () => {
       mockState = state
       render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
       expect(paneInputGroupFor(["s1"])).toEqual(c.want)
-      // And nothing under the terminal carries a menu of its own.
-      expect(
-        screen.queryByRole("button", { name: "Input options" }),
-      ).toBeNull()
     })
   }
 
@@ -3720,7 +3710,6 @@ describe("TerminalPane publishes its input group", () => {
     mockState = state
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 })
 
@@ -3777,7 +3766,6 @@ describe("TerminalPane input group for a non-owner", () => {
     // No typing surfaces for a viewer, per the tenet.
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Esc" })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 
   it("gets none even with a stored top-bar preference on the bootstrap", () => {
@@ -3787,7 +3775,6 @@ describe("TerminalPane input group for a non-owner", () => {
       state.bootstrap as unknown as { mobile_top_bar?: boolean }
     ).mobile_top_bar = false
     renderViewer(state)
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
   })
 })
 
@@ -3871,6 +3858,28 @@ describe("TerminalPane typing-surface toggle", () => {
     expect(show("direct", true)).toEqual({ box: false, keys: true, ...back })
     // Nothing under the terminal at all, and the way back is still published.
     expect(show("direct", false)).toEqual({ box: false, keys: false, ...back })
+  })
+
+  // ONE CHOICE PER DEVICE: an agent's pane and a terminal's read the same
+  // answer, and a switch made over one shows in the other.
+  it("is one choice for an agent pane and a terminal pane at once", async () => {
+    const surface = await import("@/lib/typingSurface")
+    render(
+      <>
+        <TerminalPane kind="agent" id="s1" sessionId="s1" />
+        <TerminalPane
+          kind="terminal"
+          id="t1"
+          owner={{ kind: "session", sessionId: "s1" }}
+        />
+      </>,
+    )
+    const boxes = () => screen.queryAllByRole("textbox", { name: "Message" })
+    expect(boxes()).toHaveLength(2)
+    act(() => surface.switchTypingSurface("direct"))
+    expect(boxes()).toHaveLength(0)
+    act(() => surface.switchTypingSurface("compose"))
+    expect(boxes()).toHaveLength(2)
   })
 
   it("writes the choice to localStorage, so a reload does not snap back", async () => {
@@ -5229,7 +5238,6 @@ describe("TerminalPane input group for the top menu", () => {
     mockState = { ...makeState(), theater: true } as DuxState
     paneWithProbe()
 
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
     expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 
@@ -5237,7 +5245,6 @@ describe("TerminalPane input group for the top menu", () => {
     pointerStub = stubCoarsePointer(true)
     paneWithProbe()
 
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
     expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 
@@ -5272,7 +5279,6 @@ describe("TerminalPane input group for the top menu", () => {
     paneWithProbe()
 
     expect(screen.getByRole("textbox", { name: "Message" })).toBeTruthy()
-    expect(screen.queryByRole("button", { name: "Input options" })).toBeNull()
     expect(screen.getByTestId("published").textContent).toBe("switch")
   })
 })

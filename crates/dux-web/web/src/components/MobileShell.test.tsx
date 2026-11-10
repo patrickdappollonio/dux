@@ -1363,7 +1363,6 @@ describe("MobileShell agentless terminal screen ⋯ menu", () => {
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Terminal actions"))
     expect(screen.getByText("Type directly in the terminal")).toBeTruthy()
-    expect(screen.queryByLabelText("Input options")).toBeNull()
   })
 
   it("labels flip to Show when the keys bar is already hidden", () => {

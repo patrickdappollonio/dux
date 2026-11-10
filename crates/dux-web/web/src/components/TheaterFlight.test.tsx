@@ -437,7 +437,7 @@ describe("the cluster the pill carries on a phone", () => {
 
   // The flight is a pure translation only while both ends are the same object,
   // so the keys button has to be in the same slot on the pill as on the flap.
-  it("carries the keys toggle between the count and the menu, as the flap does", async () => {
+  it("carries the keys toggle in the same slot on the pill as on the flap", async () => {
     const { registerPaneInputGroup, resetPaneInputGroups } = await import(
       "@/lib/paneInputGroup"
     )
@@ -452,23 +452,34 @@ describe("the cluster the pill carries on a phone", () => {
       value: 500,
       configurable: true,
     })
-    mockState = makeState(true)
-    render(<MobileShell />)
-    Object.defineProperty(window, "innerWidth", {
-      value: wide,
-      configurable: true,
-    })
-    const keys = screen.getByTestId("pane-keys-toggle")
-    const before = screen.getByLabelText(/changed files$/)
-    const after = screen.getByLabelText("Session actions")
-    expect(
-      before.compareDocumentPosition(keys) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
-    expect(
-      keys.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
-    expect(screen.getByTestId("theater-pill").contains(keys)).toBe(true)
-    resetPaneInputGroups()
+    // The controls of a cluster in order, the theater button named alike in
+    // both modes and the pill's grip (which the flap has no slot for) left out.
+    const cluster = (el: HTMLElement) =>
+      Array.from(el.querySelectorAll("button"))
+        .filter((b) => b.dataset.testid !== "theater-pill-grip")
+        .map((b) => b.getAttribute("aria-label") ?? "")
+        .map((l) => (/theater mode/i.test(l) ? "theater" : l.replace(/^\d+ changed files?$/, "changes")))
+    try {
+      mockState = makeState(false)
+      const flap = render(<MobileShell />)
+      const docked = cluster(screen.getByTestId("mobile-action-flap"))
+      flap.unmount()
+      mockState = makeState(true)
+      render(<MobileShell />)
+      const floating = cluster(screen.getByTestId("theater-pill"))
+      expect(floating).toEqual(docked)
+      expect(floating.slice(-3)).toEqual([
+        "changes",
+        "Hide terminal keys",
+        "Session actions",
+      ])
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        value: wide,
+        configurable: true,
+      })
+      resetPaneInputGroups()
+    }
   })
 
   it("keeps the grip, at the width the flight grows it from nothing", () => {

@@ -11,12 +11,15 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { useDux } from "@/lib/store"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
@@ -166,7 +169,10 @@ export function PaneMenuBody({
         <>
           <DropdownMenuSeparator />
           {/* The way back, from the surface the mode leaves on screen. */}
-          <InputMenuItems theaterExit />
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>{MENU_GROUP_LABELS.theater}</DropdownMenuLabel>
+            <InputMenuItems theaterExit />
+          </DropdownMenuGroup>
         </>
       ) : null}
       {settingsDrill ? (
@@ -180,15 +186,18 @@ export function PaneMenuBody({
               top-right corner, the phone hub's own header) this is the same
               body offered twice, so the anchor says no. See
               `PaneMenuSettingsDrill`. */}
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger>
-              <Settings />
-              Settings
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent side="left">
-              <AppMenuBody />
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>{MENU_GROUP_LABELS.app}</DropdownMenuLabel>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Settings />
+                Settings
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent side="left">
+                <AppMenuBody />
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </DropdownMenuGroup>
         </>
       ) : null}
     </>

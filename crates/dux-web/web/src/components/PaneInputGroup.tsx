@@ -5,13 +5,9 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
 import { useAttachCapability } from "@/lib/attachRegistry"
+import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { usePaneInputGroup } from "@/lib/paneInputGroup"
-
-/// The label every surface prints over the group. One constant so the phone
-/// sheet, the desktop pane menu and the floating pill cannot name it three
-/// different things, and so a test can pin it.
-export const PANE_INPUT_GROUP_LABEL = "Input"
 
 // The input group, at the top of whatever menu the surface already has: the
 // flap's `⋯` on a phone, the pane header's on a computer, the floating pill's in
@@ -56,7 +52,7 @@ export function PaneInputGroup({
           part reads its group from context and throws outside one, and the
           grouping is also what a screen reader announces the label as. */}
       <DropdownMenuGroup>
-        <DropdownMenuLabel>{PANE_INPUT_GROUP_LABEL}</DropdownMenuLabel>
+        <DropdownMenuLabel>{MENU_GROUP_LABELS.input}</DropdownMenuLabel>
         <InputMenuItems
           attach={attach}
           surfaceSwitch={surfaceSwitch}

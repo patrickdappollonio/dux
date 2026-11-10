@@ -1890,8 +1890,9 @@ pub struct UiConfig {
     /// Whether the web UI's mobile terminal screens show the terminal-keys
     /// accessory bar (Esc, Tab, Ctrl, Alt, the arrows and paging keys). Set
     /// to false to hide it and give those rows back to the terminal. It can be
-    /// restored from the input `⋯` menu below the terminal or from the web
-    /// UI's Preferences dialog. Web-only behavior.
+    /// restored from the keys button in a phone's action flap, from the Input
+    /// group of the pane's top `⋯` menu on a computer, or from the web UI's
+    /// Preferences dialog. Web-only behavior.
     pub mobile_accessory_bar: bool,
     /// Directory, RELATIVE to the agent's worktree, that a file dropped or pasted
     /// onto an AGENT pane is saved into. An absolute path, a `..` traversal, or an

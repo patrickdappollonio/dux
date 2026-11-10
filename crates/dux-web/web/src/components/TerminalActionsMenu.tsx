@@ -5,12 +5,10 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu"
+import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { editorRootForTarget } from "@/lib/editorRoot"
 import { openDeleteTerminal, openEditor, standaloneEditorHash } from "@/lib/store"
 import type { TerminalOwnerRef } from "@/lib/store"
-
-/// The heading over the terminal's rows.
-export const TERMINAL_MENU_GROUP_LABEL = "Terminal"
 
 // The terminal's own actions, the twin of `AgentActionsMenu`. Never rendered on
 // its own: `PaneMenuBody` is the menu and this is the group inside it about the
@@ -42,7 +40,7 @@ export function TerminalActionsMenu({
           announces the heading as. Always present: under an agent's actions an
           unlabelled Close… reads as closing the agent, and a terminal's own menu
           carries the same heading so the two cannot say different things. */}
-      <DropdownMenuLabel>{TERMINAL_MENU_GROUP_LABEL}</DropdownMenuLabel>
+      <DropdownMenuLabel>{MENU_GROUP_LABELS.terminal}</DropdownMenuLabel>
       {/* The in-app overlay is desktop-only, so on a phone its item would be a
           dead no-op and the row is hidden rather than offered. */}
       <DropdownMenuItem
