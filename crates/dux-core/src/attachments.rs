@@ -681,8 +681,28 @@ impl Attachments {
         life: Life,
         now: Instant,
     ) -> Result<u64, Vec<Blocker>> {
+        self.reserve_judging(&scope.clone(), scope, policy, life, now)
+    }
+
+    /// [`Self::reserve`] for a change judged against more than it ends: it is
+    /// refused over anybody attached to `judged`, and reserves only `scope`.
+    /// Closing one of an agent's terminals is the case: somebody with any part
+    /// of the agent's row open is in the way, but the agent's own tabs stay
+    /// open to new attaches while the terminal closes.
+    ///
+    /// # Errors
+    ///
+    /// The connections in the way, unless there are none or the policy forces it.
+    pub fn reserve_judging(
+        &self,
+        judged: &Scope,
+        scope: Scope,
+        policy: &Policy,
+        life: Life,
+        now: Instant,
+    ) -> Result<u64, Vec<Blocker>> {
         self.with(|state| {
-            let blockers = state.blockers(&scope, policy.requester.as_deref(), now);
+            let blockers = state.blockers(judged, policy.requester.as_deref(), now);
             let refused = match (&policy.accepted, policy.force) {
                 _ if blockers.is_empty() => false,
                 (_, false) => true,

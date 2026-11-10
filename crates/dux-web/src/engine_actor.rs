@@ -4089,18 +4089,17 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
         for session in &mut spine.sessions {
             overlay_session_input_owners(session, &map);
         }
-        // A companion terminal's pty id IS its terminal id and the spine carries
-        // terminals in one flat collection, so publishing their ownership is one
-        // more loop over the same snapshot. See
-        // [`overlay_session_input_owners`] for the cost this accepts.
+        // The spine carries terminals in one flat collection, so publishing
+        // their ownership is one more loop over the same snapshot. See
+        // [`overlay_terminal_input_owners`] for the cost this accepts.
         overlay_terminal_input_owners(&mut spine.terminals, &map);
     }
     spine
 }
 
-/// The pure half of the overlay: stamp `input_owner` onto every tab of ONE
-/// session whose PTY id appears in the owner map. A tab's own id is its PTY id,
-/// the first tab included, so this is a direct per-tab lookup.
+/// The pure half of the overlay: stamp the driver of ONE session's row onto
+/// every tab of it, the first tab included. A device drives a whole row, so
+/// every tab reports the same owner, the ones no socket has opened included.
 /// Companion terminal ownership IS published now, by
 /// [`overlay_terminal_input_owners`]: a terminal pane's take-over card consumes
 /// it to tell a stale driver name from a fresh one. Shared by [`owned_spine`] and the `Spine`/`Session` request arms in
@@ -4112,10 +4111,20 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
 /// collection rather than under a session.
 fn overlay_session_input_owners(
     session: &mut dux_core::viewmodel::SessionView,
-    owners: &std::collections::HashMap<String, u64>,
+    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, u64>,
 ) {
+    let row_owner = owners
+        .get(&dux_core::pty_owners::RowKey::Agent(session.id.clone()))
+        .copied();
     for tab in &mut session.tabs {
-        if let Some(conn_id) = owners.get(&tab.id) {
+        // A tab still standing alone (claimed before any surface placed it in
+        // its row) answers for itself, as the registry does.
+        let alone = || {
+            owners
+                .get(&dux_core::pty_owners::RowKey::Terminal(tab.id.clone()))
+                .copied()
+        };
+        if let Some(conn_id) = row_owner.or_else(alone) {
             // Stringified so the wire shape matches the `pty.owner` handover
             // frames' `owner` field, which is what the client compares its own
             // PTY-socket ids against.
@@ -4124,10 +4133,9 @@ fn overlay_session_input_owners(
     }
 }
 
-/// The terminal half of the overlay: stamp `input_owner` onto every terminal
-/// whose PTY id appears in the owner map. A companion terminal's PTY id is its
-/// terminal id, so this is the same direct lookup the tab loop does, over the
-/// spine's one flat terminal collection.
+/// The terminal half of the overlay: stamp onto every terminal the driver of
+/// its row, which is its agent's for an agent's terminal and its own for a
+/// project or standalone terminal.
 ///
 /// THE COST, accepted deliberately: an ownership flip on a terminal now moves
 /// the spine fingerprint and fires `sessions.changed`, exactly as it already
@@ -4136,10 +4144,21 @@ fn overlay_session_input_owners(
 /// tell a stale driver name from a fresh one.
 fn overlay_terminal_input_owners(
     terminals: &mut [dux_core::viewmodel::TerminalView],
-    owners: &std::collections::HashMap<String, u64>,
+    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, u64>,
 ) {
     for terminal in terminals {
-        if let Some(conn_id) = owners.get(&terminal.id) {
+        let agent = match &terminal.owner {
+            dux_core::viewmodel::TerminalOwnerView::Session { session_id } => {
+                Some(session_id.as_str())
+            }
+            dux_core::viewmodel::TerminalOwnerView::Project { .. }
+            | dux_core::viewmodel::TerminalOwnerView::Standalone { .. } => None,
+        };
+        // A terminal still standing alone answers for itself, as the
+        // registry does.
+        let row = dux_core::pty_owners::RowKey::of(&terminal.id, agent);
+        let alone = dux_core::pty_owners::RowKey::Terminal(terminal.id.clone());
+        if let Some(conn_id) = owners.get(&row).or_else(|| owners.get(&alone)) {
             terminal.input_owner = Some(conn_id.to_string());
         }
     }
@@ -8631,6 +8650,39 @@ mod tests {
             "a claim on a non-tab pty must not fire any coarse event"
         );
         assert!(!check.doc.json.contains("input_owner"));
+    }
+
+    /// A device drives a whole row, so a claim made through one of an agent's
+    /// terminals stamps the agent's tabs too, a tab nobody has opened included,
+    /// and leaves other agents alone.
+    #[test]
+    fn a_claim_through_an_agents_terminal_stamps_every_tab_of_its_row() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        seed_session(&paths, "s2");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        owners.join_row(
+            "term-1",
+            dux_core::pty_owners::RowKey::Agent("s1".to_string()),
+        );
+        owners.claim("term-1", 7);
+
+        let spine = owned_spine(&engine, &owners);
+        let slot_owner = |sid: &str| {
+            spine
+                .sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .expect("session present")
+                .tabs
+                .first()
+                .expect("a first tab")
+                .input_owner
+                .clone()
+        };
+        assert_eq!(slot_owner("s1"), Some("7".to_string()));
+        assert_eq!(slot_owner("s2"), None);
     }
 
     /// The overlay must iterate EVERY session's tabs, not merely find a first

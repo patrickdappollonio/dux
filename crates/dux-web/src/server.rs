@@ -182,10 +182,7 @@ impl AppState {
     ///
     /// An unowned pty is not denied, matching `may_write`: the first write claims it.
     pub(crate) fn input_held_by_someone_else(&self, pty_id: &str, conn_id: u64) -> bool {
-        matches!(
-            self.pty_size_owners.owners.lock().unwrap_or_else(std::sync::PoisonError::into_inner).map.get(pty_id),
-            Some(record) if record.conn_id != conn_id
-        )
+        self.pty_size_owners.held_by_another(pty_id, conn_id)
     }
 
     /// Hand input ownership of `pty_id` to `conn_id`, for tests that need the
@@ -2164,6 +2161,13 @@ async fn handle_pty_socket(
     // Allocated before the subscribe so the attachment can carry it, and not a
     // claim: only a resize of an unowned pty or a flagged take-over claims.
     let conn_id = pty_size_owners.next_conn_id();
+    // Placed in its row before anything is asked about it, so the handshake's
+    // owner, every claim and every release are the row's: a terminal opened in
+    // a row another device drives is that device's from here on.
+    pty_size_owners.join_row(
+        target.pty_id(),
+        dux_core::pty_owners::RowKey::of(target.pty_id(), attach.target.agent.as_deref()),
+    );
     // The release, on EVERY exit path. A socket that gave up on its opening
     // sends has to let go of the pty too (it may have claimed it at the
     // handshake), and so does one a panic unwinds through: leaving it held wedges
@@ -2712,12 +2716,14 @@ impl AttachedPtySocket<'_> {
                 self.user_agent,
                 dux_core::pty_owners::ResizeIntent::Plain,
             ));
-            self.event_bus.emit(pty_owner_event(
+            emit_row_owner(
+                self.event_bus,
+                self.owners,
                 pty_id,
                 self.conn_id,
                 epoch,
                 self.user_agent,
-            ));
+            );
         }
     }
 
@@ -2764,12 +2770,14 @@ impl AttachedPtySocket<'_> {
                 self.user_agent,
                 intent,
             ));
-            self.event_bus.emit(pty_owner_event(
+            emit_row_owner(
+                self.event_bus,
+                self.owners,
                 pty_id,
                 self.conn_id,
                 epoch,
                 self.user_agent,
-            ));
+            );
         }
         if let Some(seq) = outcome.seq {
             self.grid_bus.publish(pty_id, frame.rows, frame.cols, seq);
@@ -2841,6 +2849,29 @@ pub(crate) fn pty_owner_event(
         owner: Some(owner_conn_id.to_string()),
         epoch: Some(epoch),
         device: device.map(str::to_owned),
+    }
+}
+
+/// Announce `owner_conn_id` as the driver of every pty in `pty_id`'s row: an
+/// ownership change through one pty is a change for all of them, and a pane
+/// listens only for its own pty's `pty.owner`.
+fn emit_row_owner(
+    bus: &EventBus,
+    owners: &PtySizeOwners,
+    pty_id: &str,
+    owner_conn_id: u64,
+    epoch: u64,
+    device: Option<&str>,
+) {
+    for member in owners.row_members(pty_id) {
+        bus.emit(pty_owner_event(&member, owner_conn_id, epoch, device));
+    }
+}
+
+/// Announce that nobody drives `pty_id`'s row any more, for every pty in it.
+fn emit_row_owner_cleared(bus: &EventBus, owners: &PtySizeOwners, pty_id: &str, epoch: u64) {
+    for member in owners.row_members(pty_id) {
+        bus.emit(pty_owner_cleared_event(&member, epoch));
     }
 }
 
@@ -4385,7 +4416,7 @@ impl Drop for PtyOwnershipGuard {
             self.conn_id,
             epoch,
         ));
-        self.bus.emit(pty_owner_cleared_event(&self.pty_id, epoch));
+        emit_row_owner_cleared(&self.bus, &self.owners, &self.pty_id, epoch);
     }
 }
 
@@ -4553,9 +4584,7 @@ impl QuietWatchdog {
                     watch.conn_id,
                     epoch,
                 ));
-                watch
-                    .bus
-                    .emit(pty_owner_cleared_event(&watch.pty_id, epoch));
+                emit_row_owner_cleared(&watch.bus, &watch.owners, &watch.pty_id, epoch);
             }
             watch.expired.notify_one();
         }))
@@ -5441,7 +5470,7 @@ mod tests {
         let driver = owners.next_conn_id();
         let viewer = owners.next_conn_id();
 
-        let denied = |conn: u64| matches!(owners.owners.lock().unwrap().map.get(pty), Some(o) if o.conn_id != conn);
+        let denied = |conn: u64| owners.held_by_another(pty, conn);
 
         assert!(
             !denied(viewer),

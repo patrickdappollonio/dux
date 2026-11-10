@@ -209,6 +209,8 @@ struct Terminal {
     label: String,
     #[serde(default)]
     foreground_cmd: Option<String>,
+    #[serde(default)]
+    remote_viewers: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -947,6 +949,7 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
                 Owner::Project { project_id } => ("project", Some(project_id)),
                 Owner::Standalone { .. } => ("standalone", None),
             };
+            let viewers = terminal.remote_viewers.unwrap_or(0);
             Row {
                 id: terminal.id.clone(),
                 cells: vec![
@@ -954,6 +957,7 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
                     terminal.label.clone(),
                     owner.clone(),
                     running.clone(),
+                    viewers.to_string(),
                 ],
                 json: json!({
                     "id": terminal.id,
@@ -962,13 +966,14 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
                     "owner_id": owner_id,
                     "owner_name": owner,
                     "running": terminal.foreground_cmd,
+                    "remote_viewers": viewers,
                 }),
             }
         })
         .collect();
     Ok(output::render(
         &Listing {
-            headers: vec!["ID", "LABEL", "OWNER", "RUNNING"],
+            headers: vec!["ID", "LABEL", "OWNER", "RUNNING", "BROWSERS"],
             rows,
         },
         shape,

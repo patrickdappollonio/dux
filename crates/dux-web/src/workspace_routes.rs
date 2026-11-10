@@ -13,7 +13,10 @@
 //!   receives and deliberately not these, so they re-nest each owner's terminals
 //!   through [`SessionWithTerminals`] and [`ProjectWithTerminals`].
 //! - `GET /api/v1/terminals` lists every terminal flat and owner-tagged, standalone
-//!   ones included.
+//!   ones included, each with `remote_viewers`: how many browsers closing it would
+//!   be refused over, counted like an agent's. A device with any part of a row open
+//!   is attached to the whole row, so an agent's terminal counts its agent's
+//!   browsers too.
 //! - The thin reads answer from the engine at the request; the workspace document is
 //!   the last one pushed, so a client reading right after its own change reads a thin one.
 //! - `GET /api/v1/sessions` also lists, after the live agents, each agent a followed
@@ -209,11 +212,50 @@ async fn get_projects(State(state): State<AppState>) -> Response {
     }
 }
 
+/// A terminal on `GET /api/v1/terminals`, with its count of browsers.
+#[derive(Serialize)]
+struct TerminalWithViewers {
+    #[serde(flatten)]
+    terminal: TerminalView,
+    /// Browsers with the terminal's row open, every tab of one browser profile
+    /// counted once.
+    remote_viewers: usize,
+}
+
+impl TerminalWithViewers {
+    /// The terminal with the browsers attached to its row: its agent's row for
+    /// an agent's terminal, which is what closing it is judged against.
+    fn counting(terminal: TerminalView, attachments: &dux_core::attachments::Attachments) -> Self {
+        let mut scope = dux_core::attachments::Scope {
+            ptys: [terminal.id.clone()].into(),
+            ..Default::default()
+        };
+        match &terminal.owner {
+            TerminalOwnerView::Session { session_id } => {
+                scope.agents.insert(session_id.clone());
+            }
+            TerminalOwnerView::Project { .. } | TerminalOwnerView::Standalone { .. } => {}
+        }
+        let remote_viewers = attachments.remote_viewers(&scope, std::time::Instant::now());
+        Self {
+            terminal,
+            remote_viewers,
+        }
+    }
+}
+
 /// Every terminal, flat and owner-tagged, in manual order: the one thin read
 /// that lists standalone terminals, which own nothing to nest under.
 async fn get_terminals(State(state): State<AppState>) -> Response {
     match state.engine.spine().await {
-        Some(spine) => Json(spine.terminals).into_response(),
+        Some(spine) => {
+            let terminals: Vec<TerminalWithViewers> = spine
+                .terminals
+                .into_iter()
+                .map(|terminal| TerminalWithViewers::counting(terminal, state.engine.attachments()))
+                .collect();
+            Json(terminals).into_response()
+        }
         None => engine_unavailable(),
     }
 }
@@ -392,6 +434,72 @@ mod tests {
             .finish("op-d", StatusTone::Info, "Deleted.", None, Instant::now());
         let listed = get_json(&app, "/api/v1/sessions").await;
         assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    }
+
+    /// The terminal listing counts browsers per row: one with only the agent's
+    /// tab open counts on the agent's terminal, because closing that terminal
+    /// is refused over it, and not on a standalone terminal, a row of its own.
+    #[tokio::test]
+    async fn the_terminal_listing_counts_the_browsers_of_each_terminals_row() {
+        use dux_core::attachments::{ConnectionFacts, Heard, Surface, Target, TargetKind};
+
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let worktree = tempfile::tempdir().expect("worktree");
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        let mut agent = crate::test_support::sample_agent("live");
+        agent
+            .workspace
+            .as_managed_mut()
+            .expect("a managed agent")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(agent);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (companion, _) = engine
+            .create_companion_terminal("live", 24, 80)
+            .expect("the agent's terminal");
+        let (standalone, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("a standalone terminal");
+        engine.attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: None,
+                address: None,
+                verified: true,
+                events: true,
+                browser: None,
+            },
+            Some(Heard::now()),
+        );
+        engine
+            .attachments
+            .attach(
+                "e1",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "live-slot".to_string(),
+                    agent: Some("live".to_string()),
+                },
+                Some(Heard::now()),
+                None,
+            )
+            .unwrap();
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+        let app = crate::server::router(handle);
+
+        let listed = get_json(&app, "/api/v1/terminals").await;
+        let viewers = |id: &str| {
+            listed
+                .as_array()
+                .expect("an array")
+                .iter()
+                .find(|terminal| terminal["id"] == id)
+                .map(|terminal| terminal["remote_viewers"].clone())
+        };
+        assert_eq!(viewers(&companion), Some(serde_json::json!(1)), "{listed}");
+        assert_eq!(viewers(&standalone), Some(serde_json::json!(0)), "{listed}");
     }
 
     /// The workspace read carries the server's run clock beside the document,

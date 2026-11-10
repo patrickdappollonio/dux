@@ -342,6 +342,13 @@ fn a_project_terminal(root: &Path) {
     let terminal = last_line(&run);
     let run = ok(dux(root, &["terminals", "ls", "-q"], ""));
     assert_eq!(run.stdout(), format!("{terminal}\n"));
+    // The last column counts browsers, and nobody has the terminal open.
+    let run = ok(dux(root, &["terminals", "ls"], ""));
+    let header = run.stdout().lines().next().unwrap_or_default().to_string();
+    let last_two: Vec<&str> = header.split_whitespace().rev().take(2).collect();
+    assert_eq!(last_two, ["BROWSERS", "RUNNING"], "{header}");
+    let row = run.stdout().lines().nth(1).unwrap_or_default().to_string();
+    assert!(row.trim_end().ends_with(" 0"), "{row}");
     ok(dux(root, &["terminals", "rm", &terminal, "--yes"], ""));
 }
 

@@ -158,7 +158,7 @@ impl App {
                 self.engine.agent_scope(session_id)
             }
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => {
-                dux_core::engine::Engine::pty_scope(terminal_id)
+                self.engine.terminal_close_scope(terminal_id)
             }
             PromptState::ConfirmCloseTab { tab_id, .. }
             | PromptState::ConfirmStopTab { tab_id, .. } => {

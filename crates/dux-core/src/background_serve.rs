@@ -50,30 +50,36 @@ pub struct TuiOwnership {
 }
 
 impl TuiOwnership {
-    /// Claim `pty_id` for the terminal UI if nobody is driving it, and hand back
-    /// the handover to announce, or `None` when nothing changed hands.
+    /// Claim `pty_id`'s whole row for the terminal UI if nobody is driving it,
+    /// and hand back the handover to announce for every pty of the row, or
+    /// nothing when nothing changed hands.
     ///
-    /// It never steals: a pty another connection holds is left with that
-    /// connection. A pty this seat already holds is not a new claim either, so
-    /// there is nothing to announce for it.
-    pub fn claim_if_free(&self, pty_id: &str) -> Option<PtyOwnershipEvent> {
+    /// It never steals: a row another connection holds is left with that
+    /// connection. A row this seat already holds is not a new claim either, so
+    /// there is nothing to announce for it. The pty must already have joined
+    /// its row ([`PtySizeOwners::join_row`]).
+    pub fn claim_if_free(&self, pty_id: &str) -> Vec<PtyOwnershipEvent> {
         let claim = self
             .owners
             .may_write(pty_id, self.conn_id, Some(TUI_DEVICE_LABEL), || {});
-        if !claim.claimed_new {
-            return None;
-        }
-        claim.epoch.map(|epoch| PtyOwnershipEvent::Claimed {
-            pty_id: pty_id.to_string(),
-            conn_id: self.conn_id,
-            epoch,
-            device: TUI_DEVICE_LABEL.to_string(),
-        })
+        let (true, Some(epoch)) = (claim.claimed_new, claim.epoch) else {
+            return Vec::new();
+        };
+        self.owners
+            .row_members(pty_id)
+            .into_iter()
+            .map(|pty_id| PtyOwnershipEvent::Claimed {
+                pty_id,
+                conn_id: self.conn_id,
+                epoch,
+                device: TUI_DEVICE_LABEL.to_string(),
+            })
+            .collect()
     }
 
-    /// Claim every pty that is running in `engine` and that nobody drives, and
-    /// hand back one handover per pty that changed hands, in the engine's
-    /// stable order.
+    /// Claim every row with a pty running in `engine` that nobody drives, and
+    /// hand back one handover per pty that changed hands, rows in the engine's
+    /// stable order of their first running pty.
     ///
     /// What "running" means is [`Engine::running_pty_ids`]: a dormant tab has
     /// no process and so no pty, and is never claimed.
@@ -82,15 +88,27 @@ impl TuiOwnership {
     /// alone with the connection holding it.
     pub fn claim_every_running_pty(&self, engine: &Engine) -> Vec<PtyOwnershipEvent> {
         let running = engine.running_pty_ids();
-        let mut claimed = Vec::new();
+        for pty_id in &running {
+            self.owners.join_row(pty_id, engine.pty_row(pty_id));
+        }
+        let mut claimed: Vec<PtyOwnershipEvent> = Vec::new();
         let mut skipped = Vec::new();
         for pty_id in &running {
-            if let Some(event) = self.claim_if_free(pty_id) {
-                claimed.push(event);
-            } else {
-                let (holder, _, _) = self.owners.current_owner(pty_id);
-                skipped.push((pty_id.clone(), holder));
+            let already_claimed = claimed.iter().any(|event| {
+                matches!(event, PtyOwnershipEvent::Claimed { pty_id: claimed_id, .. }
+                    if claimed_id == pty_id)
+            });
+            if already_claimed {
+                continue;
             }
+            let events = self.claim_if_free(pty_id);
+            if events.is_empty() {
+                let (holder, _, _) = self.owners.current_owner(pty_id);
+                if holder != Some(self.conn_id) {
+                    skipped.push((pty_id.clone(), holder));
+                }
+            }
+            claimed.extend(events);
         }
         crate::logger::info(&bulk_claim_log_line(claimed.len(), running.len(), &skipped));
         claimed
@@ -399,14 +417,14 @@ mod tests {
         assert_eq!(device.as_deref(), Some(TUI_DEVICE_LABEL));
         assert_eq!(
             claimed,
-            Some(PtyOwnershipEvent::Claimed {
+            vec![PtyOwnershipEvent::Claimed {
                 pty_id: "s1-slot".to_string(),
                 conn_id: seat.conn_id,
                 epoch,
                 device: TUI_DEVICE_LABEL.to_string(),
-            })
+            }]
         );
-        assert_eq!(seat.claim_if_free("s1-slot"), None);
+        assert_eq!(seat.claim_if_free("s1-slot"), Vec::new());
     }
 
     /// The bulk claim leaves one line in the log saying how many of the running
@@ -442,7 +460,7 @@ mod tests {
         let browser = seat.owners.next_conn_id();
         seat.owners.claim("term-1", browser).expect("claimed");
 
-        assert_eq!(seat.claim_if_free("term-1"), None);
+        assert_eq!(seat.claim_if_free("term-1"), Vec::new());
         assert!(seat.owners.is_owner("term-1", browser));
     }
 
@@ -500,5 +518,55 @@ mod tests {
         assert!(seat.owners.is_owner(&terminal, seat.conn_id));
         assert!(seat.owners.is_owner("b-slot", browser));
         assert_eq!(seat.owners.current_owner("a-tab-2").0, None);
+    }
+
+    /// Switching serving on claims ROWS: two running tabs of one agent are
+    /// taken together under one epoch, and an agent a browser drives through
+    /// one tab keeps its other running tab out of the terminal UI's hands.
+    #[test]
+    fn claiming_every_running_pty_takes_whole_rows_and_never_half_of_one() {
+        let (mut engine, _tmp) = crate::engine::test_support::test_engine();
+        let spawn = || {
+            crate::pty::PtyClient::spawn(
+                "sleep",
+                &["5".to_string()],
+                std::path::Path::new("."),
+                10,
+                10,
+                100,
+            )
+            .expect("spawn pty")
+        };
+        for (tab, session) in [("a-1", "a"), ("a-2", "a"), ("b-1", "b"), ("b-2", "b")] {
+            engine
+                .providers
+                .insert(crate::ids::TabId::new(tab), spawn());
+            engine.agent_tabs.insert(
+                crate::ids::TabId::new(tab),
+                crate::engine::test_support::sample_tab(tab, session, "claude", 1),
+            );
+        }
+        let seat = seat();
+        let browser = seat.owners.next_conn_id();
+        seat.owners.join_row("b-2", engine.pty_row("b-2"));
+        seat.owners.claim("b-2", browser).expect("claimed");
+
+        let claimed = seat.claim_every_running_pty(&engine);
+
+        let epochs: std::collections::BTreeSet<u64> = claimed
+            .iter()
+            .map(|event| match event {
+                PtyOwnershipEvent::Claimed { epoch, .. } => *epoch,
+                other => panic!("only claims are announced: {other:?}"),
+            })
+            .collect();
+        assert_eq!(claimed.len(), 2, "{claimed:?}");
+        assert_eq!(epochs.len(), 1, "one row, one epoch");
+        assert!(seat.owners.is_owner("a-1", seat.conn_id));
+        assert!(seat.owners.is_owner("a-2", seat.conn_id));
+        assert!(
+            seat.owners.is_owner("b-1", browser),
+            "the browser's row stays whole"
+        );
     }
 }

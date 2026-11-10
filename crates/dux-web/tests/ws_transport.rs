@@ -2985,6 +2985,61 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
     );
 }
 
+/// A device drives a whole ROW. A terminal opened in an agent another
+/// connection drives is that connection's from its first handshake, so its
+/// creator watches it; one opened in an agent nobody drives is claimed with
+/// the agent by its creator's first resize.
+#[tokio::test]
+async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
+    async fn owner_on_open(addr: SocketAddr, path: &str) -> (ClientWs, serde_json::Value) {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{path}"))
+            .await
+            .expect("connect a pty socket");
+        let hello = next_event_frame(&mut ws, "connected", Duration::from_secs(8))
+            .await
+            .expect("the connected handshake");
+        (ws, hello)
+    }
+    async fn claim(ws: &mut ClientWs, marker: &str) {
+        ws.send(Message::Text(r#"{"rows":24,"cols":80}"#.into()))
+            .await
+            .unwrap();
+        ws.send(Message::Binary(format!("{marker}\n").into_bytes().into()))
+            .await
+            .unwrap();
+        let _ = accumulate_until(ws, marker, Duration::from_secs(8)).await;
+    }
+
+    // Driven: the agent's driver owns the new terminal from the start.
+    let (addr, _tmp) = boot().await;
+    let (mut agent, hello) = owner_on_open(addr, "/ws/sessions/s1/pty").await;
+    let driver = hello["id"].as_str().expect("an id").to_string();
+    claim(&mut agent, "dux-row-driven-marker").await;
+    let terminal = create_terminal_via_rest(addr, "s1").await;
+    let path = format!("/ws/sessions/s1/terminals/{terminal}/pty");
+    let (_creator, hello) = owner_on_open(addr, &path).await;
+    assert_eq!(
+        hello["owner"].as_str(),
+        Some(driver.as_str()),
+        "the terminal joined the row its agent's driver holds"
+    );
+
+    // Undriven: the creator's own resize takes the terminal and the agent.
+    let (addr, _tmp) = boot().await;
+    let terminal = create_terminal_via_rest(addr, "s1").await;
+    let path = format!("/ws/sessions/s1/terminals/{terminal}/pty");
+    let (mut creator, hello) = owner_on_open(addr, &path).await;
+    assert_eq!(hello["owner"], serde_json::Value::Null);
+    let creator_id = hello["id"].as_str().expect("an id").to_string();
+    claim(&mut creator, "dux-row-undriven-marker").await;
+    let (_agent, hello) = owner_on_open(addr, "/ws/sessions/s1/pty").await;
+    assert_eq!(
+        hello["owner"].as_str(),
+        Some(creator_id.as_str()),
+        "the creator's claim took the agent with its terminal"
+    );
+}
+
 /// The `connected` handshake also names the owner's DEVICE: the `User-Agent`
 /// the owning connection presented at its upgrade, recorded at claim time and
 /// read under the same owners-lock acquisition as `owner` and `owner_epoch`.

@@ -141,6 +141,28 @@ impl Engine {
         }
     }
 
+    /// Who closing terminal `terminal_id` is judged against: a device with any
+    /// part of a row open is attached to the whole row, so an agent's terminal
+    /// is judged exactly as stopping the agent is, and a project or standalone
+    /// terminal, a row of its own, by itself. Only the terminal is reserved
+    /// ([`Self::reserve_destruction_judging`]).
+    pub fn terminal_close_scope(&self, terminal_id: &str) -> Scope {
+        match self
+            .companion_terminals
+            .get(terminal_id)
+            .map(|terminal| &terminal.owner)
+        {
+            Some(TerminalOwner::Session(session_id)) => {
+                let mut scope = self.agent_scope(session_id);
+                scope.ptys.insert(terminal_id.to_string());
+                scope
+            }
+            Some(TerminalOwner::Project(_) | TerminalOwner::Standalone) | None => {
+                Self::pty_scope(terminal_id)
+            }
+        }
+    }
+
     fn add_agent(&self, scope: &mut Scope, session_id: &str) {
         scope.agents.insert(session_id.to_string());
         scope.ptys.extend(
@@ -168,6 +190,21 @@ impl Engine {
     ///
     /// [`Attached`] naming whoever else is attached, unless the asker forced it.
     pub fn reserve_destruction(&self, scope: Scope) -> Result<Reservation, Attached> {
+        self.reserve_destruction_judging(&scope.clone(), scope)
+    }
+
+    /// [`Self::reserve_destruction`] for a change refused over anybody attached
+    /// to `judged` that reserves only `scope`
+    /// ([`Attachments::reserve_judging`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Attached`] naming whoever else is attached, unless the asker forced it.
+    pub fn reserve_destruction_judging(
+        &self,
+        judged: &Scope,
+        scope: Scope,
+    ) -> Result<Reservation, Attached> {
         let policy = self.dispatch_policy.clone().unwrap_or_else(|| Policy {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
             force: false,
@@ -183,7 +220,7 @@ impl Engine {
         };
         let id = self
             .attachments
-            .reserve(scope, &policy, life, std::time::Instant::now())
+            .reserve_judging(judged, scope, &policy, life, std::time::Instant::now())
             .map_err(|blockers| Attached { blockers })?;
         Ok(Reservation {
             held: watch.is_none().then(|| (self.attachments.clone(), id)),
@@ -196,7 +233,14 @@ impl Engine {
             Command::BeginDeleteSession { session_id, .. } => self.agent_scope(session_id),
             Command::RemoveProject { project_id, .. }
             | Command::DeleteProject { project_id, .. } => self.project_scope(project_id),
-            Command::DeleteTerminal { terminal_id } => Self::pty_scope(terminal_id),
+            Command::DeleteTerminal { terminal_id } => {
+                return self
+                    .reserve_destruction_judging(
+                        &self.terminal_close_scope(terminal_id),
+                        Self::pty_scope(terminal_id),
+                    )
+                    .map(Some);
+            }
             Command::DispatchAgentLaunch { request } => {
                 let scope = self.launch_conflict_scope(&request.session.id);
                 if scope.is_empty() {
@@ -455,5 +499,179 @@ mod tests {
         assert_eq!(entries[0].agent_label.as_deref(), Some("s1-title"));
         assert_eq!(entries[1].target_label, "gone-terminal");
         assert_eq!(entries[1].agent_label, None);
+    }
+
+    /// An engine with agent `s1` (a real working copy), one of its terminals,
+    /// a standalone terminal, and a browser `e1` that has only the agent's
+    /// first tab open.
+    fn engine_with_a_watched_agent_and_terminals() -> (
+        crate::engine::Engine,
+        crate::test_scratch::ScratchDir,
+        tempfile::TempDir,
+        String,
+        String,
+    ) {
+        let (mut engine, tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree");
+        engine.projects.push(sample_project("p1", "/repo"));
+        let mut session = sample_session("s1", "p1", "feat/login");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        let (companion, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("the agent's terminal");
+        let (standalone, _) = engine
+            .create_standalone_terminal(24, 80)
+            .expect("a standalone terminal");
+        engine.attachments.register(
+            "e1",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: Some("Firefox".to_string()),
+                address: Some("192.168.1.5".parse().unwrap()),
+                verified: false,
+                events: true,
+                browser: None,
+            },
+            None,
+        );
+        engine
+            .attachments
+            .attach(
+                "e1",
+                Target {
+                    kind: TargetKind::Tab,
+                    id: "s1-slot".to_string(),
+                    agent: Some("s1".to_string()),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        (engine, tmp, worktree, companion, standalone)
+    }
+
+    fn close_terminal(
+        engine: &mut crate::engine::Engine,
+        terminal_id: &str,
+        policy: Option<crate::attachments::Policy>,
+    ) -> Result<(), String> {
+        engine.dispatch_policy = policy;
+        let outcome = engine
+            .apply(crate::engine::Command::DeleteTerminal {
+                terminal_id: terminal_id.to_string(),
+            })
+            .map(|_| ())
+            .map_err(|refused| refused.to_string());
+        engine.dispatch_policy = None;
+        outcome
+    }
+
+    /// A device with any part of an agent's row open is attached to the whole
+    /// row: closing the agent's terminal from elsewhere is refused naming the
+    /// device that has only the agent's tab open, exactly as stopping the agent
+    /// is; the asking device is exempt, and forcing goes ahead.
+    #[test]
+    fn closing_an_agents_terminal_is_judged_against_the_whole_row() {
+        let (mut engine, _tmp, _worktree, companion, _) =
+            engine_with_a_watched_agent_and_terminals();
+
+        let refused = close_terminal(&mut engine, &companion, None).expect_err("refused");
+        assert!(refused.contains("192.168.1.5"), "{refused}");
+        assert!(engine.companion_terminals.contains_key(&companion));
+
+        let asking = crate::attachments::Policy {
+            requester: Some("e1".to_string()),
+            force: false,
+            accepted: None,
+        };
+        close_terminal(&mut engine, &companion, Some(asking)).expect("the asker is exempt");
+        assert!(!engine.companion_terminals.contains_key(&companion));
+
+        let (companion, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("another terminal");
+        let forced = crate::attachments::Policy {
+            requester: None,
+            force: true,
+            accepted: None,
+        };
+        close_terminal(&mut engine, &companion, Some(forced)).expect("forced");
+        assert!(!engine.companion_terminals.contains_key(&companion));
+    }
+
+    /// A standalone terminal is a row of its own, so somebody watching an
+    /// agent does not stand in the way of closing it.
+    #[test]
+    fn closing_a_standalone_terminal_is_judged_by_itself() {
+        let (mut engine, _tmp, _worktree, _, standalone) =
+            engine_with_a_watched_agent_and_terminals();
+        close_terminal(&mut engine, &standalone, None).expect("nobody has it open");
+        assert!(!engine.companion_terminals.contains_key(&standalone));
+    }
+
+    /// The close reserves only the terminal: while it is closing, the agent's
+    /// own tab still takes new attaches, so a browser opening the agent then is
+    /// not turned away as if the agent were going.
+    #[test]
+    fn closing_an_agents_terminal_leaves_the_agent_open_to_attach() {
+        let (engine, _tmp, _worktree, companion, _) = engine_with_a_watched_agent_and_terminals();
+        let _held = engine
+            .reserve_destruction_judging(
+                &engine.terminal_close_scope(&companion),
+                crate::engine::Engine::pty_scope(&companion),
+            )
+            .expect_err("the watcher is in the way");
+        engine.attachments.register(
+            "e2",
+            ConnectionFacts {
+                surface: Surface::Browser,
+                device: None,
+                address: None,
+                verified: true,
+                events: true,
+                browser: None,
+            },
+            None,
+        );
+        let forced = crate::attachments::Policy {
+            requester: Some("e2".to_string()),
+            force: true,
+            accepted: None,
+        };
+        let reservation = engine
+            .attachments
+            .reserve_judging(
+                &engine.terminal_close_scope(&companion),
+                crate::engine::Engine::pty_scope(&companion),
+                &forced,
+                crate::attachments::Life::Released,
+                std::time::Instant::now(),
+            )
+            .expect("forced");
+        let tab = Target {
+            kind: TargetKind::Tab,
+            id: "s1-tab2".to_string(),
+            agent: Some("s1".to_string()),
+        };
+        let terminal = Target {
+            kind: TargetKind::Terminal,
+            id: companion.clone(),
+            agent: Some("s1".to_string()),
+        };
+        assert!(engine.attachments.attach("e2", tab, None, None).is_ok());
+        assert!(
+            engine
+                .attachments
+                .attach("e2", terminal, None, None)
+                .is_err()
+        );
+        engine.attachments.release(reservation);
     }
 }
