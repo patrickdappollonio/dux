@@ -1954,9 +1954,9 @@ pub struct UiConfig {
     /// menu, or the web's Preferences dialog persists the new value here
     /// immediately; it is not a per-session override.
     pub show_changes_pane: bool,
-    /// Always show the agent tab strip, even when a session has only one tab.
-    /// Default false shows the strip only once a session has two or more
-    /// tabs. Changing it from the TUI's command palette or the web's
+    /// Always show the agent tab strip, and with it the terminal dock's strip,
+    /// even when a session has only one tab. Default false shows them only once
+    /// the agent has two or more tabs or two or more terminals. Changing it from the TUI's command palette or the web's
     /// Preferences dialog persists the new value here immediately; it is a
     /// shared preference, not a per-session override.
     pub always_show_tab_strip: bool,

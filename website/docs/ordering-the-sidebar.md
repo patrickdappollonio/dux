@@ -30,9 +30,8 @@ spinner glyph animates while an agent works):
 
 ![The terminal UI sidebar: three active agents, one of them running three tabs, and a collapsed Inactive tail.](/screens/tui-agent-list-two-line.png)
 
-A terminal's second line names its owner: the project for a project terminal, or
-`agent@project` for an agent's terminal in the browser's list. A standalone terminal has no
-owner, so it names the directory it opened in instead, shortened with `~`. Whichever it
+A project terminal's second line names its project. A standalone terminal has no owner, so
+it names the directory it opened in instead, shortened with `~`. Whichever it
 shows is what the sidebar search matches on.
 
 Typing in the filter narrows the list to the rows that match, with the matching text

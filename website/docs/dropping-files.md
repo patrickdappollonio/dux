@@ -27,7 +27,8 @@ image on your clipboard takes the same route.
   floating pill's in theater mode. This is the phone entry point, since there is no drag
   gesture on a touch screen, and on a computer it gives a keyboard-only desktop one. The
   entry appears while that session's terminal is open in front of you and you are the one
-  driving it; close the terminal and the entry goes.
+  driving it; close the terminal and the entry goes. On an agent with terminals docked
+  under it, the file goes to whichever part you are typing into, the agent or a terminal.
 - The file tree's right-click menu in the editor, as **Upload here…**, which puts the file
   in the folder you right-clicked and pastes nothing anywhere.
 

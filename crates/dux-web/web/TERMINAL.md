@@ -103,7 +103,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 7. **The very first open jiggles the width (down one column and back, 60ms apart).**
    Trap: a same-size resize is a kernel no-op (no SIGWINCH), so when the PTY already
    matches the viewport the agent never repaints over the imperfect initial snapshot.
-   Fix: src/components/terminal/resizeCoordinator.ts:294-311, `src/lib/firstFrameResize.ts:24-26`.
+   Fix: src/components/terminal/resizeCoordinator.ts:294-311, `src/lib/firstFrameResize.ts` (`firstFrameResizePlan`).
    Pinned: `src/lib/firstFrameResize.test.ts` "jiggles on the very first open to repaint
    over the initial snapshot"; `components/TerminalPane.test.tsx` "still jiggles on the
    very first open (the deliberate first-frame bypass)" and "carries a re-grid landing
@@ -133,10 +133,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     position. Since the take-over arc it is also the standing recovery for a resize the
     SERVER refused (the record books "written to the socket" and nothing more), and it is
     gated on ownership like every other send, so a watcher's alt-tab volunteers nothing.
-    Fix: src/components/terminal/useTerminalLifecycle.ts (`resyncToForeground`: visibilitychange AND window focus,
+    Fix: src/components/terminal/resizeCoordinator.ts (`resyncToForeground`, called from the lifecycle on visibilitychange AND window focus,
     150ms debounce, `term.write("")` drain gate, forced send). Pinned:
-    `components/TerminalPane.test.tsx` "still re-asserts an UNCHANGED size on a
-    foreground return (the dedupe bypass)".
+    `src/components/terminal/resizeCoordinator.test.ts` "the resize coordinator's
+    foreground re-assert" suite ("re-sends an UNCHANGED size, bypassing the dedupe").
 
 11. **NEW at 39f5c2ce: the local refit and the PTY resize are one atomic pair held by a
     touch gesture, flushed together at the lift, refit first, exactly one fit.**
@@ -184,7 +184,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     bundled fonts (and any user family) load.** Trap: awaiting fonts before `open()`
     delays the PTY connection on every mount for a benefit that only matters on a cold
     cache; a stale refit after remount must not touch a successor terminal (identity
-    guard). Fix: src/components/terminal/useTerminalLifecycle.ts:397-405, `src/lib/terminalFont.ts:149-199`.
+    guard). Fix: src/components/terminal/terminalSetup.ts (`openTerminal`), `src/lib/terminalFont.ts` (`loadTerminalFontsThenRefit`).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane bundled font load on mount"
     (both tests).
 
@@ -204,17 +204,17 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 17. **Scrollback is sized from `agent_scrollback_lines` via a ref, read lazily on
     (re)connect.** Trap: xterm's 1000-line default trims the reconnect replay; making
-    bootstrap a mount-effect dep would recreate the terminal. Fix: src/components/terminal/liveValues.ts:42-44 + TP:261, src/components/terminal/useTerminalLifecycle.ts:268.
+    bootstrap a mount-effect dep would recreate the terminal. Fix: src/components/terminal/liveValues.ts:42-44 + TP:261, src/components/terminal/terminalSetup.ts (`createTerminalSetup`, the `scrollback` option).
     Pinned: unpinned.
 
 18. **The xterm scrollbar width comes from the one `--xterm-scrollbar-width` CSS var.**
     Trap: the slimmed scrollbar and the button overlay's reserved gutter must agree
     (single source); setting `overviewRuler.width` also instantiates a ruler canvas that
-    index.css hides. Fix: src/components/terminal/useTerminalLifecycle.ts:229-241, src/components/terminal/useTerminalLifecycle.ts:271-271. Pinned: unpinned.
+    index.css hides. Fix: src/components/terminal/terminalSetup.ts (`createTerminalSetup`: `xtermScrollbarWidth()`, the `overviewRuler` option). Pinned: unpinned.
 
 19. **The terminal background is the app's `--background` token, resolved through a 1x1
     canvas paint (oklch to hex), applied to canvas and padded host alike.**
-    Fix: src/components/terminal/useTerminalLifecycle.ts:203-224, src/components/terminal/useTerminalLifecycle.ts:272-272. Pinned: unpinned.
+    Fix: src/components/terminal/terminalSetup.ts (`resolveTerminalBackground`, applied in `createTerminalSetup`). Pinned: unpinned.
 
 20. **NEW at the viewer-geometry arc: the PTY's grid is ON THE WIRE, twice over.**
     Trap (proven): one PTY has ONE authoritative grid, the owner's, and every other
@@ -254,7 +254,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Fix: `crates/dux-core/src/pty.rs` (`grid_size`), `crates/dux-web/src/pty_sizes.rs`
     (the bus, and the two doc paragraphs on why it is a broadcast and not the
     event bus), `crates/dux-web/src/engine_actor.rs` (`PtyGridSize` /
-    `pty_grid_size`), `crates/dux-web/src/pty_owners.rs` (`OwnersState.grid_seq`,
+    `pty_grid_size`), `crates/dux-core/src/pty_owners.rs` (`OwnersState.grid_seq`,
     the seq stamp in `claim_for_resize`, the `grid_seq` accessor),
     `crates/dux-web/src/server.rs` (`PtyConnectedFrame.rows/cols/grid_seq`,
     `PtySizeFrame`, `pty_size_frame_text`, the `grid_changes` select arm and its
@@ -282,7 +282,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     UNKNOWN, never as agreement", "drops a size event whose seq the handshake
     already covers", "drops a size event that arrives behind a newer one, by seq
     alone", and "applies size events without a seq, for an old server that
-    stamps none"; `crates/dux-web/src/pty_owners.rs`
+    stamps none"; `crates/dux-core/src/pty_owners.rs`
     `grid_seq_is_monotonic_per_pty_in_apply_order_and_absent_on_refusal`;
     `crates/dux-web/src/pty_sizes.rs`
     `a_stale_publish_arriving_after_a_newer_one_is_droppable_by_seq`.
@@ -504,7 +504,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     anything new (the pty is already live; a second connection to it is an ordinary
     viewer attach, and the server replays it the scrollback unconditionally). A dormant tab must never be auto-mounted, because
     subscribing force-launches (App renders its card instead; reaching this pane for one
-    is an intentional launch). Fix: src/components/terminal/useTerminalLifecycle.ts:334-338 (the socket per target), src/components/terminal/useTerminalLifecycle.ts:962-964 (`pty.connect()`); `crates/dux-web/src/server.rs:1441-1449`.
+    is an intentional launch). Fix: src/components/terminal/useTerminalLifecycle.ts (`new PtySocket(ptyUrl)`, the socket per target), src/components/terminal/plainBounce.ts (`plainBounce`, the `pty.connect()`); `crates/dux-web/src/server.rs` (`subscribe_or_close`).
     Pinned: not by this pane's suites (App-level dormant-tab tests plus the CLAUDE.md
     tab tenet).
 
@@ -533,7 +533,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     reconnects constantly; a duplicate replay or a late blob from a torn-down forwarder
     stacked a second copy of history (the duplicated-text bug). Untagged (older server)
     always applies. Fix: src/components/terminal/attachReplay.ts:151-159, `src/lib/replayGeneration.ts`;
-    `crates/dux-web/src/server.rs:1473-1482,1808`.
+    `crates/dux-web/src/server.rs` (`next_replay_generation`).
     Pinned: `src/lib/replayGeneration.test.ts` (whole file);
     `crates/dux-web/src/server.rs` `replay_generations_are_strictly_increasing`.
 
@@ -554,8 +554,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     reconnect landed on a full-screen agent with `mouseTrackingMode === "none"` and a
     finger drag did nothing until a hard refresh. Do not infer modes client-side from
     what the replay draws. Fix: src/components/terminal/attachReplay.ts:13-21;
-    `crates/dux-core/src/pty.rs:234-301` (`mode_restore_sequence`),
-    `crates/dux-core/src/pty.rs:2197-2222` (`reconnect_repaint`).
+    `crates/dux-core/src/pty.rs` (`mode_restore_sequence`),
+    `crates/dux-core/src/pty.rs` (`reconnect_repaint`).
     Pinned: `crates/dux-core/src/pty.rs` `mode_restore_sequence_emits_both_polarities`,
     `reconnect_repaint_restores_private_modes_on_the_alt_screen` /
     `_on_the_main_screen`, `reconnect_repaint_restores_default_modes_when_the_child_set_none`.
@@ -563,13 +563,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 6. **The mode restore emits tracking-mode disables before the enable, ascending.**
     Trap (measured): xterm keeps one active protocol and a DECRST of ANY of
     1000/1002/1003 drops it to none, so `1000l 1002h 1003l` leaves tracking off.
-    Fix: `crates/dux-core/src/pty.rs:244-275`.
+    Fix: `crates/dux-core/src/pty.rs` (`mode_restore_sequence`).
     Pinned: `crates/dux-core/src/pty.rs`
     `mode_restore_sequence_enables_mouse_tracking_after_its_disables`.
 
 7. **The repaint restores the scroll region and positions even a hidden cursor; origin
-    mode is cleared, not restored.** Fix: `crates/dux-core/src/pty.rs:2197-2259` and the
-    doc at 218-233. Pinned: `crates/dux-core/src/pty.rs`
+    mode is cleared, not restored.** Fix: `crates/dux-core/src/pty.rs` (`reconnect_repaint`) and the
+    doc on `mode_restore_sequence`. Pinned: `crates/dux-core/src/pty.rs`
     `reconnect_repaint_restores_the_scroll_region_on_the_alt_screen` / `_main_screen`,
     `reconnect_repaint_places_a_hidden_cursor_where_the_program_left_it`,
     `reconnect_repaint_clears_origin_mode_before_it_positions_anything`.
@@ -580,7 +580,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     the pane an owner across the gap in which it has none. Trap: a `pty.owner`
     over the separate `/ws/events` socket can arrive before this socket's new
     `connected` frame; a stale id makes `isOwnerAfterHandover` misjudge ownership. Null
-    reads safely as non-owner until the new frame lands. Fix: src/components/terminal/useTerminalLifecycle.ts:895-910 + src/components/terminal/attachReplay.ts:134-139.
+    reads safely as non-owner until the new frame lands. Fix: src/components/terminal/socketCallbacks.ts (`pty.onOpen`, `retireConnectionIdentity`) + src/components/terminal/attachReplay.ts:134-139.
     Pinned: `components/TerminalPane.test.tsx` "registers its socket id as this client's
     own and retires it on reconnect and unmount".
 
@@ -595,7 +595,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Fix: `TerminalPane.tsx` (the `reconnecting` state, hoisted above the ownership
     machine so `takeOver` can raise it), src/components/terminal/ownership.ts
     (`setReconnecting(true)` in `takeOver`),
-    src/components/terminal/useTerminalLifecycle.ts (`onOpen`/`onReconnecting`). Pinned: `src/lib/ptySocket.test.ts` "fires
+    src/components/terminal/socketCallbacks.ts (`onOpen`/`onReconnecting`). Pinned: `src/lib/ptySocket.test.ts` "fires
     onReconnecting once when the socket drops, then onOpen on recovery", "does not fire
     onReconnecting on a user-initiated close".
 
@@ -603,7 +603,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     hard stop with an explicit Reconnect affordance.** Trap: before the cap, a dead
     server silently reattached behind a stuck overlay. The affordance suppresses itself
     while the whole app is offline (the OfflineOverlay owns that signal). Fix:
-    src/components/terminal/ownership.ts:213-217, src/components/terminal/useTerminalLifecycle.ts:941-948, TP:834-857.
+    src/components/terminal/ownership.ts:213-217, src/components/terminal/socketCallbacks.ts (`pty.onConn`), TP:834-857.
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane connectionLost affordance"
     (describe.each over agent AND companion terminal), incl. "suppresses its own
     connectionLost overlay while globally offline".
@@ -616,14 +616,15 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 12. **Server close code 4001 (provider unavailable/exited) stops the client cold.**
     Trap: auto-retry re-subscribes and relaunches the doomed provider forever.
-    Fix: `src/lib/ptySocket.ts:36-42,270-288`; `crates/dux-web/src/server.rs:829-835,
-    1455-1471,1538-1556`. Pinned: `crates/dux-web/src/server.rs` tests asserting
-    `PROVIDER_GONE_CLOSE_CODE` (lines ~2635, ~2647).
+    Fix: `src/lib/ptySocket.ts:36-42,270-288`; `crates/dux-web/src/server.rs`
+    (`provider_gone_close`, `spawn_pty_forwarder`). Pinned: `crates/dux-web/src/server.rs` tests asserting
+    `PROVIDER_GONE_CLOSE_CODE` (`provider_gone_close_carries_the_agreed_code`,
+    `forwarder_end_close_is_provider_gone_unless_shutting_down`).
 
 13. **An extra tab's vanished route is detected by consulting the spine, not the close.**
     Trap: a closed WebSocket carries no HTTP status, so a 404-forever route is
     indistinguishable from a transient drop and would retry forever. Session-slot tabs
-    and companion terminals never need this. Fix: src/components/terminal/useTerminalLifecycle.ts:949-961 (`shouldRetry`/`onGone`),
+    and companion terminals never need this. Fix: src/components/terminal/socketCallbacks.ts (`shouldRetry`/`onGone`),
     `src/lib/ptySocket.ts:178-193`, `src/lib/agentTabs.ts:36`.
     Pinned: `src/lib/agentTabs.test.ts` "isTabGone" suite; the pane wiring itself is
     unpinned.
@@ -685,10 +686,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     never announce: `outcome.apply` gates the publish exactly as `outcome.epoch`
     gates the `pty.owner` emit beside it, and both run after the owners lock is
     released.
-    Fix: `crates/dux-web/src/pty_owners.rs` (`claim_for_resize`, `ResizeClaim`),
+    Fix: `crates/dux-core/src/pty_owners.rs` (`claim_for_resize`, `ResizeClaim`),
     `crates/dux-web/src/server.rs` (the Text-frame arm, `PtyResizeFrame.takeover`,
     the `pty_grid_bus.publish` inside the `apply` branch).
-    Pinned: `crates/dux-web/src/pty_owners.rs` `claim_for_resize_table` (the full
+    Pinned: `crates/dux-core/src/pty_owners.rs` `claim_for_resize_table` (the full
     {unowned, owned-by-other, owned-by-self} x {plain, takeover} table) and
     `claim_for_resize_applies_in_claim_order_so_the_owner_owns_the_geometry`;
     `crates/dux-web/tests/ws_transport.rs`
@@ -707,7 +708,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 4. **`pty.owner` events are epoch-deduped per pty id.** Trap: the epoch is assigned
     under the server lock but broadcast after it releases; the runtime can reorder two
     near-simultaneous broadcasts and a stale owner would win. Absent epoch (mixed
-    versions) always delivers. Fix: `src/lib/ptyOwnership.ts:154-201`.
+    versions) always delivers. Fix: `src/lib/ptyOwnership.ts` (`notifyPtyOwner`).
     Pinned: `src/lib/ptyOwnership.test.ts` "pty.owner epoch dedup" suite.
 
 5. **The epoch high-water marks reset when the events socket reconnects, and NOTHING
@@ -733,8 +734,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     coordinator's `isOwner` gate), because against an old server a volunteered non-owner
     size is the silent steal reborn, and against a new one it is refused-resize log spam
     on every alt-tab. The flagged take-over claim is the ONLY frame this client sends
-    while it knows it is not the owner. Fix: src/components/terminal/useTerminalLifecycle.ts:440-444,
-    src/components/terminal/useTerminalLifecycle.ts:470-473,
+    while it knows it is not the owner. Fix: src/components/terminal/inputWiring.ts
+    (`registerTerminalStreams`),
     src/components/terminal/resizeCoordinator.ts (`sendOwned`);
     `crates/dux-web/src/server.rs` (the Binary and Text arms).
     Pinned: `src/lib/termkeys.test.ts` softNewlineAction owner tests;
@@ -794,13 +795,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     render-phase clear, `seedFromConnected`, `deviceLabel` in the return);
     `src/lib/ptyOwnership.ts` (`seedDeviceFromConnected`); server
     `crates/dux-web/src/server.rs` (`captured_user_agent`,
-    `PtyConnectedFrame.owner_device`) and `crates/dux-web/src/pty_owners.rs`
+    `PtyConnectedFrame.owner_device`) and `crates/dux-core/src/pty_owners.rs`
     (`OwnerRecord.device`, `current_owner`).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane take-over device naming"
     (all four tests, including "names the owning device from the connected handshake
     alone, no pty.owner event"); `src/lib/deviceLabel.test.ts`;
     `src/lib/ptyOwnership.test.ts` "seedDeviceFromConnected" suite;
-    `crates/dux-web/src/pty_owners.rs` `current_owner_reports_the_device_recorded_at_claim_time`;
+    `crates/dux-core/src/pty_owners.rs` `current_owner_reports_the_device_recorded_at_claim_time`;
     `crates/dux-web/tests/ws_transport.rs` `the_connected_handshake_names_the_owners_device`.
 
 10. **The pane publishes its ownership verdict into the store ledger, agent PTYs only,
@@ -817,7 +818,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     and unmount, in step with `myConnIdRef`.** Trap: the server releases everything the
     id owned the moment the socket closes; a kept id makes a spine field naming it read
     as "mine" when it no longer is; the two "is this id mine" trackers must never
-    disagree. Fix: src/components/terminal/useTerminalLifecycle.ts:410-415, src/components/terminal/useTerminalLifecycle.ts:905-909, src/components/terminal/useTerminalLifecycle.ts:930-934, src/components/terminal/useTerminalLifecycle.ts:1085-1089.
+    disagree. Fix: src/components/terminal/socketCallbacks.ts (`onConnected`'s `noteOwnPtyConnection`, `retireConnectionIdentity` on `onOpen` and `onReconnecting`), src/components/terminal/lifecycleCleanup.ts (`disposeTerminalLifecycle`).
     Pinned: `components/TerminalPane.test.tsx` "registers its socket id as this client's
     own and retires it on reconnect and unmount"; `src/lib/storePtyOwnership.test.ts`
     "noteOwnPtyConnection registers and retires this client's socket ids".
@@ -886,8 +887,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     the last one needs its own rule, because the same reap lag means the handshake
     usually still names the returning client's OWN dead connection id rather than null.
     SELF-SUCCESSION covers it: the ownership machine keeps the pane's previous
-    connection id (`prevConnIdRef`, written by the `connId` channel wherever the
-    lifecycle nulls the live id), and a handshake whose owner equals that ghost, on a
+    connection id (`prevConnIdRef` then; now every id the page has held, through
+    `rememberHeldConnId`/`heldConnIdStamp` in `src/lib/ptyOwnership.ts`), and a handshake whose owner equals that ghost, on a
     FOREGROUNDED page, arms the take-over intent so the claim rides the first resize
     frame of the new connection FLAGGED. The server grants a flagged claim against any
     owner and the owner being displaced is this pane's own ghost, so nothing is stolen.
@@ -901,12 +902,12 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     THE FREED EXCEPTION: an owner-cleared event leaves an ARMED take-over intent in
     place, because it names no winner and so clears nobody's victory; only an event
     naming ANOTHER owner (a genuine lost race) retires the intent.
-    Fix: `crates/dux-web/src/pty_owners.rs` (`release` returning the epoch),
+    Fix: `crates/dux-core/src/pty_owners.rs` (`release` returning the epoch),
     `crates/dux-web/src/server.rs` (`pty_owner_cleared_event`, the disconnect path),
     src/components/terminal/ownership.ts (site 5 inside the `onPtyOwner` effect,
-    `prevConnIdRef`, the self-succession branch of `seedFromConnected`),
+    the held-id set that replaced `prevConnIdRef`, the self-succession branch of `seedFromConnected`),
     `src/components/TerminalPane.tsx` (the card's three titles).
-    Pinned: `crates/dux-web/src/pty_owners.rs`
+    Pinned: `crates/dux-core/src/pty_owners.rs`
     `release_reports_an_epoch_only_when_it_cleared_a_real_owner`;
     `crates/dux-web/tests/ws_transport.rs`
     `an_owner_disconnecting_broadcasts_an_owner_cleared_pty_owner`;
@@ -916,7 +917,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     handshake claims flagged, and the lost-race clear on an event naming another
     owner) and its "self-succession after a blipped socket" suite (claims back,
     not while backgrounded, not for somebody else's id, not against a superseded
-    handshake); `components/TerminalPane.test.tsx` "says nobody is driving once the
+    handshake); `components/TerminalPane.test.tsx` "offers control once the
     owner disconnects, to a backgrounded viewer", "does not claim the freed pty, even
     foregrounded and mounted", and "self-succeeds when the reconnect's handshake names
     its own dead connection".
@@ -985,7 +986,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     src/components/terminal/useTerminalLifecycle.ts.
     Pinned: `src/lib/serverRun.test.ts`; `src/components/terminal/ownership.test.ts`
     "forgets its ghosts when the server run has actually changed" and "keeps its ghosts
-    when the run-identity probe could not answer";
+    across an ordinary events reconnect" and "refuses self-succession while the run identity is unconfirmed";
     `src/components/terminal/attachReplay.test.ts` "forgets the applied generation once
     the run can no longer be vouched for".
 
@@ -1071,18 +1072,18 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     layer.** Trap: xterm collapses Enter and Shift-Enter to CR before `onData`; the data
     layer cannot distinguish them. Only the bare chord matches; keyup/keypress pass;
     IME composition (isComposing or keyCode 229) is left strictly alone.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:493-517, `src/lib/termkeys.ts:193-264`.
+    Fix: src/components/terminal/inputWiring.ts (`terminalKeyAction`), `src/lib/termkeys.ts:193-264`.
     Pinned: `src/lib/termkeys.test.ts` "softNewline" and "softNewlineAction" suites
     (IME, keyup, modifier, owner, latch cases).
 
 2. **One `attachCustomKeyEventHandler` closure owns both the soft-newline chord and the
     clipboard chords.** Trap: xterm allows exactly one custom key handler; a second
-    registration replaces the first. Fix: src/components/terminal/useTerminalLifecycle.ts:475-493. Pinned: structural, unpinned.
+    registration replaces the first. Fix: src/components/terminal/inputWiring.ts (`registerTerminalInputWiring`). Pinned: structural, unpinned.
 
 3. **Clipboard chords classify by PHYSICAL key (`code`, `keyCode` fallback), never
     `ev.key`.** Trap: on a non-Latin layout the V key types another character; a
     key-based match misses and xterm leaks `\x16` to the REMOTE agent (the original
-    remote-clipboard bug). Fix: `src/lib/termkeys.ts:270-326`, src/components/terminal/useTerminalLifecycle.ts:519-534.
+    remote-clipboard bug). Fix: `src/lib/termkeys.ts:270-326`, src/components/terminal/inputWiring.ts (`terminalKeyAction`).
     Pinned: `src/lib/termkeys.test.ts` "classifies by physical key, not ev.key", "falls
     back to keyCode when code is empty".
 
@@ -1098,14 +1099,14 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 6. **A paste chord returns false WITHOUT preventDefault so the browser's native paste
     event fires and xterm's own handler reads `clipboardData` (secure-context-free).**
-    Fix: src/components/terminal/useTerminalLifecycle.ts:544-559. Pinned: `components/TerminalPane.clipboard.test.tsx` "is left
+    Fix: src/components/terminal/inputWiring.ts (`terminalKeyAction`). Pinned: `components/TerminalPane.clipboard.test.tsx` "is left
     entirely to xterm: nothing uploaded, nothing cancelled".
 
 7. **A NON-owner's paste chord takes the same path, deliberately.** Trap: swallowing the
     chord for a viewer meant no native paste event fired, so an image paste was silently
     inert instead of refused out loud (Linux/Windows only, since Cmd+v never reached the
     branch). Text still cannot leak: xterm's paste ends in `onData`, which returns early
-    for a non-owner, and the server drops it too. Fix: src/components/terminal/useTerminalLifecycle.ts:549-559.
+    for a non-owner, and the server drops it too. Fix: src/components/terminal/inputWiring.ts (`terminalKeyAction`).
     Pinned: `components/TerminalPane.clipboard.test.tsx` "lets a viewer's paste chord
     reach the browser, so the refusal is reachable at all" and "still keeps a viewer's
     TEXT paste off the wire".
@@ -1113,7 +1114,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 8. **The force-text-paste chord is detected independently of the classifier, before it.**
     Trap: on a Mac `Cmd+Shift+v` classifies as passthrough (the whole Cmd branch is the
     browser's), so folding the hatch into the classifier gives it to Linux only.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:528-533, `src/lib/termkeys.ts:328-355`.
+    Fix: src/components/terminal/inputWiring.ts (`terminalKeyAction`), `src/lib/termkeys.ts:328-355`.
     Pinned: `src/lib/termkeys.test.ts` "forcesTextPaste" suite ("matches Cmd-Shift-v,
     which the classifier never sees"); `components/TerminalPane.clipboard.test.tsx`
     "works on a Mac, where the chord carries Cmd and not Ctrl".
@@ -1128,7 +1129,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     after it still takes the image".
 
 10. **Copy-on-select runs inside the `mouseup` user gesture so the clipboard write is
-    permitted over plain HTTP (synchronous execCommand fallback).** Fix: src/components/terminal/useTerminalLifecycle.ts:590-612;
+    permitted over plain HTTP (synchronous execCommand fallback).** Fix: src/components/terminal/inputWiring.ts (`registerMouseCopy`);
     `src/lib/termClipboard.ts:41-54`, `src/lib/clipboard.ts`.
     Pinned: `src/lib/termClipboard.test.ts` copy suite; `src/lib/termkeys.test.ts`
     copyOnSelectAction suite.
@@ -1144,7 +1145,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     one-char mouse selection must not clobber the clipboard, but a finger held 400ms is
     deliberate by construction and single tokens (`y`, a digit) are ordinary terminal
     targets; refusing them copied nothing silently. Fix: `src/lib/termkeys.ts:388-419`,
-    src/components/terminal/useTerminalLifecycle.ts:795-811. Pinned: `src/lib/termkeys.test.ts` "ignores a trivial one-char
+    src/components/terminal/touchWiring.ts (`copyTouchSelection`). Pinned: `src/lib/termkeys.test.ts` "ignores a trivial one-char
     selection from a MOUSE drag" and "copies a one-char selection from a long press";
     `components/TerminalPane.test.tsx` "copies a ONE-character word, because a long
     press is deliberate".
@@ -1152,7 +1153,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 13. **The mouse-capture hint fires at most once per PAGE SESSION (module-scope latch),
     only after a real drag, and only when the app holds the mouse.** Trap: a
     per-component ref resets on every pane remount (every agent switch); a plain click
-    must not hint. Fix: src/components/terminal/pageSessionHints.ts:18-19 + src/components/terminal/constants.ts:8-12, src/components/terminal/useTerminalLifecycle.ts:591-611 + src/components/terminal/pageSessionHints.ts:39-41.
+    must not hint. Fix: src/components/terminal/pageSessionHints.ts:18-19 + src/components/terminal/constants.ts:8-12, src/components/terminal/inputWiring.ts (`registerMouseCopy`) + src/components/terminal/pageSessionHints.ts:39-41.
     Pinned: `src/lib/termkeys.test.ts` "hints only once per session", "does not hint on
     a plain click"; `components/TerminalPane.test.tsx` "never shows the mouse-capture
     hint, whatever the long press lands on".
@@ -1164,10 +1165,12 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     fires `contextmenu` on a long press and xterm's listener runs first (it is on a
     descendant), so the wipe must cover touch now that a long press produces a
     selection, and the focus grab would raise the soft keyboard over it.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:630-644, TP:774-791, src/components/terminal/inputSurface.ts:164-164.
-    Pinned: `components/TerminalPane.test.tsx` "wipes the selection xterm stuffed into
-    its hidden textarea on a touch long press", "hands focus back when xterm's
-    contextmenu handler grabs the textarea", "leaves the textarea focused for a MOUSE
+    Fix: src/components/terminal/inputWiring.ts (`registerPasteGuards`), TP:774-791, src/components/terminal/inputSurface.ts:164-164.
+    Since then a touch `contextmenu` no longer reaches xterm at all: `registerPasteGuards`
+    stops it on the way down, so the touch path moves no focus rather than handing it back.
+    Pinned: `components/TerminalPane.test.tsx` "moves no focus when Android follows the
+    long press with a contextmenu", "still lets xterm answer a MOUSE right click",
+    "retires the context-menu paste guard when the pane unmounts", "leaves the textarea focused for a MOUSE
     right-click, which pastes".
 
 15. **Right-click paste needs the async Clipboard API and is guarded against its
@@ -1180,7 +1183,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 16. **Sticky Ctrl/Alt latches live in state plus a ref mirror, written together;
     multi-char chunks (paste/IME) pass untransformed but still clear the latch.**
     Trap: the once-created `onData` closure would capture stale state; applying a
-    modifier to a paste corrupts it. Fix: src/components/terminal/inputSurface.ts:129-138, src/components/terminal/useTerminalLifecycle.ts:450-457,
+    modifier to a paste corrupts it. Fix: src/components/terminal/inputSurface.ts:129-138, src/components/terminal/inputWiring.ts (`registerTerminalStreams`),
     `src/lib/termkeys.ts:139-165`. Pinned: `src/lib/termkeys.test.ts` applyModifiers
     suite ("passes multi-char chunks through untransformed under every modifier").
 
@@ -1218,22 +1221,22 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (`container.clientWidth / cols`) disagreed with xterm's on 15 of 21 probed points
     (up to two columns by the far side, the scrollbar gutter). xterm resolves the cell
     (`getMouseReportCoords`) and encodes what was negotiated.
-    Fix: `src/lib/termmouse.ts` (module doc, 1-111), src/components/terminal/useTerminalLifecycle.ts:702-736,826-870.
+    Fix: `src/lib/termmouse.ts` (module doc), src/components/terminal/touchWiring.ts (`replayTouchClick`, `moveScroll`).
     Pinned: `src/lib/termmouse.test.ts` "a replayed tap through xterm's pipeline"
     (SGR, X10, SGR_PIXELS, boundary cells, padding subtraction);
-    `components/TerminalPane.test.tsx` tap-forwarding tests (1483-1554).
+    `components/TerminalPane.test.tsx` tap-forwarding tests.
 
 2. **The pane subscribes to `onBinary` as well as `onData`.** Trap (measured, xterm
     6.0.0): DEFAULT (X10) encoded reports go out through `triggerBinaryEvent` only; an
     `onData`-only pane drops every report from a `?1000`-without-`?1006` app, desktop
-    clicks included, making it unclickable. Fix: src/components/terminal/useTerminalLifecycle.ts:459-473.
+    clicks included, making it unclickable. Fix: src/components/terminal/inputWiring.ts (`registerTerminalStreams`).
     Pinned: `components/TerminalPane.test.tsx` "sends the DEFAULT (X10 byte) encoding on
     onBinary when the app never asked for SGR" (tap and drag variants);
     `src/lib/termmouse.test.ts` "encodes DEFAULT (X10 bytes) on the BINARY channel".
 
 3. **`onBinary` payloads are encoded latin1, never through `TextEncoder`.** Trap: X10
     puts `col + 32` in one byte; past column 95 UTF-8 splits it into two bytes and
-    corrupts the report. Fix: `src/lib/termmouse.ts:231-246`, src/components/terminal/useTerminalLifecycle.ts:470-473.
+    corrupts the report. Fix: `src/lib/termmouse.ts` (`latin1Bytes`), src/components/terminal/inputWiring.ts (`registerTerminalStreams`).
     Pinned: `src/lib/termmouse.test.ts` latin1Bytes suite ("keeps a high byte as ONE
     byte, where TextEncoder would emit two").
 
@@ -1246,7 +1249,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     report is an OWNER-only act (`forwardWheelNow` reads the verdict), so it is one of the
     behaviors the handshake seeding decides: a phantom owner would have forwarded wheel
     reports the server then dropped.
-    Fix: src/components/terminal/useTerminalLifecycle.ts, `src/lib/viewport.ts:45-70` (`dragWheelReport`).
+    Fix: src/components/terminal/touchWiring.ts (`moveScroll`, `forwardsWheel`), `src/lib/viewport.ts` (`dragWheelReport`).
     Pinned: `src/lib/viewport.test.ts` "CAPS a fast flick to a single notch while
     draining the whole accumulator"; `components/TerminalPane.test.tsx` "sends exactly
     one SGR wheel report per move, at the finger's cell".
@@ -1254,13 +1257,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 5. **Replayed wheel events use `deltaY` of ±1 with `DOM_DELTA_LINE`, one event per
     notch.** Trap: xterm reads only the sign, and the pixel branch accumulates a
     fractional remainder across events and swallows some. Fix:
-    `src/lib/termmouse.ts:146-172`. Pinned: `src/lib/termmouse.test.ts`
+    `src/lib/termmouse.ts` (`wheelReplaySteps`). Pinned: `src/lib/termmouse.test.ts`
     wheelReplaySteps suite ("plans one event per notch, never a bigger delta").
 
 6. **A replayed tap's release is dispatched at the DOCUMENT; under X10 it lands on
     nothing, correctly.** Trap: xterm moves `mouseup` onto the document for the duration
     of a press (`bindMouse`); an element-only release is never seen; X10 arms no
-    listener because it reports presses only. Fix: `src/lib/termmouse.ts:115-144`.
+    listener because it reports presses only. Fix: `src/lib/termmouse.ts` (`tapReplaySteps`).
     Pinned: `src/lib/termmouse.test.ts` "plans a left press at the element then a
     release at the document", "reports a press only under the X10 protocol";
     `components/TerminalPane.test.tsx` "sends NO release under the X10 protocol".
@@ -1269,7 +1272,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     discriminator.** Trap: jsdom dispatches are never trusted, so an isTrusted guard
     makes every component test of the intercept exercise nothing; an
     assistive-technology click is untrusted AND a real intent. Fix:
-    `src/lib/termreplay.ts`, `src/lib/termmouse.ts:194-228`.
+    `src/lib/termreplay.ts`, `src/lib/termmouse.ts` (`dispatchMouseReplay`).
     Pinned: "dux-replay tagging" suites in `src/lib/termmouse.test.ts` and
     `src/lib/termlink.test.ts`; `components/TerminalPaneLinks.test.tsx` "lets dux's own
     tagged link probe through".
@@ -1277,22 +1280,21 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 8. **Local wheel speed is `scrollSensitivity: 3` and affects LOCAL scrollback only.**
     Verified against installed xterm 6 source: the option feeds the viewport's local
     scrolling, which is disabled entirely while an app captures the wheel; the
-    wheel-report path stays 1:1 per event. Fix: src/components/terminal/constants.ts:14-24, src/components/terminal/useTerminalLifecycle.ts:270-270.
-    Pinned: `components/TerminalPane.test.tsx` "constructs the terminal with
-    scrollSensitivity 3".
+    wheel-report path stays 1:1 per event. Fix: src/components/terminal/constants.ts:14-24, src/components/terminal/terminalSetup.ts (`createTerminalSetup`, the `scrollSensitivity` option).
+    Pinned: `components/TerminalPane.test.tsx` "has scrollSensitivity 3".
 
 9. **The scroll target is decided fresh each touch-move: normal buffer scrolls xterm
     scrollback locally; alt screen forwards wheel only when tracking is on AND we own
     the PTY; otherwise the drag does nothing.** Trap: an agent can flip in or out of an
     alt-screen TUI mid-drag; the alt screen has no xterm scrollback at all. Fix:
-    src/components/terminal/useTerminalLifecycle.ts:677-679,702-736 + src/components/terminal/touchGesture.ts:114-130. Pinned: `components/TerminalPane.test.tsx` "forwards nothing on the
+    src/components/terminal/touchWiring.ts (`forwardsWheel`, `scrollAllowed`, `moveScroll`) + src/components/terminal/touchGesture.ts:114-130. Pinned: `components/TerminalPane.test.tsx` "forwards nothing on the
     alt screen when the app has no mouse tracking" and the drag-forward suite.
 
 10. **Accessory PgUp/PgDn on the alt screen forward a screenful of wheel notches (or the
     real PgUp/PgDn keys for a keyboard-only app) at the element's center;
     top/bottom stay scrollback-only.** Trap: there is no finger to take a point from, so
-    `rectCenter` stands in; jump-to-edge has no wheel equivalent. Fix: src/components/terminal/inputSurface.ts:337-414,
-    `src/lib/termmouse.ts:174-185`. Pinned: `src/lib/termmouse.test.ts` rectCenter test;
+    `rectCenter` stands in; jump-to-edge has no wheel equivalent. Fix: src/components/terminal/inputSurface.ts (`onScroll`, `forwardPageToApp`),
+    `src/lib/termmouse.ts` (`rectCenter`). Pinned: `src/lib/termmouse.test.ts` rectCenter test;
     `src/lib/termkeys.test.ts` pageKeySeq suite; blur contract via
     `components/AccessoryBar.test.tsx` "every key row honors the same contract".
 
@@ -1308,7 +1310,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     withheld from the app entirely. Deliberate divergence from iTerm2/Ghostty/kitty.**
     Trap: a forwarded click makes the agent CLI shell out to `open <url>` on the
     SERVER's machine, invisible to the clicker; the page opened twice, once in the wrong
-    place. Fix: src/components/terminal/linkPress.ts:108-148 (rationale), `src/lib/termkeys.ts:577-637`.
+    place. Fix: src/components/terminal/linkPress.ts:108-148 (rationale), `src/lib/termkeys.ts` (`linkPressAction`).
     Pinned: `components/TerminalPaneLinks.test.tsx` "opens exactly one tab and reports
     nothing to the app".
 
@@ -1318,7 +1320,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     so swallowing the press suppresses the whole pair; deciding at release leaks a lone
     press, which press-activated TUI controls act on; keying on the link is what keeps
     non-link TUI buttons working. Fix: src/components/terminal/linkPress.ts:124-148, src/components/terminal/linkPress.ts:179-236,
-    `src/lib/termkeys.ts:602-637` (`linkPressAction`).
+    `src/lib/termkeys.ts` (`linkPressAction`).
     Pinned: `components/TerminalPaneLinks.test.tsx` "POSITIVE CONTROL: an ordinary click
     off the link is still reported"; `src/lib/termkeys.test.ts` linkPressAction suite.
 
@@ -1333,7 +1335,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     xterm's Linkifier activates on every bare mouseup; the second click of a
     double-click (select-a-word) opened a second tab, a triple-click a third, and a
     right-click opened a tab on top of dux's paste. Scheme-gated to http(s) as defense
-    in depth. Fix: src/components/terminal/useTerminalLifecycle.ts:284-295 + src/components/terminal/linkPress.ts:286-293, `src/lib/termkeys.ts:499-545`.
+    in depth. Fix: src/components/terminal/terminalSetup.ts (the `linkHandler` option) + src/components/terminal/linkPress.ts (`linkHandler`), `src/lib/termkeys.ts:499-545`.
     Pinned: `components/TerminalPaneLinks.test.tsx` "opens only one tab for a
     double-click...", "...triple-click...", "does not open on a right-click...",
     "does not open on a middle-click"; `src/lib/termkeys.test.ts` linkActivateAction suite.
@@ -1341,7 +1343,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 5. **The hatch chord (Cmd on a Mac, Ctrl elsewhere) forwards the click AND refuses dux's
     open; with tracking off it keeps its browser meaning.** Caveat, stated in code: Ctrl
     travels to the app as the +16 modifier bit, so a Linux visitor's hatch click arrives
-    as a ctrl-click. Fix: `src/lib/termkeys.ts:461-476,535`, src/components/terminal/linkPress.ts:232-236 + src/components/terminal/pageSessionHints.ts:55-57 (one-time hint,
+    as a ctrl-click. Fix: `src/lib/termkeys.ts:461-476,535`, src/components/terminal/linkPress.ts:232-236 + src/components/terminal/pageSessionHints.ts (`raiseLinkForwardHint`, one-time hint,
     only when an open actually happens).
     Pinned: `components/TerminalPaneLinks.test.tsx` "forwards a hatch-chord click to the
     app and opens nothing", "names the hatch chord on the first suppressed click";
@@ -1404,7 +1406,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     wedge".
 
 11. **A travelled gesture opens only if it stayed on the SAME link; within the drag
-    threshold it is a click.** Fix: src/components/terminal/linkPress.ts:253-267, `src/lib/termkeys.ts:639-659`
+    threshold it is a click.** Fix: src/components/terminal/linkPress.ts:253-267, `src/lib/termkeys.ts`
     (`linkReleaseOpens`). Pinned: `src/lib/termkeys.test.ts` linkReleaseOpens suite;
     `components/TerminalPaneLinks.test.tsx` "emits no report for a press that slides off
     the link...".
@@ -1412,7 +1414,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 12. **Swallowed-but-not-opened is a real state.** Trap: forwarding a press dux will not
     act on hands the app a press with no release; it happens for multi-click tails and
     for links dux would refuse anyway (preference off under an on-screen link, bad
-    scheme). Fix: `src/lib/termkeys.ts:624-637`.
+    scheme). Fix: `src/lib/termkeys.ts` (`linkPressAction`).
     Pinned: `components/TerminalPaneLinks.test.tsx` "stays quiet when a suppressed click
     opens nothing", "leaks neither a second tab nor a report on a double-click";
     `src/lib/termkeys.test.ts` "swallows the tail of a multi-click gesture without
@@ -1420,7 +1422,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 13. **All opens go through ONE function: same truth table, same
     `noopener,noreferrer`, same activation counter the touch probe reads.**
-    Fix: src/components/terminal/linkPress.ts:88-104 (`openTerminalLink`; Linkifier activate and the capture release are
+    Fix: src/components/terminal/linkPress.ts (`openLink` inside `createLinkPress`; Linkifier activate and the capture release are
     its only two callers). Pinned: the links suite counts `window.open` calls across
     both paths; `src/lib/termlink.test.ts` activation-counter tests.
 
@@ -1428,7 +1430,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     when enabled it falls through to xterm's handler and the linkHandler gates to
     http(s).** Links created before a live toggle persist until rewritten (stated).
     `registerAgentNotifications` deliberately does not register OSC 8. Fix:
-    src/components/terminal/useTerminalLifecycle.ts:314-323, src/components/terminal/liveValues.ts:61-63 + TP:271. Pinned: `components/TerminalPaneLinks.test.tsx` "does not
+    src/components/terminal/terminalSetup.ts (the OSC 8 `registerOscHandler` gate), src/components/terminal/liveValues.ts:61-63 + TP:271. Pinned: `components/TerminalPaneLinks.test.tsx` "does not
     open when the hyperlinks preference is off"; `src/lib/agentNotifications.test.ts`
     "does not register OSC 8 (the pane owns the hyperlink gate)".
 
@@ -1438,7 +1440,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     link, so a tapped link used to just raise the keyboard; and a link tap must not pull
     the caret into the compose box (the user is leaving; matches the desktop). Runs
     inside the touchend user gesture so the `window.open` is not a popup.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:826-870, `src/lib/termlink.ts:48-111,173-215`.
+    Fix: src/components/terminal/touchWiring.ts (`handleTap`, `activateTouchLink`, `replayTouchClick`), `src/lib/termlink.ts` (`activateLinkAtPoint`, `terminalTapAction`).
     Pinned: `src/lib/termlink.test.ts` activateLinkAtPoint and terminalTapAction suites;
     `components/TerminalPane.test.tsx` "forwards a tap to a mouse-tracking app AND
     focuses compose" (ordinary-tap control).
@@ -1537,7 +1539,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     mouse-tracking app the click is forwarded, breaking "selects locally, forwards
     nothing". A drag is incidentally protected by touchmove's preventDefault; the bare
     press-and-lift is the primary gesture and is not, and Chrome's own long-press
-    threshold sits above dux's. Fix: src/components/terminal/useTerminalLifecycle.ts:770-792.
+    threshold sits above dux's. Fix: src/components/terminal/touchWiring.ts (`handleLift`).
     Pinned: `components/TerminalPane.test.tsx` "cancels the lift so no compatibility
     mouse events follow it".
 
@@ -1546,7 +1548,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Trap: the execCommand fallback needs the gesture on plain-HTTP origins; pulling
     focus back would throw the soft keyboard over the selection; the hint answer is
     meaningless here (the long press already selected locally with no modifier).
-    Fix: src/components/terminal/useTerminalLifecycle.ts:788-811. Pinned: `components/TerminalPane.test.tsx` "copies on lift and
+    Fix: src/components/terminal/touchWiring.ts (`handleLift`, `copyTouchSelection`). Pinned: `components/TerminalPane.test.tsx` "copies on lift and
     leaves the selection painted", "copies nothing on lift when copy-on-select is off",
     "does not raise the soft keyboard".
 
@@ -1559,13 +1561,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 
 14. **The next tap clears the selection, before the redirect's own early returns.**
     Trap: dismiss-on-tap must work with the compose bar off and for a non-owner too.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:813-818. Pinned: `components/TerminalPane.test.tsx` "clears the selection
+    Fix: src/components/terminal/touchWiring.ts (`handleTap`). Pinned: `components/TerminalPane.test.tsx` "clears the selection
     on the NEXT tap".
 
 15. **A long press on blank space is still not a tap.** The gesture is a selection from
     the timer's fire whatever it landed on; the lift must not focus or raise the
-    keyboard. Fix: src/components/terminal/touchGesture.ts:108-111. Pinned: `components/TerminalPane.test.tsx` "selects
-    nothing where there is nothing, rather than the nearest word".
+    keyboard. Fix: src/components/terminal/touchGesture.ts:108-111. Pinned: `components/TerminalPane.test.tsx` "highlights
+    nothing on blank cells and says so on the lift".
 
 16. **iOS callout and Android long-press context menu are suppressed over the
     terminal.** `-webkit-touch-callout: none` on the container (Safari's loupe/share
@@ -1610,7 +1612,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     and holding the virtual Ctrl while a hardware keyboard types the letter is a real way
     to work; a fine pointer's keys arrive and leave with the box. Choosing `direct` takes
     the BOX only, and the keys keep their own preference. Fix: `src/lib/composebar.ts`
-    (`terminalKeysApply`), `terminalInputLayout` in `TerminalPane.tsx`. Pinned:
+    (`terminalKeysApply`), `terminalInputLayout` in `terminal/partSetup.tsx`. Pinned:
     `src/lib/composebar.test.ts` "keeps the keys on a phone that chose direct typing" and
     "spans the four states the two surfaces can be in";
     `components/TerminalPane.test.tsx` "reaches every combination of the two rows, each
@@ -1625,7 +1627,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     The pane publishes `{surfaceSwitch, composeSurface, keysToggle}` for its owner and
     the group and the cluster read it. Fix: `src/lib/composebar.ts`
     (`terminalKeysApply`, `inputMenuSurfaceSwitchOffered`), `terminalInputLayout` in
-    `TerminalPane.tsx`, `src/lib/paneInputGroup.ts`, `src/components/PaneInputGroup.tsx`,
+    `terminal/partSetup.tsx`, `src/lib/paneInputGroup.ts`, `src/components/PaneInputGroup.tsx`,
     `KeysToggleButton` in `src/components/PaneActionCluster.tsx`, `switchTypingSurface`
     in `src/lib/typingSurface.ts`. Pinned: `components/TerminalPane.test.tsx`
     "TerminalPane publishes its input group" (the table) and "TerminalPane typing-surface
@@ -1659,7 +1661,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (16 MiB cap), so the 2 MiB client cap fails one send instead. The fixed id is
     deliberate (the reason replaces itself; three presses want one toast), with the
     countdown-restart hazard accepted and bounded. Fix: src/components/terminal/inputSurface.ts:231-263,
-    `src/lib/composebar.ts:16-32`; server `crates/dux-web/src/server.rs:207`.
+    `src/lib/composebar.ts:16-32`; server `crates/dux-web/src/server.rs` (`MAX_WS_MESSAGE_SIZE`).
     Pinned: `components/TerminalPane.test.tsx` "a Send while the socket is down keeps
     the buffer and toasts", "an oversized Send keeps the buffer and toasts";
     `src/lib/composebar.test.ts` composeSendTooLarge suite;
@@ -1682,7 +1684,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     full-screen TUI menus are driven by exactly the click the redirect swallows.
     Preference off / desktop / non-owner: taps reach xterm untouched. The listener is
     registered non-passive unconditionally (touchend passivity gates nothing).
-    Fix: src/components/terminal/useTerminalLifecycle.ts:737-870. Pinned: `components/TerminalPane.test.tsx` "TerminalPane
+    Fix: src/components/terminal/touchWiring.ts (`registerTerminalTouchWiring`, `handleTap`, `replayTouchClick`). Pinned: `components/TerminalPane.test.tsx` "TerminalPane
     tap-to-focus redirect" suite ("a tap preventDefaults and focuses the compose
     textarea", "does not intercept the tap when the preference is off", "forwards a tap
     to a mouse-tracking app AND focuses compose").
@@ -1691,7 +1693,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     owner) and retires with an only-retire-your-own guard.** Trap: a picked macro must
     become an editable DRAFT, never an immediate PTY write, but the mobile picker lives
     in MobileShell's header, outside the pane; a successor pane may already have
-    replaced the registration. Fix: TP:589-613, `src/lib/composeInsert.ts`.
+    replaced the registration. Fix: TP:589-613; the sink is now the `compose` field the pane publishes through
+    `registerPaneMacroTarget` in `src/lib/paneMacroTarget.ts` (from `TerminalStack.tsx`).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane compose macro insert sink"
     suite (register/retire/takeover/unmount, "insert lands the text in the draft at the
     caret and writes NOTHING to the PTY").
@@ -1700,9 +1703,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     (`terminalFocus`), resolved at CALL time.** Trap: Base UI's default
     return-to-trigger means the review Enter re-presses the popover trigger and reopens
     the menu; the surface must be where typing is NOW, not where it was at registration.
-    Fix: TP:610-618, `src/lib/terminalFocus.ts`. Pinned:
-    `components/TerminalPane.test.tsx` "registers its typing surface so the header's
-    picker can return focus to it".
+    Fix: TP:610-618; the surface is now the `typingSurface` field of the pane's
+    `registerPaneMacroTarget` entry in `src/lib/paneMacroTarget.ts`, read by `MacroPopover`.
+    Pinned: `components/TerminalPane.test.tsx` "publishes its own typing surface under its
+    own pty id".
 
 13. **`focusTypingSurface` is the one routing rule (compose textarea while the bar is
     up, xterm's hidden textarea otherwise); every refocus goes through it.**
@@ -1736,8 +1740,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 17. **The unfocused caret is a solid block while the compose bar is up, the conventional
     outline otherwise, applied live.** Trap: with the bar up xterm is never focused by
     design, so the hollow outline states something false all session. Verified: the
-    option is mutable in place on xterm 6.0.0. Fix: TP:410-421, src/components/terminal/useTerminalLifecycle.ts:262-266,
-    `src/lib/composebar.ts:248-268`. Pinned: `components/TerminalPane.test.tsx`
+    option is mutable in place on xterm 6.0.0. Fix: TP:410-421, `TerminalStack.tsx` (the live `cursorInactiveStyle` write),
+    `src/lib/composebar.ts` (`inactiveCursorStyle`). Pinned: `components/TerminalPane.test.tsx`
     "TerminalPane inactive cursor style" suite (open solid, open outline, follow the
     toggle on the SAME terminal); `src/lib/composebar.test.ts` inactiveCursorStyle.
 
@@ -1746,7 +1750,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     touch-gated.** Trap: on iOS the textarea stays the focused element after the user
     swipes the keyboard down, so any focus-retaining button tap pops it back up; a
     narrow-window mouse user must not silently lose terminal focus when paging.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:693-700, src/components/terminal/inputSurface.ts:349-414. Pinned: `components/AccessoryBar.test.tsx` "every
+    Fix: src/components/terminal/touchWiring.ts (`registerTerminalTouchWiring`'s blur), src/components/terminal/inputSurface.ts (`onScroll`). Pinned: `components/AccessoryBar.test.tsx` "every
     key row honors the same contract (arrows and page scroll included)";
     `components/TerminalPane.test.tsx` keyboard-state suite.
 
@@ -1754,7 +1758,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     and nothing else.** Trap: a `⋯` opening an empty popup, and the state "keys up, box
     off" once rendering two menus; both went when the menu did. The controls moved to
     the top menu's INPUT group and, on a phone, the action cluster, which outlive the
-    rows. Fix: `terminalInputLayout` in `TerminalPane.tsx`,
+    rows. Fix: `terminalInputLayout` in `terminal/partSetup.tsx`,
     `src/components/PaneInputGroup.tsx`. Pinned: `components/TerminalPane.test.tsx`
     "TerminalPane has no menu under the terminal" (the row's buttons are exactly the
     keys, or exactly Send) and "TerminalPane input group for the top menu".
@@ -1776,7 +1780,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     Trap: xterm documents some, but the defaults are unreliable across versions and
     mobile browsers (autocorrect in particular still fires), and a shell has no buffer
     for them to fix. The compose textarea is the opposite: native autocorrect ON,
-    that is its whole point. Fix: src/components/terminal/useTerminalLifecycle.ts:388-396.
+    that is its whole point. Fix: src/components/terminal/terminalSetup.ts (`openTerminal`).
     Pinned: compose half by `components/ComposeBar.test.tsx` "enables native
     autocorrect, autocapitalize, and spellcheck on the textarea"; the xterm half
     unpinned.
@@ -1787,12 +1791,13 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     "TerminalPane compose placeholder follows the surface" suite.
 
 24. **Selection-focus on mount is owner-only; a read-only observer gets no focus grab.**
-    Fix: src/components/terminal/useTerminalLifecycle.ts:562-574. Pinned: covered by the non-owner suites; unpinned in isolation.
+    Fix: `TerminalStack.tsx` (the one automatic typing focus, `nextTypingFocus`/`typingFocusAllowed`
+    in src/components/terminal/inputSurface.ts). Pinned: covered by the non-owner suites; unpinned in isolation.
 
-25. **`composeActiveRef` lags the rendered value by one commit and both mismatch
+25. **`composeActiveRef` (now `live.current.composeActive`) lags the rendered value by one commit and both mismatch
     directions degrade gracefully.** Stale false falls to `term.focus()`; stale true at
     worst redirects one tap into a just-unmounted bar (no-op on the null ref).
-    Fix: src/components/terminal/liveValues.ts:80-88. Pinned: unpinned (stated tolerance).
+    Fix: src/components/terminal/liveValues.ts (`composeActive`, which replaced the ref). Pinned: unpinned (stated tolerance).
 
 26. **The macro trigger no longer floats over the PTY text; both entry points live in
     headers outside the pane.** Fix: TP:813-820. Pinned:
@@ -2084,7 +2089,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     time; the duplicate arrives a beat later and is typed at an idle prompt as literal
     garbage (`]10;rgb:...`, `[?1;2c`). Installed before `open()` so it is armed before
     any byte. Suppressed: DA1/DA2, DSR 5/6 and the DEC-private form, DECRQM (both),
-    DECRQSS, OSC 4/10/11/12 query forms. Fix: src/components/terminal/useTerminalLifecycle.ts:298-302,
+    DECRQSS, OSC 4/10/11/12 query forms. Fix: src/components/terminal/terminalSetup.ts (`createTerminalSetup`),
     `src/lib/suppressViewerReports.ts:1-80`.
     Pinned: `src/lib/suppressViewerReports.test.ts` incl. the vanilla-xterm positive
     control ("vanilla xterm answers device/status queries via onData") and "suppresses
@@ -2104,9 +2109,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     every replay applied to an unfocused pane typed a spurious focus-OUT at the child,
     and the claude CLI reacts to focus state internally. A counter, not a flag, so
     overlapping writes cannot close the window early; never a timer; real transitions
-    outside the window still reach the PTY. Fix: src/components/terminal/useTerminalLifecycle.ts:445-449 (the
+    outside the window still reach the PTY. Fix: src/components/terminal/inputWiring.ts (`registerTerminalStreams`, the
     drop in `onData`), src/components/terminal/attachReplay.ts:107-123 (`writeReplayChunk`, `replayWritesInFlight`), src/components/terminal/attachReplay.ts:167-175 (drain path,
-    first chunk only); `src/lib/suppressViewerReports.ts:82-109` (`isFocusReport`, the
+    first chunk only); `src/lib/suppressViewerReports.ts` (`isFocusReport`, the
     measured mechanism).
     Pinned: `components/TerminalPane.test.tsx` "TerminalPane focus reports raised by a
     replay": "drops a focus report the replay chunk provokes", "still forwards a
@@ -2118,7 +2123,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 4. **Agent OSC notification sequences (9, 99, 777) bridge to browser Notifications,
     gated on enabled + permission granted + backgrounded, throttled leading-edge.**
     Registered beside suppressViewerReports so both viewer hooks are armed before the
-    first byte; OSC 9 progress (`4;<digits>`) never notifies. Fix: src/components/terminal/useTerminalLifecycle.ts:303-313,
+    first byte; OSC 9 progress (`4;<digits>`) never notifies. Fix: src/components/terminal/terminalSetup.ts (`registerAgentNotifications` in `createTerminalSetup`),
     `src/lib/agentNotifications.ts`.
     Pinned: `src/lib/agentNotifications.test.ts` (classification, gating, throttle,
     registration/dispose suites).
@@ -2139,7 +2144,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     project name, not 'Agent'".
 
 7. **Repeat notifications from one target replace instead of stack (stable per-target
-    tag).** Fix: src/components/terminal/useTerminalLifecycle.ts:310-313. Pinned: unpinned directly (tag string asserted nowhere).
+    tag).** Fix: src/components/terminal/terminalSetup.ts (the `tag` passed to `registerAgentNotifications`). Pinned: unpinned directly (tag string asserted nowhere).
 
 8. **Preference toggles for notifications, hyperlinks, clipboard mode, copy-on-select
     and attention grace are all read lazily through refs so no toggle recreates the
@@ -2159,7 +2164,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     enabled.** Trap: bootstrap loads in parallel with the workspace; defaulting the
     unknown window to on advertised a drop the server would refuse. A viewer and a
     phone get no drag handling at all (no overlay, no preventDefault).
-    Fix: TP:147-158, src/components/terminal/uploadPipeline.ts:523-544 (`paneAcceptsFileDrag`, deliberately not named
+    Fix: TP:147-158, src/components/terminal/uploadPipeline.ts (`paneAcceptsFileDrag`, deliberately not named
     `dragCarriesFiles`), `src/lib/fileDrop.ts:19-37`.
     Pinned: `components/TerminalPane.filedrop.test.tsx` "offers nothing at all when
     file drop is switched off", "offers nothing while the setting is not known yet",
@@ -2183,7 +2188,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     spinner per file, one report per drop, on an id minted per drop.** Trap: two quick
     drops sharing an id lose the first drop's report under the second's spinner; the
     report is often the refusal list. Fix: src/components/terminal/uploadPipeline.ts:195-374 (`handleUploadedFiles`,
-    `runUpload`), `src/lib/fileDrop.ts:894-914` (`nextFileDropToastId`).
+    `runUpload`), `src/lib/fileDrop.ts` (`nextFileDropToastId`).
     Pinned: `components/TerminalPane.filedrop.test.tsx` "finishes each upload and sends
     its path before the next one starts", "puts the spinner and the report on ONE id,
     so the final replaces it", "counts through a multi-file drop", "still ends in a
@@ -2258,7 +2263,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
 11. **One toast per drop, chosen from an ordered four-rung ladder (nothing saved /
     saved-not-sent / refused / success); a worse outcome can never be reported as a
     better one; renames and folder scatter are stated on every rung that has a saved
-    file.** Fix: `src/lib/fileDrop.ts:692-892` (`dropToastFor`), src/components/terminal/uploadPipeline.ts:329-348.
+    file.** Fix: `src/lib/fileDrop.ts` (`dropToastFor`), src/components/terminal/uploadPipeline.ts:329-348.
     Pinned: `src/lib/fileDrop.test.ts` dropToastFor suites ("lets the worse outcome win
     over successes, at every rung", "keeps every rename, whichever rung the toast lands
     on", rename/breakdown/reason-grouping/punctuation tests).
@@ -2296,7 +2301,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     plain HTTP (Tailscale), where `navigator.clipboard.read()` is blocked; a
     kind-string `DataTransferItem` yields its contents only asynchronously, after xterm
     has already pasted; `getData("text/plain")` on the event needs no secure context.
-    Fix: src/components/terminal/uploadPipeline.ts:419-480, `src/lib/clipboardPaste.ts:17-27`.
+    Fix: src/components/terminal/uploadPipeline.ts (`onClipboardPaste`), `src/lib/clipboardPaste.ts:17-27`.
     Pinned: `components/TerminalPane.clipboard.test.tsx` image suite;
     `src/lib/clipboardPaste.test.ts` (decision matrix).
 
@@ -2305,7 +2310,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     contents and the paste event carries no modifiers, so the two halves meet only
     through the armed latch; xterm's handler is on the hidden textarea INSIDE the
     container, so capture on the ancestor decides first; ordinary text passes through
-    untouched. Fix: src/components/terminal/useTerminalLifecycle.ts:646-651, src/components/terminal/uploadPipeline.ts:429-442.
+    untouched. Fix: src/components/terminal/inputWiring.ts (`registerPasteGuards`, the capture-phase `paste` listener), src/components/terminal/uploadPipeline.ts (`onClipboardPaste`).
     Pinned: `components/TerminalPane.clipboard.test.tsx` "is left entirely to xterm",
     "skips image handling and hands the whole event to xterm".
 
@@ -2315,7 +2320,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     copy puts `image/png` beside `text/plain`; svg markup of kind string is text
     someone copied; a silent viewer refusal is a keystroke that did nothing; image and
     text refusals sharing an id erase each other. Fix:
-    `src/lib/clipboardPaste.ts:221-298`, src/components/terminal/uploadPipeline.ts:488-520.
+    `src/lib/clipboardPaste.ts` (`clipboardPasteAction`), src/components/terminal/uploadPipeline.ts (`onClipboardPaste`).
     Pinned: `src/lib/clipboardPaste.test.ts` (image-wins, force-text, non-image,
     refusals); `components/TerminalPane.clipboard.test.tsx` "keeps the image refusal on
     its own toast id", "refuses it for a client that does not hold input, and saves
@@ -2327,8 +2332,8 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     bytes or UTF-16 units bias against CJK/emoji; the count runs in the paste handler
     before cancellation (spread costs 218ms/180MB on 20M chars, the scan 37ms, capped
     ordinary case 0.1ms); an unpaired surrogate counts as one on both halves (threshold
-    and file agree). Fix: `src/lib/clipboardPaste.ts:40-54,300-385`, TP:159-164,
-    src/components/terminal/uploadPipeline.ts:479-480.
+    and file agree). Fix: `src/lib/clipboardPaste.ts` (`ClipboardPasteContext`, `countCodePoints`), TP:159-164,
+    src/components/terminal/uploadPipeline.ts (`onClipboardPaste`).
     Pinned: `src/lib/clipboardPaste.test.ts` long-text suite ("measures the threshold
     in CHARACTERS...", "turns a LONE SURROGATE into U+FFFD...", byte-for-byte tests);
     `components/TerminalPane.clipboard.test.tsx` "fires at exactly one character over a
@@ -2391,20 +2396,21 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     reaches its closures through refs.** Trap: listing a component-body function or a
     bootstrap field tears down and rebuilds the terminal (and its socket) on every
     render or refetch; the eslint-disable comments at each site carry the reason.
-    Fix: src/components/terminal/useTerminalLifecycle.ts:1099-1105, ref mirrors at TP:140-421. Pinned: structural; regression shows
+    Fix: src/components/terminal/useTerminalLifecycle.ts (the effect's dependency list), ref mirrors at TP:140-421. Pinned: structural; regression shows
     up as churn in almost every suite; unpinned as a named rule.
 
 2. **All module-scope registrations (active PTY socket, compose sink, terminal focus
     target, attach capability) retire ONLY their own registration.** Trap: on a focus
     switch React's old-cleanup / new-effect order is not guaranteed; an unconditional
-    clear nulls the incoming pane's registration. Fix: src/components/terminal/useTerminalLifecycle.ts:1078-1093, TP:590-600,
+    clear nulls the incoming pane's registration. Fix: `src/lib/keyedRegistry.ts` (the retirement every pane registry shares:
+    `paneMacroTarget.ts`, `paneInputGroup.ts`, `paneCover.ts`), TP:590-600,
     TP:610-618; `src/lib/attachRegistry.ts`.
     Pinned: `src/lib/attachRegistry.test.ts` "a stale retirement does not remove the
     live registration"; sink/socket variants exercised by the sink and unmount tests.
 
 3. **Unmount DISPOSES the socket (no reconnect, and no way back), retires the connection id,
     nulls the term/fit refs, disposes subscriptions, notifications and the OSC 8 gate,
-    and clears every timer the effect armed.** Fix: src/components/terminal/useTerminalLifecycle.ts:1053-1098.
+    and clears every timer the effect armed.** Fix: src/components/terminal/lifecycleCleanup.ts (`disposeTerminalLifecycle`).
     Pinned: `src/lib/ptySocket.test.ts` "does not reconnect after a user-initiated
     close"; `components/TerminalPane.test.tsx` unmount halves of the ownership and sink
     tests.
@@ -2468,7 +2474,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     terminal by OWNER (session/project/standalone routes, exhaustive switch).**
     Trap: the nullable `sessionId`/`projectId` pair is lossy on purpose (lookups only);
     anything that must SAY something about the owner matches exhaustively.
-    Fix: TP:76-99 + src/components/terminal/useTerminalLifecycle.ts:101-158, `src/lib/ptySocket.ts:48-118` (`terminalSocketUrl` ends in
+    Fix: TP:76-99 + src/components/terminal/useTerminalLifecycle.ts (`TerminalTarget` and the `ptyUrl` choice), `src/lib/ptySocket.ts:48-118` (`terminalSocketUrl` ends in
     `assertNever`). Pinned: `src/lib/ptySocket.test.ts` URL-builder suite ("routes each
     owner kind to its own socket"); `components/TerminalPane.test.tsx`
     "TerminalPane project-terminal owner resolution" suite.
@@ -2618,6 +2624,9 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
   trimmed at the cap, and every inferable proxy misfires. Assessed and deliberately not
   guarded: it needs a busy writer during a one-second drag, costs a wrong selection and
   nothing else, and lifting and pressing again fixes it. src/components/terminal/selectionDrag.ts:58-73.
+  Since resolved: the anchor is now an xterm marker on each row of the pressed word, and
+  a marker moves with its line when the scrollback trims (`createSelectionDrag` in
+  src/components/terminal/selectionDrag.ts).
 
 - **X10 (`?9`) tracking loss on attach.** `dux_core::pty`'s mode restore has no X10
   flag to re-assert because alacritty_terminal does not model one, so a `?9` app's
@@ -2629,7 +2638,7 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
   reporting mid-session while the pane is unfocused) still provokes one volunteered
   report outside any window, and a real focus transition during a replay is dropped
   outright (nothing re-emits it when the window closes, so the child's focus belief
-  stays stale until the next transition). Both are the narrow ends of the trade stated at src/components/terminal/useTerminalLifecycle.ts:445-449 and src/components/terminal/attachReplay.ts:107-123.
+  stays stale until the next transition). Both are the narrow ends of the trade stated at src/components/terminal/inputWiring.ts (`registerTerminalStreams`) and src/components/terminal/attachReplay.ts:107-123.
 
 - **Overlapping-reopen drain window (inherited, pre-rebuild).** If a second (re)open
   lands while the previous reconnect's drain callback is still pending, the new
