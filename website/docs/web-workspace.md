@@ -249,21 +249,21 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
-**What stays.** Notice what did **not** leave: the terminal keys and the message box. Theater takes the chrome above the terminal, not the way you answer it. The compose box and the terminal keys stay exactly as you had them, and the pill's `⋯` keeps offering the way back to them, so theater is as bare or as equipped as you want it.
+**What stays.** Notice what did **not** leave: the terminal keys and the message box. Theater takes the chrome above the terminal, not the way you answer it. The compose box and the terminal keys stay exactly as you had them, and the pill carries the controls for them, so theater is as bare or as equipped as you want it.
 
-- If you have asked to type straight into the terminal, the message box goes and the keys stay, with their `⋯` on them.
-- Hide the keys as well and there is nothing below the terminal at all, and the pill's `⋯` is the way back.
+- If you have asked to type straight into the terminal, the message box goes and the keys stay.
+- Hide the keys as well and there is nothing below the terminal at all, and the pill brings them back: on a phone with its keys button, on a computer from the **Input** group in its `⋯`.
 
 #### The pill
 
 A small floating pill in the bottom-right corner is the only thing left over the terminal.
 
 - **On a computer** it holds the way out, the macro picker, the changed-file count where there is one, and the pane's own `⋯`, so nothing you could reach before you went full screen has gone anywhere. The count leaves theater there and brings the changes list back, showing it even if you had hidden it.
-- **On a phone** it is the flap that flew there: the theater button (now showing the way out), the macro picker, the changed-file count where there is one, and the same `⋯`, opening the same menu it opened on the band. The changed-file count is the button beside the menu rather than a row in it.
+- **On a phone** it is the flap that flew there: the theater button (now showing the way out), the macro picker, the changed-file count where there is one, the terminal-keys button, and the same `⋯`, opening the same menu it opened on the band. The changed-file count and the keys button are buttons beside the menu rather than rows in it.
 
 The pill's `⋯` menu holds, in order:
 
-- the **Input** group (**Attach a file…**, and the way back to the typing bar when you have turned it off; see [On your phone](#on-your-phone) for what the group holds)
+- the **Input** group (**Attach a file…**, the typing-surface switch, and on a computer the terminal-keys row; see [On your phone](#on-your-phone) for what the group holds)
 - the pane's own actions
 - the way out of theater, while the mode is on
 - **Settings**, which drills into the app menu the cog carries
@@ -487,20 +487,21 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 - **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New agent…** launcher along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's **▾** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
 - **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip) and the tab strip when the agent has more than one tab.
 - **An agent's own terminal** keeps the agent's screen and the agent's menu, because the header and the count around it are that agent's, and adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**.
-- **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, **Open editor in new tab** and **Close…**, then the same **Settings** drill.
+- **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, then a **Terminal** group holding **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - **The changes screen** is the full Changes pane. Tapping a file opens its diff in the standalone editor in the same browser tab, and Back comes back to the Changes screen.
 
 ### The action flap
 
 The actions hang off the band on the right, in a small tab-shaped flap over the terminal. It is the whole reason the header can stay as quiet as it is.
 
-![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count and the pane's menu.](/screens/phone-terminal-flap.png)
+![The phone agent screen: the slim top bar naming the agent, its project and its assistant, and the action flap hanging off the band with theater mode, the macro picker, the changed-file count, the terminal-keys button and the pane's menu.](/screens/phone-terminal-flap.png)
 
 It holds:
 
 - theater mode
 - the macro picker
 - the changed-file count (agents only)
+- the terminal-keys button, which hides and shows the key row, while this device is typing into the terminal
 - the session's `⋯` menu, which carries the **Input** group, the agent's actions and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
@@ -541,13 +542,13 @@ Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences r
 
 ### The typing-surface switch
 
-What the browser cannot see is a keyboard case, so there is a **typing-surface switch**: **Type directly in the terminal**, and **Use virtual input** to come back. Both live in the input `⋯`, at the left edge of whichever input row you have, for as long as you have one. Once nothing is left under the terminal, **Use virtual input** moves up into the **Input** group (see below).
+What the browser cannot see is a keyboard case, so there is a **typing-surface switch**: **Type directly in the terminal**, and **Use virtual input** to come back. Both live in the **Input** group of the pane's own `⋯` menu (see below), always: the switch never moves, whatever is left under the terminal.
 
 **Your choice wins, on any device, in both directions.** The pointer only decides where you start.
 
 - Ask for the message box on a laptop and you get it, keys and all, and while it is up your keystrokes go into the box rather than straight to the terminal.
 - Switching to Direct takes the **message box** away and leaves the terminal keys where they are. A phone keeps Esc, Tab and the Ctrl latch while every keystroke goes straight to the terminal: tap the virtual **Ctrl**, then press the letter on your keyboard.
-- Hide the terminal keys too and there is nothing under the terminal at all, which is when dux tells you once, on that device, where the way back went.
+- Hide the terminal keys too and there is nothing under the terminal at all, and the **Input** group is still where you bring things back from.
 - Your choice sticks across reloads and survives folding a convertible or unplugging a mouse, until you change it.
 - It is not a setting: it is remembered on that device and changes nothing in your config.
 - It appears only under **Automatic**, since **Always** and **Never** have already decided. Switching the preference to **Always** or **Never** does not erase it either: the choice stays remembered in that browser, and comes back the moment you put the preference on **Automatic** again.
@@ -558,23 +559,21 @@ While the message box is up it really is the typing surface. Clicking into the t
 
 The message box and the terminal keys are two separate switches, so all four combinations are yours to pick: both, the box alone, the keys alone, or neither.
 
-Terminal rows are precious on a phone, so the terminal keys are hideable. **Hide terminal keys** sits in the input `⋯` for as long as any row is under the terminal, and in the **Input** group of the pane's own `⋯` (the flap's, on every phone pane screen) once none is. It is backed by a preference that is also a row in Preferences.
+Terminal rows are precious on a phone, so the terminal keys are hideable. On a phone, a keys button in the action cluster, between the changed-file count and the `⋯`, hides and shows them, in the flap and in the theater pill alike. On a computer the same toggle is a row, **Hide terminal keys** or **Show terminal keys**, in the **Input** group of the pane's own `⋯`. Either way it stays on offer while the keys are hidden, so hiding them never takes away the way to bring them back. It is backed by a preference that is also a row in Preferences.
 
 The terminal-keys preference lives on the server, so it follows you to every device, and the keys travel with your pointer: hiding them from your phone also hides them on the tablet you pick up next.
 
 For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), not a preference. It takes the header and the tab strip together, and it hands you the way back at the same time: the floating pill, and **Leave theater mode** in the menu it opens. A preference that hid the same chrome would be a second way to reach the same place, with no way back of its own.
 
-### The input menus
+### The Input group
 
-There are two places these controls live, and each control is in exactly one of them at a time.
-
-**The input `⋯`** sits at the left edge of whatever input row you have: beside the message box, or in the key row when the box is off. It belongs to those rows and it goes when the last of them does. Inside it is only what they are about: the typing-surface switch, both ways, and **Hide terminal keys**.
-
-**The Input group** is one level up, at the top of the pane's own `⋯` menu: the flap's on a phone, the pane header's on a computer, the floating pill's in theater. It is on screen whatever the pane is doing, so it carries everything you must be able to reach when there is no input row at all:
+The input has no menu of its own under the terminal: nothing hangs off the message box or the key row but the box, its send button and the keys. Its controls live in the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the pane header's on a computer, the floating pill's in theater. It is on screen whatever the pane is doing, so you can always reach it:
 
 - **Attach a file…** (see [Dropping and pasting files](/docs/dropping-files)).
-- **Use virtual input**, which appears only once nothing is left under the terminal, since until then the input `⋯` is offering it already.
-- **Show terminal keys**, which joins the group the same way.
+- **Type directly in the terminal** or **Use virtual input**, whichever way the switch would take you, wherever the preference is **Automatic**.
+- **Hide terminal keys** or **Show terminal keys** on a computer, wherever the keys are on offer for the device. A phone has that toggle as a button in the action cluster instead, so it is in one place at each width.
+
+The group is there only while this device is driving the terminal, and a pane that offers none of those rows shows no group at all. Every group in the menu carries a heading, this one included.
 
 ## Install it like an app
 

@@ -255,8 +255,9 @@ drive the same rules.
 ## Managing an agent
 
 An agent's `⋯` menu is where the rest lives. It opens with the **Input** group (**Attach a
-file…**, and the way back to the typing bar when you have turned it off), which is the same
-group the pane's own `⋯` carries. The agent's actions sit below it:
+file…**, the typing-surface switch, and on a computer the terminal-keys row), which is the same
+group the pane's own `⋯` carries. The agent's actions sit below it, each group under its own
+heading: **Tabs and project**, **Running**, **Agent**, **Startup**, **Worktree** and **Remove**:
 
 - **Rename agent…** renames it, and its git branch too if you tick the box, exactly as in the
   terminal UI; see [renaming an agent](/docs/creating-agents#renaming-an-agent).
@@ -275,7 +276,7 @@ These entries are about a branch dux manages, so a standalone agent does not get
 - **Pull requests…**, which lists the agent's pull requests and lets you attach, hide,
   detach and reorder them; see [the Pull requests dialog](/docs/web-git#the-pull-requests-dialog).
 
-![An agent's menu open beside its sidebar row, whose badge counts three pull requests: an Input group with Attach a file and Use virtual input at the top, then new tab and project entries, force recreate, detach and auto-reopen, then rename, fork, change provider, Pull requests… and agent info, the startup command and editor entries, and delete.](/screens/agent-session-menu.png)
+![An agent's menu open beside its sidebar row, whose badge counts three pull requests: an Input group with Attach a file and Use virtual input at the top, then the Tabs and project, Running, Agent, Startup, Worktree and Remove groups, each under its own heading.](/screens/agent-session-menu.png)
 
 **Change provider** and **Force recreate** are the two knobs around resume:
 
