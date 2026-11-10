@@ -129,7 +129,9 @@ export function resolvePhoneView(inputs: PhoneViewInputs): PhoneView {
 export type AgentTabState = "live" | "startsOnSight" | "dormant"
 
 /** The layout or phone view the stack is in, as resolved by the functions
- * above (which already fall back to the agent alone when there is no dock). */
+ * above. They fall back to the agent alone when there is no dock, except for
+ * an address naming a terminal that is gone, which opens the dock so its
+ * not-found screen lands where the terminal would be. */
 export type StackPresentation = (
   | { surface: "computer"; layout: ComputerLayout }
   | { surface: "phone"; view: PhoneView }

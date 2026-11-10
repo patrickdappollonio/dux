@@ -298,8 +298,9 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
     // bare PTY write with no further effects. It goes down the connection the
     // body went down or nowhere: it is skipped when the pane has unmounted (its
     // cleanup nulls `ptyRef`), when the socket has dropped, and when it has
-    // reconnected in between, since the socket object reconnects in place and
-    // a new connection may be watching or driving something else by then.
+    // reconnected in between, since the socket object reconnects in place: the
+    // body may have been lost with the old connection, and a lone Enter on the
+    // new one would submit whatever else was on the line.
     if (writes.length > 1) {
       const pty = ptyRef.current
       const connection = pty?.openSerial
