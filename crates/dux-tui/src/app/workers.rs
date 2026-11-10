@@ -2003,7 +2003,8 @@ impl App {
     }
 
     pub(super) fn apply_agent_launch_ready_view(&mut self, outcome: AgentLaunchReadyOutcome) {
-        self.last_pty_size = outcome.pty_size;
+        self.pty_sizes
+            .insert(outcome.tab_id.clone(), outcome.pty_size);
         let started_here = self.note_launch_origin(&outcome);
         let view = if outcome.wants_fullscreen {
             LaunchView::Fullscreen
@@ -2996,6 +2997,7 @@ mod tests {
             end: TermGridPos { row: 0, col: 1 },
             dragging: true,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);

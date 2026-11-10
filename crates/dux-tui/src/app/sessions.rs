@@ -1727,10 +1727,9 @@ impl App {
     }
 
     pub(crate) fn pty_size_for_launch(&self) -> (u16, u16) {
-        if self.last_pty_size == (0, 0) {
-            (24, 80)
-        } else {
-            self.last_pty_size
+        match self.focused_pty_size() {
+            (0, 0) => (24, 80),
+            sent => sent,
         }
     }
 
@@ -5626,15 +5625,14 @@ mod tests {
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             terminal_return_to_list: false,
-            last_pty_size: (0, 0),
-            last_pty_resize_target: None,
+            pty_sizes: std::collections::HashMap::new(),
+            part_targets: crate::app::PartTargets::default(),
             tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
-            grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -5675,8 +5673,7 @@ mod tests {
             pending_diff: None,
             changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
-            snapshot_buf: crate::pty::TerminalSnapshot::empty(),
-            last_snapshot_id: None,
+            part_snapshots: crate::app::PartSnapshots::default(),
             terminal_selection: None,
             pending_link_click: None,
             pending_pr_banner_press: None,

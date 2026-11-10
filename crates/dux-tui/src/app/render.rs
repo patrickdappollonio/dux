@@ -29,18 +29,18 @@ use super::pty_ownership::PtyTakeoverCard;
 use super::text_input::TextInput;
 use super::{
     AgentInfoTone, AgentRowCues, AgentTerminalContext, App, BranchHolder, BrowseProjectsFooterKeys,
-    BrowsePurpose, CenterMode, ChangeAgentProviderMode, CloneProjectFocus, ConfigReloadFailedFocus,
-    ConfigureFieldFocus, ConfirmFocus, ConfirmNonDefaultBranchFocus, CpuWindow, DeleteAgentFocus,
-    DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache, FieldEngagement, FocusPane,
-    FullscreenOverlay, InputTarget, KillRunningFocus, KillRunningFooterAction, KillRunningPrompt,
-    KillableRuntimeKind, LeftItem, LeftSection, Listing, MacroEditFocus, MacroEditState,
-    ManageWorktreeVisualRow, ManagerSelection, NameNewAgentFocus, OverlayCheckbox,
-    OverlayCheckboxId, OverlayMouseLayout, ProjectActionsTarget, ProjectChooserEntry,
-    ProjectChooserIntent, ProjectWorktreeVisualRow, PromptState, PullRequestInputFocus,
-    RecreateWorkingCopyFocus, RenameSessionFocus, RightSection, RowDragList, RuntimeTargetId,
-    SelectionOrigin, SidebarListGeometry, StartupCommandLogFocus, TerminalSidebarRow, VisualRow,
-    WorkingCopy, build_visual_rows, first_load, manage_worktree_visual_rows, pick_project_matches,
-    project_worktree_visual_rows,
+    BrowsePurpose, CenterMode, CenterPart, ChangeAgentProviderMode, CloneProjectFocus,
+    ConfigReloadFailedFocus, ConfigureFieldFocus, ConfirmFocus, ConfirmNonDefaultBranchFocus,
+    CpuWindow, DeleteAgentFocus, DeleteAgentTarget, DeleteWorktreeFocus, DiffRowCache,
+    FieldEngagement, FocusPane, FullscreenOverlay, InputTarget, KillRunningFocus,
+    KillRunningFooterAction, KillRunningPrompt, KillableRuntimeKind, LeftItem, LeftSection,
+    Listing, MacroEditFocus, MacroEditState, ManageWorktreeVisualRow, ManagerSelection,
+    NameNewAgentFocus, OverlayCheckbox, OverlayCheckboxId, OverlayMouseLayout,
+    ProjectActionsTarget, ProjectChooserEntry, ProjectChooserIntent, ProjectWorktreeVisualRow,
+    PromptState, PullRequestInputFocus, RecreateWorkingCopyFocus, RenameSessionFocus, RightSection,
+    RowDragList, RuntimeTargetId, SelectionOrigin, SidebarListGeometry, StartupCommandLogFocus,
+    TerminalSidebarRow, VisualRow, WorkingCopy, build_visual_rows, first_load,
+    manage_worktree_visual_rows, pick_project_matches, project_worktree_visual_rows,
 };
 use crate::config::MacroSurface;
 use crate::git;
@@ -2302,6 +2302,12 @@ impl App {
         self.drawn_ptys.clear();
         self.follow_terminal_cursor();
         self.render_frame(frame);
+        let drawn: Vec<String> = self
+            .drawn_ptys
+            .iter()
+            .map(|target| target.id.clone())
+            .collect();
+        self.expire_stale_pty_takeover(&drawn);
         self.publish_drawn_attachments();
     }
 
@@ -3682,7 +3688,7 @@ impl App {
                 // Draw the tab strip (>=2 tabs) above the terminal and render
                 // the terminal into the remaining area.
                 let term_area = self.render_agent_tab_strip_if_needed(frame, pane_area);
-                self.render_agent_terminal(frame, term_area, &title, focused);
+                self.render_agent_terminal(frame, (CenterPart::Main, term_area), &title, focused);
                 self.session_surface = saved;
             }
         }
@@ -3760,7 +3766,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(content_area);
+        self.mouse_layout.focused_term = Some(content_area);
 
         self.last_diff_height = content_area.height;
 
@@ -3825,7 +3831,7 @@ impl App {
         // Scroll marker in the pane's right border column, on the content
         // pane's last row. Units are wrapped VISUAL lines (what the diff already
         // measures with), never the logical line count. The cell lies outside
-        // `content_area`, which is also `mouse_layout.agent_term`, so text
+        // `content_area`, which is also `mouse_layout.focused_term`, so text
         // selection is untouched.
         render_scroll_marker(
             frame,
@@ -4945,14 +4951,16 @@ impl App {
         self.mouse_layout.takeover_button = Some(area);
     }
 
-    fn agent_terminal_context(&self) -> AgentTerminalContext {
-        let active_surface = self.session_surface;
+    fn agent_terminal_context(&self, part: CenterPart) -> AgentTerminalContext {
+        let active_surface = Self::part_surface(part);
         let terminal_status = self.selected_companion_terminal_status();
-        let is_input = matches!(
-            (self.input_target, active_surface),
-            (InputTarget::Agent, SessionSurface::Agent)
-                | (InputTarget::Terminal, SessionSurface::Terminal)
-        );
+        let has_focus = part == self.focused_part();
+        let is_input = has_focus
+            && matches!(
+                (self.input_target, active_surface),
+                (InputTarget::Agent, SessionSurface::Agent)
+                    | (InputTarget::Terminal, SessionSurface::Terminal)
+            );
         let session_id = self.selected_session().map(|session| session.id.clone());
         let focused_tab = session_id.as_ref().map(|id| self.focused_tab_id(id));
         let provider_name = match active_surface {
@@ -4980,7 +4988,8 @@ impl App {
             active_surface,
             terminal_status,
             is_input,
-            receives_keys: is_input || self.center_typeable(),
+            receives_keys: is_input || (has_focus && self.center_typeable()),
+            part_focus: FocusState::of(part, self.focused_part()),
             session_id,
             focused_tab,
             provider_name,
@@ -4988,31 +4997,29 @@ impl App {
         }
     }
 
-    fn resize_agent_terminal(&mut self, term_area: Rect) {
+    /// Send `part`'s pane size to the pty it draws, once per change of size or
+    /// of target.
+    fn resize_part_terminal(&mut self, part: CenterPart, term_area: Rect) {
         let new_size = (term_area.height, term_area.width);
-        let resize_target = self.selected_terminal_surface_id();
-        let target_changed = self.last_pty_resize_target != resize_target;
-        let should_resize =
-            (new_size != self.last_pty_size || target_changed) && new_size.0 > 0 && new_size.1 > 0;
-        let resize_granted = should_resize
-            && match resize_target.as_deref() {
-                Some(pty_id) => {
-                    let pty_id = pty_id.to_string();
-                    self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1)
-                }
-                None => true,
-            };
-        self.expire_stale_pty_takeover(resize_target.as_deref());
-        if should_resize && resize_granted {
-            self.last_pty_size = new_size;
-            self.last_pty_resize_target = resize_target;
+        let Some(pty_id) = self.part_pty_id(part) else {
+            self.part_targets.set(part, None);
+            return;
+        };
+        let target_changed = self.part_targets.get(part) != Some(pty_id.as_str());
+        let size_changed = self.pty_sizes.get(&pty_id) != Some(&new_size);
+        if !(size_changed || target_changed) || new_size.0 == 0 || new_size.1 == 0 {
+            return;
+        }
+        if self.resize_pty_if_permitted(&pty_id, new_size.0, new_size.1) {
+            self.pty_sizes.insert(pty_id.clone(), new_size);
+            self.part_targets.set(part, Some(pty_id));
         }
     }
 
-    fn prepare_terminal_takeover(&mut self) -> Option<PtyTakeoverCard> {
-        let card = self.focused_pty_takeover_card();
-        if card.is_some() && self.scroll_mode_active() {
-            self.reset_pty_scrollback();
+    fn prepare_terminal_takeover(&mut self, part: CenterPart) -> Option<PtyTakeoverCard> {
+        let card = self.part_takeover_card(part);
+        if card.is_some() && self.part_scroll_mode_active(part) {
+            self.reset_part_scrollback(part);
         }
         card
     }
@@ -5020,17 +5027,17 @@ impl App {
     fn render_terminal_client_content(
         &mut self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         provider_name: Option<&str>,
         active_surface: SessionSurface,
         caret: Caret,
     ) -> (bool, usize) {
-        let Some(provider) = self.selected_terminal_surface_client() else {
+        let Some(provider) = self.part_client(part) else {
             return (false, 0);
         };
         let has_output = provider.has_output();
-        self.note_drawn_pty();
-        let Some(provider) = self.selected_terminal_surface_client() else {
+        self.note_drawn_pty(part);
+        let Some(provider) = self.part_client(part) else {
             return (false, 0);
         };
         if !has_output {
@@ -5042,7 +5049,7 @@ impl App {
         } else {
             dux_core::pty::ScreenBuffer::Primary
         };
-        let scrollback_offset = self.render_terminal_grid(frame, term_area, caret, screen);
+        let scrollback_offset = self.render_terminal_grid(frame, (part, term_area), caret, screen);
         (true, scrollback_offset)
     }
 
@@ -5134,30 +5141,35 @@ impl App {
     fn render_terminal_grid(
         &mut self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         caret: Caret,
         screen: dux_core::pty::ScreenBuffer,
     ) -> usize {
-        self.refresh_snapshot_buf();
+        self.refresh_part_snapshot(part);
         self.drop_drifted_selection();
-        let scrollback_offset = self.snapshot_buf.scrollback_offset;
-        let selection_origin = self.snapshot_selection_origin();
-        self.paint_terminal_cells(frame, term_area, selection_origin);
-        self.render_terminal_caret(frame, term_area, caret);
-        self.render_terminal_scrollback_indicator(frame, term_area, screen);
+        let scrollback_offset = self.part_snapshots.get(part).buf.scrollback_offset;
+        let selection_origin = self.part_selection_origin(part);
+        self.paint_terminal_cells(frame, (part, term_area), selection_origin);
+        self.render_terminal_caret(frame, (part, term_area), caret);
+        self.render_terminal_scrollback_indicator(frame, (part, term_area), screen);
         scrollback_offset
     }
 
     fn paint_terminal_cells(
         &self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         selection_origin: SelectionOrigin,
     ) {
         let buf = frame.buffer_mut();
-        for cell in &self.snapshot_buf.cells {
-            if cell.row >= self.snapshot_buf.rows
-                || cell.col >= self.snapshot_buf.cols
+        let snapshot = &self.part_snapshots.get(part).buf;
+        let selection = self
+            .terminal_selection
+            .as_ref()
+            .filter(|selection| selection.part == part);
+        for cell in &snapshot.cells {
+            if cell.row >= snapshot.rows
+                || cell.col >= snapshot.cols
                 || cell.row >= term_area.height
                 || cell.col >= term_area.width
             {
@@ -5176,7 +5188,7 @@ impl App {
                 .hyperlinks
                 .then_some(cell.link)
                 .flatten()
-                .and_then(|index| self.snapshot_buf.links.get(usize::from(index)))
+                .and_then(|index| snapshot.links.get(usize::from(index)))
                 .filter(|_| symbol == cell.symbol.as_str());
             if let Some(uri) = link_uri {
                 let width = symbol.cell_width().max(1);
@@ -5188,7 +5200,7 @@ impl App {
                 ratatui_cell.set_symbol(symbol);
             }
             ratatui_cell.set_style(style);
-            if let Some(selection) = &self.terminal_selection
+            if let Some(selection) = selection
                 && selection.anchor != selection.end
                 && selection.contains_live(cell.row, cell.col, selection_origin)
             {
@@ -5197,14 +5209,20 @@ impl App {
         }
     }
 
-    fn render_terminal_caret(&self, frame: &mut Frame<'_>, term_area: Rect, caret: Caret) {
+    fn render_terminal_caret(
+        &self,
+        frame: &mut Frame<'_>,
+        (part, term_area): (CenterPart, Rect),
+        caret: Caret,
+    ) {
         if caret == Caret::Hidden {
             return;
         }
-        let Some(cursor) = self.snapshot_buf.cursor else {
+        let snapshot = &self.part_snapshots.get(part).buf;
+        let Some(cursor) = snapshot.cursor else {
             return;
         };
-        if cursor.row >= self.snapshot_buf.rows || cursor.col >= self.snapshot_buf.cols {
+        if cursor.row >= snapshot.rows || cursor.col >= snapshot.cols {
             return;
         }
         let cx = term_area.x + cursor.col;
@@ -5217,13 +5235,15 @@ impl App {
     fn render_terminal_scrollback_indicator(
         &self,
         frame: &mut Frame<'_>,
-        term_area: Rect,
+        (part, term_area): (CenterPart, Rect),
         screen: dux_core::pty::ScreenBuffer,
     ) {
         if screen == dux_core::pty::ScreenBuffer::Alternate {
             return;
         }
-        let Some(label) = scrollback_indicator_label(self.snapshot_buf.scrollback_offset) else {
+        let Some(label) =
+            scrollback_indicator_label(self.part_snapshots.get(part).buf.scrollback_offset)
+        else {
             return;
         };
         let badge_width = usize_to_u16_wrapping(label.len());
@@ -5324,7 +5344,7 @@ impl App {
             self.interactive_terminal_hint_line(scrollback_offset, width)
         } else if scrollback_offset > 0 {
             self.scrolled_terminal_hint_line(scrollback_offset, width)
-        } else if self.center_typeable() {
+        } else if context.part_focus == FocusState::Focused && self.center_typeable() {
             self.typeable_hint_line(context.active_surface, width)
         } else {
             self.inactive_terminal_hint_line(context, width)
@@ -5433,7 +5453,7 @@ impl App {
     fn render_agent_terminal(
         &mut self,
         frame: &mut Frame<'_>,
-        area: Rect,
+        (part, area): (CenterPart, Rect),
         title: &str,
         focused: FocusState,
     ) {
@@ -5444,7 +5464,7 @@ impl App {
         // Ratatui cannot detect damage to the physical terminal outside its
         // previous-frame buffer, so resend the vulnerable focused edge.
         if focused == FocusState::Focused
-            && self.session_surface == SessionSurface::Agent
+            && part == CenterPart::Main
             && area.width > 0
             && area.height > 2
         {
@@ -5458,7 +5478,7 @@ impl App {
             return;
         }
 
-        let context = self.agent_terminal_context();
+        let context = self.agent_terminal_context(part);
         let active_surface = context.active_surface;
         let receives_keys = context.receives_keys;
         let session_provider_name = context.provider_name.as_deref();
@@ -5470,13 +5490,17 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(hint_height)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(term_area);
+        if context.part_focus == FocusState::Focused {
+            self.mouse_layout.focused_term = Some(term_area);
+        } else {
+            self.mouse_layout.other_term = Some(term_area);
+        }
 
-        self.resize_agent_terminal(term_area);
+        self.resize_part_terminal(part, term_area);
 
         // Read ownership after sizing spends an armed claim, preventing a
         // one-frame stale take-over card after a successful claim.
-        let takeover_card = self.prepare_terminal_takeover();
+        let takeover_card = self.prepare_terminal_takeover(part);
         let cover = if takeover_card.is_some() {
             CardCover::Covered
         } else {
@@ -5490,7 +5514,7 @@ impl App {
 
         let (rendered_content, scrollback_offset) = self.render_terminal_client_content(
             frame,
-            term_area,
+            (part, term_area),
             session_provider_name,
             active_surface,
             caret,
@@ -14060,7 +14084,7 @@ impl App {
         // boxes would be dead chrome spending three rows of a surface whose
         // whole point is maximum terminal space. The windowed center pane is
         // where tabs render and switch.
-        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
+        self.render_agent_terminal(frame, (CenterPart::Main, area), &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -14071,7 +14095,7 @@ impl App {
         let saved = self.session_surface;
         self.session_surface = SessionSurface::Terminal;
         let title = self.terminal_caption();
-        self.render_agent_terminal(frame, area, &title, FocusState::Focused);
+        self.render_agent_terminal(frame, (CenterPart::Dock, area), &title, FocusState::Focused);
         self.session_surface = saved;
     }
 
@@ -14147,7 +14171,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(2)])
             .areas(inner);
-        self.mouse_layout.agent_term = Some(term_area);
+        self.mouse_layout.focused_term = Some(term_area);
 
         let Some(viewer) = &mut self.startup_log_viewer else {
             return;
@@ -19343,7 +19367,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    let context = app.agent_terminal_context();
+                    let context = app.agent_terminal_context(CenterPart::Main);
                     app.render_terminal_empty_state(frame, area, &context);
                 })
                 .expect("render frame");
@@ -21335,19 +21359,23 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
+            .draw(|frame| {
+                app.render_agent_terminal(
+                    frame,
+                    (CenterPart::Main, area),
+                    " Agent ",
+                    FocusState::Unfocused,
+                );
+            })
             .expect("render frame");
 
         let expected_grid = Rect::new(4, 3, 68, 10);
-        assert_eq!(app.mouse_layout.agent_term, Some(expected_grid));
+        assert_eq!(app.mouse_layout.focused_term, Some(expected_grid));
         assert_eq!(
-            app.last_pty_size,
-            (expected_grid.height, expected_grid.width)
+            app.pty_sizes.get(&slot_tab).copied(),
+            Some((expected_grid.height, expected_grid.width))
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(slot_tab.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(slot_tab.as_str()));
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         assert!(rendered.contains("Starting"), "loading card: {rendered}");
         assert!(
@@ -21371,10 +21399,17 @@ mod tests {
         let area = Rect::new(3, 2, 70, 14);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
         terminal
-            .draw(|frame| app.render_agent_terminal(frame, area, " Agent ", FocusState::Unfocused))
+            .draw(|frame| {
+                app.render_agent_terminal(
+                    frame,
+                    (CenterPart::Main, area),
+                    " Agent ",
+                    FocusState::Unfocused,
+                );
+            })
             .expect("render frame");
 
-        assert_eq!(app.mouse_layout.agent_term, Some(Rect::new(4, 3, 68, 10)));
+        assert_eq!(app.mouse_layout.focused_term, Some(Rect::new(4, 3, 68, 10)));
         assert!(!app.welcome_logo.visible);
         let rendered = buffer_rows(terminal.backend().buffer()).join("\n");
         // This tab has no recorded verdict, so the card's ranked content is the
@@ -21439,14 +21474,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         // Confirm the renderer's input cursor really is the parked PTY cursor,
         // then derive the expected screen cell from the KNOWN (row 4, col 9)
         // literals, not from snapshot_buf, so a transposed or mis-offset
         // production computation cannot make this assertion tautologically true.
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("interactive agent snapshot should expose a PTY cursor");
         assert_eq!(
@@ -21494,7 +21531,7 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         // Guard against a tautological pass: the terminal must be offset from
         // the origin so the +9/+4 offset below is actually exercised (mirrors
@@ -21504,7 +21541,9 @@ mod tests {
             "test setup: agent terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("inline agent snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -21544,7 +21583,7 @@ mod tests {
             .expect("render frame");
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
@@ -21758,7 +21797,7 @@ mod tests {
             app.input_target = InputTarget::None;
             let (mut terminal, _) = draw_caret_frame(&mut app);
             assert!(
-                app.snapshot_buf.cursor.is_some(),
+                app.part_snapshots.main.buf.cursor.is_some(),
                 "test setup: the PTY should still expose a cursor to (not) place"
             );
             terminal.backend_mut().assert_cursor_position((0u16, 0u16));
@@ -21857,7 +21896,7 @@ mod tests {
         let (_, _) = draw_caret_frame(&mut app);
         wait_for_parsed_output(&mut app, "L100");
         assert!(
-            app.snapshot_buf.scrollback_total > 0,
+            app.part_snapshots.main.buf.scrollback_total > 0,
             "test setup: the child must have produced scrollback"
         );
         app.selected_terminal_surface_client()
@@ -21871,9 +21910,11 @@ mod tests {
         // Scrolled back, the cursor cell maps below the viewport (or not at
         // all), so the render gate must leave the hardware cursor alone.
         assert!(
-            app.snapshot_buf
+            app.part_snapshots
+                .main
+                .buf
                 .cursor
-                .is_none_or(|c| c.row >= app.snapshot_buf.rows),
+                .is_none_or(|c| c.row >= app.part_snapshots.main.buf.rows),
             "test premise: the PTY cursor cell must be out of the viewport"
         );
         terminal.backend_mut().assert_cursor_position((0u16, 0u16));
@@ -21927,14 +21968,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
             "test setup: companion terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .dock
+            .buf
             .cursor
             .expect("companion terminal snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -21993,29 +22036,24 @@ mod tests {
         app.session_surface = SessionSurface::Agent;
         select(&mut app, 0);
         draw(&mut app);
-        let pane = app.last_pty_size;
+        let pane = app.pty_sizes[&first_slot];
         assert_ne!(
             pane,
             (5, 40),
             "test setup: the pane must differ from the spawn geometry"
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(first_slot.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(first_slot.as_str()));
 
         // Same pane, different agent. Comparing geometry alone says "nothing
         // changed" here, which is exactly the bug.
         select(&mut app, 1);
         draw(&mut app);
         assert_eq!(
-            app.last_pty_size, pane,
+            app.pty_sizes.get(&second_slot).copied(),
+            Some(pane),
             "test premise: the pane did not change between the two frames"
         );
-        assert_eq!(
-            app.last_pty_resize_target.as_deref(),
-            Some(second_slot.as_str())
-        );
+        assert_eq!(app.part_targets.main.as_deref(), Some(second_slot.as_str()));
         let snapshot = app.engine.providers[TabIdRef::new(&second_slot)].snapshot();
         assert_eq!(
             (snapshot.rows, snapshot.cols),
@@ -22093,7 +22131,7 @@ mod tests {
     /// not part of the pane surface these tests measure. Mirrors the render
     /// site's geometry rather than guessing it.
     fn scrollback_badge_rect(app: &App, term_area: Rect) -> Option<Rect> {
-        let label = scrollback_indicator_label(app.snapshot_buf.scrollback_offset)?;
+        let label = scrollback_indicator_label(app.part_snapshots.main.buf.scrollback_offset)?;
         let width = usize_to_u16_wrapping(label.len());
         (term_area.height > 0 && width <= term_area.width)
             .then(|| Rect::new(term_area.x + term_area.width - width, term_area.y, width, 1))
@@ -22186,10 +22224,10 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
-            app.snapshot_buf.scrollback_offset > 0,
+            app.part_snapshots.main.buf.scrollback_offset > 0,
             "test setup: the pane must be parked in scrollback"
         );
 
@@ -22197,7 +22235,7 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("render quiet frame");
-        let quiet_offset = app.snapshot_buf.scrollback_offset;
+        let quiet_offset = app.part_snapshots.main.buf.scrollback_offset;
         let quiet_badge = scrollback_badge_rect(&app, term_area);
         let quiet = pane_bg_tally(terminal.backend().buffer(), term_area, quiet_badge);
 
@@ -22210,7 +22248,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("render moved frame");
         assert_ne!(
-            app.snapshot_buf.scrollback_offset, quiet_offset,
+            app.part_snapshots.main.buf.scrollback_offset, quiet_offset,
             "test setup: the second frame must carry a CHANGED scrollback offset"
         );
         let moved_badge = scrollback_badge_rect(&app, term_area);
@@ -22265,10 +22303,12 @@ mod tests {
             .expect("render wide frame");
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
-            app.snapshot_buf
+            app.part_snapshots
+                .main
+                .buf
                 .cells
                 .iter()
                 .any(|cell| cell.symbol.as_str() == "日"),
@@ -22293,7 +22333,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let mut covered = std::collections::HashSet::new();
-        for cell in &app.snapshot_buf.cells {
+        for cell in &app.part_snapshots.main.buf.cells {
             if cell.row >= term_area.height || cell.col >= term_area.width {
                 continue;
             }
@@ -22371,14 +22411,16 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         assert!(
             term_area.x > 0 || term_area.y > 0,
             "test setup: agent terminal should be offset from the origin"
         );
         let cursor = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cursor
             .expect("interactive agent snapshot should expose a PTY cursor");
         assert_eq!((cursor.row, cursor.col), (4, 9));
@@ -22993,7 +23035,7 @@ mod tests {
 
         let term_area = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("agent terminal area should be recorded after render");
         let cell = &terminal.backend().buffer()[(term_area.x + 8, term_area.y + 4)];
         assert_eq!(cell.symbol(), "X");
@@ -24858,7 +24900,7 @@ mod tests {
             .draw(|frame| app.render(frame))
             .expect("first frame");
 
-        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
         let border = (term_area.right(), term_area.y + 2);
         assert_eq!(terminal.backend().physical[border].symbol(), "│");
         terminal.backend_mut().physical[border].set_symbol(" ");
@@ -24896,7 +24938,7 @@ mod tests {
                 .draw(|frame| app.render(frame))
                 .expect("render frame");
 
-            let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+            let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
             let x = term_area.right();
             let expected: Vec<_> = if focus == FocusPane::Center {
                 (term_area.y..term_area.bottom() + 2)
@@ -24926,7 +24968,7 @@ mod tests {
             .draw(|frame| {
                 app.render_agent_terminal(
                     frame,
-                    Rect::new(2, 2, 96, 26),
+                    (CenterPart::Dock, Rect::new(2, 2, 96, 26)),
                     " Terminal ",
                     FocusState::Focused,
                 );
@@ -24980,7 +25022,7 @@ mod tests {
         terminal
             .draw(|frame| app.render(frame))
             .expect("initial frame");
-        let term_area = app.mouse_layout.agent_term.expect("agent terminal area");
+        let term_area = app.mouse_layout.focused_term.expect("agent terminal area");
         let border = (term_area.right(), term_area.y + 2);
 
         app.help_scroll = Some(0);
@@ -25438,7 +25480,7 @@ mod tests {
     fn diff_rects(app: &App) -> (Rect, Rect) {
         let content = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the diff records its content area for text selection");
         (
             content,
@@ -25533,15 +25575,15 @@ mod tests {
 
     #[test]
     fn the_diff_marker_leaves_text_selection_geometry_untouched() {
-        // `mouse_layout.agent_term` is the drag-to-select surface. The marker
+        // `mouse_layout.focused_term` is the drag-to-select surface. The marker
         // lands in the border column OUTSIDE it, so a short diff (no marker) and
         // a long one (marker) must record the same rect, and the marker cell must
         // never be inside it.
         for gutter_width in [0usize, 6] {
             let (short, _) = diff_frame((120, 40), 3, gutter_width, 0);
             let (long, _) = diff_frame((120, 40), 400, gutter_width, 7);
-            let short_rect = short.mouse_layout.agent_term.expect("selection surface");
-            let long_rect = long.mouse_layout.agent_term.expect("selection surface");
+            let short_rect = short.mouse_layout.focused_term.expect("selection surface");
+            let long_rect = long.mouse_layout.focused_term.expect("selection surface");
             assert_eq!(
                 short_rect, long_rect,
                 "drawing a scroll marker must not resize the selection surface"
@@ -25975,7 +26017,7 @@ mod tests {
     fn startup_log_rects(app: &App, frame: Rect) -> (Rect, Rect) {
         let content = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the startup log records its content area");
         let area = centered_rect(96, 94, frame);
         (
@@ -27219,7 +27261,7 @@ mod tests {
     /// The diff pane's outer rect, reconstructed from the content rect it
     /// recorded: the block's border ring is one cell on each side.
     fn centered_diff_pane_area(app: &App) -> Rect {
-        let content = app.mouse_layout.agent_term.expect("selection surface");
+        let content = app.mouse_layout.focused_term.expect("selection surface");
         // The content pane is the block's inner area minus the two hint rows at
         // the bottom, so the outer pane is one cell out on the left/top and two
         // rows taller at the bottom plus the border.

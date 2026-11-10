@@ -398,6 +398,7 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
             terminal_status: CompanionTerminalStatus::Running,
             is_input,
             receives_keys: is_input,
+            part_focus: FocusState::Focused,
             session_id: session_id.map(str::to_string),
             focused_tab: None,
             provider_name: None,

@@ -347,15 +347,14 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         host_forward_error_logged_at: None,
         agent_tab_regions: Vec::new(),
         terminal_return_to_list: false,
-        last_pty_size: (0, 0),
-        last_pty_resize_target: None,
+        pty_sizes: std::collections::HashMap::new(),
+        part_targets: crate::app::PartTargets::default(),
         tui_launched_ptys: HashSet::default(),
         pull_request_create: None,
         clone_draft: None,
         macro_editor_version: None,
         pending_pty_takeover: None,
         last_refused_pty_resize: None,
-        grid_generation: 0,
         scroll_mode: std::collections::HashSet::new(),
         last_diff_height: 0,
         last_diff_visual_lines: 0,
@@ -396,8 +395,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         pending_diff: None,
         changes_tree: ChangesTreeState::default(),
         diff_request_seq: 0,
-        snapshot_buf: crate::pty::TerminalSnapshot::empty(),
-        last_snapshot_id: None,
+        part_snapshots: crate::app::PartSnapshots::default(),
         terminal_selection: None,
         pending_link_click: None,
         pending_pr_banner_press: None,
@@ -474,6 +472,16 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
     app
 }
 
+impl App {
+    /// Record `size` as the geometry last sent to the focused part's pty, as a
+    /// render would, which is what a page of scrolling is measured against.
+    pub(crate) fn set_focused_pty_size(&mut self, size: (u16, u16)) {
+        if let Some(id) = self.selected_terminal_surface_id() {
+            self.pty_sizes.insert(id, size);
+        }
+    }
+}
+
 /// A browser tab at 10.0.0.7 watching `pty_id`, a terminal of `agent`, as
 /// the attachment registry records one.
 pub(crate) fn watch_from_a_browser(app: &App, pty_id: &str, agent: &str) -> u64 {
@@ -536,7 +544,9 @@ pub(crate) fn wait_for_parsed_output(app: &mut App, marker: &str) {
     loop {
         app.refresh_snapshot_buf();
         let screen: String = app
-            .snapshot_buf
+            .part_snapshots
+            .main
+            .buf
             .cells
             .iter()
             .map(|cell| cell.symbol.as_str())
@@ -593,7 +603,7 @@ pub(crate) fn enter_scroll_mode(app: &mut App, lines: usize) {
 pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
     for _ in 0..200 {
         app.refresh_snapshot_buf();
-        if matches!(app.snapshot_buf.cursor, Some(c) if c.row == row && c.col == col)
+        if matches!(app.part_snapshots.get(app.focused_part()).buf.cursor, Some(c) if c.row == row && c.col == col)
             && surface_has_output(app)
         {
             return;
@@ -602,7 +612,7 @@ pub(crate) fn wait_for_agent_cursor(app: &mut App, row: u16, col: u16) {
     }
     panic!(
         "PTY did not park its cursor at row {row}, col {col} within 2s (got {:?})",
-        app.snapshot_buf.cursor
+        app.part_snapshots.get(app.focused_part()).buf.cursor
     );
 }
 

@@ -136,6 +136,8 @@ pub(crate) struct PendingLinkClick {
     pub(crate) button: MouseButton,
     /// The terminal surface that was selected when the press landed.
     pub(crate) surface: Option<String>,
+    /// The center part the press landed in.
+    pub(crate) part: CenterPart,
     /// The address under the pressed cell.
     pub(crate) uri: String,
     /// Withhold this gesture's press, drag and release from the child.
@@ -216,6 +218,8 @@ struct AgentTerminalContext {
     terminal_status: CompanionTerminalStatus,
     is_input: bool,
     receives_keys: bool,
+    /// Whether the part this context describes is the focused one.
+    part_focus: crate::theme::FocusState,
     session_id: Option<String>,
     focused_tab: Option<String>,
     provider_name: Option<String>,
@@ -627,9 +631,11 @@ pub(crate) struct App {
     /// renderer, empty when the strip is hidden (< 2 tabs) or in fullscreen.
     pub(crate) agent_tab_regions: Vec<(String, Rect)>,
     pub(crate) terminal_return_to_list: bool,
-    pub(crate) last_pty_size: (u16, u16),
-    /// Which terminal surface `last_pty_size` was last sent to, so the resize
-    /// dedupe is keyed by target and not by geometry alone.
+    /// The geometry last sent to each pty, keyed by pty id, so a frame that
+    /// draws two parts resizes each child once and then leaves both alone.
+    pub(crate) pty_sizes: HashMap<String, (u16, u16)>,
+    /// Which pty each center part drew last frame, so the resize dedupe is also
+    /// keyed by target and not by geometry alone.
     ///
     /// Keying on the size alone filters workspace-wide: select another agent
     /// whose pane measures what this one measures now, the send is deduped away,
@@ -638,24 +644,24 @@ pub(crate) struct App {
     /// a target resized by some other surface (the web pane drives the same
     /// PTYs) and cannot be defeated by a new switch site forgetting to reset
     /// anything.
-    pub(crate) last_pty_resize_target: Option<String>,
-    /// A pty this surface has been told to TAKE OVER, armed by the take-over
-    /// action and consumed by the next resize of that pty.
+    pub(crate) part_targets: PartTargets,
+    /// A row this surface has been told to TAKE OVER, armed by the take-over
+    /// action and consumed by the next resize of any pty in that row.
     ///
     /// Armed rather than acted on directly, so there is exactly one place that
-    /// claims a pty for sizing: the render site that measures the pane. That also
-    /// gives the take-over the surface's real geometry rather than a remembered
-    /// one. The action clears `last_pty_resize_target` alongside setting this, so
-    /// a take-over at a geometry that happens to match the last one still sends a
+    /// claims for sizing: the render site that measures a pane. That also gives
+    /// the take-over the surface's real geometry rather than a remembered one.
+    /// The action forgets the row's sent geometry alongside setting this, so a
+    /// take-over at a geometry that happens to match the last one still sends a
     /// resize, which is what carries the claim.
     ///
-    /// Only meaningful while a background server is serving; a pty id left here
+    /// Only meaningful while a background server is serving; a row left here
     /// when serving stops is cleared with the rest of the participation state.
-    pub(crate) pending_pty_takeover: Option<String>,
+    pub(crate) pending_pty_takeover: Option<dux_core::pty_owners::RowKey>,
     /// The last resize this surface was REFUSED, as (pty id, rows, cols), so the
     /// refusal is logged when it is news rather than on every frame.
     ///
-    /// A refused resize deliberately does not record `last_pty_resize_target`: it
+    /// A refused resize deliberately does not record the sent geometry: it
     /// never reached the child, and recording it made a stale geometry permanent.
     /// The cost is that the render pass asks again every tick for as long as the
     /// demoted pane is on screen, which without this would be tens of identical
@@ -686,12 +692,6 @@ pub(crate) struct App {
     /// The macro list's version as the editor last saw it, on open and after each
     /// of its own writes; a save is refused once the list has moved on since.
     pub(crate) macro_editor_version: Option<String>,
-    /// How many times the selected surface's grid has been REBUILT (see
-    /// `refresh_snapshot_buf`). Not a clock and not a line count: it only
-    /// answers "has the grid moved since I looked?", which is the one question
-    /// `drop_drifted_selection` needs and the one the scroll numbers cannot
-    /// answer once the history ring is full.
-    pub(crate) grid_generation: u64,
     /// Which terminal surfaces (focused tab ids, companion terminal ids) the
     /// user has put into scroll mode. Empty means nobody is scrolled back.
     ///
@@ -828,11 +828,10 @@ pub(crate) struct App {
     /// Monotonic request counter, stamped into every [`crate::diff::DiffRequestKey`]
     /// so two requests that agree on file and settings are still told apart.
     pub(crate) diff_request_seq: u64,
-    /// Reusable snapshot buffer to avoid per-frame allocation of terminal cells.
-    pub(crate) snapshot_buf: TerminalSnapshot,
-    /// ID of the provider that last populated `snapshot_buf`, used to detect
-    /// agent switches and force a snapshot rebuild.
-    last_snapshot_id: Option<String>,
+    /// Each center part's grid as last snapshotted, one per part so drawing two
+    /// terminals in one frame neither rebuilds one buffer twice nor wipes a
+    /// selection stamped against the other part.
+    pub(crate) part_snapshots: PartSnapshots,
     /// Active text selection in the terminal viewport, if any.
     pub(crate) terminal_selection: Option<TerminalSelection>,
     /// A press dux took an interest in, awaiting the release that acts on it.
@@ -1607,6 +1606,87 @@ pub(crate) enum OnDormant {
     Launch,
     /// Leave it stopped and only leave interactive mode.
     Leave,
+}
+
+/// One of the two terminals the center pane can draw at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CenterPart {
+    /// The row's own terminal: the agent's focused tab, or a project or
+    /// standalone terminal shown for its row.
+    Main,
+    /// The agent's terminal dock, below the agent.
+    Dock,
+}
+
+/// One center part's grid as last snapshotted, and what everything stamped
+/// against it needs to know about that grid.
+pub(crate) struct PartSnapshot {
+    /// Reusable buffer, to avoid allocating terminal cells every frame.
+    pub(crate) buf: TerminalSnapshot,
+    /// The pty that last filled `buf`, so a switch to another pty rebuilds it
+    /// and retires what was stamped against the old one.
+    pub(crate) last_id: Option<String>,
+    /// How many times this part's grid has been REBUILT. Not a clock and not
+    /// a line count: it only answers "has the grid moved since I looked?",
+    /// which is the one question `drop_drifted_selection` needs and the one the
+    /// scroll numbers cannot answer once the history ring is full.
+    pub(crate) generation: u64,
+}
+
+impl Default for PartSnapshot {
+    fn default() -> Self {
+        Self {
+            buf: TerminalSnapshot::empty(),
+            last_id: None,
+            generation: 0,
+        }
+    }
+}
+
+/// The two parts' snapshots.
+#[derive(Default)]
+pub(crate) struct PartSnapshots {
+    pub(crate) main: PartSnapshot,
+    pub(crate) dock: PartSnapshot,
+}
+
+impl PartSnapshots {
+    pub(crate) fn get(&self, part: CenterPart) -> &PartSnapshot {
+        match part {
+            CenterPart::Main => &self.main,
+            CenterPart::Dock => &self.dock,
+        }
+    }
+
+    pub(crate) fn get_mut(&mut self, part: CenterPart) -> &mut PartSnapshot {
+        match part {
+            CenterPart::Main => &mut self.main,
+            CenterPart::Dock => &mut self.dock,
+        }
+    }
+}
+
+/// Which pty each part last sent a geometry for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PartTargets {
+    pub(crate) main: Option<String>,
+    pub(crate) dock: Option<String>,
+}
+
+impl PartTargets {
+    pub(crate) fn get(&self, part: CenterPart) -> Option<&str> {
+        match part {
+            CenterPart::Main => self.main.as_deref(),
+            CenterPart::Dock => self.dock.as_deref(),
+        }
+    }
+
+    pub(crate) fn set(&mut self, part: CenterPart, pty_id: Option<String>) {
+        match part {
+            CenterPart::Main => self.main = pty_id,
+            CenterPart::Dock => self.dock = pty_id,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4166,6 +4246,9 @@ pub(crate) struct TerminalSelection {
     /// at (see `screen_to_startup_log_grid` and
     /// `App::reconcile_startup_log_wrap_width`).
     pub origin: SelectionOrigin,
+    /// The center part the selection was made in. Only that part's own switch
+    /// to another pty retires it.
+    pub part: CenterPart,
 }
 
 impl TerminalSelection {
@@ -4261,7 +4344,13 @@ pub(crate) struct MouseLayoutState {
     /// rows), so a click row no longer maps 1:1 to a terminal; this is the
     /// reverse map (see `render::left_row_to_item`, reused for both lists).
     pub(crate) terminal_row_to_item: Vec<usize>,
-    pub(crate) agent_term: Option<Rect>,
+    /// The grid of the center part that has focus (the one drawn alone when a
+    /// surface is maximized), which is what a press, a drag and a link test
+    /// translate against.
+    pub(crate) focused_term: Option<Rect>,
+    /// The grid of the other center part, when the center pane draws two. A
+    /// press there moves focus to it first (see `App::focus_part_under`).
+    pub(crate) other_term: Option<Rect>,
     /// The take-over card's button, when the card is on screen. Published by the
     /// render pass and cleared with the rest of this state every frame, so a
     /// click can only land on a button that is drawn right now: the card comes
@@ -4297,7 +4386,8 @@ impl MouseLayoutState {
         self.left_row_to_item.clear();
         self.terminal_list = Rect::default();
         self.terminal_row_to_item.clear();
-        self.agent_term = None;
+        self.focused_term = None;
+        self.other_term = None;
         self.takeover_button = None;
         self.dormant_tab_button = None;
         self.pr_banner = None;
@@ -5369,15 +5459,14 @@ impl App {
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             terminal_return_to_list: false,
-            last_pty_size: (0, 0),
-            last_pty_resize_target: None,
+            pty_sizes: HashMap::new(),
+            part_targets: PartTargets::default(),
             tui_launched_ptys: HashSet::default(),
             pull_request_create: None,
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
             last_refused_pty_resize: None,
-            grid_generation: 0,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
             last_diff_visual_lines: 0,
@@ -5418,8 +5507,7 @@ impl App {
             pending_diff: None,
             changes_tree: ChangesTreeState::default(),
             diff_request_seq: 0,
-            snapshot_buf: TerminalSnapshot::empty(),
-            last_snapshot_id: None,
+            part_snapshots: PartSnapshots::default(),
             terminal_selection: None,
             pending_link_click: None,
             pending_pr_banner_press: None,
@@ -8520,14 +8608,28 @@ impl App {
         }
     }
 
-    /// The id that names the currently selected terminal surface: the focused
-    /// tab id for an agent, the terminal id for a companion terminal. `None`
-    /// when that surface has no live PTY, so it always agrees with
-    /// [`Self::selected_terminal_surface_client`] about whether there is a
-    /// surface at all. Scroll mode is keyed by this id so scrolling back in one
-    /// agent never suppresses typing in another.
-    pub(crate) fn selected_terminal_surface_id(&self) -> Option<String> {
+    /// The center part keyboard commands and typing act on: the dock while an
+    /// agent's terminal has focus, the row's own terminal otherwise.
+    pub(crate) fn focused_part(&self) -> CenterPart {
         match self.session_surface {
+            SessionSurface::Agent => CenterPart::Main,
+            SessionSurface::Terminal => CenterPart::Dock,
+        }
+    }
+
+    /// Which kind of terminal `part` draws.
+    pub(crate) fn part_surface(part: CenterPart) -> SessionSurface {
+        match part {
+            CenterPart::Main => SessionSurface::Agent,
+            CenterPart::Dock => SessionSurface::Terminal,
+        }
+    }
+
+    /// The pty id `part` draws: the focused tab id for an agent, the terminal
+    /// id for a terminal. `None` when that part has no live PTY, so it always
+    /// agrees with [`Self::part_client`] about whether there is one at all.
+    pub(crate) fn part_pty_id(&self, part: CenterPart) -> Option<String> {
+        match Self::part_surface(part) {
             SessionSurface::Agent => {
                 let session_id = self.selected_session()?.id.clone();
                 let tab_id = self.focused_tab_id(&session_id);
@@ -8546,8 +8648,9 @@ impl App {
         }
     }
 
-    pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
-        match self.session_surface {
+    /// The PTY behind `part`.
+    pub(crate) fn part_client(&self, part: CenterPart) -> Option<&PtyClient> {
+        match Self::part_surface(part) {
             SessionSurface::Agent => {
                 let session_id = self.selected_session()?.id.clone();
                 self.engine
@@ -8559,6 +8662,32 @@ impl App {
                 self.engine.companion_terminals.get(id).map(|t| &t.client)
             }
         }
+    }
+
+    /// The id that names the focused terminal surface (see
+    /// [`Self::focused_part`]). Scroll mode is keyed by this id so scrolling
+    /// back in one agent never suppresses typing in another.
+    pub(crate) fn selected_terminal_surface_id(&self) -> Option<String> {
+        self.part_pty_id(self.focused_part())
+    }
+
+    pub(crate) fn selected_terminal_surface_client(&self) -> Option<&PtyClient> {
+        self.part_client(self.focused_part())
+    }
+
+    /// The geometry last sent to the focused part's pty, or zero when none was:
+    /// what a page of scrolling is.
+    pub(crate) fn focused_pty_size(&self) -> (u16, u16) {
+        self.selected_terminal_surface_id()
+            .and_then(|id| self.pty_sizes.get(&id).copied())
+            .unwrap_or((0, 0))
+    }
+
+    /// Forget every geometry sent, so the next frame sends each drawn part's
+    /// size again whether or not it changed.
+    pub(crate) fn forget_sent_pty_sizes(&mut self) {
+        self.pty_sizes.clear();
+        self.part_targets = PartTargets::default();
     }
 
     // ---- Agent tabs: per-session focused tab, switching, labels ----
@@ -8661,8 +8790,8 @@ impl App {
         let _ = self
             .engine
             .set_last_focused_tab(session_id, (!is_slot).then_some(tab_id));
-        self.last_snapshot_id = None;
-        self.last_pty_size = (0, 0);
+        self.part_snapshots.main.last_id = None;
+        self.forget_sent_pty_sizes();
         self.terminal_selection = None;
         // Switching tabs foregrounds the owning agent, so refresh its PR status.
         self.engine.spawn_foreground_pr_check(session_id);
@@ -8706,11 +8835,17 @@ impl App {
         }
     }
 
-    /// The scroll state of the snapshot currently in `snapshot_buf`, as a
-    /// [`SelectionOrigin`]. Callers stamp it onto a new selection and pass it
-    /// back in as the "now" frame when testing live cells.
+    /// The scroll state of the snapshot currently in the focused part's
+    /// buffer, as a [`SelectionOrigin`].
     pub(crate) fn snapshot_selection_origin(&self) -> SelectionOrigin {
-        // The capacity the selected PTY was spawned with, read from the client
+        self.part_selection_origin(self.focused_part())
+    }
+
+    /// The scroll state of `part`'s snapshot, as a [`SelectionOrigin`]. Callers
+    /// stamp it onto a new selection and pass it back in as the "now" frame
+    /// when testing live cells.
+    pub(crate) fn part_selection_origin(&self, part: CenterPart) -> SelectionOrigin {
+        // The capacity the part's PTY was spawned with, read from the client
         // rather than from config: capacity is fixed when the emulator is built
         // and a live reload never reaches a running PTY, so reading
         // `ui.agent_scrollback_lines` here would make a full ring read as
@@ -8718,73 +8853,92 @@ impl App {
         // no resolvable client, means "never saturated" rather than "always", so
         // an unconfigured surface keeps the ordinary behaviour.
         let capacity = self
-            .selected_terminal_surface_client()
+            .part_client(part)
             .map_or(0, dux_core::pty::PtyClient::scrollback_capacity);
+        let snapshot = self.part_snapshots.get(part);
         SelectionOrigin {
-            history_saturated: capacity > 0 && self.snapshot_buf.scrollback_total >= capacity,
-            grid_generation: self.grid_generation,
-            scrollback_offset: self.snapshot_buf.scrollback_offset,
-            scrollback_total: self.snapshot_buf.scrollback_total,
-            grid_size: (self.snapshot_buf.rows, self.snapshot_buf.cols),
+            history_saturated: capacity > 0 && snapshot.buf.scrollback_total >= capacity,
+            grid_generation: snapshot.generation,
+            scrollback_offset: snapshot.buf.scrollback_offset,
+            scrollback_total: snapshot.buf.scrollback_total,
+            grid_size: (snapshot.buf.rows, snapshot.buf.cols),
         }
     }
 
-    /// Refresh `self.snapshot_buf` from the currently selected terminal
-    /// surface, reusing the existing cell allocation. Returns `true` if a
-    /// provider was found and the snapshot was updated.
+    /// Refresh the focused part's snapshot. See [`Self::refresh_part_snapshot`].
     pub(crate) fn refresh_snapshot_buf(&mut self) -> bool {
-        let (client_id, client): (String, Option<&PtyClient>) = match self.session_surface {
-            SessionSurface::Agent => {
-                let session_id = match self.selected_session() {
-                    Some(s) => s.id.clone(),
-                    None => return false,
-                };
-                let tab_id = self.focused_tab_id(&session_id);
-                let provider = self.engine.providers.get(TabIdRef::new(&tab_id));
-                (tab_id, provider)
-            }
-            SessionSurface::Terminal => {
-                let id = match self.active_terminal_id.as_ref() {
-                    Some(id) => id.clone(),
-                    None => return false,
-                };
-                let provider = self.engine.companion_terminals.get(&id).map(|t| &t.client);
-                (id, provider)
-            }
+        self.refresh_part_snapshot(self.focused_part())
+    }
+
+    /// Refresh `part`'s snapshot from the PTY it draws, reusing the existing
+    /// cell allocation. Returns `true` if a provider was found and the snapshot
+    /// was updated.
+    pub(crate) fn refresh_part_snapshot(&mut self, part: CenterPart) -> bool {
+        let Some(client_id) = self.part_pty_id(part) else {
+            return false;
         };
-        if let Some(provider) = client {
-            if self.last_snapshot_id.as_deref() != Some(&client_id) {
-                provider.mark_dirty();
-                self.last_snapshot_id = Some(client_id);
-                self.terminal_selection = None;
-                // The same reason the selection goes: both were stamped against
-                // a grid that is no longer the one on screen. Retired EAGERLY
-                // here rather than left to the release's own surface check, so
-                // switching away and back cannot hand the record a grid it
-                // happens to match again. The repeat-open guard is stamped
-                // against that same picture, so it goes too: the cell it names
-                // belongs to another agent's link now.
-                self.pending_link_click = None;
-                self.last_link_open = None;
-            }
-            let collect_links = self.engine.config.capabilities.hyperlinks;
-            // A rebuild means the grid MOVED (output, a scroll, a resize). The
-            // counter is what lets `drop_drifted_selection` tell "nothing has
-            // happened since this selection was stamped" from "the grid has
-            // moved and, at saturation, I can no longer say by how much".
-            if provider.snapshot_into(
-                &mut self.snapshot_buf,
-                if collect_links {
-                    dux_core::pty::Hyperlinks::Collect
-                } else {
-                    dux_core::pty::Hyperlinks::Skip
-                },
-            ) {
-                self.grid_generation = self.grid_generation.wrapping_add(1);
-            }
-            true
-        } else {
-            false
+        let collect_links = self.engine.config.capabilities.hyperlinks;
+        // Looked up through the engine field alone, so the snapshot can be
+        // borrowed beside it.
+        let provider = match Self::part_surface(part) {
+            SessionSurface::Agent => self.engine.providers.get(TabIdRef::new(&client_id)),
+            SessionSurface::Terminal => self
+                .engine
+                .companion_terminals
+                .get(&client_id)
+                .map(|terminal| &terminal.client),
+        };
+        let Some(provider) = provider else {
+            return false;
+        };
+        let snapshot = self.part_snapshots.get_mut(part);
+        let switched = snapshot.last_id.as_deref() != Some(&client_id);
+        if switched {
+            provider.mark_dirty();
+            snapshot.last_id = Some(client_id);
+        }
+        // A rebuild means the grid MOVED (output, a scroll, a resize). The
+        // counter is what lets `drop_drifted_selection` tell "nothing has
+        // happened since this selection was stamped" from "the grid has moved
+        // and, at saturation, I can no longer say by how much".
+        if provider.snapshot_into(
+            &mut snapshot.buf,
+            if collect_links {
+                dux_core::pty::Hyperlinks::Collect
+            } else {
+                dux_core::pty::Hyperlinks::Skip
+            },
+        ) {
+            snapshot.generation = snapshot.generation.wrapping_add(1);
+        }
+        if switched {
+            self.retire_stamps_on_part(part);
+        }
+        true
+    }
+
+    /// Retire what was stamped against `part`'s previous grid: the selection
+    /// and a withheld link press, when either was made on this part. Retired
+    /// EAGERLY rather than left to the release's own surface check, so
+    /// switching away and back cannot hand the record a grid it happens to
+    /// match again. The repeat-open guard is stamped against that same
+    /// picture, so it goes too: the cell it names belongs to another pty's
+    /// link now. What was stamped on the other part stays.
+    fn retire_stamps_on_part(&mut self, part: CenterPart) {
+        if self
+            .terminal_selection
+            .as_ref()
+            .is_none_or(|selection| selection.part == part)
+        {
+            self.terminal_selection = None;
+        }
+        if self
+            .pending_link_click
+            .as_ref()
+            .is_none_or(|press| press.part == part)
+        {
+            self.pending_link_click = None;
+            self.last_link_open = None;
         }
     }
 }
@@ -11043,6 +11197,7 @@ leading_branch = "main"
             end: TermGridPos { row: 4, col: 10 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 2, col: 5 });
@@ -11056,6 +11211,7 @@ leading_branch = "main"
             end: TermGridPos { row: 2, col: 5 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 2, col: 5 });
@@ -11069,6 +11225,7 @@ leading_branch = "main"
             end: TermGridPos { row: 3, col: 5 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         let (start, end) = sel.ordered();
         assert_eq!(start, TermGridPos { row: 3, col: 5 });
@@ -11082,6 +11239,7 @@ leading_branch = "main"
             end: TermGridPos { row: 3, col: 10 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         assert!(sel.contains(3, 5));
         assert!(sel.contains(3, 7));
@@ -11099,6 +11257,7 @@ leading_branch = "main"
             end: TermGridPos { row: 4, col: 5 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         // First row: from anchor col to end of line.
         assert!(sel.contains(2, 10));
@@ -11124,6 +11283,7 @@ leading_branch = "main"
             end: TermGridPos { row: 2, col: 10 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: CenterPart::Main,
         };
         assert!(sel.contains(2, 10));
         assert!(sel.contains(3, 0));
@@ -11144,6 +11304,7 @@ leading_branch = "main"
                 scrollback_total: 100,
                 ..Default::default()
             },
+            part: CenterPart::Main,
         }
     }
 

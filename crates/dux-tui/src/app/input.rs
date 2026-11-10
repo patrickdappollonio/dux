@@ -1766,8 +1766,8 @@ impl App {
             *scroll = scroll.saturating_sub(page);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Up, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(ScrollDirection::Up, usize::from(self.focused_pty_size().0));
         }
     }
 
@@ -1778,8 +1778,11 @@ impl App {
             *scroll = scroll.saturating_add(page).min(max_scroll);
         } else if self.center_typeable() && self.should_forward_center_page() {
             self.forward_typing_key_to_center(key);
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(ScrollDirection::Down, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(
+                ScrollDirection::Down,
+                usize::from(self.focused_pty_size().0),
+            );
         }
     }
 
@@ -1787,7 +1790,7 @@ impl App {
         if let CenterMode::Diff { ref mut scroll, .. } = self.center_mode {
             *scroll = scroll.saturating_sub(1);
         } else if !self.center_scroll_keys_gated() {
-            if self.last_pty_size.0 > 0 {
+            if self.focused_pty_size().0 > 0 {
                 self.scroll_pty(ScrollDirection::Up, 1);
             }
         } else {
@@ -1800,7 +1803,7 @@ impl App {
             let max_scroll = diff_max_scroll(self.last_diff_visual_lines, self.last_diff_height);
             *scroll = scroll.saturating_add(1).min(max_scroll);
         } else if !self.center_scroll_keys_gated() {
-            if self.last_pty_size.0 > 0 {
+            if self.focused_pty_size().0 > 0 {
                 self.scroll_pty(ScrollDirection::Down, 1);
             }
         } else {
@@ -2230,7 +2233,12 @@ impl App {
     }
 
     pub(crate) fn reset_pty_scrollback(&mut self) {
-        if let Some(provider) = self.selected_terminal_surface_client() {
+        self.reset_part_scrollback(self.focused_part());
+    }
+
+    /// Snap `part` back to its live edge.
+    pub(crate) fn reset_part_scrollback(&mut self, part: CenterPart) {
+        if let Some(provider) = self.part_client(part) {
             provider.set_scrollback(0);
         }
         // A snap to the live edge is a user action, so scroll mode ends here
@@ -2238,7 +2246,7 @@ impl App {
         // you asked to is not a surprise and needs no status message. Scoped to
         // the surface whose offset was just zeroed, so an agent parked in its own
         // scrollback keeps both its frozen view and its cue.
-        if let Some(id) = self.selected_terminal_surface_id() {
+        if let Some(id) = self.part_pty_id(part) {
             self.scroll_mode.remove(&id);
         }
         self.note_selection_survives_own_scroll();
@@ -2281,7 +2289,12 @@ impl App {
     /// Whether the selected terminal surface is in scroll mode, which is what
     /// gates keystroke forwarding, the hint-bar cue and the badge.
     pub(crate) fn scroll_mode_active(&self) -> bool {
-        self.selected_terminal_surface_id()
+        self.part_scroll_mode_active(self.focused_part())
+    }
+
+    /// Whether `part`'s pty is in scroll mode.
+    pub(crate) fn part_scroll_mode_active(&self, part: CenterPart) -> bool {
+        self.part_pty_id(part)
             .is_some_and(|current| self.scroll_mode.contains(&current))
     }
 
@@ -2380,7 +2393,12 @@ impl App {
     /// and its re-read is re-stamped along with it: a frame-wide window that
     /// fails toward keeping the selection.
     pub(crate) fn drop_drifted_selection(&mut self) {
-        let live_cols = self.snapshot_buf.cols;
+        let Some(part) = self.terminal_selection.as_ref().map(|sel| sel.part) else {
+            return;
+        };
+        let snapshot = self.part_snapshots.get(part);
+        let live_cols = snapshot.buf.cols;
+        let live_generation = snapshot.generation;
         let drifted = self.terminal_selection.as_ref().is_some_and(|sel| {
             // A WIDTH change reflows the grid under the recorded rows, at ANY
             // history depth, so it is its own retirement trigger and not a
@@ -2389,8 +2407,7 @@ impl App {
             // total arithmetic translates that exactly, so the selection
             // follows its text. See `SelectionOrigin::grid_size`.
             sel.origin.grid_size.1 != live_cols
-                || (sel.origin.history_saturated
-                    && sel.origin.grid_generation != self.grid_generation)
+                || (sel.origin.history_saturated && sel.origin.grid_generation != live_generation)
         });
         if drifted {
             self.terminal_selection = None;
@@ -2406,7 +2423,7 @@ impl App {
         }
         // Consume the rebuild this scroll caused, then adopt its generation.
         self.refresh_snapshot_buf();
-        let generation = self.grid_generation;
+        let generation = self.part_snapshots.get(self.focused_part()).generation;
         if let Some(sel) = &mut self.terminal_selection {
             sel.origin.grid_generation = generation;
         }
@@ -2416,7 +2433,7 @@ impl App {
         let Some(viewer) = &self.startup_log_viewer else {
             return 0;
         };
-        let Some(area) = self.mouse_layout.agent_term else {
+        let Some(area) = self.mouse_layout.focused_term else {
             return 0;
         };
         u16::try_from(startup_command_log_visual_lines(&viewer.content, area.width).len())
@@ -2455,7 +2472,7 @@ impl App {
     /// error, so a query that stops matching leaves the offset where it is.
     pub(crate) fn reconcile_startup_log_wrap_width(&mut self) {
         if matches!(self.fullscreen_overlay, FullscreenOverlay::StartupLog)
-            && let Some(area) = self.mouse_layout.agent_term
+            && let Some(area) = self.mouse_layout.focused_term
             && let Some(viewer) = self.startup_log_viewer.as_ref()
         {
             let width = area.width;
@@ -2533,7 +2550,7 @@ impl App {
             viewer.scroll_offset = 0;
             return;
         }
-        let Some(width) = self.mouse_layout.agent_term.map(|area| area.width) else {
+        let Some(width) = self.mouse_layout.focused_term.map(|area| area.width) else {
             return;
         };
         if let Some(index) = startup_command_log_visual_lines(&viewer.content, width)
@@ -2622,11 +2639,17 @@ impl App {
                 }
             }
             Some(Action::ScrollPageDown) => {
-                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
+                let page = self
+                    .mouse_layout
+                    .focused_term
+                    .map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(page.max(1).cast_signed());
             }
             Some(Action::ScrollPageUp) => {
-                let page = self.mouse_layout.agent_term.map_or(10, |area| area.height);
+                let page = self
+                    .mouse_layout
+                    .focused_term
+                    .map_or(10, |area| area.height);
                 self.scroll_startup_log_viewer(-page.max(1).cast_signed());
             }
             Some(Action::ScrollLineDown | Action::MoveDown) => {
@@ -3543,7 +3566,7 @@ impl App {
             has_scrollback: self
                 .selected_terminal_surface_client()
                 .is_some_and(|provider| provider.scrollback_offset() > 0),
-            has_page_height: self.last_pty_size.0 > 0,
+            has_page_height: self.focused_pty_size().0 > 0,
         };
         let batch_can_reach_pty = actions
             .iter()
@@ -3571,8 +3594,8 @@ impl App {
             if self.write_into_focused_pty(raw) {
                 dispatch.forwarded.note(raw);
             }
-        } else if self.last_pty_size.0 > 0 {
-            self.scroll_pty(direction, usize::from(self.last_pty_size.0));
+        } else if self.focused_pty_size().0 > 0 {
+            self.scroll_pty(direction, usize::from(self.focused_pty_size().0));
         }
     }
 
@@ -3586,7 +3609,8 @@ impl App {
         let has_scrollback = self
             .selected_terminal_surface_client()
             .is_some_and(|provider| provider.scrollback_offset() > 0);
-        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.last_pty_size.0 > 0 {
+        if scroll == RawScroll::WhenScrolledBack && has_scrollback && self.focused_pty_size().0 > 0
+        {
             dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
@@ -3731,7 +3755,7 @@ impl App {
         matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
-                .agent_term
+                .focused_term
                 .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
     }
 
@@ -3782,7 +3806,7 @@ impl App {
         } else if !dispatch.is_scrolled_back {
             // SGR coordinates are screen-absolute; the child expects them
             // relative to the embedded terminal grid.
-            if let Some(term_area) = self.mouse_layout.agent_term
+            if let Some(term_area) = self.mouse_layout.focused_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(raw, term_area.x, term_area.y)
                 && self.write_into_focused_pty(&translated)
@@ -7895,7 +7919,7 @@ impl App {
 
     fn fullscreen_mouse_target(&self, column: u16, row: u16) -> Option<MouseTarget> {
         self.mouse_layout
-            .agent_term
+            .focused_term
             .filter(|rect| contains_point(*rect, column, row))
             .map(|_| MouseTarget::Center)
     }
@@ -11421,7 +11445,7 @@ impl App {
             };
             let screen_seq =
                 format!("\x1b[<{cb};{};{}M", mouse.column + 1, mouse.row + 1).into_bytes();
-            let forwarded = if let Some(term_area) = self.mouse_layout.agent_term
+            let forwarded = if let Some(term_area) = self.mouse_layout.focused_term
                 && let Some(translated) =
                     crate::raw_input::translate_sgr_mouse(&screen_seq, term_area.x, term_area.y)
             {
@@ -11475,19 +11499,21 @@ impl App {
         // agent's cells as far as this buffer is concerned. Opening a link out
         // of them would open an address the user is not looking at.
         let live = self.selected_terminal_surface_id();
-        if live.is_none() || self.last_snapshot_id != live {
+        let snapshot = self.part_snapshots.get(self.focused_part());
+        if live.is_none() || snapshot.last_id != live {
             return None;
         }
         self.selected_terminal_surface_client()?;
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point(term_area, column, row)?;
-        let cell = self.snapshot_buf.cells.iter().find(|cell| {
+        let cell = snapshot.buf.cells.iter().find(|cell| {
             cell.row == row
                 && col >= cell.col
                 && col < cell.col + snapshot_cell_columns(cell.symbol.as_str())
         })?;
         let index = cell.link?;
-        self.snapshot_buf
+        snapshot
+            .buf
             .links
             .get(usize::from(index))
             .map(String::as_str)
@@ -11516,6 +11542,7 @@ impl App {
             // against whatever button comes back up.
             button: MouseButton::Left,
             surface: self.selected_terminal_surface_id(),
+            part: self.focused_part(),
             uri: decision.uri,
             suppress: decision.suppress,
             open: decision.open && !repeat,
@@ -11721,7 +11748,7 @@ impl App {
         let MouseEventKind::Down(button) = mouse.kind else {
             return false;
         };
-        let Some(term_area) = self.mouse_layout.agent_term else {
+        let Some(term_area) = self.mouse_layout.focused_term else {
             return false;
         };
         if !contains_point(term_area, mouse.column, mouse.row) {
@@ -11796,7 +11823,7 @@ impl App {
     /// itself (press/release arm the short Button window, motion arms
     /// nothing), keeping this in lockstep with `classify_pty_write`.
     fn write_center_mouse_report(&mut self, cb: u16, final_byte: u8, column: u16, row: u16) {
-        let Some(term_area) = self.mouse_layout.agent_term else {
+        let Some(term_area) = self.mouse_layout.focused_term else {
             return;
         };
         if term_area.width == 0 || term_area.height == 0 {
@@ -12076,7 +12103,7 @@ impl App {
         }
         let inside_log = self
             .mouse_layout
-            .agent_term
+            .focused_term
             .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left)
@@ -12111,7 +12138,7 @@ impl App {
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && !self
                 .mouse_layout
-                .agent_term
+                .focused_term
                 .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row))
         {
             self.close_top_overlay();
@@ -12566,7 +12593,7 @@ impl App {
     /// Map screen coordinates to terminal grid position.
     /// Returns `None` if the point is outside the terminal area.
     fn screen_to_grid(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point(term_area, screen_col, screen_row)?;
         Some(TermGridPos { row, col })
     }
@@ -12575,7 +12602,7 @@ impl App {
     /// terminal area edges. Used during drag so the selection extends to the
     /// nearest boundary when the mouse leaves the terminal area.
     fn screen_to_grid_clamped(&self, screen_col: u16, screen_row: u16) -> Option<TermGridPos> {
-        let term_area = self.mouse_layout.agent_term?;
+        let term_area = self.mouse_layout.focused_term?;
         let (col, row) = relative_point_clamped(term_area, screen_col, screen_row);
         Some(TermGridPos { row, col })
     }
@@ -12700,7 +12727,7 @@ impl App {
                 }
                 let covered = self
                     .mouse_layout
-                    .agent_term
+                    .focused_term
                     .is_some_and(|rect| contains_point(rect, mouse.column, mouse.row));
                 if covered && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     // A click on a pane still focuses it, which is the one thing
@@ -12725,6 +12752,7 @@ impl App {
                         // read of the live grid: the click selects the cells on
                         // screen, and output may already have arrived since.
                         origin: self.snapshot_selection_origin(),
+                        part: self.focused_part(),
                     });
                 }
             }
@@ -12804,7 +12832,9 @@ impl App {
         // takes whatever text has since scrolled into those screen rows instead of
         // the text the user highlighted.
         let selected: Vec<(u16, u16, &str)> = self
-            .snapshot_buf
+            .part_snapshots
+            .get(self.focused_part())
+            .buf
             .cells
             .iter()
             .filter_map(|cell| {
@@ -12863,6 +12893,7 @@ impl App {
                         // its scroll offset), so it needs no frame to translate
                         // against and never calls `contains_live`.
                         origin: SelectionOrigin::default(),
+                        part: crate::app::CenterPart::Main,
                     });
                     return true;
                 }
@@ -12899,7 +12930,7 @@ impl App {
         let (sel, content, width) = match (
             self.fullscreen_overlay,
             &self.startup_log_viewer,
-            self.mouse_layout.agent_term,
+            self.mouse_layout.focused_term,
             &self.prompt,
             self.overlay_layout.active,
         ) {
@@ -13032,7 +13063,7 @@ impl App {
             if let Some(mouse_ev) = crate::raw_input::parse_sgr_mouse(seq) {
                 let outside_overlay =
                     matches!(mouse_ev.kind, MouseEventKind::Down(MouseButton::Left))
-                        && !self.mouse_layout.agent_term.is_some_and(|rect| {
+                        && !self.mouse_layout.focused_term.is_some_and(|rect| {
                             contains_point(rect, mouse_ev.column, mouse_ev.row)
                         });
                 if outside_overlay {
@@ -13367,7 +13398,8 @@ mod tests {
             left_row_to_item: (0..10usize).collect(),
             terminal_list: Rect::default(),
             terminal_row_to_item: Vec::new(),
-            agent_term: Some(Rect::new(21, 1, 55, 16)),
+            focused_term: Some(Rect::new(21, 1, 55, 16)),
+            other_term: None,
             takeover_button: None,
             dormant_tab_button: None,
             pr_banner: None,
@@ -14441,7 +14473,7 @@ mod tests {
         );
 
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.mouse_layout.agent_term = Some(Rect::new(60, 5, 5, 5));
+        app.mouse_layout.focused_term = Some(Rect::new(60, 5, 5, 5));
         assert_eq!(app.mouse_target(61, 6), Some(MouseTarget::Center));
         assert_eq!(app.mouse_target(overlap.x, overlap.y), None);
     }
@@ -20937,7 +20969,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         app.focus = FocusPane::Left;
 
-        // agent_term is (21,1,55,16); a click at screen (30,5) translates to
+        // focused_term is (21,1,55,16); a click at screen (30,5) translates to
         // child cell (10,5) in 1-based SGR coordinates.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
 
@@ -21019,7 +21051,7 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         wait_for_forwarded_echo(&app, "[<0;10;5M");
 
-        // (0,0) is far outside agent_term (21,1,55,16): clamped to the pane's
+        // (0,0) is far outside focused_term (21,1,55,16): clamped to the pane's
         // top-left content cell, which is (1,1) in child coordinates.
         app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
 
@@ -21088,7 +21120,7 @@ not_a_real_action = ["x"]
         app.center_mode = CenterMode::Agent;
         app.focus = FocusPane::Center;
 
-        // agent_term is (21,1,55,16), so screen (21,1) is child cell (0,0),
+        // focused_term is (21,1,55,16), so screen (21,1) is child cell (0,0),
         // where the fixture's READY sentinel starts.
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 21, 1));
         assert!(
@@ -21264,10 +21296,12 @@ not_a_real_action = ["x"]
     /// as belonging to the surface on screen (which is what the hit test
     /// requires before it will read a cell at all).
     fn install_linked_cells(app: &mut App, uri: &str, cells: &[(u16, u16, &str)]) {
-        app.snapshot_buf.rows = 16;
-        app.snapshot_buf.cols = 55;
-        app.snapshot_buf.links = vec![uri.to_string()];
-        app.snapshot_buf.cells = cells
+        let last_id = app.selected_terminal_surface_id();
+        let snapshot = app.part_snapshots.get_mut(app.focused_part());
+        snapshot.buf.rows = 16;
+        snapshot.buf.cols = 55;
+        snapshot.buf.links = vec![uri.to_string()];
+        snapshot.buf.cells = cells
             .iter()
             .map(|(row, col, symbol)| crate::pty::SnapshotCell {
                 row: *row,
@@ -21279,7 +21313,7 @@ not_a_real_action = ["x"]
                 link: Some(0),
             })
             .collect();
-        app.last_snapshot_id = app.selected_terminal_surface_id();
+        snapshot.last_id = last_id;
     }
 
     /// The common case: one linked cell at grid (4, 9), which the synthetic
@@ -21311,7 +21345,7 @@ not_a_real_action = ["x"]
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
-        // agent_term is (21,1,55,16), so screen (30,5) is grid cell (9,4).
+        // focused_term is (21,1,55,16), so screen (30,5) is grid cell (9,4).
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
@@ -21593,8 +21627,8 @@ not_a_real_action = ["x"]
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/history");
         // A snapshot taken well above the live edge resolves the same point to
         // the same cell: adding the offset anywhere in the lookup moves it.
-        app.snapshot_buf.scrollback_offset = 120;
-        app.snapshot_buf.scrollback_total = 400;
+        app.part_snapshots.main.buf.scrollback_offset = 120;
+        app.part_snapshots.main.buf.scrollback_total = 400;
 
         assert_eq!(
             app.link_at_screen_point(30, 5),
@@ -21750,6 +21784,7 @@ not_a_real_action = ["x"]
             end: TermGridPos { row: 0, col: 4 },
             dragging: false,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
@@ -21897,11 +21932,11 @@ not_a_real_action = ["x"]
         nothing_opened(&rx);
     }
 
-    /// Switching surface retires the record where the SELECTION is retired,
-    /// eagerly: coming back to the original surface must not resurrect a press
-    /// that belongs to a view the user has since left and returned to.
+    /// Switching a part to another pty retires the record where the SELECTION
+    /// is retired, eagerly: coming back to the original tab must not resurrect
+    /// a press that belongs to a view the user has since left and returned to.
     #[test]
-    fn switching_surface_away_and_back_retires_a_pending_press() {
+    fn switching_tab_away_and_back_retires_a_pending_press() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         let rx = recording_opener(&mut app);
@@ -21911,31 +21946,25 @@ not_a_real_action = ["x"]
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 30, 5));
         assert!(app.pending_link_click.is_some());
 
-        // Away to a companion terminal with a child of its own, and back.
-        let terminal_id = "terminal-1".to_string();
-        app.engine.companion_terminals.insert(
-            terminal_id.clone(),
-            dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session(session_id.clone()),
-                label: "shell".to_string(),
-                foreground_cmd: None,
-                client: PtyClient::spawn(
-                    "sh",
-                    &["-c".to_string(), "sleep 5".to_string()],
-                    std::path::Path::new("."),
-                    16,
-                    55,
-                    100,
-                )
-                .expect("spawn pty"),
-                sort_order: 0,
-                created_at: chrono::Utc::now(),
-            },
+        // Away to another tab of the same agent, with a child of its own, and
+        // back: the part's own switch of pty.
+        let slot_tab = app.engine.sessions[0].slot_tab_id().as_str().to_string();
+        seed_input_tab(&mut app, &session_id, "tab-x", "codex", 1);
+        app.engine.providers.insert(
+            TabId::new("tab-x"),
+            PtyClient::spawn(
+                "sh",
+                &["-c".to_string(), "sleep 5".to_string()],
+                std::path::Path::new("."),
+                16,
+                55,
+                100,
+            )
+            .expect("spawn pty"),
         );
-        app.session_surface = SessionSurface::Terminal;
-        app.active_terminal_id = Some(terminal_id);
+        app.set_focused_tab(&session_id, "tab-x");
         app.refresh_snapshot_buf();
-        app.session_surface = SessionSurface::Agent;
+        app.set_focused_tab(&session_id, &slot_tab);
         app.refresh_snapshot_buf();
 
         assert_eq!(
@@ -22282,12 +22311,12 @@ not_a_real_action = ["x"]
     fn the_link_lookup_follows_the_snapshots_own_table() {
         let mut app = test_app(default_bindings());
         install_mouse_forward_child(&mut app, "");
-        app.snapshot_buf.rows = 16;
-        app.snapshot_buf.cols = 55;
-        app.snapshot_buf.links = (0..256)
+        app.part_snapshots.main.buf.rows = 16;
+        app.part_snapshots.main.buf.cols = 55;
+        app.part_snapshots.main.buf.links = (0..256)
             .map(|i| format!("https://example.com/{i}"))
             .collect();
-        app.last_snapshot_id = app.selected_terminal_surface_id();
+        app.part_snapshots.main.last_id = app.selected_terminal_surface_id();
         let cell = |col: u16, link: u16| crate::pty::SnapshotCell {
             row: 0,
             col,
@@ -22298,7 +22327,7 @@ not_a_real_action = ["x"]
             link: Some(link),
         };
         // The 256th interned URI is index 255; index 256 is one past the end.
-        app.snapshot_buf.cells = vec![cell(0, 255), cell(1, 256)];
+        app.part_snapshots.main.buf.cells = vec![cell(0, 255), cell(1, 256)];
 
         assert_eq!(
             app.link_at_screen_point(21, 1),
@@ -22311,8 +22340,8 @@ not_a_real_action = ["x"]
         );
 
         // A rebuild replaces the table; the same cell now names the new address.
-        app.snapshot_buf.links = vec!["https://example.com/rebuilt".to_string()];
-        app.snapshot_buf.cells = vec![cell(0, 0)];
+        app.part_snapshots.main.buf.links = vec!["https://example.com/rebuilt".to_string()];
+        app.part_snapshots.main.buf.cells = vec![cell(0, 0)];
         assert_eq!(
             app.link_at_screen_point(21, 1),
             Some("https://example.com/rebuilt")
@@ -22331,7 +22360,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (16, 55);
+        app.set_focused_pty_size((16, 55));
         let rx = recording_opener(&mut app);
         install_linked_cell(&mut app, 4, 9, "P", "https://example.com/pr/1");
         (app, rx)
@@ -22408,7 +22437,7 @@ not_a_real_action = ["x"]
         install_mouse_forward_child(&mut app, "\\033[?1000h");
         // Stretch the recorded terminal rect over the left divider column
         // (center.x == 20 in the synthetic layout) so the two claims overlap.
-        app.mouse_layout.agent_term = Some(Rect::new(20, 1, 56, 16));
+        app.mouse_layout.focused_term = Some(Rect::new(20, 1, 56, 16));
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 20, 5));
 
@@ -22787,7 +22816,9 @@ not_a_real_action = ["x"]
         for _ in 0..200 {
             app.refresh_snapshot_buf();
             if app
-                .snapshot_buf
+                .part_snapshots
+                .main
+                .buf
                 .cells
                 .iter()
                 .any(|c| c.row == 0 && c.col == 0 && c.symbol == "R")
@@ -22811,14 +22842,14 @@ not_a_real_action = ["x"]
         for _ in 0..200 {
             app.refresh_snapshot_buf();
             // Also drawable, or a test that renders next gets the loading card.
-            if app.snapshot_buf.scrollback_total == total && surface_has_output(app) {
+            if app.part_snapshots.main.buf.scrollback_total == total && surface_has_output(app) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!(
             "PTY reached {} lines of scrollback, expected {total}",
-            app.snapshot_buf.scrollback_total
+            app.part_snapshots.main.buf.scrollback_total
         );
     }
 
@@ -22828,7 +22859,7 @@ not_a_real_action = ["x"]
     fn snapshot_row_of(app: &mut App, needle: &str) -> u16 {
         app.refresh_snapshot_buf();
         let mut rows: std::collections::BTreeMap<u16, String> = std::collections::BTreeMap::new();
-        for cell in &app.snapshot_buf.cells {
+        for cell in &app.part_snapshots.main.buf.cells {
             rows.entry(cell.row).or_default().push_str(&cell.symbol);
         }
         rows.into_iter()
@@ -22844,6 +22875,7 @@ not_a_real_action = ["x"]
             end: TermGridPos { row, col: last_col },
             dragging: false,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
     }
 
@@ -22994,7 +23026,7 @@ not_a_real_action = ["x"]
             app.refresh_snapshot_buf();
             let mut rows: std::collections::BTreeMap<u16, String> =
                 std::collections::BTreeMap::new();
-            for cell in &app.snapshot_buf.cells {
+            for cell in &app.part_snapshots.main.buf.cells {
                 rows.entry(cell.row).or_default().push_str(&cell.symbol);
             }
             if rows.values().any(|line| line.trim().starts_with(needle)) {
@@ -23016,7 +23048,7 @@ not_a_real_action = ["x"]
         feed_until_row_present(&mut app, &fill, "L39");
         app.refresh_snapshot_buf();
         assert_eq!(
-            app.snapshot_buf.scrollback_total, 5,
+            app.part_snapshots.main.buf.scrollback_total, 5,
             "test premise: the ring must be at capacity, not merely deep"
         );
         let row = snapshot_row_of(&mut app, "L30");
@@ -23111,7 +23143,7 @@ not_a_real_action = ["x"]
     fn a_drag_that_races_output_selects_the_rows_the_user_dragged_over() {
         let mut app = test_app(default_bindings());
         install_mouse_layout(&mut app);
-        let term = app.mouse_layout.agent_term.expect("agent term rect");
+        let term = app.mouse_layout.focused_term.expect("agent term rect");
         fill_and_select_l30(&mut app);
         // Start from no selection: this test builds one with the mouse.
         app.terminal_selection = None;
@@ -23169,7 +23201,7 @@ not_a_real_action = ["x"]
     }
 
     /// Wheel-up over the PTY pane in interactive mode, as the host sends it
-    /// (SGR button 64), landing inside the installed `agent_term` rect.
+    /// (SGR button 64), landing inside the installed `focused_term` rect.
     const WHEEL_UP_IN_PANE: &[u8] = b"\x1b[<64;30;5M";
 
     /// A wheel that scrolls dux's OWN scrollback keeps the selection: the text
@@ -23496,7 +23528,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         assert!(
             divider >= term.x && divider < term.x + term.width,
@@ -23632,7 +23664,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         let row = (rect.y..rect.y + rect.height)
             .find(|r| *r >= term.y && *r < term.y + term.height)
@@ -23663,7 +23695,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
         assert!(
             term.x > 0,
@@ -23693,7 +23725,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized terminal records its terminal area");
         let row = term.y + term.height / 2;
 
@@ -23720,7 +23752,7 @@ not_a_real_action = ["x"]
 
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized startup log records its body area");
         let row = term.y + term.height / 2;
 
@@ -23776,7 +23808,7 @@ not_a_real_action = ["x"]
         draw_frame(&mut app, &mut terminal);
         let term = app
             .mouse_layout
-            .agent_term
+            .focused_term
             .expect("the maximized surface records its terminal area");
 
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, term.x + 5, term.y + 3));
@@ -28422,7 +28454,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         // The fullscreen surface occupies this rect; the click lands outside.
-        app.mouse_layout.agent_term = Some(Rect::new(20, 5, 60, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(20, 5, 60, 20));
 
         app.handle_mouse(crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -31235,7 +31267,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 10));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 10));
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
             .unwrap();
@@ -31277,7 +31309,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 20, 4));
 
         // First reconcile only records the width; nothing has been stamped yet.
         app.reconcile_startup_log_wrap_width();
@@ -31317,9 +31349,10 @@ cyan = "#00ffff"
             },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: crate::app::CenterPart::Main,
         });
 
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 4));
         app.reconcile_startup_log_wrap_width();
 
         let viewer = app.startup_log_viewer.as_ref().expect("viewer");
@@ -31366,7 +31399,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 20, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 20, 4));
         app.reconcile_startup_log_wrap_width();
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
@@ -31396,7 +31429,7 @@ cyan = "#00ffff"
             .expect("viewer")
             .scroll_offset = 32;
 
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 4));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 4));
         app.reconcile_startup_log_wrap_width();
 
         let viewer = app.startup_log_viewer.as_ref().expect("viewer");
@@ -31469,6 +31502,7 @@ cyan = "#00ffff"
             end: TermGridPos { row: 35, col: 5 },
             dragging: false,
             origin: SelectionOrigin::default(),
+            part: crate::app::CenterPart::Main,
         });
 
         app.overlay_layout.active = layout(Rect::new(0, 4, 80, 10));
@@ -31513,7 +31547,7 @@ cyan = "#00ffff"
         terminal
             .draw(|frame| app.render(frame))
             .expect("render frame");
-        let body = app.mouse_layout.agent_term.expect("log body");
+        let body = app.mouse_layout.focused_term.expect("log body");
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -33527,7 +33561,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
 
         // Scroll back the way a user does. Poking `set_scrollback` directly
         // would move the VIEW without entering scroll mode, and scroll mode is
@@ -33564,7 +33598,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
         install_mouse_layout(&mut app);
         // Pin the local branch of every scroll path: with `forward_scroll`
         // unset these tests would depend on whether the child happened to raise
@@ -33574,13 +33608,13 @@ cyan = "#00ffff"
         // Wait on the fact the test depends on (real history), not on a sleep.
         for _ in 0..200 {
             app.refresh_snapshot_buf();
-            if app.snapshot_buf.scrollback_total > 0 {
+            if app.part_snapshots.main.buf.scrollback_total > 0 {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
-            app.snapshot_buf.scrollback_total > 0,
+            app.part_snapshots.main.buf.scrollback_total > 0,
             "PTY produced no scrollback within 2s"
         );
         assert!(
@@ -33932,7 +33966,7 @@ cyan = "#00ffff"
             app.input_target = InputTarget::Agent;
             app.session_surface = SessionSurface::Agent;
             app.fullscreen_overlay = FullscreenOverlay::Agent;
-            app.last_pty_size = (5, 40);
+            app.set_focused_pty_size((5, 40));
 
             enter_scroll_mode(&mut app, 3);
 
@@ -34446,7 +34480,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
         assert!(
             app.center_typeable(),
             "test setup: the fixture must be typeable or these tests prove nothing"
@@ -34461,7 +34495,7 @@ cyan = "#00ffff"
             app.refresh_snapshot_buf();
             let mut rows: std::collections::BTreeMap<u16, String> =
                 std::collections::BTreeMap::new();
-            for cell in &app.snapshot_buf.cells {
+            for cell in &app.part_snapshots.main.buf.cells {
                 rows.entry(cell.row).or_default().push_str(&cell.symbol);
             }
             if rows.values().any(|line| line.trim().starts_with(needle)) {
@@ -34508,7 +34542,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         app.input_target = InputTarget::None;
         app.fullscreen_overlay = FullscreenOverlay::None;
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
         wait_for_grid_row(&mut app, "READY");
         assert!(
             app.center_typeable(),
@@ -35200,7 +35234,7 @@ cyan = "#00ffff"
             let _ = writeln!(fill, "L{n:02}");
         }
         feed_until_history(&mut app, &fill, 18);
-        app.last_pty_size = (24, 80);
+        app.set_focused_pty_size((24, 80));
 
         tap_center(&mut app, KeyCode::PageUp, KeyModifiers::NONE);
 
@@ -35371,6 +35405,7 @@ cyan = "#00ffff"
             end: TermGridPos { row: 0, col: 1 },
             dragging: true,
             origin: app.snapshot_selection_origin(),
+            part: crate::app::CenterPart::Main,
         });
         app.raw_input_parser
             .feed_sequences(crate::raw_input::BRACKET_PASTE_START);
@@ -35643,7 +35678,7 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.session_surface = SessionSurface::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
-        app.last_pty_size = (5, 40);
+        app.set_focused_pty_size((5, 40));
         install_mouse_layout(&mut app);
         app
     }
@@ -35654,8 +35689,8 @@ cyan = "#00ffff"
         assert_eq!(app.input_target, InputTarget::Agent);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::Agent);
 
-        // Click at (1,1) which is inside the left pane, outside agent_term
-        // (agent_term starts at x=21). SGR coords are 1-based.
+        // Click at (1,1) which is inside the left pane, outside focused_term
+        // (focused_term starts at x=21). SGR coords are 1-based.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35676,7 +35711,7 @@ cyan = "#00ffff"
         let mut app = app_with_interactive_agent_pty();
         assert_eq!(app.input_target, InputTarget::Agent);
 
-        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // Click at (30, 5) which is inside focused_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         let bytes = sgr_mouse_down(31, 6);
         let result = app.process_raw_input_bytes(&bytes);
@@ -35701,7 +35736,7 @@ cyan = "#00ffff"
         app.fullscreen_overlay = FullscreenOverlay::Terminal;
         app.session_surface = SessionSurface::Terminal;
 
-        // Click outside agent_term.
+        // Click outside focused_term.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35754,7 +35789,7 @@ cyan = "#00ffff"
             "test setup: should be scrolled back"
         );
 
-        // Click outside agent_term while scrolled back: the overlay must close.
+        // Click outside focused_term while scrolled back: the overlay must close.
         let bytes = sgr_mouse_down(2, 2);
         let result = app.process_raw_input_bytes(&bytes);
         assert!(!result);
@@ -35949,8 +35984,8 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         install_mouse_layout(&mut app);
 
-        // Click at (1,1) which is inside the left pane, outside agent_term
-        // (agent_term starts at x=21). SGR coords are 1-based, so (2,2).
+        // Click at (1,1) which is inside the left pane, outside focused_term
+        // (focused_term starts at x=21). SGR coords are 1-based, so (2,2).
         app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
             app.scan_loading_phase_exit(),
@@ -35968,7 +36003,7 @@ cyan = "#00ffff"
         app.session_surface = SessionSurface::Agent;
         install_mouse_layout(&mut app);
 
-        // Click at (30, 5) which is inside agent_term (x=21..76, y=1..17).
+        // Click at (30, 5) which is inside focused_term (x=21..76, y=1..17).
         // SGR coords are 1-based so (31, 6).
         app.loading_input_buf = sgr_mouse_down(31, 6);
         assert!(
@@ -36023,12 +36058,12 @@ cyan = "#00ffff"
         app.input_target = InputTarget::Agent;
         app.fullscreen_overlay = FullscreenOverlay::Agent;
         app.session_surface = SessionSurface::Agent;
-        // No mouse layout installed, so agent_term is None.
+        // No mouse layout installed, so focused_term is None.
         // Any left-click should be treated as outside.
         app.loading_input_buf = sgr_mouse_down(50, 10);
         assert!(
             app.scan_loading_phase_exit(),
-            "left-click must exit when agent_term rect is not set"
+            "left-click must exit when focused_term rect is not set"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
@@ -36044,7 +36079,7 @@ cyan = "#00ffff"
         app.focus = FocusPane::Center;
         install_mouse_layout(&mut app);
 
-        // Click outside agent_term (which also covers terminal overlays).
+        // Click outside focused_term (which also covers terminal overlays).
         app.loading_input_buf = sgr_mouse_down(2, 2);
         assert!(
             app.scan_loading_phase_exit(),
@@ -40993,7 +41028,7 @@ cyan = "#00ffff"
             return_to: None,
         });
         app.fullscreen_overlay = FullscreenOverlay::StartupLog;
-        app.mouse_layout.agent_term = Some(Rect::new(0, 0, 80, 20));
+        app.mouse_layout.focused_term = Some(Rect::new(0, 0, 80, 20));
         app
     }
 

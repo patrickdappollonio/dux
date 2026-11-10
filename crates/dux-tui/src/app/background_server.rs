@@ -620,7 +620,7 @@ impl App {
                             // launch's claim does: a child something else
                             // re-gridded would otherwise keep that grid.
                             if claim_before_serving {
-                                self.last_pty_resize_target = None;
+                                self.forget_sent_pty_sizes();
                             }
                             // Persist the choice, so a restart comes up the way the
                             // user left it. Lazy rather than eager: nothing is
