@@ -181,7 +181,7 @@ fall back on. Closing one ends that session, so dux asks you to confirm. Like a 
 tab, closing the tab you are looking at lands you on the tab to its right, or the one to its
 left when it was the last. Closing the
 agent's **last running** tab detaches the whole agent: it leaves the sidebar's active list
-but stays in Projects, ready to reopen.
+(unless one of its terminals is still running) but stays in Projects, ready to reopen.
 
 ![A running tab's menu open over the tab strip, offering Change provider, Stop tab and Close tab.](/screens/agent-tab-actions-menu.png)
 
