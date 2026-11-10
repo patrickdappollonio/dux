@@ -108,7 +108,8 @@ first, would have taken the very same conversation.
 ## Switching between tabs
 
 On the web, click a pill. Tabs are deep-linkable, so the URL points right at one and a
-reload brings you back to it.
+reload brings you back to it. Each tab you switch to is a step in the browser's history,
+like a browser tab, so Back takes you to the tab you were on before.
 
 ### Reordering tabs
 

@@ -27,7 +27,11 @@ const openMacrosDialog = vi.fn()
 let mockSpine: unknown = null
 const mockState = () => ({
   bootstrap: {
-    macros: [{ name: "Greet", text: "hello", surface: "both" }],
+    macros: [
+      { name: "Greet", text: "hello", surface: "both" },
+      { name: "Prompt", text: "explain", surface: "agent" },
+      { name: "Build", text: "make", surface: "terminal" },
+    ],
   },
   spine: mockSpine,
   startedDormantTabs: [],
@@ -300,6 +304,36 @@ describe("MacroPopover returns focus to the pane the macro was sent to", () => {
     expect(document.activeElement).toBe(first)
     first.remove()
     second.remove()
+  })
+})
+
+// Over an agent with its dock, the header's picker is handed the part typing goes
+// to, which may be a terminal of the dock: its list and its sends are that
+// part's, never the agent's.
+describe("MacroPopover on a terminal of the agent's dock", () => {
+  const dockTerminal: SelectedTarget = {
+    kind: "terminal",
+    terminalId: "t9",
+    owner: { kind: "session", sessionId: "s1" },
+  }
+
+  it("lists the terminal's macros and sends to the terminal's pane", async () => {
+    const terminalBox = document.createElement("textarea")
+    document.body.appendChild(terminalBox)
+    registerPaneMacroTarget("t9", ownerPane({ typingSurface: () => terminalBox }))
+    runMacro.mockReturnValue("pty")
+
+    render(<MacroPopover target={dockTerminal} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    expect(screen.getByText("Build")).toBeTruthy()
+    expect(screen.queryByText("Prompt")).toBeNull()
+    fireEvent.click(screen.getByText("Build"))
+    await settle()
+
+    expect(runMacro).toHaveBeenCalledWith("Build", dockTerminal)
+    expect(document.activeElement).toBe(terminalBox)
+    terminalBox.remove()
   })
 })
 

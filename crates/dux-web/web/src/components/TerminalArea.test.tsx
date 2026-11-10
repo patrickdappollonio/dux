@@ -318,6 +318,38 @@ describe("TerminalArea not-found route", () => {
   })
 })
 
+describe("TerminalArea terminal not-found route", () => {
+  it("says the agent's terminal is gone and opens a new one for that agent", () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      routeNotFound: {
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+    })
+    render(<TerminalArea />)
+    expect(screen.getByText("Terminal not found")).toBeTruthy()
+    expect(screen.getByText("t9")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "New terminal" }))
+    expect(createTerminalMock).toHaveBeenCalledWith("s1")
+  })
+
+  it("offers no new terminal for an owner that is gone too", () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      routeNotFound: {
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "project", projectId: "gone" },
+      },
+    })
+    render(<TerminalArea />)
+    expect(screen.getByText("Terminal not found")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "New terminal" })).toBeNull()
+  })
+})
+
 describe("TerminalArea in theater", () => {
   it("floats the draggable pill inside the pane's own box", async () => {
     // Inside the pane, not beside it: the pill is clamped to the surface it is
@@ -738,6 +770,29 @@ describe("TerminalArea dock", () => {
       cleanup()
     }
   })
+
+  it.each([
+    ["the agent", "agent", [true, false]],
+    ["the dock terminal", "terminal", [false, true]],
+  ] as const)(
+    "shows %s typing goes to alone in theater, with no strip, and puts the split back on leaving",
+    async (_part, target, shown) => {
+      mockState = { ...dockState({ layout: "split", alwaysShow: true, target }), theater: true }
+      const { rerender } = render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      expect([onScreen("agent"), onScreen("dock")]).toEqual(shown)
+      expect(screen.queryByRole("separator")).toBeNull()
+      expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+      expect(screen.getByTestId("theater-pill")).toBeTruthy()
+      // Theater never changed the layout the stack is in.
+      expect(setStackLayoutMock).not.toHaveBeenCalled()
+
+      mockState = dockState({ layout: "split", alwaysShow: true, target })
+      rerender(<TerminalArea />)
+      expect([onScreen("agent"), onScreen("dock")]).toEqual([true, true])
+      expect(screen.getByRole("separator")).toBeTruthy()
+    },
+  )
 
   it("greys the terminal box of the part typing does not go to, never its strip", async () => {
     mockState = dockState({ layout: "split", alwaysShow: true })

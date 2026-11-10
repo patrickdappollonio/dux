@@ -242,26 +242,24 @@ describe("entering and leaving theater", () => {
     expect(loc.hash).toBe("")
   })
 
-  it("switching tab from the pill carries the mode to a tab that never had it", async () => {
-    // The real journey: theater is entered on ONE tab, and the pill's mini
-    // strip switches to a sibling that has never been in theater. Reading the
-    // destination's memory would drop the mode mid-gesture, so the switch says
-    // the mode explicitly and the destination remembers it from then on.
+  it("keeps the mode across the row's tabs and terminals, a step for each", async () => {
+    // Theater is the row's: switching tabs or terminals of one agent never
+    // enters or leaves it, while each switch is still a position of its own.
     const mod = await loadStore("", [
-      { id: "s1", project_id: "p1", tabs: ["t2"] },
+      { id: "s1", project_id: "p1", tabs: ["t2"], terminals: ["tm1", "tm2"] },
     ])
     mod.selectSession("s1")
     mod.enterTheater()
     pushStateMock.mockClear()
-    replaceStateMock.mockClear()
 
-    mod.selectTab("s1", "t2", { theater: true })
+    mod.selectTab("s1", "t2")
     expect(mod.getSnapshot().theater).toBe(true)
-    expect(loc.hash).toBe("#/agent/s1/tab/t2?view=theater")
-    expect(store.get("dux:theater:agent:t2")).toBe("on")
-    // A move within a screen, so it replaces like every other tab switch.
-    expect(pushStateMock).not.toHaveBeenCalled()
-    expect(replaceStateMock).toHaveBeenCalled()
+    mod.selectTerminal("tm2", { kind: "session", sessionId: "s1" })
+    expect(mod.getSnapshot().theater).toBe(true)
+    mod.chooseStackPart("s1", "t2")
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(loc.hash).toBe("#/agent/s1/tab/t2/terminal/tm2?view=theater")
+    expect(pushStateMock).toHaveBeenCalledTimes(2)
   })
 
   it("a plain tab switch after leaving theater never resurrects it", async () => {
@@ -296,31 +294,35 @@ describe("entering and leaving theater", () => {
   })
 })
 
-describe("the per-pane memory", () => {
-  it("restores the mode when the pane is selected again", async () => {
+describe("the per-row memory", () => {
+  it("restores the mode when the row is selected again", async () => {
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1", tabs: ["t2"] },
+      { id: "s2", project_id: "p1" },
     ])
     mod.selectSession("s1")
     mod.enterTheater()
 
-    mod.selectTab("s1", "t2")
+    mod.selectSession("s2")
     expect(mod.getSnapshot().theater).toBe(false)
 
-    mod.selectTab("s1", "s1")
+    mod.selectTab("s1", "t2")
     expect(mod.getSnapshot().theater).toBe(true)
-    expect(loc.hash).toBe("#/agent/s1?view=theater")
+    expect(loc.hash).toBe("#/agent/s1/tab/t2?view=theater")
   })
 
-  it("is per tab, so one tab's mode never follows its sibling", async () => {
-    const mod = await loadStore("", [
-      { id: "s1", project_id: "p1", tabs: ["t2"] },
-    ])
-    mod.selectSession("s1")
+  it("keeps a project terminal row's mode its own", async () => {
+    const mod = await loadStore(
+      "",
+      [{ id: "s1", project_id: "p1" }],
+      [{ id: "p1", terminals: ["pt1"] }],
+    )
+    mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
     mod.enterTheater()
-    mod.selectTab("s1", "t2")
+    mod.selectSession("s1")
     expect(mod.getSnapshot().theater).toBe(false)
-    expect(loc.hash).toBe("#/agent/s1/tab/t2")
+    mod.selectTerminal("pt1", { kind: "project", projectId: "p1" })
+    expect(mod.getSnapshot().theater).toBe(true)
   })
 
   it("forgets the mode once the user leaves it", async () => {
@@ -521,14 +523,12 @@ describe("the editor and the changes screen", () => {
     // Leaving theater pushes, as it does from the toggle.
     expect(pushStateMock).toHaveBeenCalledTimes(1)
 
-    // A tab switch inside the agent is a move within one position.
+    // Another tab is a position of its own, and the row is out of theater.
     pushStateMock.mockClear()
-    replaceStateMock.mockClear()
     mod.selectTab("s1", "t2")
     expect(loc.hash).toBe("#/agent/s1/tab/t2")
     expect(mod.getSnapshot().theater).toBe(false)
-    expect(pushStateMock).not.toHaveBeenCalled()
-    expect(replaceStateMock).toHaveBeenCalled()
+    expect(pushStateMock).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -558,9 +558,10 @@ describe("losing input ownership", () => {
     expect(mod.getSnapshot().theater).toBe(false)
   })
 
-  it("leaves another pane's mode alone", async () => {
+  it("leaves another row's mode alone", async () => {
     const mod = await loadStore("", [
-      { id: "s1", project_id: "p1", tabs: ["t2"] },
+      { id: "s1", project_id: "p1" },
+      { id: "s2", project_id: "p1", tabs: ["t2"] },
     ])
     mod.selectSession("s1")
     mod.enterTheater()
@@ -569,7 +570,7 @@ describe("losing input ownership", () => {
     expect(store.get("dux:theater:agent:s1")).toBe("on")
   })
 
-  it("clears a terminal pane's memory too", async () => {
+  it("forgets the agent row's mode when a terminal of its dock is lost", async () => {
     const mod = await loadStore("", [
       { id: "s1", project_id: "p1", terminals: ["tm1"] },
     ])
@@ -577,7 +578,7 @@ describe("losing input ownership", () => {
     mod.enterTheater()
     mod.noteTheaterOwnershipLost("terminal", "tm1")
     expect(mod.getSnapshot().theater).toBe(false)
-    expect(store.has("dux:theater:terminal:tm1")).toBe(false)
+    expect(store.has("dux:theater:agent:s1")).toBe(false)
   })
 })
 

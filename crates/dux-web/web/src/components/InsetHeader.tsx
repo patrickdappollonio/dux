@@ -58,7 +58,12 @@ export function InsetHeader() {
   const dux = useDux()
   const { spine, selectedSessionId, selectedTarget } = dux
   const session = spine?.sessions.find((s) => s.id === selectedSessionId)
-  const chips = insetHeaderChips(spine, session, selectedTarget)
+  const chips = insetHeaderChips(
+    spine,
+    session,
+    selectedTarget,
+    session ? dux.stackTabs[session.id] : undefined,
+  )
 
   const paneSubject = insetHeaderPaneSubject(spine, session, selectedTarget)
 

@@ -232,7 +232,9 @@ export function resolveStackOpening(inputs: StackOpeningInputs): StackOpening {
   return {
     activeTerminal,
     terminalNotFound,
-    layout: openingLayout(inputs, named !== null),
+    // An address naming the terminal this device last had in front is its own
+    // address coming back (a reload), not a request to open the terminal.
+    layout: openingLayout(inputs, named !== null && named !== remembered),
     rememberTerminal,
     rewriteAddress,
   }

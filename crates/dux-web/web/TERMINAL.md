@@ -1971,8 +1971,10 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     pipeline. The overlay layer
     is the stack's too, over the parts' box and withheld when a cover owns the target's
     part. Fix: `TerminalStack`/`TerminalPart` in `TerminalStack.tsx`; on a computer the
-    target is the store's (`selectedTarget`, moved by `chooseStackPart` with a REPLACE,
-    never a push, because focus moving between the parts on screen is not a position).
+    target is the store's (`selectedTarget`, moved by `chooseStackPart`, which writes
+    nothing to history: the agent's address names its tab and its dock terminal
+    whichever part has focus, because focus moving between the parts on screen is
+    not a position).
     The store's target and the stack's are ONE answer: when the part the store names
     is folded away or has no live terminal (a layout button, a fold, Back, a stopped
     agent opened from its row), the agent's screen hands the stack's fallback back to
@@ -2047,6 +2049,12 @@ only guard and the rewrite's review must weigh whether that is still acceptable.
     `PartBox` in `src/components/AgentStack.tsx`, `panelSizes` in
     `agentStackLayout.ts`. Pinned: `components/TerminalArea.test.tsx` "lays out the …
     layout with both strips kept" (both parts mounted in every layout).
+    Theater rides the same tree: it shows the part typing goes to as that part's
+    maximized layout, derived in `agentStackModel` and never written to the stack's
+    recorded layout, so leaving theater finds the layout it left; the divider is not
+    drawn while it is on. Writing the maximized layout would lose the split for
+    good. Pinned: `components/TerminalArea.test.tsx` "shows … typing goes to alone
+    in theater, with no strip, and puts the split back on leaving".
 
 ## I. Viewer suppression and notifications
 

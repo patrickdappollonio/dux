@@ -7,32 +7,46 @@
 // here is dux's own chrome, which no system mode could give back.
 
 import type { SelectedTarget } from "./store"
+import { matchOwner } from "./terminalOwner"
 
-/** The `localStorage` key prefix every pane's theater memory is filed under. */
+/** The `localStorage` key prefix every row's theater memory is filed under. */
 export const THEATER_STORAGE_PREFIX = "dux:theater:"
 
 /**
- * The key a pane's theater memory lives at, or `null` when nothing is focused.
- * Keyed on the stable id of the thing on screen: an agent's tab id, never its
- * session id, because two tabs of one agent must be able to disagree.
+ * A row of the agents list, which is what theater is remembered for: an agent
+ * with all its tabs and terminals, or a project or standalone terminal.
  */
-export function theaterMemoryKey(target: SelectedTarget | null): string | null {
-  if (!target) return null
-  return target.kind === "agent"
-    ? theaterMemoryKeyForPty("agent", target.tabId)
-    : theaterMemoryKeyForPty("terminal", target.terminalId)
+export type TheaterRow =
+  | { kind: "agent"; sessionId: string }
+  | { kind: "terminal"; terminalId: string }
+
+/** The key a row's theater memory lives at. */
+export function theaterRowKey(row: TheaterRow): string {
+  return row.kind === "agent"
+    ? `${THEATER_STORAGE_PREFIX}agent:${row.sessionId}`
+    : `${THEATER_STORAGE_PREFIX}terminal:${row.terminalId}`
 }
 
 /**
- * The same key from what a mounted pane holds: its kind and the id of the PTY it
- * drives. A pane learns it lost input ownership without ever holding a
- * `SelectedTarget`, so it needs the key without one.
+ * The row a focused part belongs to, or `null` when nothing is focused. Every
+ * tab of an agent and every terminal of its dock answer with the agent, so
+ * switching between them never enters or leaves theater.
  */
-export function theaterMemoryKeyForPty(
-  kind: "agent" | "terminal",
-  id: string,
-): string {
-  return `${THEATER_STORAGE_PREFIX}${kind}:${id}`
+export function theaterRow(target: SelectedTarget | null): TheaterRow | null {
+  if (!target) return null
+  if (target.kind === "agent") return { kind: "agent", sessionId: target.sessionId }
+  const terminalId = target.terminalId
+  return matchOwner<TheaterRow>(target.owner, {
+    session: ({ sessionId }) => ({ kind: "agent", sessionId }),
+    project: () => ({ kind: "terminal", terminalId }),
+    standalone: () => ({ kind: "terminal", terminalId }),
+  })
+}
+
+/** The memory key of the row a focused part belongs to. */
+export function theaterMemoryKey(target: SelectedTarget | null): string | null {
+  const row = theaterRow(target)
+  return row === null ? null : theaterRowKey(row)
 }
 
 // Storage can be missing or throw outright (private mode, a browser set to block
@@ -45,7 +59,7 @@ function storage(): Storage | null {
   }
 }
 
-/** Was this pane last left in theater? Anything unreadable reads as "no". */
+/** Was this row last left in theater? Anything unreadable reads as "no". */
 export function readTheaterMemory(key: string | null): boolean {
   if (!key) return false
   try {
@@ -55,7 +69,7 @@ export function readTheaterMemory(key: string | null): boolean {
   }
 }
 
-/** Remember (or forget) that this pane is in theater. Best-effort. */
+/** Remember (or forget) that this row is in theater. Best-effort. */
 export function writeTheaterMemory(key: string | null, on: boolean): void {
   if (!key) return
   try {
@@ -70,7 +84,7 @@ export function writeTheaterMemory(key: string | null, on: boolean): void {
 }
 
 /**
- * Forget a pane's theater memory outright. Losing input ownership calls this:
+ * Forget a row's theater memory outright. Losing input ownership calls this:
  * after another device takes over, re-entering theater is a fresh choice.
  */
 export function clearTheaterMemory(key: string | null): void {

@@ -46,7 +46,7 @@ Drag the sidebar narrow enough and it snaps to its icon rail, which you reopen b
 
 ### The header and the cog
 
-A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button that opens the app menu. The cog menu holds:
+A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog** button that opens the app menu. The breadcrumbs name the row you picked in the list: an agent, with how many terminals it has, stays named the same whichever of its tabs or terminals you are typing into, and a project or standalone terminal names itself. **Macros…** beside them sends to the part you are typing into, the agent or one of its terminals. The cog menu holds:
 
 - your preferences
 - the configuration dialogs
@@ -65,18 +65,17 @@ The URL tracks what you are looking at, so you can bookmark a session or send a 
 
 - An agent is `#/agent/<sessionId>`.
 - An extra provider tab is `#/agent/<sessionId>/tab/<tabId>`.
-- A companion terminal is `#/agent/<sessionId>/terminal/<terminalId>`.
+- An agent with terminals also names the terminal in front of its dock: `#/agent/<sessionId>/terminal/<terminalId>`, or `#/agent/<sessionId>/tab/<tabId>/terminal/<terminalId>` with an extra tab on top. A link naming a terminal opens with that terminal on screen. The layout (split or maximized) is not part of the link.
 - A project terminal is `#/project/<projectId>/terminal/<terminalId>`.
 - A standalone terminal is `#/terminal/<terminalId>`, with no owner in the address.
 - The phone's Changes screen is the same link with `/changes` on the end.
 
 ### Back and Forward
 
-Every move to a different place adds one history entry, so Back always returns you to where you were: select three agents in turn and Back walks them in reverse.
+Every move to a different place adds one history entry, so Back always returns you to where you were: select three agents in turn and Back walks them in reverse. Every tab and every terminal you look at is a place of its own, like browser tabs: switch from one of an agent's tabs to another, or from one of its terminals to the next, and Back takes you to the one before.
 
-Moves that stay where you already are rewrite the one entry instead:
+Changing the layout, or clicking from the agent into its terminal and back, adds nothing: you are still looking at the same things. Moves that stay where you already are rewrite the one entry instead:
 
-- switching between an agent's own tabs
 - reconnecting after the wifi drops
 - following a link back to where you already were
 
@@ -101,9 +100,13 @@ Three things can go wrong with a link:
   the dead end.
 - **The agent you are watching is deleted out from under you.** dux moves you to the next
   active agent, or home when there is not one.
-- **The terminal has since closed.** It lands you on the agent that owned it, or on the
-  home screen for a terminal that belonged to a project or to nothing at all, and tidies
-  the address bar to match.
+- **The terminal has since closed.** You get a **Terminal not found** screen with a
+  **New terminal** button that opens a fresh one in the same place: in that agent's
+  worktree, at that project's root, or a new standalone terminal. It shows every time you
+  arrive at such a link, Back included, so close three terminals and walk back and you
+  see it three times rather than landing somewhere the link never named.
+
+![The Terminal not found screen: a short explanation naming the terminal's id, a New terminal button, and Back to agents.](/screens/terminal-not-found.png)
 
 ## Adding projects
 
@@ -246,6 +249,7 @@ The **Theater** button hands the whole screen to the terminal. The header, the p
 - On a computer both side panels leave too, the agent list and the changes list. They come back as you had them: open, collapsed to the rail, hidden, and at the widths you dragged them to.
 - Open a link that goes straight into theater and there was no layout on screen to remember, so leaving lands on your saved preferences instead.
 - Theater is the only thing that takes the top bar away, and it all comes back when you leave.
+- On an agent with terminals, theater shows only the part you are typing into, the agent or the terminal in front of its dock, with no tab strip and no dock strip. On a computer nothing inside theater switches to the other part: leave theater, pick it, and go back in. Leaving puts the split, or whichever layout you had, back.
 
 ![Theater mode on a phone: the top bar is gone, the floating pill hovers over the terminal, and the keys and message box are still there.](/screens/phone-theater-pill.png)
 
@@ -304,7 +308,7 @@ The pill goes with the terminal underneath it, so the header returns with **Back
 On a computer the top bar comes back the same way, with the **Theater** button in it, since a tablet gets that layout on width alone and has no Escape key to leave with; the side panels stay away. The moment the card goes, theater picks up where it left off. A brief spinner during a quick reconnect is not a card and changes nothing.
 
 > [!TIP]
-> Theater is remembered per tab, in that browser, so the agent you like watching full-screen comes back full-screen and the others do not. If another device takes over the terminal, theater ends and the memory goes with it, so you always come back to the full layout to decide what to do next.
+> Theater is remembered per row of the agents list, in that browser, so the agent you like watching full-screen comes back full-screen and the others do not. Switching between an agent's tabs or terminals never takes you in or out of it; a project or standalone terminal keeps its own. If another device takes over the terminal, theater ends and the memory goes with it, so you always come back to the full layout to decide what to do next.
 
 ### One writer, many watchers
 

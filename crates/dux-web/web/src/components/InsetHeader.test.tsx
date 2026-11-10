@@ -9,7 +9,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
-    useDux: () => mockState,
+    // Every state here is a partial; the stack's per-agent maps start empty.
+    useDux: () => ({ stackTabs: {}, ...mockState }),
     setChangesPaneVisibility: vi.fn(),
     showChangesPane: vi.fn(),
   }
@@ -470,7 +471,7 @@ describe("InsetHeader project terminal chips", () => {
 })
 
 describe("InsetHeader session terminal chips", () => {
-  it("keeps the owning agent's fields and hands the primary slot to the terminal", () => {
+  it("names the agent's row while a terminal of its dock has focus", () => {
     const base = stateFor("main", "main")
     mockState = {
       ...base,
@@ -494,17 +495,16 @@ describe("InsetHeader session terminal chips", () => {
       },
     } as unknown as DuxState
     render(<InsetHeader />)
-    // One terminal glyph, not two: the focused terminal's chip replaces the
-    // agent's count rather than sitting beside it.
+    // The header is the row's, so it reads exactly as it does with the agent
+    // focused: the agent first among equals, and its terminal count.
     expect(chipKindsInOrder()).toEqual([
       "project",
       "agent",
       "terminal",
       "assistant",
     ])
-    expect(chipValue("terminal")).toBe("Terminal 1")
-    expect(chip("terminal")!.className).not.toContain("shrink-[9999]")
-    expect(chip("agent")!.className).toContain("shrink-[9999]")
+    expect(chipValue("terminal")).toBe("1 terminal")
+    expect(chip("agent")!.className).not.toContain("shrink-[9999]")
   })
 })
 

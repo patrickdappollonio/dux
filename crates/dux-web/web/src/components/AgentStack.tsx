@@ -341,7 +341,9 @@ function StackSplit({
         </ResizablePanel>
         {hasDock ? (
           <>
-            <DockDivider disabled={!split} />
+            {/* Theater draws no strip, and the divider is the dock's strip
+              * while the strips are hidden. */}
+            {theater ? null : <DockDivider disabled={!split} />}
             <ResizablePanel
               id={DOCK_PANEL}
               defaultSize={`${100 - sizes.agent}%`}

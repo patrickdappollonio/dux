@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react"
 
-import { AgentNotFound } from "@/components/AgentNotFound"
+import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { EditorBody } from "@/components/EditorBody"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
@@ -51,9 +51,9 @@ export function StandaloneEditorShell() {
       }}
     >
       {routeNotFound !== null ? (
-        // The address names an agent this workspace does not have: the same
+        // The address names an agent or a terminal this workspace does not have: the same
         // truthful screen the main app renders, filling the tab.
-        <AgentNotFound sessionId={routeNotFound.sessionId} />
+        <RouteNotFoundScreen missing={routeNotFound} />
       ) : editorTarget === null ? (
         // Booting: the spine has not resolved the deep link yet.
         <div className="flex h-full items-center justify-center text-muted-foreground">
