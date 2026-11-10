@@ -263,6 +263,25 @@ describe("entering and leaving theater", () => {
     expect(pushStateMock).toHaveBeenCalledTimes(2)
   })
 
+  it("swaps between the agent and the terminal used last from the pill's switch, staying in theater", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["tm1", "tm2"] },
+    ])
+    mod.selectSession("s1")
+    mod.selectTerminal("tm2", { kind: "session", sessionId: "s1" })
+    mod.selectSession("s1")
+    mod.enterTheater()
+    pushStateMock.mockClear()
+
+    mod.switchPhonePart("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "tm2" })
+    expect(mod.getSnapshot().theater).toBe(true)
+    mod.switchPhonePart("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+    expect(mod.getSnapshot().theater).toBe(true)
+    expect(pushStateMock).toHaveBeenCalledTimes(2)
+  })
+
   it("a plain tab switch after leaving theater never resurrects it", async () => {
     // Leaving through the chrome forgets the pane, so an ordinary switch back
     // (no override, because there is no pill on screen to make one) lands on
