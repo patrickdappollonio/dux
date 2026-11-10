@@ -43,7 +43,7 @@ function model(over: Partial<Ctx> = {}) {
     stackLayouts: {},
     stackTerminals: {},
     stackTabs: {},
-    memory: { layout: null, terminal: null, tab: null },
+    memory: { layout: null, view: null, terminal: null, tab: null },
     startedDormantTabs: [],
     pendingSlotTab: {},
     endedInViewTab: null,
@@ -103,7 +103,7 @@ describe("agentStackModel", () => {
 
   it("keeps the tab this device showed on top after a reload", () => {
     expect(
-      model({ target: dockTarget, memory: { layout: null, terminal: null, tab: "b2" } }).tabId,
+      model({ target: dockTarget, memory: { layout: null, view: null, terminal: null, tab: "b2" } }).tabId,
     ).toBe("b2")
   })
 
@@ -157,4 +157,28 @@ describe("agentStackModel", () => {
       expect(m.openingToSettle).toBeNull()
     },
   )
+
+  it("puts one part on a phone's screen, the one the selection names, whatever the layout", () => {
+    const agent = model({ surface: "phone", stackLayouts: { s1: "split" } })
+    expect(agent.view).toBe("agent")
+    expect(agent.parts).toMatchObject({ agent: true, dock: false })
+    expect(agent.typingPtyId).toBe("s1")
+    const dock = model({ surface: "phone", target: dockTarget, stackLayouts: { s1: "split" } })
+    expect(dock.view).toBe("terminals")
+    expect(dock.parts).toMatchObject({ agent: false, dock: true })
+    expect(dock.typingPtyId).toBe("t1")
+  })
+
+  it("gives a phone's stopped agent its full card, never the short one, and no socket while its terminals show", () => {
+    const stopped = session({
+      status: "detached",
+      tabs: [{ id: "s1", provider: "claude", order: 0, has_live_process: false }],
+    } as Partial<SessionView>)
+    expect(model({ surface: "phone", session: stopped, target: dockTarget }).parts.agentLiveSocket).toBe(
+      false,
+    )
+    const agent = model({ surface: "phone", session: stopped })
+    expect(agent.parts.agentLiveSocket).toBe(false)
+    expect(agent.agentCard).toBe("full")
+  })
 })

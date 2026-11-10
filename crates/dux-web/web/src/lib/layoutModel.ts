@@ -5,7 +5,7 @@
 // caller owns the remembered values and passes them in.
 
 import { shouldShowTabStrip } from "./agentTabs"
-import type { AgentTabView } from "./types"
+import type { AgentTabView, SessionView, TerminalView } from "./types"
 
 /** A computer's stack: agent maximized, both parts, or terminal maximized. */
 export type ComputerLayout = "agent" | "split" | "terminal"
@@ -117,6 +117,41 @@ export function resolvePhoneView(inputs: PhoneViewInputs): PhoneView {
   if (inputs.terminalCount === 0) return "agent"
   if (inputs.agentStopped && inputs.anyTerminalRunning) return "terminals"
   return inputs.remembered ?? "agent"
+}
+
+/** The state a phone's agent/terminals switch shows for the part it points
+ * to. */
+export type PartCue = "attention" | "working" | "plain"
+
+export interface PhoneSwitch {
+  /** The part a press brings on screen, which is the icon it wears. */
+  shows: PhoneView
+  /** How many terminals the agent has, shown beside the terminal icon. */
+  count: number | null
+  cue: PartCue
+}
+
+/**
+ * What the switch between an agent and its terminals shows, or null when the
+ * agent has no terminal to switch to. It points at the part that is not on
+ * screen and carries that part's state, read off the same ladder the list's
+ * state word reads: needs-you over working, and a part typing into is not
+ * working. Terminals have no needs-you state.
+ */
+export function phoneSwitch(
+  view: PhoneView,
+  session: Pick<SessionView, "needs_attention" | "status" | "working" | "typing">,
+  terminals: readonly Pick<TerminalView, "working" | "typing">[],
+): PhoneSwitch | null {
+  if (terminals.length === 0) return null
+  if (view === "agent") {
+    const running = terminals.some((t) => t.working && !t.typing)
+    return { shows: "terminals", count: terminals.length, cue: running ? "working" : "plain" }
+  }
+  let cue: PartCue = "plain"
+  if (session.needs_attention) cue = "attention"
+  else if (session.status === "active" && session.working && !session.typing) cue = "working"
+  return { shows: "agent", count: null, cue }
 }
 
 /**

@@ -169,8 +169,10 @@ import {
 import { ownerHasTerminal } from "./terminals"
 import {
   layoutOnStart,
+  resolvePhoneView,
   resolveStackOpening,
   type ComputerLayout,
+  type PhoneView,
 } from "./layoutModel"
 import { readStackMemory, writeStackMemory } from "./stackMemory"
 import { agentStackModel } from "@/components/agentStackModel"
@@ -1335,11 +1337,21 @@ function setState(patch: Partial<DuxState>): void {
       next.stackTabs = { ...next.stackTabs, [target.sessionId]: target.tabId }
       writeStackMemory(target.sessionId, { tab: target.tabId })
     }
+    // A phone shows the part the selection names, so whatever it lands on is the
+    // view this device left the agent in, however it got there.
+    if (target != null && isMobileViewport()) rememberPhoneView(target)
   }
   const held = heldFirstTab(next)
   if (held !== null && next.endedInViewTab !== held) next.endedInViewTab = held
   state = next
   emit()
+}
+
+function rememberPhoneView(target: SelectedTarget): void {
+  const sessionId = target.kind === "agent" ? target.sessionId : ownerSessionId(target.owner)
+  if (sessionId === null) return
+  const view: PhoneView = target.kind === "agent" ? "agent" : "terminals"
+  if (readStackMemory(sessionId).view !== view) writeStackMemory(sessionId, { view })
 }
 
 // The one rule that keeps a dormant first tab from starting on sight once the
@@ -5288,6 +5300,11 @@ function selectSessionRoute(
     return
   }
   const session = state.spine?.sessions.find((s) => s.id === id)
+  const phoneTerminal = session ? phoneOpeningTerminal(session) : null
+  if (phoneTerminal !== null) {
+    selectTerminal(phoneTerminal, { kind: "session", sessionId: id }, { urlMode, changes, extra })
+    return
+  }
   const focusedTab = session ? resolveFocusedTab(session) : id
   if (focusedTab !== id) {
     // A remembered extra tab is still live: select it directly so the
@@ -5320,6 +5337,53 @@ function selectSessionRoute(
   switchChangesSubscription(prev, id)
   syncUrl(urlMode)
   if (prev !== id) void restartChanges(id)
+}
+
+// The terminal a phone opens an agent on, or null when it opens on the agent:
+// the view this device last left the agent in, or its terminals when the agent
+// is stopped while one of them runs, because that is the only part with
+// anything live in it. Opening it never starts the agent.
+function phoneOpeningTerminal(session: SessionView): string | null {
+  if (!isMobileViewport()) return null
+  const dock = dockTerminalIds(session.id)
+  const memory = readStackMemory(session.id)
+  const agentStopped = session.status !== "active"
+  const view = resolvePhoneView({
+    terminalCount: dock.length,
+    addressNamesTerminal: false,
+    agentStopped,
+    anyTerminalRunning: dock.length > 0,
+    remembered: memory.view,
+  })
+  if (view !== "terminals") return null
+  return lastShownTerminal(session.id, dock)
+}
+
+// The agent's terminal shown last on this device while it is still running,
+// else the first in its dock.
+function lastShownTerminal(sessionId: string, dock: string[]): string | null {
+  return resolveStackOpening({
+    addressTerminal: null,
+    rememberedTerminal: state.stackTerminals[sessionId] ?? readStackMemory(sessionId).terminal,
+    rememberedLayout: null,
+    dockTerminals: dock,
+    agentStopped: false,
+    anyTerminalRunning: dock.length > 0,
+  }).activeTerminal
+}
+
+// The phone's agent/terminals switch: show the part that is not on screen, the
+// agent's tab this page showed last or the terminal used last. Another part is
+// another position, so it pushes and Back flips back.
+export function switchPhonePart(sessionId: string): void {
+  const target = state.selectedTarget
+  if (target?.kind === "terminal" && target.owner.kind === "session") {
+    selectTab(sessionId, shownStackTab(sessionId), { persist: false })
+    return
+  }
+  const terminal = lastShownTerminal(sessionId, dockTerminalIds(sessionId))
+  if (terminal === null) return
+  selectTerminal(terminal, { kind: "session", sessionId })
 }
 
 // Drop the focused target and land on home. The target is cleared FIRST so any

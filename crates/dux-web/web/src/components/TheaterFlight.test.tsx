@@ -57,6 +57,10 @@ vi.mock("@/components/LazyTerminalPane", () => ({
   LazyTerminalPane: ({ overlay }: { overlay?: React.ReactNode }) => (
     <div data-testid="pane-stub">{overlay}</div>
   ),
+  // An agent's screen is its stack, the same stand-in with the same overlay.
+  LazyTerminalStack: ({ overlay }: { overlay?: React.ReactNode }) => (
+    <div data-testid="pane-stub">{overlay}</div>
+  ),
 }))
 installBootStubs()
 const { MobileShell } = await import("./MobileShell")
@@ -115,6 +119,11 @@ function makeState(theater: boolean): DuxState {
     terminalEpoch: 0,
     startedDormantTabs: [],
     pendingSlotTab: {},
+    endedInViewTab: null,
+    stackLayouts: {},
+    stackTerminals: {},
+    stackTabs: {},
+    pendingTerminalOrder: null,
     routeNotFound: null,
     createTabInFlight: [],
     pendingTabOrder: {},
@@ -479,6 +488,52 @@ describe("the cluster the pill carries on a phone", () => {
         value: wide,
         configurable: true,
       })
+      resetPaneInputGroups()
+    }
+  })
+
+  // The agent/terminals switch rides the same flight, so it too has to be in
+  // the same slot at both ends: after the keys, before the menu.
+  it("carries the agent/terminals switch in the same slot on the pill as on the flap", async () => {
+    const { registerPaneInputGroup, resetPaneInputGroups } = await import(
+      "@/lib/paneInputGroup"
+    )
+    resetPaneInputGroups()
+    registerPaneInputGroup("s1", {
+      surfaceSwitch: false,
+      composeSurface: false,
+      keysToggle: true,
+    })
+    const wide = window.innerWidth
+    Object.defineProperty(window, "innerWidth", { value: 500, configurable: true })
+    const withTerminal = (theater: boolean) => {
+      const state = makeState(theater)
+      ;(state.spine as unknown as { terminals: unknown[] }).terminals = [
+        { id: "t1", owner: { kind: "session", session_id: "s1" }, label: "t1", working: false, typing: false, sort_order: 0 },
+      ]
+      return state
+    }
+    const cluster = (el: HTMLElement) =>
+      Array.from(el.querySelectorAll("button"))
+        .filter((b) => b.dataset.testid !== "theater-pill-grip")
+        .map((b) => b.getAttribute("aria-label") ?? "")
+        .map((l) => (/theater mode/i.test(l) ? "theater" : l.replace(/^\d+ changed files?$/, "changes")))
+    try {
+      mockState = withTerminal(false)
+      const docked = render(<MobileShell />)
+      const flapCluster = cluster(screen.getByTestId("mobile-action-flap"))
+      docked.unmount()
+      mockState = withTerminal(true)
+      render(<MobileShell />)
+      const floating = cluster(screen.getByTestId("theater-pill"))
+      expect(floating).toEqual(flapCluster)
+      expect(floating.slice(-3)).toEqual([
+        "Hide terminal keys",
+        "Show terminals (1)",
+        "Session actions",
+      ])
+    } finally {
+      Object.defineProperty(window, "innerWidth", { value: wide, configurable: true })
       resetPaneInputGroups()
     }
   })

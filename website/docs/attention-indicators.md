@@ -20,9 +20,11 @@ looking.
   and in the mobile list, plus a small dot on the specific tab's pill when you are
   running several tabs. With an agent's terminal maximized and its strips hidden, the
   floating layout pill carries a dot that does the same: cyan and blinking when the agent
-  needs you, green and pulsing while it works. A docked terminal's pill pulses and bounces
-  while something runs in it, like a tab pill. Everything holds still if you have
-  reduced-motion turned on.
+  needs you, green and pulsing while it works. On a phone, while one of an agent's
+  terminals is on screen, the agent icon on the switch in the action flap does the same,
+  with no dot, so an agent waiting on you is never hidden behind its terminal. A docked
+  terminal's pill pulses and bounces while something runs in it, like a tab pill.
+  Everything holds still if you have reduced-motion turned on.
 - **The browser tab title** gains a count in front of your configured instance name:
   `(2) dux` when two agents are waiting. A backgrounded tab updates the count without
   you visiting it.
@@ -47,7 +49,10 @@ And this is the same moment in the terminal UI, where the accent dot and the wor
 
 The flag clears the moment you look. Selecting the agent and focusing its terminal in
 the terminal UI, opening its live view on the web, or typing into it all put the flag
-down. An agent you are already watching never nags you.
+down. An agent you are already watching never nags you. On the web, an agent kept out
+of sight behind its own terminal (a phone showing the terminal, or a computer with the
+terminal maximized) is not being looked at, so its flag stays up until it comes back on
+screen.
 
 When you step away entirely, dux stops treating the focused agent as watched, so a fresh
 request still lights up. Coming back holds the indicators for a short grace window; see

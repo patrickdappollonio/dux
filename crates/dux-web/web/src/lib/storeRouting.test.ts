@@ -2049,6 +2049,70 @@ describe("an agent's address names its tab and its terminal", () => {
   })
 })
 
+// A phone shows an agent or its terminals, never both, and the address names
+// the one on screen, so the switch between them is a move Back undoes.
+describe("a phone shows one part of an agent at a time", () => {
+  beforeEach(() => {
+    viewportWidth = 390
+    // The view is remembered per device, in the browser's own storage.
+    const mem = new Map<string, string>()
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+    })
+  })
+
+  it("switches between the agent and the terminal used last, pushing, and Back flips back", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1", "t2"] },
+    ])
+    mod.selectSession("s1")
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    mod.clickTab("s1", "b2")
+    const at = index
+    mod.switchPhonePart("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t2" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t2")
+    mod.switchPhonePart("s1")
+    // The tab this page showed last, not the first one.
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "b2" })
+    expect(index).toBe(at + 2)
+    history.back()
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t2" })
+    history.back()
+    expect(mod.getSnapshot().selectedTarget).toEqual({ kind: "agent", sessionId: "s1", tabId: "b2" })
+  })
+
+  it("opens an agent on the view this device left it in", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", terminals: ["t1", "t2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    // The first time, the agent.
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
+    mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+    mod.selectSession("s2")
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t2" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t2")
+    mod.switchPhonePart("s1")
+    mod.selectSession("s2")
+    mod.selectSession("s1")
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent" })
+  })
+
+  it("opens a stopped agent on its running terminal, rewriting a bare address rather than pushing", async () => {
+    const mod = await loadStore("#/agent/s1", [
+      { id: "s1", project_id: "p1", status: "detached", terminals: ["t1"] },
+    ])
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "terminal", terminalId: "t1" })
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+    expect(index).toBe(DUX_ENTRY_INDEX)
+  })
+})
+
 describe("the changes screen needs something to show changes for", () => {
   it("stays on home when opened with nothing focused", async () => {
     // Without the guard the screen would read "changes" while the URL, which
@@ -3392,7 +3456,8 @@ describe("journeys a fuzzer found", () => {
 })
 
 // A seeded walk through everything that moves the address: selecting agents,
-// tab and terminal pills, presses into a part, layouts, theater, tabs and
+// tab and terminal pills, the phone's agent/terminals switch, presses into a
+// part, layouts, theater, tabs and
 // terminals closing here and on another device, new ones, dialogs, reloads,
 // links, and runs of Back and Forward, in the order a real browser delivers
 // events. After every step:
@@ -3432,9 +3497,10 @@ describe("a seeded walk keeps the address and history true", () => {
     }
   }
 
-  async function walk(seed: number, nav: boolean) {
+  async function walk(seed: number, nav: boolean, phone: boolean) {
     realistic = true
     navigationApi = nav
+    viewportWidth = phone ? 390 : 1280
     const r = rng(seed)
     const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]
     const w: World = [
@@ -3525,8 +3591,14 @@ describe("a seeded walk keeps the address and history true", () => {
           log.push(`terminal pill ${s.id} ${t}`)
           mod.selectTerminal(t, { kind: "session", sessionId: s.id })
         }
+      } else if (roll < 0.34) {
+        if (cur && cur.terminals.length > 0) {
+          log.push(`switch ${cur.id}`)
+          mod.switchPhonePart(cur.id)
+        }
       } else if (roll < 0.38) {
-        if (cur) {
+        // A phone has one part on screen, so nothing to press between.
+        if (cur && !phone) {
           const st = mod.getSnapshot()
           const parts = [st.stackTabs[cur.id] ?? `${cur.id}-slot`, ...(cur.terminals.length ? [st.stackTerminals[cur.id] ?? cur.terminals[0]] : [])]
           const p = pick(parts)
@@ -3534,7 +3606,7 @@ describe("a seeded walk keeps the address and history true", () => {
           mod.chooseStackPart(cur.id, p)
         }
       } else if (roll < 0.45) {
-        if (cur) {
+        if (cur && !phone) {
           const l = pick(["agent", "split", "terminal"] as const)
           log.push(`layout ${cur.id} ${l}`)
           mod.setStackLayout(cur.id, l)
@@ -3628,9 +3700,14 @@ describe("a seeded walk keeps the address and history true", () => {
     }
   }
 
-  for (const nav of [true, false]) {
-    it(`holds for ${SEEDS} seeds of ${STEPS} steps (Navigation API ${nav})`, async () => {
-      for (let seed = 1; seed <= SEEDS; seed++) {
+  for (const [nav, phone, seeds] of [
+    [true, false, SEEDS],
+    [false, false, SEEDS],
+    [true, true, SEEDS / 3],
+    [false, true, SEEDS / 3],
+  ] as const) {
+    it(`holds for ${seeds} seeds of ${STEPS} steps (Navigation API ${nav}${phone ? ", on a phone" : ""})`, async () => {
+      for (let seed = 1; seed <= seeds; seed++) {
         // Each seed is a fresh page in a fresh tab: no listener, warning or
         // queued traversal of the seed before it may reach this one.
         popstateListeners = []
@@ -3639,7 +3716,7 @@ describe("a seeded walk keeps the address and history true", () => {
         traversals = []
         warnings.length = 0
         vi.resetModules()
-        await walk(seed, nav)
+        await walk(seed, nav, phone)
         const store = await import("./store")
         store.eventsSocket.dispose()
         await settle(8)

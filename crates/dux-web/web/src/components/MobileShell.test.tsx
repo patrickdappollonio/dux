@@ -56,6 +56,33 @@ vi.mock("@/components/LazyTerminalPane", () => ({
   LazyTerminalPane: (props: { overlay?: React.ReactNode }) => (
     <div data-testid="terminal-pane-stub">{props.overlay}</div>
   ),
+  // An agent's screen is its stack: each part a stand-in naming its pty and
+  // whether it is on screen, laid out by the screen's own arrangement.
+  LazyTerminalStack: (props: {
+    parts: { slot?: string; id: string; kind: string; onScreen?: boolean }[]
+    overlay?: React.ReactNode
+    typingTarget?: string | null
+    arrange?: (parts: Record<string, React.ReactNode>, target: string | null) => React.ReactNode
+  }) => {
+    const rendered: Record<string, React.ReactNode> = {}
+    for (const part of props.parts) {
+      rendered[part.slot ?? part.id] = (
+        <div
+          key={part.id}
+          data-testid="terminal-part-stub"
+          data-id={part.id}
+          data-kind={part.kind}
+          data-on-screen={String(part.onScreen !== false)}
+        />
+      )
+    }
+    return (
+      <div data-testid="terminal-pane-stub" data-typing={props.typingTarget ?? ""}>
+        {props.arrange ? props.arrange(rendered, props.typingTarget ?? null) : Object.values(rendered)}
+        {props.overlay}
+      </div>
+    )
+  },
 }))
 
 // jsdom lacks localStorage/fetch/matchMedia as globals; the real store boots on
@@ -126,6 +153,15 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     createTabInFlight: [],
     pendingTabOrder: {},
     mobileScreen: "home",
+    theater: false,
+    terminalEpoch: 0,
+    startedDormantTabs: [],
+    pendingSlotTab: {},
+    endedInViewTab: null,
+    stackLayouts: {},
+    stackTerminals: {},
+    stackTabs: {},
+    pendingTerminalOrder: null,
     ...overrides,
   } as unknown as DuxState
 }
@@ -1865,5 +1901,134 @@ describe("MobileShell changes screen", () => {
 
     const stage = screen.getByRole("button", { name: "Stage 1" })
     expect(stage.textContent).toContain("Stage 1")
+  })
+})
+
+// A PHONE SHOWS AN AGENT OR ITS TERMINALS, NEVER BOTH. Both stay mounted, the
+// one out of sight clipped in a box of the same size, so flipping between them
+// reattaches nothing; only the shown part's strip is drawn, and the switch in
+// the flap is the way across.
+describe("MobileShell one part of an agent at a time", () => {
+  const desktopWidth = window.innerWidth
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true })
+  })
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", { value: desktopWidth, configurable: true })
+  })
+
+  const dock = { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } } as const
+  function partsState(
+    target: DuxState["selectedTarget"],
+    opts: { tabs?: number; terminals?: string[]; stopped?: boolean } = {},
+  ): DuxState {
+    const spine = makeSessionSpine(opts.tabs ?? 1) as unknown as {
+      sessions: { status: string; tabs: { has_live_process: boolean }[] }[]
+      terminals: unknown[]
+    }
+    if (opts.stopped) {
+      spine.sessions[0].status = "detached"
+      for (const t of spine.sessions[0].tabs) t.has_live_process = false
+    }
+    spine.terminals = (opts.terminals ?? ["t1"]).map((id, i) => ({
+      id,
+      owner: { kind: "session", session_id: "s1" },
+      label: id,
+      working: false,
+      typing: false,
+      sort_order: i,
+    }))
+    return makeState({
+      spine: spine as unknown as DuxState["spine"],
+      bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
+      selectedTarget: target,
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+    } as unknown as Partial<DuxState>)
+  }
+  const part = (id: string) =>
+    screen.getAllByTestId("terminal-part-stub").find((el) => el.dataset.id === id)
+
+  it("puts the agent on screen and keeps its terminal mounted out of sight", () => {
+    mockState = partsState({ kind: "agent", sessionId: "s1", tabId: "s1" })
+    render(<MobileShell />)
+    expect(part("s1")?.dataset.onScreen).toBe("true")
+    expect(part("t1")?.dataset.onScreen).toBe("false")
+    expect(screen.getByTestId("stack-dock-box").dataset.onScreen).toBe("false")
+    expect(screen.getByTestId("terminal-pane-stub").dataset.typing).toBe("s1")
+  })
+
+  it("flips to the terminal without remounting either part, so only what shows changes", () => {
+    mockState = partsState({ kind: "agent", sessionId: "s1", tabId: "s1" })
+    const view = render(<MobileShell />)
+    const agentPart = part("s1")
+    const dockPart = part("t1")
+    mockState = partsState(dock)
+    view.rerender(<MobileShell />)
+    // The same elements: the terminal coming on screen is what sends `shown`.
+    expect(part("s1")).toBe(agentPart)
+    expect(part("t1")).toBe(dockPart)
+    expect(part("t1")?.dataset.onScreen).toBe("true")
+    expect(part("s1")?.dataset.onScreen).toBe("false")
+    expect(screen.getByTestId("terminal-pane-stub").dataset.typing).toBe("t1")
+  })
+
+  it("opens nothing of a stopped agent while its terminals show", () => {
+    mockState = partsState(dock, { stopped: true })
+    render(<MobileShell />)
+    expect(part("s1")).toBeUndefined()
+    expect(part("t1")?.dataset.onScreen).toBe("true")
+    expect(screen.queryByText("Start session")).toBeNull()
+  })
+
+  it("draws only the shown part's strip, and both only with two of either", () => {
+    mockState = partsState({ kind: "agent", sessionId: "s1", tabId: "s1" }, { terminals: ["t1", "t2"] })
+    const view = render(<MobileShell />)
+    expect(screen.getByLabelText("New tab")).toBeTruthy()
+    expect(screen.queryByTestId("dock-strip")).toBeNull()
+    view.unmount()
+    mockState = partsState(dock, { terminals: ["t1", "t2"] })
+    render(<MobileShell />)
+    expect(screen.getByTestId("dock-strip")).toBeTruthy()
+    expect(screen.queryByLabelText("New tab")).toBeNull()
+    // A phone has no layout to change.
+    expect(screen.queryByLabelText("Maximize terminal")).toBeNull()
+  })
+
+  it("draws no strip for a lone tab beside a lone terminal, and no floating +", () => {
+    mockState = partsState(dock)
+    render(<MobileShell />)
+    expect(screen.queryByTestId("dock-strip")).toBeNull()
+    expect(screen.queryByLabelText("New tab")).toBeNull()
+    expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+  })
+
+  it("offers another tab and another terminal from the flap's menu", async () => {
+    mockState = partsState(dock)
+    render(<MobileShell />)
+    fireEvent.click(screen.getByLabelText("Session actions"))
+    expect(await screen.findByText("New agent tab…")).toBeTruthy()
+    expect(screen.getByText("New terminal in the worktree")).toBeTruthy()
+  })
+
+  it("carries the switch on the agent's screen and none on an agentless terminal's", () => {
+    mockState = partsState(dock)
+    const view = render(<MobileShell />)
+    expect(screen.getByTestId("pane-part-switch").getAttribute("aria-label")).toBe(
+      "Show the agent",
+    )
+    view.unmount()
+    mockState = makeState({
+      spine: {
+        ...(makeSessionSpine(1) as object),
+        terminals: [{ id: "x1", owner: { kind: "standalone", cwd_label: "~" }, label: "x1" }],
+      } as unknown as DuxState["spine"],
+      selectedTarget: { kind: "terminal", terminalId: "x1", owner: { kind: "standalone" } },
+      mobileScreen: "terminal",
+    } as unknown as Partial<DuxState>)
+    render(<MobileShell />)
+    expect(screen.getByTestId("mobile-action-flap")).toBeTruthy()
+    expect(screen.queryByTestId("pane-part-switch")).toBeNull()
   })
 })

@@ -33,8 +33,9 @@ const STRIP_ICON_BUTTON =
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
 // pulses and bounces while its terminal runs, a click brings that terminal to
 // the front, a drag along the strip reorders the dock, and its ⋯ holds that
-// terminal's own actions. The + opens another terminal, and the strip's right
-// end carries the layout controls.
+// terminal's own actions. The + opens another terminal, and on a computer the
+// strip's right end carries the layout controls; a phone shows one part at a
+// time and has none.
 export function DockStrip({
   sessionId,
   terminals,
@@ -45,8 +46,9 @@ export function DockStrip({
   sessionId: string
   terminals: TerminalView[]
   activeTerminal: string | null
-  layout: ComputerLayout
-  onLayoutAction: (action: LayoutAction) => void
+  /** Absent on a phone, which has no layout to change. */
+  layout?: ComputerLayout
+  onLayoutAction?: (action: LayoutAction) => void
 }) {
   const ids = terminals.map((t) => t.id)
   const attachStrip = useKeepCueClocks(ids.join("\n"))
@@ -80,20 +82,22 @@ export function DockStrip({
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
           other. */}
-      <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">
-        {layoutControls(layout).map((control) => (
-          <SimpleTooltip key={control.action} content={control.label}>
-            <button
-              type="button"
-              aria-label={control.label}
-              onClick={() => onLayoutAction(control.action)}
-              className={STRIP_ICON_BUTTON}
-            >
-              <control.icon className="size-3.5" />
-            </button>
-          </SimpleTooltip>
-        ))}
-      </div>
+      {layout !== undefined && onLayoutAction !== undefined ? (
+        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">
+          {layoutControls(layout).map((control) => (
+            <SimpleTooltip key={control.action} content={control.label}>
+              <button
+                type="button"
+                aria-label={control.label}
+                onClick={() => onLayoutAction(control.action)}
+                className={STRIP_ICON_BUTTON}
+              >
+                <control.icon className="size-3.5" />
+              </button>
+            </SimpleTooltip>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -5,6 +5,7 @@ import {
   foldForDivider,
   layoutOnStart,
   partsOnScreen,
+  phoneSwitch,
   resolvePhoneView,
   resolveStackOpening,
   shouldPersistDividerRatio,
@@ -132,6 +133,41 @@ describe("resolvePhoneView", () => {
     [{}, "agent"],
   ] as const)("%o -> %s", (overrides, expected) => {
     expect(resolvePhoneView({ ...base, ...overrides })).toBe(expected)
+  })
+})
+
+describe("phoneSwitch", () => {
+  const idle = { needs_attention: false, status: "active", working: false, typing: false } as const
+  const quiet = { working: false, typing: false }
+  const running = { working: true, typing: false }
+
+  it("is absent for an agent with no terminal to switch to", () => {
+    expect(phoneSwitch("agent", idle, [])).toBeNull()
+  })
+
+  it("points at the terminals from the agent, with their count, working while any runs", () => {
+    expect(phoneSwitch("agent", idle, [quiet, running])).toEqual({
+      shows: "terminals",
+      count: 2,
+      cue: "working",
+    })
+    expect(phoneSwitch("agent", idle, [quiet])?.cue).toBe("plain")
+    // Typing into a terminal is not work, as on its row.
+    expect(phoneSwitch("agent", idle, [{ working: true, typing: true }])?.cue).toBe("plain")
+  })
+
+  it.each([
+    [{ needs_attention: true, working: true }, "attention"],
+    [{ working: true }, "working"],
+    [{ working: true, typing: true }, "plain"],
+    [{ working: true, status: "detached" }, "plain"],
+    [{}, "plain"],
+  ] as const)("points at the agent from its terminals: %o -> %s", (over, cue) => {
+    expect(phoneSwitch("terminals", { ...idle, ...over }, [running])).toEqual({
+      shows: "agent",
+      count: null,
+      cue,
+    })
   })
 })
 
