@@ -141,25 +141,21 @@ impl Engine {
         }
     }
 
-    /// Who closing terminal `terminal_id` is judged against: a device with any
-    /// part of a row open is attached to the whole row, so an agent's terminal
-    /// is judged exactly as stopping the agent is, and a project or standalone
-    /// terminal, a row of its own, by itself. Only the terminal is reserved
-    /// ([`Self::reserve_destruction_judging`]).
-    pub fn terminal_close_scope(&self, terminal_id: &str) -> Scope {
-        match self
-            .companion_terminals
-            .get(terminal_id)
-            .map(|terminal| &terminal.owner)
-        {
-            Some(TerminalOwner::Session(session_id)) => {
-                let mut scope = self.agent_scope(session_id);
-                scope.ptys.insert(terminal_id.to_string());
+    /// Who ending one tab or terminal is judged against: a device with any
+    /// part of a row open is attached to the whole row, so closing or stopping
+    /// one of an agent's tabs or closing one of its terminals is judged exactly
+    /// as stopping the agent is, and a project or standalone terminal, a row of
+    /// its own, by itself. Only the pty itself is reserved
+    /// ([`Self::reserve_destruction_judging`]), so the rest of the row keeps
+    /// taking new attaches while it ends.
+    pub fn pty_row_scope(&self, pty_id: &str) -> Scope {
+        match self.pty_row(pty_id) {
+            crate::pty_owners::RowKey::Agent(session_id) => {
+                let mut scope = self.agent_scope(&session_id);
+                scope.ptys.insert(pty_id.to_string());
                 scope
             }
-            Some(TerminalOwner::Project(_) | TerminalOwner::Standalone) | None => {
-                Self::pty_scope(terminal_id)
-            }
+            crate::pty_owners::RowKey::Terminal(_) => Self::pty_scope(pty_id),
         }
     }
 
@@ -236,7 +232,7 @@ impl Engine {
             Command::DeleteTerminal { terminal_id } => {
                 return self
                     .reserve_destruction_judging(
-                        &self.terminal_close_scope(terminal_id),
+                        &self.pty_row_scope(terminal_id),
                         Self::pty_scope(terminal_id),
                     )
                     .map(Some);
@@ -281,7 +277,14 @@ impl Engine {
                 scope
             }
             WireCommand::CloseAgentTab { tab_id, .. }
-            | WireCommand::StopAgentTab { tab_id, .. } => Self::pty_scope(tab_id),
+            | WireCommand::StopAgentTab { tab_id, .. } => {
+                return self
+                    .reserve_destruction_judging(
+                        &self.pty_row_scope(tab_id),
+                        Self::pty_scope(tab_id),
+                    )
+                    .map(Some);
+            }
             WireCommand::RecreateWorkingCopy {
                 session_id,
                 restart_tabs: true,
@@ -606,6 +609,113 @@ mod tests {
         assert!(!engine.companion_terminals.contains_key(&companion));
     }
 
+    /// Closing or stopping one of an agent's tabs is judged against the whole
+    /// row: a browser with only another tab of the agent open, or only one of
+    /// its terminals, is in the way and named; the asker is exempt and forcing
+    /// goes ahead. Only the tab itself is reserved, so the agent's other tab
+    /// still takes new attaches meanwhile.
+    #[test]
+    fn closing_or_stopping_an_agents_tab_is_judged_against_the_whole_row() {
+        let (mut engine, _tmp, _worktree, companion, _) =
+            engine_with_a_watched_agent_and_terminals();
+        engine.agent_tabs.insert(
+            TabId::new("s1-tab2"),
+            crate::engine::test_support::sample_tab("s1-tab2", "s1", "claude", 1),
+        );
+        let browser = |engine: &crate::engine::Engine, id: &str, target: Target| {
+            engine.attachments.register(
+                id,
+                ConnectionFacts {
+                    surface: Surface::Browser,
+                    device: None,
+                    address: Some("192.168.1.9".parse().unwrap()),
+                    verified: false,
+                    events: true,
+                    browser: None,
+                },
+                None,
+            );
+            engine.attachments.attach(id, target, None, None).unwrap()
+        };
+        // Nobody but e2, on the agent's terminal, and e1, on the first tab.
+        browser(
+            &engine,
+            "e2",
+            Target {
+                kind: TargetKind::Terminal,
+                id: companion.clone(),
+                agent: Some("s1".to_string()),
+            },
+        );
+        for command in [
+            WireCommand::CloseAgentTab {
+                session_id: "s1".to_string(),
+                tab_id: "s1-tab2".to_string(),
+            },
+            WireCommand::StopAgentTab {
+                session_id: "s1".to_string(),
+                tab_id: "s1-tab2".to_string(),
+            },
+        ] {
+            engine.dispatch_policy = None;
+            let refused = engine.guard_wire(&command).expect_err("refused");
+            let named: Vec<&str> = refused
+                .blockers
+                .iter()
+                .filter_map(|blocker| blocker.address.as_deref())
+                .collect();
+            assert!(named.contains(&"192.168.1.5"), "the other tab: {refused}");
+            assert!(named.contains(&"192.168.1.9"), "the terminal: {refused}");
+
+            engine.dispatch_policy = Some(crate::attachments::Policy {
+                requester: None,
+                force: true,
+                accepted: None,
+            });
+            let held = engine.guard_wire(&command).expect("forced");
+            let tab = Target {
+                kind: TargetKind::Tab,
+                id: "s1-slot".to_string(),
+                agent: Some("s1".to_string()),
+            };
+            let closing = Target {
+                kind: TargetKind::Tab,
+                id: "s1-tab2".to_string(),
+                agent: Some("s1".to_string()),
+            };
+            assert!(engine.attachments.attach("e1", tab, None, None).is_ok());
+            assert!(
+                engine
+                    .attachments
+                    .attach("e1", closing, None, None)
+                    .is_err()
+            );
+            drop(held);
+            engine.dispatch_policy = None;
+        }
+
+        // The asker is exempt from its own attachments, never from others'.
+        let mut engine = engine;
+        engine.dispatch_policy = Some(crate::attachments::Policy {
+            requester: Some("e1".to_string()),
+            force: false,
+            accepted: None,
+        });
+        let refused = engine
+            .guard_wire(&WireCommand::StopAgentTab {
+                session_id: "s1".to_string(),
+                tab_id: "s1-tab2".to_string(),
+            })
+            .expect_err("e2 is still in the way");
+        assert!(
+            refused
+                .blockers
+                .iter()
+                .all(|b| b.address.as_deref() != Some("192.168.1.5")),
+            "{refused}"
+        );
+    }
+
     /// A standalone terminal is a row of its own, so somebody watching an
     /// agent does not stand in the way of closing it.
     #[test]
@@ -624,7 +734,7 @@ mod tests {
         let (engine, _tmp, _worktree, companion, _) = engine_with_a_watched_agent_and_terminals();
         let _held = engine
             .reserve_destruction_judging(
-                &engine.terminal_close_scope(&companion),
+                &engine.pty_row_scope(&companion),
                 crate::engine::Engine::pty_scope(&companion),
             )
             .expect_err("the watcher is in the way");
@@ -648,7 +758,7 @@ mod tests {
         let reservation = engine
             .attachments
             .reserve_judging(
-                &engine.terminal_close_scope(&companion),
+                &engine.pty_row_scope(&companion),
                 crate::engine::Engine::pty_scope(&companion),
                 &forced,
                 crate::attachments::Life::Released,

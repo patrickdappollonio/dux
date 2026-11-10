@@ -434,7 +434,8 @@ agent opens that agent's editor instead. See [The code editor](/docs/web-editor)
 
 Closing a companion terminal is guarded the way stopping its agent is: while another
 device has any of the agent's tabs or terminals open, dux refuses and names that device,
-and you can go ahead anyway from the dialog. A project or standalone terminal is refused
+and you can go ahead anyway from the dialog. Closing or stopping one of the agent's tabs is
+guarded the same way. A project or standalone terminal is refused
 only over a device that has that terminal open.
 
 Nothing closes a standalone terminal for you. Removing a project closes that project's

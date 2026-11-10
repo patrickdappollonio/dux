@@ -157,12 +157,13 @@ impl App {
             | PromptState::ConfirmDetachAgent { session_id, .. } => {
                 self.engine.agent_scope(session_id)
             }
-            PromptState::ConfirmDeleteTerminal { terminal_id, .. } => {
-                self.engine.terminal_close_scope(terminal_id)
+            PromptState::ConfirmDeleteTerminal {
+                terminal_id: pty_id,
+                ..
             }
-            PromptState::ConfirmCloseTab { tab_id, .. }
-            | PromptState::ConfirmStopTab { tab_id, .. } => {
-                dux_core::engine::Engine::pty_scope(tab_id)
+            | PromptState::ConfirmCloseTab { tab_id: pty_id, .. }
+            | PromptState::ConfirmStopTab { tab_id: pty_id, .. } => {
+                self.engine.pty_row_scope(pty_id)
             }
             PromptState::ConfirmDeleteProject { project_id, .. }
             | PromptState::ConfirmRemoveProject { project_id, .. } => {
