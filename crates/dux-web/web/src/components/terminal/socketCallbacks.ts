@@ -124,7 +124,10 @@ export function registerTerminalSocketCallbacks(
   // update that removed the terminal also prunes its selection and unmounts the
   // pane, so there is nothing for the socket to announce.
   if (kind === "terminal") {
-    pty.shouldRetry = () => !terminalSocketGone(live.current.spineTerminals, id)
+    pty.shouldRetry = () => {
+      const listed = live.current.terminalListed
+      return !terminalSocketGone(listed.now, listed.ever)
+    }
   }
 
   pty.onBeat = (sequence) => beat.noteAnswer(sequence)

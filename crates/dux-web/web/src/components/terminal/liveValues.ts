@@ -5,7 +5,7 @@
 // effect, does not act on the previous commit's.
 import { useLayoutEffect, useRef } from "react"
 
-import type { AgentTabView, TerminalView } from "@/lib/types"
+import type { AgentTabView } from "@/lib/types"
 import type { ConfiguredDropPaste, DropPasteProfile } from "@/lib/fileDrop"
 
 /// Everything the pane's long-lived closures may read, and nothing they write:
@@ -49,9 +49,9 @@ export type TerminalLiveSettings = {
   /// The owning session's tabs, for the tab-gone check. A dependency of the
   /// lifecycle effect would rebuild the socket on every spine refresh.
   sessionTabs: AgentTabView[] | undefined
-  /// The spine's terminals, for the terminal-gone check; `undefined` until the
-  /// spine arrives.
-  spineTerminals: TerminalView[] | undefined
+  /// Whether the spine lists this pane's terminal now, and whether it ever has
+  /// on this mount, for the terminal-gone check. Both false for an agent pane.
+  terminalListed: { now: boolean; ever: boolean }
   /// Whether the faithful watcher is OVERFLOWING on purpose: the floor font could
   /// not fit the adopted grid, so the host scrolls. Always false for an owner.
   viewerOverflow: boolean

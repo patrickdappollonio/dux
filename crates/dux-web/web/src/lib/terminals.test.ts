@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  spineListsTerminal,
   terminalForeground,
   terminalSocketGone,
   terminalTitle,
@@ -124,16 +125,24 @@ describe("terminalTitle", () => {
 })
 
 describe("terminalSocketGone", () => {
-  it("is not gone while the spine has not arrived", () => {
-    expect(terminalSocketGone(undefined, "t1")).toBe(false)
+  it("is not gone while the spine has never listed it", () => {
+    expect(terminalSocketGone(false, false)).toBe(false)
   })
 
-  it("is gone when the loaded list lacks it, an empty list included", () => {
-    expect(terminalSocketGone([term({ id: "t2" })], "t1")).toBe(true)
-    expect(terminalSocketGone([], "t1")).toBe(true)
+  it("is gone once the spine stops listing a terminal it listed", () => {
+    expect(terminalSocketGone(false, true)).toBe(true)
   })
 
-  it("is not gone while the list holds it", () => {
-    expect(terminalSocketGone([term({ id: "t1" })], "t1")).toBe(false)
+  it("is not gone while the spine lists it", () => {
+    expect(terminalSocketGone(true, true)).toBe(false)
+  })
+})
+
+describe("spineListsTerminal", () => {
+  it("answers false before the spine arrives and by id after", () => {
+    expect(spineListsTerminal(undefined, "t1")).toBe(false)
+    expect(spineListsTerminal([], "t1")).toBe(false)
+    expect(spineListsTerminal([term({ id: "t2" })], "t1")).toBe(false)
+    expect(spineListsTerminal([term({ id: "t1" })], "t1")).toBe(true)
   })
 })

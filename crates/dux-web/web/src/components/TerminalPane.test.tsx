@@ -5674,6 +5674,17 @@ describe("TerminalPane terminal socket handover", () => {
 
     expect(pty.shouldRetry()).toBe(false)
   })
+
+  // A new terminal is opened on screen before the spine that names it
+  // arrives; a socket dropped in that window keeps retrying.
+  it("keeps retrying for a terminal the spine has not listed yet", () => {
+    mockState = {
+      ...mockState,
+      spine: { ...mockState.spine!, terminals: [] },
+    } as DuxState
+    render(<TerminalPane kind="terminal" id="t1" owner={owner} />)
+    expect(last().shouldRetry()).toBe(true)
+  })
 })
 
 // Where a picked macro goes is published under this pane's own pty id, so a
