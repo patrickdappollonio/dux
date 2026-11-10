@@ -333,7 +333,17 @@ export class PtySocket extends ReconnectingSocket {
 
   // Nothing to resend on (re)open: the server replays this PTY's scrollback as the
   // first Binary frame after every open, so the byte feed rehydrates itself.
-  protected onSocketOpen(): void {}
+  // How many times this socket has opened. The object reconnects in place, so
+  // something that must reach the SAME connection (the delayed Enter of a
+  // compose Send) compares this rather than the object.
+  private opens = 0
+  get openSerial(): number {
+    return this.opens
+  }
+
+  protected onSocketOpen(): void {
+    this.opens += 1
+  }
 
   protected handleMessage(event: MessageEvent): void {
     if (event.data instanceof ArrayBuffer) {
@@ -488,18 +498,6 @@ export class PtySocket extends ReconnectingSocket {
     return false
   }
 
-  // The one periodic client frame: `{"beat":N,"viewed":B}`.
-  //
-  // `viewed` never claims sizing ownership server-side; it only stamps the
-  // engine's engagement window, so an agent the user is watching keeps its
-  // attention flag down without keystrokes. The caller decides it through
-  // `shouldSendViewed`. `beat` is the liveness half, and a watcher sends it too:
-  // the server's own ping is send-only with no pong deadline, so it cannot see
-  // the half-open socket a network handoff leaves behind. The server echoes the
-  // number back.
-  //
-  // Returns whether it went on the wire, so the heartbeat does not start a
-  // deadline for a frame it never sent.
   // The pane came on screen: `{"shown":true}`, the "looking at it" a socket
   // opening on screen is, for one already open. Sent whoever owns the pty, and
   // never echoed.
@@ -522,6 +520,18 @@ export class PtySocket extends ReconnectingSocket {
     return false
   }
 
+  // The one periodic client frame: `{"beat":N,"viewed":B}`.
+  //
+  // `viewed` never claims sizing ownership server-side; it only stamps the
+  // engine's engagement window, so an agent the user is watching keeps its
+  // attention flag down without keystrokes. The caller decides it through
+  // `shouldSendViewed`. `beat` is the liveness half, and a watcher sends it too:
+  // the server's own ping is send-only with no pong deadline, so it cannot see
+  // the half-open socket a network handoff leaves behind. The server echoes the
+  // number back.
+  //
+  // Returns whether it went on the wire, so the heartbeat does not start a
+  // deadline for a frame it never sent.
   sendBeat(n: number, viewed: boolean): boolean {
     if (authPaused()) return false
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {

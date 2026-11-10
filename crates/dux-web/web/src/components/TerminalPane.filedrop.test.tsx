@@ -5,11 +5,12 @@
 // the terminal emulator (it needs a canvas) and the network. The ordering, the
 // gating and the reporting are all the real code.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { toastChips, toastText } from "@/test/toastText"
+import { stubCoarsePointer } from "@/test/matchMedia"
 
 /// A stand-in for xterm that does what xterm's `paste()` REALLY does.
 ///
@@ -214,7 +215,7 @@ function installStubs() {
 }
 
 installStubs()
-const { TerminalPane } = await import("./TerminalPane")
+const { TerminalPane, TerminalStack } = await import("./TerminalPane")
 // The compose drafts live in the real store, which is module state outliving one
 // test, so each test starts from a clean map. Imported here rather than at the
 // top of the file because the store touches `localStorage` at import time and
@@ -1438,5 +1439,118 @@ describe("attaching a file from the picker", () => {
     expect(await attach()).not.toBeNull()
     view.unmount()
     expect(await attach()).toBeNull()
+  })
+})
+
+// An agent and its docked terminal are one stack with one typing target. A file
+// gesture binds to the part it started in: moving the target to the other part
+// while the upload is in flight must not move where the path lands.
+describe("a stack of two parts", () => {
+  const parts = [
+    { kind: "agent" as const, id: "s1", sessionId: "s1" },
+    {
+      kind: "terminal" as const,
+      id: "t1",
+      owner: { kind: "session" as const, session_id: "s1" },
+    },
+  ]
+  const partBox = (index: number) =>
+    screen.getAllByTestId("terminal-container")[index].closest(".group")!
+  const decoded = (index: number) =>
+    FakePtySocket.instances[index].sendInput.mock.calls.map(([bytes]) =>
+      new TextDecoder().decode(bytes as Uint8Array),
+    )
+  const flush = async () => {
+    await act(async () => {
+      for (let i = 0; i < 8; i++) await Promise.resolve()
+    })
+  }
+  // An upload that answers only when the test says so, so the target can move
+  // while it is in flight.
+  const heldUpload = () => {
+    let answer: (value: unknown) => void = () => {}
+    uploadDroppedFile.mockImplementation(
+      () => new Promise((resolve) => (answer = resolve)),
+    )
+    return (name: string) => answer(saved(name))
+  }
+
+  it("pastes a dropped file's path into the part it was dropped on", async () => {
+    const finish = heldUpload()
+    render(<TerminalStack parts={parts} />)
+    await act(async () => {
+      fireEvent.drop(partBox(0), { dataTransfer: fileTransfer([file("shot.png")]) })
+    })
+    fireEvent.pointerDown(partBox(1))
+    finish("shot.png")
+    await flush()
+    expect(decoded(0)).toEqual(["/tmp/p1/shot.png "])
+    expect(decoded(1)).toEqual([])
+  })
+
+  it("pastes a picked file's path into the part the pick started from", async () => {
+    const finish = heldUpload()
+    render(<TerminalStack parts={parts} />)
+    const { attachCapabilityFor } = await import("@/lib/attachRegistry")
+    act(() => attachCapabilityFor("s1")!())
+    const input = screen.getAllByTestId("file-picker-input")[0] as HTMLInputElement
+    Object.defineProperty(input, "files", { value: [file("pick.png")], configurable: true })
+    await act(async () => {
+      fireEvent.change(input)
+    })
+    fireEvent.pointerDown(partBox(1))
+    finish("pick.png")
+    await flush()
+    expect(decoded(0)).toEqual(["/tmp/p1/pick.png "])
+    expect(decoded(1)).toEqual([])
+  })
+
+  it("hears a paste into the message box for whichever part is the target", async () => {
+    uploadDroppedFile.mockImplementation(async (f: File) => saved(f.name))
+    const pointer = stubCoarsePointer(true)
+    try {
+      render(<TerminalStack parts={parts} />)
+      fireEvent.pointerDown(partBox(1))
+      const box = () => screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+      const image = new File([new Uint8Array([1])], "boxed.png", { type: "image/png" })
+      const event = createEvent.paste(box(), {
+        clipboardData: {
+          items: [{ kind: "file", type: "image/png", getAsFile: () => image }],
+          types: ["image/png"],
+          getData: () => "",
+        },
+      })
+      await act(async () => {
+        fireEvent(box(), event)
+      })
+      await flush()
+      expect(box().placeholder).toBe("Type a command…")
+      expect(box().value).toContain("boxed.png")
+      fireEvent.pointerDown(partBox(0))
+      expect(box().value).toBe("")
+    } finally {
+      pointer.restore()
+    }
+  })
+
+  it("pastes a pasted image's path into the part it was pasted in", async () => {
+    const finish = heldUpload()
+    render(<TerminalStack parts={parts} />)
+    const image = new File([new Uint8Array([1])], "clip.png", { type: "image/png" })
+    const event = createEvent.paste(screen.getAllByTestId("terminal-container")[0], {
+      clipboardData: {
+        items: [{ kind: "file", type: "image/png", getAsFile: () => image }],
+        types: ["image/png"],
+        getData: () => "",
+      },
+    })
+    await act(async () => {
+      fireEvent(screen.getAllByTestId("terminal-container")[0], event)
+    })
+    fireEvent.pointerDown(partBox(1))
+    finish("clip.png")
+    await flush()
+    expect(decoded(0)).toEqual(["/tmp/p1/clip.png "])
+    expect(decoded(1)).toEqual([])
   })
 })

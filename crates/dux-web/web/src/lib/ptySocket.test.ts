@@ -211,6 +211,18 @@ describe("PtySocket", () => {
     expect(new URL(last().url).searchParams.has("viewed")).toBe(false)
   })
 
+  it("counts every open, so a reconnect in place is a new connection", () => {
+    vi.useFakeTimers()
+    const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
+    sock.connect()
+    last().open()
+    const first = sock.openSerial
+    last().triggerClose(1006)
+    vi.advanceTimersByTime(600)
+    last().open()
+    expect(sock.openSerial).toBe(first + 1)
+  })
+
   it("sends the shown and unviewed frames without a beat to echo", () => {
     const sock = new PtySocket("ws://x/ws/sessions/s1/pty")
     sock.connect()

@@ -928,15 +928,6 @@ describe("a pane kept mounted off screen", () => {
     expect(sent).toEqual([{ rows: 24, cols: 80 }])
   })
 
-  it("sends a take-over armed while hidden with its next resize", () => {
-    // The pane counts an armed claim as confirmation enough to ask.
-    const { coord, sent } = setup({ onScreen: false, rowConfirmed: true, flagged: true })
-    coord.start(document.createElement("div"))
-    coord.noteOpen(false)
-    coord.firstFrameLanded()
-    expect(sent).toEqual([{ rows: 24, cols: 80 }])
-  })
-
   it("adopts the handshake and later size reports while it watches, hidden", () => {
     const { coord, term } = setup({ owner: false, onScreen: false })
     coord.start(document.createElement("div"))

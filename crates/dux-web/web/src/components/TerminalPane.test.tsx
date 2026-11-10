@@ -5635,6 +5635,102 @@ describe("TerminalStack with two parts", () => {
     expect(composeBox().value).toBe("for the agent")
   })
 
+  it("owns the row when its page's claim is announced before its own handshake lands", () => {
+    // The dock opens on the page's shared driver id while the row is unclaimed;
+    // the agent part claims it, and that announcement overtakes the dock's own
+    // handshake, which was snapshotted before the claim.
+    resetPtyOwnerEpochs()
+    render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    const dockPty = FakePtySocket.instances[1]
+    act(() => dockPty.onOpen())
+    act(() => notifyPtyOwner("t1", "seat-1", 5))
+    act(() => dockPty.onConnected("seat-1", null, 4))
+    act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+    expect(dockPty.sendResize).toHaveBeenCalled()
+    expect(screen.queryByText("Active on another device")).toBeNull()
+  })
+
+  it("lets a part off screen ask for its row back with a self-succession", () => {
+    // Its handshake names this page's own previous connection, which still
+    // holds the row: the armed, flagged claim is what goes out, hidden or not.
+    vi.useFakeTimers()
+    try {
+      render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+      const dockPty = FakePtySocket.instances[1]
+      act(() => {
+        dockPty.onOpen()
+        dockPty.onConnected("old-1", "old-1")
+      })
+      act(() => dockPty.onReconnecting())
+      dockPty.sendResize.mockClear()
+      act(() => {
+        dockPty.onOpen()
+        dockPty.onConnected("new-1", "old-1")
+      })
+      act(() => dockPty.bytesCb?.(new Uint8Array([0x61])))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(dockPty.sendResize).toHaveBeenCalledWith(24, 80, true, "old-1")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("sends a Send's Enter to the part the body went to after the target moved", () => {
+    vi.useFakeTimers()
+    try {
+      pointerStub = stubCoarsePointer(true)
+      render(<TerminalStack parts={[agent, dock]} />)
+      const [agentPty, dockPty] = FakePtySocket.instances
+      ownBoth()
+      fireEvent.change(composeBox(), { target: { value: "hello" } })
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Send" }))
+      fireEvent.pointerDown(partBox(1))
+      expect(composeBox().placeholder).toBe("Type a command…")
+      act(() => {
+        vi.advanceTimersByTime(COMPOSE_SUBMIT_DELAY_MS)
+      })
+      const sent = agentPty.sendInput.mock.calls.map((call: unknown[]) =>
+        new TextDecoder().decode(call[0] as Uint8Array),
+      )
+      expect(sent).toEqual(["hello", "\r"])
+      expect(dockPty.sendInput).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("falls back to the part on screen when the chosen part goes off screen", () => {
+    pointerStub = stubCoarsePointer(true)
+    const { rerender } = render(<TerminalStack parts={[agent, dock]} />)
+    ownBoth()
+    fireEvent.pointerDown(partBox(1))
+    expect(composeBox().placeholder).toBe("Type a command…")
+    rerender(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
+    expect(composeBox().placeholder).toBe("Write a message to the agent…")
+  })
+
+  it("lands a click into the other part's terminal in the message box, now for that part", async () => {
+    pointerStub = stubCoarsePointer(true)
+    render(<TerminalStack parts={[agent, dock]} />)
+    ownBoth()
+    const dockContainer = screen.getAllByTestId("terminal-container")[1]
+    // Not the target yet: the redirect is the target part's alone.
+    await act(async () => {
+      fireEvent.focusIn(dockContainer)
+      await Promise.resolve()
+    })
+    expect(document.activeElement).not.toBe(composeBox())
+    fireEvent.pointerDown(partBox(1))
+    await act(async () => {
+      fireEvent.focusIn(dockContainer)
+      await Promise.resolve()
+    })
+    expect(document.activeElement).toBe(composeBox())
+    expect(composeBox().placeholder).toBe("Type a command…")
+  })
+
   it("keeps a part off screen in a real box, hidden rather than shrunk", () => {
     render(<TerminalStack parts={[agent, { ...dock, onScreen: false }]} />)
     expect(partBox(1).className).toContain("absolute")

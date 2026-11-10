@@ -195,6 +195,10 @@ export function useTerminalOwnership(
   // A handshake superseded by that word, naming one of this page's own ghosts,
   // is a row the page let go of between the snapshot and the event.
   const newestEventFreedRef = useRef(false)
+  // The owner the newest applied `pty.owner` named, or null when it freed the
+  // row. A pane whose handshake is still in flight has no id to compare an
+  // event with, so the comparison is made again when the handshake lands.
+  const newestEventOwnerRef = useRef<string | null>(null)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
@@ -296,6 +300,7 @@ export function useTerminalOwnership(
       pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
       newestEventFreedRef.current = freed
+      newestEventOwnerRef.current = freed ? null : (ownerId ?? null)
       // A self-succession still waiting to be sent outlives its ghost letting
       // go: the row is free, and the server claims a free row for that frame
       // as it would for a plain resize, displacing nobody. Dropping the intent
@@ -405,7 +410,16 @@ export function useTerminalOwnership(
       owner !== myConnId &&
       ownGhostOfThisRun(owner) &&
       isForeground()
+    // The page's other pane claimed the row on the driver id this socket was
+    // just seated on, and that claim reached this pane before its own
+    // handshake, which was snapshotted before it. Without this the pane stays a
+    // watcher of its own page's row, because a superseded handshake keeps the
+    // verdict the event left, and nothing later corrects it.
+    const eventNamedThisSeat =
+      superseded && newestEventOwnerRef.current === myConnId
+    if (eventNamedThisSeat) setRowConfirmed(true)
     const mine =
+      eventNamedThisSeat ||
       ghostLetGo ||
       seedVerdictFromConnected({
         owner,

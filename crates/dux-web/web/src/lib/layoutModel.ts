@@ -106,30 +106,59 @@ export interface PhoneViewInputs {
 }
 
 /**
- * Which part a phone opens on. A stopped agent with a terminal still running
- * opens on the terminals, because that is the only part with anything live in
- * it.
+ * Which part a phone opens on. An address naming a terminal opens the
+ * terminals even when that terminal is gone, so its not-found screen is what
+ * shows rather than a quiet fallback to the agent. A stopped agent with a
+ * terminal still running opens on the terminals, because that is the only part
+ * with anything live in it.
  */
 export function resolvePhoneView(inputs: PhoneViewInputs): PhoneView {
-  if (inputs.terminalCount === 0) return "agent"
   if (inputs.addressNamesTerminal) return "terminals"
+  if (inputs.terminalCount === 0) return "agent"
   if (inputs.agentStopped && inputs.anyTerminalRunning) return "terminals"
   return inputs.remembered ?? "agent"
 }
 
-export type StackPresentation =
-  | { surface: "computer"; layout: ComputerLayout; hasTerminals: boolean }
-  | { surface: "phone"; view: PhoneView; hasTerminals: boolean }
+/**
+ * What the agent's tab on top is doing, as far as mounting it goes:
+ *   - "live": its process is running, so a socket only attaches.
+ *   - "startsOnSight": dormant, and the dormant-card rule says showing it
+ *     starts it (a healthy first tab, as selecting an agent does today).
+ *   - "dormant": dormant, and nothing that opens the stack may start it.
+ */
+export type AgentTabState = "live" | "startsOnSight" | "dormant"
+
+/** The layout or phone view the stack is in, as resolved by the functions
+ * above (which already fall back to the agent alone when there is no dock). */
+export type StackPresentation = (
+  | { surface: "computer"; layout: ComputerLayout }
+  | { surface: "phone"; view: PhoneView }
+) & { agentTab: AgentTabState }
+
+export type StackParts = Record<StackPart, boolean> & {
+  /** Whether the agent part may hold a live socket. Subscribing to a dormant
+   * tab's pty LAUNCHES it whether or not the pane is on screen, so a dormant
+   * tab gets its card instead of a socket unless it is on screen and showing
+   * it is what starts it. */
+  agentLiveSocket: boolean
+}
 
 /**
  * Which parts are on screen. A part that is off screen may stay mounted, but
  * it raises no attention of its own and makes no first claim of a row: nobody
  * can see it, so it must not act as if somebody were looking at it.
  */
-export function partsOnScreen(
+export function partsOnScreen(presentation: StackPresentation): StackParts {
+  const shown = shownParts(presentation)
+  const agentLiveSocket =
+    presentation.agentTab === "live" ||
+    (presentation.agentTab === "startsOnSight" && shown.agent)
+  return { ...shown, agentLiveSocket }
+}
+
+function shownParts(
   presentation: StackPresentation,
 ): Record<StackPart, boolean> {
-  if (!presentation.hasTerminals) return { agent: true, dock: false }
   if (presentation.surface === "phone") {
     const dock = presentation.view === "terminals"
     return { agent: !dock, dock }

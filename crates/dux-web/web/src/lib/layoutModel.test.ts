@@ -100,17 +100,22 @@ describe("resolvePhoneView", () => {
     remembered: null,
   }
 
-  it("is the agent when there are no terminals, whatever else holds", () => {
+  it("is the agent when there are no terminals and the address names none", () => {
     expect(
       resolvePhoneView({
         ...base,
         terminalCount: 0,
-        addressNamesTerminal: true,
         agentStopped: true,
         anyTerminalRunning: true,
         remembered: "terminals",
       }),
     ).toBe("agent")
+  })
+
+  it("opens the terminals for an address naming a terminal that is gone, so its not-found screen is what shows", () => {
+    expect(
+      resolvePhoneView({ ...base, terminalCount: 0, addressNamesTerminal: true }),
+    ).toBe("terminals")
   })
 
   it.each([
@@ -134,24 +139,60 @@ describe("partsOnScreen", () => {
     ["terminal", { agent: false, dock: true }],
   ] as const)("computer %s", (layout, expected) => {
     expect(
-      partsOnScreen({ surface: "computer", layout, hasTerminals: true }),
-    ).toEqual(expected)
-  })
-
-  it("shows only the agent when there are no terminals", () => {
-    expect(
-      partsOnScreen({ surface: "computer", layout: "terminal", hasTerminals: false }),
-    ).toEqual({ agent: true, dock: false })
+      partsOnScreen({ surface: "computer", layout, agentTab: "live" }),
+    ).toMatchObject(expected)
   })
 
   it("shows the one part a phone's view names", () => {
     expect(
-      partsOnScreen({ surface: "phone", view: "terminals", hasTerminals: true }),
-    ).toEqual({ agent: false, dock: true })
+      partsOnScreen({ surface: "phone", view: "terminals", agentTab: "live" }),
+    ).toMatchObject({ agent: false, dock: true })
     expect(
-      partsOnScreen({ surface: "phone", view: "agent", hasTerminals: true }),
-    ).toEqual({ agent: true, dock: false })
+      partsOnScreen({ surface: "phone", view: "agent", agentTab: "live" }),
+    ).toMatchObject({ agent: true, dock: false })
   })
+
+  it("puts the dock on screen wherever an address names a gone terminal, on both form factors", () => {
+    const opening = resolveStackOpening({
+      addressTerminal: "gone",
+      rememberedTerminal: null,
+      rememberedLayout: "agent",
+      dockTerminals: [],
+      agentStopped: false,
+      anyTerminalRunning: false,
+    })
+    expect(opening.terminalNotFound).toBe(true)
+    expect(
+      partsOnScreen({ surface: "computer", layout: opening.layout, agentTab: "live" }).dock,
+    ).toBe(true)
+    const view = resolvePhoneView({
+      terminalCount: 0,
+      addressNamesTerminal: true,
+      agentStopped: false,
+      anyTerminalRunning: false,
+      remembered: "agent",
+    })
+    expect(partsOnScreen({ surface: "phone", view, agentTab: "live" }).dock).toBe(true)
+  })
+
+  // Subscribing to a dormant tab's pty launches it, whether or not the pane is
+  // on screen, so a stopped agent beside a running terminal must not get a
+  // live socket just because its part is mounted off screen.
+  it.each([
+    ["live", "agent", true],
+    ["live", "terminal", true],
+    ["startsOnSight", "agent", true],
+    ["startsOnSight", "terminal", false],
+    ["dormant", "agent", false],
+    ["dormant", "split", false],
+  ] as const)(
+    "gives the agent part a live socket for a %s tab in the %s layout: %s",
+    (agentTab, layout, expected) => {
+      expect(
+        partsOnScreen({ surface: "computer", layout, agentTab }).agentLiveSocket,
+      ).toBe(expected)
+    },
+  )
 })
 
 describe("resolveStackOpening", () => {
