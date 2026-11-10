@@ -494,6 +494,33 @@ describe("self-succession after a blipped socket", () => {
     expect(view.result.current.isOwner).toBe(true)
   })
 
+  // The other order of the same switch: the row is freed and that event is
+  // applied BEFORE the terminal's handshake, which was snapshotted while the
+  // tab's connection still held the row. The handshake is superseded, and the
+  // newer word is that nobody drives a row this page's own ghost let go, so
+  // the pane owns it and its plain resize claims it.
+  it("owns a row its ghost freed before the superseded handshake arrived", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", undefined, 5, undefined))
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 4))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.takeoverIntent.read()).toBe(false)
+  })
+
+  it("stays a watcher of that freed row while the page is backgrounded", () => {
+    const left = setup()
+    act(() => left.view.result.current.connId.write("conn-a"))
+    left.view.unmount()
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", undefined, 5, undefined))
+    setVisibility("hidden")
+    act(() => view.result.current.seedFromConnected("conn-b", "conn-a", 4))
+    expect(view.result.current.isOwner).toBe(false)
+  })
+
   it("does NOT self-succeed while the page is backgrounded", () => {
     const { view } = setup()
     act(() => view.result.current.connId.write("conn-a"))

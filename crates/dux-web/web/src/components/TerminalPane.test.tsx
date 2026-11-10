@@ -860,6 +860,45 @@ describe("TerminalPane seeds its ownership verdict from the connected frame", ()
   })
 })
 
+describe("TerminalPane self-succession from a page hidden since it armed", () => {
+  // The handshake arms the succession while the page is in front; the page is
+  // hidden before the first resize goes out. A hidden page claims nothing, so
+  // the flagged frame never leaves and the pane stays a watcher.
+  it("drops the succession and sends no flagged frame", () => {
+    vi.useFakeTimers()
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      const pty = last()
+      act(() => pty.onOpen())
+      act(() => pty.onConnected("conn-a", null))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      act(() => pty.onReconnecting())
+      pty.sendResize.mockClear()
+      act(() => {
+        pty.onOpen()
+        pty.onConnected("conn-b", "conn-a")
+      })
+      Object.defineProperty(document, "visibilityState", {
+        value: "hidden",
+        configurable: true,
+      })
+      act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(pty.sendResize.mock.calls.filter((call) => call[2] === true)).toEqual([])
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      })
+      vi.useRealTimers()
+    }
+  })
+})
+
 // ONE PTY HAS ONE AUTHORITATIVE GRID, the owner's, and every other attached
 // browser renders the same byte stream into its own, differently sized xterm.
 // A viewer in that state is looking at wrapped and clamped output, and every

@@ -175,6 +175,10 @@ export function useTerminalOwnership(
   // flash the card back over a pane the user just took. A press names no
   // expected owner and so cannot be refused, which is why blocking is safe.
   const pressedClaimRef = useRef(false)
+  // Whether the newest `pty.owner` applied for this pty said nobody drives it.
+  // A handshake superseded by that word, naming one of this page's own ghosts,
+  // is a row the page let go of between the snapshot and the event.
+  const newestEventFreedRef = useRef(false)
   const takeoverIntent = useMemo<TakeoverIntent>(
     () => ({
       read: () => takeoverArmedRef.current,
@@ -275,6 +279,7 @@ export function useTerminalOwnership(
       // spine. This event is the definitive word either way.
       pressedClaimRef.current = false
       const freed = ownerId === undefined || ownerId === null
+      newestEventFreedRef.current = freed
       // A self-succession still waiting to be sent outlives its ghost letting
       // go: the row is free, and the server claims a free row for that frame
       // as it would for a plain resize, displacing nobody. Dropping the intent
@@ -369,15 +374,29 @@ export function useTerminalOwnership(
     ) {
       takeoverIntent.arm(owner)
     }
-    const mine = seedVerdictFromConnected({
-      owner,
-      myConnId,
-      foreground: isForeground(),
-      takeoverArmed: takeoverIntent.read(),
-      handshakeEpoch: ownerEpoch,
-      appliedEpoch,
-      priorVerdict: ownership.read(),
-    })
+    // The same switch in the other order: the event freeing the row was applied
+    // before this handshake, which was snapshotted while this page's own ghost
+    // still held the row. The newer word is that nobody drives it, so a
+    // foregrounded page owns it as it would an unowned handshake, and its plain
+    // resize claims it. Anything newer naming an owner leaves this false.
+    const ghostLetGo =
+      superseded &&
+      newestEventFreedRef.current &&
+      typeof owner === "string" &&
+      owner !== myConnId &&
+      ownGhostOfThisRun(owner) &&
+      isForeground()
+    const mine =
+      ghostLetGo ||
+      seedVerdictFromConnected({
+        owner,
+        myConnId,
+        foreground: isForeground(),
+        takeoverArmed: takeoverIntent.read(),
+        handshakeEpoch: ownerEpoch,
+        appliedEpoch,
+        priorVerdict: ownership.read(),
+      })
     ownership.write(mine)
     // Seed the other device's name from the same frame: a watcher that merely
     // attached hears no `pty.owner` broadcast, so this is its only chance at a
