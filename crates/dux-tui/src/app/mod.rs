@@ -276,6 +276,9 @@ struct PruneViewContext {
     /// exit of that tab moves.
     selected_slot_tab: Option<String>,
     tab_providers: HashMap<String, String>,
+    /// The selected agent's strip as it stood BEFORE the sweep, which a tab that
+    /// exited cleanly leaves: the view lands beside where that tab was.
+    strip_before: Vec<String>,
 }
 
 /// Whether an agent's working copy is on disk.
@@ -746,6 +749,14 @@ pub(crate) struct App {
     /// loss, on any keystroke, and by the next press. See [`RowDragState`] for
     /// the click/drag threshold.
     pub(crate) row_drag: Option<RowDragState>,
+    /// The live drag-to-reorder gesture over a pill of the agent tab strip, or
+    /// `None`. Armed by a left press on a pill and retired on release, on a host
+    /// resize, on focus loss, on any keystroke, and by the next press.
+    pub(crate) tab_drag: Option<TabDragState>,
+    /// The selected agent's strip as it was last drawn. A tab another screen closes is already gone from the engine by the
+    /// time this surface notices, so the strip the user was looking at is the only
+    /// place the tab's neighbours are still written down.
+    pub(crate) last_tab_strip: Option<DrawnTabStrip>,
     /// A mouse button pressed inside the WINDOWED center pane that is being
     /// forwarded to a mouse-aware child: holds the SGR button
     /// code of the pressed button (0 left, 1 middle, 2 right) from press to
@@ -4726,6 +4737,30 @@ pub(crate) struct RowDragState {
     pub(crate) promoted: bool,
 }
 
+/// A strip as it was last drawn: whose it was, its tab ids in order, and the tab
+/// on screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DrawnTabStrip {
+    pub(crate) session_id: String,
+    pub(crate) tabs: Vec<String>,
+    pub(crate) focused: String,
+}
+
+/// A drag-to-reorder gesture over a pill of a tab strip. It stays a plain click
+/// until the pointer reaches a different pill, so the press that focuses a tab
+/// is the same one that can pick it up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TabDragState {
+    /// The agent whose strip the press landed in.
+    pub(crate) session_id: String,
+    /// The pill the press picked up.
+    pub(crate) source_id: String,
+    /// The pill the pointer is over now, when a drop there would mean something.
+    pub(crate) hover_id: Option<String>,
+    /// Whether the pointer has left the pressed pill, making the press a drag.
+    pub(crate) promoted: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RecentMouseClick {
     pub(crate) target: MouseClickTarget,
@@ -4978,6 +5013,7 @@ mod picker_lists;
 mod render;
 mod reorder;
 mod sessions;
+mod tab_reorder;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod text_input;
@@ -5089,6 +5125,8 @@ impl App {
         )?;
         let sessions = session_store.load_sessions()?;
         let agent_tabs = session_store.load_extra_agent_tabs()?;
+        let slot_tab_positions = session_store.load_slot_tab_positions()?;
+        let slot_tab_created_ms = session_store.load_slot_tab_created_ms()?;
         let (worker_tx, worker_rx) = mpsc::channel();
         let watched_worktree: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let branch_sync_sessions = Arc::new(Mutex::new(Vec::new()));
@@ -5150,6 +5188,8 @@ impl App {
                 .into_iter()
                 .map(|t| (TabId::new(t.id.clone()), t))
                 .collect(),
+            slot_tab_positions,
+            slot_tab_created_ms,
             terminating_ptys: Vec::new(),
             process_registry: AgentProcessRegistry::default(),
             removal_workers: Vec::new(),
@@ -5352,6 +5392,8 @@ impl App {
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
             row_drag: None,
+            tab_drag: None,
+            last_tab_strip: None,
             center_mouse_forward: None,
             last_mouse_click: None,
             pressed_button: None,
@@ -6095,6 +6137,7 @@ impl App {
                 // no longer under the pointer, so the gesture is retired rather
                 // than dropped somewhere the user did not choose.
                 self.row_drag = None;
+                self.tab_drag = None;
                 false
             }
             Event::FocusGained => {
@@ -6106,6 +6149,7 @@ impl App {
                 // never here.
                 self.retire_pending_link_click();
                 self.row_drag = None;
+                self.tab_drag = None;
                 self.end_terminal_selection_drag();
                 self.terminal_focus.on_focus_lost();
                 false
@@ -6512,6 +6556,14 @@ impl App {
             }
             "stop-agent-tab" => {
                 self.stop_focused_tab_prompt();
+                Ok(())
+            }
+            "move-tab-left" => {
+                self.move_focused_tab(reorder::MoveDir::Up);
+                Ok(())
+            }
+            "move-tab-right" => {
+                self.move_focused_tab(reorder::MoveDir::Down);
                 Ok(())
             }
             "change-default-provider" => {
@@ -8589,6 +8641,14 @@ impl App {
     pub(crate) fn set_focused_tab(&mut self, session_id: &str, tab_id: &str) {
         // The slot tab is the default focus, so focusing it is recorded as "no
         // memory" on both the in-process map and the persisted column.
+        // The drawing of the strip is only refreshed when the strip is drawn, and
+        // a focus change made while it is not (a diff, a fullscreen overlay) must
+        // not be overridden by a later close elsewhere landing from the old one.
+        if let Some(drawn) = self.last_tab_strip.as_mut()
+            && drawn.session_id == session_id
+        {
+            drawn.focused = tab_id.to_string();
+        }
         let is_slot = self
             .engine
             .is_slot_tab_of(SessionIdRef::new(session_id), TabIdRef::new(tab_id));

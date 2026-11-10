@@ -14,14 +14,14 @@ import {
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { closeTabConsequences } from "@/lib/agentTabs"
+import { closeTabConsequences, sessionAsShown } from "@/lib/agentTabs"
 import { DOCS_AGENT_TABS_CLOSING } from "@/lib/docs"
 import { renderProse } from "@/lib/prose"
 import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 
 // Confirmation before closing a tab. The agent's first tab reaches this dialog
 // like any other: the session slot is a pointer, so closing the tab holding it
-// hands the slot to the next tab in strip order rather than being refused.
+// hands the slot to the leftmost other tab rather than being refused.
 //
 // Two gestures deliberately do not come here. An agent's only tab has no
 // successor, so the strip's menu item is disabled with the reason rather than
@@ -32,11 +32,21 @@ import { closeCloseTab, closeTab, useDux } from "@/lib/store"
 // The copy states only the consequences that apply (`closeTabConsequences`),
 // and Cancel is the default focus.
 export function ConfirmCloseTabDialog() {
-  const { closeTabTarget, spine } = useDux()
+  const { closeTabTarget, spine, pendingTabOrder, pendingSlotTab } = useDux()
 
-  const session = closeTabTarget
+  // The strip as the screen shows it, so the tab named as taking the slot is the
+  // leftmost one the user sees, not the one the server's older order has first.
+  const listed = closeTabTarget
     ? spine?.sessions.find((s) => s.id === closeTabTarget.sessionId)
     : undefined
+  const session =
+    listed && closeTabTarget
+      ? sessionAsShown(
+          listed,
+          pendingTabOrder[closeTabTarget.sessionId],
+          pendingSlotTab[closeTabTarget.sessionId],
+        )
+      : undefined
   const tab = closeTabTarget
     ? session?.tabs.find((t) => t.id === closeTabTarget.tabId)
     : undefined
@@ -90,8 +100,8 @@ export function ConfirmCloseTabDialog() {
             {successorLabel ? (
               <>
                 {" "}
-                The next tab, <InlineCode>{successorLabel}</InlineCode>, takes its
-                place as the agent&rsquo;s first tab.
+                <InlineCode>{successorLabel}</InlineCode> takes its place as the
+                agent&rsquo;s first tab.
               </>
             ) : null}{" "}
             <a

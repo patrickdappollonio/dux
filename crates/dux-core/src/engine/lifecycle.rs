@@ -639,8 +639,8 @@ pub fn closed_terminal_notice(label: &str) -> crate::status_text::StatusText {
 /// run did not end badly for any other reason. The one shared rule every
 /// surface's exit path consults.
 ///
-/// The slot tab is not privileged here: a clean exit closes it and the next tab
-/// in strip order takes the slot, the same promotion a user-initiated close
+/// The slot tab is not privileged here: a clean exit closes it and the leftmost other tab
+/// takes the slot, the same promotion a user-initiated close
 /// runs. Only the last remaining tab keeps its row, because an agent always has
 /// a first tab and that exit is the agent's detach instead.
 ///
@@ -1519,7 +1519,7 @@ impl Engine {
     }
 
     /// Close the row of the slot tab whose clean exit earned it, and report
-    /// whether a row actually went. The slot tab hands its slot to the next tab
+    /// whether a row actually went. The slot tab hands its slot to the leftmost other tab
     /// in strip order (the same one transaction a user-initiated close runs),
     /// which deletes the outgoing row with the pointer move; an extra tab's row
     /// needs none of this and is simply removed by the caller.

@@ -528,6 +528,56 @@ async fn delete_slot_tab_promotes_the_next_tab() {
     );
 }
 
+/// A reorder names every tab of the agent. The strip the spine publishes then
+/// follows it with the slot tab anywhere, the slot pointer stays where it was,
+/// and a list that is not the exact set is refused.
+#[tokio::test]
+async fn reordering_tabs_moves_the_slot_tab_without_moving_the_pointer() {
+    let (addr, _tmp) = boot().await;
+    let client = reqwest::Client::new();
+    let slot = slot_tab_id(&client, addr, "s1").await;
+    let extra = create_extra_tab(&client, addr, "s1").await;
+    let url = format!("http://{addr}/api/v1/sessions/s1/tabs/reorder");
+
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({ "tab_ids": [extra, slot] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let min_rev = body["min_workspace_rev"]
+        .as_u64()
+        .expect("the answer names a revision");
+
+    let session = wait_for_session(&client, addr, "s1", |s| {
+        s["tabs"][0]["id"].as_str() == Some(extra.as_str())
+    })
+    .await;
+    assert_eq!(session["tabs"][1]["id"].as_str(), Some(slot.as_str()));
+    assert_eq!(session["slot_tab_id"].as_str(), Some(slot.as_str()));
+    // The revision named is one that shows the new order: the document served
+    // once the strip has moved is at or past it.
+    let workspace: serde_json::Value = client
+        .get(format!("http://{addr}/api/v1/workspace"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(workspace["rev"].as_u64().unwrap() >= min_rev);
+
+    let partial = client
+        .post(&url)
+        .json(&serde_json::json!({ "tab_ids": [slot] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(partial.status(), 400);
+}
+
 /// The agent's ONLY tab still cannot be closed: an agent always has a slot, and
 /// that gesture is the agent's detach rather than a tab close. The engine's own
 /// sentence reaches the caller through the same 400 shape as before.

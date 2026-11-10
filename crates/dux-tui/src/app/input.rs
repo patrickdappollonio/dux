@@ -1367,7 +1367,9 @@ impl App {
         // way out of a drag, so it is consumed only once the gesture became one;
         // a press that has not left its row is a click in progress, and
         // swallowing the cancel key there would steal it from whatever it closes.
-        if self.row_drag.take().is_some_and(|drag| drag.promoted)
+        let row_drag_promoted = self.row_drag.take().is_some_and(|drag| drag.promoted);
+        let tab_drag_promoted = self.tab_drag.take().is_some_and(|drag| drag.promoted);
+        if (row_drag_promoted || tab_drag_promoted)
             && self.bindings.lookup(&key, BindingScope::Global) == Some(Action::CloseOverlay)
         {
             return Ok(false);
@@ -1715,6 +1717,8 @@ impl App {
             Action::NewTab => self.open_new_tab_provider_prompt()?,
             Action::CloseTab => self.close_focused_tab_prompt(),
             Action::StopTab => self.stop_focused_tab_prompt(),
+            Action::MoveTabLeft => self.move_focused_tab(super::reorder::MoveDir::Up),
+            Action::MoveTabRight => self.move_focused_tab(super::reorder::MoveDir::Down),
             Action::SelectTab1 => self.focus_tab_index(0),
             Action::SelectTab2 => self.focus_tab_index(1),
             Action::SelectTab3 => self.focus_tab_index(2),
@@ -9442,15 +9446,28 @@ impl App {
                 self.engine
                     .tab_prose_label(SessionIdRef::new(&session_id), id.as_ref_id())
             });
+        // The strip as the user saw it, and whether the tab on screen is the one
+        // going: a close lands beside the closed tab like a browser tab.
+        let strip_before = self.session_tab_ids(&session_id);
+        let closing_the_tab_on_screen = self.focused_tab_id(&session_id) == tab_id;
         match self.engine.close_tab(&session_id, &tab_id) {
             Ok(outcome) => {
-                // A promotion decides where the user lands: the tab that took the
-                // session slot, running or not. Otherwise prefer a live sibling,
-                // falling back to whichever tab holds the slot. Either way the
-                // snapshot resets so the target tab's PTY renders immediately.
-                let target = match &outcome.promoted {
-                    Some(promoted) => promoted.as_str().to_string(),
-                    None => self.engine.first_live_tab(&session_id).unwrap_or_else(|| {
+                // The neighbour decides where the user lands when the tab on
+                // screen closed. Otherwise a promotion decides: the tab that took
+                // the session slot, running or not. Failing that, prefer a live
+                // sibling, falling back to whichever tab holds the slot. Either
+                // way the snapshot resets so the target tab's PTY renders
+                // immediately.
+                let strip_now = self.session_tab_ids(&session_id);
+                let neighbour = closing_the_tab_on_screen
+                    .then(|| dux_core::agent_tabs::tab_after_close(&strip_before, &tab_id))
+                    .flatten()
+                    .filter(|id| strip_now.iter().any(|now| now == id))
+                    .map(str::to_string);
+                let target = match (neighbour, &outcome.promoted) {
+                    (Some(neighbour), _) => neighbour,
+                    (None, Some(promoted)) => promoted.as_str().to_string(),
+                    (None, None) => self.engine.first_live_tab(&session_id).unwrap_or_else(|| {
                         self.engine
                             .slot_tab_id_of(SessionIdRef::new(&session_id))
                             .as_str()
@@ -11825,6 +11842,7 @@ impl App {
             if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
                 self.focus = FocusPane::Center;
                 self.set_focused_tab(&session_id, &tab_id);
+                self.arm_tab_drag(&tab_id);
             }
             return true;
         }
@@ -12415,6 +12433,7 @@ impl App {
         // unrelated click somewhere else entirely. Arming happens further down, so
         // a press on a row still starts its own gesture.
         self.row_drag = None;
+        self.tab_drag = None;
         self.end_terminal_selection_drag();
         if layout == PaneLayout::Windowed
             && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row)
@@ -12493,6 +12512,12 @@ impl App {
             // The divider drag returns before the sidebar hit-test ever runs, so
             // a pane resize and a row reorder can never be live at once; these
             // arms sit after it for exactly that reason.
+            MouseEventKind::Drag(MouseButton::Left) if self.tab_drag.is_some() => {
+                self.continue_tab_drag(mouse);
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.tab_drag.is_some() => {
+                self.finish_tab_drag();
+            }
             MouseEventKind::Drag(MouseButton::Left) if self.row_drag.is_some() => {
                 self.continue_row_drag(mouse);
             }
@@ -24631,23 +24656,25 @@ not_a_real_action = ["x"]
                 "stop-agent-tab",
                 "toggle-always-show-tabs",
                 "toggle-tab-to-agent",
-                "close-tab"
+                "close-tab",
+                "move-tab-left",
+                "move-tab-right"
             ]
         );
     }
 
     #[test]
     fn palette_movement_clamps_at_both_ends() {
-        // Five commands, and the cursor stops at each end of them.
+        // Seven commands, and the cursor stops at each end of them.
         let mut app = palette_app("agent tab", 0);
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
 
-        for expected in [1, 2, 3, 4, 4] {
+        for expected in [1, 2, 3, 4, 5, 6, 6] {
             app.handle_key(down).unwrap();
             assert_eq!(palette_selection(&app), expected, "moving down");
         }
-        for expected in [3, 2, 1, 0, 0] {
+        for expected in [5, 4, 3, 2, 1, 0, 0] {
             app.handle_key(up).unwrap();
             assert_eq!(palette_selection(&app), expected, "moving up");
         }

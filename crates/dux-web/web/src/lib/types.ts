@@ -119,7 +119,7 @@ export interface TabRunVerdict {
   excerpt: string[]
 }
 
-// One provider tab of an agent, in creation order, sharing the agent's worktree.
+// One provider tab of an agent, sharing the agent's worktree.
 // Which tab holds the session slot is named by `SessionView.slot_tab_id`, read
 // through `isFirstTab`: never a position or a session id, and resume eligibility
 // is likewise decided at launch rather than by position. A dormant tab
@@ -129,6 +129,9 @@ export interface AgentTabView {
   id: string
   provider: string
   order: number
+  /** When the tab was created (ms since the epoch). Duplicate provider labels are
+   * numbered by it, so a tab keeps its name when dragged. Missing reads as `0`. */
+  created_at_ms?: number
   working: boolean
   /** This tab is streaming keystroke-level input, a finer cue than `working`.
    * Rolled up any-tab into `SessionView.typing`; missing normalizes to `false`. */
@@ -225,7 +228,7 @@ export interface SessionView {
    * change. */
   pr_revision?: number
   /** The id of this agent's session-slot tab. Closing it hands the slot to the
-   * next tab in strip order, so this pointer moves; an agent's only tab cannot be
+   * leftmost other tab, so this pointer moves; an agent's only tab cannot be
    * closed. Read it through `isFirstTab` in `lib/agentTabs.ts` rather than
    * comparing a tab id against the session id. Missing is filled with the session
    * id, the placeholder for "the first tab, whichever it is". */
@@ -236,7 +239,8 @@ export interface SessionView {
    * `lib/detachAgent.ts`, never by scanning `tabs` again. An older server omits
    * it and that helper falls back to the tab scan. */
   detachable?: boolean
-  /** The agent's provider tabs in creation order; a session always has at least
+  /** The agent's provider tabs in strip order, left to right, with the slot tab
+   * (`slot_tab_id`) wherever the user placed it; a session always has at least
    * one, and the strip renders only when there are two or more. Missing coerces
    * to `[]` at ingestion. */
   tabs: AgentTabView[]

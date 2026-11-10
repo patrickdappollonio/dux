@@ -1106,7 +1106,7 @@ impl AgentSession {
     }
 
     /// The id of this agent's **session-slot tab**: its first tab. Closing that
-    /// tab hands the slot to the next tab in strip order, so this pointer moves;
+    /// tab hands the slot to the leftmost other tab, so this pointer moves;
     /// what cannot be closed is an agent's only tab.
     ///
     /// A stored pointer into `agent_tabs`, read from the
@@ -1168,26 +1168,40 @@ pub struct AgentTab {
     pub session_id: String,
     /// The provider the tab runs.
     pub provider: ProviderKind,
-    /// The tab's position among the agent's tabs, ascending.
+    /// The tab's position in the agent's strip, ascending. Positions are the
+    /// user's own order: a reorder rewrites all of them and a new tab takes the
+    /// next one after the highest, so the slot tab can hold any of them.
     pub sort_order: i64,
     /// When the tab was created.
     pub created_at: DateTime<Utc>,
 }
 
-/// The one comparator that decides which extra tab comes before which, on every
+/// The one comparator that decides which tab comes before which, on every
 /// surface: `sort_order`, then `created_at`, then the id.
 ///
 /// The id is the final tiebreak so the answer is deterministic even for two tabs
-/// written in the same instant, because the engine holds its tabs in a `HashMap`
-/// whose iteration order is not. Ties are unreachable today (`sort_order` is a
-/// per-agent append-only stamp), so this is parity across the orderings rather
-/// than a fix: the TUI strip, the web strip and the promotion successor must not
-/// be able to disagree about which pill comes first.
+/// holding the same position, because the engine holds its tabs in a `HashMap`
+/// whose iteration order is not. Positions are distinct by construction, so this
+/// is parity across the orderings rather than a fix: the TUI strip, the web strip
+/// and the promotion successor must not be able to disagree about which pill
+/// comes first.
 pub(crate) fn tab_display_order(a: &AgentTab, b: &AgentTab) -> std::cmp::Ordering {
     a.sort_order
         .cmp(&b.sort_order)
         .then_with(|| a.created_at.cmp(&b.created_at))
         .then_with(|| a.id.cmp(&b.id))
+}
+
+/// Where the slot tab sits among `extras`, which are already in
+/// [`tab_display_order`]: the index it takes in the whole strip. A tie goes to
+/// the slot tab, so the answer is deterministic even for a position the data
+/// should never repeat. Both the engine's id order and the wire's tab list place
+/// the slot tab through this, so they cannot disagree.
+pub(crate) fn slot_tab_index<T: std::borrow::Borrow<AgentTab>>(
+    extras: &[T],
+    slot_position: i64,
+) -> usize {
+    extras.partition_point(|t| t.borrow().sort_order < slot_position)
 }
 
 /// One changed path in a working copy, as git status and numstat report it.

@@ -192,6 +192,8 @@ struct Tab {
     working: bool,
     #[serde(default)]
     needs_attention: bool,
+    #[serde(default)]
+    created_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -283,8 +285,12 @@ impl Agent {
     /// The tabs' names as the strip shows them: the provider, numbered from
     /// its second tab on.
     fn tab_labels(&self) -> Vec<String> {
-        let providers: Vec<&str> = self.tabs.iter().map(|tab| tab.provider.as_str()).collect();
-        crate::agent_tabs::tab_labels(&providers)
+        let keyed: Vec<(&str, i64)> = self
+            .tabs
+            .iter()
+            .map(|tab| (tab.provider.as_str(), tab.created_at_ms))
+            .collect();
+        crate::agent_tabs::tab_labels(&keyed)
     }
 }
 

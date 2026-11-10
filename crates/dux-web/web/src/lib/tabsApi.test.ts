@@ -101,6 +101,15 @@ describe("tabsApi", () => {
     )
   })
 
+  it("reorder POSTs the complete tab order to the agent's reorder endpoint", async () => {
+    const fetchMock = stubOkFetch(200)
+    await tabsApi.reorder("s 1", ["b2", "s1"])
+    const call = lastCall(fetchMock)
+    expect(call.url).toBe("/api/v1/sessions/s%201/tabs/reorder")
+    expect(call.method).toBe("POST")
+    expect(JSON.parse(call.body ?? "{}")).toEqual({ tab_ids: ["b2", "s1"] })
+  })
+
   it("patch PATCHes the tab endpoint with the new provider", async () => {
     const fetchMock = stubOkFetch(200, {})
     await tabsApi.patch("s1", "b1", "opencode")

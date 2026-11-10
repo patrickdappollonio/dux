@@ -35,7 +35,7 @@ const iterate = (name = NAME) => fireAnimationIteration(probe(), name)
 
 // A stand-in for the browser's CSSAnimation, which jsdom does not implement:
 // just the parts the hook drives (its timing and its finished promise).
-function fakeAnimation(animationName: string, currentIteration: number) {
+function fakeAnimation(animationName: string, currentIteration: number, startTime: number | null = null) {
   let resolve!: () => void
   let reject!: (reason: unknown) => void
   const finished = new Promise<void>((res, rej) => {
@@ -46,6 +46,7 @@ function fakeAnimation(animationName: string, currentIteration: number) {
   return {
     animation: {
       animationName,
+      startTime,
       finished,
       effect: { getComputedTiming: () => ({ currentIteration }), updateTiming },
     },
@@ -137,6 +138,43 @@ describe("useSettlingAnimation", () => {
       rerender(<Probe active={false} />)
       await bounce.cancel()
       expect(animating()).toBe(false)
+    })
+
+    // A drag moves the pill's element, and the browser ends its animation and
+    // starts a new one from the first frame. A move is not a stop: the replacement
+    // takes over the settle on the schedule the old one had, so the bounce still
+    // lands on its resting frame and the class stays until it has.
+    it("hands a settle in flight to the animation that replaces a moved element's", async () => {
+      const bounce = fakeAnimation(NAME, 3, 480)
+      const { rerender } = render(<Probe active />)
+      withAnimations(probe(), [bounce.animation])
+      start()
+      rerender(<Probe active={false} />)
+      expect(bounce.updateTiming).toHaveBeenLastCalledWith({ iterations: 4 })
+
+      // The move: the old animation is cancelled, a fresh infinite one is there.
+      const replacement = fakeAnimation(NAME, 0, 3413)
+      withAnimations(probe(), [replacement.animation])
+      await bounce.cancel()
+
+      expect(replacement.updateTiming).toHaveBeenCalledWith({ iterations: 4 })
+      expect(replacement.animation.startTime).toBe(480)
+      expect(animating()).toBe(true)
+
+      await replacement.finish()
+      expect(animating()).toBe(false)
+    })
+
+    it("does not take the browser's cancel event for a stop when the animation was only replaced", () => {
+      const bounce = fakeAnimation(NAME, 0)
+      const { rerender } = render(<Probe active />)
+      withAnimations(probe(), [bounce.animation])
+      start()
+      rerender(<Probe active={false} />)
+      const replacement = fakeAnimation(NAME, 0)
+      withAnimations(probe(), [replacement.animation])
+      fireAnimationCancel(probe(), NAME)
+      expect(animating()).toBe(true)
     })
 
     it("stops at once when the element has no such animation", () => {

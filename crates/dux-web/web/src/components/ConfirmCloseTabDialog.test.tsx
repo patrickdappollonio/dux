@@ -47,12 +47,19 @@ function tab(overrides: Partial<AgentTabView>): AgentTabView {
 // Seed the dialog to close `tabId` of a session whose tabs are `tabs`.
 // `slotTabId` names the tab holding the session slot; left out, no tab does,
 // which is the shape the extra-tab cases care about.
-function seed(tabId: string, tabs: AgentTabView[], slotTabId?: string) {
+function seed(
+  tabId: string,
+  tabs: AgentTabView[],
+  slotTabId?: string,
+  pendingOrder?: string[],
+) {
   mockState = {
     closeTabTarget: { sessionId: "s1", tabId },
     spine: {
       sessions: [{ id: "s1", slot_tab_id: slotTabId, tabs }],
     },
+    pendingTabOrder: pendingOrder ? { s1: { ids: pendingOrder, answered: null } } : {},
+    pendingSlotTab: {},
   } as unknown as DuxState
 }
 
@@ -128,7 +135,7 @@ describe("ConfirmCloseTabDialog", () => {
   })
 
   // Closing the tab in the session slot is not refused any more: the slot moves
-  // to the next tab in strip order, and the copy has to say so and name it, or
+  // to the leftmost other tab, and the copy has to say so and name it, or
   // the user cannot tell this close apart from an extra tab's.
   it("says which tab takes the slot when closing the agent's first tab", () => {
     seed(
@@ -144,7 +151,7 @@ describe("ConfirmCloseTabDialog", () => {
     expect(body.textContent).toContain("This ends the claude session")
     expect(screen.getByText("claude", { selector: "code" })).toBeTruthy()
     expect(body.textContent).toMatch(
-      /The next tab, Codex, takes its place as the agent’s first tab/,
+      /Codex takes its place as the agent’s first tab/,
     )
     // The tab's name is the shared chip.
     expect(screen.getByText("Codex", { selector: "code" })).toBeTruthy()
@@ -165,9 +172,24 @@ describe("ConfirmCloseTabDialog", () => {
     const body = screen.getByText(/This ends the/)
     expect(body.textContent).toContain("This ends the codex session")
     expect(body.textContent).toMatch(
-      /The next tab, Codex 2, takes its place as the agent’s first tab/,
+      /Codex 2 takes its place as the agent’s first tab/,
     )
     expect(screen.getByText("Codex 2", { selector: "code" })).toBeTruthy()
+  })
+
+  it("names the leftmost tab of the strip on screen while a drag is unconfirmed", () => {
+    seed(
+      "t1",
+      [
+        tab({ id: "t1", provider: "claude" }),
+        tab({ id: "t2", provider: "codex" }),
+        tab({ id: "t3", provider: "opencode" }),
+      ],
+      "t1",
+      ["t3", "t1", "t2"],
+    )
+    render(<ConfirmCloseTabDialog />)
+    expect(screen.getByText("Opencode", { selector: "code" })).toBeTruthy()
   })
 
   it("says nothing about a successor when closing an extra tab", () => {
@@ -200,7 +222,7 @@ describe("ConfirmCloseTabDialog", () => {
     expect(body.textContent).toContain("This ends the claude session")
     expect(screen.getByText("claude", { selector: "code" })).toBeTruthy()
     expect(body.textContent).toMatch(
-      /The next tab, Codex, takes its place as the agent’s first tab/,
+      /Codex takes its place as the agent’s first tab/,
     )
     // The tab's name is the shared chip.
     expect(screen.getByText("Codex", { selector: "code" })).toBeTruthy()

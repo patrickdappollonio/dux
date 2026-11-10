@@ -6,8 +6,6 @@
 //! Keep these functions small and pure; anything needing engine state belongs on
 //! `Engine`, not here.
 
-use std::collections::HashMap;
-
 /// The one sentence dux says when closing a tab would leave an agent with no
 /// tab at all. Owned here so the engine's refusal, the terminal UI's status
 /// line and the browser's disabled menu item are the same words in the same
@@ -27,22 +25,31 @@ pub(crate) fn prose_tab_label(strip_label: &str) -> String {
     }
 }
 
-/// Disambiguated tab labels: each provider name is used as-is the first time and
-/// suffixed with " 2", " 3", … for repeats, in tab order. The first occurrence
-/// stays bare. Mirrors the web's `tabLabels`.
-pub fn tab_labels(providers: &[&str]) -> Vec<String> {
-    let mut seen: HashMap<&str, usize> = HashMap::new();
-    let mut out = Vec::with_capacity(providers.len());
-    for p in providers {
-        let n = seen.entry(*p).or_insert(0);
-        *n += 1;
-        if *n == 1 {
-            out.push((*p).to_string());
-        } else {
-            out.push(format!("{p} {n}"));
-        }
-    }
-    out
+/// Disambiguated tab labels: each provider name is bare on its oldest tab and
+/// suffixed " 2", " 3", … on the later ones of the same provider, numbered by
+/// CREATION order (`created_ms`, then the strip position for a tie), never by
+/// where a tab happens to sit. A name is how a tab is told apart from its
+/// siblings in a confirmation and on the command line, so dragging a pill must
+/// not rename it. `tabs` is in strip order, as is the answer. Mirrors the web's
+/// `tabLabels`.
+pub fn tab_labels(tabs: &[(&str, i64)]) -> Vec<String> {
+    tabs.iter()
+        .enumerate()
+        .map(|(i, (provider, created))| {
+            let older = tabs
+                .iter()
+                .enumerate()
+                .filter(|(j, (other, other_created))| {
+                    other == provider && (*other_created, *j) < (*created, i)
+                })
+                .count();
+            if older == 0 {
+                (*provider).to_string()
+            } else {
+                format!("{provider} {}", older + 1)
+            }
+        })
+        .collect()
 }
 
 /// True when an agent's `current` branch has drifted from the `initial` branch it
@@ -55,20 +62,53 @@ pub fn branch_drifted(current: &str, initial: &str) -> bool {
     !initial.is_empty() && current != initial
 }
 
+/// The tab the view lands on when the one on screen closes, like a browser tab:
+/// the tab to its right, or the one to its left when it was the last. `strip` is
+/// the strip as it stood BEFORE the close. `None` when the closed tab was the
+/// only one, or is not in the strip. Mirrors the web's `tabAfterClose`.
+pub fn tab_after_close<'a>(strip: &'a [String], closed: &str) -> Option<&'a str> {
+    let index = strip.iter().position(|id| id == closed)?;
+    strip
+        .get(index + 1)
+        .or_else(|| index.checked_sub(1).and_then(|left| strip.get(left)))
+        .map(String::as_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn strip(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    #[test]
+    fn closing_a_tab_lands_on_the_one_to_its_right_or_the_left_when_it_was_last() {
+        let tabs = strip(&["a", "b", "c"]);
+        assert_eq!(tab_after_close(&tabs, "a"), Some("b"));
+        assert_eq!(tab_after_close(&tabs, "b"), Some("c"));
+        assert_eq!(tab_after_close(&tabs, "c"), Some("b"));
+    }
+
+    #[test]
+    fn closing_the_only_tab_or_one_not_in_the_strip_lands_nowhere() {
+        assert_eq!(tab_after_close(&strip(&["a"]), "a"), None);
+        assert_eq!(tab_after_close(&strip(&["a", "b"]), "z"), None);
+    }
+
     // ── SHARED VECTORS with agentTabs.test.ts `tabLabels` ──────────────────────
     #[test]
     fn tab_labels_disambiguate_duplicate_providers() {
-        assert_eq!(tab_labels(&["claude", "codex"]), vec!["claude", "codex"]);
         assert_eq!(
-            tab_labels(&["codex", "codex"]),
+            tab_labels(&[("claude", 1), ("codex", 2)]),
+            vec!["claude", "codex"]
+        );
+        assert_eq!(
+            tab_labels(&[("codex", 1), ("codex", 2)]),
             vec!["codex".to_string(), "codex 2".to_string()]
         );
         assert_eq!(
-            tab_labels(&["claude", "codex", "codex", "claude"]),
+            tab_labels(&[("claude", 1), ("codex", 2), ("codex", 3), ("claude", 4)]),
             vec![
                 "claude".to_string(),
                 "codex".to_string(),
@@ -77,6 +117,21 @@ mod tests {
             ]
         );
         assert_eq!(tab_labels(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_tab_keeps_its_number_wherever_it_is_dragged() {
+        // Created in the order a, b, c; the strip shows c, a, b.
+        assert_eq!(
+            tab_labels(&[("claude", 30), ("claude", 10), ("claude", 20)]),
+            vec!["claude 3", "claude", "claude 2"]
+        );
+        // The same creation times with no clock to tell them apart fall back to
+        // the strip order.
+        assert_eq!(
+            tab_labels(&[("claude", 0), ("claude", 0)]),
+            vec!["claude", "claude 2"]
+        );
     }
 
     // ── SHARED VECTORS with agentTabs.test.ts `tabProseLabel` ──────────────────

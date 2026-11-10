@@ -150,6 +150,7 @@ function makeState(
     pendingSlotTab: {},
     routeNotFound: null,
     createTabInFlight: [],
+    pendingTabOrder: {},
     mobileScreen: "terminal",
     changes: { bySession: {} },
     ...over,

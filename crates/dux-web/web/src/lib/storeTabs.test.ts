@@ -64,6 +64,8 @@ function makeSpine() {
 }
 
 let spineBody: unknown = makeSpine()
+// The revision the fake server names when it answers a tab reorder.
+let reorderMinRev: number | null = 5
 let calls: [string, RequestInit | undefined][] = []
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -96,6 +98,16 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       headers: { get: () => null },
     } as unknown as Response
   }
+  if (u.endsWith("/tabs/reorder") && init?.method === "POST") {
+    const body = reorderMinRev === null ? {} : { min_workspace_rev: reorderMinRev }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
   if (u.includes("/tabs/") && init?.method === "DELETE") {
     // Mirror the real server: 200 + the authoritative `{ detached }` outcome,
     // computed from whether any OTHER tab in the closed tab's session is still
@@ -116,8 +128,8 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       ? !session.tabs.some((t) => t.id !== tid && t.has_live_process)
       : true
     // Mirror the real route's promotion: closing the tab the session's pointer
-    // names hands the slot to the next tab in strip order, and the body says
-    // which one took it.
+    // names hands the slot to the leftmost other tab, and the body says which
+    // one took it.
     const promoted =
       session && (session.slot_tab_id ?? session.id) === tid
         ? session.tabs.find((t) => t.id !== tid)?.id
@@ -253,6 +265,7 @@ function writeUrl(url: string) {
 }
 
 beforeEach(() => {
+  reorderMinRev = 5
   calls = []
   sockets = []
   spineBody = makeSpine()
@@ -461,6 +474,177 @@ describe("store agent-tab lifecycle", () => {
         u === "/api/v1/sessions/s1/tabs/t1" && init?.method === "DELETE",
     )
     expect(del).toBeDefined()
+  })
+
+  // ── Closing the tab on screen lands beside it, like a browser tab ────────
+
+  it("closing the focused tab lands on the tab to its right", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t3",
+    })
+  })
+
+  it("closing the focused last tab lands on the one to its left, not on the first", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t3")
+    mod.closeTab("s1", "t3")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t2",
+    })
+  })
+
+  it("closing the first tab placed in the middle lands on the right neighbour, whoever takes the slot", async () => {
+    // The slot passes to the leftmost tab (t1), but the view lands beside the
+    // tab that was closed.
+    seedTabs("t2", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t3",
+    })
+  })
+
+  it("a tab closed by another client lands beside where it was", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+
+    seedTabs("t1", ["t1", "t3"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "agent",
+        sessionId: "s1",
+        tabId: "t3",
+      })
+    })
+  })
+
+  it("a reorder shows at once and its overlay retires when the spine shows it", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    expect(mod.getSnapshot().pendingTabOrder.s1.ids).toEqual(["t3", "t1", "t2"])
+    expect(
+      find((u, init) => u === "/api/v1/sessions/s1/tabs/reorder" && init?.method === "POST"),
+    ).toBeDefined()
+
+    seedTabs("t1", ["t3", "t1", "t2"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("an answered reorder yields to the next spine even when another screen ordered the tabs differently", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered).not.toBeNull()
+    })
+
+    // Somebody else's order, not ours: it must not stay hidden behind the overlay.
+    seedTabs("t1", ["t2", "t3", "t1"])
+    fireSessionsChanged()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("a stale push that arrives after the answer does not retire the overlay, the revision the answer named does", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    reorderMinRev = 5
+    const mod = await loadStore()
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered?.minRev).toBe(5)
+    })
+
+    // Made before the reorder reached the server, delivered after the answer.
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const pushed = (rev: number) =>
+      mod.eventsSocket.onEvent({
+        event: "workspace",
+        rev,
+        workspace: { ...(spineBody as object), rev },
+      } as never)
+    pushed(4)
+    await tick()
+    expect(mod.getSnapshot().pendingTabOrder.s1).toBeDefined()
+
+    // The first document made after the reorder: it retires the overlay
+    // whatever order it shows (here another screen's).
+    seedTabs("t1", ["t2", "t3", "t1"])
+    pushed(5)
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+  })
+
+  it("keeps the overlay against every push when the answer names no revision", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    reorderMinRev = null
+    const mod = await loadStore()
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder.s1.answered).not.toBeNull()
+    })
+    // An older server's answer: no revision to hold a push to.
+    mod.eventsSocket.onEvent({
+      event: "workspace",
+      rev: 99,
+      workspace: { ...(spineBody as object), rev: 99 },
+    } as never)
+    await tick()
+    expect(mod.getSnapshot().pendingTabOrder.s1).toBeDefined()
+  })
+
+  it("a refused reorder drops the overlay and says so", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    const realFetch = fetchMock.getMockImplementation()
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error("The agent's tabs changed while you were moving one; try again.")
+    })
+    mod.reorderTabs("s1", ["t3", "t1", "t2"])
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().pendingTabOrder).toEqual({})
+    })
+    if (realFetch) fetchMock.mockImplementation(realFetch)
+  })
+
+  it("closing the focused tab lands beside it in the order on screen while a drag is unconfirmed", async () => {
+    seedTabs("t1", ["t1", "t2", "t3"])
+    const mod = await loadStore()
+    mod.selectTab("s1", "t2")
+    // Dragged to t3, t2, t1 and not confirmed yet: the tab to t2's right on
+    // screen is t1, not t3.
+    mod.reorderTabs("s1", ["t3", "t2", "t1"])
+    mod.closeTab("s1", "t2")
+    await tick()
+    expect(mod.getSnapshot().selectedTarget).toEqual({
+      kind: "agent",
+      sessionId: "s1",
+      tabId: "t1",
+    })
   })
 
   // ── The promotion overlay's lifecycle ────────────────────────────────────

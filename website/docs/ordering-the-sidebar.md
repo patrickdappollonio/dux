@@ -103,7 +103,7 @@ commands appear only when you have a terminal to move; the agent ones are always
 ## What sticks around
 
 Your **agent** order is saved. Quit dux, reopen it, and your agents come back in the
-order you left them.
+order you left them. So is the order of each agent's [provider tabs](/docs/agent-tabs#reordering-tabs).
 
 Your **terminal** order is not, because terminals themselves do not survive a restart.
 A terminal is a live shell; when dux stops, it is gone. New terminals start in creation

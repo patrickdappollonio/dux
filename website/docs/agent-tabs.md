@@ -33,7 +33,16 @@ tab on.
 There is no "main" tab and no "support" tab. Every tab is a provider session in the
 agent's shared worktree, and they all behave the same. This is the strip in the browser:
 
-![Three provider tabs on one agent, the first one active, with a plus button for adding another.](/screens/agent-tabs-strip.png)
+![Three provider tabs on one agent, the first one active and wearing a small pin, with a plus button for adding another.](/screens/agent-tabs-strip.png)
+
+The one difference is a small pin after the first tab's name, shown whenever the agent has
+two or more tabs. It marks the agent's first tab. On the web, selecting a stopped agent
+starts that tab, wherever it sits in the strip, and the pin's tooltip says so. The terminal
+UI draws the pin as `⚲`, and there nothing starts just because you looked at an agent, so
+the pin only says which tab is first. The pin moves only when the first tab closes and its
+place passes on.
+
+![The terminal UI tab strip with the first pill wearing the ⚲ pin after its name.](/screens/tui-tabs-strip-ordinals.png)
 
 - **On the web**, the `+` button on the strip adds a tab running the project's default
   provider immediately. The dropdown attached to it picks a different one.
@@ -99,6 +108,20 @@ first, would have taken the very same conversation.
 On the web, click a pill. Tabs are deep-linkable, so the URL points right at one and a
 reload brings you back to it.
 
+### Reordering tabs
+
+Tabs sit in the order you give them, like tabs in a browser. Drag a pill along the strip and
+drop it where you want it: on the web with the mouse, or with a press and hold on a touch
+screen, and in the terminal UI with the mouse. The terminal UI also has the
+`move-tab-left` and `move-tab-right` palette commands, which move the focused tab one place
+and tell you when it is already at that end.
+
+- **New tabs** always join at the right-hand end.
+- **The order is kept** across restarts, and is shared between the terminal UI and the web.
+- **Order is only for looking at.** Moving the first tab does not change which tab is the
+  agent's first, and resume never depends on position.
+- **A strip reorders within itself.** A tab never moves to another agent.
+
 dux also remembers, per agent, whichever tab you had focused last. Jump to a different
 agent and back (on the web, a sidebar click or the plain `#/agent/<id>` link; in the
 terminal UI, reselecting the agent) and you land on that same tab.
@@ -148,7 +171,9 @@ says nothing about it; a key you chose yourself is kept.
 ## Closing tabs
 
 Every tab closes, the **first** one included, as long as the agent has another tab to
-fall back on. Closing one ends that session, so dux asks you to confirm. Closing the
+fall back on. Closing one ends that session, so dux asks you to confirm. Like a browser
+tab, closing the tab you are looking at lands you on the tab to its right, or the one to its
+left when it was the last. Closing the
 agent's **last running** tab detaches the whole agent: it leaves the sidebar's active list
 but stays in Projects, ready to reopen.
 
@@ -161,8 +186,8 @@ long it waits.
 
 ### Closing the first tab hands its place on
 
-Closing an agent's first tab promotes the **next tab** to first, and the confirmation
-names it before you commit. The promoted tab is untouched otherwise: same conversation,
+Closing an agent's first tab promotes the **leftmost remaining tab** to first, and the
+confirmation names it before you commit. The promoted tab is untouched otherwise: same conversation,
 same process if it was running, same link. It simply becomes the tab the agent opens on.
 
 > [!IMPORTANT]

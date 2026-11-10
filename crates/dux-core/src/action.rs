@@ -83,6 +83,10 @@ pub enum Action {
     CloseTab,
     /// Stop the focused tab of the selected agent; the tab stays, ready to start again.
     StopTab,
+    /// Move the focused tab of the selected agent one place to the left.
+    MoveTabLeft,
+    /// Move the focused tab of the selected agent one place to the right.
+    MoveTabRight,
     /// Focus tab 1 of the selected agent. Ships with no default key: most terminals send Ctrl-1 as
     /// a plain 1, so bind your own key here for direct access.
     SelectTab1,
@@ -423,6 +427,8 @@ impl Action {
             Action::NewTab => "new_tab",
             Action::CloseTab => "close_tab",
             Action::StopTab => "stop_tab",
+            Action::MoveTabLeft => "move_tab_left",
+            Action::MoveTabRight => "move_tab_right",
             Action::SelectTab1 => "select_tab_1",
             Action::SelectTab2 => "select_tab_2",
             Action::SelectTab3 => "select_tab_3",
@@ -609,6 +615,8 @@ impl Action {
             Action::StopTab => {
                 "Stop the focused tab of the selected agent; the tab stays, ready to start again."
             }
+            Action::MoveTabLeft => "Move the focused tab of the selected agent one place left.",
+            Action::MoveTabRight => "Move the focused tab of the selected agent one place right.",
             Action::SelectTab1 => {
                 "Focus tab 1 of the selected agent. Ships with no default key: most terminals send Ctrl-1 as a plain 1, so bind your own key here for direct access."
             }
@@ -944,6 +952,8 @@ impl Action {
             | Action::NewTab
             | Action::CloseTab
             | Action::StopTab
+            | Action::MoveTabLeft
+            | Action::MoveTabRight
             | Action::SelectTab1
             | Action::SelectTab2
             | Action::SelectTab3

@@ -105,6 +105,7 @@ function makeState(overrides: Partial<DuxState> = {}): DuxState {
     startedDormantTabs: [],
     pendingSlotTab: {},
     createTabInFlight: [],
+    pendingTabOrder: {},
     ...overrides,
   } as unknown as DuxState
 }

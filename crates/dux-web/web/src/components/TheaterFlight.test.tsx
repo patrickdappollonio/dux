@@ -117,6 +117,7 @@ function makeState(theater: boolean): DuxState {
     pendingSlotTab: {},
     routeNotFound: null,
     createTabInFlight: [],
+    pendingTabOrder: {},
     mobileScreen: "terminal",
     changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
   } as unknown as DuxState

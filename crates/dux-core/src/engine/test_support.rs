@@ -85,6 +85,8 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         launched_drop_paste: HashMap::new(),
         companion_terminals: HashMap::new(),
         agent_tabs: HashMap::new(),
+        slot_tab_positions: HashMap::new(),
+        slot_tab_created_ms: HashMap::new(),
         terminating_ptys: Vec::new(),
         process_registry: crate::process_sessions::AgentProcessRegistry::default(),
         removal_workers: Vec::new(),

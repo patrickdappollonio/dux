@@ -6,7 +6,7 @@
 //!
 //! Every tab of `:id` is addressable at `.../tabs/:tab`, the session-slot tab
 //! included, and so is its PTY socket. `DELETE` closes the slot tab by PROMOTING
-//! the next tab in strip order into the slot, a pointer move, so the successor keeps
+//! the leftmost other tab into the slot, a pointer move, so the successor keeps
 //! its own id, row, process and sockets and only changes role; `PATCH` accepts it
 //! and delegates to the session-level provider change. Both ask
 //! `EngineHandle::is_slot_tab` rather than infer slot-ness from a missing row.
@@ -50,6 +50,7 @@ use std::sync::Arc;
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/sessions/{id}/tabs", post(create_tab))
+        .route("/api/v1/sessions/{id}/tabs/reorder", post(reorder_tabs))
         .route("/api/v1/sessions/{id}/tabs/{tab}", delete(delete_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}", patch(retarget_tab))
         .route("/api/v1/sessions/{id}/tabs/{tab}/start", post(start_tab))
@@ -135,6 +136,69 @@ async fn create_tab(
     }
 }
 
+/// Body for a tab reorder: every tab of the agent, in the desired order.
+#[derive(Deserialize)]
+struct ReorderTabsBody {
+    tab_ids: Vec<String>,
+}
+
+/// 200 body for a tab reorder: the lowest workspace revision that is certain to
+/// show the new order. Pushed documents travel on another channel from this
+/// answer, so one made before the reorder can still arrive after it; the browser
+/// keeps its own order on screen until a document at or past this revision (or a
+/// fetch begun after the answer) replaces it.
+#[derive(Serialize)]
+struct ReorderedTabs {
+    min_workspace_rev: u64,
+}
+
+/// `POST /api/v1/sessions/:id/tabs/reorder` - persist a new left-to-right order
+/// for the agent's provider tabs, the slot tab included. `tab_ids` must be the
+/// complete set of the agent's tabs; the engine validates it strictly. Which
+/// tab holds the slot does not change.
+///
+/// The revision is read after the command has been applied, on the engine's own
+/// thread order: the document published now cannot show the change unless it was
+/// made after it, and the next one is the first certain to.
+async fn reorder_tabs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ReorderTabsBody>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    if let Err(resp) = resolve_worktree(&state, id.clone()).await {
+        return resp.into_response();
+    }
+    match state
+        .engine
+        .apply_wire_scoped(
+            WireCommand::ReorderAgentTabs {
+                session_id: id,
+                tab_ids: body.tab_ids,
+            },
+            scope_from_headers(&headers, &state.connections),
+        )
+        .await
+    {
+        Ok(_) => {
+            let published = state
+                .engine
+                .workspace_docs()
+                .borrow()
+                .as_ref()
+                .map_or(0, |doc| doc.rev);
+            Json(ReorderedTabs {
+                min_workspace_rev: published.saturating_add(1),
+            })
+            .into_response()
+        }
+        Err(e) => refusal(e, StatusCode::BAD_REQUEST),
+    }
+}
+
 /// Resolve a `.../tabs/:tab` address: `:id` names a live session and `:tab` is one
 /// of its tabs. Every `:tab`-scoped verb opens with this, so they cannot drift on
 /// what a bad address answers. The refusal is boxed because an axum response is wide
@@ -170,7 +234,7 @@ async fn resolve_tab_of_session(
 }
 
 /// `DELETE /api/v1/sessions/:id/tabs/:tab` - close one tab. Naming the
-/// session-slot tab promotes the next tab in strip order into it; the agent's
+/// session-slot tab promotes the leftmost other tab into it; the agent's
 /// only tab is refused by the engine, because an agent always has a slot. A
 /// `:tab` not owned by `:id` is a 404.
 async fn delete_tab(

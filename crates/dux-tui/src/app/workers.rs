@@ -40,11 +40,21 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 impl PruneViewContext {
-    fn capture(app: &App) -> Self {
+    pub(super) fn capture(app: &App) -> Self {
         let selected_session = app.selected_session().map(|session| session.id.clone());
-        let focused_tab = selected_session
-            .as_ref()
-            .map(|session_id| app.focused_tab_id(session_id));
+        // The tab on screen when the strip was last drawn, if it has since been
+        // closed elsewhere: resolving the focus now would already have fallen
+        // back to another tab, and the close would look like one that was not
+        // on screen.
+        let focused_tab = selected_session.as_ref().map(|session_id| {
+            let now = app.session_tab_ids(session_id);
+            match &app.last_tab_strip {
+                Some(drawn) if drawn.session_id == *session_id && !now.contains(&drawn.focused) => {
+                    drawn.focused.clone()
+                }
+                _ => app.focused_tab_id(session_id),
+            }
+        });
         // Extra tabs only: a closed tab's sentence comes from the prune itself,
         // and the slot tab's own exit is the agent's notice rather than a tab's.
         let tab_providers: HashMap<String, String> = app
@@ -60,11 +70,21 @@ impl PruneViewContext {
                 .find(|session| &session.id == session_id)
                 .map(|session| session.slot_tab_id().as_str().to_string())
         });
+        // The strip as last drawn when it is this agent's: a tab another screen
+        // closed is already gone from the engine, but not from that drawing.
+        let strip_before = selected_session
+            .as_ref()
+            .map(|session_id| match &app.last_tab_strip {
+                Some(drawn) if drawn.session_id == *session_id => drawn.tabs.clone(),
+                _ => app.session_tab_ids(session_id),
+            })
+            .unwrap_or_default();
         Self {
             selected_session,
             focused_tab,
             selected_slot_tab,
             tab_providers,
+            strip_before,
         }
     }
 }
@@ -232,7 +252,11 @@ impl App {
         }
     }
 
-    fn apply_pruned_agent_tabs(&mut self, pruned: &[PrunedPty], context: &PruneViewContext) {
+    pub(super) fn apply_pruned_agent_tabs(
+        &mut self,
+        pruned: &[PrunedPty],
+        context: &PruneViewContext,
+    ) {
         let mut rebuild_needed = false;
         for pty in pruned.iter().filter(|pty| pty.kind == PrunedPtyKind::Agent) {
             rebuild_needed |= self.apply_pruned_agent_tab(pty, context);
@@ -264,7 +288,7 @@ impl App {
                 .unwrap_or_default()
         });
         if pty.tab_closed {
-            self.apply_closed_agent_tab(pty, session_id, was_focused_tab);
+            self.apply_closed_agent_tab(pty, session_id, was_focused_tab, context);
             true
         } else {
             self.apply_exited_agent_tab(support_provider, was_focused_tab);
@@ -272,7 +296,13 @@ impl App {
         }
     }
 
-    fn apply_closed_agent_tab(&mut self, pty: &PrunedPty, session_id: &str, tab_focus: FocusState) {
+    fn apply_closed_agent_tab(
+        &mut self,
+        pty: &PrunedPty,
+        session_id: &str,
+        tab_focus: FocusState,
+        context: &PruneViewContext,
+    ) {
         // The prune's own account of the close, in the sentence the browser
         // gets: the row is gone, so nothing here could look these facts up.
         if let Some(closed) = &pty.closed_tab {
@@ -281,9 +311,14 @@ impl App {
         if tab_focus == FocusState::Unfocused {
             return;
         }
-        let target = self
-            .engine
-            .first_live_tab(session_id)
+        // The tab that closed was on screen, so the view lands beside where it
+        // was, like a browser tab; a neighbour that is gone too falls back to
+        // the first live tab.
+        let strip_now = self.session_tab_ids(session_id);
+        let target = dux_core::agent_tabs::tab_after_close(&context.strip_before, &pty.id)
+            .filter(|id| strip_now.iter().any(|now| now == id))
+            .map(str::to_string)
+            .or_else(|| self.engine.first_live_tab(session_id))
             .unwrap_or_else(|| session_id.to_string());
         self.set_focused_tab(session_id, &target);
         if self.session_surface == SessionSurface::Agent {
