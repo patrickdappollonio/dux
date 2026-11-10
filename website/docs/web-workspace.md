@@ -74,7 +74,7 @@ The URL tracks what you are looking at, so you can bookmark a session or send a 
 
 Every move to a different place adds one history entry, so Back always returns you to where you were: select three agents in turn and Back walks them in reverse. Every tab and every terminal you look at is a place of its own, like browser tabs: switch from one of an agent's tabs to another, or from one of its terminals to the next, and Back takes you to the one before.
 
-Changing the layout, or clicking from the agent into its terminal and back, adds nothing: the address follows the part you are typing into, rewritten in place. Closing the tab you are on adds nothing either: its step becomes the tab beside it. If Back or Forward lands on a tab that has since closed, dux says so and takes you on: Back to the agent, Forward to the step after it. Moves that stay where you already are rewrite the one entry instead:
+Changing the layout, or clicking from the agent into its terminal and back, adds nothing: the address follows the part you are typing into, rewritten in place. Closing the tab you are on adds nothing either: its step becomes the tab beside it. If Back or Forward lands on a tab that has since closed, dux says so, tells you where you are now, and keeps going the way you were: Back to the agent (or past it, if you just came from there), Forward to the step after it, or back where you came from when there is nothing after it. Moves that stay where you already are rewrite the one entry instead:
 
 - reconnecting after the wifi drops
 - following a link back to where you already were

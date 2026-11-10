@@ -61,8 +61,15 @@ function applyCurrentEntry(): void {
 let deferTraversal = false
 let traversals: (() => void)[] = []
 
+// REALISTIC ORDER, opt-in per test: a browser runs every traversal as a later
+// task, and a traversal that changes the fragment fires popstate and then, as
+// a task of its own queued in the same turn, hashchange. A store that reads
+// the hashchange as a second navigation lands twice; only this order shows it.
+let realistic = false
+
 function queueTraversal(run: () => void): void {
   if (deferTraversal) traversals.push(run)
+  else if (realistic) setTimeout(run, 0)
   else run()
 }
 
@@ -84,9 +91,15 @@ function mintKey(): string {
 }
 
 function landOn(target: number): void {
+  const before = loc.hash
   index = target
   applyCurrentEntry()
-  for (const listener of popstateListeners) listener()
+  if (realistic && loc.hash !== before) {
+    setTimeout(() => {
+      for (const listener of [...hashchangeListeners]) listener()
+    }, 0)
+  }
+  for (const listener of [...popstateListeners]) listener()
 }
 
 const fakeHistory = {
@@ -179,7 +192,8 @@ vi.mock("./notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./notify")>()
   return {
     ...actual,
-    notifyWarning: (message: string) => void warnings.push(message),
+    notifyWarning: (message: Parameters<typeof actual.notifyWarning>[0]) =>
+      void warnings.push(actual.noticeText(message)),
   }
 })
 
@@ -361,6 +375,7 @@ beforeEach(() => {
   historyWriteError = null
   deferTraversal = false
   traversals = []
+  realistic = false
   navigationApi = true
   fakeNavigation.transition = null
   popstateListeners = []
@@ -467,7 +482,12 @@ function popstateTo(url: string): void {
   entryKeys.push(mintKey())
   index = entries.length - 1
   applyCurrentEntry()
-  for (const listener of popstateListeners) listener()
+  if (realistic) {
+    setTimeout(() => {
+      for (const listener of [...hashchangeListeners]) listener()
+    }, 0)
+  }
+  for (const listener of [...popstateListeners]) listener()
 }
 
 // Push a new spine through the events socket, as the server does when the
@@ -490,9 +510,12 @@ async function pushSpine(
       terminals: spine?.terminals.map((t) => [t.id, ownerKey(t.owner)]) ?? [],
     })
   const want = shape(spineBody)
-  await vi.waitFor(() => {
-    expect(shape(mod.getSnapshot().spine)).toBe(want)
-  })
+  await vi.waitFor(
+    () => {
+      expect(shape(mod.getSnapshot().spine)).toBe(want)
+    },
+    { interval: 2 },
+  )
 }
 
 // Open a terminal the agent did not have, the way creating one does: the
@@ -3192,3 +3215,436 @@ describe("entries that went away, and identical neighbours", () => {
     expect(entries).toEqual([OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1/tab/b2"])
   })
 })
+
+// Seen by a fuzzer and kept as the shortest journeys that broke a rule: the
+// address and history stay true through presses, folds, tabs closed here and
+// elsewhere, reloads and links, in the order a browser really delivers events.
+describe("journeys a fuzzer found", () => {
+  const settle = async (n = 6) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0))
+  }
+  function identicalNeighbour(): string | null {
+    const live = entries
+      .slice(DUX_ENTRY_INDEX)
+      .filter((_, i) => {
+        const st = entryStates[i + DUX_ENTRY_INDEX] as { duxModal?: unknown } | null
+        return !(st && typeof st === "object" && "duxModal" in st)
+      })
+    for (let i = 1; i < live.length; i++) if (live[i] === live[i - 1]) return live[i]
+    return null
+  }
+
+  it("goes forward onto the entry ahead when a press names it", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    history.back()
+    await settle()
+    mod.chooseStackPart("s1", "t1")
+    await settle()
+    expect(identicalNeighbour()).toBeNull()
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+  })
+
+  it("goes forward onto the entry ahead when a fold the user pressed names it", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"], live: true }])
+    mod.selectSession("s1")
+    mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+    history.back()
+    await settle()
+    mod.setStackLayout("s1", "terminal")
+    await settle()
+    expect(identicalNeighbour()).toBeNull()
+  })
+
+  it("goes back onto the entry behind when the tab on screen closes elsewhere", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["b2"] }])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    await settle()
+    expect(identicalNeighbour()).toBeNull()
+    expect(loc.hash).toBe("#/agent/s1")
+  })
+
+  it("stops naming the tab on top of the dock when it closes elsewhere", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["b2"], terminals: ["t1"] }])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.chooseStackPart("s1", "t1")
+    await settle()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+    await settle()
+    expect(loc.hash).toBe(mod.screenAddress())
+    expect(loc.hash).toBe("#/agent/s1/terminal/t1")
+  })
+
+  it("moves on past a closed tab when its fallback is the place Back left", async () => {
+    const mod = await loadStore("", [{ id: "s1", project_id: "p1", tabs: ["b2"] }])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.clickTab("s1", "s1-slot")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }])
+    const before = mod.screenAddress()
+    history.back()
+    await settle()
+    expect(mod.screenAddress()).not.toBe(before)
+    expect(mod.getSnapshot().selectedTarget).toBeNull()
+    expect(leftApp).toBe(false)
+  })
+
+  it("goes back where it came from on Forward onto a closed newest tab, and says so", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    history.back()
+    await settle()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    const w0 = warnings.length
+    history.forward()
+    await settle()
+    // Forward has nowhere to go past the closed tab; the place it came from is
+    // the only honest landing, and the toast says that is where the user is.
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ kind: "agent", sessionId: "s1" })
+    expect(identicalNeighbour()).toBeNull()
+    expect(warnings.slice(w0)).toHaveLength(1)
+    expect(warnings[w0]).toMatch(/back/i)
+  })
+
+  it("raises one toast for a closed tab Back lands on, in the order a browser fires events", async () => {
+    realistic = true
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.selectSession("s2")
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    const w0 = warnings.length
+    history.back()
+    await settle()
+    expect(warnings.length - w0).toBe(1)
+    expect(loc.hash).toBe("#/agent/s1")
+  })
+
+  it("names where a Forward walk past a closed tab landed", async () => {
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"] },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s1")
+    mod.clickTab("s1", "b2")
+    mod.selectSession("s2")
+    history.back()
+    await settle()
+    history.back()
+    await settle()
+    await pushSpine(mod, [{ id: "s1", project_id: "p1" }, { id: "s2", project_id: "p1" }])
+    const w0 = warnings.length
+    history.forward()
+    await settle()
+    expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    expect(warnings.slice(w0)).toHaveLength(1)
+    expect(warnings[w0]).toMatch(/moved on to s2/)
+  })
+
+  // Only with the Navigation API: without it nothing tells this Back from a
+  // link, so the entry resolves as a link does and is rewritten, which is the
+  // tenet's stated fallback for such a browser.
+  it.each([true])(
+    "lands Back on an earlier load's bare agent entry without copying it (Navigation API %s)",
+    async (nav) => {
+      navigationApi = nav
+      const foreign = (id: number) => ({ duxRoute: "", duxEntry: { session: "older-load", id, key: "k", prev: null } })
+      entries = [OUTSIDE_ENTRY, "#/agent/s1", "#/agent/s1/tab/b2"]
+      entryStates = [null, foreign(1), foreign(2)]
+      entryKeys = [mintKey(), mintKey(), mintKey()]
+      index = 2
+      loc = { protocol: "http:", host: "localhost:0", hash: "#/agent/s1/tab/b2", pathname: "/", search: "" }
+      vi.stubGlobal("location", loc)
+      spineBody = makeSpine([{ id: "s1", project_id: "p1", tabs: ["b2"], focused: "b2" }])
+      const mod = await import("./store")
+      await vi.waitFor(() => expect(mod.getSnapshot().selectedTarget).toMatchObject({ tabId: "b2" }))
+      await settle()
+      history.back()
+      await settle()
+      expect(identicalNeighbour()).toBeNull()
+    },
+  )
+
+  it("follows a link to a bare agent address to its remembered tab when the browser fires both events", async () => {
+    realistic = true
+    const mod = await loadStore("", [
+      { id: "s1", project_id: "p1", tabs: ["b2"], focused: "b2" },
+      { id: "s2", project_id: "p1" },
+    ])
+    mod.selectSession("s2")
+    await settle()
+    popstateTo("#/agent/s1")
+    await settle()
+    expect(mod.getSnapshot().selectedTarget).toMatchObject({ tabId: "b2" })
+  })
+})
+
+// A seeded walk through everything that moves the address: selecting agents,
+// tab and terminal pills, presses into a part, layouts, theater, tabs and
+// terminals closing here and on another device, new ones, dialogs, reloads,
+// links, and runs of Back and Forward, in the order a real browser delivers
+// events. After every step:
+//
+// - no two neighbouring entries are the same address (dialog entries aside);
+// - the screen stands for the address in the bar, or a not-found screen does;
+// - every Back and Forward visibly changes the screen, except a Forward onto a
+//   closed tab with nothing after it, which goes back where it came from and
+//   says so;
+// - a landing on a closed tab raises exactly one toast saying so, and no other
+//   landing raises one.
+//
+// What the tenet itself exempts is exempted, and only that: without the
+// Navigation API a browser rewrites rather than going onto an exact entry, so
+// identical neighbours and still presses are allowed there; an entry written
+// before a reload is not this page's, so it is never gone onto; and a Forward
+// onto a closed dialog's entry with nothing ahead steps back the other way, onto
+// the place it came from.
+describe("a seeded walk keeps the address and history true", () => {
+  type Mod = Awaited<ReturnType<typeof loadStore>>
+  type World = { id: string; tabs: string[]; terminals: string[] }[]
+  const SEEDS = 60
+  const STEPS = 50
+  const settle = async (n = 3) => {
+    for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0))
+  }
+  const specs = (w: World): SessionSpec[] =>
+    w.map((s) => ({ id: s.id, project_id: "p1", tabs: [...s.tabs], terminals: [...s.terminals], live: true }))
+  // xorshift: the same seed walks the same steps on every machine.
+  function rng(seed: number) {
+    let x = seed * 2654435761 + 12345
+    return () => {
+      x ^= x << 13
+      x ^= x >>> 17
+      x ^= x << 5
+      return ((x >>> 0) % 1000000) / 1000000
+    }
+  }
+
+  async function walk(seed: number, nav: boolean) {
+    realistic = true
+    navigationApi = nav
+    const r = rng(seed)
+    const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]
+    const w: World = [
+      { id: "s1", tabs: ["b2", "b3"], terminals: ["t1", "t2"] },
+      { id: "s2", tabs: ["c2"], terminals: ["u1"] },
+    ]
+    const mem = new Map<string, string>()
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+    })
+    let mod: Mod = await loadStore("", specs(w))
+    let modals = await import("./modalHistory")
+    const foreignKeys = new Set<string>()
+    const dialogs: (() => void)[] = []
+    const log: string[] = []
+    let n = 0
+    const fail = (why: string): never => {
+      throw new Error(`seed ${seed} (Navigation API ${nav}): ${why}\n  ${log.join("\n  ")}\nlast toasts ${JSON.stringify(warnings.slice(-2))}\nentries ${JSON.stringify(entries)} @${index}`)
+    }
+    const isModal = (i: number) => {
+      const st = entryStates[i] as { duxModal?: unknown } | null
+      return !!st && typeof st === "object" && "duxModal" in st
+    }
+    const screen = () => {
+      const s = mod.getSnapshot()
+      return `${mod.screenAddress()}|${JSON.stringify(s.routeNotFound)}|${modals.openModals().length}|${JSON.stringify(s.selectedTarget)}|${s.theater}`
+    }
+    const check = () => {
+      if (leftApp) fail("left the app")
+      const live = entries.map((url, i) => ({ url, i })).filter(({ i }) => i >= DUX_ENTRY_INDEX && !isModal(i))
+      for (let k = 1; k < live.length; k++) {
+        const [a, b] = [live[k - 1], live[k]]
+        if (a.url !== b.url || !nav || foreignKeys.has(entryKeys[a.i]) || foreignKeys.has(entryKeys[b.i])) continue
+        fail(`identical neighbours ${a.url}`)
+      }
+      const s = mod.getSnapshot()
+      if (s.routeNotFound) {
+        if (mod.parseRoute(loc.hash).target === null) fail(`not-found at home address ${loc.hash}`)
+      } else if (mod.screenAddress() !== loc.hash) {
+        fail(`screen ${mod.screenAddress()} but address ${loc.hash}`)
+      }
+    }
+    const session = (id: string | null) => w.find((s) => s.id === id)
+    const press = async (dir: -1 | 1) => {
+      const target = index + dir
+      if (target < DUX_ENTRY_INDEX || target >= entries.length) return
+      const url = entries[target]
+      // A tab the address is about: its own address, or the editor or changes
+      // screen over it, never a terminal named under it.
+      const tab = /#\/agent\/([^/?]+)\/tab\/([^/?]+)(\/editor.*|\/changes)?$/.exec(url.replace(/\?.*$/, ""))
+      const owner = tab ? session(tab[1]) : undefined
+      const closedTab = !isModal(target) && owner !== undefined && !owner.tabs.includes(tab![2])
+      const foreign = foreignKeys.has(entryKeys[target])
+      const before = screen()
+      const w0 = warnings.length
+      log.push(`${dir < 0 ? "BACK" : "FORWARD"} -> ${url}${closedTab ? " (closed tab)" : ""}`)
+      if (dir < 0) history.back()
+      else history.forward()
+      await settle(5)
+      const toasts = warnings.slice(w0).filter((m) => /tab has closed/.test(m)).length
+      // Forward onto a closed tab with nothing after it can only go back where
+      // it came from, and the toast says that is what happened.
+      const saidBack = warnings.slice(w0).some((m) => /nothing after it/.test(m))
+      if (screen() === before && nav && !isModal(target) && !foreign && !saidBack) {
+        fail(`${dir < 0 ? "Back" : "Forward"} did not visibly move (${before}; toasts ${JSON.stringify(warnings.slice(w0))})`)
+      }
+      if (closedTab && !foreign && toasts !== 1) fail(`closed-tab landing raised ${toasts} toasts`)
+      if (!closedTab && toasts !== 0) fail(`a plain landing raised ${toasts} closed-tab toasts`)
+    }
+    for (let step = 0; step < STEPS; step++) {
+      const roll = r()
+      const cur = session(mod.getSnapshot().selectedSessionId)
+      if (roll < 0.1) {
+        const s = pick(w)
+        log.push(`select ${s.id}`)
+        mod.selectSession(s.id)
+      } else if (roll < 0.2) {
+        const s = cur ?? pick(w)
+        const t = pick([`${s.id}-slot`, ...s.tabs])
+        log.push(`tab pill ${s.id} ${t}`)
+        mod.clickTab(s.id, t)
+      } else if (roll < 0.3) {
+        const s = cur ?? pick(w)
+        if (s.terminals.length > 0) {
+          const t = pick(s.terminals)
+          log.push(`terminal pill ${s.id} ${t}`)
+          mod.selectTerminal(t, { kind: "session", sessionId: s.id })
+        }
+      } else if (roll < 0.38) {
+        if (cur) {
+          const st = mod.getSnapshot()
+          const parts = [st.stackTabs[cur.id] ?? `${cur.id}-slot`, ...(cur.terminals.length ? [st.stackTerminals[cur.id] ?? cur.terminals[0]] : [])]
+          const p = pick(parts)
+          log.push(`press ${cur.id} ${p}`)
+          mod.chooseStackPart(cur.id, p)
+        }
+      } else if (roll < 0.45) {
+        if (cur) {
+          const l = pick(["agent", "split", "terminal"] as const)
+          log.push(`layout ${cur.id} ${l}`)
+          mod.setStackLayout(cur.id, l)
+        }
+      } else if (roll < 0.5) {
+        log.push("theater")
+        mod.toggleTheater()
+      } else if (roll < 0.55) {
+        if (cur && cur.tabs.length > 0) {
+          const t = pick(cur.tabs)
+          log.push(`close tab here ${cur.id} ${t}`)
+          await mod.closeTab(cur.id, t)
+          cur.tabs = cur.tabs.filter((x) => x !== t)
+          await pushSpine(mod, specs(w))
+        }
+      } else if (roll < 0.6) {
+        const s = pick(w)
+        if (s.tabs.length > 0) {
+          const t = pick(s.tabs)
+          log.push(`close tab elsewhere ${s.id} ${t}`)
+          s.tabs = s.tabs.filter((x) => x !== t)
+          await pushSpine(mod, specs(w))
+        }
+      } else if (roll < 0.66) {
+        const s = r() < 0.6 && cur ? cur : pick(w)
+        if (s.terminals.length > 0) {
+          const t = pick(s.terminals)
+          log.push(`close terminal ${s.id} ${t}`)
+          s.terminals = s.terminals.filter((x) => x !== t)
+          await pushSpine(mod, specs(w))
+        }
+      } else if (roll < 0.69) {
+        const s = cur ?? pick(w)
+        const t = `n${++n}`
+        log.push(`new terminal ${s.id} ${t}`)
+        s.terminals.push(t)
+        await pushSpine(mod, specs(w))
+        mod.selectTerminal(t, { kind: "session", sessionId: s.id })
+      } else if (roll < 0.72) {
+        const s = cur ?? pick(w)
+        const t = `x${++n}`
+        log.push(`new tab ${s.id} ${t}`)
+        s.tabs.push(t)
+        await pushSpine(mod, specs(w))
+        mod.clickTab(s.id, t)
+      } else if (roll < 0.77) {
+        log.push("open dialog")
+        const close: { run: () => void } = { run: () => {} }
+        close.run = modals.registerModal(() => {
+          close.run()
+          dialogs.splice(dialogs.indexOf(close.run), 1)
+        })
+        dialogs.push(close.run)
+      } else if (roll < 0.8) {
+        const close = dialogs.pop()
+        if (close) {
+          log.push("cancel dialog")
+          close()
+        }
+      } else if (roll < 0.83) {
+        log.push(`reload at ${loc.hash}`)
+        for (const k of entryKeys) foreignKeys.add(k)
+        popstateListeners = []
+        hashchangeListeners = []
+        mod.eventsSocket.dispose()
+        dialogs.length = 0
+        vi.resetModules()
+        mod = (await import("./store")) as Mod
+        modals = await import("./modalHistory")
+        await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull(), { interval: 2 })
+      } else if (roll < 0.86) {
+        const all = ["/", ...w.flatMap((s) => [
+          `#/agent/${s.id}`,
+          ...s.tabs.map((t) => `#/agent/${s.id}/tab/${t}`),
+          ...s.terminals.map((t) => `#/agent/${s.id}/terminal/${t}`),
+        ]), "#/agent/s1/tab/gone9", "#/agent/s1/terminal/gone8", "#/agent/s1/terminal/gone8/editor"]
+        const a = pick(all)
+        if (a !== (loc.hash || "/")) {
+          log.push(`link ${a}`)
+          popstateTo(a)
+        }
+      } else {
+        const dir = roll < 0.94 ? -1 : 1
+        for (let k = 1 + Math.floor(r() * 3); k > 0; k--) {
+          await press(dir)
+          check()
+        }
+      }
+      await settle()
+      check()
+    }
+  }
+
+  for (const nav of [true, false]) {
+    it(`holds for ${SEEDS} seeds of ${STEPS} steps (Navigation API ${nav})`, async () => {
+      for (let seed = 1; seed <= SEEDS; seed++) {
+        // Each seed is a fresh page in a fresh tab: no listener, warning or
+        // queued traversal of the seed before it may reach this one.
+        popstateListeners = []
+        hashchangeListeners = []
+        leftApp = false
+        traversals = []
+        warnings.length = 0
+        vi.resetModules()
+        await walk(seed, nav)
+        const store = await import("./store")
+        store.eventsSocket.dispose()
+        await settle(8)
+      }
+    }, 300_000)
+  }
+})
+

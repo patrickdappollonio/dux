@@ -213,7 +213,7 @@ import type {
   StartupLogEntry,
   TerminalView,
 } from "./types"
-import { supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
+import { sessionLabel, supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   renameBlockedReason,
   renamePayload,
@@ -2561,6 +2561,10 @@ function pruneSelectionIfGone(
   const owner = target.owner
   const stillExists = ownerHasTerminal(spine.terminals, owner, target.terminalId)
   const dockSession = owner.kind === "session" ? owner.sessionId : null
+  if (stillExists && dockSession !== null) {
+    followStackTabAfterClose(spine, previous, dockSession)
+    return
+  }
   if (!stillExists && dockSession !== null && spine.sessions.some((s) => s.id === dockSession)) {
     // Like a browser tab: the terminal on screen ending shows its neighbour in
     // the dock, the one to its right or else the one to its left, and with
@@ -2594,6 +2598,24 @@ function pruneSelectionIfGone(
         : null
     fallBackTo(() => selectSessionRoute(fallback, "replace"))
   }
+}
+
+// The tab on top of the dock closed, here or on another device, while typing
+// goes to the dock. Like a browser tab, the tab beside it takes its place, and
+// the address, which names the tab on top, is rewritten to say so.
+function followStackTabAfterClose(spine: Spine, previous: SessionView[], sessionId: string): void {
+  const onTop = state.stackTabs[sessionId] ?? readStackMemory(sessionId).tab
+  const session = spine.sessions.find((s) => s.id === sessionId)
+  if (onTop === null || onTop === undefined || session === undefined) return
+  if (session.tabs.some((t) => t.id === onTop)) return
+  const neighbour = tabAfterClose(previous.find((s) => s.id === sessionId)?.tabs ?? [], onTop)
+  const landing =
+    neighbour !== undefined && session.tabs.some((t) => t.id === neighbour)
+      ? neighbour
+      : session.slot_tab_id
+  writeStackMemory(sessionId, { tab: landing })
+  setState({ stackTabs: { ...state.stackTabs, [sessionId]: landing } })
+  syncUrl("replace")
 }
 
 // The terminal in front of the dock ended while typing goes to the agent. The
@@ -3558,6 +3580,12 @@ function pushHashAfterModals(hash: string): void {
   if (!dropModalEntriesBeforeMove(go)) go()
 }
 
+// The address the screen currently stands for. Exported for the routing tests
+// only, which hold it against the address bar after every move.
+export function screenAddress(): string {
+  return routeHash(currentRoute())
+}
+
 // The route the app currently holds in state.
 function currentRoute(): Route {
   const target = state.selectedTarget
@@ -3663,12 +3691,44 @@ function syncUrl(mode?: "replace" | "push"): void {
       const label = { session: PAGE_SESSION, id: nextEntryId++, key, prev: behind }
       history.pushState(entryState(null, next, label), "", url)
       labelledEntryKeys.set(label.id, key)
+      cursorMoves += 1
+      noteWrittenEntry(next)
       rememberEntryIndex()
       return
     }
-    if (fallbackWrite && traverseOnto(key)) return
+    rewriteEntry(next)
+  } catch (err) {
+    console.warn("[dux] history write refused", err)
+  }
+}
+
+// THE ONE PATH EVERY IN-PLACE REWRITE TAKES. When the entry right behind or
+// right ahead, written by this page, already holds the address, the page goes
+// onto that entry by its exact key instead of writing a copy beside it, so no
+// two neighbouring entries are ever the same place. Otherwise the entry the
+// page is on is rewritten. Without the Navigation API there is no exact key to
+// go to, and it rewrites.
+function rewriteEntry(next: string): void {
+  const nav = navigationApi()
+  const here = nav?.currentEntry
+  if (nav && here && !nav.transition) {
+    const twin = nav
+      .entries()
+      .filter((entry) => Math.abs(entry.index - here.index) === 1)
+      .sort((a, b) => a.index - b.index)
+      .find((entry) => writtenAddresses.get(entry.key) === next)
+    if (twin && traverseExactly(nav, twin.key, { newerIntent: true }, () => replaceEntry(next))) {
+      return
+    }
+  }
+  replaceEntry(next)
+}
+
+function replaceEntry(next: string): void {
+  try {
     // A rewrite keeps the entry's identity and what is behind it, and records
     // its new position.
+    const key = positionKey(parseRoute(next))
     const own = ownLabel(history.state)
     const label = {
       session: PAGE_SESSION,
@@ -3676,11 +3736,23 @@ function syncUrl(mode?: "replace" | "push"): void {
       key,
       prev: own?.prev ?? null,
     }
-    history.replaceState(entryState(history.state, next, label), "", url)
+    history.replaceState(entryState(history.state, next, label), "", historyUrlFor(next))
     labelledEntryKeys.set(label.id, key)
+    noteWrittenEntry(next)
+    if (landedAt !== null && landedAt.moves === cursorMoves) landedAt.hash = next
   } catch (err) {
     console.warn("[dux] history write refused", err)
   }
+}
+
+// The address this page wrote into each entry, by Navigation API key: what a
+// rewrite compares its neighbours against. Only entries this page load wrote
+// or labelled are here, so nothing outside dux is ever gone onto.
+const writtenAddresses = new Map<string, string>()
+
+function noteWrittenEntry(address: string): void {
+  const here = navigationApi()?.currentEntry
+  if (here) writtenAddresses.set(here.key, address)
 }
 
 // --- History entry labels ---------------------------------------------------
@@ -3761,6 +3833,7 @@ function labelCurrentEntry(current: string): EntryLabel["prev"] {
   }
   history.replaceState(entryState(history.state, current, label), "", historyUrlFor(current))
   labelledEntryKeys.set(label.id, label.key)
+  noteWrittenEntry(current)
   return { id: label.id, key: label.key, navKey }
 }
 
@@ -3782,11 +3855,9 @@ interface PendingTraversal {
 }
 let pendingTraversal: PendingTraversal | null = null
 
-// Run a navigation that falls back from something that disappeared. Such a
-// navigation replaces the current entry, unless the entry right behind it is
-// the destination, in which case it goes back to that entry: a replace there
-// would leave two identical entries in a row and a Back that changes nothing
-// on screen.
+// Run a navigation that falls back from something that disappeared. Its write
+// is a rewrite like any other (`rewriteEntry`); the mark carries it across a
+// modal entry being taken away first, so it still runs as a fallback there.
 function fallBackTo(navigate: () => void): void {
   const outer = fallbackWrite
   fallbackWrite = true
@@ -3797,42 +3868,97 @@ function fallBackTo(navigate: () => void): void {
   }
 }
 
-// Leave an entry whose subject went away. Arrived at by Forward, the page moves
-// on to the entry ahead by its exact key, the way the user was going, so a
-// place past it stays reachable. Otherwise it falls back: onto the entry
-// behind when that already names the destination, else by rewriting this one.
-function leaveTakenAwayEntry(fallback: () => void): void {
-  if (landing === "forward") {
-    const nav = navigationApi()
-    const here = nav?.currentEntry
-    const ahead = here ? nav?.entries().find((entry) => entry.index === here.index + 1) : undefined
-    if (nav && ahead && !nav.transition) {
-      if (traverseExactly(nav, ahead.key, { newerIntent: false }, () => fallBackTo(fallback))) return
+// Leave an entry whose tab went away, moving the way the user was going so
+// every Back and Forward visibly moves, and say where they are now:
+//
+// - Forward goes on to the entry ahead by its exact key; with nothing ahead it
+//   lands on the agent, or, when that is the place Forward just left, goes back
+//   onto the entry it came from.
+// - Back lands on the agent, onto the entry behind when that already names it;
+//   when the agent is the place Back just left, it goes on past it to the next
+//   place behind.
+//
+// `destination` is the address the fallback shows; `fallback` shows it.
+function leaveTakenAwayEntry(
+  closed: Prose | null,
+  agentName: string,
+  destination: string,
+  fallback: () => void,
+): void {
+  const quiet = quietLanding
+  const say = (where: Prose) => {
+    if (!quiet && closed !== null) notifyWarning(prose`${closed} ${where}`)
+  }
+  const onAgent = prose`You are on ${chip(agentName)}'s first tab.`
+  const nav = navigationApi()
+  const here = nav?.currentEntry
+  if (nav && here && !nav.transition && landing !== "new") {
+    const places = nav
+      .entries()
+      .filter((entry) => writtenAddresses.has(entry.key) && !retiredModalKeys.has(entry.key))
+    const go = (entry: NavigationHistoryEntry | undefined, where: Prose): boolean => {
+      if (!entry) return false
+      walkingPastTo = entry.key
+      if (traverseExactly(nav, entry.key, { newerIntent: false }, () => fallBackTo(fallback))) {
+        say(where)
+        return true
+      }
+      walkingPastTo = null
+      return false
+    }
+    if (landing === "forward") {
+      const ahead = places.find((entry) => entry.index === here.index + 1)
+      if (ahead && go(ahead, prose`You moved on to ${placeName(addressOf(ahead.url))}.`)) return
+      if (!ahead && destination === addressLeft) {
+        const behind = places.find((entry) => entry.index === here.index - 1)
+        if (go(behind, prose`There is nothing after it, so you are back on ${chip(agentName)}'s first tab.`)) {
+          return
+        }
+      }
+    } else if (destination === addressLeft) {
+      const further = places
+        .filter((entry) => entry.index < here.index && addressOf(entry.url) !== destination)
+        .pop()
+      if (further && go(further, prose`You moved on to ${placeName(addressOf(further.url))}.`)) return
     }
   }
+  say(onAgent)
   fallBackTo(fallback)
 }
 
-// The one history move the app makes that is not a write: going back to the
-// entry immediately behind, when this page labelled it and it holds `key`. It
-// is never relative. It names that entry's own slot through the Navigation
-// API, which lands there or fails, so a Back the user already queued cannot
-// turn it into a step out of dux. Where the browser has no Navigation API, or
-// is already traversing, it does nothing and returns false, and the caller
-// replaces.
-function traverseOnto(key: string): boolean {
-  const nav = navigationApi()
-  if (nav === null || nav.transition) return false
-  const behind = ownLabel(history.state)?.prev
-  if (!behind?.navKey || labelledEntryKeys.get(behind.id) !== key) return false
-  if (!exactlyBehind(nav, behind.navKey, 1)) return false
-  // The router's own writes while it lands are not fallbacks of their own.
-  fallbackWrite = false
-  // A failed traversal leaves the page where it was: rewrite that entry, as
-  // before.
-  return traverseExactly(nav, behind.navKey, { newerIntent: false }, () =>
-    syncUrl("replace"),
-  )
+// The address a fallback onto `target` will show from the route being resolved:
+// its editor, changes screen and theater ride along.
+function addressShowing(target: SelectedTarget, changes?: boolean): string {
+  return routeHash({
+    ...currentRoute(),
+    target,
+    stack: null,
+    changes: changes ?? false,
+    theater: pendingTheater ?? state.theater,
+  })
+}
+
+// The entry the page is walking onto by itself past a taken-away one, and
+// whether the landing being handled is that walk's: it was already announced,
+// so it does not announce itself a second time.
+let walkingPastTo: string | null = null
+let quietLanding = false
+
+// The fragment of a history entry's URL: the address dux reads.
+function addressOf(url: string | null | undefined): string {
+  if (!url) return ""
+  const at = url.indexOf("#")
+  return at === -1 ? "" : url.slice(at)
+}
+
+// What an address is, in the words a toast uses.
+function placeName(address: string): Prose {
+  const target = parseRoute(address).target
+  if (target === null) return prose`the workspace`
+  const sessionId = targetSessionId(target)
+  const session = state.spine?.sessions.find((s) => s.id === sessionId)
+  if (session) return prose`${chip(sessionLabel(session))}`
+  return prose`a terminal`
 }
 
 // Whether the entry holding `navKey` sits exactly `steps` entries behind the
@@ -3920,6 +4046,15 @@ function routeTargetLive(spine: Spine, route: Route): boolean {
 // close the modals whose entries the browser left, or otherwise follow the URL.
 // A landing on a modal entry that is no longer a place moves on instead.
 function onTraversal(): void {
+  // A browser fires popstate and then hashchange for one navigation: the second
+  // event is the same landing, not a new one.
+  if (sameLandingAgain()) return
+  addressLeft = routeHash(currentRoute())
+  const arrivedAt = navigationApi()?.currentEntry?.key ?? null
+  quietLanding = walkingPastTo !== null && arrivedAt === walkingPastTo
+  walkingPastTo = null
+  cursorMoves += 1
+  landedAt = { key: navigationApi()?.currentEntry?.key ?? null, hash: currentHash(), moves: cursorMoves }
   if (pendingTraversal !== null) landTraversal()
   else if (stepOffRetiredEntry()) return
   else if (!leaveModalEntries()) applyUrlRoute()
@@ -4041,6 +4176,7 @@ function reconcileModalEntries(): void {
     if (!behind) return
     try {
       history.pushState(modalEntryState(modal.id), "", historyUrlFor(currentHash()))
+      cursorMoves += 1
     } catch (err) {
       console.warn("[dux] history write refused", err)
       return
@@ -4318,6 +4454,22 @@ function landingKind(): "back" | "forward" | "new" {
 
 let landing: "back" | "forward" | "new" = "new"
 
+// The entry the last landing arrived on, and how many times the cursor had
+// moved by then (pushes and landings). A rewrite since keeps the entry, so it
+// updates the address this landing stands at.
+let landedAt: { key: string | null; hash: string; moves: number } | null = null
+let cursorMoves = 0
+
+// Where the screen was before the landing being handled: the place Back or
+// Forward left.
+let addressLeft = ""
+
+function sameLandingAgain(): boolean {
+  if (landedAt === null || landedAt.moves !== cursorMoves) return false
+  const key = navigationApi()?.currentEntry?.key ?? null
+  return key !== null ? key === landedAt.key : currentHash() === landedAt.hash
+}
+
 // Set while a route Back or Forward landed on is being resolved. That entry was
 // a position the user was on, so a bare agent address there means its first
 // tab, the one it was written for, rather than whichever tab the agent
@@ -4573,8 +4725,10 @@ function resolveRouteTarget(
     // the terminal it passed through is incidental, so the agent opens with its
     // editor and the address drops the terminal.
     if (withEditor) {
-      const agent = sessionId
-      leaveTakenAwayEntry(() => selectSessionRoute(agent, "replace", changes))
+      const firstTab: SelectedTarget = { kind: "agent", sessionId, tabId: session.slot_tab_id }
+      leaveTakenAwayEntry(null, sessionLabel(session), addressShowing(firstTab, changes), () =>
+        selectTab(firstTab.sessionId, firstTab.tabId, { persist: false, urlMode: "replace", changes }),
+      )
       return
     }
     setTerminalNotFound(target.terminalId, target.owner)
@@ -4757,15 +4911,21 @@ function applyDeepLinkSelection(
   }
   if (!isFirstTab(session, target.tabId) && !isSlotTabOf(target.sessionId, target.tabId)) {
     // The tab the address names has closed, here or on another device.
-    notifyWarning(
-      "That tab has closed, so its place in your history is gone. You are on the agent's first tab.",
-    )
-    leaveTakenAwayEntry(() =>
-      selectTab(target.sessionId, session.slot_tab_id, {
-        persist: false,
-        urlMode: "replace",
-        changes,
-      }),
+    const firstTab: SelectedTarget = {
+      kind: "agent",
+      sessionId: target.sessionId,
+      tabId: session.slot_tab_id,
+    }
+    leaveTakenAwayEntry(
+      prose`That tab has closed, so its place in your history is gone.`,
+      sessionLabel(session),
+      addressShowing(firstTab, changes),
+      () =>
+        selectTab(target.sessionId, session.slot_tab_id, {
+          persist: false,
+          urlMode: "replace",
+          changes,
+        }),
     )
     return
   }
