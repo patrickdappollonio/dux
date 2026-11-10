@@ -343,7 +343,7 @@ export const SETTING_GROUPS: SettingGroup[] = [
         key: "ui.always_show_tab_strip",
         label: "Always show tab strip",
         description:
-          "Always shows the agent tab strip, even when a session has only one tab. Off shows the strip only once a session has two or more tabs.",
+          "Always shows the agent tab strip and its terminal dock's strip, even when a session has only one tab. Off shows them only once the agent has two or more tabs or two or more terminals.",
         surface: "both",
         control: { kind: "bool" },
         default: false,

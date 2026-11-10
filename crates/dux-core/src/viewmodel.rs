@@ -249,8 +249,9 @@ pub struct BootstrapView {
     /// Older servers omit it, so the web falls back to a sane default.
     pub agent_tabs_max: u16,
     /// Mirrors `config.ui.always_show_tab_strip`: when true the web always
-    /// renders the agent tab strip, even when a session has only one tab.
-    /// Default false shows it only once a session has two or more tabs.
+    /// renders the agent tab strip and the terminal dock's strip, even when a
+    /// session has only one tab. Default false shows them only once the agent
+    /// has two or more tabs or two or more terminals.
     /// Changing it from the web's Preferences dialog persists the new value
     /// here.
     /// Older servers omit it, so the web treats a missing value as `false`.

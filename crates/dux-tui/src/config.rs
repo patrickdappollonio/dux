@@ -637,9 +637,10 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "terminal_dock_pct",
             comment: Some(CommentSource::Static(
-                "# Percentage of the center pane's height an agent's terminal dock takes when the\n\
-                 # agent and its terminals share it (10-80). Drag the divider between them to\n\
-                 # change it; dragging it to an edge shows the agent or the terminal alone.",
+                "# Percentage of the center pane's height an agent's terminal dock takes in the\n\
+                 # terminal UI when the agent and its terminals share it (10-80). Drag the\n\
+                 # divider between them to change it; dragging it to an edge shows the agent or\n\
+                 # the terminal alone. The web UI remembers its own split in each browser.",
             )),
             value_fn: |c| FieldValue::U16(c.ui.terminal_dock_pct),
         },
@@ -905,7 +906,7 @@ fn config_schema() -> Vec<ConfigEntry> {
         ConfigEntry::Field {
             key: "always_show_tab_strip",
             comment: Some(CommentSource::Static(
-                "# Always show the agent tab strip, even when a session has only one tab.\n# Default false shows it only once a session has two or more tabs. In the\n# terminal UI it covers the strip of an agent's terminal dock too: both show\n# together, also once the agent has two or more terminals.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
+                "# Always show the agent tab strip, even when a session has only one tab.\n# It covers the strip of an agent's terminal dock too, on both surfaces: the\n# two show together. Default false shows them only once the agent has two or\n# more tabs or two or more terminals.\n# Toggle at runtime from the TUI command palette, or the web UI's\n# Preferences dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.always_show_tab_strip),
         },
