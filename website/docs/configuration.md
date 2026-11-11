@@ -673,7 +673,7 @@ shifted form, such as `shift-p`.
 
 Two actions bound to one key in the same place stop dux from starting, and the message
 names both. The exception is an action that gained its default key after your `[keys]`
-was written, such as `cycle_terminal_layout` (the terminal UI's layout key, `Ctrl-e` by
+was written, such as `cycle_terminal_layout` (the terminal UI's layout key, `Ctrl-t` by
 default): when your file already gives that key to another action, the newer action starts
 unbound instead, and the terminal UI's status line says so at startup and how to bind it.
 A pane action given a key that a global action already holds is not refused,

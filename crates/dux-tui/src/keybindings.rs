@@ -521,7 +521,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
     },
     BindingDef {
         action: Action::CycleTerminalLayout,
-        default_keys: &[key!(ctrl - e)],
+        default_keys: &[key!(ctrl - t)],
         scopes: &[BindingScope::Center],
         help: Some(HelpEntry {
             section: "Agent pane",
@@ -3326,12 +3326,12 @@ mod tests {
         let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
         let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         let plain_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
         for (holder, bound, key, scope, holder_action, late, late_name) in [
             (
                 "reconnect_agent",
-                &["ctrl-e"][..],
-                ctrl_e,
+                &["ctrl-t"][..],
+                ctrl_t,
                 BindingScope::Center,
                 Action::ReconnectAgent,
                 Action::CycleTerminalLayout,
@@ -3412,7 +3412,7 @@ mod tests {
     }
 
     /// The help overlay names the layout key, and typing in interactive mode
-    /// keeps Ctrl-e for the child.
+    /// keeps Ctrl-t for the child.
     #[test]
     fn the_layout_key_is_in_the_help_and_never_taken_from_a_typing_child() {
         let sections = default_bindings().help_sections();
@@ -3421,10 +3421,37 @@ mod tests {
                 && rows.iter().any(|(_, text)| text.contains("terminal dock"))),
             "{sections:?}"
         );
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(
+            default_bindings().lookup(&ctrl_t, BindingScope::Interactive),
+            None
+        );
+    }
+
+    /// The agent pane's layout key is Ctrl-t, and Ctrl-e is left to the agent:
+    /// it is end-of-line in readline and the external-editor key in Claude
+    /// Code, so no default anywhere in the pane may take it.
+    #[test]
+    fn the_layout_key_is_ctrl_t_and_ctrl_e_reaches_the_agent() {
+        let bindings = default_bindings();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
         let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
         assert_eq!(
-            default_bindings().lookup(&ctrl_e, BindingScope::Interactive),
-            None
+            bindings.lookup(&ctrl_t, BindingScope::Center),
+            Some(Action::CycleTerminalLayout)
+        );
+        assert_eq!(bindings.label_for(Action::CycleTerminalLayout), "Ctrl-t");
+        for scope in [BindingScope::Center, BindingScope::Interactive] {
+            assert_eq!(bindings.lookup(&ctrl_e, scope), None, "{scope:?}");
+        }
+        assert_eq!(
+            bindings.interactive_byte_patterns().match_sequence(&[0x05]),
+            None,
+            "fullscreen must not intercept the Ctrl-e byte"
+        );
+        assert!(
+            detect_conflicts(&crate::config::KeysConfig::default()).is_empty(),
+            "the defaults must not collide"
         );
     }
 

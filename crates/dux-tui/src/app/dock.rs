@@ -903,11 +903,11 @@ mod tests {
     #[test]
     fn the_layout_key_cycles_agent_split_and_term() {
         let mut app = app_with_a_dock(1, Agent::Running);
-        let ctrl_e = key(KeyCode::Char('e'), KeyModifiers::CONTROL);
-        app.handle_key(ctrl_e).unwrap();
+        let ctrl_t = key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_t).unwrap();
         assert_eq!(app.selected_dock_layout(), DockLayout::Term);
         assert_eq!(app.focused_part(), CenterPart::Dock);
-        app.handle_key(ctrl_e).unwrap();
+        app.handle_key(ctrl_t).unwrap();
         assert_eq!(app.selected_dock_layout(), DockLayout::Agent);
         assert_eq!(app.focused_part(), CenterPart::Main);
         draw(&mut app);
@@ -916,7 +916,7 @@ mod tests {
             !drawn.contains(&dock_ids(&app)[0]),
             "the dock is not drawn: {drawn:?}"
         );
-        app.handle_key(ctrl_e).unwrap();
+        app.handle_key(ctrl_t).unwrap();
         assert_eq!(app.selected_dock_layout(), DockLayout::Split);
     }
 

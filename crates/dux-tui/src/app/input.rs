@@ -28010,12 +28010,7 @@ cyan = "#00ffff"
     /// pane: a typing-owned key like Home now belongs to the agent there.
     #[test]
     fn a_migrated_custom_exit_key_reopens_a_minimized_agent() {
-        // The layout key's default steps aside for a key the user's own
-        // bindings give to another action, as `[keys]` loading does.
-        let bindings = bindings_with_overrides(&[
-            (Action::ToggleFullscreen, &["ctrl-e"]),
-            (Action::CycleTerminalLayout, &[]),
-        ]);
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
         let mut app = test_app(bindings);
         app.interactive_patterns = app.bindings.interactive_byte_patterns();
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
@@ -28135,12 +28130,7 @@ cyan = "#00ffff"
     /// here so nobody reads it as a regression.
     #[test]
     fn a_migrated_custom_exit_key_on_a_dormant_tab_launches_seeking_fullscreen() {
-        // The layout key's default steps aside for a key the user's own
-        // bindings give to another action, as `[keys]` loading does.
-        let bindings = bindings_with_overrides(&[
-            (Action::ToggleFullscreen, &["ctrl-e"]),
-            (Action::CycleTerminalLayout, &[]),
-        ]);
+        let bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["ctrl-e"])]);
         let mut app = test_app(bindings);
         app.focus = FocusPane::Center;
         app.center_mode = CenterMode::Agent;

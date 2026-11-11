@@ -3677,13 +3677,13 @@ mod tests {
         config
             .keys
             .bindings
-            .insert("select_tab_4".to_string(), vec!["ctrl-t".to_string()]);
+            .insert("select_tab_4".to_string(), vec!["alt-4".to_string()]);
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&config.keys);
         let rendered = render_config(&config, &bindings);
         assert!(
             rendered
                 .lines()
-                .any(|l| l.trim() == "select_tab_4 = [\"ctrl-t\"]"),
+                .any(|l| l.trim() == "select_tab_4 = [\"alt-4\"]"),
             "a user-bound action must render as an active row; got:\n{}",
             rendered
                 .lines()
