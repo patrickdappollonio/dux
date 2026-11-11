@@ -466,7 +466,7 @@ ends when you close it, or when dux shuts down.
 
 ## Messages
 
-Progress and results arrive as small messages at the bottom of the screen, and **they clear themselves.** Dismiss one early by swiping it away or with its close button.
+Progress and results arrive as small messages, centered along the bottom of the screen on a computer and along the top on a phone (the bottom of a phone's screen is where you type), and **they clear themselves.** Dismiss one early by swiping it away or with its close button.
 
 How long a finished one stays depends on how much it matters:
 

@@ -63,7 +63,8 @@ On the web, use the **Sort** dropdown above the agent list. In the terminal UI, 
   does not offer it, but shows it (checked) while the terminal UI has it set.
 - **Manual**: your exact hand-placed order, left untouched by dux. The terminal UI's cycle
   does not include it, since it is what you get by placing a row by hand. The web dropdown
-  lists it as **Manual order**.
+  lists it as **Manual order**. In manual order a new agent lands at the top of the list,
+  and a new project or standalone terminal at the end.
 
 Terminals follow the same choice, on both surfaces, sorting among the agents. By name, a
 terminal uses the name it was opened with (`Terminal 3`), never what is running in it, so a

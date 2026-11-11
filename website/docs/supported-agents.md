@@ -84,7 +84,7 @@ The default provider.
 
 - **Progress:** Copilot reports it on its own, so the working spinner is accurate with
   no setup.
-- **Needs-you indicator:** its finished-turn bell ships switched off (since v1.0.60), so
+- **Needs-you indicator:** its finished-turn bell ships switched off (since v1.0.55), so
   turn the terminal bell back on in Copilot's config if you want a completed turn
   flagged.
 - **Pasted paths:** go in as written. Copilot is closed source, so that form is the safe

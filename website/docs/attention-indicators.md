@@ -83,9 +83,8 @@ Some agents need a one-line setting before they emit anything dux can see:
   the bell it rings on a permission prompt or a finished turn.
 - **Codex**: set `tui.notification_method` in its config. Any value works. dux captures
   both the bell and the richer notification form.
-- **Copilot**: it emits progress by default (its `terminalProgress` setting, on since
-  v1.0.55), which dux reads with no setup. Its turn-completion bell went quiet by
-  default in v1.0.60, so turn the terminal bell back on in Copilot's config if you want
+- **Copilot**: it emits progress by default (its `terminalProgress` setting), which dux
+  reads with no setup. Its turn-completion bell went quiet by default in v1.0.55, so turn the terminal bell back on in Copilot's config if you want
   a finished turn flagged.
 - **Grok**: whether it emits a signal dux can read has not been verified, so its rows may
   not light up on their own.
