@@ -3887,7 +3887,9 @@ mod tests {
         }
 
         assert!(
-            app.status.message().contains("temporarily unavailable"),
+            app.status
+                .message()
+                .contains("cannot list the changed files"),
             "got {}",
             app.status.message()
         );

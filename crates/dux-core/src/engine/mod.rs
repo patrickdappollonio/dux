@@ -4124,13 +4124,15 @@ impl Engine {
     pub fn note_changed_files_outcome(
         &mut self,
         session_id: &str,
-        failure: Option<&str>,
+        outcome: crate::changes_status::ReadOutcome,
     ) -> Option<crate::poller_status::PollerNotice> {
-        match failure {
-            Some(message) => self
-                .changed_files_failures
-                .record_failure(session_id, message),
-            None => self.changed_files_failures.record_success(session_id),
+        match outcome {
+            crate::changes_status::ReadOutcome::Failed => {
+                self.changed_files_failures.record_failure(session_id)
+            }
+            crate::changes_status::ReadOutcome::Succeeded => {
+                self.changed_files_failures.record_success(session_id)
+            }
         }
     }
 
@@ -4143,8 +4145,12 @@ impl Engine {
     /// browsers only, and the terminal UI would never learn that the same
     /// repository is failing. The worker lane is the one road both surfaces
     /// already drain.
-    pub fn post_changed_files_outcome(&mut self, session_id: &str, failure: Option<&str>) {
-        if let Some(notice) = self.note_changed_files_outcome(session_id, failure) {
+    pub fn post_changed_files_outcome(
+        &mut self,
+        session_id: &str,
+        outcome: crate::changes_status::ReadOutcome,
+    ) {
+        if let Some(notice) = self.note_changed_files_outcome(session_id, outcome) {
             let _ = self.worker_tx.send(notice.into_worker_event());
         }
     }

@@ -305,7 +305,7 @@ Everything else is noticed within a couple of seconds while any agent or termina
 > [!IMPORTANT]
 > A change dux did not make is never invisible, it is just up to ten seconds late. **Refresh changes** in the header menu skips that wait and says what it found. The terminal UI has the same action as its `refresh-changes` command.
 
-If a git operation collides with a lock, dux keeps retrying, so a single blip usually clears itself. If it does not, you get a "Couldn't load changes" card with a Refresh button, and a warning toast once the failures persist. The toast goes away by itself as soon as git answers again, with no message in its place: the list filling back in is the news. A commit you make in the browser is an ordinary commit, visible everywhere.
+If a git operation collides with a lock, dux keeps retrying, so a single blip usually clears itself. If it does not, you get a "Couldn't load changes" card with a Refresh button, and a warning toast once the failures persist, which says dux cannot list the changed files right now and points you to `dux.log` for the details. The toast goes away by itself as soon as git answers again, with no message in its place: the list filling back in is the news. A commit you make in the browser is an ordinary commit, visible everywhere.
 
 dux also keeps checking which branch each agent is on, so a branch the agent switches to shows up in its row and header. If it cannot read the branch at all for a while (the folder stopped being a repository, or git will not run), a warning names the agent's folder and says the branch shown may be out of date. The details are in `dux.log`. That warning, too, goes away quietly once git answers again.
 

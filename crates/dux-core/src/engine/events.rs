@@ -3835,11 +3835,18 @@ impl Engine {
                     worktree.display()
                 ));
                 return session_id
-                    .and_then(|id| self.note_changed_files_outcome(&id, Some(&message)))
+                    .and_then(|id| {
+                        self.note_changed_files_outcome(
+                            &id,
+                            crate::changes_status::ReadOutcome::Failed,
+                        )
+                    })
                     .map_or(EventReaction::Nothing, PollerNotice::into_reaction);
             }
         };
-        let withdrawal = session_id.and_then(|id| self.note_changed_files_outcome(&id, None));
+        let withdrawal = session_id.and_then(|id| {
+            self.note_changed_files_outcome(&id, crate::changes_status::ReadOutcome::Succeeded)
+        });
         self.set_changed_files(staged, unstaged);
         match withdrawal {
             Some(notice) => EventReaction::Multi(vec![
@@ -7839,8 +7846,8 @@ mod tests {
             Some(crate::changes_status::warn_key("s1").as_str())
         );
         assert!(
-            warning.message.contains("index.lock exists"),
-            "{}",
+            warning.message.contains("dux.log") && !warning.message.contains("index.lock"),
+            "git's text stays in dux.log: {}",
             warning.message
         );
 

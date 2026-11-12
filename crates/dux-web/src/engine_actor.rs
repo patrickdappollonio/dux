@@ -318,7 +318,7 @@ pub(crate) enum EngineRequest {
     /// `Some(message)` for a failure. The ENGINE owns the streak and the
     /// sentences, and queues whatever status it owes on its own worker lane, so
     /// the terminal UI sees the same warning this browser does.
-    NoteChangedFilesOutcome(String, Option<String>),
+    NoteChangedFilesOutcome(String, dux_core::changes_status::ReadOutcome),
     /// Branches a delete dialog's offer found in an agent's HEAD reflog that
     /// its recorded list did not have, for the delete that follows to decide
     /// over too.
@@ -1806,10 +1806,14 @@ impl EngineHandle {
 
     /// See [`EngineRequest::NoteChangedFilesOutcome`]. Fire and forget: the
     /// status it may produce travels the engine's worker lane, not this call.
-    pub async fn note_changed_files_outcome(&self, session_id: String, failure: Option<String>) {
+    pub async fn note_changed_files_outcome(
+        &self,
+        session_id: String,
+        outcome: dux_core::changes_status::ReadOutcome,
+    ) {
         let _ = self
             .req_tx
-            .send(EngineRequest::NoteChangedFilesOutcome(session_id, failure))
+            .send(EngineRequest::NoteChangedFilesOutcome(session_id, outcome))
             .await;
     }
 
@@ -4842,8 +4846,8 @@ fn handle_request(
                     .map_err(|err| format!("{err:#}")),
             );
         }
-        EngineRequest::NoteChangedFilesOutcome(session_id, failure) => {
-            engine.post_changed_files_outcome(&session_id, failure.as_deref());
+        EngineRequest::NoteChangedFilesOutcome(session_id, outcome) => {
+            engine.post_changed_files_outcome(&session_id, outcome);
         }
         EngineRequest::RecordOfferedBranches(session_id, names) => {
             engine.record_offered_branches(&session_id, &names);

@@ -25,6 +25,21 @@ use crate::statusline::StatusTone;
 /// the signal that something is actually wrong.
 pub const ERROR_WARN_THRESHOLD: u32 = 3;
 
+/// How one changed-files read ended, as far as the failure streak cares: git's
+/// own text goes to dux.log and never reaches the streak.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOutcome {
+    /// The read failed.
+    Failed,
+    /// The read answered.
+    Succeeded,
+}
+
+/// What the standing-failure warning says. git's own text is left to dux.log,
+/// where every failed read is written: it is the detail someone debugging
+/// needs, and it is wrong to call every failure a busy repository.
+pub const CHANGED_FILES_STUCK: &str = "dux cannot list the changed files for this agent right now, so the Changes pane may be out of date. It keeps trying, and the details are in dux.log.";
+
 /// The keyed-status key for one agent's changed-files escalation, which the
 /// withdrawal names to take the warning down.
 pub fn warn_key(session_id: &str) -> String {
@@ -43,7 +58,7 @@ impl ChangedFilesFailures {
     /// Record one failed read. Answers with the keyed warning on the crossing
     /// and with nothing on every other failure, so a blip stays silent and a
     /// standing failure is reported exactly once.
-    pub fn record_failure(&mut self, session_id: &str, message: &str) -> Option<PollerNotice> {
+    pub fn record_failure(&mut self, session_id: &str) -> Option<PollerNotice> {
         let streak = self.streaks.entry(session_id.to_string()).or_insert(0);
         *streak += 1;
         if *streak != ERROR_WARN_THRESHOLD {
@@ -53,9 +68,7 @@ impl ChangedFilesFailures {
         Some(PollerNotice::Warn(StatusUpdate::keyed(
             warn_key(session_id),
             StatusTone::Warning,
-            format!(
-                "Changed files for this agent are temporarily unavailable (git busy): {message}"
-            ),
+            CHANGED_FILES_STUCK,
         )))
     }
 
@@ -85,17 +98,21 @@ mod tests {
     fn a_blip_stays_silent_and_a_streak_warns_once() {
         let mut failures = ChangedFilesFailures::default();
         for _ in 1..ERROR_WARN_THRESHOLD {
-            assert!(failures.record_failure("s1", "index.lock exists").is_none());
+            assert!(failures.record_failure("s1").is_none());
         }
-        let Some(PollerNotice::Warn(warning)) = failures.record_failure("s1", "index.lock exists")
-        else {
+        let Some(PollerNotice::Warn(warning)) = failures.record_failure("s1") else {
             panic!("the streak crosses the threshold")
         };
         assert_eq!(warning.tone, StatusTone::Warning);
         assert_eq!(warning.key.as_deref(), Some(warn_key("s1").as_str()));
-        assert!(warning.message.contains("index.lock exists"));
+        assert!(warning.message.contains("dux.log"));
         assert!(
-            failures.record_failure("s1", "index.lock exists").is_none(),
+            !warning.message.contains("git") && !warning.message.contains("index.lock"),
+            "git's text belongs in dux.log, not in the toast: {}",
+            warning.message
+        );
+        assert!(
+            failures.record_failure("s1").is_none(),
             "a standing failure is reported once, not once per cycle"
         );
     }
@@ -103,14 +120,14 @@ mod tests {
     #[test]
     fn the_warning_is_withdrawn_only_where_it_was_shown() {
         let mut failures = ChangedFilesFailures::default();
-        assert!(failures.record_failure("s1", "boom").is_none());
+        assert!(failures.record_failure("s1").is_none());
         assert!(
             failures.record_success("s1").is_none(),
             "a blip that never warned has nothing to take down"
         );
 
         for _ in 0..ERROR_WARN_THRESHOLD {
-            failures.record_failure("s2", "boom");
+            failures.record_failure("s2");
         }
         assert!(
             matches!(
@@ -129,7 +146,7 @@ mod tests {
         let mut failures = ChangedFilesFailures::default();
         let mut warnings = 0;
         for _ in 0..(ERROR_WARN_THRESHOLD * 2) {
-            if failures.record_failure("s1", "boom").is_some() {
+            if failures.record_failure("s1").is_some() {
                 warnings += 1;
             }
         }

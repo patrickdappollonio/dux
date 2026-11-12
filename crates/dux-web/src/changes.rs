@@ -298,13 +298,11 @@ impl ChangesService {
                                 // elected owner whose good `Cached::Ok` carries a lower
                                 // rev, which the plain `rev >= existing` guard would let
                                 // this error overwrite into a spurious 409.
-                                svc.store_err(
-                                    &id_for_err,
-                                    rev,
-                                    generation,
-                                    "changed-files computation timed out".to_string(),
-                                    Failure::Timeout,
-                                );
+                                dux_core::logger::error(&format!(
+                                    "changed-files computation for session {id_for_err} \
+                                     timed out"
+                                ));
+                                svc.store_err(&id_for_err, rev, generation, Failure::Timeout);
                             }
                         }
                     })
@@ -654,15 +652,12 @@ impl ChangesService {
         // text can be redacted of both forms git may print.
         let wt = worktree.clone();
         let request_wait = self.request_turn_wait();
-        let computed = tokio::task::spawn_blocking(move || {
-            let listing = match read {
-                Read::Poll => dux_core::changes_lane::poll_changed_files(&wt),
-                Read::Request => Some(dux_core::changes_lane::request_changed_files_within(
-                    &wt,
-                    request_wait,
-                )),
-            };
-            listing.map(|listing| listing.map_err(|e| (e, std::fs::canonicalize(&wt).ok())))
+        let computed = tokio::task::spawn_blocking(move || match read {
+            Read::Poll => dux_core::changes_lane::poll_changed_files(&wt),
+            Read::Request => Some(dux_core::changes_lane::request_changed_files_within(
+                &wt,
+                request_wait,
+            )),
         })
         .await;
 
@@ -674,29 +669,23 @@ impl ChangesService {
                 self.store_ok_and_maybe_emit(session_id, generation, staged, unstaged)
                     .await;
             }
-            Ok(Some(Err((e, canonical)))) => {
+            Ok(Some(Err(e))) => {
                 let rev = self.engine.next_changes_rev(session_id.to_string()).await;
                 let message = format!("{e:#}");
                 dux_core::logger::error(&format!(
                     "changed-files compute failed for session {session_id}: {message}"
                 ));
-                // The stored text becomes the warning both surfaces show; the
-                // unredacted chain went to dux.log just above.
-                let message = dux_core::git::redact_resolved_worktree_path(
-                    &message,
-                    &worktree,
-                    canonical.as_deref(),
-                );
+                // The warning both surfaces show carries no git text; the
+                // whole chain went to dux.log just above.
                 // A genuine git failure must replace a now-stale success (`clobber_ok`).
-                let _ = self.store_err(session_id, rev, generation, message, Failure::Real);
+                let _ = self.store_err(session_id, rev, generation, Failure::Real);
             }
             Err(join_err) => {
                 let rev = self.engine.next_changes_rev(session_id.to_string()).await;
-                let message = format!("changed-files git task failed: {join_err}");
                 dux_core::logger::error(&format!(
                     "changed-files compute task failed for session {session_id}: {join_err}"
                 ));
-                let _ = self.store_err(session_id, rev, generation, message, Failure::Real);
+                let _ = self.store_err(session_id, rev, generation, Failure::Real);
             }
         }
     }
@@ -807,7 +796,6 @@ impl ChangesService {
         session_id: &str,
         rev: u64,
         generation: u64,
-        message: String,
         failure: Failure,
     ) -> bool {
         let clobber_ok = failure == Failure::Real;
@@ -871,7 +859,10 @@ impl ChangesService {
         let session_id = session_id.to_string();
         tokio::spawn(async move {
             engine
-                .note_changed_files_outcome(session_id, Some(message))
+                .note_changed_files_outcome(
+                    session_id,
+                    dux_core::changes_status::ReadOutcome::Failed,
+                )
                 .await;
         });
         true
@@ -885,7 +876,12 @@ impl ChangesService {
         let engine = self.engine.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
-            engine.note_changed_files_outcome(session_id, None).await;
+            engine
+                .note_changed_files_outcome(
+                    session_id,
+                    dux_core::changes_status::ReadOutcome::Succeeded,
+                )
+                .await;
         });
     }
 
@@ -1436,7 +1432,7 @@ mod tests {
         let mut clears = svc.engine.subscribe_status_clears();
 
         for rev in 1..=u64::from(dux_core::changes_status::ERROR_WARN_THRESHOLD) {
-            let _ = svc.store_err("s1", rev, 0, "git busy".to_string(), Failure::Real);
+            let _ = svc.store_err("s1", rev, 0, Failure::Real);
         }
         let warning = loop {
             let status = statuses.recv().await.expect("a status");
@@ -1444,7 +1440,12 @@ mod tests {
                 break status;
             }
         };
-        assert!(warning.message.contains("temporarily unavailable"));
+        assert!(warning.message.contains("dux.log"));
+        assert!(
+            !warning.message.contains("git busy"),
+            "git's text stays out of the toast: {}",
+            warning.message
+        );
 
         svc.reset_error_streak("s1");
 
@@ -1492,8 +1493,8 @@ mod tests {
             }
         };
         assert!(
-            message.contains("git status failed"),
-            "the reason must survive the redaction: {message}"
+            message.contains("dux.log") && !message.contains("git status failed"),
+            "the reason goes to dux.log, not the toast: {message}"
         );
         assert!(
             !message.contains(resolved.to_string_lossy().as_ref())
@@ -1617,7 +1618,7 @@ mod tests {
         // A poll-tick timeout error mints a HIGHER rev (it ran later) but must NOT
         // overwrite the concurrent success: `clobber_ok = false`. Otherwise a GET
         // would see a spurious 409 over a perfectly good result.
-        let escalated = svc.store_err("s1", 6, 0, "timed out".to_string(), Failure::Timeout);
+        let escalated = svc.store_err("s1", 6, 0, Failure::Timeout);
         match lock(&svc.cache).get("s1") {
             Some(Cached::Ok { rev, .. }) => assert_eq!(*rev, 5, "the fresh Ok must survive"),
             _ => panic!("a timeout error clobbered a concurrent success"),
@@ -1628,7 +1629,7 @@ mod tests {
 
         // A GENUINE git error (`clobber_ok = true`) with a higher rev DOES replace
         // the stale success, so a real failure still surfaces as 409.
-        let _ = svc.store_err("s1", 7, 0, "git failed".to_string(), Failure::Real);
+        let _ = svc.store_err("s1", 7, 0, Failure::Real);
         match lock(&svc.cache).get("s1") {
             Some(Cached::Err { rev, .. }) => assert_eq!(*rev, 7, "a real error must win"),
             _ => panic!("a real git error should replace the stale Ok"),
