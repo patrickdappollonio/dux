@@ -5152,6 +5152,7 @@ mod ellipsis_rows;
 mod hint_lines;
 #[cfg(test)]
 mod name_chip_dialogs;
+mod no_branch_notice;
 #[cfg(test)]
 mod picker_lists;
 mod render;

@@ -77,6 +77,11 @@ export type AgentWorkspaceWire =
       /** Why the changes region is quiet, when it is. Empty or absent while the
        * working copy is there. */
       quiet_reason?: string
+      /** Whether the working copy has no branch checked out right now (a
+       * detached checkout, a rebase or a bisect in progress). `branch_name`
+       * still names the branch it was last on. Absent from a server that
+       * predates it, which reads as "a branch is checked out". */
+      no_branch_checked_out?: boolean
       /** What the recreate confirmation says about the running tabs and offers
        * to restart, decided on the server so the browser asks no CLI question
        * of its own. Null or absent while the working copy is there. */
@@ -150,6 +155,18 @@ export function folderWorkspace(
  * driven, because a folder at a repository's top level gets a real panel. */
 export function supportsBranchGit(workspace: AgentWorkspaceWire): boolean {
   return managedWorkspace(workspace) !== null
+}
+
+/** The branch dux keeps showing while the agent's working copy has no branch
+ * checked out (a detached checkout, a rebase or a bisect in progress), or
+ * `null` while one is. A standalone agent has no branch to keep showing. */
+export function branchShownWithoutCheckout(
+  workspace: AgentWorkspaceWire,
+): string | null {
+  return matchWorkspace(workspace, {
+    managed: (w) => (w.no_branch_checked_out === true ? w.branch_name : null),
+    folder: () => null,
+  })
 }
 
 /** Why the changes region is quiet, or `null` when it is not, which doubles as

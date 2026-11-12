@@ -243,6 +243,100 @@ describe("the Changes pane's Refresh changes action", () => {
   })
 })
 
+describe("the Changes pane while no branch is checked out", () => {
+  function managedState(branch: string, noBranchCheckedOut: boolean | undefined) {
+    return {
+      selectedSessionId: "s1",
+      changes: {
+        ...loadedChanges(),
+        unstaged: [
+          {
+            path: "src/app.ts",
+            status: "M",
+            additions: 1,
+            deletions: 0,
+            binary: false,
+          },
+        ],
+      },
+      spine: {
+        projects: [],
+        terminals: [],
+        sessions: [
+          {
+            id: "s1",
+            slot_tab_id: "s1",
+            title: "",
+            provider: "claude",
+            status: "active",
+            tabs: [],
+            has_output: false,
+            working: false,
+            typing: false,
+            needs_attention: false,
+            created_at: "",
+            updated_at: "",
+            auto_reopen_enabled: false,
+            workspace: {
+              kind: "managed",
+              project_id: "p1",
+              branch_name: branch,
+              initial_branch: branch,
+              branch_provenance: "created",
+              source_branch: "main",
+              worktree_path: "/home/someone/wt",
+              ...(noBranchCheckedOut === undefined
+                ? {}
+                : { no_branch_checked_out: noBranchCheckedOut }),
+            },
+          },
+        ],
+      },
+    } as unknown as DuxState
+  }
+
+  it("heads the pane with a notice naming the branch dux keeps showing", () => {
+    mockState = managedState("feat-login", true)
+    render(<ChangedFiles />)
+    const notice = screen.getByTestId("no-branch-checked-out")
+    expect(within(notice).getByText("No branch checked out")).toBeTruthy()
+    expect(notice.textContent).toContain(
+      "dux keeps showing feat-login until one is checked out again.",
+    )
+    const chip = notice.querySelector('[data-slot="inline-code"]')
+    expect(chip?.textContent).toBe("feat-login")
+    // A long branch name must be free to wrap inside the strip.
+    expect(chip?.className).not.toContain("whitespace-nowrap")
+    // It sits above the filter, as the first thing under the header.
+    const filter = screen.getByLabelText("Filter changed files")
+    expect(
+      notice.compareDocumentPosition(filter) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("is absent while a branch is checked out", () => {
+    mockState = managedState("feat-login", false)
+    render(<ChangedFiles />)
+    expect(screen.queryByTestId("no-branch-checked-out")).toBeNull()
+    expect(screen.queryByText("No branch checked out")).toBeNull()
+  })
+
+  it("is absent when a server that predates the fact says nothing", () => {
+    mockState = managedState("feat-login", undefined)
+    render(<ChangedFiles />)
+    expect(screen.queryByTestId("no-branch-checked-out")).toBeNull()
+  })
+
+  it("goes away once a branch is checked out again", () => {
+    mockState = managedState("feat-login", true)
+    render(<ChangedFiles />)
+    expect(screen.getByTestId("no-branch-checked-out")).toBeTruthy()
+    mockState = managedState("feat-login", false)
+    publishMockState()
+    expect(screen.queryByTestId("no-branch-checked-out")).toBeNull()
+  })
+})
+
 describe("ChangedFiles for a standalone agent", () => {
   function standaloneState(
     repo_status: "working_repo" | "no_repo" | "inside_repo_rooted_elsewhere",

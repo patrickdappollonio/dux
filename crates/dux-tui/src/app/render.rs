@@ -5703,6 +5703,7 @@ impl App {
         );
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
+        let inner = self.render_no_branch_notice(frame, inner, section);
 
         let (search_area, list_area, hint_area) = self.files_list_areas(inner, focus, hint);
 
