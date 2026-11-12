@@ -1272,6 +1272,86 @@
       ]
     },
     {
+      "what": "the worktree box while the dialog is still asking git about its files",
+      "sentence": "delete_worktree_files_checking",
+      "args": {
+        "agent": "check-fable"
+      },
+      "segments": [
+        "Looking for uncommitted files in ",
+        {
+          "name": "check-fable",
+          "quoted": false
+        },
+        "…"
+      ]
+    },
+    {
+      "what": "one uncommitted file the worktree removal deletes",
+      "sentence": "delete_worktree_files",
+      "args": {
+        "agent": "check-fable",
+        "files": {
+          "count": 1
+        }
+      },
+      "segments": [
+        "1 file in ",
+        {
+          "name": "check-fable",
+          "quoted": false
+        },
+        " isn't committed and will be deleted."
+      ]
+    },
+    {
+      "what": "several uncommitted files the worktree removal deletes",
+      "sentence": "delete_worktree_files",
+      "args": {
+        "agent": "check-fable",
+        "files": {
+          "count": 3
+        }
+      },
+      "segments": [
+        "3 files in ",
+        {
+          "name": "check-fable",
+          "quoted": false
+        },
+        " aren't committed and will be deleted."
+      ]
+    },
+    {
+      "what": "a worktree with every file committed says nothing",
+      "sentence": "delete_worktree_files",
+      "args": {
+        "agent": "check-fable",
+        "files": {
+          "count": 0
+        }
+      },
+      "segments": []
+    },
+    {
+      "what": "the worktree's files when git could not look",
+      "sentence": "delete_worktree_files",
+      "args": {
+        "agent": "check-fable",
+        "files": {
+          "failed": "fatal: not a git repository"
+        }
+      },
+      "segments": [
+        "dux could not look for uncommitted files in ",
+        {
+          "name": "check-fable",
+          "quoted": false
+        },
+        " (fatal: not a git repository); check it before deleting it."
+      ]
+    },
+    {
       "what": "the branch check's answer for one branch with nothing unpushed",
       "sentence": "delete_branches_checked",
       "args": {

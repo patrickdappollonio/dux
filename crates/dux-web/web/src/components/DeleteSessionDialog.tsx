@@ -34,7 +34,10 @@ import {
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
+  type UncommittedAnswer,
   type UnpushedAnswer,
+  worktreeFilesCheckingProse,
+  worktreeFilesProse,
 } from "@/lib/deleteAgent"
 import { type Prose, renderProse } from "@/lib/prose"
 import { cn } from "@/lib/utils"
@@ -134,6 +137,27 @@ function countFailures(offer: BranchOffer): [string | null, string | null] {
       : lossAnswer(offer.others_unpushed, offer.others_unpushed_error),
     lossAnswer(offer.both_unpushed, offer.both_unpushed_error),
   )
+}
+
+// What the ticked worktree box says about the files in `agent`'s worktree:
+// quietly that git is still being asked, then in the loss warning's style how
+// many uncommitted files go with it or that git could not look. `null` once
+// git counted none, as the loss warning says nothing about a branch that
+// loses no commit.
+function worktreeFiles(
+  offer: OfferState,
+  agent: string,
+): { prose: Prose; tone: "quiet" | "warning" } | null {
+  if (offer.state === "pending")
+    return { prose: worktreeFilesCheckingProse(agent), tone: "quiet" }
+  const answer: UncommittedAnswer =
+    offer.state === "failed"
+      ? { failed: offer.reason }
+      : typeof offer.offer.uncommitted_files === "number"
+        ? { count: offer.offer.uncommitted_files }
+        : { failed: offer.offer.uncommitted_files_error ?? "no count came back" }
+  const prose = worktreeFilesProse(agent, answer)
+  return prose === null ? null : { prose, tone: "warning" }
 }
 
 // What deleting the boxes ticked right now loses, or `null` with nothing
@@ -400,6 +424,8 @@ export function DeleteSessionDialog() {
     ? (othersAnswer ?? othersDefault(others))
     : false
   const check = branchCheck(offer)
+  // Said only under the ticked worktree box, which it rides inside.
+  const files = managed ? worktreeFiles(offer, name ?? managed.branch_name) : null
   // The first box is left out only for the project's own branch; a failed
   // check keeps it, disabled, with the reason said once, in the pill.
   const firstBoxShown =
@@ -532,6 +558,14 @@ export function DeleteSessionDialog() {
                 git will not delete a branch still checked out, so there is
                 nothing to offer. */}
             <Collapse open={deleteWorktree}>
+              {files &&
+                (files.tone === "quiet" ? (
+                  <p className="text-sm text-muted-foreground">
+                    {renderProse(files.prose)}
+                  </p>
+                ) : (
+                  <BranchWarning prose={files.prose} />
+                ))}
               {firstBoxShown && (
                 <CheckboxRow
                   id="delete-branch"

@@ -33,6 +33,51 @@ pub fn unpushed_count_failure_prose(branches: &[&str], reason: &str) -> Prose {
 /// could not count.
 pub type UnpushedAnswer = Result<crate::git::UnpushedCommits, String>;
 
+/// What git answered about the agent's worktree: how many files in it are not
+/// committed, or why it could not look.
+pub type UncommittedAnswer = Result<u32, String>;
+
+/// What the worktree box says while the dialog is still asking git about the
+/// files in `agent`'s worktree.
+pub fn worktree_files_checking_prose(agent: &str) -> Prose {
+    Prose::new()
+        .text("Looking for uncommitted files in ")
+        .name(agent)
+        .text("\u{2026}")
+}
+
+/// The warning under a ticked worktree box: how many files in `agent`'s
+/// worktree are not committed and go with it, or that git could not look.
+/// `None` when every file is committed (or the folder is already gone), since
+/// there is nothing to warn about, exactly as [`branch_loss_prose`] says
+/// nothing about a branch that loses no commit. The reason is relayed error
+/// text and stays plain.
+pub fn worktree_files_prose(agent: &str, answer: &UncommittedAnswer) -> Option<Prose> {
+    let count = match answer {
+        Ok(0) => return None,
+        Ok(count) => *count,
+        Err(reason) => {
+            return Some(
+                Prose::new()
+                    .text("dux could not look for uncommitted files in ")
+                    .name(agent)
+                    .text(format!(" ({reason}); check it before deleting it.")),
+            );
+        }
+    };
+    let (lead, verb) = if count == 1 {
+        ("1 file in ".to_string(), " isn't")
+    } else {
+        (format!("{count} files in "), " aren't")
+    };
+    Some(
+        Prose::new()
+            .text(lead)
+            .name(agent)
+            .text(format!("{verb} committed and will be deleted.")),
+    )
+}
+
 /// `[a]`, `[a] and [b]`, `[a], [b] and [c]` with `joiner` before the last.
 fn push_list(prose: &mut Prose, names: &[&str], joiner: &str) {
     for (index, name) in names.iter().enumerate() {

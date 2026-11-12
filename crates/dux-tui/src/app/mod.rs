@@ -3087,17 +3087,24 @@ impl DeleteAgentTarget {
 pub(crate) enum DeleteBranchOffer {
     /// The worker has not answered yet.
     Pending,
-    /// The branches, each pinned to the commit a tick would delete.
-    Ready(dux_core::branch_history::BranchOffer),
+    /// The branches, each pinned to the commit a tick would delete, and the
+    /// worktree's uncommitted files. Boxed: the answer is far larger than the
+    /// other states.
+    Ready(Box<dux_core::branch_history::BranchOffer>),
     /// Why git could not be asked.
     Failed(String),
 }
 
 impl DeleteBranchOffer {
+    /// The state once git's answer has landed.
+    pub(crate) fn answered(offer: dux_core::branch_history::BranchOffer) -> Self {
+        Self::Ready(Box::new(offer))
+    }
+
     /// git's answer, when it has landed.
     pub(crate) fn ready(&self) -> Option<&dux_core::branch_history::BranchOffer> {
         match self {
-            Self::Ready(offer) => Some(offer),
+            Self::Ready(offer) => Some(offer.as_ref()),
             Self::Pending | Self::Failed(_) => None,
         }
     }

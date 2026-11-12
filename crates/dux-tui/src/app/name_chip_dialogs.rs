@@ -619,7 +619,7 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
         dux_core::engine::WorktreeOnDelete::Remove,
     );
     if let PromptState::ConfirmDeleteAgent { offer, .. } = &mut prompt {
-        *offer = crate::app::DeleteBranchOffer::Ready(BranchOffer {
+        *offer = crate::app::DeleteBranchOffer::answered(BranchOffer {
             current_name: String::new(),
             current: Some(offered("now-br", BranchOrigin::Dux)),
             current_unpushed: counted(2),
@@ -627,6 +627,7 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
             others_unpushed: counted(0),
             both_unpushed: counted(2),
             newly_seen: Vec::new(),
+            uncommitted_files: Ok(0),
             protected: Vec::new(),
         });
     }
@@ -640,6 +641,134 @@ fn the_delete_agent_dialog_chips_the_agent_and_every_branch_it_names() {
     assert_chipped(&app, &buf, "born-br");
     assert!(occurrences(&buf, "born-br").len() >= 2, "{}", screen(&buf));
     assert!(screen(&buf).contains("Delete"), "{}", screen(&buf));
+}
+
+/// A landed offer with nothing unpushed and `files` as the worktree's answer.
+fn offer_with_files(files: Result<u32, String>) -> crate::app::DeleteBranchOffer {
+    use dux_core::branch_history::{BranchOffer, BranchOrigin, OfferedBranch};
+    let counted = Ok(dux_core::git::UnpushedCommits {
+        count: 0,
+        has_remote_refs: true,
+    });
+    crate::app::DeleteBranchOffer::answered(BranchOffer {
+        current_name: "now-br".to_string(),
+        current: Some(OfferedBranch {
+            name: "now-br".to_string(),
+            oid: "a".repeat(40),
+            origin: BranchOrigin::Dux,
+        }),
+        current_unpushed: counted.clone(),
+        others: Vec::new(),
+        others_unpushed: counted.clone(),
+        both_unpushed: counted,
+        newly_seen: Vec::new(),
+        protected: Vec::new(),
+        uncommitted_files: files,
+    })
+}
+
+/// The delete dialog for a managed agent, its worktree box as `worktree`
+/// says, with `offer` as what git answered, painted.
+fn delete_dialog_with(
+    app: &mut App,
+    worktree: dux_core::engine::WorktreeOnDelete,
+    offer: crate::app::DeleteBranchOffer,
+) -> Buffer {
+    let mut prompt = delete_agent_prompt(
+        DeleteAgentTarget::Managed {
+            branch_name: "now-br".to_string(),
+            worktree_shared: false,
+        },
+        worktree,
+    );
+    if let PromptState::ConfirmDeleteAgent { offer: slot, .. } = &mut prompt {
+        *slot = offer;
+    }
+    open(app, prompt)
+}
+
+/// A ticked worktree box says how many uncommitted files go with the
+/// worktree, in the warning colour and chipping the agent; nothing is said for
+/// a clean worktree or while the worktree box is unticked.
+#[test]
+fn the_delete_agent_dialog_counts_the_uncommitted_files_only_when_the_worktree_goes() {
+    use dux_core::engine::WorktreeOnDelete::{Keep, Remove};
+    let mut app = test_app(default_bindings());
+
+    let buf = delete_dialog_with(&mut app, Remove, offer_with_files(Ok(3)));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(
+        text.contains("3 files in launch-at-login aren't committed and will be deleted."),
+        "{text}"
+    );
+    let row = occurrences(&buf, "3 files in")
+        .first()
+        .copied()
+        .expect("the warning is on screen");
+    assert_eq!(buf[row].fg, app.theme.warning_fg, "{}", screen(&buf));
+    assert_chipped_on_row(&app, &buf, "3 files in", "launch-at-login");
+
+    let buf = delete_dialog_with(&mut app, Remove, offer_with_files(Ok(1)));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(
+        text.contains("1 file in launch-at-login isn't committed and will be deleted."),
+        "{text}"
+    );
+
+    let buf = delete_dialog_with(&mut app, Remove, offer_with_files(Ok(0)));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(!text.contains("committed and will be deleted"), "{text}");
+    assert!(!text.contains("uncommitted files"), "{text}");
+
+    let buf = delete_dialog_with(&mut app, Keep, offer_with_files(Ok(3)));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(!text.contains("committed and will be deleted"), "{text}");
+}
+
+/// While git is asked the ticked worktree box says so; a look that failed,
+/// alone or with the whole check, says so in the warning colour rather than
+/// reading as a clean worktree; and an unticked box says nothing.
+#[test]
+fn the_delete_agent_dialog_says_when_it_is_still_looking_or_could_not_look() {
+    use crate::app::DeleteBranchOffer::{Failed, Pending};
+    use dux_core::engine::WorktreeOnDelete::{Keep, Remove};
+    let mut app = test_app(default_bindings());
+
+    let failed = offer_with_files(Err("fatal: not a git repository".to_string()));
+    let buf = delete_dialog_with(&mut app, Remove, failed);
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(
+        text.contains(
+            "dux could not look for uncommitted files in launch-at-login \
+             (fatal: not a git repository); check it before deleting it."
+        ),
+        "{text}"
+    );
+    let row = occurrences(&buf, "dux could not look")
+        .first()
+        .copied()
+        .expect("the failure is on screen");
+    assert_eq!(buf[row].fg, app.theme.warning_fg, "{}", screen(&buf));
+
+    let buf = delete_dialog_with(&mut app, Remove, Failed("git could not be run".to_string()));
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(
+        text.contains(
+            "dux could not look for uncommitted files in launch-at-login (git could not be run)"
+        ),
+        "{text}"
+    );
+
+    let buf = delete_dialog_with(&mut app, Remove, Pending);
+    let text = dialog_text(&buf, "Delete Agent");
+    // The chip's padding cell stands between the name and the ellipsis.
+    assert!(
+        text.contains("Looking for uncommitted files in launch-at-login \u{2026}"),
+        "{text}"
+    );
+    let buf = delete_dialog_with(&mut app, Keep, Pending);
+    let text = dialog_text(&buf, "Delete Agent");
+    assert!(!text.contains("uncommitted files"), "{text}");
 }
 
 #[test]

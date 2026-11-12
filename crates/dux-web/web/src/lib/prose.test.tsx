@@ -16,6 +16,7 @@ import { changeBaseBranchProse } from "./changeBaseBranch"
 import { checkoutDefaultBranchProse } from "./checkoutDefaultBranch"
 import {
   type BranchOrigin,
+  type UncommittedAnswer,
   type UnpushedAnswer,
   branchesCheckFailedProse,
   branchesCheckedProse,
@@ -28,6 +29,8 @@ import {
   protectedBranchesProse,
   branchLossProse,
   unpushedCountFailureProse,
+  worktreeFilesCheckingProse,
+  worktreeFilesProse,
 } from "./deleteAgent"
 import { detachConfirmProse } from "./detachAgent"
 import {
@@ -223,6 +226,15 @@ describe("the sentences both surfaces print", () => {
         )
       case "delete_branches_checking":
         return branchesCheckingProse()
+      case "delete_worktree_files_checking":
+        return worktreeFilesCheckingProse(args.agent as string)
+      case "delete_worktree_files":
+        return (
+          worktreeFilesProse(
+            args.agent as string,
+            args.files as UncommittedAnswer,
+          ) ?? []
+        )
       case "delete_branches_checked": {
         const answer = branchesCheckedProse(
           args.current as string | null,

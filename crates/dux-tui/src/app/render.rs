@@ -12531,7 +12531,9 @@ impl App {
         // Under the worktree box: that git has not answered about the
         // branches, or could not, and which of them are the project's own.
         let status_lines = if branch_boxes {
-            self.delete_agent_branch_status_lines(offer, inner_width)
+            let mut lines = self.delete_agent_worktree_files_lines(agent_label, offer, inner_width);
+            lines.extend(self.delete_agent_branch_status_lines(offer, inner_width));
+            lines
         } else {
             Vec::new()
         };
@@ -12744,6 +12746,37 @@ impl App {
                 DeleteAgentFocus::OtherBranchesCheckbox,
             ),
         ]
+    }
+
+    /// What the ticked worktree box says about the files in `agent`'s
+    /// worktree: that git is still being asked, how many files are not
+    /// committed and go with it, or that git could not look. Nothing once git
+    /// counted none, as the branch boxes say nothing about a tick that loses
+    /// no commit.
+    fn delete_agent_worktree_files_lines(
+        &self,
+        agent: &str,
+        offer: &crate::app::DeleteBranchOffer,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        use dux_core::delete_agent_prose as copy;
+        let (prose, style) = match offer {
+            crate::app::DeleteBranchOffer::Pending => (
+                Some(copy::worktree_files_checking_prose(agent)),
+                Style::default().fg(self.theme.hint_desc_fg),
+            ),
+            crate::app::DeleteBranchOffer::Failed(reason) => (
+                copy::worktree_files_prose(agent, &Err(reason.clone())),
+                Style::default().fg(self.theme.warning_fg),
+            ),
+            crate::app::DeleteBranchOffer::Ready(offer) => (
+                copy::worktree_files_prose(agent, &offer.uncommitted_files),
+                Style::default().fg(self.theme.warning_fg),
+            ),
+        };
+        prose
+            .map(|prose| self.indented_prose_lines(&prose, style, inner_width))
+            .unwrap_or_default()
     }
 
     /// What stands in for the branch boxes while git has not answered about
@@ -28186,7 +28219,7 @@ mod tests {
             has_remote_refs: true,
         };
         delete_agent_prompt_with(
-            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+            crate::app::DeleteBranchOffer::answered(dux_core::branch_history::BranchOffer {
                 current_name: String::new(),
                 current: Some(offered("feature", origin)),
                 current_unpushed: Ok(none_unpushed),
@@ -28200,6 +28233,7 @@ mod tests {
                     has_remote_refs: true,
                 }),
                 newly_seen: Vec::new(),
+                uncommitted_files: Ok(0),
                 protected: Vec::new(),
             }),
             worktree,
@@ -28416,7 +28450,7 @@ mod tests {
             })
         };
         app.prompt = delete_agent_prompt_with(
-            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+            crate::app::DeleteBranchOffer::answered(dux_core::branch_history::BranchOffer {
                 current_name: "feature".to_string(),
                 current: Some(dux_core::branch_history::OfferedBranch {
                     name: "feature".to_string(),
@@ -28428,6 +28462,7 @@ mod tests {
                 others_unpushed: unpushed(0),
                 both_unpushed: unpushed(2),
                 newly_seen: Vec::new(),
+                uncommitted_files: Ok(0),
                 protected: Vec::new(),
             }),
             dux_core::engine::WorktreeOnDelete::Remove,
@@ -28449,7 +28484,7 @@ mod tests {
         };
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt_with(
-            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+            crate::app::DeleteBranchOffer::answered(dux_core::branch_history::BranchOffer {
                 current_name: "main".to_string(),
                 current: None,
                 current_unpushed: Ok(none_unpushed),
@@ -28457,6 +28492,7 @@ mod tests {
                 others_unpushed: Ok(none_unpushed),
                 both_unpushed: Ok(none_unpushed),
                 newly_seen: Vec::new(),
+                uncommitted_files: Ok(0),
                 protected: vec!["main".to_string()],
             }),
             dux_core::engine::WorktreeOnDelete::Remove,
@@ -28478,7 +28514,7 @@ mod tests {
         };
         let mut app = test_app(default_bindings());
         app.prompt = delete_agent_prompt_with(
-            crate::app::DeleteBranchOffer::Ready(dux_core::branch_history::BranchOffer {
+            crate::app::DeleteBranchOffer::answered(dux_core::branch_history::BranchOffer {
                 current_name: "refactor-cache".to_string(),
                 current: None,
                 current_unpushed: Ok(none_unpushed),
@@ -28490,6 +28526,7 @@ mod tests {
                 others_unpushed: Ok(none_unpushed),
                 both_unpushed: Ok(none_unpushed),
                 newly_seen: Vec::new(),
+                uncommitted_files: Ok(0),
                 protected: Vec::new(),
             }),
             dux_core::engine::WorktreeOnDelete::Remove,

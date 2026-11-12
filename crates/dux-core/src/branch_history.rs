@@ -1612,6 +1612,10 @@ pub struct BranchOffer {
     /// Branches the HEAD reflog showed that the agent's list did not have yet,
     /// each with its identity, for the engine to record.
     pub newly_seen: Vec<SeenBranch>,
+    /// How many files in the worktree are not committed, which removing the
+    /// worktree deletes, or why git could not look. A worktree folder that is
+    /// gone counts 0.
+    pub uncommitted_files: crate::delete_agent_prose::UncommittedAnswer,
 }
 
 impl BranchOffer {
@@ -1798,6 +1802,14 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
         all_names.push(current.name.as_str());
     }
     let both_unpushed = count_at(repo, &all_oids, &all_names, &local);
+    // The worktree box's question rides the same read: removing the worktree
+    // deletes every file in it that is not committed.
+    let uncommitted_files = crate::git::uncommitted_file_count(worktree).map_err(|err| {
+        crate::logger::warn(&format!(
+            "could not count the uncommitted files for the delete dialog: {err:#}"
+        ));
+        crate::git::unpushed_count_failure_reason(&err)
+    });
     BranchOffer {
         current_name: inputs.branch_name.clone(),
         current,
@@ -1807,6 +1819,7 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
         both_unpushed,
         protected,
         newly_seen,
+        uncommitted_files,
     }
 }
 
@@ -2585,6 +2598,55 @@ mod tests {
         assert_eq!(current.origin, BranchOrigin::Adopted);
         assert!(!offer.current_default());
         assert_eq!(offer.protected, Vec::<String>::new());
+    }
+
+    /// A worktree whose only work is an untracked file: the branch check is
+    /// rightly clean (no commit is unpushed), and the offer must still say
+    /// that removing the worktree deletes that file, since
+    /// `git worktree remove --force` takes it with the folder.
+    #[test]
+    fn the_offer_counts_an_untracked_file_the_worktree_removal_would_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, wt) = repo_and_worktree(tmp.path());
+        git(&repo, &["update-ref", "refs/remotes/origin/agent", "HEAD"]);
+        std::fs::write(wt.join("RELEASE_NOTES.md"), "draft").unwrap();
+        let offer = delete_branch_offer(&inputs(
+            &repo,
+            &wt,
+            "agent",
+            BranchProvenance::CreatedByDux,
+            vec![birth("agent")],
+            &[],
+        ));
+        assert_eq!(offer.current_unpushed.as_ref().map(|c| c.count), Ok(0));
+        assert_eq!(offer.uncommitted_files, Ok(1));
+        let warning = crate::delete_agent_prose::worktree_files_prose(
+            "check-fable",
+            &offer.uncommitted_files,
+        )
+        .expect("a warning");
+        assert_eq!(
+            warning.plain(),
+            "1 file in check-fable isn't committed and will be deleted."
+        );
+    }
+
+    /// A worktree folder that is already gone has nothing to lose, and the
+    /// offer says so rather than failing the check.
+    #[test]
+    fn the_offer_counts_no_files_for_a_missing_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, wt) = repo_and_worktree(tmp.path());
+        std::fs::remove_dir_all(&wt).unwrap();
+        let offer = delete_branch_offer(&inputs(
+            &repo,
+            &wt,
+            "agent",
+            BranchProvenance::CreatedByDux,
+            vec![birth("agent")],
+            &[],
+        ));
+        assert_eq!(offer.uncommitted_files, Ok(0));
     }
 
     /// The project's own branch the agent was on is named as protected and

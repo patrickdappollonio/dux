@@ -4515,6 +4515,69 @@ pub(crate) fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// How many files in the worktree are not committed: modified, staged,
+/// deleted, renamed, or untracked, which is what `git worktree remove --force`
+/// destroys with the directory. Ignored files do not count. A renamed or
+/// copied file is one file, though its record carries two paths. A worktree
+/// directory that is not there has nothing to lose, so it counts 0.
+///
+/// It shells out to git, so callers run it in a background worker. Immune to
+/// user config: `--porcelain=v1 -z` is the machine-stable form, every flag
+/// that config could change (`status.showUntrackedFiles`, `status.renames`,
+/// `diff.ignoreSubmodules`) is passed explicitly, and only the records'
+/// status columns are read, never their paths.
+///
+/// # Errors
+///
+/// Fails when git cannot be run or `git status` fails.
+pub fn uncommitted_file_count(worktree_path: &Path) -> Result<u32> {
+    if !worktree_path.is_dir() {
+        return Ok(0);
+    }
+    // A scan that only reads: it never takes the index lock.
+    let output = Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "-C",
+            worktree_path.to_string_lossy().as_ref(),
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--renames",
+            "--ignore-submodules=none",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| anyhow!("git could not be run: {err}"))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        return Err(match said.trim() {
+            "" => anyhow!("git status failed ({})", output.status),
+            said => anyhow!("git status failed: {said}"),
+        });
+    }
+    Ok(count_status_records(&output.stdout))
+}
+
+/// The number of files in `git status --porcelain=v1 -z` output: one per
+/// record, where a rename or copy record's second path is part of the same
+/// file and is skipped.
+fn count_status_records(stdout: &[u8]) -> u32 {
+    let mut records = stdout.split(|byte| *byte == 0).filter(|r| !r.is_empty());
+    let mut count: u32 = 0;
+    while let Some(record) = records.next() {
+        count = count.saturating_add(1);
+        let renamed = record
+            .get(..2)
+            .is_some_and(|xy| xy.iter().any(|column| matches!(column, b'R' | b'C')));
+        if renamed {
+            records.next();
+        }
+    }
+    count
+}
+
 /// Remove a worktree and delete the branches the agent owned.
 ///
 /// `branch_name` is the branch the worktree is on NOW. `initial_branch` is the
@@ -12283,6 +12346,74 @@ mod tests {
             worktree_is_dirty(&wt).unwrap(),
             "an untracked file must read as dirty"
         );
+    }
+
+    /// Every kind of uncommitted file the delete dialog warns about counts
+    /// once (a rename too, though git prints two paths for it), and an ignored
+    /// file does not count, since it is not work anyone expects to keep.
+    #[test]
+    fn uncommitted_file_count_counts_each_uncommitted_file_once() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "filecount");
+        let git = worktree_git(&wt);
+        for name in ["modified", "staged", "deleted", "moved"] {
+            std::fs::write(wt.join(name), name).unwrap();
+        }
+        std::fs::write(wt.join(".gitignore"), "*.log\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "files"]);
+        assert_eq!(uncommitted_file_count(&wt).unwrap(), 0, "a clean worktree");
+
+        std::fs::write(wt.join("modified"), "changed").unwrap();
+        std::fs::write(wt.join("staged"), "changed").unwrap();
+        git(&["add", "staged"]);
+        std::fs::remove_file(wt.join("deleted")).unwrap();
+        git(&["mv", "moved", "renamed"]);
+        std::fs::create_dir_all(wt.join("new/deep")).unwrap();
+        std::fs::write(wt.join("new/deep/untracked"), "x").unwrap();
+        std::fs::write(wt.join("new/other"), "x").unwrap();
+        std::fs::write(wt.join("debug.log"), "ignored").unwrap();
+        // modified, staged, deleted, renamed (once) and the two untracked
+        // files, each listed on its own rather than as their folder.
+        assert_eq!(uncommitted_file_count(&wt).unwrap(), 6);
+    }
+
+    /// Config that would change git status's records (renames off, untracked
+    /// files hidden) changes nothing about the count.
+    #[test]
+    fn uncommitted_file_count_ignores_status_config() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "statusconfig");
+        let git = worktree_git(&wt);
+        std::fs::write(wt.join("moved"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "one"]);
+        git(&["mv", "moved", "renamed"]);
+        std::fs::create_dir_all(wt.join("dir")).unwrap();
+        std::fs::write(wt.join("dir/a"), "x").unwrap();
+        std::fs::write(wt.join("dir/b"), "x").unwrap();
+        git(&["config", "status.renames", "false"]);
+        git(&["config", "diff.renames", "false"]);
+        git(&["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(uncommitted_file_count(&wt).unwrap(), 3);
+    }
+
+    /// A worktree folder that is gone holds nothing a delete could lose.
+    #[test]
+    fn uncommitted_file_count_of_a_missing_worktree_is_zero() {
+        let repo = init_test_repo();
+        assert_eq!(
+            uncommitted_file_count(&repo.path().join("not-there")).unwrap(),
+            0
+        );
+    }
+
+    /// A folder that is no repository is a failure to check, never a clean
+    /// answer.
+    #[test]
+    fn uncommitted_file_count_fails_outside_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(uncommitted_file_count(dir.path()).is_err());
     }
 
     /// Deleting an agent whose branch dux created removes the LOCAL branch and

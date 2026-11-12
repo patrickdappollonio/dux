@@ -343,3 +343,45 @@ export function protectedBranchesProse(branches: string[]): Prose {
       : " are the project's own branches, so dux keeps them.",
   ]
 }
+
+/**
+ * What git answered about the agent's worktree: how many files in it are not
+ * committed, or why it could not look.
+ */
+export type UncommittedAnswer = { count: number } | { failed: string }
+
+/**
+ * What the worktree box says while the dialog is still asking git about the
+ * files in `agent`'s worktree. Mirrors dux-core's
+ * `worktree_files_checking_prose`, pinned by the shared prose fixture.
+ */
+export function worktreeFilesCheckingProse(agent: string): Prose {
+  return ["Looking for uncommitted files in ", chip(agent), "…"]
+}
+
+/**
+ * The warning under a ticked worktree box: how many files in `agent`'s
+ * worktree are not committed and go with it, or that git could not look;
+ * `null` when every file is committed (or the folder is already gone), as
+ * `branchLossProse` says nothing about a branch that loses no commit. Mirrors
+ * dux-core's `worktree_files_prose`, pinned by the shared prose fixture.
+ */
+export function worktreeFilesProse(
+  agent: string,
+  answer: UncommittedAnswer,
+): Prose | null {
+  if ("failed" in answer)
+    return [
+      "dux could not look for uncommitted files in ",
+      chip(agent),
+      ` (${answer.failed}); check it before deleting it.`,
+    ]
+  if (answer.count === 0) return null
+  return answer.count === 1
+    ? ["1 file in ", chip(agent), " isn't committed and will be deleted."]
+    : [
+        `${answer.count} files in `,
+        chip(agent),
+        " aren't committed and will be deleted.",
+      ]
+}

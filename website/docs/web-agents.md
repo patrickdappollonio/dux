@@ -421,6 +421,17 @@ it only passed through between two of dux's checks, so the dialog can offer all 
 - **"Also delete the other branches this agent was on: …"** names every other branch the
   worktree has been on that still exists. It appears only when there is at least one.
 
+Ticking the worktree box also shows how many files in the worktree are not committed, such
+as "3 files in … aren't committed and will be deleted". Modified, staged, deleted, renamed
+and untracked files all count; files your `.gitignore` ignores do not. While git is still
+being asked the line says "Looking for uncommitted files in …", and when git could not look
+it says so and asks you to check the worktree yourself. With every file committed, or the
+worktree folder already gone, there is no line at all.
+
+> [!WARNING]
+> No unpushed commits does not mean nothing is lost. Removing the worktree deletes every
+> uncommitted file in it, untracked ones included, and nothing can bring them back.
+
 dux starts reading the branches from git as soon as the dialog opens, so the answer is
 usually in by the time you tick the worktree box. Until it is, the dialog says "Looking for
 unpushed work on the branches…" (the browser shows the first box disabled; the terminal UI

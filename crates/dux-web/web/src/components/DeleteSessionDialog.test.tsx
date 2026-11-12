@@ -99,6 +99,8 @@ function offer(
     both_unpushed: { count: 0, has_remote_refs: true },
     both_unpushed_error: null,
     protected: [],
+    uncommitted_files: 0,
+    uncommitted_files_error: null,
     ...extra,
   }
 }
@@ -159,7 +161,7 @@ describe("DeleteSessionDialog", () => {
     const before = browser.index
     render(<DeleteSessionDialog />)
     expect(screen.getByText("Delete agent?")).toBeTruthy()
-    expect(screen.getByText(/quacky-mallard/)).toBeTruthy()
+    expect(paragraph(/^This removes the agent session quacky-mallard/)).toBeTruthy()
     await waitFor(() => {
       expect(browser.index).toBe(before + 1)
     })
@@ -571,6 +573,89 @@ describe("DeleteSessionDialog", () => {
     fireEvent.click(othersBox()!)
     expect(othersBox()!.getAttribute("aria-checked")).toBe("true")
     expect(screen.queryByText(/^Deleting /)).toBeNull()
+  })
+
+  // Removing the worktree deletes every file in it that is not committed, which
+  // the branch check never sees: the ticked worktree box says how many, naming
+  // the agent as a chip, and an unticked one says nothing.
+  it("warns how many uncommitted files go with the worktree, only while its box is ticked", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [], { uncommitted_files: 3 }),
+    )
+    seed("s1", [session1])
+    render(<DeleteSessionDialog />)
+    await act(async () => {})
+    const hidden = paragraph(/aren't committed and will be deleted/)
+    expect(hidden.closest("[aria-hidden='true']")).not.toBeNull()
+    tickWorktree()
+    const warning = paragraph(/aren't committed and will be deleted/)
+    expect(warning.closest("[aria-hidden='true']")).toBeNull()
+    expect(warning.textContent).toBe(
+      "3 files in quacky-mallard aren't committed and will be deleted.",
+    )
+    expect(chipsIn(warning)).toEqual(["quacky-mallard"])
+    expect(warning.className).toContain("text-destructive")
+  })
+
+  it("says one uncommitted file in the singular, and nothing for a clean worktree", async () => {
+    branchUnpushed.mockResolvedValue(
+      offer({ name: "dux/s1", origin: "dux" }, [], { uncommitted_files: 1 }),
+    )
+    seed("s1", [session1])
+    const { unmount } = render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() =>
+      expect(paragraph(/isn't committed/).textContent).toBe(
+        "1 file in quacky-mallard isn't committed and will be deleted.",
+      ),
+    )
+    unmount()
+
+    branchUnpushed.mockResolvedValue(offer({ name: "dux/s1", origin: "dux" }))
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() =>
+      expect(currentBox().getAttribute("aria-disabled")).not.toBe("true"),
+    )
+    expect(screen.queryByText(/committed and will be deleted/)).toBeNull()
+    expect(screen.queryByText(/uncommitted files/)).toBeNull()
+  })
+
+  // While git is asked the box says so quietly; a look that failed says so as
+  // a warning rather than reading as a clean worktree, whether the files alone
+  // or the whole check failed.
+  it("says it is still looking, and says so when git could not look", async () => {
+    let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
+    branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    seed("s1", [session1])
+    const { unmount } = render(<DeleteSessionDialog />)
+    tickWorktree()
+    const looking = paragraph(/^Looking for uncommitted files in /)
+    expect(looking.textContent).toBe("Looking for uncommitted files in quacky-mallard…")
+    expect(looking.className).toContain("text-muted-foreground")
+    await act(async () =>
+      answer(
+        offer({ name: "dux/s1", origin: "dux" }, [], {
+          uncommitted_files: null,
+          uncommitted_files_error: "fatal: not a git repository",
+        }),
+      ),
+    )
+    const failed = paragraph(/^dux could not look for uncommitted files/)
+    expect(failed.textContent).toBe(
+      "dux could not look for uncommitted files in quacky-mallard (fatal: not a git repository); check it before deleting it.",
+    )
+    expect(failed.className).toContain("text-destructive")
+    unmount()
+
+    branchUnpushed.mockRejectedValue(new Error("git could not be run"))
+    render(<DeleteSessionDialog />)
+    tickWorktree()
+    await waitFor(() =>
+      expect(paragraph(/^dux could not look for uncommitted files/).textContent).toBe(
+        "dux could not look for uncommitted files in quacky-mallard (git could not be run); check it before deleting it.",
+      ),
+    )
   })
 
   // Whether a missing first box is the project's own branch is decided from
@@ -1063,7 +1148,7 @@ describe("DeleteSessionDialog", () => {
     // Reopen for another existing session; the checkbox must render unchecked.
     seed("s2", [session2])
     rerender(<DeleteSessionDialog />)
-    expect(screen.getByText(/wobbly-duckling/)).toBeTruthy()
+    expect(paragraph(/^This removes the agent session wobbly-duckling/)).toBeTruthy()
     const reopenedCheckbox = screen.getByRole("checkbox")
     expect(reopenedCheckbox.getAttribute("aria-checked")).toBe("false")
   })

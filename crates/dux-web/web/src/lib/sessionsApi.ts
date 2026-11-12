@@ -211,6 +211,10 @@ export interface BranchOffer {
   // Branches the agent was on that are the project's own: offered in no box,
   // and never deleted.
   protected: string[]
+  // How many files in the worktree are not committed, which removing the
+  // worktree deletes, or why git could not look.
+  uncommitted_files: number | null
+  uncommitted_files_error: string | null
 }
 
 // One box's answer on a delete. A ticked box carries exactly the entries the

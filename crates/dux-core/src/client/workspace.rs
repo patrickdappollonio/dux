@@ -1971,6 +1971,9 @@ impl BranchOfferReply {
             both_unpushed: count_answer(self.both_unpushed, self.both_unpushed_error.as_ref()),
             protected: self.protected.clone(),
             newly_seen: Vec::new(),
+            // Only the branch boxes are asked about here; nothing on the
+            // command line reads the worktree's file count.
+            uncommitted_files: Ok(0),
         }
     }
 }

@@ -96,6 +96,8 @@ fn standalone_session(id: &str, folder: &str) -> dux_core::model::AgentSession {
 struct Fixture {
     addr: SocketAddr,
     repo: std::path::PathBuf,
+    /// The drifted agent's worktree.
+    drifted_wt: std::path::PathBuf,
     _tmp: dux_core::test_scratch::ScratchDir,
 }
 
@@ -229,6 +231,7 @@ async fn boot() -> Fixture {
     Fixture {
         addr,
         repo,
+        drifted_wt,
         _tmp: tmp,
     }
 }
@@ -412,6 +415,24 @@ async fn branch_unpushed_offers_both_boxes_pinned() {
     assert_eq!(body["current_name"], "develop-next", "{body}");
     assert_eq!(body["protected"], serde_json::json!([]), "{body}");
     assert_eq!(body["others_unpushed"]["has_remote_refs"], false, "{body}");
+}
+
+/// The offer also says how many files in the worktree are not committed, which
+/// a worktree removal deletes along with the folder.
+#[tokio::test]
+async fn branch_unpushed_counts_the_worktrees_uncommitted_files() {
+    let f = boot().await;
+    let (_, clean) = branch_unpushed(f.addr, "drifted").await;
+    assert_eq!(clean["uncommitted_files"], 0, "{clean}");
+    std::fs::write(f.drifted_wt.join("RELEASE_NOTES.md"), "draft").expect("write a file");
+    let (status, body) = branch_unpushed(f.addr, "drifted").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["uncommitted_files"], 1, "{body}");
+    assert_eq!(
+        body["uncommitted_files_error"],
+        serde_json::Value::Null,
+        "{body}"
+    );
 }
 
 /// A branch the worktree was on but that no longer exists is not offered: there

@@ -696,6 +696,10 @@ struct BranchOfferResponse {
     both_unpushed_error: Option<String>,
     /// Branches the agent was on that are the project's own, offered in no box.
     protected: Vec<String>,
+    /// How many files in the worktree are not committed, which removing the
+    /// worktree deletes, or why git could not look.
+    uncommitted_files: Option<u32>,
+    uncommitted_files_error: Option<String>,
 }
 
 /// The wire shape of [`dux_core::git::UnpushedCommits`].
@@ -753,6 +757,10 @@ async fn session_branch_unpushed(
     let (current_unpushed, current_unpushed_error) = unpushed_payload(offer.current_unpushed);
     let (others_unpushed, others_unpushed_error) = unpushed_payload(offer.others_unpushed);
     let (both_unpushed, both_unpushed_error) = unpushed_payload(offer.both_unpushed);
+    let (uncommitted_files, uncommitted_files_error) = match offer.uncommitted_files {
+        Ok(count) => (Some(count), None),
+        Err(reason) => (None, Some(reason)),
+    };
     axum::Json(BranchOfferResponse {
         current_name: offer.current_name,
         current: offer.current,
@@ -764,6 +772,8 @@ async fn session_branch_unpushed(
         both_unpushed,
         both_unpushed_error,
         protected: offer.protected,
+        uncommitted_files,
+        uncommitted_files_error,
     })
     .into_response()
 }

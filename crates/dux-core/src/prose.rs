@@ -395,6 +395,8 @@ mod tests {
         "unpushed_count_failure",
         "delete_protected_branches",
         "delete_branch_loss",
+        "delete_worktree_files_checking",
+        "delete_worktree_files",
     ];
 
     fn build_delete_agent_box(sentence: &str, args: &Value) -> Prose {
@@ -446,6 +448,20 @@ mod tests {
                 )
             }
             "delete_branches_checking" => crate::delete_agent_prose::branches_checking_prose(),
+            "delete_worktree_files_checking" => {
+                crate::delete_agent_prose::worktree_files_checking_prose(&s("agent"))
+            }
+            "delete_worktree_files" => {
+                let files = &args["files"];
+                let answer = match files["failed"].as_str() {
+                    Some(reason) => Err(reason.to_string()),
+                    None => Ok(
+                        u32::try_from(files["count"].as_u64().expect("count")).expect("a count")
+                    ),
+                };
+                crate::delete_agent_prose::worktree_files_prose(&s("agent"), &answer)
+                    .unwrap_or_default()
+            }
             "delete_branches_checked" => {
                 let lost = |key: &str| fixture_unpushed(&args[key]).expect(key);
                 let others = strings(&args["others"]);

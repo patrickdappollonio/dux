@@ -2549,7 +2549,7 @@ impl App {
         } = &mut self.prompt
             && *session_id == answer.session_id
         {
-            *offer = crate::app::DeleteBranchOffer::Ready(answer.offer);
+            *offer = crate::app::DeleteBranchOffer::answered(answer.offer);
         }
     }
 

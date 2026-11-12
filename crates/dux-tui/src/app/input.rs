@@ -30295,6 +30295,7 @@ cyan = "#00ffff"
                 has_remote_refs: true,
             }),
             newly_seen: Vec::new(),
+            uncommitted_files: Ok(0),
             protected: Vec::new(),
         }
     }
@@ -30348,7 +30349,7 @@ cyan = "#00ffff"
         offer.current_unpushed = Err("git rev-list failed".to_string());
         let mut app = test_app(default_bindings());
         app.prompt =
-            delete_agent_prompt_state(&app, crate::app::DeleteBranchOffer::Ready(offer), Remove);
+            delete_agent_prompt_state(&app, crate::app::DeleteBranchOffer::answered(offer), Remove);
         tab_through(
             &mut app,
             &[Delete, WorktreeCheckbox, OtherBranchesCheckbox, Cancel],
@@ -30390,7 +30391,7 @@ cyan = "#00ffff"
         use dux_core::branch_history::BranchOrigin;
         use dux_core::engine::WorktreeOnDelete::{Keep, Remove};
         let ready = |others: &[&str]| {
-            crate::app::DeleteBranchOffer::Ready(branch_offer(
+            crate::app::DeleteBranchOffer::answered(branch_offer(
                 BranchOrigin::Dux,
                 others,
                 BranchOrigin::After,
@@ -30439,7 +30440,7 @@ cyan = "#00ffff"
     fn space_toggles_the_focused_branch_box_from_its_default() {
         use dux_core::branch_history::BranchOrigin;
         let mut app = test_app(default_bindings());
-        let offer = crate::app::DeleteBranchOffer::Ready(branch_offer(
+        let offer = crate::app::DeleteBranchOffer::answered(branch_offer(
             BranchOrigin::Dux,
             &["visited"],
             BranchOrigin::After,
@@ -30475,7 +30476,7 @@ cyan = "#00ffff"
             worktree_shared: false,
         };
         let remove = dux_core::engine::WorktreeOnDelete::Remove;
-        let offer = crate::app::DeleteBranchOffer::Ready(branch_offer(
+        let offer = crate::app::DeleteBranchOffer::answered(branch_offer(
             BranchOrigin::Dux,
             &["visited"],
             BranchOrigin::After,
@@ -30523,7 +30524,7 @@ cyan = "#00ffff"
             unchecked: Some(Unchecked::NotOffered),
             ..BoxWire::default()
         };
-        let lone = crate::app::DeleteBranchOffer::Ready(branch_offer(
+        let lone = crate::app::DeleteBranchOffer::answered(branch_offer(
             BranchOrigin::Dux,
             &[],
             BranchOrigin::After,
@@ -30536,7 +30537,7 @@ cyan = "#00ffff"
         let answers = target
             .branch_answers(
                 remove,
-                &crate::app::DeleteBranchOffer::Ready(own),
+                &crate::app::DeleteBranchOffer::answered(own),
                 None,
                 None,
             )
