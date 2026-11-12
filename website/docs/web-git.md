@@ -305,7 +305,15 @@ Everything else is noticed within a couple of seconds while any agent or termina
 > [!IMPORTANT]
 > A change dux did not make is never invisible, it is just up to ten seconds late. **Refresh changes** in the header menu skips that wait and says what it found. The terminal UI has the same action as its `refresh-changes` command.
 
-If a git operation collides with a lock, dux keeps retrying, so a single blip usually clears itself. If it does not, you get a "Couldn't load changes" card with a Refresh button, and a warning toast once the failures persist. A commit you make in the browser is an ordinary commit, visible everywhere.
+If a git operation collides with a lock, dux keeps retrying, so a single blip usually clears itself. If it does not, you get a "Couldn't load changes" card with a Refresh button, and a warning toast once the failures persist. The toast goes away by itself as soon as git answers again, with no message in its place: the list filling back in is the news. A commit you make in the browser is an ordinary commit, visible everywhere.
+
+dux also keeps checking which branch each agent is on, so a branch the agent switches to shows up in its row and header. If it cannot read the branch at all for a while (the folder stopped being a repository, or git will not run), a warning names the agent's folder and says the branch shown may be out of date. The details are in `dux.log`. That warning, too, goes away quietly once git answers again.
+
+### No branch checked out
+
+An agent can leave its worktree with no branch checked out: a detached checkout, a rebase or a bisect in progress. That is an ordinary state, not an error, so nothing pops up about it. The Changes pane says so instead, in a strip at its top: **No branch checked out**, and the branch dux keeps showing for the agent, which is the one it was last on. The list of changes works as usual underneath.
+
+The strip goes away on its own once a branch is checked out again, within the branch check's interval (`branch_sync_interval` in `[ui]`, 30 seconds by default). The terminal UI shows the same notice as a box at the top of its changes list.
 
 ## When an agent deletes its own working copy
 
