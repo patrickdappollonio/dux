@@ -1993,6 +1993,44 @@ mod tests {
         );
     }
 
+    /// The same button pressed by the focus key sent as a Kitty key, which a
+    /// host sending extended keys reports for Enter only under its report-all
+    /// level; the palette chord sent as a Kitty key opens the palette.
+    #[test]
+    fn the_focus_and_palette_chords_sent_as_kitty_keys_still_work_under_the_card() {
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.process_raw_input_bytes(b"\x1b[13u");
+        assert_eq!(
+            app.pending_pty_takeover,
+            Some(app.engine.pty_row("session-1-slot")),
+            "Enter as a Kitty key presses the take-over button"
+        );
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.process_raw_input_bytes(b"\x1b[112;5u");
+        assert!(
+            matches!(app.prompt, PromptState::Command { .. }),
+            "Ctrl-p as a Kitty key opens the palette over the card"
+        );
+
+        let (mut app, _recorded, _seat) = app_with_the_card_up();
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.process_raw_input_bytes(b"\x1b[13;2u");
+        assert!(
+            !app.engine.is_typing("session-1-slot"),
+            "Shift-Enter under the card reaches no child"
+        );
+        assert_eq!(app.pending_pty_takeover, None);
+    }
+
     /// SPACE PRESSES THE BUTTON ON THE RAW PATH TOO. It is the universal
     /// activation convention rather than a binding, so it has no byte pattern to
     /// look up and was missing here while the windowed path took it: the same

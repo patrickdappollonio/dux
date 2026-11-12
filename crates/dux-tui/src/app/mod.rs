@@ -161,13 +161,25 @@ enum RawScroll {
 }
 
 enum RawSeqAction {
-    Intercept(Action, RawScroll, Vec<u8>),
+    /// A dux binding matched. The key, when the sequence was decoded, is what
+    /// reaches the child if the action falls through to it.
+    Intercept(
+        Action,
+        RawScroll,
+        Vec<u8>,
+        Option<crossterm::event::KeyEvent>,
+    ),
     Mouse(MouseEvent, Vec<u8>),
+    /// The host's bytes, for the child as they are.
     Forward(Vec<u8>),
+    /// A decoded key, for the child as its classic bytes.
+    ForwardKey(crossterm::event::KeyEvent, Vec<u8>),
 }
 
 #[derive(Default)]
 struct DemotedInputPatterns {
+    /// Whether the take-over card covers the pane, which is when these apply.
+    card_covers: bool,
     palette: Vec<Vec<u8>>,
     takeover: Vec<Vec<u8>>,
 }
@@ -493,6 +505,11 @@ pub(crate) struct OneShotNotes {
 pub(crate) struct App {
     pub(crate) engine: Engine,
     pub(crate) bindings: RuntimeBindings,
+    /// Whether this run reads extended keys: `CSI … u` keys are decoded and
+    /// matched by meaning, each key reaches a child as its classic bytes, and
+    /// Shift-Enter as the soft newline. Set when the run starts; with it off,
+    /// keys are read and sent exactly as a classic terminal sends them.
+    pub(crate) extended_keys: crate::keybindings::ExtendedKeys,
     pub(crate) selected_left: usize,
     /// The terminal ids `LeftItem::Terminal` indexes into, built with the list.
     pub(crate) left_terminals: Vec<String>,
@@ -5515,6 +5532,7 @@ impl App {
             active_terminal_id: None,
             focused_tabs: HashMap::new(),
             host_forward_carry: Vec::new(),
+            extended_keys: crate::keybindings::ExtendedKeys::Off,
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             pty_sizes: HashMap::new(),
@@ -5715,6 +5733,7 @@ impl App {
     }
 
     pub(crate) fn run(&mut self) -> Result<RunExit> {
+        self.set_extended_keys(crate::keybindings::ExtendedKeys::On);
         self.start_run_services();
         install_terminal_restore_panic_hook();
         let result = enter_tui_terminal().and_then(|mut terminal| {
@@ -5741,6 +5760,14 @@ impl App {
                 .flush_focused_tab_writes(dux_core::engine::FOCUSED_TAB_FLUSH_BOUND);
         }
         Ok(result)
+    }
+
+    /// Decide, for this run, whether dux reads extended keys, for its own key
+    /// handling and its bindings alike. Read once per start, so the two always
+    /// agree.
+    pub(crate) fn set_extended_keys(&mut self, extended_keys: crate::keybindings::ExtendedKeys) {
+        self.extended_keys = extended_keys;
+        self.bindings.set_extended_keys(extended_keys);
     }
 
     fn start_run_services(&mut self) {
@@ -6258,6 +6285,36 @@ impl App {
         agents || terminals
     }
 
+    /// The key `handle_key` sees for a key crossterm decoded, or `None` when it
+    /// is dropped. The input debugger gets every key as it came, kind and all.
+    /// Elsewhere a release is dropped, because no dux action fires on one
+    /// (crokey drops the kind, so it would fire the action a second time), and
+    /// a repeat counts as a press, as a classic terminal sends it. With extended
+    /// keys on, Ctrl-`[` held with Ctrl alone becomes Esc.
+    fn structured_key(
+        &self,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<crossterm::event::KeyEvent> {
+        if matches!(self.prompt, PromptState::DebugInput { .. }) {
+            return Some(key);
+        }
+        let key = match key.kind {
+            crossterm::event::KeyEventKind::Release => return None,
+            crossterm::event::KeyEventKind::Repeat => crossterm::event::KeyEvent {
+                kind: crossterm::event::KeyEventKind::Press,
+                ..key
+            },
+            crossterm::event::KeyEventKind::Press => key,
+        };
+        Some(
+            if self.extended_keys == crate::keybindings::ExtendedKeys::On {
+                crate::key_encode::fold_ctrl_bracket(key)
+            } else {
+                key
+            },
+        )
+    }
+
     /// Route one crossterm event to its handler. Returns whether the app should
     /// exit.
     ///
@@ -6270,9 +6327,10 @@ impl App {
         // to remember it.
         self.mark_frame_dirty();
         match event {
-            Event::Key(key) => match self.handle_key(key) {
-                Ok(exit) => exit,
-                Err(err) => {
+            Event::Key(key) => match self.structured_key(key).map(|key| self.handle_key(key)) {
+                None => false,
+                Some(Ok(exit)) => exit,
+                Some(Err(err)) => {
                     self.report_runtime_error("key handling failed", err.as_ref());
                     false
                 }
@@ -7202,7 +7260,8 @@ impl App {
     /// sizes, diff line numbers) from `config`, returning the theme's own
     /// warning when it could not be loaded.
     pub(crate) fn take_reload_view_state(&mut self, config: &Config) -> Option<String> {
-        let bindings = RuntimeBindings::from_keys_config(&config.keys);
+        let mut bindings = RuntimeBindings::from_keys_config(&config.keys);
+        bindings.set_extended_keys(self.extended_keys);
         self.interactive_patterns = bindings.interactive_byte_patterns();
         self.bindings = bindings;
 

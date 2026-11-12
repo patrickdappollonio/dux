@@ -29,6 +29,10 @@ similar = "3"
 zeroize = "1.9"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 crokey = "1.4.0"
+# Reads a raw `CSI … u` key in fullscreen and converts it to crossterm's key
+# type; only this crate depends on them.
+terminput = "0.5.16"
+terminput-crossterm = { version = "0.4.12", default-features = false, features = ["crossterm_0_29"] }
 indexmap.workspace = true
 # Counts the newlines in a diff side without a byte-at-a-time loop.
 memchr = "2.8"

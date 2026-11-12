@@ -68,7 +68,7 @@ pub enum Action {
     /// Close the selected terminal.
     CloseTerminal,
     // Agent pane
-    /// Open the selected agent fullscreen, where keys go to the agent verbatim.
+    /// Open the selected agent fullscreen, where keys go straight to the agent.
     InteractAgent,
     /// Open the first companion terminal for the selected agent, or launch a new one in the agent's
     /// directory if none exists.
@@ -145,7 +145,7 @@ pub enum Action {
     /// Pull requests modal: move the selected pull request to the top.
     PullRequestMoveTop,
     /// Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent
-    /// while dux chords stay active; fullscreen, keys go to the agent verbatim.
+    /// while dux chords stay active; fullscreen, keys go straight to the agent.
     ToggleFullscreen,
     /// Scroll up one page in the agent output. Forwarded to the app itself when it owns the screen
     /// (see each provider's `forward_scroll`).
@@ -612,7 +612,7 @@ impl Action {
                 "Close the selected terminal. A row under its old name, delete_terminal, is read as this one."
             }
             Action::InteractAgent => {
-                "Open the selected agent fullscreen, where keys go to the agent verbatim."
+                "Open the selected agent fullscreen, where keys go straight to the agent."
             }
             Action::ShowTerminal => {
                 "Open the first companion terminal for the selected agent, or launch a new one in the agent's directory if none exists."
@@ -697,7 +697,7 @@ impl Action {
             Action::PullRequestMoveDown => "Pull requests: move the selected one down.",
             Action::PullRequestMoveTop => "Pull requests: move the selected one to the top.",
             Action::ToggleFullscreen => {
-                "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go to the agent verbatim."
+                "Toggle the agent pane between windowed and fullscreen. Windowed, typing reaches the agent while dux chords stay active; fullscreen, keys go straight to the agent."
             }
             Action::ScrollPageUp => {
                 "Scroll up one page in the agent output. Forwarded to the app itself when it owns the screen (see each provider's forward_scroll)."

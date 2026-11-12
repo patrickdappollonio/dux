@@ -806,6 +806,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Elsewhere
             },
+            self.extended_keys,
         ) {
             None
         } else {

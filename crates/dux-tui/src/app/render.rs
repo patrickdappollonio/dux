@@ -6406,7 +6406,7 @@ impl App {
                 "3-pane layout), typing reaches the agent while dux".to_string(),
                 format!("keeps its chords: {next_pane_key} still moves panes, and the tab,"),
                 "palette, and scroll keys stay dux's. Fullscreen".to_string(),
-                format!("({fullscreen_key}), every key goes to the agent verbatim and"),
+                format!("({fullscreen_key}), every key goes straight to the agent and"),
                 format!("{fullscreen_key} is the way back. A chord dux keeps never"),
                 "reaches the agent windowed; rebind it in [keys] to".to_string(),
                 "hand its key to the agent.".to_string(),
@@ -26707,7 +26707,9 @@ mod tests {
     /// The toggle key the two text-field modals actually route to the toggle.
     fn reachable_toggle(app: &App) -> Option<crokey::KeyCombination> {
         app.bindings
-            .first_key_reaching(Action::ToggleSelection, |k| !text_field_owns_key(k))
+            .first_key_reaching(Action::ToggleSelection, |k| {
+                !text_field_owns_key(k, crate::keybindings::ExtendedKeys::Off)
+            })
     }
 
     fn rename_prompt() -> PromptState {

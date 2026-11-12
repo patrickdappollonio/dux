@@ -4580,14 +4580,20 @@ oneshot_output = "stdout"
                 && !warnings[0].contains("f20"),
             "{warnings:?}"
         );
-        // A Ctrl-digit chord is the same case: no byte is invented for it.
-        let keys = toml::from_str::<Config>("[keys]\nscroll_to_bottom = [\"ctrl-1\"]\n")
-            .expect("parses")
-            .keys;
-        assert_eq!(
-            keybindings::unmatchable_interactive_bindings(&keys),
-            vec!["scroll_to_bottom"]
-        );
+        // A Ctrl-digit chord is the same case: no byte is invented for it,
+        // not even Ctrl-2's NUL, which the classic encoder for children knows
+        // but which would fire on Ctrl-Space.
+        for chord in ["ctrl-1", "ctrl-2"] {
+            let keys =
+                toml::from_str::<Config>(&format!("[keys]\nscroll_to_bottom = [\"{chord}\"]\n"))
+                    .expect("parses")
+                    .keys;
+            assert_eq!(
+                keybindings::unmatchable_interactive_bindings(&keys),
+                vec!["scroll_to_bottom"],
+                "{chord}"
+            );
+        }
         assert_eq!(
             key_binding_warnings(&KeysConfig::default()),
             Vec::<String>::new()

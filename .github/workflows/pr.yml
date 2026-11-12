@@ -217,7 +217,7 @@ jobs:
       # graph by design and are excluded from the deny-list below.
       - name: Verify dux-web does not depend on TUI crates
         run: |
-          if cargo tree -p dux-web --edges normal,build,dev 2>&1 | grep -E '\b(dux-tui|ratatui|crossterm|crokey)\b'; then
+          if cargo tree -p dux-web --edges normal,build,dev 2>&1 | grep -E '\b(dux-tui|ratatui|crossterm|crokey|terminput)\b'; then
             echo "FAIL: dux-web pulled in a TUI-only dependency" >&2
             exit 1
           fi

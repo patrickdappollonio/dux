@@ -159,7 +159,7 @@ screen.
 ![The terminal UI tab strip above an agent's terminal, three numbered pills for the same provider with the third one highlighted.](/screens/tui-tabs-strip-ordinals.png)
 
 > [!IMPORTANT]
-> Fullscreen gives every key to the agent verbatim and does not draw the strip at all.
+> Fullscreen gives every key straight to the agent and does not draw the strip at all.
 > Minimize first to hop between tabs.
 
 Only tabs 6 and 7 ship with a switch-by-number key. Most terminals send the other

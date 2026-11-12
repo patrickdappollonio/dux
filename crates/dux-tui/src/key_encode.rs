@@ -1,9 +1,13 @@
-//! Encoding of key events into the raw bytes a legacy terminal would send.
+//! Encoding of key events into the bytes a child expects.
 //!
-//! The one source of truth for the key-to-bytes table, used two ways:
+//! The one source of truth for the classic key-to-bytes table, the bytes a
+//! classic xterm sends, used two ways:
 //!
-//! - `key_event_to_pty_bytes` turns a crossterm `KeyEvent` into PTY bytes, so
-//!   the minimized center pane can forward typed keys to the agent.
+//! - `key_event_to_pty_bytes` and `encode_for_child` turn a key dux hands to a
+//!   child into its classic bytes. `encode_for_child` also knows the classic
+//!   forms a classic host never sends to dux but a decoded extended key can
+//!   name (Ctrl with digits, modified F-keys, shifted letters), sends
+//!   Shift-Enter as the soft newline, and drops releases.
 //! - `keybindings::key_combination_to_bytes` is a thin adapter over
 //!   `encode_key` for building the interactive-mode byte patterns from crokey
 //!   `KeyCombination`s. It carries no table of its own.
@@ -23,6 +27,17 @@ pub(crate) enum CursorKeys {
     Normal,
     /// Application cursor keys (DECSET 1): the SS3 form, `ESC O A`.
     Application,
+}
+
+impl CursorKeys {
+    /// The cursor-key mode the child running in `client` has set right now.
+    pub(crate) fn of(client: &dux_core::pty::PtyClient) -> Self {
+        if client.has_app_cursor() {
+            Self::Application
+        } else {
+            Self::Normal
+        }
+    }
 }
 
 /// Convert a crossterm key event into the byte sequence a legacy terminal
@@ -120,8 +135,11 @@ pub(crate) fn encode_key(
             ctrl_byte(c).map(|b| vec![b])
         }
         KeyCode::Char(c) if has_alt => {
-            // Alt+char: ESC then the char's UTF-8 (Shift is already folded
-            // into the char itself, crossterm delivers capitals as capitals).
+            // Alt+char: ESC then the char's UTF-8. This relies on crossterm's
+            // classic decoding, which has already folded Shift into the char
+            // (it delivers capitals as capitals); a decoded key with Shift and
+            // a lower-case letter is upper-cased first by
+            // `encode_for_classic_child`.
             let mut buf = vec![0x1b];
             let mut char_buf = [0u8; 4];
             buf.extend_from_slice(c.encode_utf8(&mut char_buf).as_bytes());
@@ -140,15 +158,16 @@ pub(crate) fn encode_key(
             Some(vec![0x1b, 0x0d])
         }
         KeyCode::Enter => {
-            // Plain CR, and deliberately also for Shift+Enter: the legacy
-            // terminal protocol sends the same CR byte for both, so there is
-            // no distinct Shift+Enter to encode (see the Shift-Enter tenet in
-            // CLAUDE.md; Ctrl-j is the supported soft-newline key).
+            // CR: a classic terminal sends it for Enter with any modifier but
+            // Alt. Shift-Enter becomes a line feed in `encode_for_child`, not
+            // here, because this table also builds the fullscreen byte
+            // patterns, where a `0x0a` pattern would fire on Ctrl-j.
             Some(vec![0x0d])
         }
         KeyCode::Tab if !mods.contains(KeyModifiers::SHIFT) => Some(vec![0x09]),
-        // Two spellings of shift-tab: crossterm sends BackTab on a legacy
-        // terminal and Tab + SHIFT under the Kitty protocol.
+        // crossterm reports Shift-Tab as BackTab on a classic host and, for a
+        // Kitty `CSI 9;2u`, as BackTab with Shift; terminput-crossterm does the
+        // same. Tab with Shift is kept only as a defensive second spelling.
         KeyCode::Tab | KeyCode::BackTab => Some(vec![0x1b, b'[', b'Z']),
         KeyCode::Backspace if has_ctrl && has_alt => Some(vec![0x1b, 0x08]),
         KeyCode::Backspace if has_ctrl => Some(vec![0x08]),
@@ -186,9 +205,155 @@ pub(crate) fn encode_key(
     }
 }
 
+/// Ctrl-`[` held with Ctrl alone is Esc: classic terminals send it as Esc, and
+/// people press it as Escape everywhere.
+pub(crate) fn fold_ctrl_bracket(key: KeyEvent) -> KeyEvent {
+    if key.code == KeyCode::Char('[') && key.modifiers == KeyModifiers::CONTROL {
+        KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            ..key
+        }
+    } else {
+        key
+    }
+}
+
+/// The modifiers the classic encoding has no bytes for.
+const NON_CLASSIC_MODIFIERS: KeyModifiers = KeyModifiers::SUPER
+    .union(KeyModifiers::HYPER)
+    .union(KeyModifiers::META);
+
+/// Encode `key` for a child. Every child receives classic keys, the bytes a
+/// classic xterm sends, except Shift-Enter: Shift alone with Enter is a line
+/// feed (`0x0a`, the Ctrl-j byte), the soft newline the web sends. A repeat
+/// counts as a press, as a classic terminal sends it. `None` for a release,
+/// which a classic terminal never sends, and for a chord the classic encoding
+/// cannot express.
+pub(crate) fn encode_for_child(key: &KeyEvent, cursor_keys: CursorKeys) -> Option<Vec<u8>> {
+    let key = fold_ctrl_bracket(*key);
+    match key.kind {
+        KeyEventKind::Release => None,
+        KeyEventKind::Press | KeyEventKind::Repeat => {
+            // Lock states live in `key.state`, not in the modifiers, so Caps
+            // Lock or Num Lock leave this a Shift-Enter.
+            if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::SHIFT {
+                return Some(vec![0x0a]);
+            }
+            encode_for_classic_child(key.code, key.modifiers, cursor_keys)
+        }
+    }
+}
+
+/// A terminput key as crossterm's. terminput-crossterm's own conversion drops
+/// Hyper and Meta, which would turn a Hyper chord into a plain key, so they
+/// are carried across here.
+pub(crate) fn from_terminput(key: terminput::KeyEvent) -> KeyEvent {
+    let mut converted = terminput_crossterm::to_crossterm_key(key);
+    for (terminput_bit, crossterm_bit) in [
+        (terminput::KeyModifiers::HYPER, KeyModifiers::HYPER),
+        (terminput::KeyModifiers::META, KeyModifiers::META),
+    ] {
+        if key.modifiers.contains(terminput_bit) {
+            converted.modifiers |= crossterm_bit;
+        }
+    }
+    converted
+}
+
+/// The bytes a classic xterm sends for `(code, mods)`. Covers the classic forms [`encode_key`] lacks because a
+/// classic host never sends them to dux: Ctrl with digits and with `@`, `[`,
+/// `/` and `?`, upper-case for a shifted letter, and modified F1 to F12.
+/// `None` for a key held with Super, Hyper or Meta: the classic encoding has
+/// no bytes for them, and a bare letter would type a character nobody typed.
+pub(crate) fn encode_for_classic_child(
+    code: KeyCode,
+    mods: KeyModifiers,
+    cursor_keys: CursorKeys,
+) -> Option<Vec<u8>> {
+    if mods.intersects(NON_CLASSIC_MODIFIERS) {
+        return None;
+    }
+    let has_ctrl = mods.contains(KeyModifiers::CONTROL);
+    let has_alt = mods.contains(KeyModifiers::ALT);
+    let has_shift = mods.contains(KeyModifiers::SHIFT);
+    let alt_prefixed = |byte: u8| {
+        if has_alt {
+            vec![0x1b, byte]
+        } else {
+            vec![byte]
+        }
+    };
+    match code {
+        // xterm sends Alt with Esc, Tab or Shift-Tab as ESC and then the key's
+        // own bytes; `encode_key` has no Alt form for them.
+        KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab if has_alt => {
+            let mut out = vec![0x1b];
+            out.extend(encode_key(code, mods - KeyModifiers::ALT, cursor_keys)?);
+            return Some(out);
+        }
+        KeyCode::Char(c) if has_ctrl => {
+            if let Some(byte) = classic_ctrl_extra(c) {
+                return Some(alt_prefixed(byte));
+            }
+        }
+        KeyCode::Char(c) if has_shift && c.is_ascii_lowercase() => {
+            let upper =
+                u8::try_from(c.to_ascii_uppercase()).expect("an ASCII letter fits in a byte");
+            return Some(alt_prefixed(upper));
+        }
+        KeyCode::F(n @ 1..=4) if csi_modifier_param(mods) > 1 => {
+            let final_byte = b'P' + (n - 1);
+            return Some(vec![
+                0x1b,
+                b'[',
+                b'1',
+                b';',
+                b'0' + csi_modifier_param(mods),
+                final_byte,
+            ]);
+        }
+        KeyCode::F(n @ 5..=12) if csi_modifier_param(mods) > 1 => {
+            let number: &[u8] = match n {
+                5 => b"15",
+                6 => b"17",
+                7 => b"18",
+                8 => b"19",
+                9 => b"20",
+                10 => b"21",
+                11 => b"23",
+                _ => b"24",
+            };
+            let mut out = b"\x1b[".to_vec();
+            out.extend_from_slice(number);
+            out.extend_from_slice(&[b';', b'0' + csi_modifier_param(mods), b'~']);
+            return Some(out);
+        }
+        _ => {}
+    }
+    encode_key(code, mods, cursor_keys)
+}
+
+/// xterm's control bytes for Ctrl with a digit or with `@`, `[`, `/`, `?`,
+/// `-`, `` ` `` or `~`, which [`ctrl_byte`] leaves out.
+fn classic_ctrl_extra(c: char) -> Option<u8> {
+    match c {
+        '2' | '@' | '`' => Some(0x00),
+        '3' | '[' => Some(0x1b),
+        '4' => Some(0x1c),
+        '5' => Some(0x1d),
+        '6' | '~' => Some(0x1e),
+        '7' | '/' | '-' => Some(0x1f),
+        '8' | '?' => Some(0x7f),
+        '1' | '9' | '0' => u8::try_from(c).ok(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyEventState;
 
     fn press(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
@@ -205,9 +370,9 @@ mod tests {
         );
     }
 
-    /// Crossterm spells shift-tab `BackTab` on most terminals and `Tab + SHIFT`
-    /// under the Kitty protocol. Both are the same keystroke and both must send
-    /// the CSI backtab sequence.
+    /// Crossterm spells Shift-Tab `BackTab`, with or without Shift held; `Tab`
+    /// with Shift is the defensive second spelling. All are the same keystroke
+    /// and all must send the CSI backtab sequence.
     #[test]
     fn both_spellings_of_shift_tab_encode_to_csi_backtab() {
         let csi_backtab = Some(vec![0x1b, b'[', b'Z']);
@@ -292,11 +457,16 @@ mod tests {
 
     #[test]
     fn shift_enter_is_plain_cr() {
-        // Deliberate: the legacy protocol cannot distinguish Shift+Enter from
-        // Enter, so both encode as the same CR byte.
+        // The classic table, and the fullscreen byte patterns built from it,
+        // keep CR for Shift-Enter: a `0x0a` pattern would make a `shift-enter`
+        // binding fire on Ctrl-j. Only `encode_for_child` sends the line feed.
         let ev = press(KeyCode::Enter, KeyModifiers::SHIFT);
         assert_eq!(
             key_event_to_pty_bytes(&ev, CursorKeys::Normal),
+            Some(vec![0x0d])
+        );
+        assert_eq!(
+            encode_key(KeyCode::Enter, KeyModifiers::SHIFT, CursorKeys::Normal),
             Some(vec![0x0d])
         );
     }
@@ -351,6 +521,29 @@ mod tests {
         assert_eq!(
             key_event_to_pty_bytes(&ev, CursorKeys::Normal),
             Some(vec![0x03])
+        );
+        assert_eq!(encode_for_child(&ev, CursorKeys::Normal), Some(vec![0x03]));
+        // The fullscreen byte patterns keep today's table: a pattern for Ctrl-2
+        // would fire on Ctrl-Space's byte, so it has none.
+        assert_eq!(
+            encode_key(
+                KeyCode::Char('2'),
+                KeyModifiers::CONTROL,
+                CursorKeys::Normal
+            ),
+            None
+        );
+        assert_eq!(
+            encode_key(
+                KeyCode::Char('/'),
+                KeyModifiers::CONTROL,
+                CursorKeys::Normal
+            ),
+            None
+        );
+        assert_eq!(
+            encode_key(KeyCode::F(5), KeyModifiers::CONTROL, CursorKeys::Normal),
+            None
         );
     }
 
@@ -466,5 +659,132 @@ mod tests {
             key_event_to_pty_bytes(&f5, CursorKeys::Application),
             key_event_to_pty_bytes(&f5, CursorKeys::Normal)
         );
+    }
+
+    fn with(code: KeyCode, mods: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent::new_with_kind(code, mods, kind)
+    }
+
+    /// Every row is a byte literal a classic xterm sends for that key, with
+    /// Shift-Enter as the soft newline.
+    #[test]
+    fn encode_for_child_gives_a_classic_child_every_xterm_classic_form() {
+        use KeyEventKind::{Press, Release, Repeat};
+        let ctrl = KeyModifiers::CONTROL;
+        let alt = KeyModifiers::ALT;
+        let shift = KeyModifiers::SHIFT;
+        let none = KeyModifiers::NONE;
+        let caps_lock_shift_enter = KeyEvent::new_with_kind_and_state(
+            KeyCode::Enter,
+            shift,
+            Press,
+            KeyEventState::CAPS_LOCK,
+        );
+        let rows: Vec<(KeyEvent, Option<&[u8]>)> = vec![
+            (with(KeyCode::Char(' '), ctrl, Press), Some(&[0x00])),
+            (with(KeyCode::Char('2'), ctrl, Press), Some(&[0x00])),
+            (with(KeyCode::Char('@'), ctrl, Press), Some(&[0x00])),
+            (with(KeyCode::Char('3'), ctrl, Press), Some(&[0x1b])),
+            (with(KeyCode::Char('['), ctrl, Press), Some(&[0x1b])),
+            (with(KeyCode::Char('\\'), ctrl, Press), Some(&[0x1c])),
+            (with(KeyCode::Char('4'), ctrl, Press), Some(&[0x1c])),
+            (with(KeyCode::Char(']'), ctrl, Press), Some(&[0x1d])),
+            (with(KeyCode::Char('5'), ctrl, Press), Some(&[0x1d])),
+            (with(KeyCode::Char('^'), ctrl, Press), Some(&[0x1e])),
+            (with(KeyCode::Char('6'), ctrl, Press), Some(&[0x1e])),
+            (with(KeyCode::Char('_'), ctrl, Press), Some(&[0x1f])),
+            (with(KeyCode::Char('/'), ctrl, Press), Some(&[0x1f])),
+            (with(KeyCode::Char('7'), ctrl, Press), Some(&[0x1f])),
+            (with(KeyCode::Char('8'), ctrl, Press), Some(&[0x7f])),
+            (with(KeyCode::Char('?'), ctrl, Press), Some(&[0x7f])),
+            (with(KeyCode::Char('1'), ctrl, Press), Some(b"1")),
+            (with(KeyCode::Char('9'), ctrl, Press), Some(b"9")),
+            (with(KeyCode::Char('0'), ctrl, Press), Some(b"0")),
+            (with(KeyCode::Char('l'), ctrl, Press), Some(&[0x0c])),
+            (with(KeyCode::Char('l'), ctrl | shift, Press), Some(&[0x0c])),
+            (with(KeyCode::Char('L'), ctrl | shift, Press), Some(&[0x0c])),
+            (
+                with(KeyCode::Char('2'), ctrl | alt, Press),
+                Some(&[0x1b, 0x00]),
+            ),
+            (
+                with(KeyCode::Char('a'), ctrl | alt | shift, Press),
+                Some(&[0x1b, 0x01]),
+            ),
+            (with(KeyCode::Char('a'), alt | shift, Press), Some(b"\x1bA")),
+            (with(KeyCode::Char('a'), shift, Press), Some(b"A")),
+            (with(KeyCode::Char('x'), alt, Press), Some(b"\x1bx")),
+            (with(KeyCode::Esc, none, Press), Some(&[0x1b])),
+            (with(KeyCode::Enter, none, Press), Some(&[0x0d])),
+            (with(KeyCode::Enter, shift, Press), Some(&[0x0a])),
+            (with(KeyCode::Enter, shift, Repeat), Some(&[0x0a])),
+            (caps_lock_shift_enter, Some(&[0x0a])),
+            (with(KeyCode::Enter, ctrl, Press), Some(&[0x0d])),
+            (with(KeyCode::Enter, ctrl | shift, Press), Some(&[0x0d])),
+            (with(KeyCode::Enter, alt, Press), Some(&[0x1b, 0x0d])),
+            (
+                with(KeyCode::Enter, alt | shift, Press),
+                Some(&[0x1b, 0x0d]),
+            ),
+            (with(KeyCode::Enter, ctrl | alt, Press), Some(&[0x1b, 0x0d])),
+            (with(KeyCode::BackTab, none, Press), Some(b"\x1b[Z")),
+            (with(KeyCode::BackTab, shift, Press), Some(b"\x1b[Z")),
+            (with(KeyCode::Esc, alt, Press), Some(&[0x1b, 0x1b])),
+            (with(KeyCode::Tab, alt, Press), Some(&[0x1b, 0x09])),
+            (
+                with(KeyCode::BackTab, shift | alt, Press),
+                Some(b"\x1b\x1b[Z"),
+            ),
+            (with(KeyCode::Tab, shift | alt, Press), Some(b"\x1b\x1b[Z")),
+            (with(KeyCode::Char('-'), ctrl, Press), Some(&[0x1f])),
+            (with(KeyCode::Char('`'), ctrl, Press), Some(&[0x00])),
+            (with(KeyCode::Char('~'), ctrl, Press), Some(&[0x1e])),
+            (
+                with(KeyCode::Char('-'), ctrl | alt, Press),
+                Some(&[0x1b, 0x1f]),
+            ),
+            (with(KeyCode::F(1), shift, Press), Some(b"\x1b[1;2P")),
+            (with(KeyCode::F(4), ctrl, Press), Some(b"\x1b[1;5S")),
+            (with(KeyCode::F(5), ctrl, Press), Some(b"\x1b[15;5~")),
+            (with(KeyCode::F(12), alt, Press), Some(b"\x1b[24;3~")),
+            (with(KeyCode::Up, ctrl, Press), Some(b"\x1b[1;5A")),
+            (with(KeyCode::Home, shift, Press), Some(b"\x1b[1;2H")),
+            (with(KeyCode::Delete, ctrl | alt, Press), Some(b"\x1b[3;7~")),
+            (with(KeyCode::PageUp, shift, Press), Some(b"\x1b[5;2~")),
+            (with(KeyCode::Char('x'), KeyModifiers::SUPER, Press), None),
+            (with(KeyCode::Char('x'), KeyModifiers::HYPER, Press), None),
+            (with(KeyCode::Char('x'), KeyModifiers::META, Press), None),
+            (with(KeyCode::Char('a'), none, Release), None),
+            (with(KeyCode::Char('a'), none, Repeat), Some(b"a")),
+        ];
+        for (key, expected) in rows {
+            assert_eq!(
+                encode_for_child(&key, CursorKeys::Normal).as_deref(),
+                expected,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// A classic host sends a lone `0x08` and `0x1c` to `0x1f` for Ctrl-h and
+    /// Ctrl with `\`, `]`, `^` and `_`; crossterm reads the last four as Ctrl
+    /// with the digits `4` to `7`. Each reaches a child as the byte it was.
+    #[test]
+    fn the_lone_control_bytes_crossterm_reads_reach_a_child_unchanged() {
+        let ctrl = KeyModifiers::CONTROL;
+        let rows: [(KeyEvent, u8); 5] = [
+            (KeyEvent::new(KeyCode::Char('h'), ctrl), 0x08),
+            (KeyEvent::new(KeyCode::Char('4'), ctrl), 0x1c),
+            (KeyEvent::new(KeyCode::Char('5'), ctrl), 0x1d),
+            (KeyEvent::new(KeyCode::Char('6'), ctrl), 0x1e),
+            (KeyEvent::new(KeyCode::Char('7'), ctrl), 0x1f),
+        ];
+        for (key, byte) in rows {
+            assert_eq!(
+                encode_for_child(&key, CursorKeys::Normal),
+                Some(vec![byte]),
+                "{key:?}"
+            );
+        }
     }
 }

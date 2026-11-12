@@ -554,13 +554,14 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         hint_contexts: &[],
     },
     // Tab numbers ship with a default key only where the chord reaches dux as
-    // itself. dux asks the terminal for no keyboard protocol, so Ctrl-digit
-    // arrives in the legacy encoding: Ctrl-1 and Ctrl-9 as the bare digit,
-    // Ctrl-2 as NUL (Ctrl-Space), Ctrl-3 as ESC, Ctrl-4 and Ctrl-5 as the bytes
-    // of Ctrl-\ and Ctrl-] (`normalize_ctrl_punct` folds them, and the macro
-    // bar and remove-git-pane hold those), Ctrl-8 as DEL (Backspace). Ctrl-6
-    // and Ctrl-7 arrive as themselves. The rest stay reachable through
-    // NextTab/PrevTab or a rebind.
+    // itself. A classic host sends Ctrl-digit in the legacy encoding: Ctrl-1
+    // and Ctrl-9 as the bare digit, Ctrl-2 as NUL (Ctrl-Space), Ctrl-3 as ESC,
+    // Ctrl-4 and Ctrl-5 as the bytes of Ctrl-\ and Ctrl-] (`normalize_ctrl_punct`
+    // folds them, and the macro bar and remove-git-pane hold those), Ctrl-8 as
+    // DEL (Backspace). Ctrl-6 and Ctrl-7 arrive as themselves. A host that
+    // sends extended keys sends each Ctrl-digit as itself, but the defaults
+    // must work on every host. The rest stay reachable through NextTab/PrevTab
+    // or a rebind.
     BindingDef {
         action: Action::SelectTab1,
         default_keys: &[],
@@ -690,7 +691,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         scopes: &[BindingScope::Left],
         help: Some(HelpEntry {
             section: "Projects pane",
-            description: "Open the selected agent fullscreen (keys go to it verbatim)",
+            description: "Open the selected agent fullscreen (keys go straight to it)",
         }),
         hint_contexts: &[],
     },
@@ -753,7 +754,7 @@ pub(crate) const BINDING_DEFS: &[BindingDef] = &[
         ],
         help: Some(HelpEntry {
             section: "Agent pane",
-            description: "Toggle fullscreen for the focused agent or dock terminal (keys go to it verbatim)",
+            description: "Toggle fullscreen for the focused agent or dock terminal (other keys go straight to it)",
         }),
         hint_contexts: &[(HintContext::Center, "Fullscreen")],
     },
@@ -1687,12 +1688,23 @@ const HELP_SECTION_ORDER: &[&str] = &[
 /// [`RuntimeBindings::label_for_text_field_dialog`], so a hint cannot name a
 /// key the field swallows.
 ///
+/// With `extended_keys` on, a character held with Super, Hyper or Meta is a
+/// chord rather than typing, and is left to the bindings.
+///
 /// Accepts anything that converts into a [`KeyCombination`], so the input layer
 /// can hand it a raw crossterm `KeyEvent` and the renderer a stored binding key.
-pub(crate) fn text_field_owns_key(key: impl Into<KeyCombination>) -> bool {
+pub(crate) fn text_field_owns_key(
+    key: impl Into<KeyCombination>,
+    extended_keys: ExtendedKeys,
+) -> bool {
     let key: KeyCombination = key.into();
+    let chord_modifiers = if extended_keys == ExtendedKeys::On {
+        KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META
+    } else {
+        KeyModifiers::CONTROL
+    };
     match key.codes {
-        crokey::OneToThree::One(KeyCode::Char(_)) => !key.modifiers.contains(KeyModifiers::CONTROL),
+        crokey::OneToThree::One(KeyCode::Char(_)) => !key.modifiers.intersects(chord_modifiers),
         crokey::OneToThree::One(KeyCode::Left | KeyCode::Right) => true,
         _ => false,
     }
@@ -1736,12 +1748,29 @@ pub(crate) enum TabKey {
 /// emits 0x03, SIGINT), and Quit stays reachable via `q` from a non-typeable
 /// pane and via the palette.
 ///
+/// With `extended_keys` on, Super, Hyper and Meta make a chord too, so it is
+/// dux's like a Ctrl or Alt chord: only a host sending extended keys reports
+/// them.
+///
 /// The sibling of [`text_field_owns_key`]: `app::input::handle_key` suppresses
 /// the Global and Center binding lookups with it while the pane is typeable
 /// and at the live edge, so hints must not advertise a key it swallows.
-pub(crate) fn center_typing_owns_key(key: &KeyEvent, tab_key: TabKey) -> bool {
+pub(crate) fn center_typing_owns_key(
+    key: &KeyEvent,
+    tab_key: TabKey,
+    extended_keys: ExtendedKeys,
+) -> bool {
     let mods = key.modifiers;
-    if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT) {
+    let chord_modifiers = if extended_keys == ExtendedKeys::On {
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META
+    } else {
+        KeyModifiers::CONTROL | KeyModifiers::ALT
+    };
+    if mods.intersects(chord_modifiers) {
         // Ctrl+c is the one chord the agent gets (see above). Any extra
         // modifier turns it back into a dux-side chord.
         return key.code == KeyCode::Char('c') && mods == KeyModifiers::CONTROL;
@@ -1763,6 +1792,24 @@ pub(crate) fn center_typing_owns_key(key: &KeyEvent, tab_key: TabKey) -> bool {
             | KeyCode::Home
             | KeyCode::End
     )
+}
+
+/// A key event as the binding lookup compares it.
+fn normalized_combination(key: &KeyEvent) -> KeyCombination {
+    normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()))
+}
+
+/// Whether the terminal UI reads extended keys this run: `CSI … u` keys are
+/// decoded and matched by meaning, and each key reaches a child as its classic
+/// bytes, with Shift-Enter as the soft newline. Decided once when the run
+/// starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ExtendedKeys {
+    /// Keys are read and sent exactly as a classic terminal sends them.
+    #[default]
+    Off,
+    /// Extended keys are read, and every child gets classic keys.
+    On,
 }
 
 /// Normalize `BackTab` (sent by crossterm for shift-tab) into `Tab + SHIFT`
@@ -1915,6 +1962,9 @@ pub(crate) struct RuntimeBinding {
 pub(crate) struct RuntimeBindings {
     bindings: Vec<RuntimeBinding>,
     format: KeyCombinationFormat,
+    /// Whether the terminal UI reads extended keys this run; see
+    /// [`Self::set_extended_keys`].
+    extended_keys: ExtendedKeys,
 }
 
 impl RuntimeBindings {
@@ -1959,7 +2009,34 @@ impl RuntimeBindings {
                 }
             })
             .collect();
-        Self { bindings, format }
+        Self {
+            bindings,
+            format,
+            extended_keys: ExtendedKeys::Off,
+        }
+    }
+
+    /// Whether the terminal UI reads extended keys this run. With it on, a
+    /// plain binding on Enter, Esc or Backspace also takes the key with Shift
+    /// (see [`Self::lookup`]), because a classic terminal sends identical bytes
+    /// for those keys with and without Shift.
+    pub(crate) fn set_extended_keys(&mut self, extended_keys: ExtendedKeys) {
+        self.extended_keys = extended_keys;
+    }
+
+    /// Whether `key` is one of the keys bound to `action`, in any scope, with
+    /// exactly the modifiers it names: the decoded-key twin of
+    /// [`Self::byte_patterns_for`].
+    pub(crate) fn binds_exactly(&self, action: Action, key: &KeyEvent) -> bool {
+        let incoming = normalized_combination(key);
+        self.bindings
+            .iter()
+            .filter(|binding| binding.action == action)
+            .flat_map(|binding| binding.keys.iter())
+            .any(|bound| {
+                let bound = normalize_ctrl_punct(normalize_backtab(bound.normalized()));
+                bound.codes == incoming.codes && bound.modifiers == incoming.modifiers
+            })
     }
 
     /// Every action's binding, in declaration order.
@@ -1991,8 +2068,7 @@ impl RuntimeBindings {
         scope: BindingScope,
         modifiers: ModifierMatch,
     ) -> Option<Action> {
-        let incoming =
-            normalize_ctrl_punct(normalize_backtab(KeyCombination::from(*key).normalized()));
+        let incoming = normalized_combination(key);
         self.bindings
             .iter()
             .filter(|b| b.scopes.contains(&scope))
@@ -2002,9 +2078,21 @@ impl RuntimeBindings {
                     if norm.codes != incoming.codes {
                         return false;
                     }
-                    if modifiers == ModifierMatch::Exact || norm.modifiers.is_empty() {
-                        // Plain binding: reject if any modifier is pressed
+                    if modifiers == ModifierMatch::Exact {
                         incoming.modifiers == norm.modifiers
+                    } else if norm.modifiers.is_empty() {
+                        // Plain binding: reject if any modifier is pressed,
+                        // except Shift on a key a classic terminal sends the
+                        // same with and without it.
+                        incoming.modifiers.is_empty()
+                            || (self.extended_keys == ExtendedKeys::On
+                                && incoming.modifiers == KeyModifiers::SHIFT
+                                && matches!(
+                                    norm.codes,
+                                    crokey::OneToThree::One(
+                                        KeyCode::Enter | KeyCode::Esc | KeyCode::Backspace
+                                    )
+                                ))
                     } else {
                         incoming.modifiers.contains(norm.modifiers)
                     }
@@ -2147,7 +2235,7 @@ impl RuntimeBindings {
     /// keys is swallowed by the field there; a caller must then drop the hint
     /// rather than name a key that types a character.
     pub(crate) fn label_for_text_field_dialog(&self, action: Action) -> Option<String> {
-        self.label_for_reaching(action, |k| !text_field_owns_key(k))
+        self.label_for_reaching(action, |k| !text_field_owns_key(k, self.extended_keys))
     }
 
     /// Display label for an action's first key that still reaches the bindings
@@ -2164,7 +2252,7 @@ impl RuntimeBindings {
     ) -> Option<String> {
         self.label_for_reaching(action, |k| {
             let event: KeyEvent = k.into();
-            !center_typing_owns_key(&event, tab_key)
+            !center_typing_owns_key(&event, tab_key, self.extended_keys)
         })
     }
 
@@ -2627,10 +2715,12 @@ fn global_shadows(action: Action, scope: BindingScope) -> bool {
 }
 
 /// Every action bound in interactive mode to a key that sends no bytes of its
-/// own. Interactive mode matches the raw bytes the terminal sends, and dux asks
-/// for no keyboard protocol, so a chord such as Ctrl-5 arrives as another
-/// key's byte or as nothing at all: the binding can never fire there. No byte
-/// is guessed for it, because the guess would fire on that other key too.
+/// own. Interactive mode matches the raw bytes the terminal sends, and on a
+/// classic host a chord such as Ctrl-5 arrives as another key's byte or as
+/// nothing at all: the binding can never fire there. No byte is guessed for
+/// it, because the guess would fire on that other key too. When the host sends
+/// extended keys, the chord arrives as a `CSI … u` key and is matched by
+/// meaning, so it fires in fullscreen after all.
 pub(crate) fn unmatchable_interactive_bindings(
     keys: &crate::config::KeysConfig,
 ) -> Vec<&'static str> {
@@ -2757,12 +2847,6 @@ impl RuntimeBindings {
     /// Each key combination is converted to its raw terminal byte
     /// representation. Bindings that cannot be byte-encoded are skipped.
     pub(crate) fn interactive_byte_patterns(&self) -> InteractiveBytePatterns {
-        let conditional_actions = [
-            Action::ScrollLineUp,
-            Action::ScrollLineDown,
-            Action::ScrollToBottom,
-            Action::ScrollToTop,
-        ];
         let mut bindings = Vec::new();
         for rb in &self.bindings {
             if !rb.scopes.contains(&BindingScope::Interactive) {
@@ -2773,13 +2857,25 @@ impl RuntimeBindings {
                     bindings.push(InteractiveByteBinding {
                         pattern: bytes,
                         action: rb.action,
-                        conditional: conditional_actions.contains(&rb.action),
+                        conditional: scrolls_only_when_scrolled_back(rb.action),
                     });
                 }
             }
         }
         InteractiveBytePatterns { bindings }
     }
+}
+
+/// Whether an interactive-mode `action` acts only while the pane is scrolled
+/// back, its key otherwise reaching the child.
+pub(crate) fn scrolls_only_when_scrolled_back(action: Action) -> bool {
+    matches!(
+        action,
+        Action::ScrollLineUp
+            | Action::ScrollLineDown
+            | Action::ScrollToBottom
+            | Action::ScrollToTop
+    )
 }
 
 /// Convert a `KeyCombination` to the raw byte sequence a terminal would send.
@@ -2847,6 +2943,72 @@ mod tests {
             Some(Action::Confirm),
             "a chord nothing names exactly still reaches the binding it extends"
         );
+
+        // With extended keys, a plain Enter, Esc or Backspace binding also takes
+        // the key with Shift, which a classic terminal never told apart; an
+        // explicit Shift binding still wins, and no other key or modifier is
+        // let through.
+        let mut plain = RuntimeBindings::new(|action| match action {
+            Action::Confirm => vec![crokey::parse("enter").unwrap()],
+            Action::CloseOverlay => vec![crokey::parse("esc").unwrap()],
+            Action::ToggleSelection => vec![crokey::parse("backspace").unwrap()],
+            Action::OpenPalette => vec![crokey::parse("x").unwrap()],
+            _ => Vec::new(),
+        });
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let shifted = |code| key(code, KeyModifiers::SHIFT);
+        for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Backspace] {
+            assert_eq!(
+                plain.lookup(&shifted(code), BindingScope::Dialog),
+                None,
+                "{code:?}: a classic run keeps today's matching"
+            );
+        }
+        plain.set_extended_keys(ExtendedKeys::On);
+        assert_eq!(
+            plain.lookup(&shifted(KeyCode::Enter), BindingScope::Dialog),
+            Some(Action::Confirm)
+        );
+        assert_eq!(
+            plain.lookup(&shifted(KeyCode::Esc), BindingScope::Dialog),
+            Some(Action::CloseOverlay)
+        );
+        assert_eq!(
+            plain.lookup(&shifted(KeyCode::Backspace), BindingScope::Dialog),
+            Some(Action::ToggleSelection)
+        );
+        assert_eq!(
+            plain.lookup_exact(&shifted(KeyCode::Enter), BindingScope::Dialog),
+            None,
+            "the exact lookup fullscreen uses has no Shift allowance"
+        );
+        assert_eq!(
+            plain.lookup(
+                &key(KeyCode::Enter, KeyModifiers::CONTROL),
+                BindingScope::Dialog
+            ),
+            None,
+            "only Shift is let through"
+        );
+        assert_eq!(
+            plain.lookup(
+                &key(KeyCode::Char('X'), KeyModifiers::SHIFT),
+                BindingScope::Dialog
+            ),
+            None,
+            "only Enter, Esc and Backspace take Shift"
+        );
+        let mut explicit = RuntimeBindings::new(|action| match action {
+            Action::Confirm => vec![crokey::parse("enter").unwrap()],
+            Action::ToggleSelection => vec![crokey::parse("shift-enter").unwrap()],
+            _ => Vec::new(),
+        });
+        explicit.set_extended_keys(ExtendedKeys::On);
+        assert_eq!(
+            explicit.lookup(&shifted(KeyCode::Enter), BindingScope::Dialog),
+            Some(Action::ToggleSelection),
+            "an explicit shift-enter binding wins"
+        );
     }
 
     #[test]
@@ -2861,7 +3023,10 @@ mod tests {
             KeyEvent::new(KeyCode::Left, KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
         ] {
-            assert!(text_field_owns_key(key), "{key:?} belongs to the field");
+            assert!(
+                text_field_owns_key(key, ExtendedKeys::Off),
+                "{key:?} belongs to the field"
+            );
         }
         // Not owned: these still reach the dialog's bindings.
         for key in [
@@ -2871,8 +3036,30 @@ mod tests {
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE),
         ] {
-            assert!(!text_field_owns_key(key), "{key:?} reaches the bindings");
+            assert!(
+                !text_field_owns_key(key, ExtendedKeys::Off),
+                "{key:?} reaches the bindings"
+            );
         }
+    }
+
+    #[test]
+    fn a_super_hyper_or_meta_chord_is_not_typing_in_a_text_field_with_extended_keys() {
+        for modifier in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+            let chord = KeyEvent::new(KeyCode::Char('x'), modifier);
+            assert!(
+                !text_field_owns_key(chord, ExtendedKeys::On),
+                "{modifier:?}-x reaches the bindings"
+            );
+            assert!(
+                text_field_owns_key(chord, ExtendedKeys::Off),
+                "{modifier:?}-x: a classic run keeps today's ownership"
+            );
+        }
+        assert!(text_field_owns_key(
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT),
+            ExtendedKeys::On
+        ));
     }
 
     #[test]
@@ -2898,7 +3085,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         ] {
             assert!(
-                center_typing_owns_key(&key, TabKey::MovesPanes),
+                center_typing_owns_key(&key, TabKey::MovesPanes, ExtendedKeys::Off),
                 "{key:?} types into the agent"
             );
         }
@@ -2921,10 +3108,28 @@ mod tests {
             ),
         ] {
             assert!(
-                !center_typing_owns_key(&key, TabKey::MovesPanes),
+                !center_typing_owns_key(&key, TabKey::MovesPanes, ExtendedKeys::Off),
                 "{key:?} reaches the bindings"
             );
         }
+        // With extended keys, Super, Hyper and Meta make a chord like Ctrl and
+        // Alt do; in a classic run they still type, as before.
+        for modifier in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+            let chord = KeyEvent::new(KeyCode::Char('x'), modifier);
+            assert!(
+                !center_typing_owns_key(&chord, TabKey::MovesPanes, ExtendedKeys::On),
+                "{modifier:?}-x is dux's"
+            );
+            assert!(
+                center_typing_owns_key(&chord, TabKey::MovesPanes, ExtendedKeys::Off),
+                "{modifier:?}-x types in a classic run"
+            );
+        }
+        assert!(center_typing_owns_key(
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            TabKey::MovesPanes,
+            ExtendedKeys::On
+        ));
     }
 
     /// `tab_reaches_agent` moves exactly Tab and its two shift spellings across
@@ -2939,11 +3144,11 @@ mod tests {
         ];
         for key in tabs {
             assert!(
-                !center_typing_owns_key(&key, TabKey::MovesPanes),
+                !center_typing_owns_key(&key, TabKey::MovesPanes, ExtendedKeys::Off),
                 "{key:?} moves panes while the option is off"
             );
             assert!(
-                center_typing_owns_key(&key, TabKey::ReachesAgent),
+                center_typing_owns_key(&key, TabKey::ReachesAgent, ExtendedKeys::Off),
                 "{key:?} types into the agent while the option is on"
             );
         }
@@ -2956,7 +3161,7 @@ mod tests {
             KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
         ] {
             assert!(
-                !center_typing_owns_key(&key, TabKey::ReachesAgent),
+                !center_typing_owns_key(&key, TabKey::ReachesAgent, ExtendedKeys::Off),
                 "{key:?} stays a dux chord whatever the option says"
             );
         }

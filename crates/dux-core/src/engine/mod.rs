@@ -32,6 +32,8 @@ pub use spawn_worker::fail_next_worker_spawn;
 pub mod status_op;
 
 #[cfg(test)]
+mod classic_keys_tests;
+#[cfg(test)]
 mod races_review2_tests;
 #[cfg(test)]
 mod races_review3_tests;

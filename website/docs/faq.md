@@ -59,7 +59,7 @@ See [Custom CLI Agents](/docs/custom-agents).
 
 No. Focusing the agent's pane is enough: what you type goes to the agent right there in
 the windowed layout, while dux's own shortcuts (all modifier chords) keep working.
-Fullscreen is the escape hatch for when the agent needs every key verbatim, readline
+Fullscreen is the escape hatch for when the agent needs every key, readline
 shortcuts included. The in-app help overlay shows its binding.
 
 Tab is the one exception worth naming, because it moves between panes by default. If your

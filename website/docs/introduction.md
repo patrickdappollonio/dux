@@ -69,7 +69,7 @@ Both front ends lay the workspace out the same way:
 - The **center pane** shows the focused agent's live terminal, and it is a real typing
   surface on both front ends: focus it and your keystrokes go to the agent, while dux's
   own shortcuts keep working around them.
-  - The terminal UI adds a fullscreen toggle that passes input through verbatim, and its
+  - The terminal UI adds a fullscreen toggle that passes input straight through, and its
     center pane doubles as the diff view.
   - An agent's companion terminals dock under it in the same pane, on both front ends,
     and the pane shows the agent alone, the agent and its terminals split, or the
@@ -87,9 +87,9 @@ agent streams its work and the sidebar marks the agent as typing.
 > [!IMPORTANT]
 > In the terminal UI's windowed layout, not every key reaches the agent. dux keeps its
 > own chords for itself: pane navigation, the command palette, tab switching, and the
-> rest of its bindings fire in dux instead of typing into the agent. Fullscreen forwards
-> everything verbatim, so it is the escape hatch when the agent needs a key dux normally
-> keeps.
+> rest of its bindings fire in dux instead of typing into the agent. Fullscreen sends
+> everything straight to the agent, so it is the escape hatch when the agent needs a key
+> dux normally keeps.
 
 > [!TIP]
 > Three ways to get a key to the agent while windowed:

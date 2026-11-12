@@ -329,7 +329,7 @@ pub const WELCOME_TIPS: &[WelcomeTip] = &[
         web: None,
         tui: Some(|cx| {
             format!(
-                "Agent keybinds clashing with dux? `{}` goes fullscreen, where keys reach the agent verbatim.",
+                "Agent keybinds clashing with dux? `{}` goes fullscreen, where keys go straight to the agent.",
                 cx.key(Action::ToggleFullscreen)
             )
         }),

@@ -2720,6 +2720,12 @@ impl TerminalState {
         let dimensions = TerminalDimensions::new(rows, cols);
         let config = Config {
             scrolling_history: scrollback,
+            // dux never offers Kitty keys to a child, which receives classic keys
+            // from every surface. With this off the emulator answers no Kitty
+            // query and ignores every push, pop and set before any stack logic,
+            // so the eviction at its maximum stack depth (which removes from the
+            // title stack and panics when that is empty) cannot be reached.
+            kitty_keyboard: false,
             ..Config::default()
         };
         Self {
@@ -4282,6 +4288,34 @@ mod tests {
                 String::from_utf8_lossy(reply),
             );
         }
+    }
+
+    #[test]
+    fn the_emulator_never_answers_or_keeps_a_childs_kitty_keyboard_requests() {
+        let mut terminal = TerminalState::with_scrollback(24, 80, 100);
+        assert!(
+            terminal.process(b"\x1b[?u").is_empty(),
+            "a Kitty keyboard query gets no answer"
+        );
+        terminal.process(b"\x1b[>1u");
+        terminal.process(b"\x1b[=1;1u");
+        assert!(
+            !terminal
+                .term
+                .mode()
+                .intersects(TermMode::KITTY_KEYBOARD_PROTOCOL),
+            "a push and a set leave no Kitty bit in the mode"
+        );
+        // A full reset empties the title stack the emulator's eviction removes
+        // from, then more pushes than its stack may hold arrive in one write.
+        terminal.process(b"\x1bc");
+        terminal.process(&b"\x1b[>1u".repeat(5_000));
+        assert!(
+            !terminal
+                .term
+                .mode()
+                .intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)
+        );
     }
 
     /// Replies leave in the order their queries arrived, whatever kind of

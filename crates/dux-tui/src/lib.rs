@@ -11,6 +11,7 @@ mod diff;
 // The terminal-focus grace state machine is core-owned (`dux_core::focus`),
 // shared by rule with the web's viewed-ping grace.
 pub(crate) use dux_core::focus;
+mod key_decode;
 mod key_encode;
 mod keybindings;
 mod numeric;

@@ -508,7 +508,14 @@ impl TextInput {
                 self.move_right_word();
                 true
             }
-            KeyCode::Char(c) if !has_ctrl => {
+            // A Super, Hyper or Meta chord is a chord, not typing: inserting
+            // its bare letter would type a character nobody typed.
+            KeyCode::Char(c)
+                if !has_ctrl
+                    && !key.modifiers.intersects(
+                        KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+                    ) =>
+            {
                 self.insert_char(c);
                 true
             }
@@ -831,6 +838,17 @@ fn wordwrap_byte_offset(
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    #[test]
+    fn a_super_hyper_or_meta_chord_types_nothing() {
+        let mut input = TextInput::new();
+        for modifier in [KeyModifiers::SUPER, KeyModifiers::HYPER, KeyModifiers::META] {
+            assert!(!input.handle_key(KeyEvent::new(KeyCode::Char('x'), modifier)));
+        }
+        assert_eq!(input.text, "");
+        assert!(input.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT)));
+        assert_eq!(input.text, "X");
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {

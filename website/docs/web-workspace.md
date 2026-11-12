@@ -406,8 +406,13 @@ How names are kept or cleaned, and how the pasted path is written for each provi
 ### Shift-Enter for a soft newline
 
 In the browser, **Shift-Enter inserts a newline instead of submitting.** Plain Enter still
-submits. This is web-only (the TUI cannot tell the two apart), and it never fires
-mid-composition, so it will not mangle a CJK input method's confirm keystroke.
+submits, and Shift-Enter never fires mid-composition, so it will not mangle a CJK input
+method's confirm keystroke.
+
+The terminal UI does the same whenever your terminal sends extended keys, which many modern
+terminals do. On a terminal that does not, Shift-Enter and Enter arrive as the same key and the
+TUI cannot tell them apart, so reach for **Ctrl-j** there: it inserts a soft newline in the
+browser and in the terminal UI alike, on any terminal.
 
 ## Companion terminals
 

@@ -5643,6 +5643,7 @@ mod tests {
             active_terminal_id: None,
             focused_tabs: std::collections::HashMap::new(),
             host_forward_carry: Vec::new(),
+            extended_keys: crate::keybindings::ExtendedKeys::Off,
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             pty_sizes: std::collections::HashMap::new(),

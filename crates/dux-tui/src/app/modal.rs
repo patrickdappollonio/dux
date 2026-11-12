@@ -571,8 +571,12 @@ pub(crate) enum TextFieldFocus {
 /// The renderer must ask the same question when it picks the footer's key
 /// (`RuntimeBindings::label_for_text_field_dialog`), so the hint can never name
 /// a key the field swallows.
-pub(crate) fn binding_lookup_is_suppressed(key: KeyEvent, focus: TextFieldFocus) -> bool {
-    focus == TextFieldFocus::Field && text_field_owns_key(key)
+pub(crate) fn binding_lookup_is_suppressed(
+    key: KeyEvent,
+    focus: TextFieldFocus,
+    extended_keys: crate::keybindings::ExtendedKeys,
+) -> bool {
+    focus == TextFieldFocus::Field && text_field_owns_key(key, extended_keys)
 }
 
 /// Classify a key into its rung, given the action the bindings resolved it to
@@ -2038,21 +2042,25 @@ pub(super) mod tests {
         // The shipped bug: Left is in the movement action's default key set.
         assert!(binding_lookup_is_suppressed(
             key(KeyCode::Left),
-            crate::app::modal::TextFieldFocus::Field
+            crate::app::modal::TextFieldFocus::Field,
+            crate::keybindings::ExtendedKeys::Off
         ));
         assert!(binding_lookup_is_suppressed(
             key(KeyCode::Char('a')),
-            crate::app::modal::TextFieldFocus::Field
+            crate::app::modal::TextFieldFocus::Field,
+            crate::keybindings::ExtendedKeys::Off
         ));
         // With focus on a checkbox the field owns nothing, so movement works.
         assert!(!binding_lookup_is_suppressed(
             key(KeyCode::Left),
-            crate::app::modal::TextFieldFocus::Elsewhere
+            crate::app::modal::TextFieldFocus::Elsewhere,
+            crate::keybindings::ExtendedKeys::Off
         ));
         // Tab is never owned by the field, so it stays a focus key in both.
         assert!(!binding_lookup_is_suppressed(
             key(KeyCode::Tab),
-            crate::app::modal::TextFieldFocus::Field
+            crate::app::modal::TextFieldFocus::Field,
+            crate::keybindings::ExtendedKeys::Off
         ));
     }
 }

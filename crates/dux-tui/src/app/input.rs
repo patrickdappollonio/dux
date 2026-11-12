@@ -628,19 +628,20 @@ fn raw_action_can_reach_pty(action: &RawSeqAction, local: LocalScroll) -> bool {
             | Action::FocusAgent
             | Action::ScrollPageUp
             | Action::ScrollPageDown,
-            _,
-            _,
+            ..,
         )
         | RawSeqAction::Mouse(..) => false,
-        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, _) => {
+        RawSeqAction::Intercept(Action::ScrollLineUp | Action::ScrollLineDown, scroll, ..) => {
             !(*scroll == RawScroll::WhenScrolledBack
                 && local.has_scrollback
                 && local.has_page_height)
         }
-        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, _) => {
+        RawSeqAction::Intercept(Action::ScrollToBottom | Action::ScrollToTop, scroll, ..) => {
             !(*scroll == RawScroll::WhenScrolledBack && local.has_scrollback)
         }
-        RawSeqAction::Forward(_) | RawSeqAction::Intercept(..) => true,
+        RawSeqAction::Forward(_) | RawSeqAction::ForwardKey(..) | RawSeqAction::Intercept(..) => {
+            true
+        }
     }
 }
 
@@ -1167,6 +1168,7 @@ impl App {
             } else {
                 crate::keybindings::TabKey::MovesPanes
             },
+            self.extended_keys,
         );
         let card_owns_center = self.takeover_card_owns_center_key();
         let claim = if typing_owns_key {
@@ -1476,7 +1478,7 @@ impl App {
                         self.fullscreen_overlay = FullscreenOverlay::Agent;
                         let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
                         self.set_info(format!(
-                            "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
+                            "Fullscreen. Keys go straight to the agent. Press {exit_key} to minimize."
                         ));
                     } else {
                         let r = self.bindings.label_for(Action::ReconnectAgent);
@@ -1923,14 +1925,14 @@ impl App {
             return;
         };
         // The child's DECCKM state is read at encode time so an app that
-        // flips application cursor keys on or off mid-session gets the form
-        // it currently expects.
-        let app_cursor = if provider.has_app_cursor() {
-            crate::key_encode::CursorKeys::Application
+        // flips it mid-session gets the form it currently expects.
+        let cursor_keys = crate::key_encode::CursorKeys::of(provider);
+        let bytes = if self.extended_keys == crate::keybindings::ExtendedKeys::On {
+            crate::key_encode::encode_for_child(key, cursor_keys)
         } else {
-            crate::key_encode::CursorKeys::Normal
+            crate::key_encode::key_event_to_pty_bytes(key, cursor_keys)
         };
-        let Some(bytes) = crate::key_encode::key_event_to_pty_bytes(key, app_cursor) else {
+        let Some(bytes) = bytes else {
             return;
         };
         // Ownership rides with the write: a pty another device is driving takes
@@ -3250,10 +3252,11 @@ impl App {
     }
 
     /// Read raw bytes from stdin, split into terminal sequences, and either
-    /// handle intercepted bindings (exit interactive, scroll) or forward
-    /// verbatim to the active PTY. This bypasses crossterm's event parser so
-    /// all key combinations (Shift+Tab, Alt+Backspace, Ctrl+Right, F-keys,
-    /// kitty keyboard protocol sequences, etc.) reach the child process.
+    /// handle intercepted bindings (exit interactive, scroll) or forward to the
+    /// active PTY: classic-shaped sequences byte for byte, and a decoded
+    /// `CSI … u` key as its classic bytes. This bypasses crossterm's event
+    /// parser so every key combination (Shift+Tab, Alt+Backspace, Ctrl+Right,
+    /// F-keys, etc.) reaches the child process.
     pub(crate) fn poll_and_forward_raw_input(&mut self) -> Result<bool> {
         use rustix::event::{PollFd, PollFlags, poll};
         use std::os::fd::AsFd;
@@ -3464,9 +3467,96 @@ impl App {
         let mut takeover = self.bindings.byte_patterns_for(Action::FocusAgent);
         takeover.push(b" ".to_vec());
         DemotedInputPatterns {
+            card_covers: true,
             palette: self.bindings.byte_patterns_for(Action::OpenPalette),
             takeover,
         }
+    }
+
+    /// The key `seq` carries when it is a `CSI … u` key and this run reads
+    /// extended keys. Ctrl-`[` comes back as Esc.
+    fn decoded_extended_key(&self, seq: &[u8]) -> Option<KeyEvent> {
+        if self.extended_keys == crate::keybindings::ExtendedKeys::Off
+            || !crate::key_decode::is_extended_key_sequence(seq)
+        {
+            return None;
+        }
+        crate::key_decode::decode_key(seq).map(crate::key_encode::fold_ctrl_bracket)
+    }
+
+    /// The focused child's cursor-key mode right now.
+    fn focused_cursor_keys(&self) -> crate::key_encode::CursorKeys {
+        self.selected_terminal_surface_client().map_or(
+            crate::key_encode::CursorKeys::Normal,
+            crate::key_encode::CursorKeys::of,
+        )
+    }
+
+    /// Classify a decoded `CSI … u` key in fullscreen. A release is dropped:
+    /// it never fires an action and never reaches the child. A press or repeat
+    /// matches the bindings with exact modifiers, so Shift-Enter and Ctrl-Alt-g
+    /// still reach the child.
+    fn classify_decoded_raw_key(
+        &self,
+        key: KeyEvent,
+        seq: &[u8],
+        patterns: &DemotedInputPatterns,
+    ) -> Option<RawSeqAction> {
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return None;
+        }
+        if patterns.card_covers {
+            for action in [Action::OpenPalette, Action::FocusAgent] {
+                if self.bindings.binds_exactly(action, &key) {
+                    return Some(RawSeqAction::Intercept(
+                        action,
+                        RawScroll::Never,
+                        seq.to_vec(),
+                        Some(key),
+                    ));
+                }
+            }
+        }
+        if let Some(action) = self.bindings.lookup_exact(&key, BindingScope::Interactive) {
+            let scroll = if crate::keybindings::scrolls_only_when_scrolled_back(action) {
+                RawScroll::WhenScrolledBack
+            } else {
+                RawScroll::Never
+            };
+            return Some(RawSeqAction::Intercept(
+                action,
+                scroll,
+                seq.to_vec(),
+                Some(key),
+            ));
+        }
+        Some(RawSeqAction::ForwardKey(key, seq.to_vec()))
+    }
+
+    /// Queue what the focused child gets for a key that falls through to it:
+    /// the decoded key's classic bytes, or the host's bytes when nothing was
+    /// decoded.
+    fn queue_for_child(&self, key: Option<&KeyEvent>, raw: &[u8], dispatch: &mut RawInputDispatch) {
+        if let Some(bytes) = self.bytes_for_child(key, raw) {
+            dispatch.queue(&bytes);
+        }
+    }
+
+    /// The bytes the focused child gets for a key that falls through to it, or
+    /// `None` when the classic encoding has no bytes for the key (logged, and
+    /// dropped: sending the host's bytes instead would type escape-code
+    /// garbage).
+    fn bytes_for_child(&self, key: Option<&KeyEvent>, raw: &[u8]) -> Option<Vec<u8>> {
+        let Some(key) = key else {
+            return Some(raw.to_vec());
+        };
+        let bytes = crate::key_encode::encode_for_child(key, self.focused_cursor_keys());
+        if bytes.is_none() {
+            dux_core::logger::debug(&format!(
+                "dropped a key the classic encoding cannot express: {key:?}"
+            ));
+        }
+        bytes
     }
 
     fn classify_raw_input_sequences(
@@ -3498,11 +3588,15 @@ impl App {
     ) -> Option<RawSeqAction> {
         let seq = parsed.bytes.as_slice();
         let intercepts_allowed = !parsed.in_bracket_paste;
+        if intercepts_allowed && let Some(key) = self.decoded_extended_key(seq) {
+            return self.classify_decoded_raw_key(key, seq, patterns);
+        }
         if intercepts_allowed && patterns.palette.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
                 Action::OpenPalette,
                 RawScroll::Never,
                 seq.to_vec(),
+                None,
             ));
         }
         if intercepts_allowed && patterns.takeover.iter().any(|pattern| pattern == seq) {
@@ -3510,6 +3604,7 @@ impl App {
                 Action::FocusAgent,
                 RawScroll::Never,
                 seq.to_vec(),
+                None,
             ));
         }
         if seq == crate::raw_input::BRACKET_PASTE_START {
@@ -3562,7 +3657,7 @@ impl App {
             } else {
                 RawScroll::Never
             };
-            return Some(RawSeqAction::Intercept(action, scroll, seq.to_vec()));
+            return Some(RawSeqAction::Intercept(action, scroll, seq.to_vec(), None));
         }
         Some(RawSeqAction::Forward(seq.to_vec()))
     }
@@ -3597,6 +3692,7 @@ impl App {
         &mut self,
         direction: ScrollDirection,
         raw: &[u8],
+        key: Option<&KeyEvent>,
         dispatch: &mut RawInputDispatch,
     ) {
         dispatch.flush(self);
@@ -3610,8 +3706,10 @@ impl App {
             dux_core::pty::ScreenBuffer::Primary
         };
         if should_forward_page(forward_scroll, alt_screen) {
-            if self.write_into_focused_pty(raw) {
-                dispatch.forwarded.note(raw);
+            if let Some(bytes) = self.bytes_for_child(key, raw)
+                && self.write_into_focused_pty(&bytes)
+            {
+                dispatch.forwarded.note(&bytes);
             }
         } else if self.focused_pty_size().0 > 0 {
             self.scroll_pty(direction, usize::from(self.focused_pty_size().0));
@@ -3623,6 +3721,7 @@ impl App {
         direction: ScrollDirection,
         scroll: RawScroll,
         raw: &[u8],
+        key: Option<&KeyEvent>,
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
@@ -3633,7 +3732,7 @@ impl App {
             dispatch.flush(self);
             self.scroll_pty(direction, 1);
         } else {
-            dispatch.queue(raw);
+            self.queue_for_child(key, raw, dispatch);
         }
     }
 
@@ -3641,6 +3740,7 @@ impl App {
         &mut self,
         scroll: RawScroll,
         raw: &[u8],
+        key: Option<&KeyEvent>,
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
@@ -3650,7 +3750,7 @@ impl App {
             dispatch.flush(self);
             self.reset_pty_scrollback();
         } else {
-            dispatch.queue(raw);
+            self.queue_for_child(key, raw, dispatch);
         }
     }
 
@@ -3658,6 +3758,7 @@ impl App {
         &mut self,
         scroll: RawScroll,
         raw: &[u8],
+        key: Option<&KeyEvent>,
         dispatch: &mut RawInputDispatch,
     ) {
         let has_scrollback = self
@@ -3667,7 +3768,7 @@ impl App {
             dispatch.flush(self);
             self.set_pty_scrollback_max();
         } else {
-            dispatch.queue(raw);
+            self.queue_for_child(key, raw, dispatch);
         }
     }
 
@@ -3842,7 +3943,7 @@ impl App {
     ) -> Option<bool> {
         for action in actions {
             match action {
-                RawSeqAction::Intercept(Action::OpenMacroBar, _, _) => {
+                RawSeqAction::Intercept(Action::OpenMacroBar, ..) => {
                     // Stamp now, before `input_target` moves below: this arm can
                     // leave the function without reaching the tail stamp, and
                     // the id is resolved from `input_target`.
@@ -3858,7 +3959,7 @@ impl App {
                 // Only reachable while the take-over card covers this pane (see
                 // the match above), which is the one state where this key means
                 // something other than "type into the child".
-                RawSeqAction::Intercept(Action::FocusAgent, _, _) => {
+                RawSeqAction::Intercept(Action::FocusAgent, ..) => {
                     dispatch.flush_and_stamp(self);
                     self.take_over_focused_pty();
                     self.raw_input_buf.clear();
@@ -3867,7 +3968,7 @@ impl App {
                 }
                 // Only reachable while another device drives the pty (see the
                 // match above); the prompt takes over input from here.
-                RawSeqAction::Intercept(Action::OpenPalette, _, _) => {
+                RawSeqAction::Intercept(Action::OpenPalette, ..) => {
                     dispatch.flush_and_stamp(self);
                     self.open_command_palette();
                     self.raw_input_buf.clear();
@@ -3875,30 +3976,42 @@ impl App {
                     return Some(false);
                 }
                 // In fullscreen the toggle means one thing: leave fullscreen.
-                RawSeqAction::Intercept(Action::ToggleFullscreen, _, _) => {
+                RawSeqAction::Intercept(Action::ToggleFullscreen, ..) => {
                     // Stamp before leaving interactive mode: that moves
                     // `input_target`, which is what resolves the id.
                     dispatch.flush_and_stamp(self);
                     self.exit_interactive_mode();
                     return Some(false);
                 }
-                RawSeqAction::Intercept(Action::ScrollPageUp, _, raw) => {
-                    self.route_raw_page_scroll(ScrollDirection::Up, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollPageUp, _, raw, key) => {
+                    self.route_raw_page_scroll(ScrollDirection::Up, &raw, key.as_ref(), dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollPageDown, _, raw) => {
-                    self.route_raw_page_scroll(ScrollDirection::Down, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollPageDown, _, raw, key) => {
+                    self.route_raw_page_scroll(ScrollDirection::Down, &raw, key.as_ref(), dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollLineUp, scroll, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Up, scroll, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineUp, scroll, raw, key) => {
+                    self.route_raw_line_scroll(
+                        ScrollDirection::Up,
+                        scroll,
+                        &raw,
+                        key.as_ref(),
+                        dispatch,
+                    );
                 }
-                RawSeqAction::Intercept(Action::ScrollLineDown, scroll, raw) => {
-                    self.route_raw_line_scroll(ScrollDirection::Down, scroll, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollLineDown, scroll, raw, key) => {
+                    self.route_raw_line_scroll(
+                        ScrollDirection::Down,
+                        scroll,
+                        &raw,
+                        key.as_ref(),
+                        dispatch,
+                    );
                 }
-                RawSeqAction::Intercept(Action::ScrollToBottom, scroll, raw) => {
-                    self.route_raw_scroll_to_bottom(scroll, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToBottom, scroll, raw, key) => {
+                    self.route_raw_scroll_to_bottom(scroll, &raw, key.as_ref(), dispatch);
                 }
-                RawSeqAction::Intercept(Action::ScrollToTop, scroll, raw) => {
-                    self.route_raw_scroll_to_top(scroll, &raw, dispatch);
+                RawSeqAction::Intercept(Action::ScrollToTop, scroll, raw, key) => {
+                    self.route_raw_scroll_to_top(scroll, &raw, key.as_ref(), dispatch);
                 }
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
@@ -3906,11 +4019,16 @@ impl App {
                         RawInputFlow::Return(should_exit) => return Some(should_exit),
                     }
                 }
-                RawSeqAction::Intercept(_, _, raw) | RawSeqAction::Forward(raw) => {
-                    // Unknown intercepted action or normal forward: batch
-                    // for a single PTY write. In scroll mode, all non-scroll
-                    // input is suppressed (the batch won't be flushed).
-                    dispatch.queue(&raw);
+                RawSeqAction::Intercept(_, _, raw, key) => {
+                    // Unknown intercepted action: it falls through to the
+                    // child like any forwarded key, batched for a single PTY
+                    // write. In scroll mode, all non-scroll input is suppressed
+                    // (the batch won't be flushed).
+                    self.queue_for_child(key.as_ref(), &raw, dispatch);
+                }
+                RawSeqAction::Forward(raw) => dispatch.queue(&raw),
+                RawSeqAction::ForwardKey(key, raw) => {
+                    self.queue_for_child(Some(&key), &raw, dispatch);
                 }
             }
         }
@@ -4352,6 +4470,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Elsewhere
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -4636,6 +4755,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Elsewhere
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -5036,6 +5156,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Elsewhere
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -5720,6 +5841,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Elsewhere
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -5766,8 +5888,11 @@ impl App {
         if !matches!(self.prompt, PromptState::AttachPullRequestInput { .. }) {
             return None;
         }
-        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
-        {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            crate::app::modal::TextFieldFocus::Field,
+            self.extended_keys,
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
@@ -5797,8 +5922,11 @@ impl App {
         if !matches!(self.prompt, PromptState::NameStandaloneAgent { .. }) {
             return None;
         }
-        let action = if binding_lookup_is_suppressed(key, crate::app::modal::TextFieldFocus::Field)
-        {
+        let action = if binding_lookup_is_suppressed(
+            key,
+            crate::app::modal::TextFieldFocus::Field,
+            self.extended_keys,
+        ) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
@@ -5828,6 +5956,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Field
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -6081,7 +6210,7 @@ impl App {
                 | NameNewAgentFocus::CopyChangesCheckbox
                 | NameNewAgentFocus::ReviewCopyCheckbox
         );
-        let action = if !checkbox_focused && text_field_owns_key(key) {
+        let action = if !checkbox_focused && text_field_owns_key(key, self.extended_keys) {
             None
         } else {
             self.bindings.lookup(&key, BindingScope::Dialog)
@@ -6124,6 +6253,7 @@ impl App {
             } else {
                 crate::app::modal::TextFieldFocus::Field
             },
+            self.extended_keys,
         ) {
             None
         } else {
@@ -6681,7 +6811,7 @@ impl App {
             FieldEngagement::Engaged
         } else {
             FieldEngagement::Unengaged
-        }) && text_field_owns_key(key);
+        }) && text_field_owns_key(key, self.extended_keys);
         let action = if owned_by_field {
             None
         } else {
@@ -11271,7 +11401,7 @@ impl App {
                     self.fullscreen_overlay = FullscreenOverlay::Terminal;
                     let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
                     self.set_info(format!(
-                        "Fullscreen terminal. Keys go to it verbatim. Press {exit_key} to minimize."
+                        "Fullscreen terminal. Keys go straight to it. Press {exit_key} to minimize."
                     ));
                 }
             }
@@ -11294,7 +11424,7 @@ impl App {
             self.fullscreen_overlay = FullscreenOverlay::Agent;
             let exit_key = self.bindings.label_for(Action::ToggleFullscreen);
             self.set_info(format!(
-                "Fullscreen. Keys go to the agent verbatim. Press {exit_key} to minimize."
+                "Fullscreen. Keys go straight to the agent. Press {exit_key} to minimize."
             ));
         } else if !self
             .engine
@@ -13063,10 +13193,20 @@ impl App {
     pub(crate) fn scan_loading_phase_exit(&mut self) -> bool {
         let (sequences, _) = crate::raw_input::split_sequences(&self.loading_input_buf);
         for seq in &sequences {
-            // Check for the fullscreen toggle keybinding.
-            if let Some((Action::ToggleFullscreen, _)) =
-                self.interactive_patterns.match_sequence(seq)
-            {
+            // Check for the fullscreen toggle keybinding, by meaning for a
+            // decoded `CSI … u` key and by bytes for everything else.
+            let toggles = match self.decoded_extended_key(seq) {
+                Some(key) => {
+                    key.kind != crossterm::event::KeyEventKind::Release
+                        && self.bindings.lookup_exact(&key, BindingScope::Interactive)
+                            == Some(Action::ToggleFullscreen)
+                }
+                None => matches!(
+                    self.interactive_patterns.match_sequence(seq),
+                    Some((Action::ToggleFullscreen, _))
+                ),
+            };
+            if toggles {
                 self.exit_interactive_mode();
                 return true;
             }
@@ -33597,6 +33737,13 @@ cyan = "#00ffff"
             "the fullscreen toggle must work even when scrolled back"
         );
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+
+        // The same toggle sent as a Kitty key, by a host sending extended keys.
+        let mut app = app_with_scrolled_back_pty();
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.process_raw_input_bytes(b"\x1b[103;5u");
+        assert_eq!(app.input_target, InputTarget::None);
+        assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
     }
 
     /// Flatten a rendered line back to plain text so a test can assert on what
@@ -34339,6 +34486,20 @@ cyan = "#00ffff"
     /// Block until some viewport row's text starts with `needle`, i.e. the
     /// child echoed back what dux forwarded to its PTY.
     fn wait_for_grid_row(app: &mut App, needle: &str) {
+        wait_for_grid(app, needle, |rows| {
+            rows.iter().any(|line| line.starts_with(needle))
+        });
+    }
+
+    /// Block until the grid's non-empty rows, trimmed and joined with `\n`,
+    /// start with `needle`. A line feed `cat -v` passes through moves to the
+    /// next row instead of showing as `^J`, so this is how a test sees one.
+    fn wait_for_grid_rows(app: &mut App, needle: &str) {
+        wait_for_grid(app, needle, |rows| rows.join("\n").starts_with(needle));
+    }
+
+    fn wait_for_grid(app: &mut App, needle: &str, found: impl Fn(&[String]) -> bool) {
+        let mut shown = Vec::new();
         for _ in 0..200 {
             app.refresh_snapshot_buf();
             let mut rows: std::collections::BTreeMap<u16, String> =
@@ -34346,12 +34507,17 @@ cyan = "#00ffff"
             for cell in &app.part_snapshots.main.buf.cells {
                 rows.entry(cell.row).or_default().push_str(&cell.symbol);
             }
-            if rows.values().any(|line| line.trim().starts_with(needle)) {
+            shown = rows
+                .values()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect();
+            if found(&shown) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("the child never echoed {needle:?} within 2s");
+        panic!("the child never echoed {needle:?} within 2s; the grid shows {shown:?}");
     }
 
     fn tap_center(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -34397,6 +34563,57 @@ cyan = "#00ffff"
             "test setup: the fixture must be typeable or these tests prove nothing"
         );
         app
+    }
+
+    fn press_through_the_terminal(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+        app.handle_terminal_event(crossterm::event::Event::Key(KeyEvent::new(code, mods)));
+    }
+
+    /// With extended keys on, Shift-Enter reaches the windowed child as the
+    /// soft newline and every other key as its classic bytes, whether or not
+    /// the child pushed Kitty flags: dux's emulator never offers them.
+    #[test]
+    fn the_windowed_pane_sends_classic_keys_with_shift_enter_as_a_soft_newline() {
+        for prelude in ["", "\\033[>1u"] {
+            let mut app = app_with_minimized_typeable_caret_child(prelude);
+            app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+            press_through_the_terminal(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
+            press_through_the_terminal(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            press_through_the_terminal(&mut app, KeyCode::Char('j'), KeyModifiers::CONTROL);
+            press_through_the_terminal(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+            press_through_the_terminal(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+            press_through_the_terminal(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            press_through_the_terminal(&mut app, KeyCode::Char('['), KeyModifiers::CONTROL);
+            // Neither chord is bound, so each falls through to the child in
+            // its classic form.
+            press_through_the_terminal(
+                &mut app,
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            );
+            press_through_the_terminal(
+                &mut app,
+                KeyCode::Enter,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            );
+            // A Super chord has no classic form, so it types nothing.
+            press_through_the_terminal(&mut app, KeyCode::Char('x'), KeyModifiers::SUPER);
+            press_through_the_terminal(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+            // `cat -v` passes a line feed through, so Shift-Enter and Ctrl-j
+            // each start a new row, while Enter's CR shows as `^M`.
+            wait_for_grid_rows(&mut app, "READY\n^M\n^Ca^[^[^M^[^Mz");
+        }
+    }
+
+    /// With extended keys off, the windowed pane sends classic bytes as before:
+    /// Shift-Enter is a CR and Super-x types its letter, because nothing about a
+    /// classic run changed.
+    #[test]
+    fn with_extended_keys_off_the_windowed_pane_sends_classic_bytes() {
+        let mut app = app_with_minimized_typeable_caret_child("");
+        press_through_the_terminal(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
+        press_through_the_terminal(&mut app, KeyCode::Char('x'), KeyModifiers::SUPER);
+        wait_for_grid_row(&mut app, "READY^Mx");
     }
 
     /// A child that enabled application cursor keys (DECSET 1) receives an
@@ -34604,7 +34821,7 @@ cyan = "#00ffff"
         tap_center(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
         wait_for_grid_row(&mut app, "READY^I^[[Z");
 
-        // The Kitty-protocol spelling of the same keystroke sends the same
+        // The Tab-with-Shift spelling of the same keystroke sends the same
         // bytes; ownership is decided before backtab normalization.
         tap_center(&mut app, KeyCode::Tab, KeyModifiers::SHIFT);
         wait_for_grid_row(&mut app, "READY^I^[[Z^[[Z");
@@ -34739,7 +34956,7 @@ cyan = "#00ffff"
         );
     }
 
-    /// Fullscreen is a verbatim passthrough that intercepts only the
+    /// Fullscreen passes keys straight through and intercepts only the
     /// Interactive-scoped bindings, and the two pane chords are deliberately not
     /// in that scope: `cat -v` echoing `^O` and `^Y` is the proof they reached
     /// the child rather than moving panes behind the overlay.
@@ -34766,6 +34983,96 @@ cyan = "#00ffff"
             FocusPane::Center,
             "a chord the child consumed must not also move panes"
         );
+    }
+
+    /// The caret fixture shown fullscreen, reading extended keys.
+    fn fullscreen_caret_app(prelude: &str, echo_cmd: &str) -> App {
+        let mut app = app_with_minimized_typeable_echo_child(prelude, echo_cmd);
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app
+    }
+
+    /// In fullscreen a `CSI … u` key from the host is decoded and reaches the
+    /// child as what a classic terminal would have sent for the same key, with
+    /// Shift-Enter as the soft newline; classic bytes pass through unchanged.
+    #[test]
+    fn fullscreen_gives_a_classic_child_classic_keys() {
+        for prelude in ["", "\\033[>1u"] {
+            let mut app = fullscreen_caret_app(prelude, "cat -vT");
+            app.process_raw_input_bytes(b"\x1b[13;2u");
+            app.process_raw_input_bytes(b"\x1b[105;5u");
+            app.process_raw_input_bytes(b"\x1b[108;6u");
+            app.process_raw_input_bytes(b"\x1b[76;6u");
+            app.process_raw_input_bytes(b"\x1b[120;3u");
+            // Ctrl-]; Ctrl-\ is the macro bar's key here.
+            app.process_raw_input_bytes(b"\x1b[93;5u");
+            app.process_raw_input_bytes(b"\x1b[27u");
+            app.process_raw_input_bytes(b"\x1b[120;9u");
+            app.process_raw_input_bytes(b"\x1b[97;5:3u");
+            app.process_raw_input_bytes(b"\x1b[97;5:2u");
+            app.process_raw_input_bytes(&[0x0f]);
+            // Ctrl-Alt-g only extends the Ctrl-g binding, so it reaches the child.
+            app.process_raw_input_bytes(b"\x1b[103;7u");
+            // The soft newline starts a new row under `cat -vT`.
+            wait_for_grid_rows(&mut app, "READY\n^I^L^L^[x^]^[^A^O^[^G");
+            assert_eq!(app.input_target, InputTarget::Agent);
+        }
+    }
+
+    /// A release is dropped: it never reaches the child and never fires the
+    /// binding its press would.
+    #[test]
+    fn fullscreen_drops_every_release_and_never_acts_on_one() {
+        let mut app = fullscreen_caret_app("", "cat -v");
+        app.process_raw_input_bytes(b"\x1b[97;5:3u");
+        app.process_raw_input_bytes(b"\x1b[103;5:3u");
+        assert_eq!(
+            app.input_target,
+            InputTarget::Agent,
+            "the release of the fullscreen toggle does not leave fullscreen"
+        );
+        app.process_raw_input_bytes(b"z");
+        wait_for_grid_row(&mut app, "READYz");
+        app.process_raw_input_bytes(b"\x1b[103;5u");
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "the press of the fullscreen toggle sent as a Kitty key leaves fullscreen"
+        );
+    }
+
+    /// A scroll key at the live edge falls through to the child: a
+    /// classic-shaped sequence byte for byte, and a decoded key as its classic
+    /// bytes.
+    #[test]
+    fn fullscreen_scroll_keys_that_fall_through_are_encoded_for_the_child() {
+        let mut classic = fullscreen_caret_app("", "cat -v");
+        classic.process_raw_input_bytes(b"\x1b[A");
+        wait_for_grid_row(&mut classic, "READY^[[A");
+
+        // On the alternate screen the child owns paging, so Page Up reaches it.
+        let mut paging = fullscreen_caret_app("\\033[?1049h", "cat -v");
+        paging.process_raw_input_bytes(b"\x1b[5~");
+        wait_for_grid_row(&mut paging, "READY^[[5~");
+
+        let mut rebound = fullscreen_caret_app("", "cat -v");
+        rebound.bindings = bindings_with_overrides(&[(Action::ScrollLineUp, &["ctrl-shift-k"])]);
+        rebound.interactive_patterns = rebound.bindings.interactive_byte_patterns();
+        rebound.process_raw_input_bytes(b"\x1b[107;6u");
+        wait_for_grid_row(&mut rebound, "READY^K");
+    }
+
+    /// With extended keys off, fullscreen forwards the host's bytes as they
+    /// are, a `CSI … u` key included.
+    #[test]
+    fn with_extended_keys_off_fullscreen_forwards_the_hosts_bytes() {
+        let mut app = fullscreen_caret_app("", "cat -v");
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::Off);
+        app.process_raw_input_bytes(b"\x1b[13;2u");
+        app.process_raw_input_bytes(&[0x0f]);
+        wait_for_grid_row(&mut app, "READY^[[13;2u^O");
     }
 
     /// The pane chords move focus from the typeable pane whatever the option
@@ -35697,6 +36004,22 @@ cyan = "#00ffff"
         );
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None);
+
+        // The default toggle sent as a Kitty key leaves fullscreen too, and its
+        // release does not.
+        let mut app = test_app(default_bindings());
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        app.input_target = InputTarget::Agent;
+        app.fullscreen_overlay = FullscreenOverlay::Agent;
+        app.session_surface = SessionSurface::Agent;
+        app.loading_input_buf = b"\x1b[103;5:3u".to_vec();
+        assert!(
+            !app.scan_loading_phase_exit(),
+            "a release is not the toggle"
+        );
+        app.loading_input_buf = b"\x1b[103;5u".to_vec();
+        assert!(app.scan_loading_phase_exit());
+        assert_eq!(app.input_target, InputTarget::None);
     }
 
     #[test]
@@ -41355,6 +41678,92 @@ cyan = "#00ffff"
             last_refresh: std::time::Instant::now(),
             cpu_window: crate::app::CpuWindow::Full,
         }
+    }
+
+    fn send_key_event(
+        app: &mut App,
+        code: KeyCode,
+        mods: KeyModifiers,
+        kind: crossterm::event::KeyEventKind,
+    ) {
+        app.handle_terminal_event(crossterm::event::Event::Key(KeyEvent::new_with_kind(
+            code, mods, kind,
+        )));
+    }
+
+    /// No action fires on a key release (crokey drops the kind, so it would
+    /// fire twice), a repeat counts as a press, and the input debugger still
+    /// sees the release for what it is.
+    #[test]
+    fn a_release_fires_nothing_a_repeat_acts_and_the_debugger_records_a_release() {
+        let mut app = test_app(default_bindings());
+        send_key_event(
+            &mut app,
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+            crossterm::event::KeyEventKind::Release,
+        );
+        assert!(
+            matches!(app.prompt, PromptState::None),
+            "a release opens nothing"
+        );
+
+        send_key_event(
+            &mut app,
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+            crossterm::event::KeyEventKind::Press,
+        );
+        let before = palette_selection(&app);
+        send_key_event(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Repeat,
+        );
+        assert_eq!(
+            palette_selection(&app),
+            before + 1,
+            "a held key's repeat moves on"
+        );
+
+        let mut app = test_app(default_bindings());
+        app.prompt = PromptState::DebugInput {
+            lines: Vec::new(),
+            scroll_offset: 0,
+        };
+        send_key_event(
+            &mut app,
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Release,
+        );
+        let PromptState::DebugInput { lines, .. } = &app.prompt else {
+            panic!("expected the input debugger");
+        };
+        assert_eq!(lines.len(), 1, "the debugger records the release");
+    }
+
+    /// With extended keys, Ctrl-`[` is Esc wherever dux handles keys, as a
+    /// classic terminal sends it: it closes a dialog the way Esc does.
+    #[test]
+    fn ctrl_left_bracket_closes_a_dialog_the_way_esc_does() {
+        let mut app = test_app(default_bindings());
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        send_key_event(
+            &mut app,
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+            crossterm::event::KeyEventKind::Press,
+        );
+        assert!(matches!(app.prompt, PromptState::Command { .. }));
+        send_key_event(
+            &mut app,
+            KeyCode::Char('['),
+            KeyModifiers::CONTROL,
+            crossterm::event::KeyEventKind::Press,
+        );
+        assert!(matches!(app.prompt, PromptState::None));
     }
 
     #[test]
