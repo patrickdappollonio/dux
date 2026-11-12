@@ -124,7 +124,7 @@ pub(crate) const REARM_AFTER_SUCCESSES: u32 = WARN_AFTER_FAILURES;
 /// Per-subject consecutive-failure counting for a poller that repeats the same
 /// question every cycle.
 ///
-/// Answers on the CROSSING only, and owes a recovery only where a warning was
+/// Answers on the CROSSING only, and owes a withdrawal only where a warning was
 /// actually shown, so a blip stays silent and a standing failure is reported
 /// once.
 #[derive(Debug, Default)]
@@ -146,37 +146,68 @@ impl FailureStreaks {
         true
     }
 
-    /// Record one success. `true` only when a warning was actually shown, so a
-    /// blip that never warned leaves no orphaned "it is back" behind it.
+    /// Record one success. `true` only when a warning was actually shown and is
+    /// now owed a withdrawal; a blip that never warned has nothing to take down.
     pub(crate) fn record_success(&mut self, subject: &str) -> bool {
         self.streaks.remove(subject);
         self.warned.remove(subject)
     }
 }
 
-/// Branch sync has failed to read git's current branch in one worktree for a
-/// whole streak, so the branch dux shows for that agent may have drifted.
-pub(crate) fn branch_sync_stuck(worktree: &str, error: &str) -> StatusUpdate {
-    StatusUpdate::keyed(
-        key(&format!("branch-sync:{worktree}")),
-        StatusTone::Warning,
-        format!(
-            "dux has failed {WARN_AFTER_FAILURES} times running to read the current branch in \
-             {worktree}: {error}. The branch dux shows for that agent may be out of date until \
-             git can answer there again."
-        ),
-    )
+/// What one outcome of a streak-counting poller owes the surfaces: a warning
+/// raised on the crossing, or the withdrawal of a warning that was shown, once
+/// the trouble behind it is over.
+///
+/// A withdrawal is silent on both surfaces. The warning said what was wrong
+/// while it was wrong, and the screen working again is the news that it ended.
+#[derive(Debug, Clone)]
+pub enum PollerNotice {
+    /// Raise this warning.
+    Warn(StatusUpdate),
+    /// Take down the warning standing on this key, with nothing in its place.
+    Withdraw(String),
 }
 
-/// And the same read succeeded again, on the same key.
-pub(crate) fn branch_sync_recovered(worktree: &str) -> StatusUpdate {
+impl PollerNotice {
+    /// The reaction for a poller whose outcome the draining surface applies
+    /// directly.
+    pub fn into_reaction(self) -> crate::engine::EventReaction {
+        match self {
+            Self::Warn(status) => crate::engine::EventReaction::Status(status),
+            Self::Withdraw(key) => crate::engine::EventReaction::ClearStatus(key),
+        }
+    }
+
+    /// The worker-lane event for a poller running off the draining thread, so
+    /// whichever surface drains shows (or takes down) the same thing.
+    pub fn into_worker_event(self) -> crate::worker::WorkerEvent {
+        match self {
+            Self::Warn(status) => crate::worker::WorkerEvent::PollerStatus(status),
+            Self::Withdraw(key) => crate::worker::WorkerEvent::PollerStatusWithdrawn(key),
+        }
+    }
+}
+
+/// The keyed-status key branch sync warns on for one worktree.
+pub(crate) fn branch_sync_key(worktree: &str) -> String {
+    key(&format!("branch-sync:{worktree}"))
+}
+
+/// Branch sync has failed to read git's current branch in one worktree for a
+/// whole streak, so the branch dux shows for that agent may have drifted.
+///
+/// git's own text is left to dux.log, where every failure is written: it is
+/// the detail someone debugging needs and noise for everyone else.
+pub(crate) fn branch_sync_stuck(worktree: &str) -> StatusUpdate {
     StatusUpdate::keyed(
-        key(&format!("branch-sync:{worktree}")),
-        StatusTone::Info,
-        format!(
-            "dux can read the current branch in {worktree} again, so the branch it shows for that \
-             agent is up to date."
-        ),
+        branch_sync_key(worktree),
+        StatusTone::Warning,
+        crate::status_text![
+            "dux cannot read the current branch in the agent's folder ",
+            q(worktree),
+            ", so the branch it shows for that agent may be out of date. It keeps trying, and \
+             the details are in dux.log."
+        ],
     )
 }
 
@@ -192,24 +223,35 @@ mod tests {
         }
         assert!(streaks.record_failure("/w"), "the crossing speaks");
         assert!(!streaks.record_failure("/w"), "and only the crossing");
-        assert!(streaks.record_success("/w"), "a warned subject recovers");
+        assert!(
+            streaks.record_success("/w"),
+            "a warned subject is withdrawn"
+        );
         assert!(!streaks.record_success("/w"), "once");
     }
 
     #[test]
-    fn a_recovery_is_owed_only_where_a_warning_was_shown() {
+    fn a_withdrawal_is_owed_only_where_a_warning_was_shown() {
         let mut streaks = FailureStreaks::default();
         streaks.record_failure("/w");
         assert!(!streaks.record_success("/w"));
     }
 
     #[test]
-    fn a_stuck_branch_read_and_its_recovery_share_the_worktrees_key() {
-        let stuck = branch_sync_stuck("/tmp/wt", "index.lock exists");
+    fn a_stuck_branch_read_names_the_folder_and_points_at_the_log() {
+        let stuck = branch_sync_stuck("/tmp/wt");
         assert_eq!(stuck.tone, StatusTone::Warning);
-        assert!(stuck.message.contains("index.lock exists"));
-        assert_eq!(stuck.key, branch_sync_recovered("/tmp/wt").key);
-        assert_ne!(stuck.key, branch_sync_recovered("/tmp/other").key);
+        assert_eq!(
+            stuck.key.as_deref(),
+            Some(branch_sync_key("/tmp/wt").as_str())
+        );
+        assert_ne!(stuck.key, branch_sync_stuck("/tmp/other").key);
+        assert_eq!(
+            stuck.message,
+            "dux cannot read the current branch in the agent's folder \"/tmp/wt\", so the branch \
+             it shows for that agent may be out of date. It keeps trying, and the details are in \
+             dux.log."
+        );
     }
 
     #[test]

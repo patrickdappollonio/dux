@@ -724,7 +724,7 @@ impl ChangesService {
         };
 
         // A clean success resets the error streak and (only if a warning was shown)
-        // emits the keyed recovery info.
+        // withdraws it, quietly.
         self.reset_error_streak(session_id);
 
         if !changed {
@@ -877,10 +877,10 @@ impl ChangesService {
         true
     }
 
-    /// Reset a session's error streak; emit the keyed recovery info ONLY when a
-    /// keyed warning was actually emitted for this session (the streak had reached
-    /// the threshold). A 1-2 error blip that never showed a warning therefore does
-    /// not leave an orphaned recovery toast.
+    /// Reset a session's error streak; withdraw the keyed warning ONLY when one
+    /// was actually emitted for this session (the streak had reached the
+    /// threshold). A 1-2 error blip that never showed a warning has nothing to
+    /// take down.
     fn reset_error_streak(self: &Arc<Self>, session_id: &str) {
         let engine = self.engine.clone();
         let session_id = session_id.to_string();
@@ -1426,13 +1426,14 @@ mod tests {
         );
     }
 
-    /// The recovery line retires a standing warning, so it has to say what it
-    /// recovered from rather than only that things work now.
+    /// A read that works again takes the standing warning down on its own key,
+    /// and says nothing in its place: the list filling in is the news.
     #[tokio::test]
-    async fn the_recovery_line_names_the_failure_it_ended() {
+    async fn a_read_that_works_again_withdraws_the_warning_quietly() {
         let (engine, bus, _tmp, _root) = boot();
         let svc = ChangesService::new(engine, bus);
         let mut statuses = svc.engine.subscribe_status();
+        let mut clears = svc.engine.subscribe_status_clears();
 
         for rev in 1..=u64::from(dux_core::changes_status::ERROR_WARN_THRESHOLD) {
             let _ = svc.store_err("s1", rev, 0, "git busy".to_string(), Failure::Real);
@@ -1447,21 +1448,20 @@ mod tests {
 
         svc.reset_error_streak("s1");
 
-        let recovery = loop {
-            let status = statuses.recv().await.expect("a status");
-            if status.tone == "info" {
-                break status;
+        let key = dux_core::changes_status::warn_key("s1");
+        loop {
+            if clears.recv().await.expect("a clear").as_deref() == Some(key.as_str()) {
+                break;
             }
-        };
-        assert_eq!(
-            recovery.message,
-            "Changed files are back: git had been failing for this worktree and the latest \
-             check succeeded."
-        );
-        assert_eq!(
-            recovery.key.as_deref(),
-            Some(dux_core::changes_status::warn_key("s1").as_str())
-        );
+        }
+        while let Ok(status) = statuses.try_recv() {
+            assert_ne!(
+                status.key.as_deref(),
+                Some(key.as_str()),
+                "nothing is said in the warning's place: {}",
+                status.message
+            );
+        }
     }
 
     /// git resolves a relative gitdir from the directory it changed into, so a

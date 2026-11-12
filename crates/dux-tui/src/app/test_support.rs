@@ -232,6 +232,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         resumed_tab_runs: std::collections::HashSet::new(),
         pending_deletions: std::collections::HashSet::new(),
         folder_repo_statuses: std::collections::HashMap::new(),
+        no_branch_checked_out: std::collections::HashSet::new(),
         changed_files_failures: ChangedFilesFailures::default(),
         closing_sessions: std::collections::HashSet::new(),
         deletion_busy_messages: std::collections::HashMap::new(),

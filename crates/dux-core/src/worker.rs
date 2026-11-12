@@ -701,6 +701,16 @@ impl CreateAgentRequest {
     }
 }
 
+/// Whether a worktree has a branch checked out, as branch sync read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchCheckout {
+    /// HEAD names a branch.
+    OnBranch,
+    /// HEAD names no branch: a detached checkout, or a rebase or a bisect in
+    /// progress.
+    NoBranch,
+}
+
 /// A message a background worker sends back to the engine.
 #[derive(Debug)]
 pub enum WorkerEvent {
@@ -725,6 +735,18 @@ pub enum WorkerEvent {
     /// so it reaches whichever surface is draining rather than only the one
     /// that raised it. The web's changed-files service is the producer today.
     PollerStatus(StatusUpdate),
+    /// A background poller's warning is over: take down the status standing on
+    /// this key, quietly, on whichever surface is draining.
+    PollerStatusWithdrawn(String),
+    /// Branch sync found an agent's worktree with no branch checked out (a
+    /// detached checkout, a rebase or a bisect in progress), or found one
+    /// checked out again. Sent when the answer changes, not on every pass.
+    BranchCheckoutChanged {
+        /// The agent whose worktree was read.
+        session_id: String,
+        /// Whether a branch is checked out there now.
+        checkout: BranchCheckout,
+    },
     /// A progress update emitted while an agent is being created/forked/attached.
     /// `status_op_id` is the opaque id of the shared create-agent `HandlerStatusOp`
     /// (see `Engine::pending_create_ops`); the handler looks the op up and re-emits

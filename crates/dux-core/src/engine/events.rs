@@ -18,6 +18,7 @@ use crate::logger;
 use crate::model::{
     AgentSession, GhStatus, Project, ProjectBranchStatus, ProviderKind, SessionStatus,
 };
+use crate::poller_status::PollerNotice;
 use crate::prose::ProseSegment;
 use crate::startup::StartupCommandLogListing;
 use crate::status_text::StatusText;
@@ -2685,8 +2686,10 @@ impl Engine {
         // stored.
         self.folder_repo_statuses.remove(&session.id);
         // So does the changed-files failure streak: an agent that is gone owes
-        // no recovery for a warning about a repository nobody is watching.
+        // no withdrawal of a warning about a repository nobody is watching.
         self.changed_files_failures.forget(&session.id);
+        // And branch sync's answer about its worktree's checkout.
+        self.no_branch_checked_out.remove(&session.id);
         // The detach state goes with the session too, so a later session that
         // reuses the id does not inherit a detach it never asked for.
         self.pr_prefs.remove(&session.id);
@@ -3833,15 +3836,15 @@ impl Engine {
                 ));
                 return session_id
                     .and_then(|id| self.note_changed_files_outcome(&id, Some(&message)))
-                    .map_or(EventReaction::Nothing, EventReaction::Status);
+                    .map_or(EventReaction::Nothing, PollerNotice::into_reaction);
             }
         };
-        let recovery = session_id.and_then(|id| self.note_changed_files_outcome(&id, None));
+        let withdrawal = session_id.and_then(|id| self.note_changed_files_outcome(&id, None));
         self.set_changed_files(staged, unstaged);
-        match recovery {
-            Some(status) => EventReaction::Multi(vec![
+        match withdrawal {
+            Some(notice) => EventReaction::Multi(vec![
                 EventReaction::ClampFilesCursor,
-                EventReaction::Status(status),
+                notice.into_reaction(),
             ]),
             None => EventReaction::ClampFilesCursor,
         }
@@ -5254,6 +5257,26 @@ impl Engine {
         self.refresh_branch_history(session_id);
     }
 
+    /// Branch sync's answer to whether a branch is checked out in an agent's
+    /// worktree. An agent that has gone since the pass read it is ignored, so
+    /// nothing is kept for it.
+    fn process_branch_checkout_changed(
+        &mut self,
+        session_id: String,
+        checkout: crate::worker::BranchCheckout,
+    ) {
+        match checkout {
+            crate::worker::BranchCheckout::OnBranch => {
+                self.no_branch_checked_out.remove(&session_id);
+            }
+            crate::worker::BranchCheckout::NoBranch => {
+                if self.sessions.iter().any(|session| session.id == session_id) {
+                    self.no_branch_checked_out.insert(session_id);
+                }
+            }
+        }
+    }
+
     fn process_folder_repo_status_ready(
         &mut self,
         session_id: &str,
@@ -5297,6 +5320,14 @@ impl Engine {
         match event {
             WorkerEvent::CommandWorkerStarted(status) | WorkerEvent::PollerStatus(status) => {
                 EventReaction::Status(status)
+            }
+            WorkerEvent::PollerStatusWithdrawn(key) => EventReaction::ClearStatus(key),
+            WorkerEvent::BranchCheckoutChanged {
+                session_id,
+                checkout,
+            } => {
+                self.process_branch_checkout_changed(session_id, checkout);
+                EventReaction::Nothing
             }
             WorkerEvent::WorkingCopyRecreated {
                 session_id,
@@ -7813,27 +7844,28 @@ mod tests {
             warning.message
         );
 
-        // And the recovery rides the same key, so the surfaces replace rather
-        // than stack.
+        // A read that works again takes the warning down on its key, with no
+        // message in its place.
         let reaction = engine.process_worker_event(WorkerEvent::ChangedFilesReady {
             outcome: Ok((Vec::new(), Vec::new())),
             worktree,
             read: 0,
         });
         let EventReaction::Multi(parts) = reaction else {
-            panic!("a recovering read owes both a repaint and a status")
+            panic!("a read that works again owes both a repaint and a withdrawal")
         };
-        let recovered = parts
-            .iter()
-            .find_map(|part| match part {
-                EventReaction::Status(status) => Some(status),
-                _ => None,
-            })
-            .expect("the recovery status");
-        assert_eq!(recovered.tone, crate::statusline::StatusTone::Info);
-        assert_eq!(
-            recovered.key.as_deref(),
-            Some(crate::changes_status::warn_key("s1").as_str())
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, EventReaction::Status(_))),
+            "nothing is said in the warning's place: {parts:?}"
+        );
+        assert!(
+            parts.iter().any(|part| matches!(
+                part,
+                EventReaction::ClearStatus(key) if *key == crate::changes_status::warn_key("s1")
+            )),
+            "{parts:?}"
         );
     }
 

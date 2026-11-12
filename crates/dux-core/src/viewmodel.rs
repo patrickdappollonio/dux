@@ -545,6 +545,11 @@ pub enum AgentWorkspaceView {
         /// The sentence explaining why the changes region is quiet, when it is.
         /// Empty while the working copy is there.
         quiet_reason: String,
+        /// Whether the working copy has no branch checked out right now (a
+        /// detached checkout, a rebase or a bisect in progress). `branch_name`
+        /// then still names the branch it was last on, and the changes panel
+        /// says so until a branch is checked out again.
+        no_branch_checked_out: bool,
         /// Whether this agent's provider resumes its prior conversation when it
         /// comes up in the same directory. Carried because the recreate
         /// confirmation promises exactly that, and a provider with no
@@ -602,6 +607,7 @@ impl AgentWorkspaceView {
         repo_status: crate::git::FolderRepoStatus,
         conversation: ConversationResume,
         recreate: Option<RecreateView>,
+        checkout: crate::worker::BranchCheckout,
     ) -> Self {
         match workspace {
             crate::model::AgentWorkspace::Managed(managed) => {
@@ -621,6 +627,7 @@ impl AgentWorkspaceView {
                         crate::model::AgentWorkspaceKind::Managed,
                     )
                     .unwrap_or_default(),
+                    no_branch_checked_out: checkout == crate::worker::BranchCheckout::NoBranch,
                     conversation_resumes: conversation == ConversationResume::Resumes,
                     recreate,
                 }
@@ -1622,6 +1629,11 @@ impl Engine {
                 self.folder_repo_status(&s.id),
                 conversation,
                 recreate,
+                if self.no_branch_checked_out(&s.id) {
+                    crate::worker::BranchCheckout::NoBranch
+                } else {
+                    crate::worker::BranchCheckout::OnBranch
+                },
             ),
             status: s.status.as_str().to_string(),
             auto_reopen_enabled: s.auto_reopen_enabled,
@@ -1954,6 +1966,7 @@ mod tests {
                 worktree_label: "/tmp/s1-worktree".to_string(),
                 worktree_missing: false,
                 quiet_reason: String::new(),
+                no_branch_checked_out: false,
                 // The fixture agent runs claude, which resumes per directory.
                 conversation_resumes: true,
                 recreate: None,

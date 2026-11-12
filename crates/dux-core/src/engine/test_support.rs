@@ -128,6 +128,7 @@ pub(crate) fn test_engine_at(root: &std::path::Path) -> Engine {
         resumed_tab_runs: HashSet::new(),
         pending_deletions: HashSet::new(),
         folder_repo_statuses: HashMap::new(),
+        no_branch_checked_out: std::collections::HashSet::new(),
         changed_files_failures: crate::changes_status::ChangedFilesFailures::default(),
         closing_sessions: HashSet::new(),
         deletion_busy_messages: HashMap::new(),

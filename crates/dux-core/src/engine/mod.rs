@@ -725,6 +725,11 @@ pub struct Engine {
     /// mutations. Read it through [`Engine::folder_repo_status`], never
     /// directly, so that default can never be forgotten.
     pub folder_repo_statuses: HashMap<String, crate::git::FolderRepoStatus>,
+    /// Agents whose worktree branch sync last found with no branch checked out
+    /// (a detached checkout, a rebase or a bisect in progress). Runtime only:
+    /// it is a fact about the worktree right now, reported by branch sync when
+    /// it changes. Read it through [`Engine::no_branch_checked_out`].
+    pub no_branch_checked_out: HashSet<String>,
     /// The changed-files failure streaks, shared by BOTH pollers.
     ///
     /// One tracker so the terminal UI and the web say the same thing about the
@@ -3507,6 +3512,11 @@ impl Engine {
         // Agents whose birth branch git cannot prove, not asked about again
         // until their branch changes or dux restarts.
         let mut unprovable: HashSet<String> = HashSet::new();
+        // Agents this loop last found with no branch checked out, so the engine
+        // hears about a change rather than every pass. Kept for an agent that
+        // leaves the plan (a working copy that went missing), so when it comes
+        // back on a branch the engine hears that the notice is over.
+        let mut no_branch: HashSet<String> = HashSet::new();
         self.spawn_loop_worker(
             LoopWorkerSpec {
                 label: "branch-sync".into(),
@@ -3544,32 +3554,12 @@ impl Engine {
                     .clone();
                 let mut updates = Vec::new();
                 for entry in &snapshot {
-                    let worktree = Path::new(&entry.worktree_path);
-                    let read = crate::git::current_branch(worktree);
-                    if let Err(err) = &read {
-                        crate::logger::error(&format!(
-                            "branch sync could not read the branch of {}: {err:#}",
-                            worktree.display()
-                        ));
-                        report_missing_directory(tx, &entry.session_id, worktree);
-                        // A blip is ordinary here (the agent's own commit holds
-                        // the index lock), so only a streak is worth a sentence.
-                        if streaks.record_failure(&entry.worktree_path) {
-                            let _ = tx.send(WorkerEvent::PollerStatus(
-                                crate::poller_status::branch_sync_stuck(
-                                    &entry.worktree_path,
-                                    &format!("{err:#}"),
-                                ),
-                            ));
-                        }
+                    // With no branch checked out the agent keeps the branch it
+                    // was last seen on: nothing has replaced it.
+                    let Some(actual) = branch_sync_read(entry, tx, &mut streaks, &mut no_branch)
+                    else {
                         continue;
-                    }
-                    if streaks.record_success(&entry.worktree_path) {
-                        let _ = tx.send(WorkerEvent::PollerStatus(
-                            crate::poller_status::branch_sync_recovered(&entry.worktree_path),
-                        ));
-                    }
-                    let Ok(actual) = read else { continue };
+                    };
                     if let Some(update) = branch_sync_update(
                         entry,
                         &actual,
@@ -3587,6 +3577,69 @@ impl Engine {
             },
         );
     }
+}
+
+/// Read the branch one agent's worktree is on, for one branch-sync pass, and
+/// say what that answer owes the surfaces. `None` when no branch is checked out
+/// there or git could not answer, either way leaving nothing to sync.
+///
+/// A worktree with no branch checked out (a detached checkout, a rebase or a
+/// bisect in progress) is an answer, not a failure: it counts toward no
+/// streak, and the engine hears about it when it changes, not every pass. A
+/// real failure is logged every time and warned about only after a streak, and
+/// any answer from git takes down a warning that was standing, quietly.
+fn branch_sync_read(
+    entry: &BranchSyncEntry,
+    tx: &std::sync::mpsc::Sender<WorkerEvent>,
+    streaks: &mut crate::poller_status::FailureStreaks,
+    no_branch: &mut HashSet<String>,
+) -> Option<String> {
+    let worktree = Path::new(&entry.worktree_path);
+    let read = match crate::git::current_branch_opt(worktree) {
+        Ok(read) => read,
+        Err(err) => {
+            crate::logger::error(&format!(
+                "branch sync could not read the branch of {}: {err:#}",
+                worktree.display()
+            ));
+            report_missing_directory(tx, &entry.session_id, worktree);
+            // A blip is ordinary here (the agent's own commit holds the index
+            // lock), so only a streak is worth a sentence.
+            if streaks.record_failure(&entry.worktree_path) {
+                let _ = tx.send(WorkerEvent::PollerStatus(
+                    crate::poller_status::branch_sync_stuck(&entry.worktree_path),
+                ));
+            }
+            return None;
+        }
+    };
+    // The branch on screen being right again is the news, so nothing is said
+    // in the warning's place.
+    if streaks.record_success(&entry.worktree_path) {
+        let _ = tx.send(
+            crate::poller_status::PollerNotice::Withdraw(crate::poller_status::branch_sync_key(
+                &entry.worktree_path,
+            ))
+            .into_worker_event(),
+        );
+    }
+    let checkout = if read.is_some() {
+        crate::worker::BranchCheckout::OnBranch
+    } else {
+        crate::worker::BranchCheckout::NoBranch
+    };
+    let known_without = no_branch.contains(&entry.session_id);
+    if known_without != (checkout == crate::worker::BranchCheckout::NoBranch) {
+        match checkout {
+            crate::worker::BranchCheckout::OnBranch => no_branch.remove(&entry.session_id),
+            crate::worker::BranchCheckout::NoBranch => no_branch.insert(entry.session_id.clone()),
+        };
+        let _ = tx.send(WorkerEvent::BranchCheckoutChanged {
+            session_id: entry.session_id.clone(),
+            checkout,
+        });
+    }
+    read
 }
 
 /// One branch-sync pass over one agent whose branch was read as `actual`: the
@@ -4019,6 +4072,15 @@ impl Engine {
         self.changed_files_revision = self.changed_files_revision.wrapping_add(1);
     }
 
+    /// Whether the agent's worktree has no branch checked out right now (a
+    /// detached checkout, a rebase or a bisect in progress), as branch sync
+    /// last found it. False for a working copy that is gone, whose changes
+    /// region says that instead.
+    pub fn no_branch_checked_out(&self, session_id: &str) -> bool {
+        self.no_branch_checked_out.contains(session_id)
+            && self.folder_repo_status(session_id) != crate::git::FolderRepoStatus::Missing
+    }
+
     /// The live repository verdict for the directory an agent lives in.
     ///
     /// A MANAGED agent answers [`crate::git::FolderRepoStatus::WorkingRepo`]
@@ -4052,7 +4114,7 @@ impl Engine {
     }
 
     /// Record what a changed-files read answered for one agent, and hand back
-    /// the status it owes, if any.
+    /// the warning it owes, or the withdrawal of one, if any.
     ///
     /// The ONE place either poller escalates. It returns rather than emits
     /// because its two callers reach their surfaces differently: the terminal
@@ -4063,7 +4125,7 @@ impl Engine {
         &mut self,
         session_id: &str,
         failure: Option<&str>,
-    ) -> Option<StatusUpdate> {
+    ) -> Option<crate::poller_status::PollerNotice> {
         match failure {
             Some(message) => self
                 .changed_files_failures
@@ -4073,8 +4135,8 @@ impl Engine {
     }
 
     /// Record a changed-files outcome for a poller that is not the one draining
-    /// worker events, and queue whatever status it owes on the engine's own
-    /// worker lane.
+    /// worker events, and queue the warning it owes, or its withdrawal, on the
+    /// engine's own worker lane.
     ///
     /// The web's changes service runs on the tokio side and cannot produce an
     /// [`EventReaction`]; going out through its own emitter instead would reach
@@ -4082,8 +4144,8 @@ impl Engine {
     /// repository is failing. The worker lane is the one road both surfaces
     /// already drain.
     pub fn post_changed_files_outcome(&mut self, session_id: &str, failure: Option<&str>) {
-        if let Some(status) = self.note_changed_files_outcome(session_id, failure) {
-            self.post_status(status);
+        if let Some(notice) = self.note_changed_files_outcome(session_id, failure) {
+            let _ = self.worker_tx.send(notice.into_worker_event());
         }
     }
 
@@ -11792,15 +11854,16 @@ mod tests {
         assert!(matches!(event, WorkerEvent::BranchSyncReady(_)));
     }
 
-    /// git falling over in one worktree for a whole streak is said out loud, and
-    /// so is the read working again, on the same key so the good news replaces
-    /// the bad rather than sitting under it.
+    /// git falling over in one worktree for a whole streak is said out loud,
+    /// without git's own text, and the read working again takes the warning
+    /// down quietly on the key it stands on.
     ///
     /// Driven against a real directory that is not a repository and then made
     /// into one, because the streak counting lives inside the loop and only a
-    /// real sequence of cycles exercises the crossing and the recovery together.
+    /// real sequence of cycles exercises the crossing and the withdrawal
+    /// together.
     #[test]
-    fn a_branch_read_that_stays_broken_and_then_works_says_both() {
+    fn a_branch_read_that_stays_broken_warns_and_working_again_withdraws_it_quietly() {
         let (mut engine, tmp) = test_engine();
         let (worker_tx, worker_rx) = std::sync::mpsc::channel();
         engine.worker_tx = worker_tx;
@@ -11828,36 +11891,238 @@ mod tests {
         engine.config.ui.branch_sync_interval = 1;
         engine.spawn_branch_sync_worker();
 
-        let stuck = next_poller_status(&worker_rx, "the streak is reported");
+        let stuck = match next_poller_notice(&worker_rx, "the streak is reported") {
+            crate::poller_status::PollerNotice::Warn(stuck) => stuck,
+            other @ crate::poller_status::PollerNotice::Withdraw(_) => {
+                panic!("the streak warns first: {other:?}")
+            }
+        };
         assert_eq!(stuck.tone, crate::statusline::StatusTone::Warning);
         assert_eq!(
-            stuck.key,
-            crate::poller_status::branch_sync_stuck(&worktree_path, "x").key
+            stuck.key.as_deref(),
+            Some(crate::poller_status::branch_sync_key(&worktree_path).as_str())
         );
         assert!(
-            stuck.message.contains(&worktree_path),
-            "the warning names the worktree git cannot answer in: {}",
+            stuck.message.contains(&worktree_path) && stuck.message.contains("dux.log"),
+            "the warning names the folder and where the details are: {}",
+            stuck.message
+        );
+        assert!(
+            !stuck.message.contains("not a git repository"),
+            "git's own text stays in the log: {}",
             stuck.message
         );
 
         crate::git::init_repo(&worktree).expect("init repo");
-        let recovered = next_poller_status(&worker_rx, "the recovery is reported");
-        assert_eq!(recovered.tone, crate::statusline::StatusTone::Info);
-        assert_eq!(
-            recovered.key, stuck.key,
-            "the good news lands on the key the warning is standing on"
+        let key = crate::poller_status::branch_sync_key(&worktree_path);
+        assert!(
+            matches!(
+                next_poller_notice(&worker_rx, "the warning is withdrawn"),
+                crate::poller_status::PollerNotice::Withdraw(withdrawn) if withdrawn == key
+            ),
+            "nothing replaces the warning; it is taken down on its own key"
         );
     }
 
-    /// The next poller status on the lane, skipping the sweeps' own events.
-    fn next_poller_status(
+    /// A worktree with no branch checked out (a detached checkout, a rebase, a
+    /// bisect) is an ordinary state git answers about cleanly, so branch sync
+    /// never counts it toward the failure streak and never warns about it. It
+    /// tells the engine once that no branch is checked out, and once that one
+    /// is again, which is what the changes panel's notice follows.
+    ///
+    /// A second agent whose recorded branch is stale makes every pass produce
+    /// an update, so the count of updates is the count of passes and the quiet
+    /// is measured over more passes than the streak needs to warn.
+    #[test]
+    fn a_worktree_with_no_branch_checked_out_is_not_a_failed_branch_read() {
+        let (mut engine, tmp) = test_engine();
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        engine.worker_tx = worker_tx;
+        engine.branch_sync_wait.slice_ms.store(5, Ordering::Relaxed);
+
+        let git = |dir: &Path, args: &[&str]| {
+            let out = crate::test_git::fixture_git()
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let detached = tmp.path().join("detached");
+        std::fs::create_dir_all(&detached).expect("detached dir");
+        git(&detached, &["init", "--initial-branch=main"]);
+        git(
+            &detached,
+            &[
+                "-c",
+                "user.email=t@e",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        );
+        git(&detached, &["checkout", "--detach"]);
+        let pacer = tmp.path().join("pacer");
+        std::fs::create_dir_all(&pacer).expect("pacer dir");
+        git(&pacer, &["init", "--initial-branch=main"]);
+
+        let entry = |session_id: &str, worktree: &Path, branch_name: &str| BranchSyncEntry {
+            created_at: chrono::Utc::now(),
+            unidentified_birth: None,
+            recorded_tips: Vec::new(),
+            session_id: session_id.to_string(),
+            worktree_path: worktree.to_string_lossy().to_string(),
+            branch_name: branch_name.to_string(),
+        };
+        engine
+            .branch_sync_sessions
+            .lock()
+            .expect("branch sync sessions")
+            .extend([
+                entry("detached", &detached, "agent-branch"),
+                entry("pacer", &pacer, "a-branch-it-is-not-on"),
+            ]);
+
+        engine.config.ui.branch_sync_interval = 1;
+        engine.spawn_branch_sync_worker();
+
+        let passes = crate::poller_status::WARN_AFTER_FAILURES + 2;
+        assert_eq!(
+            branch_checkout_changes(&worker_rx, passes, crate::worker::BranchCheckout::NoBranch),
+            vec![(
+                "detached".to_string(),
+                crate::worker::BranchCheckout::NoBranch
+            )],
+            "said once, about the detached agent only"
+        );
+        git(&detached, &["switch", "main"]);
+        // One pass may already have been under way before the switch.
+        assert_eq!(
+            branch_checkout_changes(&worker_rx, passes, crate::worker::BranchCheckout::OnBranch),
+            vec![(
+                "detached".to_string(),
+                crate::worker::BranchCheckout::OnBranch
+            )],
+            "a branch checked out again is said once too"
+        );
+    }
+
+    /// Every `BranchCheckoutChanged` branch sync sends over `passes` more
+    /// sweeps of the detached-agent test, failing on any poller warning. While
+    /// that agent's worktree is still in `NoBranch`, it must also move nowhere.
+    fn branch_checkout_changes(
+        rx: &std::sync::mpsc::Receiver<WorkerEvent>,
+        passes: u32,
+        detached_agent: crate::worker::BranchCheckout,
+    ) -> Vec<(String, crate::worker::BranchCheckout)> {
+        let mut changes = Vec::new();
+        let mut seen = 0;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while seen < passes {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("branch sync kept sweeping");
+            match rx
+                .recv_timeout(remaining)
+                .expect("branch sync kept sweeping")
+            {
+                WorkerEvent::BranchSyncReady(updates) => {
+                    assert!(
+                        detached_agent == crate::worker::BranchCheckout::OnBranch
+                            || updates.iter().all(|update| update.session_id == "pacer"),
+                        "the agent with no branch checked out moved nowhere: {updates:?}"
+                    );
+                    seen += 1;
+                }
+                WorkerEvent::PollerStatus(status) => {
+                    panic!("no branch checked out is not a failure: {}", status.message)
+                }
+                WorkerEvent::BranchCheckoutChanged {
+                    session_id,
+                    checkout,
+                } => changes.push((session_id, checkout)),
+                _ => {}
+            }
+        }
+        changes
+    }
+
+    /// The engine keeps branch sync's answer for the agent's view model, and a
+    /// gone working copy's own notice takes precedence over it.
+    #[test]
+    fn no_branch_checked_out_reaches_the_agents_workspace_view() {
+        let (mut engine, _tmp) = test_engine();
+        engine.sessions.push(sample_session("s1", "p1", "feat"));
+        let view_says = |engine: &Engine| {
+            let session = engine.session_view("s1").expect("s1");
+            match session.workspace {
+                crate::viewmodel::AgentWorkspaceView::Managed {
+                    no_branch_checked_out,
+                    branch_name,
+                    ..
+                } => (no_branch_checked_out, branch_name),
+                crate::viewmodel::AgentWorkspaceView::Folder { .. } => panic!("managed"),
+            }
+        };
+        assert_eq!(view_says(&engine), (false, "feat".to_string()));
+
+        engine.process_worker_event(WorkerEvent::BranchCheckoutChanged {
+            session_id: "s1".to_string(),
+            checkout: crate::worker::BranchCheckout::NoBranch,
+        });
+        assert_eq!(
+            view_says(&engine),
+            (true, "feat".to_string()),
+            "the last branch stays on screen beside the notice"
+        );
+
+        engine
+            .folder_repo_statuses
+            .insert("s1".to_string(), crate::git::FolderRepoStatus::Missing);
+        assert!(
+            !view_says(&engine).0,
+            "a gone working copy says that instead"
+        );
+        engine.folder_repo_statuses.remove("s1");
+
+        engine.process_worker_event(WorkerEvent::BranchCheckoutChanged {
+            session_id: "s1".to_string(),
+            checkout: crate::worker::BranchCheckout::OnBranch,
+        });
+        assert!(!view_says(&engine).0);
+
+        engine.process_worker_event(WorkerEvent::BranchCheckoutChanged {
+            session_id: "gone".to_string(),
+            checkout: crate::worker::BranchCheckout::NoBranch,
+        });
+        assert!(
+            engine.no_branch_checked_out.is_empty(),
+            "nothing is kept for an agent that is not there"
+        );
+    }
+
+    /// The next poller warning or withdrawal on the lane, skipping the sweeps'
+    /// own events.
+    fn next_poller_notice(
         rx: &std::sync::mpsc::Receiver<WorkerEvent>,
         what: &str,
-    ) -> crate::engine::StatusUpdate {
+    ) -> crate::poller_status::PollerNotice {
         let deadline = Instant::now() + Duration::from_secs(60);
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(remaining) {
-                Ok(WorkerEvent::PollerStatus(status)) => return status,
+                Ok(WorkerEvent::PollerStatus(status)) => {
+                    return crate::poller_status::PollerNotice::Warn(status);
+                }
+                Ok(WorkerEvent::PollerStatusWithdrawn(key)) => {
+                    return crate::poller_status::PollerNotice::Withdraw(key);
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }

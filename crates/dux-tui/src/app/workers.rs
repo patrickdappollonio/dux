@@ -3894,7 +3894,7 @@ mod tests {
         assert!(
             app.status.snapshot().iter().any(|s| s.key.as_deref()
                 == Some(dux_core::changes_status::warn_key(&session_id).as_str())),
-            "the warning carries the shared key, so the recovery replaces it"
+            "the warning carries the shared key, so its withdrawal can take it down"
         );
     }
 

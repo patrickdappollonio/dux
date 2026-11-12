@@ -1,20 +1,21 @@
-//! What dux says when it cannot read an agent's changed files, and when it can
-//! again.
+//! What dux says when it cannot read an agent's changed files, and how that
+//! warning goes away again.
 //!
 //! Two pollers ask the same question: the terminal UI's own changed-files
 //! refresh and the web's changes service. They used to answer differently, the
 //! web raising a warning through its own side door and the terminal UI saying
 //! nothing at all, so the same failing repository produced two different
-//! screens. The streak, the threshold, the key and both sentences live here,
-//! and the engine owns the one instance both pollers feed.
+//! screens. The streak, the threshold, the key and the sentence live here, and
+//! the engine owns the one instance both pollers feed.
 //!
 //! Feeding one tracker from two pollers is deliberately harmless: the streak
-//! simply climbs faster, the warning is emitted on the one crossing, and the
-//! recovery fires once.
+//! simply climbs faster, the warning is emitted on the one crossing, and it is
+//! withdrawn once.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::StatusUpdate;
+use crate::poller_status::PollerNotice;
 use crate::statusline::StatusTone;
 
 /// Consecutive failures before a warning is raised.
@@ -24,8 +25,8 @@ use crate::statusline::StatusTone;
 /// the signal that something is actually wrong.
 pub const ERROR_WARN_THRESHOLD: u32 = 3;
 
-/// The keyed-status key for one agent's changed-files escalation. The warning
-/// and its recovery share it, so the surfaces replace rather than stack.
+/// The keyed-status key for one agent's changed-files escalation, which the
+/// withdrawal names to take the warning down.
 pub fn warn_key(session_id: &str) -> String {
     format!("changes-error:{session_id}")
 }
@@ -42,37 +43,31 @@ impl ChangedFilesFailures {
     /// Record one failed read. Answers with the keyed warning on the crossing
     /// and with nothing on every other failure, so a blip stays silent and a
     /// standing failure is reported exactly once.
-    pub fn record_failure(&mut self, session_id: &str, message: &str) -> Option<StatusUpdate> {
+    pub fn record_failure(&mut self, session_id: &str, message: &str) -> Option<PollerNotice> {
         let streak = self.streaks.entry(session_id.to_string()).or_insert(0);
         *streak += 1;
         if *streak != ERROR_WARN_THRESHOLD {
             return None;
         }
         self.warned.insert(session_id.to_string());
-        Some(StatusUpdate::keyed(
+        Some(PollerNotice::Warn(StatusUpdate::keyed(
             warn_key(session_id),
             StatusTone::Warning,
             format!(
                 "Changed files for this agent are temporarily unavailable (git busy): {message}"
             ),
-        ))
+        )))
     }
 
-    /// Record one successful read. Answers with the keyed recovery ONLY when a
-    /// warning was actually shown, so a blip that never raised one does not
-    /// leave an orphaned "it is back" behind it.
-    pub fn record_success(&mut self, session_id: &str) -> Option<StatusUpdate> {
+    /// Record one successful read. Answers with the withdrawal of the warning
+    /// ONLY when one was actually shown, so a blip that never raised one has
+    /// nothing to take down. The list filling in again is the news that it
+    /// ended, so nothing is said in its place.
+    pub fn record_success(&mut self, session_id: &str) -> Option<PollerNotice> {
         self.streaks.remove(session_id);
-        if !self.warned.remove(session_id) {
-            return None;
-        }
-        Some(StatusUpdate::keyed(
-            warn_key(session_id),
-            StatusTone::Info,
-            "Changed files are back: git had been failing for this worktree and the latest check \
-             succeeded."
-                .to_string(),
-        ))
+        self.warned
+            .remove(session_id)
+            .then(|| PollerNotice::Withdraw(warn_key(session_id)))
     }
 
     /// Forget an agent entirely, for a session that is gone.
@@ -92,9 +87,10 @@ mod tests {
         for _ in 1..ERROR_WARN_THRESHOLD {
             assert!(failures.record_failure("s1", "index.lock exists").is_none());
         }
-        let warning = failures
-            .record_failure("s1", "index.lock exists")
-            .expect("the streak crosses the threshold");
+        let Some(PollerNotice::Warn(warning)) = failures.record_failure("s1", "index.lock exists")
+        else {
+            panic!("the streak crosses the threshold")
+        };
         assert_eq!(warning.tone, StatusTone::Warning);
         assert_eq!(warning.key.as_deref(), Some(warn_key("s1").as_str()));
         assert!(warning.message.contains("index.lock exists"));
@@ -105,23 +101,25 @@ mod tests {
     }
 
     #[test]
-    fn the_recovery_only_fires_where_a_warning_was_shown() {
+    fn the_warning_is_withdrawn_only_where_it_was_shown() {
         let mut failures = ChangedFilesFailures::default();
         assert!(failures.record_failure("s1", "boom").is_none());
         assert!(
             failures.record_success("s1").is_none(),
-            "a blip that never warned owes no recovery"
+            "a blip that never warned has nothing to take down"
         );
 
         for _ in 0..ERROR_WARN_THRESHOLD {
             failures.record_failure("s2", "boom");
         }
-        let recovery = failures
-            .record_success("s2")
-            .expect("a warned agent recovers out loud");
-        assert_eq!(recovery.tone, StatusTone::Info);
-        assert_eq!(recovery.key.as_deref(), Some(warn_key("s2").as_str()));
-        assert!(failures.record_success("s2").is_none(), "and says so once");
+        assert!(
+            matches!(
+                failures.record_success("s2"),
+                Some(PollerNotice::Withdraw(key)) if key == warn_key("s2")
+            ),
+            "a shown warning is taken down quietly, on its own key"
+        );
+        assert!(failures.record_success("s2").is_none(), "once");
     }
 
     /// Both pollers feed one tracker, so the streak climbs faster and the
