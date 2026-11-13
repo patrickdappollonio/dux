@@ -2203,6 +2203,7 @@ fn patch_ui_web_and_attention(doc: &mut DocumentMut, config: &Config) {
         config.ui.always_show_tab_strip,
     );
     patch_table_value(doc, "ui", "tab_reaches_agent", config.ui.tab_reaches_agent);
+    patch_table_str(doc, "ui", "extended_keys", &config.ui.extended_keys);
     patch_table_str(doc, "ui", "upload_directory", &config.ui.upload_directory);
     patch_table_value(
         doc,
@@ -3704,6 +3705,25 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             let rendered = render_config_plain(&config);
             let parsed: Config = toml::from_str(&rendered).expect("re-parse");
             assert_eq!(parsed.ui.compose_bar, mode);
+        }
+    }
+
+    #[test]
+    fn extended_keys_renders_and_round_trips() {
+        let rendered = render_config_plain(&Config::default());
+        let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+        assert_eq!(parsed.ui.extended_keys, "auto");
+        for mode in ["on", "off"] {
+            let config = Config {
+                ui: crate::config::UiConfig {
+                    extended_keys: mode.to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let rendered = render_config_plain(&config);
+            let parsed: Config = toml::from_str(&rendered).expect("re-parse");
+            assert_eq!(parsed.ui.extended_keys, mode);
         }
     }
 

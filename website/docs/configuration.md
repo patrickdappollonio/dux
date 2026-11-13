@@ -686,6 +686,11 @@ key, and `dux.log` gets a warning naming both actions.
 > needs. The `input-debugging` palette command shows what dux receives for each keypress.
 > Full story in [Introduction](/docs/introduction#the-three-panes).
 
+A classic terminal sends some chords as the same bytes as others: `ctrl-shift-l` arrives as
+`ctrl-l`, and `ctrl-i` as Tab. Bindings on such chords can be told apart only with extended
+keys on, which the terminal UI asks your terminal for by default; see
+[Extended keys in the terminal UI](/docs/terminal-capabilities#extended-keys-in-the-terminal-ui).
+
 Tab is the exception, because it moves between panes rather than typing. Set
 `tab_reaches_agent = true` under `[ui]` to send Tab and Shift-Tab to the agent in the
 windowed pane instead, and to an agent's docked terminal while you type into it;

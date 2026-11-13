@@ -494,6 +494,24 @@ export const SETTING_GROUPS: SettingGroup[] = [
         writeTarget: "settings",
         read: (b) => b.nerd_font_icons ?? false,
       },
+      {
+        key: "ui.extended_keys",
+        label: "Extended keys",
+        description:
+          "In the terminal app, ask your terminal for the Kitty keyboard protocol (inside tmux, tmux's extended keys) so dux can tell apart keys such as Shift-Enter and Enter, or Ctrl-i and Tab, and Shift-Enter gives agents a new line. Agents and shells still receive classic keys. Automatic asks your terminal first; On skips the question; Off reads keys exactly as a classic terminal sends them. Takes effect the next time the terminal app starts. The web terminal is unaffected.",
+        surface: "tui",
+        control: {
+          kind: "enum",
+          options: [
+            { value: "auto", label: "Automatic" },
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ],
+        },
+        default: "auto",
+        writeTarget: "settings",
+        read: (b) => b.extended_keys ?? "auto",
+      },
     ],
   },
 ]

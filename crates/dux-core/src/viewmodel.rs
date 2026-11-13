@@ -267,6 +267,14 @@ pub struct BootstrapView {
     /// show and change it; the web draws its own icons. Older servers omit it,
     /// so the web treats a missing value as `false`.
     pub nerd_font_icons: bool,
+    /// Mirrors `config.ui.extended_keys`: whether the TUI asks its host
+    /// terminal for extended keys (`"auto"`, `"on"` or `"off"`). Normalized
+    /// through [`crate::config::ExtendedKeysMode`] on the way out, so the
+    /// browser only ever sees a mode it knows. Projected only so the web's
+    /// Preferences dialog can show and change it; the web's own keys are
+    /// unaffected. Older servers omit it, so the web treats a missing value as
+    /// `"auto"`.
+    pub extended_keys: String,
     /// Mirrors `config.ui.attention_indicator`: whether an attention
     /// glyph/dot/tab-title/favicon cue is shown at all when an agent asks for
     /// attention (default true). The settings modal's "Both surfaces" group
@@ -1883,6 +1891,11 @@ impl Engine {
             always_show_tab_strip: self.config.ui.always_show_tab_strip,
             tab_reaches_agent: self.config.ui.tab_reaches_agent,
             nerd_font_icons: self.config.ui.nerd_font_icons,
+            extended_keys: crate::config_effective::effective_extended_keys(
+                &self.config.ui.extended_keys,
+            )
+            .as_str()
+            .to_string(),
             attention_indicator: self.config.ui.attention_indicator,
             attention_on_bell: self.config.ui.attention_on_bell,
             global_default_provider: self.config.defaults.provider.clone(),
@@ -3395,6 +3408,22 @@ mod tests {
     }
 
     #[test]
+    fn extended_keys_is_projected_from_config() {
+        let (mut engine, _tmp) = test_engine();
+
+        assert_eq!(engine.bootstrap().extended_keys, "auto");
+
+        engine.config.ui.extended_keys = "off".to_string();
+        assert_eq!(engine.bootstrap().extended_keys, "off");
+
+        engine.config.ui.extended_keys = " ON ".to_string();
+        assert_eq!(engine.bootstrap().extended_keys, "on");
+
+        engine.config.ui.extended_keys = "kitty".to_string();
+        assert_eq!(engine.bootstrap().extended_keys, "auto");
+    }
+
+    #[test]
     fn compose_bar_projection_normalizes_an_unknown_mode() {
         let (mut engine, _tmp) = test_engine();
 
@@ -3939,6 +3968,7 @@ mod tests {
             "always_show_tab_strip",
             "tab_reaches_agent",
             "nerd_font_icons",
+            "extended_keys",
             "attention_indicator",
             "attention_on_bell",
             "global_default_provider",

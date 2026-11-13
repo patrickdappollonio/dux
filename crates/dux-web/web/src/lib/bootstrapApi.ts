@@ -124,6 +124,11 @@ export interface Bootstrap {
    * icons from a Nerd Font. Nothing in the web UI acts on it (the web draws its
    * own icons); Preferences shows and changes it. Falls back to false. */
   nerd_font_icons?: boolean
+  /** Mirrors `config.ui.extended_keys` as its canonical name: "auto" | "on" |
+   * "off". Whether the terminal UI asks its host terminal for extended keys.
+   * Nothing in the web UI acts on it; Preferences shows and changes it. An
+   * older server omits it, so the row falls back to "auto". */
+  extended_keys?: string
   /** Global environment variables applied to every spawned agent/terminal. */
   global_env: Record<string, string>
   /** The version of `global_env`, sent back on its dialog's save for the same

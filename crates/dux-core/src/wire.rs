@@ -922,6 +922,12 @@ pub struct SettingsPatch {
     /// and Shift-Tab to the agent. A plain field write the TUI reads live, so it
     /// rides the generic settings path even though nothing in the web reads it.
     pub tab_reaches_agent: Option<bool>,
+    /// `ui.extended_keys`: whether the TUI asks its host terminal for extended
+    /// keys. One of `"auto"`, `"on"` or `"off"`; an unrecognized value REJECTS
+    /// the whole command, like `compose_bar`. A plain field write: the TUI reads
+    /// it the next time it starts, so it rides the generic settings path even
+    /// though nothing in the web reads it.
+    pub extended_keys: Option<String>,
     /// `ui.nerd_font_icons`: whether the TUI draws its icons from a Nerd Font.
     /// A plain field write the TUI reads on every frame, so it rides the
     /// generic settings path even though the web draws its own icons.
@@ -1982,6 +1988,7 @@ struct SettingsUiBehaviorPatch {
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
     tab_reaches_agent: Option<bool>,
+    extended_keys: Option<String>,
 }
 
 impl SettingsUiBehaviorPatch {
@@ -2013,6 +2020,9 @@ impl SettingsUiBehaviorPatch {
         }
         if let Some(value) = self.tab_reaches_agent {
             config.ui.tab_reaches_agent = value;
+        }
+        if let Some(value) = self.extended_keys {
+            config.ui.extended_keys = value;
         }
     }
 }
@@ -2118,6 +2128,14 @@ fn validate_settings_patch(
             crate::config::ComposeBarMode::parse(&raw)
                 .map(|mode| mode.as_str().to_string())
                 .ok_or_else(|| anyhow::anyhow!("unknown compose bar mode \"{raw}\""))
+        })
+        .transpose()?;
+    patch.extended_keys = patch
+        .extended_keys
+        .map(|raw| {
+            crate::config::ExtendedKeysMode::parse(&raw)
+                .map(|mode| mode.as_str().to_string())
+                .ok_or_else(|| anyhow::anyhow!("unknown extended keys mode \"{raw}\""))
         })
         .transpose()?;
     if let Some(provider) = &patch.default_provider
@@ -2888,6 +2906,7 @@ impl Engine {
             web_notifications,
             always_show_tab_strip,
             tab_reaches_agent,
+            extended_keys,
             nerd_font_icons,
             status_clear_seconds,
             attention_grace_seconds,
@@ -2914,6 +2933,7 @@ impl Engine {
             show_changes_pane,
             always_show_tab_strip,
             tab_reaches_agent,
+            extended_keys,
         }
         .apply_to(&mut candidate);
         SettingsUiDisplayPatch {
@@ -17085,6 +17105,13 @@ mod tests {
                 expect: "true",
             },
             SettingsFieldRow {
+                key: "extended_keys",
+                seed: |c| c.ui.extended_keys = "auto".to_string(),
+                sent: serde_json::json!("off"),
+                read: |c| c.ui.extended_keys.clone(),
+                expect: "off",
+            },
+            SettingsFieldRow {
                 key: "nerd_font_icons",
                 seed: |c| c.ui.nerd_font_icons = false,
                 sent: serde_json::json!(true),
@@ -17196,11 +17223,40 @@ mod tests {
     /// The patch is built from the wire JSON rather than a Rust literal so the
     /// row exercises the same envelope a client sends.
     #[test]
+    fn set_settings_refuses_an_unknown_extended_keys_mode_and_normalizes_a_known_one() {
+        let (mut engine, _tmp) = test_engine();
+        let refused: WireCommand = serde_json::from_value(serde_json::json!({
+            "command": "set_settings",
+            "args": { "extended_keys": "kitty" },
+        }))
+        .expect("build wire command");
+        let err = engine
+            .apply_wire(refused)
+            .expect_err("an unknown mode must be refused");
+        assert!(
+            err.to_string()
+                .contains("unknown extended keys mode \"kitty\""),
+            "{err}"
+        );
+        assert_eq!(engine.config.ui.extended_keys, "auto");
+
+        let accepted: WireCommand = serde_json::from_value(serde_json::json!({
+            "command": "set_settings",
+            "args": { "extended_keys": " OFF " },
+        }))
+        .expect("build wire command");
+        engine
+            .apply_wire(accepted)
+            .expect("a known mode is accepted");
+        assert_eq!(engine.config.ui.extended_keys, "off");
+    }
+
+    #[test]
     fn set_settings_applies_every_field_when_sent_alone() {
         let rows = settings_field_rows();
         assert_eq!(
             rows.len(),
-            23,
+            24,
             "add a row when you add a field to SettingsPatch"
         );
         for row in rows {
@@ -17248,6 +17304,11 @@ mod tests {
             web_notifications: Some(!before.capabilities.web_notifications),
             always_show_tab_strip: Some(!before.ui.always_show_tab_strip),
             tab_reaches_agent: Some(!before.ui.tab_reaches_agent),
+            extended_keys: Some(if before.ui.extended_keys == "off" {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }),
             nerd_font_icons: Some(!before.ui.nerd_font_icons),
             status_clear_seconds: Some(before.ui.status_clear_seconds + 1),
             attention_grace_seconds: Some(before.ui.attention_grace_seconds + 1),
@@ -17280,6 +17341,7 @@ mod tests {
     fn assert_disk_agrees_with_memory(disk: &crate::config::Config, after: &crate::config::Config) {
         assert_eq!(disk.ui.copy_on_select, after.ui.copy_on_select);
         assert_eq!(disk.ui.compose_bar, after.ui.compose_bar);
+        assert_eq!(disk.ui.extended_keys, after.ui.extended_keys);
         assert_eq!(disk.ui.mobile_accessory_bar, after.ui.mobile_accessory_bar);
         assert_eq!(disk.ui.auto_reopen_agents, after.ui.auto_reopen_agents);
         assert_eq!(disk.ui.show_changes_pane, after.ui.show_changes_pane);
@@ -17352,6 +17414,7 @@ mod tests {
             !before.ui.always_show_tab_strip
         );
         assert_eq!(after.ui.tab_reaches_agent, !before.ui.tab_reaches_agent);
+        assert_eq!(after.ui.extended_keys, "off");
         assert_eq!(after.ui.nerd_font_icons, !before.ui.nerd_font_icons);
         assert_eq!(
             after.ui.status_clear_seconds,

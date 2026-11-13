@@ -1730,6 +1730,77 @@ pub(crate) fn compose_bar_load_warning(config: &Config) -> Option<String> {
     ComposeBarMode::unknown_value_warning(&config.ui.compose_bar)
 }
 
+/// Whether the terminal UI asks its host terminal for extended keys
+/// ([`UiConfig::extended_keys`]).
+///
+/// [`Self::Auto`] asks the host terminal (and, inside tmux, reads tmux's own
+/// settings) before switching anything on; [`Self::On`] skips the question
+/// outside tmux; [`Self::Off`] is the behaviour before the setting existed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExtendedKeysMode {
+    /// Ask the host terminal and switch the Kitty keyboard protocol on when it
+    /// says yes; inside tmux, switch tmux's extended keys on when tmux is set up
+    /// for them. The default.
+    #[default]
+    Auto,
+    /// Switch the Kitty keyboard protocol on without asking; inside tmux, the
+    /// same as [`Self::Auto`] plus a warning when tmux is not set up.
+    On,
+    /// Ask nothing of the host and read keys exactly as a classic terminal
+    /// sends them.
+    Off,
+}
+
+impl ExtendedKeysMode {
+    /// Parse a config string into a mode, returning `None` for an unrecognized
+    /// value so the caller decides whether to warn. Never warns itself.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The warning text for one unrecognized value, or `None` when the value is
+    /// a mode dux knows. Returned rather than logged so the message is testable.
+    pub(crate) fn unknown_value_warning(s: &str) -> Option<String> {
+        if Self::parse(s).is_some() {
+            return None;
+        }
+        Some(format!(
+            "unknown ui.extended_keys value {s:?}; falling back to \"auto\" \
+             (valid: auto, on, off)"
+        ))
+    }
+
+    /// Parse a config string, falling back to [`ExtendedKeysMode::Auto`] with a
+    /// logged warning on an unrecognized value.
+    pub fn from_config_str(s: &str) -> Self {
+        if let Some(warning) = Self::unknown_value_warning(s) {
+            crate::logger::warn(&warning);
+        }
+        Self::parse(s).unwrap_or(Self::Auto)
+    }
+
+    /// The canonical lowercase name, as written in `config.toml` and projected
+    /// into the web bootstrap document.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// The one-line warning to log when `ui.extended_keys` names a mode dux does
+/// not know, or `None` when it is fine. Called once per load.
+pub(crate) fn extended_keys_load_warning(config: &Config) -> Option<String> {
+    ExtendedKeysMode::unknown_value_warning(&config.ui.extended_keys)
+}
+
 /// One `[[projects]]` entry: a repository's portable identity and preferences.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
@@ -1965,6 +2036,15 @@ pub struct UiConfig {
     /// between panes since dux's first version. The pane chords bound to
     /// `focus_next`/`focus_prev` move panes whatever this is set to.
     pub tab_reaches_agent: bool,
+    /// Whether the terminal UI asks its host terminal for extended keys (the
+    /// Kitty keyboard protocol, or tmux's own extended keys inside tmux) so dux
+    /// can tell apart keys a classic terminal sends identically. The raw config
+    /// string, parsed at use through [`ExtendedKeysMode`] so a typo degrades
+    /// (warn once at load, fall back to `"auto"`) instead of failing the load,
+    /// the `compose_bar` precedent. Read once when the terminal UI starts.
+    /// Programs inside dux receive classic keys whatever it holds. Terminal UI
+    /// only.
+    pub extended_keys: String,
     /// Show an indicator when an agent asks for attention (a permission prompt,
     /// a finished turn). Detected from the agent's terminal notifications and
     /// bell. When false, no attention glyph/dot/tab-title/favicon cue is shown on
@@ -2469,6 +2549,7 @@ impl Default for UiConfig {
             show_changes_pane: true,
             always_show_tab_strip: false,
             tab_reaches_agent: false,
+            extended_keys: ExtendedKeysMode::Auto.as_str().to_string(),
             attention_indicator: true,
             attention_on_bell: true,
             disable_automated_welcome_screen: false,
@@ -3232,6 +3313,7 @@ impl Default for Config {
                 show_changes_pane: true,
                 always_show_tab_strip: false,
                 tab_reaches_agent: false,
+                extended_keys: ExtendedKeysMode::Auto.as_str().to_string(),
                 attention_indicator: true,
                 attention_on_bell: true,
                 disable_automated_welcome_screen: false,
@@ -6021,6 +6103,11 @@ fn load_corrections(mut config: Config) -> (Config, Vec<(Vec<String>, String)>) 
     if let Some(warning) = compose_bar_load_warning(&config) {
         corrections.push((key_path(&["ui", "compose_bar"]), warning));
         config.ui.compose_bar = ComposeBarMode::Auto.as_str().to_string();
+    }
+    // And once more for a `ui.extended_keys` naming a mode dux does not know.
+    if let Some(warning) = extended_keys_load_warning(&config) {
+        corrections.push((key_path(&["ui", "extended_keys"]), warning));
+        config.ui.extended_keys = ExtendedKeysMode::Auto.as_str().to_string();
     }
     // And once more for a `[server] tailscale` naming a mode dux does not know.
     // Corrected in memory so the serve path reads a real mode rather than
@@ -10003,6 +10090,49 @@ mod agent_tabs_cap_tests {
         assert_eq!(
             ComposeBarMode::from_config_str(&parsed.ui.compose_bar),
             ComposeBarMode::Auto
+        );
+    }
+
+    #[test]
+    fn extended_keys_mode_parses_the_three_modes_case_and_space_insensitively() {
+        assert_eq!(
+            ExtendedKeysMode::parse("auto"),
+            Some(ExtendedKeysMode::Auto)
+        );
+        assert_eq!(ExtendedKeysMode::parse("  ON "), Some(ExtendedKeysMode::On));
+        assert_eq!(
+            ExtendedKeysMode::parse("Off\n"),
+            Some(ExtendedKeysMode::Off)
+        );
+        assert_eq!(ExtendedKeysMode::parse("true"), None);
+        assert_eq!(ExtendedKeysMode::parse("kitty"), None);
+        assert_eq!(ExtendedKeysMode::parse(""), None);
+        for mode in [
+            ExtendedKeysMode::Auto,
+            ExtendedKeysMode::On,
+            ExtendedKeysMode::Off,
+        ] {
+            assert_eq!(ExtendedKeysMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(ExtendedKeysMode::default(), ExtendedKeysMode::Auto);
+        assert_eq!(UiConfig::default().extended_keys, "auto");
+    }
+
+    #[test]
+    fn extended_keys_mode_warns_only_for_an_unknown_value_and_degrades_to_auto() {
+        assert_eq!(ExtendedKeysMode::unknown_value_warning("off"), None);
+        let warning = ExtendedKeysMode::unknown_value_warning("kitty").expect("warning expected");
+        assert_eq!(
+            warning,
+            "unknown ui.extended_keys value \"kitty\"; falling back to \"auto\" \
+             (valid: auto, on, off)"
+        );
+        let parsed: Config =
+            toml::from_str("[ui]\nextended_keys = \"kitty\"\n").expect("still parses");
+        assert!(extended_keys_load_warning(&parsed).is_some());
+        assert_eq!(
+            ExtendedKeysMode::from_config_str(&parsed.ui.extended_keys),
+            ExtendedKeysMode::Auto
         );
     }
 

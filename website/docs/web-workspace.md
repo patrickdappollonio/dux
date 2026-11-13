@@ -409,10 +409,12 @@ In the browser, **Shift-Enter inserts a newline instead of submitting.** Plain E
 submits, and Shift-Enter never fires mid-composition, so it will not mangle a CJK input
 method's confirm keystroke.
 
-The terminal UI does the same whenever your terminal sends extended keys, which many modern
-terminals do. On a terminal that does not, Shift-Enter and Enter arrive as the same key and the
-TUI cannot tell them apart, so reach for **Ctrl-j** there: it inserts a soft newline in the
-browser and in the terminal UI alike, on any terminal.
+The terminal UI sends the agent the same new line for Shift-Enter when extended keys are on,
+which is the default on a terminal that supports them; see
+[Extended keys in the terminal UI](/docs/terminal-capabilities#extended-keys-in-the-terminal-ui).
+Without them, Shift-Enter and Enter arrive as the same key and the TUI cannot tell them apart,
+so reach for **Ctrl-j** there: it inserts a soft newline in the browser and in the terminal UI
+alike, on any terminal.
 
 ## Companion terminals
 

@@ -130,6 +130,8 @@ fn an_older_config_loads_without_error_and_keeps_every_value_the_user_set() {
     assert_eq!(config.terminal.command, "/usr/bin/fish");
     assert_eq!(config.terminal.args, vec!["-l".to_string()]);
     assert_eq!(config.ui.left_width_pct, 33);
+    // A setting the old file predates takes its default.
+    assert_eq!(config.ui.extended_keys, "auto");
 
     // The user's hand-added provider survives, arguments and all.
     let mine = config

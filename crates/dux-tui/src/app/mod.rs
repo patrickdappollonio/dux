@@ -510,6 +510,9 @@ pub(crate) struct App {
     /// Shift-Enter as the soft newline. Set when the run starts; with it off,
     /// keys are read and sent exactly as a classic terminal sends them.
     pub(crate) extended_keys: crate::keybindings::ExtendedKeys,
+    /// The `[ui] extended_keys` value this run started with, its tmux probes
+    /// and the keys typed while dux asked the host terminal about Kitty keys.
+    pub(crate) host_keys: crate::host_keys::HostKeysState,
     pub(crate) selected_left: usize,
     /// The terminal ids `LeftItem::Terminal` indexes into, built with the list.
     pub(crate) left_terminals: Vec<String>,
@@ -5540,6 +5543,7 @@ impl App {
             focused_tabs: HashMap::new(),
             host_forward_carry: Vec::new(),
             extended_keys: crate::keybindings::ExtendedKeys::Off,
+            host_keys: crate::host_keys::HostKeysState::default(),
             host_forward_error_logged_at: None,
             agent_tab_regions: Vec::new(),
             pty_sizes: HashMap::new(),
@@ -5740,10 +5744,13 @@ impl App {
     }
 
     pub(crate) fn run(&mut self) -> Result<RunExit> {
-        self.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        let mode = self.begin_extended_keys();
         self.start_run_services();
         install_terminal_restore_panic_hook();
         let result = enter_tui_terminal().and_then(|mut terminal| {
+            // On the alternate screen, before the input modes: the push lands
+            // on that screen's own keyboard stack.
+            self.negotiate_host_keys(mode);
             execute!(
                 stdout(),
                 EnableMouseCapture,
@@ -5767,6 +5774,132 @@ impl App {
                 .flush_focused_tab_writes(dux_core::engine::FOCUSED_TAB_FLUSH_BOUND);
         }
         Ok(result)
+    }
+
+    /// Read `[ui] extended_keys` for this run and set dux's own key handling
+    /// from it. Read once per start: a reload while dux runs changes nothing
+    /// until the next start, so the host terminal and dux always agree.
+    pub(crate) fn begin_extended_keys(&mut self) -> dux_core::config::ExtendedKeysMode {
+        let mode = dux_core::config::ExtendedKeysMode::parse(&self.engine.config.ui.extended_keys)
+            .unwrap_or_default();
+        self.host_keys.mode = mode;
+        self.set_extended_keys(match mode {
+            dux_core::config::ExtendedKeysMode::Off => crate::keybindings::ExtendedKeys::Off,
+            dux_core::config::ExtendedKeysMode::Auto | dux_core::config::ExtendedKeysMode::On => {
+                crate::keybindings::ExtendedKeys::On
+            }
+        });
+        mode
+    }
+
+    /// Ask the host terminal for extended keys as `mode` says. Outside tmux in
+    /// `auto` this asks the host whether it speaks Kitty keys, on this thread,
+    /// before the first frame: the answer arrives on the stdin this thread
+    /// reads, so a worker reading it would race the input loop. The question
+    /// is bounded by one deadline and asked once per process. When the
+    /// environment says tmux, this thread first asks tmux whether dux's own tty
+    /// is the pane the environment names, bounded by one ceiling, because an
+    /// inherited `TMUX` is not a tmux host. Under a verified tmux, tmux's
+    /// settings are read on a quiet job.
+    fn negotiate_host_keys(&mut self, mode: dux_core::config::ExtendedKeysMode) {
+        use crate::host_keys;
+        self.host_keys.host = host_keys::Host::Terminal;
+        if mode == dux_core::config::ExtendedKeysMode::Off {
+            return;
+        }
+        let host = host_keys::verified_host(if self.engine.host_under_tmux() {
+            host_keys::Host::Tmux
+        } else {
+            host_keys::Host::Terminal
+        });
+        self.host_keys.host = host;
+        let under_tmux = host == host_keys::Host::Tmux;
+        let kitty = (mode == dux_core::config::ExtendedKeysMode::Auto && !under_tmux).then(|| {
+            let started = Instant::now();
+            let query = host_keys::kitty_answer_once(&host_keys::KITTY_ANSWER, || {
+                host_keys::query_kitty(
+                    std::io::stdin(),
+                    &mut stdout(),
+                    host_keys::KITTY_QUERY_DEADLINE,
+                )
+            });
+            logger::debug(&format!(
+                "the Kitty keyboard query answered {:?} in {} ms",
+                query.answer,
+                started.elapsed().as_millis()
+            ));
+            self.host_keys.startup_keys = query.keys;
+            query.answer
+        });
+        let plan = host_keys::plan(mode, host, kitty, None);
+        log_host_keys_plan(&plan);
+        if plan.push_kitty
+            && let Err(err) = host_keys::switch_on_kitty(&mut stdout(), &host_keys::HOST_KEYS)
+        {
+            logger::warn(&format!(
+                "could not switch on the Kitty keyboard protocol, so dux reads classic keys: {err}"
+            ));
+        }
+        if under_tmux {
+            self.start_tmux_probe(mode);
+        }
+    }
+
+    /// Read tmux's extended-keys settings on a quiet job and apply what they
+    /// say, unless a newer probe has started by the time the answer lands.
+    fn start_tmux_probe(&mut self, mode: dux_core::config::ExtendedKeysMode) {
+        let probe = self.host_keys.probes.start();
+        self.spawn_quiet_ui_job(crate::host_keys::tmux_keys, move |app, report| {
+            app.apply_tmux_report(probe, mode, report);
+        });
+    }
+
+    /// Apply one tmux probe's answer: switch tmux's extended keys on or off as
+    /// it says, and raise the plan's warning. An answer from an older probe is
+    /// ignored, because it would switch tmux back, and so is one landing in a
+    /// run whose host is not a verified tmux.
+    pub(crate) fn apply_tmux_report(
+        &mut self,
+        probe: u64,
+        mode: dux_core::config::ExtendedKeysMode,
+        report: Option<crate::host_keys::TmuxReport>,
+    ) {
+        self.apply_tmux_report_to(
+            &mut stdout(),
+            &crate::host_keys::HOST_KEYS,
+            probe,
+            mode,
+            report,
+        );
+    }
+
+    /// [`Self::apply_tmux_report`] writing to `out` and recording in `record`.
+    pub(crate) fn apply_tmux_report_to(
+        &mut self,
+        out: &mut impl std::io::Write,
+        record: &crate::host_keys::HostKeysRecord,
+        probe: u64,
+        mode: dux_core::config::ExtendedKeysMode,
+        report: Option<crate::host_keys::TmuxReport>,
+    ) {
+        use crate::host_keys;
+        if !self.host_keys.probes.is_latest(probe) || self.host_keys.host != host_keys::Host::Tmux {
+            return;
+        }
+        let report = report.unwrap_or_else(|| {
+            host_keys::TmuxReport::CommandFailed("the tmux check stopped".to_string())
+        });
+        let plan = host_keys::plan(mode, host_keys::Host::Tmux, None, Some(&report));
+        log_host_keys_plan(&plan);
+        if let Err(err) = host_keys::apply_tmux_plan(out, record, &plan) {
+            logger::warn(&format!(
+                "could not ask tmux for its extended keys, so dux reads classic keys: {err}"
+            ));
+        }
+        self.host_keys.last_tmux_report = Some(report);
+        if let Some(warning) = plan.warning {
+            self.set_warning(warning);
+        }
     }
 
     /// Decide, for this run, whether dux reads extended keys, for its own key
@@ -5793,6 +5926,13 @@ impl App {
                 return RunExit::Quit;
             }
 
+            // Keys typed while dux asked the host about Kitty keys, before the
+            // first frame.
+            for key in std::mem::take(&mut self.host_keys.startup_keys) {
+                if self.handle_terminal_event(Event::Key(key)) {
+                    return RunExit::Quit;
+                }
+            }
             self.prepare_run_tick();
             self.refresh_run_terminal(terminal);
             // The loop keeps polling at its own cadence; only the DRAW is gated.
@@ -5872,6 +6012,15 @@ impl App {
             EnableFocusChange,
             EnableBracketedPaste
         );
+        // The host terminal does not change mid-session, so Kitty keys are
+        // re-asserted rather than asked about again; tmux's settings may have
+        // been reloaded, so they are read again.
+        crate::host_keys::reassert_kitty(&mut stdout(), &crate::host_keys::HOST_KEYS);
+        if self.host_keys.mode != dux_core::config::ExtendedKeysMode::Off
+            && self.host_keys.host == crate::host_keys::Host::Tmux
+        {
+            self.start_tmux_probe(self.host_keys.mode);
+        }
     }
 
     fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) {
@@ -9486,12 +9635,34 @@ fn enter_tui_terminal() -> std::io::Result<ratatui::DefaultTerminal> {
 /// alternate screen, which `ratatui::restore` does not know about. Left on,
 /// the user's shell prints every mouse move and focus change as escape text.
 fn disable_input_modes() {
+    write_disable_input_modes(&mut stdout(), &crate::host_keys::HOST_KEYS);
+}
+
+/// The bytes of [`disable_input_modes`], written to `out`: first the
+/// switch-off for the extended keys `record` says dux switched on (so the
+/// pop lands on the alternate screen, before `ratatui::restore` leaves it),
+/// then the input modes. Write errors are ignored: this runs while the
+/// terminal is handed back, a panic included.
+pub(crate) fn write_disable_input_modes(
+    out: &mut impl std::io::Write,
+    record: &crate::host_keys::HostKeysRecord,
+) {
+    crate::host_keys::write_switch_off(out, record);
     let _ = execute!(
-        stdout(),
+        out,
         DisableMouseCapture,
         DisableFocusChange,
         DisableBracketedPaste
     );
+}
+
+/// Write a host-keys plan's log line, if it has one.
+fn log_host_keys_plan(plan: &crate::host_keys::Plan) {
+    match &plan.log {
+        Some((crate::host_keys::LogLevel::Warn, line)) => logger::warn(line),
+        Some((crate::host_keys::LogLevel::Info, line)) => logger::info(line),
+        None => {}
+    }
 }
 
 /// The thread [`App::run`] draws the terminal UI on.
@@ -9544,6 +9715,99 @@ mod tests {
             .join()
             .expect("worker thread");
         assert!(!panic_takes_the_tui_down(worker));
+
+        // The panic hook and the normal exit both hand the terminal back
+        // through `disable_input_modes`, so one record's teardown bytes are
+        // the same on either path: the pop and the tmux reset, each once.
+        let record = crate::host_keys::HostKeysRecord::new();
+        crate::host_keys::switch_on_kitty(&mut Vec::new(), &record).expect("write");
+        crate::host_keys::switch_on_tmux(&mut Vec::new(), &record).expect("write");
+        let mut first = Vec::new();
+        write_disable_input_modes(&mut first, &record);
+        let count = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .filter(|w| *w == needle)
+                .count()
+        };
+        assert_eq!(count(&first, crate::host_keys::KITTY_POP), 1, "{first:?}");
+        assert_eq!(count(&first, crate::host_keys::TMUX_RESET), 1, "{first:?}");
+        let mut second = Vec::new();
+        write_disable_input_modes(&mut second, &record);
+        assert_eq!(count(&second, crate::host_keys::KITTY_POP), 0);
+        assert_eq!(count(&second, crate::host_keys::TMUX_RESET), 0);
+        let mut quiet = Vec::new();
+        write_disable_input_modes(&mut quiet, &crate::host_keys::HostKeysRecord::new());
+        assert_eq!(second, quiet, "only the input modes are left to switch off");
+    }
+
+    /// Each force redraw starts its own tmux probe; an answer from an older
+    /// one arriving last is ignored, or it would switch tmux back.
+    #[test]
+    fn a_tmux_probe_answer_from_an_older_probe_is_ignored() {
+        use crate::host_keys::TmuxReport;
+        use dux_core::config::ExtendedKeysMode;
+        let mut app = test_support::test_app(test_support::default_bindings());
+        app.host_keys.host = crate::host_keys::Host::Tmux;
+        let record = crate::host_keys::HostKeysRecord::new();
+        let older = app.host_keys.probes.start();
+        let newer = app.host_keys.probes.start();
+        app.apply_tmux_report_to(
+            &mut Vec::new(),
+            &record,
+            older,
+            ExtendedKeysMode::On,
+            Some(TmuxReport::XtermFormat),
+        );
+        assert_eq!(app.host_keys.last_tmux_report, None);
+        assert_ne!(app.status.tone(), StatusTone::Warning);
+
+        let off = TmuxReport::ExtendedKeysOff { needs_format: true };
+        app.apply_tmux_report_to(
+            &mut Vec::new(),
+            &record,
+            newer,
+            ExtendedKeysMode::On,
+            Some(off.clone()),
+        );
+        assert_eq!(app.host_keys.last_tmux_report, Some(off));
+        assert_eq!(app.status.tone(), StatusTone::Warning);
+    }
+
+    /// Every ready answer asks tmux again, the bit already set or not, so a
+    /// force redraw restores a pane whose mode was reset since; and nothing is
+    /// written when this run's host is not a verified tmux.
+    #[test]
+    fn every_ready_tmux_answer_asks_tmux_again_only_under_a_verified_tmux() {
+        use crate::host_keys::{HostKeysRecord, TMUX_REQUEST, TmuxReport};
+        use dux_core::config::ExtendedKeysMode;
+        let mut app = test_support::test_app(test_support::default_bindings());
+        let record = HostKeysRecord::new();
+        let mut out = Vec::new();
+        let probe = app.host_keys.probes.start();
+        app.apply_tmux_report_to(
+            &mut out,
+            &record,
+            probe,
+            ExtendedKeysMode::Auto,
+            Some(TmuxReport::Ready),
+        );
+        assert_eq!(out, Vec::<u8>::new(), "an unverified host is left alone");
+        assert!(!record.current().tmux_extended);
+
+        app.host_keys.host = crate::host_keys::Host::Tmux;
+        for _ in 0..2 {
+            let probe = app.host_keys.probes.start();
+            app.apply_tmux_report_to(
+                &mut out,
+                &record,
+                probe,
+                ExtendedKeysMode::Auto,
+                Some(TmuxReport::Ready),
+            );
+        }
+        assert_eq!(out, [TMUX_REQUEST, TMUX_REQUEST].concat());
+        assert!(record.current().tmux_extended);
     }
 
     /// A spoken changed-files read is live for as long as its busy shows, so a

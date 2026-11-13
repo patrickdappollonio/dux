@@ -27,8 +27,8 @@ use crate::config::{
     DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS, DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
     DEFAULT_HEARTBEAT_SECONDS, DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
     DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS, DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
-    DEFAULT_UPLOAD_DIRECTORY, LOG_VIEWER_LINES_MAX, MAX_AGENT_TABS_MAX, MAX_LOG_KEEP,
-    MAX_PR_HISTORY_BRANCHES_PER_CYCLE, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
+    DEFAULT_UPLOAD_DIRECTORY, ExtendedKeysMode, LOG_VIEWER_LINES_MAX, MAX_AGENT_TABS_MAX,
+    MAX_LOG_KEEP, MAX_PR_HISTORY_BRANCHES_PER_CYCLE, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
     MAX_PR_POLL_INTERVAL_SECONDS, MAX_PR_SETTLED_RECHECK_SECONDS, MAX_SHUTDOWN_TIMEOUT_SECONDS,
     MIN_PR_POLL_INTERVAL_SECONDS, TailscaleMode, WebDragDropPaste,
 };
@@ -276,6 +276,13 @@ pub fn effective_pr_banner_position(configured: &str) -> PrBannerPosition {
 /// corrects, with a warning of its own).
 pub(crate) fn effective_compose_bar(configured: &str) -> ComposeBarMode {
     ComposeBarMode::parse(configured).unwrap_or_default()
+}
+
+/// `[ui] extended_keys`: the mode it names, read without regard to case or
+/// surrounding spaces, and `auto` for anything else (which the load also
+/// corrects, with a warning of its own).
+pub(crate) fn effective_extended_keys(configured: &str) -> ExtendedKeysMode {
+    ExtendedKeysMode::parse(configured).unwrap_or_default()
 }
 
 /// `[ui] upload_directory`: the relative path dux creates, its components
@@ -895,6 +902,19 @@ fn ui_display_corrections(
             )
         },
     );
+    let extended = &ui.extended_keys;
+    found.note(
+        &["ui", "extended_keys"],
+        &json(extended),
+        json(&effective_extended_keys(extended).as_str()),
+        &|| {
+            worded(
+                ExtendedKeysMode::parse(extended).into(),
+                "auto, on and off",
+                "auto",
+            )
+        },
+    );
     let uploads = &ui.upload_directory;
     found.note(
         &["ui", "upload_directory"],
@@ -1195,6 +1215,9 @@ pub(crate) fn fixed_values(path: &[String]) -> Option<FixedValues> {
         ),
         ["ui", "compose_bar"] => fixed(vec!["auto", "always", "never"], |value| {
             ComposeBarMode::parse(value).is_some()
+        }),
+        ["ui", "extended_keys"] => fixed(vec!["auto", "on", "off"], |value| {
+            ExtendedKeysMode::parse(value).is_some()
         }),
         ["capabilities", "terminal_identity"] => fixed(
             vec!["auto", "mirror", "ghostty", "kitty", "iterm2", "none"],

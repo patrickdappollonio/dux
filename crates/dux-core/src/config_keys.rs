@@ -3071,6 +3071,7 @@ port = 3890
             &["ui", "agent_sort"],
             &["ui", "pr_banner_position"],
             &["ui", "compose_bar"],
+            &["ui", "extended_keys"],
             &["capabilities", "terminal_identity"],
             &["capabilities", "clipboard_passthrough"],
             &["providers", "claude", "web_dragdrop_paste"],

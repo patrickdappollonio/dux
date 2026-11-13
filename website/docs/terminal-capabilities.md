@@ -196,6 +196,58 @@ rather than a burst of keystrokes.
 Otherwise the text arrives as plain typed input,
 exactly as in any other terminal.
 
+## Extended keys in the terminal UI
+
+A classic terminal sends the same bytes for keys you think of as different: Shift-Enter and
+Enter, Ctrl-i and Tab, Ctrl-Shift-l and Ctrl-l. With extended keys on, the terminal UI can tell
+them apart, so:
+
+- a binding on `ctrl-shift-l` or `ctrl-i` under `[keys]` works and stays apart from `ctrl-l`
+  and Tab;
+- **Shift-Enter gives the agent a new line instead of submitting**, as it does in the web UI.
+
+The setting is `extended_keys` under `[ui]`, or **Extended keys** in the web UI's Preferences
+dialog, in its Terminal UI section:
+
+| Value | What it does |
+|---|---|
+| `"auto"` | The default. dux asks your terminal whether it speaks the Kitty keyboard protocol and turns it on when it says yes. Inside tmux, dux turns on tmux's extended keys when tmux is set up for them. |
+| `"on"` | Turns the Kitty keyboard protocol on without asking. Inside tmux, the same as `"auto"`, plus a warning on the status line when tmux is not set up. |
+| `"off"` | Reads keys exactly as a classic terminal sends them. Nothing is switched on in your terminal or in tmux. |
+
+A change takes effect the next time the terminal UI starts. The `input-debugging` palette
+command shows what your terminal sends for each key.
+
+> [!TIP]
+> Inside tmux, dux needs tmux 3.2 or newer and this line in your `tmux.conf`:
+>
+> ```tmux
+> set -s extended-keys on
+> ```
+>
+> On tmux 3.5 and newer, whose default format dux cannot read, add this line too:
+>
+> ```tmux
+> set -s extended-keys-format csi-u
+> ```
+>
+> After reloading tmux's config, run the `force-redraw` palette command and dux checks tmux's
+> settings again.
+
+> [!IMPORTANT]
+> Agents and shells inside dux still receive classic keys, the bytes a classic terminal sends.
+> A program cannot tell Ctrl-i from Tab or Ctrl-Shift-l from Ctrl-l: those distinctions serve
+> dux's own bindings. Shift-Enter reaches a program as the same byte as Ctrl-j, so a shell
+> treats it like Ctrl-j and runs the command line.
+
+> [!IMPORTANT]
+> In the windowed pane, Ctrl, Alt and Super chords (Ctrl-Enter included) still belong to dux.
+> They reach the agent in fullscreen.
+
+> [!NOTE]
+> If dux is killed with `kill -9`, your terminal or tmux pane can be left with extended keys on,
+> and your shell then sees escape codes for Ctrl chords. Running `reset` clears it.
+
 ## Getting a file to the agent
 
 The other direction, getting something from your machine into the agent, is file drop and

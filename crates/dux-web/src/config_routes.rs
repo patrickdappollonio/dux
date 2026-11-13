@@ -546,6 +546,10 @@ struct UiSettingsPatch {
     show_changes_pane: Option<bool>,
     always_show_tab_strip: Option<bool>,
     tab_reaches_agent: Option<bool>,
+    /// Whether the TUI asks its host terminal for extended keys (`auto`, `on`
+    /// or `off`). TUI-only, carried so the Preferences dialog can change it
+    /// from a browser; an unknown value is refused engine-side.
+    extended_keys: Option<String>,
     /// Whether the TUI draws its icons from a Nerd Font. TUI-only, carried so
     /// the Preferences dialog can change it from a browser.
     nerd_font_icons: Option<bool>,
@@ -644,6 +648,7 @@ async fn set_settings(
             web_notifications: body.capabilities.web_notifications,
             always_show_tab_strip: body.ui.always_show_tab_strip,
             tab_reaches_agent: body.ui.tab_reaches_agent,
+            extended_keys: body.ui.extended_keys,
             nerd_font_icons: body.ui.nerd_font_icons,
             status_clear_seconds: body.ui.status_clear_seconds,
             attention_grace_seconds: body.ui.attention_grace_seconds,
@@ -1915,6 +1920,7 @@ mod tests {
                         "auto_reopen_agents": true,
                         "always_show_tab_strip": true,
                         "tab_reaches_agent": true,
+                        "extended_keys": "off",
                         "nerd_font_icons": true,
                         "status_clear_seconds": 42,
                         "attention_grace_seconds": 11,
@@ -1953,6 +1959,7 @@ mod tests {
             "auto_reopen_agents = true",
             "always_show_tab_strip = true",
             "tab_reaches_agent = true",
+            "extended_keys = \"off\"",
             "nerd_font_icons = true",
             "status_clear_seconds = 42",
             "attention_grace_seconds = 11",
@@ -2040,6 +2047,17 @@ mod tests {
                 "PATCH",
                 "/api/v1/config/settings",
                 r#"{"ui":{"pr_banner_position":"sideways"}}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .clone()
+            .oneshot(json_req(
+                "PATCH",
+                "/api/v1/config/settings",
+                r#"{"ui":{"extended_keys":"kitty"}}"#,
             ))
             .await
             .unwrap();

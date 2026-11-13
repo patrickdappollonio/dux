@@ -145,7 +145,9 @@ fn ensure_config_with(paths: &DuxPaths, purpose: ConfigRead) -> Result<Config> {
     }
     // A binding that loads but never runs is said once per read, like the
     // load corrections below.
-    for warning in key_binding_warnings(&config.keys) {
+    let extended_keys =
+        dux_core::config::ExtendedKeysMode::parse(&config.ui.extended_keys).unwrap_or_default();
+    for warning in key_binding_warnings(&config.keys, extended_keys) {
         dux_core::logger::warn(&format!("{}: {warning}", paths.config_path.display()));
     }
     // The load's in-memory corrections, the same every surface makes (an
@@ -916,6 +918,13 @@ fn config_schema() -> Vec<ConfigEntry> {
                 "# Send Tab and Shift-Tab to the agent in the center pane instead of moving\n# between panes with them. Default false: Tab has cycled panes since dux's\n# first version. Turn it on for agents that use Tab to autocomplete and\n# Shift-Tab to cycle modes. In the terminal UI it also hands Tab to an agent's\n# docked terminal while you type into it. Panes still move either way, with the chords bound\n# under [keys] as focus_next and focus_prev (Ctrl-o and Ctrl-y by default).\n# Toggle at runtime from the TUI command palette, or the web UI's Preferences\n# dialog.",
             )),
             value_fn: |c| FieldValue::Bool(c.ui.tab_reaches_agent),
+        },
+        ConfigEntry::Field {
+            key: "extended_keys",
+            comment: Some(CommentSource::Static(
+                "# Extended keys in the terminal UI: let dux tell apart keys a classic terminal\n# sends identically, such as Shift-Enter and Enter, Ctrl-i and Tab, or\n# Ctrl-Shift-l and Ctrl-l, so each can have its own binding.\n#   \"auto\"  ask your terminal and turn on the Kitty keyboard protocol when it\n#           says yes; inside tmux, turn on tmux's extended keys when tmux is\n#           set up for them (see below). The default.\n#   \"on\"    turn the Kitty keyboard protocol on without asking first; inside\n#           tmux, the same as \"auto\", plus a warning when tmux is not set up.\n#   \"off\"   read keys exactly as dux did before this setting existed: nothing\n#           is switched on in your terminal or in tmux.\n# Programs inside dux (agents and shells) always receive classic keys, the\n# bytes a classic terminal sends. With extended keys on, Shift-Enter reaches\n# them as a new line that does not submit (the same byte as Ctrl-j), as it does\n# in the web UI.\n# Inside tmux, dux needs tmux 3.2 or newer and this line in your tmux.conf:\n#   set -s extended-keys on\n# On tmux 3.5 and newer, whose default format dux cannot read, add this too:\n#   set -s extended-keys-format csi-u\n# Takes effect the next time the terminal UI starts. The force-redraw palette\n# command checks tmux's settings again. The input-debugging palette command\n# shows what your terminal sends for each key. The web UI's keys are\n# unaffected.",
+            )),
+            value_fn: |c| FieldValue::Str(c.ui.extended_keys.clone()),
         },
         ConfigEntry::Field {
             key: "attention_indicator",
@@ -2816,7 +2825,14 @@ pub(crate) fn validate_keys(keys: &KeysConfig) -> Result<(), String> {
 /// Also every newer default that starts unbound because the file already
 /// binds its key elsewhere, which names that default key, dux's own. These
 /// warn rather than refuse, because a file holding one used to load.
-pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
+///
+/// The interactive warning is worded by `extended_keys`: the config is read
+/// before dux knows what the host terminal sends, so with extended keys
+/// possible the chord may yet arrive, and with them off it never will.
+pub(crate) fn key_binding_warnings(
+    keys: &KeysConfig,
+    extended_keys: dux_core::config::ExtendedKeysMode,
+) -> Vec<String> {
     let shadowed = keybindings::detect_conflicts(keys)
         .into_iter()
         .filter(|conflict| conflict.kind == keybindings::ConflictKind::Shadowed)
@@ -2831,13 +2847,26 @@ pub(crate) fn key_binding_warnings(keys: &KeysConfig) -> Vec<String> {
         });
     let unmatchable = keybindings::unmatchable_interactive_bindings(keys)
         .into_iter()
-        .map(|action| {
-            format!(
-                "[keys] a key bound to {action} cannot be matched in {scope}: the terminal sends \
-                 no bytes of its own for that chord while you type into a pane; give it a \
-                 different key in [keys]",
-                scope = keybindings::BindingScope::Interactive.display_name(),
-            )
+        .map(move |action| {
+            let scope = keybindings::BindingScope::Interactive.display_name();
+            match extended_keys {
+                dux_core::config::ExtendedKeysMode::Auto
+                | dux_core::config::ExtendedKeysMode::On => {
+                    format!(
+                        "[keys] a key bound to {action} cannot be matched in {scope} on a \
+                         terminal without extended keys: a classic terminal sends no bytes of \
+                         its own for that chord while you type into a pane. It works when your \
+                         terminal or tmux sends extended keys ([ui] extended_keys); otherwise \
+                         give it a different key in [keys]"
+                    )
+                }
+                dux_core::config::ExtendedKeysMode::Off => format!(
+                    "[keys] a key bound to {action} cannot be matched in {scope}: extended keys \
+                     are off ([ui] extended_keys), and a classic terminal sends no bytes of its \
+                     own for that chord while you type into a pane; give it a different key in \
+                     [keys]"
+                ),
+            }
         });
     shadowed
         .chain(unmatchable)
@@ -2901,6 +2930,7 @@ fn key_binding_problems(keys: &KeysConfig, line_of: &dyn Fn(&str) -> Option<usiz
     reason = "the tests call the deprecated save_config wrapper directly to verify its behaviour"
 )]
 mod tests {
+    use dux_core::config::ExtendedKeysMode;
     use indexmap::IndexMap;
 
     use super::*;
@@ -3508,6 +3538,13 @@ mod tests {
         assert!(rendered.contains("terminal_font_family = \"\""));
         assert!(rendered.contains("terminal_font_size = 14"));
         assert!(rendered.contains("compose_bar = \"auto\""));
+        assert!(rendered.contains(
+            "# Extended keys in the terminal UI: let dux tell apart keys a classic terminal\n"
+        ));
+        assert!(rendered.contains(
+            "#   set -s extended-keys-format csi-u\n# Takes effect the next time the terminal UI starts."
+        ));
+        assert!(rendered.contains("extended_keys = \"auto\""));
         assert!(rendered.contains("mobile_accessory_bar = true"));
         assert!(rendered.contains("attention_grace_seconds = 3"));
         assert!(rendered.contains("auto_reopen_agents = false"));
@@ -4533,7 +4570,10 @@ oneshot_output = "stdout"
                    select_tab_9 = [\"ctrl-9\"]\nremove_git_pane = [\"ctrl-]\"]\n";
         assert_eq!(keys_start_problems(raw), Vec::<String>::new());
         let keys = toml::from_str::<Config>(raw).expect("parses").keys;
-        assert_eq!(key_binding_warnings(&keys), Vec::<String>::new());
+        assert_eq!(
+            key_binding_warnings(&keys, ExtendedKeysMode::Auto),
+            Vec::<String>::new()
+        );
         let bindings = crate::keybindings::RuntimeBindings::from_keys_config(&keys);
         for action in [
             keybindings::Action::SelectTab1,
@@ -4572,13 +4612,33 @@ oneshot_output = "stdout"
         let raw = "[keys]\nscroll_to_bottom = [\"f20\", \"end\"]\n";
         assert_eq!(keys_start_problems(raw), Vec::<String>::new());
         let keys = toml::from_str::<Config>(raw).expect("parses").keys;
-        let warnings = key_binding_warnings(&keys);
+        let warnings = key_binding_warnings(&keys, ExtendedKeysMode::Auto);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("scroll_to_bottom")
                 && warnings[0].contains("Interactive mode")
                 && !warnings[0].contains("f20"),
             "{warnings:?}"
+        );
+        // With extended keys possible the chord may yet arrive, so the warning
+        // says where it works; with them off it says why it never will.
+        assert_eq!(
+            warnings[0],
+            "[keys] a key bound to scroll_to_bottom cannot be matched in Interactive mode on a \
+             terminal without extended keys: a classic terminal sends no bytes of its own for \
+             that chord while you type into a pane. It works when your terminal or tmux sends \
+             extended keys ([ui] extended_keys); otherwise give it a different key in [keys]"
+        );
+        assert_eq!(key_binding_warnings(&keys, ExtendedKeysMode::On), warnings);
+        assert_eq!(
+            key_binding_warnings(&keys, ExtendedKeysMode::Off),
+            vec![
+                "[keys] a key bound to scroll_to_bottom cannot be matched in Interactive mode: \
+                 extended keys are off ([ui] extended_keys), and a classic terminal sends no \
+                 bytes of its own for that chord while you type into a pane; give it a \
+                 different key in [keys]"
+                    .to_string()
+            ]
         );
         // A Ctrl-digit chord is the same case: no byte is invented for it,
         // not even Ctrl-2's NUL, which the classic encoder for children knows
@@ -4595,7 +4655,7 @@ oneshot_output = "stdout"
             );
         }
         assert_eq!(
-            key_binding_warnings(&KeysConfig::default()),
+            key_binding_warnings(&KeysConfig::default(), ExtendedKeysMode::Auto),
             Vec::<String>::new()
         );
     }
@@ -4607,7 +4667,7 @@ oneshot_output = "stdout"
         let raw = "[keys]\nselect_tab_6 = [\"ctrl-]\"]\n";
         assert_eq!(keys_start_problems(raw), Vec::<String>::new());
         let keys = toml::from_str::<Config>(raw).expect("parses").keys;
-        let warnings = key_binding_warnings(&keys);
+        let warnings = key_binding_warnings(&keys, ExtendedKeysMode::Auto);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].contains("select_tab_6") && warnings[0].contains("remove_git_pane"),

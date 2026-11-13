@@ -8,6 +8,7 @@ mod config_cli;
 mod config_saver;
 mod config_spec;
 mod diff;
+mod host_keys;
 // The terminal-focus grace state machine is core-owned (`dux_core::focus`),
 // shared by rule with the web's viewed-ping grace.
 pub(crate) use dux_core::focus;

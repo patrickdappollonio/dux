@@ -37,6 +37,7 @@ const sampleBootstrap: Bootstrap = {
   always_show_tab_strip: true,
   tab_reaches_agent: true,
   nerd_font_icons: true,
+  extended_keys: "off",
   attention_indicator: false,
   attention_on_bell: false,
   global_default_provider: "codex",
@@ -91,6 +92,7 @@ describe("settingsDescriptors", () => {
         "ui.always_show_tab_strip",
         "ui.tab_reaches_agent",
         "ui.nerd_font_icons",
+        "ui.extended_keys",
         "ui.pr_banner_position",
         "capabilities.hyperlinks",
         "ui.github_integration",
@@ -156,6 +158,7 @@ describe("settingsDescriptors", () => {
     expect(byKey["ui.always_show_tab_strip"]).toBe(true)
     expect(byKey["ui.tab_reaches_agent"]).toBe(true)
     expect(byKey["ui.nerd_font_icons"]).toBe(true)
+    expect(byKey["ui.extended_keys"]).toBe("off")
     expect(byKey["ui.pr_banner_position"]).toBe("top")
     expect(byKey["capabilities.hyperlinks"]).toBe(false)
     expect(byKey["ui.github_integration"]).toBe(false)
@@ -291,6 +294,7 @@ describe("settingsDescriptors", () => {
       "ui.copy_on_select",
       "ui.disable_automated_welcome_screen",
       "ui.disable_release_notes",
+      "ui.extended_keys",
       "ui.mobile_accessory_bar",
       "ui.nerd_font_icons",
       "ui.pr_banner_position",

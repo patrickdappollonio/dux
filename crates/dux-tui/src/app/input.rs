@@ -195,6 +195,17 @@ fn append_capped(buf: &mut Vec<u8>, bytes: &[u8], max: usize) {
     }
 }
 
+/// What one raw sequence is to the fullscreen key reader.
+enum RawKeyDecode {
+    /// Matched and forwarded by its bytes: a classic-shaped sequence, or any
+    /// sequence while extended keys are off.
+    Classic,
+    /// An extended key, read by meaning.
+    Key(KeyEvent),
+    /// Shaped like an extended key but not one dux can read: dropped.
+    Undecodable,
+}
+
 /// Read whatever the terminal has ready straight from its file descriptor.
 ///
 /// The raw-input loop decides when to read by polling the descriptor, so a
@@ -3473,15 +3484,22 @@ impl App {
         }
     }
 
-    /// The key `seq` carries when it is a `CSI … u` key and this run reads
-    /// extended keys. Ctrl-`[` comes back as Esc.
-    fn decoded_extended_key(&self, seq: &[u8]) -> Option<KeyEvent> {
+    /// What `seq` is when this run reads extended keys: a `CSI … u` key, or a
+    /// legacy-shaped key carrying a field a classic xterm never sends (a lock,
+    /// Super, Hyper or Meta bit, an event type), read by meaning, with Ctrl-`[`
+    /// as Esc; such a sequence that does not decode; or neither, which is
+    /// matched and forwarded by its bytes.
+    fn decoded_extended_key(&self, seq: &[u8]) -> RawKeyDecode {
         if self.extended_keys == crate::keybindings::ExtendedKeys::Off
-            || !crate::key_decode::is_extended_key_sequence(seq)
+            || !(crate::key_decode::is_extended_key_sequence(seq)
+                || crate::key_decode::is_extended_legacy_key_sequence(seq))
         {
-            return None;
+            return RawKeyDecode::Classic;
         }
-        crate::key_decode::decode_key(seq).map(crate::key_encode::fold_ctrl_bracket)
+        match crate::key_decode::decode_key(seq) {
+            Some(key) => RawKeyDecode::Key(crate::key_encode::fold_ctrl_bracket(key)),
+            None => RawKeyDecode::Undecodable,
+        }
     }
 
     /// The focused child's cursor-key mode right now.
@@ -3588,8 +3606,20 @@ impl App {
     ) -> Option<RawSeqAction> {
         let seq = parsed.bytes.as_slice();
         let intercepts_allowed = !parsed.in_bracket_paste;
-        if intercepts_allowed && let Some(key) = self.decoded_extended_key(seq) {
-            return self.classify_decoded_raw_key(key, seq, patterns);
+        if intercepts_allowed {
+            match self.decoded_extended_key(seq) {
+                RawKeyDecode::Key(key) => return self.classify_decoded_raw_key(key, seq, patterns),
+                // Forwarded, the host's bytes would type escape-code garbage at
+                // the child's prompt; no key was read, so none is typed.
+                RawKeyDecode::Undecodable => {
+                    dux_core::logger::debug(&format!(
+                        "dropped an extended key sequence dux cannot read: {:?}",
+                        String::from_utf8_lossy(seq)
+                    ));
+                    return None;
+                }
+                RawKeyDecode::Classic => {}
+            }
         }
         if intercepts_allowed && patterns.palette.iter().any(|pattern| pattern == seq) {
             return Some(RawSeqAction::Intercept(
@@ -13196,12 +13226,13 @@ impl App {
             // Check for the fullscreen toggle keybinding, by meaning for a
             // decoded `CSI … u` key and by bytes for everything else.
             let toggles = match self.decoded_extended_key(seq) {
-                Some(key) => {
+                RawKeyDecode::Key(key) => {
                     key.kind != crossterm::event::KeyEventKind::Release
                         && self.bindings.lookup_exact(&key, BindingScope::Interactive)
                             == Some(Action::ToggleFullscreen)
                 }
-                None => matches!(
+                RawKeyDecode::Undecodable => false,
+                RawKeyDecode::Classic => matches!(
                     self.interactive_patterns.match_sequence(seq),
                     Some((Action::ToggleFullscreen, _))
                 ),
@@ -34615,6 +34646,28 @@ cyan = "#00ffff"
         press_through_the_terminal(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
         press_through_the_terminal(&mut app, KeyCode::Char('x'), KeyModifiers::SUPER);
         wait_for_grid_row(&mut app, "READY^Mx");
+
+        // A run started from a config holding `off` reads keys the classic
+        // way, and a reload to `auto` changes nothing until the next start.
+        let mut started = app_with_minimized_typeable_caret_child("");
+        started.engine.config.ui.extended_keys = "off".to_string();
+        assert_eq!(
+            started.begin_extended_keys(),
+            dux_core::config::ExtendedKeysMode::Off
+        );
+        assert_eq!(started.extended_keys, crate::keybindings::ExtendedKeys::Off);
+        let mut reloaded = started.engine.config.clone();
+        reloaded.ui.extended_keys = "auto".to_string();
+        started
+            .apply_reloaded_config(reloaded)
+            .expect("reload applies");
+        assert_eq!(started.extended_keys, crate::keybindings::ExtendedKeys::Off);
+        assert_eq!(
+            started.host_keys.mode,
+            dux_core::config::ExtendedKeysMode::Off
+        );
+        press_through_the_terminal(&mut started, KeyCode::Enter, KeyModifiers::SHIFT);
+        wait_for_grid_row(&mut started, "READY^M");
     }
 
     /// A child that enabled application cursor keys (DECSET 1) receives an
@@ -35063,6 +35116,56 @@ cyan = "#00ffff"
         rebound.interactive_patterns = rebound.bindings.interactive_byte_patterns();
         rebound.process_raw_input_bytes(b"\x1b[107;6u");
         wait_for_grid_row(&mut rebound, "READY^K");
+    }
+
+    /// A host in the Kitty protocol sends arrows and the other functional keys
+    /// in their legacy shape with Caps Lock or Num Lock in the modifier. Such a
+    /// key is read by meaning: the lock never stops a binding matching and never
+    /// reaches the child, which gets the classic bytes. A classic modifier
+    /// passes byte for byte.
+    #[test]
+    fn fullscreen_reads_a_legacy_key_with_lock_bits_by_meaning() {
+        let mut app = fullscreen_caret_app("", "cat -v");
+        // Up with Caps Lock, at the live edge: the line-scroll binding falls
+        // through and the child gets a plain Up.
+        app.process_raw_input_bytes(b"\x1b[1;65A");
+        // Ctrl-Up with Caps Lock, and Ctrl-Delete with Num Lock.
+        app.process_raw_input_bytes(b"\x1b[1;69A");
+        app.process_raw_input_bytes(b"\x1b[3;133~");
+        // Super-Up has no classic form and is dropped.
+        app.process_raw_input_bytes(b"\x1b[1;9A");
+        // A classic Ctrl-Up passes unchanged.
+        app.process_raw_input_bytes(b"\x1b[1;5A");
+        wait_for_grid_row(&mut app, "READY^[[A^[[1;5A^[[3;5~^[[1;5A");
+
+        let mut bound = fullscreen_caret_app("", "cat -v");
+        bound.bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["f5"])]);
+        bound.interactive_patterns = bound.bindings.interactive_byte_patterns();
+        bound.process_raw_input_bytes(b"\x1b[15;129~");
+        assert_eq!(
+            bound.input_target,
+            InputTarget::None,
+            "F5 with Num Lock still matches a binding on F5"
+        );
+    }
+
+    /// A sequence shaped like an extended key that does not decode types
+    /// nothing: the host's bytes would be escape-code garbage at a prompt, and
+    /// a mangled modifier must not come back as a bare letter.
+    #[test]
+    fn fullscreen_drops_an_extended_key_it_cannot_read() {
+        let mut app = fullscreen_caret_app("", "cat -v");
+        for bad in [
+            &b"\x1b[55296u"[..],
+            b"\x1b[;5u",
+            b"\x1b[99;256u",
+            b"\x1b[1;999A",
+        ] {
+            app.process_raw_input_bytes(bad);
+        }
+        // `z` lands right after the prompt: nothing was typed before it.
+        app.process_raw_input_bytes(b"z");
+        wait_for_grid_row(&mut app, "READYz");
     }
 
     /// With extended keys off, fullscreen forwards the host's bytes as they
