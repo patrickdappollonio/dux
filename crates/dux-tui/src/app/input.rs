@@ -3302,7 +3302,6 @@ impl App {
     /// parser so every key combination (Shift+Tab, Alt+Backspace, Ctrl+Right,
     /// F-keys, etc.) reaches the child process.
     pub(crate) fn poll_and_forward_raw_input(&mut self) -> Result<bool> {
-        use rustix::event::{PollFd, PollFlags, poll};
         use std::os::fd::AsFd;
 
         if !self.raw_input_target_available() {
@@ -3317,16 +3316,8 @@ impl App {
         let stdin_handle = std::io::stdin();
         let mut buf = [0u8; 4096];
         let poll_ms = 100u64.min(self.max_poll_ms());
-        let timeout = rustix::time::Timespec {
-            tv_sec: 0,
-            tv_nsec: (poll_ms * 1_000_000).cast_signed(),
-        };
         let stdin_borrow = stdin_handle.as_fd();
-        let ready = crate::io_retry::retry_on_interrupt_errno(|| {
-            let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
-            poll(&mut pollfd, Some(&timeout))
-        })?;
-        if ready == 0 {
+        if !wait_for_input(&stdin_borrow, Duration::from_millis(poll_ms))? {
             self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
             return Ok(false);
         }
@@ -3408,13 +3399,7 @@ impl App {
         stdin_borrow: &impl std::os::fd::AsFd,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
-        use rustix::event::{PollFd, PollFlags, poll};
-
         let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
-        let zero_timeout = rustix::time::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
         loop {
             if std::time::Instant::now() >= drain_deadline {
                 break;
@@ -3426,12 +3411,8 @@ impl App {
             ) {
                 break;
             }
-            // Poll stdin with zero timeout: return immediately if no data.
-            let more = crate::io_retry::retry_on_interrupt_errno(|| {
-                let mut pollfd = [PollFd::new(&stdin_borrow, PollFlags::IN)];
-                poll(&mut pollfd, Some(&zero_timeout))
-            })?;
-            if more == 0 {
+            // Look at stdin without waiting: stop if no data.
+            if !wait_for_input(stdin_borrow, Duration::ZERO)? {
                 break;
             }
             let n2 = read_raw_chunk(stdin_borrow, buf)?;
@@ -3457,8 +3438,6 @@ impl App {
         stdin_borrow: &impl std::os::fd::AsFd,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
-        use rustix::event::{PollFd, PollFlags, poll};
-
         if self
             .raw_input_parser
             .expire_held_host_reply(std::time::Instant::now())
@@ -3470,15 +3449,7 @@ impl App {
         }
 
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        let zero_timeout = rustix::time::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let more = crate::io_retry::retry_on_interrupt_errno(|| {
-            let mut pollfd = [PollFd::new(stdin_borrow, PollFlags::IN)];
-            poll(&mut pollfd, Some(&zero_timeout))
-        })?;
-        if more != 0 {
+        if wait_for_input(stdin_borrow, Duration::ZERO)? {
             let n = read_raw_chunk(stdin_borrow, buf)?;
             if n != 0 {
                 return Ok(self.process_raw_input_bytes(&buf[..n]));
@@ -35673,6 +35644,33 @@ cyan = "#00ffff"
             "timed-out bare ESC should resolve as ToggleFullscreen"
         );
         assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+    }
+
+    /// The forwarding path's bare-Esc resolve looks at the input once the
+    /// ambiguity timeout has passed: a byte that arrived by then joins the
+    /// Esc (Alt-x reaches the agent), and nothing waiting resolves it alone.
+    #[test]
+    fn the_bare_esc_resolve_reads_a_byte_waiting_after_the_timeout() {
+        use std::io::Write;
+
+        for (waiting, target) in [
+            (&b"x"[..], InputTarget::Agent),
+            (&b""[..], InputTarget::None),
+        ] {
+            let mut app = app_with_scrolled_back_pty();
+            app.bindings = bindings_with_overrides(&[(Action::ToggleFullscreen, &["esc"])]);
+            app.interactive_patterns = app.bindings.interactive_byte_patterns();
+            app.process_raw_input_bytes(b"\x1b");
+
+            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+            writer.write_all(waiting).expect("write");
+            let mut buf = [0u8; 4096];
+            app.resolve_pending_bare_esc(&reader, &mut buf)
+                .expect("resolve");
+
+            assert_eq!(app.input_target, target, "waiting {waiting:?}");
+            assert_eq!(app.raw_input_buf, Vec::<u8>::new());
+        }
     }
 
     #[test]
