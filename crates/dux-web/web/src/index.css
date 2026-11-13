@@ -893,7 +893,15 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 
    Each edge's fade depth is a registered length so it can transition; at an
    edge with nothing past it the depth is zero, and with both at zero the mask
-   is fully opaque. */
+   is fully opaque.
+
+   A row brought into view (the selected row, or a search pick walked past an
+   edge) must land clear of the fade, so the full depth is also the container's
+   scroll padding, which scrolling an element into view (and a page step)
+   honours and a wheel, a drag or a scrollbar does not, so those still reach
+   the very top and bottom. Where there is
+   nothing past an edge, the padding there clamps against it and leaves no gap.
+   The selected-row reveal reads the same padding back as the depth. */
 @property --dux-list-fade-top {
   syntax: "<length>";
   inherits: false;
@@ -905,8 +913,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   initial-value: 0px;
 }
 .dux-list-fade {
+  --dux-list-fade-depth: 2.5rem;
   --dux-list-fade-top: 0px;
   --dux-list-fade-bottom: 0px;
+  scroll-padding-block: var(--dux-list-fade-depth);
   -webkit-mask-image: linear-gradient(
     to bottom,
     transparent,
@@ -926,10 +936,10 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     --dux-list-fade-bottom 150ms ease-out;
 }
 .dux-list-fade[data-more-above] {
-  --dux-list-fade-top: 2.5rem;
+  --dux-list-fade-top: var(--dux-list-fade-depth);
 }
 .dux-list-fade[data-more-below] {
-  --dux-list-fade-bottom: 2.5rem;
+  --dux-list-fade-bottom: var(--dux-list-fade-depth);
 }
 @media (prefers-reduced-motion: reduce) {
   .dux-list-fade {

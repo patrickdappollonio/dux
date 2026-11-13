@@ -1335,6 +1335,42 @@ describe("FlatAgentList reveals the selected row", () => {
     expect(scrollIntoView).not.toHaveBeenCalled()
   })
 
+  // The scroller (0-200) carries the fade depth as its scroll padding, as
+  // `.dux-list-fade` sets it, and reports a scroll position of `scrollTop`
+  // within 1000px of content.
+  function selectAlphaInFadingList(scrollTop: number) {
+    const { rerender } = render(<FlatAgentList handlers={handlers} />)
+    const scroller = screen.getByText("Alpha").closest(".overflow-y-auto") as HTMLElement
+    scroller.style.setProperty("scroll-padding-top", "40px")
+    scroller.style.setProperty("scroll-padding-bottom", "40px")
+    Object.defineProperty(scroller, "scrollTop", { value: scrollTop })
+    Object.defineProperty(scroller, "scrollHeight", { value: 1000 })
+    Object.defineProperty(scroller, "clientHeight", { value: 200 })
+    mockState = {
+      ...mockState,
+      selectedTarget: { kind: "agent", sessionId: "alpha", tabId: "alpha" },
+    }
+    rerender(<FlatAgentList handlers={handlers} />)
+  }
+
+  it("treats a selected row under the top fade as out of view", () => {
+    rects["agent:alpha"] = { top: 10, bottom: 50 }
+    selectAlphaInFadingList(300)
+    expect(scrolledRows()).toEqual(["agent:alpha"])
+  })
+
+  it("treats a selected row under the bottom fade as out of view", () => {
+    rects["agent:alpha"] = { top: 150, bottom: 190 }
+    selectAlphaInFadingList(300)
+    expect(scrolledRows()).toEqual(["agent:alpha"])
+  })
+
+  it("leaves a row at the top of a list scrolled to the top, where nothing fades", () => {
+    rects["agent:alpha"] = { top: 10, bottom: 50 }
+    selectAlphaInFadingList(0)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
   it("does not scroll again on a workspace push that keeps the selection", () => {
     rects["agent:mike"] = { top: 600, bottom: 640 }
     mockState = {

@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { hasMoreAbove, hasMoreBelow } from "@/hooks/use-scroll-edges"
 import type { SelectedTarget } from "@/lib/store"
 
 // The attribute a sidebar row carries, set to its row key, so the reveal can
@@ -33,6 +34,29 @@ function isLaidOut(rect: DOMRect): boolean {
   return rect.width > 0 || rect.height > 0
 }
 
+// A resolved scroll padding in pixels; "auto" or anything unparsable is none.
+function paddingPx(value: string): number {
+  const px = Number.parseFloat(value)
+  return Number.isFinite(px) ? px : 0
+}
+
+// The part of the container a row must sit inside to count as in view. A list
+// that fades an edge while rows are hidden past it (`.dux-list-fade`) carries
+// the fade depth as its scroll padding, so a row under a fade that is showing
+// is not in view, and `scrollIntoView` lands it clear of that same padding.
+function clearBox(container: HTMLElement): { top: number; bottom: number } {
+  const box = container.getBoundingClientRect()
+  const style = getComputedStyle(container)
+  return {
+    top:
+      box.top +
+      (hasMoreAbove(container) ? paddingPx(style.scrollPaddingTop) : 0),
+    bottom:
+      box.bottom -
+      (hasMoreBelow(container) ? paddingPx(style.scrollPaddingBottom) : 0),
+  }
+}
+
 // True once the row has been dealt with: scrolled to, or found already in view.
 function reveal(container: HTMLElement, rowKey: string): boolean {
   const row = [...container.querySelectorAll(`[${SIDEBAR_ROW_ATTR}]`)].find(
@@ -41,7 +65,7 @@ function reveal(container: HTMLElement, rowKey: string): boolean {
   if (row === undefined) return false
   const rowRect = row.getBoundingClientRect()
   if (!isLaidOut(rowRect)) return false
-  const box = container.getBoundingClientRect()
+  const box = clearBox(container)
   if (rowRect.top >= box.top && rowRect.bottom <= box.bottom) return true
   // No `behavior`: the default is instant, which is how the rest of the app
   // scrolls, and what reduced motion asks for anyway.
