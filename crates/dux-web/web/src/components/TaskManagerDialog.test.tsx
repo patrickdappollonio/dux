@@ -847,4 +847,25 @@ describe("TaskManagerDialog", () => {
     const cells = within(childRow).getAllByRole("cell")
     expect(cells[2].textContent).not.toContain("4242")
   })
+
+  // The scrollbar must keep clear of the right-hand Force stop buttons and
+  // dashes: the vertical scroller reserves a stable gutter and pads its own
+  // right edge. The header and the rows sit in the one table inside it, so the
+  // padding moves them together and the columns stay aligned.
+  it("scroll_container_keeps_a_gutter_between_the_scrollbar_and_the_stop_column", async () => {
+    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+
+    const stop = await screen.findByLabelText(/^Force stop/)
+    const scroller = screen.getByTestId("task-manager-scroll")
+    expect(scroller.className).toContain("overflow-y-auto")
+    expect(scroller.className).toContain("[scrollbar-gutter:stable]")
+    expect(scroller.className).toMatch(/(^|\s)pr-\d/)
+
+    const header = screen.getByRole("columnheader", { name: "Memory" })
+    const table = header.closest("table")
+    expect(table).not.toBeNull()
+    expect(scroller.contains(table)).toBe(true)
+    expect(table!.contains(stop)).toBe(true)
+  })
 })

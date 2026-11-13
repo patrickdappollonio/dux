@@ -240,8 +240,15 @@ function TaskManagerBody() {
 
           {/* The table scrolls HORIZONTALLY before any name is ellipsized: child
               rows are command names ("node", "rg", "nvim") and a name truncated
-              to nothing tells the user less than a scrollbar does. */}
-          <div className="max-h-96 overflow-y-auto">
+              to nothing tells the user less than a scrollbar does. The vertical
+              scroller reserves a stable gutter and pads its own right edge, so
+              the scrollbar never touches the Force stop buttons or the dashes;
+              header and rows share one table inside it, so their columns stay
+              aligned whether or not the list scrolls. */}
+          <div
+            data-testid="task-manager-scroll"
+            className="max-h-96 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
+          >
             <div className="overflow-x-auto">
               {/* Desktop: the 4-column table. */}
               {isMobile ? null : (
