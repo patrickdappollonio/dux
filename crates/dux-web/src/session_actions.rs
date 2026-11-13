@@ -84,6 +84,10 @@ pub fn routes() -> Router<AppState> {
             axum::routing::get(session_branch_unpushed),
         )
         .route(
+            "/api/v1/sessions/{id}/uncommitted-files",
+            axum::routing::get(session_uncommitted_files),
+        )
+        .route(
             "/api/v1/sessions/{id}/branch-pushed",
             axum::routing::get(session_branch_pushed),
         )
@@ -772,6 +776,59 @@ async fn session_branch_unpushed(
         both_unpushed,
         both_unpushed_error,
         protected: offer.protected,
+        uncommitted_files,
+        uncommitted_files_error,
+    })
+    .into_response()
+}
+
+/// How many files in an agent's worktree are not committed, on its own.
+#[derive(Serialize)]
+struct UncommittedFilesResponse {
+    /// The count, or `null` when git could not look.
+    uncommitted_files: Option<u32>,
+    /// Why git could not look, `null` when it counted.
+    uncommitted_files_error: Option<String>,
+}
+
+/// How many files a worktree removal would delete with the folder, and
+/// nothing else: the command line's `agents rm --delete-worktree` and
+/// `projects rm --delete-worktrees` ask this when no branch is being decided.
+///
+/// Unlike `branch-unpushed` it reads no branch, counts no commit and records
+/// no branch the agent was on, so asking it leaves the delete that follows
+/// exactly as it would have been. It needs no project record: the worktree is
+/// the managed agent's own, the path the delete removes. A read, run off the
+/// reactor because it shells out to git. A standalone agent has no worktree
+/// dux would remove, so it is answered as an unknown session.
+async fn session_uncommitted_files(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if !id_within_bound(&id) {
+        return unknown_session();
+    }
+    // The rename probe is the managed workspace's own worktree path; its
+    // branch is not used here.
+    let Some((worktree, _branch)) = state.engine.rename_pushed_probe(id).await else {
+        return unknown_session();
+    };
+    let Ok(answer) = tokio::task::spawn_blocking(move || {
+        dux_core::branch_history::worktree_uncommitted_files(std::path::Path::new(&worktree))
+    })
+    .await
+    else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the uncommitted-file check stopped unexpectedly",
+        )
+            .into_response();
+    };
+    let (uncommitted_files, uncommitted_files_error) = match answer {
+        Ok(count) => (Some(count), None),
+        Err(reason) => (None, Some(reason)),
+    };
+    axum::Json(UncommittedFilesResponse {
         uncommitted_files,
         uncommitted_files_error,
     })

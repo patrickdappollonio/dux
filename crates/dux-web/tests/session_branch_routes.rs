@@ -3,6 +3,8 @@
 //!
 //! - `GET    /api/v1/sessions/:id/branch-unpushed`: the branches a delete would
 //!   offer, each pinned, and how much of their work exists only here.
+//! - `GET    /api/v1/sessions/:id/uncommitted-files`: the worktree's
+//!   uncommitted file count alone, reading no branch.
 //! - `DELETE /api/v1/sessions/:id`: an absent answer, the older
 //!   `?delete_branch=`, and the body carrying both boxes' pinned answers.
 //! - `GET    /api/v1/sessions/:id/branch-pushed`: whether a branch rename would
@@ -460,6 +462,56 @@ async fn branch_unpushed_refuses_a_standalone_agent() {
 async fn branch_unpushed_refuses_a_session_that_does_not_exist() {
     let f = boot().await;
     let (status, _) = branch_unpushed(f.addr, "nobody").await;
+    assert_eq!(status, 404);
+}
+
+async fn uncommitted_files(addr: SocketAddr, id: &str) -> (u16, serde_json::Value) {
+    let resp = reqwest::get(format!(
+        "http://{addr}/api/v1/sessions/{id}/uncommitted-files"
+    ))
+    .await
+    .expect("send the request");
+    let status = resp.status().as_u16();
+    let body = resp.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// The file count on its own reads no branch and records none: a branch the
+/// agent visited since its last branch check stays unknown to the delete that
+/// follows, which says exactly what it would have said with no read at all.
+#[tokio::test]
+async fn uncommitted_files_counts_without_recording_any_branch() {
+    let f = boot().await;
+    git(&f.drifted_wt, &["switch", "-q", "-c", "spike"]);
+    git(&f.drifted_wt, &["switch", "-q", "develop-next"]);
+    std::fs::write(f.drifted_wt.join("RELEASE_NOTES.md"), "draft").expect("write a file");
+    let (status, body) = uncommitted_files(f.addr, "drifted").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["uncommitted_files"], 1, "{body}");
+    assert_eq!(
+        body["uncommitted_files_error"],
+        serde_json::Value::Null,
+        "{body}"
+    );
+
+    let (mut ws, connection) = events_socket(f.addr).await;
+    assert_eq!(
+        delete(f.addr, "drifted", "delete_worktree=true", &connection).await,
+        204
+    );
+    let outcome = wait_for_delete_status(&mut ws, "drifted").await;
+    assert!(
+        !outcome.contains("spike"),
+        "reading the count must not record the branches the agent was on: {outcome}"
+    );
+}
+
+/// A standalone agent has no worktree dux would remove, so there is nothing
+/// to count.
+#[tokio::test]
+async fn uncommitted_files_refuses_a_standalone_agent() {
+    let f = boot().await;
+    let (status, _) = uncommitted_files(f.addr, "folder").await;
     assert_eq!(status, 404);
 }
 

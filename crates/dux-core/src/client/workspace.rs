@@ -1982,12 +1982,57 @@ impl BranchOfferReply {
     /// How many files in the worktree are not committed, or why the server
     /// could not say.
     fn uncommitted_files(&self) -> crate::delete_agent_prose::UncommittedAnswer {
-        self.uncommitted_files.ok_or_else(|| {
-            self.uncommitted_files_error
-                .clone()
-                .unwrap_or_else(|| "no count came back".to_string())
-        })
+        uncommitted_answer(
+            self.uncommitted_files,
+            self.uncommitted_files_error.as_ref(),
+        )
     }
+}
+
+/// What `uncommitted-files` answers: the worktree's file count alone, read
+/// without touching any branch.
+#[derive(Deserialize)]
+struct UncommittedReply {
+    #[serde(default)]
+    uncommitted_files: Option<u32>,
+    #[serde(default)]
+    uncommitted_files_error: Option<String>,
+}
+
+/// A file count as the server answered it, or why it could not count.
+fn uncommitted_answer(
+    count: Option<u32>,
+    error: Option<&String>,
+) -> crate::delete_agent_prose::UncommittedAnswer {
+    count.ok_or_else(|| {
+        error
+            .cloned()
+            .unwrap_or_else(|| "no count came back".to_string())
+    })
+}
+
+/// How many files in `agent`'s worktree are not committed, read from the
+/// running dux without reading or recording any branch. A refused read is
+/// the reason dux could not look, never a reason to stop: the caller only
+/// says it before asking.
+fn read_uncommitted_files(
+    client: &Client,
+    agent: &Agent,
+) -> crate::delete_agent_prose::UncommittedAnswer {
+    client
+        .get_json::<UncommittedReply>(&format!(
+            "/api/v1/sessions/{}/uncommitted-files",
+            segment(&agent.id)
+        ))
+        .map_or_else(
+            |error| Err(error.message),
+            |reply| {
+                uncommitted_answer(
+                    reply.uncommitted_files,
+                    reply.uncommitted_files_error.as_ref(),
+                )
+            },
+        )
 }
 
 /// The delete dialogs' line about the files a worktree removal deletes with
@@ -2256,7 +2301,9 @@ fn plan_branch_answers(
 /// Deleting a managed agent's worktree also reads how many of its files are
 /// not committed, which the folder takes with it, and says so before the
 /// question in the dialogs' words. The count comes from the running dux,
-/// since the worktree may be on another machine.
+/// since the worktree may be on another machine. With no branch flag it is
+/// read on its own, so the command still reads no branch and counts no
+/// commit; with one it rides the branch read.
 ///
 /// # Errors
 ///
@@ -2282,7 +2329,6 @@ pub fn agents_rm(
     }
     let flagged = delete_branch.is_some() || delete_other_branches.is_some();
     let managed = matches!(agent.workspace, Workspace::Managed { .. });
-    let offer_path = format!("/api/v1/sessions/{}/branch-unpushed", segment(&agent.id));
     if !flagged || !managed || !delete_worktree {
         // The older single answer, exactly as before the boxes: with no flag
         // the server decides, a standalone agent has no branch of its own, and
@@ -2303,20 +2349,18 @@ pub fn agents_rm(
         }
         let mut planned = Planned::new(question, Method::Delete, path, None).forced(if_attached);
         if managed && delete_worktree {
-            // Only the file count is wanted here, so a refused read says
-            // that dux could not look rather than stopping a delete that
-            // asks nothing about branches.
-            let files = client
-                .get_json::<BranchOfferReply>(&offer_path)
-                .map_or_else(
-                    |error| Err(error.message),
-                    |offer| offer.uncommitted_files(),
-                );
+            // Only the file count is wanted here, and it is read on its own:
+            // the branch offer would also record the branches the agent was
+            // on, changing what the delete that follows says about them.
+            let files = read_uncommitted_files(client, &agent);
             planned.notice = uncommitted_note(&agent.name(), &files);
         }
         return Ok(planned);
     }
-    let offer: BranchOfferReply = client.get_json(&offer_path)?;
+    let offer: BranchOfferReply = client.get_json(&format!(
+        "/api/v1/sessions/{}/branch-unpushed",
+        segment(&agent.id)
+    ))?;
     let plan = plan_branch_answers(&offer, delete_branch, delete_other_branches, &agent.name())?;
     question.push_str(&plan.question);
     let body = json!({ "branches": plan.answers });
@@ -3391,12 +3435,25 @@ mod agents_rm_tests {
         delete: Option<bool>,
         others: Option<bool>,
     ) -> Result<Planned, CliError> {
+        try_plan_reading(offer, worktree, delete, others).0
+    }
+
+    /// The plan, and every path it asked the running dux for. The file
+    /// count's own route answers the offer's two count fields.
+    fn try_plan_reading(
+        offer: &'static str,
+        worktree: Worktrees,
+        delete: Option<bool>,
+        others: Option<bool>,
+    ) -> (Result<Planned, CliError>, Vec<String>) {
         let dir = private_dir();
         let socket = dir.path().join("dux.sock");
-        let _fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+        let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
             "/api/v1/build" => Reply::json(200, BUILD),
             "/api/v1/sessions" => Reply::json(200, AGENTS),
-            "/api/v1/sessions/a1/branch-unpushed" => Reply::json(200, offer),
+            "/api/v1/sessions/a1/branch-unpushed" | "/api/v1/sessions/a1/uncommitted-files" => {
+                Reply::json(200, offer)
+            }
             _ => Reply::json(404, "{}"),
         });
         let lock_path = dir.path().join("dux.lock");
@@ -3411,14 +3468,16 @@ mod agents_rm_tests {
         )
         .unwrap();
         let client = connect(&Target::Local, &lock_path).unwrap();
-        agents_rm(
+        let planned = agents_rm(
             &client,
             "feat",
             worktree,
             delete,
             others,
             IfAttached::Refuse,
-        )
+        );
+        let paths = fake.seen().into_iter().map(|seen| seen.path).collect();
+        (planned, paths)
     }
 
     /// The project's own branch is offered in no box: the command line says
@@ -3550,15 +3609,30 @@ mod agents_rm_tests {
 
     /// Deleting the worktree says first, in the delete dialogs' words, how
     /// many of its files are not committed, with or without a branch flag,
-    /// and that dux could not look when the running dux says so.
+    /// and that dux could not look when the running dux says so. With no
+    /// flag the count is read on its own: the branch offer would record the
+    /// branches the agent was on and change what the delete says about them.
     #[test]
     fn deleting_the_worktree_says_how_many_uncommitted_files_go_with_it() {
-        let unflagged = plan(r#"{"uncommitted_files":2,"others":[]}"#, None, None);
+        let (unflagged, asked) = try_plan_reading(
+            r#"{"uncommitted_files":2,"others":[]}"#,
+            Worktrees::Delete,
+            None,
+            None,
+        );
+        let unflagged = unflagged.unwrap();
         assert_eq!(
             unflagged.notice.as_deref(),
             Some("2 files in feat aren't committed and will be deleted.")
         );
         assert!(unflagged.body.is_none(), "no flag still sends no answers");
+        assert!(
+            asked
+                .iter()
+                .any(|path| path == "/api/v1/sessions/a1/uncommitted-files")
+                && !asked.iter().any(|path| path.contains("branch-unpushed")),
+            "with no branch flag no branch is read: {asked:?}"
+        );
 
         let flagged = plan(
             r#"{"uncommitted_files":1,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},

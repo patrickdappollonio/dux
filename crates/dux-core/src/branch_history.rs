@@ -1804,12 +1804,7 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
     let both_unpushed = count_at(repo, &all_oids, &all_names, &local);
     // The worktree box's question rides the same read: removing the worktree
     // deletes every file in it that is not committed.
-    let uncommitted_files = crate::git::uncommitted_file_count(worktree).map_err(|err| {
-        crate::logger::warn(&format!(
-            "could not count the uncommitted files for the delete dialog: {err:#}"
-        ));
-        crate::git::unpushed_count_failure_reason(&err)
-    });
+    let uncommitted_files = worktree_uncommitted_files(worktree);
     BranchOffer {
         current_name: inputs.branch_name.clone(),
         current,
@@ -1821,6 +1816,23 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
         newly_seen,
         uncommitted_files,
     }
+}
+
+/// How many files in `worktree` are not committed, which removing it deletes
+/// with the folder, or the reason to show when git could not look. Only reads:
+/// no branch is resolved and nothing is recorded. It shells out to git, so
+/// callers run it in a background worker.
+///
+/// # Errors
+///
+/// The reason git could not count, worded for the dialogs, and logged.
+pub fn worktree_uncommitted_files(worktree: &Path) -> crate::delete_agent_prose::UncommittedAnswer {
+    crate::git::uncommitted_file_count(worktree).map_err(|err| {
+        crate::logger::warn(&format!(
+            "could not count the uncommitted files for the delete dialog: {err:#}"
+        ));
+        crate::git::unpushed_count_failure_reason(&err)
+    })
 }
 
 /// One delete-dialog box as a request carries it.
