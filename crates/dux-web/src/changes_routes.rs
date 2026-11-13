@@ -8,8 +8,9 @@
 //!   `dux_core::viewmodel::ChangedFilesView`, which carries a global watched
 //!   session id and has no `rev`.
 //! - 404 when the session is unknown (no worktree).
-//! - 409 with `Retry-After` on a git lock or rebase error; 409 rather than 503
-//!   because proxies may reroute a 503.
+//! - 409 with `Retry-After` when the changed files cannot be read (a git lock,
+//!   a rebase, or any other git failure, logged to dux.log); 409 rather than
+//!   503 because proxies may reroute a 503.
 
 use axum::{
     Json, Router,
@@ -33,6 +34,13 @@ const MAX_ID_LEN: usize = 128;
 /// `Retry-After` seconds returned alongside a 409 so a client backs off before
 /// refetching during a transient git lock/rebase.
 const RETRY_AFTER_SECS: u64 = 2;
+
+/// The 409 body when the changed files cannot be read. The cause is whatever
+/// git said, which is not always a busy repository, so the sentence names what
+/// dux cannot do and leaves git's text to dux.log, where the service writes
+/// every failed read.
+const CHANGES_UNREADABLE: &str = "dux cannot list the changed files for this agent right now. \
+                                  Try again in a moment; the details are in dux.log.";
 
 /// The dedicated 200 body. Distinct from `ChangedFilesView` (no global
 /// `watched_session_id`; carries `rev`). The per-file [`ChangedFileView`] is reused.
@@ -270,7 +278,7 @@ async fn get_changes(State(state): State<AppState>, Path(id): Path<String>) -> R
         Err(GitError::Git) => (
             StatusCode::CONFLICT,
             [(header::RETRY_AFTER, RETRY_AFTER_SECS.to_string())],
-            "changed files are temporarily unavailable (the repository is busy); retry shortly",
+            CHANGES_UNREADABLE,
         )
             .into_response(),
     }

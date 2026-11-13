@@ -530,6 +530,11 @@ async fn rest_changes_409_with_retry_after_on_git_error() {
         resp.headers().get(reqwest::header::RETRY_AFTER).is_some(),
         "a 409 must carry Retry-After"
     );
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("dux.log") && !body.contains("busy"),
+        "the refusal points to dux.log and does not guess the repository is busy: {body}"
+    );
 }
 
 #[tokio::test]
