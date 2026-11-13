@@ -156,7 +156,14 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
             items={macroDragIds(macros)}
             strategy={verticalListSortingStrategy}
           >
-            <ul className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+            {/* The scrollbar keeps clear of the rows' Edit and Delete
+                buttons: a stable gutter plus right padding, pulled into the
+                dialog's own padding so a row's border still ends where the
+                Add macro button does wherever the scrollbar overlays. */}
+            <ul
+              data-testid="macros-scroll"
+              className="-mr-2 flex max-h-72 flex-col gap-1 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
+            >
               {macros.map((macro, index) => (
                 <SortableMacroRow
                   key={index}

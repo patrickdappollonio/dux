@@ -397,7 +397,8 @@ function PullRequestsView({
   }
 
   return (
-    <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
+    // The scrollbar keeps clear of each row's trailing `⋯`: see SCROLL_LIST.
+    <div data-testid="pull-requests-scroll" className={SCROLL_LIST}>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -425,6 +426,13 @@ function PullRequestsView({
     </div>
   )
 }
+
+// Both views' scrolling lists. A stable gutter plus right padding keeps the
+// scrollbar off the rows' trailing controls, and the negative margin pulls that
+// padding into the dialog's own, so the rows still end where the header and
+// footer controls do wherever the scrollbar overlays the content.
+const SCROLL_LIST =
+  "-mr-2 flex max-h-[50dvh] flex-col gap-1 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
 
 // A small, muted label beside a name (Attached, Current, a count): it says
 // something about the row without competing with the title for attention.
@@ -767,7 +775,8 @@ function BranchesView({
   // lives in another repository, not because the branch is missing.
   const listed = new Set(rows.flatMap((branch) => [branch.name, ...branch.former_names]))
   return (
-    <div className="flex max-h-[50dvh] flex-col gap-1 overflow-y-auto">
+    // The scrollbar keeps clear of each branch's pull-request chips: see SCROLL_LIST.
+    <div data-testid="branches-scroll" className={SCROLL_LIST}>
       {branches.error ? (
         <p className="text-xs text-destructive">{branches.error}</p>
       ) : null}

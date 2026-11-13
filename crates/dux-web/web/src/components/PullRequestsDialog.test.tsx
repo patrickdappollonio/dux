@@ -478,3 +478,24 @@ describe("PullRequestsDialog branches view", () => {
     expect(pullRequestBranches).toHaveBeenCalledWith("s1")
   })
 })
+
+describe("PullRequestsDialog scrolling", () => {
+  function expectGutter(scroller: HTMLElement, control: HTMLElement) {
+    expect(scroller.className).toContain("overflow-y-auto")
+    expect(scroller.className).toContain("[scrollbar-gutter:stable]")
+    expect(scroller.className).toMatch(/(^|\s)pr-\d/)
+    expect(scroller.contains(control)).toBe(true)
+  }
+
+  // The scrollbar must keep clear of each row's trailing controls, in both views.
+  it("keeps a gutter between the scrollbar and the rows' trailing controls", async () => {
+    seed(session())
+    render(<PullRequestsDialog />)
+    expectGutter(screen.getByTestId("pull-requests-scroll"), screen.getByLabelText("Actions for #418"))
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: /Branches/ }))
+    })
+    await screen.findByText("spike-tab-ids")
+    expectGutter(screen.getByTestId("branches-scroll"), screen.getByText("No pull request"))
+  })
+})

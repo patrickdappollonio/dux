@@ -257,3 +257,16 @@ describe("MacrosDialog stale save", () => {
     expect(screen.queryByRole("alert")).toBeNull()
   })
 })
+
+describe("MacrosDialog list", () => {
+  // The scrollbar must keep clear of the rows' Edit and Delete buttons.
+  it("keeps a gutter between the scrollbar and the rows' buttons", () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    const scroller = screen.getByTestId("macros-scroll")
+    expect(scroller.className).toContain("overflow-y-auto")
+    expect(scroller.className).toContain("[scrollbar-gutter:stable]")
+    expect(scroller.className).toMatch(/(^|\s)pr-\d/)
+    expect(scroller.contains(screen.getByLabelText("Delete Deploy"))).toBe(true)
+  })
+})
