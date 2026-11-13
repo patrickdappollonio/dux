@@ -1922,6 +1922,10 @@ struct BranchOfferReply {
     both_unpushed_error: Option<String>,
     #[serde(default)]
     protected: Vec<String>,
+    #[serde(default)]
+    uncommitted_files: Option<u32>,
+    #[serde(default)]
+    uncommitted_files_error: Option<String>,
 }
 
 /// A count as the server answered it, or why it could not count.
@@ -1971,11 +1975,28 @@ impl BranchOfferReply {
             both_unpushed: count_answer(self.both_unpushed, self.both_unpushed_error.as_ref()),
             protected: self.protected.clone(),
             newly_seen: Vec::new(),
-            // Only the branch boxes are asked about here; nothing on the
-            // command line reads the worktree's file count.
-            uncommitted_files: Ok(0),
+            uncommitted_files: self.uncommitted_files(),
         }
     }
+
+    /// How many files in the worktree are not committed, or why the server
+    /// could not say.
+    fn uncommitted_files(&self) -> crate::delete_agent_prose::UncommittedAnswer {
+        self.uncommitted_files.ok_or_else(|| {
+            self.uncommitted_files_error
+                .clone()
+                .unwrap_or_else(|| "no count came back".to_string())
+        })
+    }
+}
+
+/// The delete dialogs' line about the files a worktree removal deletes with
+/// the folder, for `agent`; `None` when every file is committed.
+fn uncommitted_note(
+    agent: &str,
+    answer: &crate::delete_agent_prose::UncommittedAnswer,
+) -> Option<String> {
+    crate::delete_agent_prose::worktree_files_prose(agent, answer).map(|prose| prose.plain())
 }
 
 /// Which boxes git could not count (`[first, second]`) and the sentence the
@@ -2232,6 +2253,11 @@ fn plan_branch_answers(
 /// at all, only the branch dux made for the agent goes, and only while dux can
 /// prove it.
 ///
+/// Deleting a managed agent's worktree also reads how many of its files are
+/// not committed, which the folder takes with it, and says so before the
+/// question in the dialogs' words. The count comes from the running dux,
+/// since the worktree may be on another machine.
+///
 /// # Errors
 ///
 /// Fails when the dux cannot be reached or refuses, `query` names no single
@@ -2256,6 +2282,7 @@ pub fn agents_rm(
     }
     let flagged = delete_branch.is_some() || delete_other_branches.is_some();
     let managed = matches!(agent.workspace, Workspace::Managed { .. });
+    let offer_path = format!("/api/v1/sessions/{}/branch-unpushed", segment(&agent.id));
     if !flagged || !managed || !delete_worktree {
         // The older single answer, exactly as before the boxes: with no flag
         // the server decides, a standalone agent has no branch of its own, and
@@ -2274,17 +2301,31 @@ pub fn agents_rm(
         if let Some(delete) = answer {
             let _ = write!(path, "&delete_branch={delete}");
         }
-        return Ok(Planned::new(question, Method::Delete, path, None).forced(if_attached));
+        let mut planned = Planned::new(question, Method::Delete, path, None).forced(if_attached);
+        if managed && delete_worktree {
+            // Only the file count is wanted here, so a refused read says
+            // that dux could not look rather than stopping a delete that
+            // asks nothing about branches.
+            let files = client
+                .get_json::<BranchOfferReply>(&offer_path)
+                .map_or_else(
+                    |error| Err(error.message),
+                    |offer| offer.uncommitted_files(),
+                );
+            planned.notice = uncommitted_note(&agent.name(), &files);
+        }
+        return Ok(planned);
     }
-    let offer: BranchOfferReply = client.get_json(&format!(
-        "/api/v1/sessions/{}/branch-unpushed",
-        segment(&agent.id)
-    ))?;
+    let offer: BranchOfferReply = client.get_json(&offer_path)?;
     let plan = plan_branch_answers(&offer, delete_branch, delete_other_branches, &agent.name())?;
     question.push_str(&plan.question);
     let body = json!({ "branches": plan.answers });
     let mut planned = Planned::new(question, Method::Delete, path, Some(body)).forced(if_attached);
-    planned.notice = plan.notice;
+    let notes: Vec<String> = uncommitted_note(&agent.name(), &offer.uncommitted_files())
+        .into_iter()
+        .chain(plan.notice)
+        .collect();
+    planned.notice = (!notes.is_empty()).then(|| notes.join(" "));
     Ok(planned)
 }
 
@@ -3385,7 +3426,7 @@ mod agents_rm_tests {
     #[test]
     fn delete_branch_on_the_projects_own_branch_says_so_and_sends_not_offered() {
         let planned = plan(
-            r#"{"current_name":"main","current":null,"others":[],"protected":["main"]}"#,
+            r#"{"uncommitted_files":0,"current_name":"main","current":null,"others":[],"protected":["main"]}"#,
             Some(true),
             Some(true),
         );
@@ -3413,7 +3454,7 @@ mod agents_rm_tests {
     #[test]
     fn one_delete_flag_answers_the_other_box_at_the_dialogs_default() {
         let planned = plan(
-            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+            r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
                "current_unpushed":{"count":3,"has_remote_refs":true},
                "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"after"}],
                "others_unpushed":{"count":1,"has_remote_refs":true},
@@ -3449,7 +3490,7 @@ mod agents_rm_tests {
     #[test]
     fn delete_branch_alone_after_a_switch_also_answers_the_second_box() {
         let planned = plan(
-            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+            r#"{"uncommitted_files":0,"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
                "current_unpushed":{"count":1,"has_remote_refs":true},
                "others":[{"name":"agent-x","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":0,"has_remote_refs":true},
@@ -3484,7 +3525,7 @@ mod agents_rm_tests {
     #[test]
     fn a_keep_flag_alone_answers_the_other_box_at_the_dialogs_default() {
         let planned = plan(
-            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+            r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
                "current_unpushed":{"count":3,"has_remote_refs":true},
                "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":1,"has_remote_refs":true},
@@ -3507,6 +3548,46 @@ mod agents_rm_tests {
         assert_eq!(body["branches"]["others"]["offered"][0], "spike");
     }
 
+    /// Deleting the worktree says first, in the delete dialogs' words, how
+    /// many of its files are not committed, with or without a branch flag,
+    /// and that dux could not look when the running dux says so.
+    #[test]
+    fn deleting_the_worktree_says_how_many_uncommitted_files_go_with_it() {
+        let unflagged = plan(r#"{"uncommitted_files":2,"others":[]}"#, None, None);
+        assert_eq!(
+            unflagged.notice.as_deref(),
+            Some("2 files in feat aren't committed and will be deleted.")
+        );
+        assert!(unflagged.body.is_none(), "no flag still sends no answers");
+
+        let flagged = plan(
+            r#"{"uncommitted_files":1,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+               "current_unpushed":{"count":3,"has_remote_refs":true},"others":[],"protected":[]}"#,
+            Some(true),
+            None,
+        );
+        assert_eq!(
+            flagged.notice.as_deref(),
+            Some(
+                "1 file in feat isn't committed and will be deleted. Deleting agent-x loses 3 \
+                 commits that are on no remote and no branch that stays."
+            )
+        );
+
+        let failed = plan(
+            r#"{"uncommitted_files_error":"git timed out","others":[]}"#,
+            None,
+            None,
+        );
+        assert_eq!(
+            failed.notice.as_deref(),
+            Some(
+                "dux could not look for uncommitted files in feat (git timed out); check it \
+                 before deleting it."
+            )
+        );
+    }
+
     /// A worktree that stays keeps every branch: a keep flag without
     /// --delete-worktree reads nothing and sends the older answer.
     #[test]
@@ -3525,7 +3606,7 @@ mod agents_rm_tests {
     #[test]
     fn a_current_branch_that_could_not_be_read_is_named_as_kept() {
         let planned = plan(
-            r#"{"current_name":"agent-x","current":null,"others":[],"protected":[]}"#,
+            r#"{"uncommitted_files":0,"current_name":"agent-x","current":null,"others":[],"protected":[]}"#,
             None,
             Some(false),
         );
@@ -3543,7 +3624,7 @@ mod agents_rm_tests {
     #[test]
     fn the_notice_counts_what_the_ticked_boxes_lose_together() {
         let planned = plan(
-            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+            r#"{"uncommitted_files":0,"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
                "current_unpushed":{"count":1,"has_remote_refs":true},
                "others":[{"name":"born","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":0,"has_remote_refs":true},
@@ -3570,7 +3651,7 @@ mod agents_rm_tests {
     #[test]
     fn the_notice_is_absent_when_the_ticked_boxes_lose_nothing() {
         let planned = plan(
-            r#"{"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+            r#"{"uncommitted_files":0,"current_name":"drifted","current":{"name":"drifted","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
                "current_unpushed":{"count":0,"has_remote_refs":true},
                "others":[{"name":"born","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":0,"has_remote_refs":true},
@@ -3587,7 +3668,7 @@ mod agents_rm_tests {
     #[test]
     fn a_box_whose_count_failed_is_kept_and_says_why() {
         let planned = plan(
-            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+            r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
                "current_unpushed_error":"git timed out",
                "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":1,"has_remote_refs":true},
@@ -3622,7 +3703,7 @@ mod agents_rm_tests {
     #[test]
     fn a_failed_joint_count_keeps_both_boxes() {
         let planned = plan(
-            r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+            r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
                "current_unpushed":{"count":3,"has_remote_refs":true},
                "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"dux"}],
                "others_unpushed":{"count":1,"has_remote_refs":true},
@@ -3654,7 +3735,7 @@ mod agents_rm_tests {
     /// before anything is asked, rather than deleting on an unknown count.
     #[test]
     fn deleting_a_branch_whose_count_failed_is_refused() {
-        let current_failed = r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
+        let current_failed = r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"after"},
                "current_unpushed_error":"git timed out","others":[],"protected":[]}"#;
         let refused = try_plan(current_failed, Worktrees::Delete, Some(true), None)
             .err()
@@ -3665,7 +3746,7 @@ mod agents_rm_tests {
             "dux could not count the unpushed commits on agent-x (git timed out); check it \
              before deleting it."
         );
-        let others_failed = r#"{"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
+        let others_failed = r#"{"uncommitted_files":0,"current_name":"agent-x","current":{"name":"agent-x","oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin":"dux"},
                "current_unpushed":{"count":0,"has_remote_refs":true},
                "others":[{"name":"spike","oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","origin":"after"}],
                "others_unpushed_error":"git timed out",
