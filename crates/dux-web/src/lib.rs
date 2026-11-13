@@ -2251,10 +2251,7 @@ async fn apply_leg_command(
                 if let Ok(mut slot) = bound_tailscale.lock() {
                     *slot = Some(addr);
                 }
-                let message = format!(
-                    "Tailscale interface is back: dux is now also serving on http://{addr}. \
-                     Nothing else changed; your other address is untouched."
-                );
+                let message = crate::serve_legs::leg_back_message(addr);
                 dux_core::logger::info(&format!("[server] {message}"));
                 console.leg_changed(&message);
                 status.changed(&message);
@@ -2264,7 +2261,7 @@ async fn apply_leg_command(
                 // what is BOUND, so it asks again next period. Say it ONCE per
                 // streak, though: a port somebody else holds permanently would
                 // otherwise repeat the same sentence for as long as dux runs.
-                let warning = tailscale_bind_warning(addr, &err);
+                let warning = dux_core::serve_log::tailscale_bind_warning_text(addr, &err);
                 if *last_bind_failure == Some(addr) {
                     dux_core::logger::debug(&format!("[server] still {warning}"));
                 } else {
@@ -2289,11 +2286,7 @@ async fn apply_leg_command(
             // than being silenced by a streak that predates the flap.
             *last_bind_failure = None;
             if stopped {
-                let message = format!(
-                    "Tailscale interface went away: dux stopped serving on {addr} and is still \
-                     serving on its other address(es). Browsers that were on the tailnet \
-                     reconnect by themselves when it comes back."
-                );
+                let message = crate::serve_legs::leg_gone_message(addr);
                 dux_core::logger::info(&format!("[server] {message}"));
                 console.leg_changed(&message);
                 status.changed(&message);
@@ -3755,6 +3748,11 @@ mod tests {
         );
         assert_eq!(status.tone, dux_core::statusline::StatusTone::Info);
         assert!(status.message.contains("went away"), "{}", status.message);
+        assert_eq!(
+            leg_status_names(&status),
+            [("100.64.0.5:8080", false)],
+            "the address reaches the web as a bare name chip"
+        );
     }
 
     /// An interface that comes and goes inside one dwell is one story, not four.
@@ -3835,6 +3833,11 @@ mod tests {
             "{}",
             settled.message
         );
+        assert_eq!(
+            leg_status_names(&settled),
+            [(addr.to_string().as_str(), false)],
+            "the settled sentence keeps the address it wraps as a bare name chip"
+        );
         assert!(
             engine.worker_rx.try_recv().is_err(),
             "and the settling is one answer, on the same key"
@@ -3901,6 +3904,23 @@ mod tests {
             "the warning names the address that would not bind: {}",
             status.message
         );
+    }
+
+    /// The names a leg status marks for the web to draw as chips, each with
+    /// whether its plain spelling quotes it.
+    fn leg_status_names(status: &dux_core::engine::StatusUpdate) -> Vec<(&str, bool)> {
+        status
+            .segments
+            .as_deref()
+            .expect("the leg's sentence is built from parts")
+            .iter()
+            .filter_map(|segment| match segment {
+                dux_core::prose::ProseSegment::Name { name, quoted } => {
+                    Some((name.as_str(), *quoted))
+                }
+                dux_core::prose::ProseSegment::Text(_) => None,
+            })
+            .collect()
     }
 
     /// The one leg status on the lane, or a panic naming what came instead.

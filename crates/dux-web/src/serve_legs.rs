@@ -221,7 +221,7 @@ impl ServeShutdown {
         &self,
         addr: SocketAddr,
         err: &anyhow::Error,
-    ) -> String {
+    ) -> StatusText {
         let warning =
             best_effort_death_warning(addr, err, LegWatch::of_cell(&self.tailscale_watched));
         dux_core::logger::warn(&format!("[server] {warning}"));
@@ -270,7 +270,7 @@ pub(crate) const LEG_SETTLE_DWELL: Duration =
 struct PendingLegTransition {
     due: std::time::Instant,
     tone: dux_core::statusline::StatusTone,
-    message: String,
+    message: StatusText,
 }
 
 /// Collapses a flapping leg into one sentence: nothing is said until a state has
@@ -291,13 +291,13 @@ impl LegCoalescer {
         &mut self,
         now: std::time::Instant,
         tone: dux_core::statusline::StatusTone,
-        message: &str,
+        message: &StatusText,
     ) -> Option<dux_core::engine::StatusUpdate> {
         let interrupted = self.pending.is_some();
         self.pending = Some(PendingLegTransition {
             due: now + LEG_SETTLE_DWELL,
             tone,
-            message: message.to_string(),
+            message: message.clone(),
         });
         if !interrupted || self.unstable {
             return None;
@@ -305,7 +305,7 @@ impl LegCoalescer {
         self.unstable = true;
         Some(leg_status_update(
             dux_core::statusline::StatusTone::Warning,
-            &leg_unstable_warning(),
+            leg_unstable_warning(),
         ))
     }
 
@@ -322,10 +322,10 @@ impl LegCoalescer {
         if std::mem::take(&mut self.unstable) {
             return Some(leg_status_update(
                 pending.tone,
-                &leg_settled_message(&pending.message),
+                leg_settled_message(&pending.message),
             ));
         }
-        Some(leg_status_update(pending.tone, &pending.message))
+        Some(leg_status_update(pending.tone, pending.message))
     }
 
     fn deadline(&self) -> Option<std::time::Instant> {
@@ -335,7 +335,7 @@ impl LegCoalescer {
 
 fn leg_status_update(
     tone: dux_core::statusline::StatusTone,
-    message: &str,
+    message: impl Into<StatusText>,
 ) -> dux_core::engine::StatusUpdate {
     dux_core::engine::StatusUpdate::keyed(TAILSCALE_LEG_KEY, tone, message)
 }
@@ -351,10 +351,29 @@ pub(crate) fn leg_unstable_warning() -> String {
     )
 }
 
+/// What dux says when the Tailscale interface comes back and the leg binds.
+pub(crate) fn leg_back_message(addr: SocketAddr) -> StatusText {
+    dux_core::status_text![
+        "Tailscale interface is back: dux is now also serving on ",
+        n(format!("http://{addr}")),
+        ". Nothing else changed; your other address is untouched.",
+    ]
+}
+
+/// What dux says when the Tailscale interface goes away and the leg stops.
+pub(crate) fn leg_gone_message(addr: SocketAddr) -> StatusText {
+    dux_core::status_text![
+        "Tailscale interface went away: dux stopped serving on ",
+        n(addr),
+        " and is still serving on its other address(es). Browsers that were on the tailnet \
+         reconnect by themselves when it comes back.",
+    ]
+}
+
 /// And what it says once the flapping stops, on the same key, so the warning is
 /// answered rather than left standing.
-pub(crate) fn leg_settled_message(message: &str) -> String {
-    format!("The Tailscale interface has settled. {message}")
+pub(crate) fn leg_settled_message(message: &StatusText) -> StatusText {
+    dux_core::status_text!["The Tailscale interface has settled. ", message]
 }
 
 impl LegStatus {
@@ -367,7 +386,7 @@ impl LegStatus {
 
     /// The leg degraded: it could not bind, or it stopped serving. A warning,
     /// because the address the user may be reaching dux on has gone.
-    pub(crate) fn degraded(&self, message: &str) {
+    pub(crate) fn degraded(&self, message: &StatusText) {
         self.record(
             std::time::Instant::now(),
             dux_core::statusline::StatusTone::Warning,
@@ -377,7 +396,7 @@ impl LegStatus {
 
     /// The leg arrived or left as the interface came and went. An info, for the
     /// same reason the console says it in the quiet tone: it is expected news.
-    pub(crate) fn changed(&self, message: &str) {
+    pub(crate) fn changed(&self, message: &StatusText) {
         self.record(
             std::time::Instant::now(),
             dux_core::statusline::StatusTone::Info,
@@ -389,7 +408,7 @@ impl LegStatus {
         &self,
         now: std::time::Instant,
         tone: dux_core::statusline::StatusTone,
-        message: &str,
+        message: &StatusText,
     ) {
         let update = self.lock().record(now, tone, message);
         if let Some(update) = update {
@@ -489,7 +508,7 @@ pub(crate) fn best_effort_death_warning(
     addr: SocketAddr,
     err: &anyhow::Error,
     watch: LegWatch,
-) -> String {
+) -> StatusText {
     let recovery = if watch == LegWatch::Watched {
         format!(
             "dux is watching the Tailscale interface, so it binds this address again by itself \
@@ -503,10 +522,13 @@ pub(crate) fn best_effort_death_warning(
          goes."
             .to_string()
     };
-    format!(
-        "the listener on the Tailscale address {addr} stopped serving: {err}. dux is still \
-         serving on its other address(es). {recovery}"
-    )
+    dux_core::status_text![
+        "the listener on the Tailscale address ",
+        n(addr),
+        format!(
+            " stopped serving: {err}. dux is still serving on its other address(es). {recovery}"
+        ),
+    ]
 }
 
 /// Await either the parent lane or this leg's own lane, whichever trips first.
@@ -1013,7 +1035,11 @@ pub(crate) fn identity_news(
     {
         news.push((
             StatusTone::Info,
-            format!("The Tailscale Funnel route is off, so dux answers to {name} again.").into(),
+            dux_core::status_text![
+                "The Tailscale Funnel route is off, so dux answers to ",
+                n(name),
+                " again."
+            ],
         ));
     }
 
@@ -1023,19 +1049,26 @@ pub(crate) fn identity_news(
     match (admitted_before.as_deref(), admitted_now.as_deref()) {
         (Some(old), Some(new)) if old != new => news.push((
             StatusTone::Info,
-            format!(
-                "This machine's tailnet name changed from {old} to {new} (the tailnet or the \
-                 machine was renamed). dux now answers to {new} and no longer to {old}."
-            )
-            .into(),
+            dux_core::status_text![
+                "This machine's tailnet name changed from ",
+                n(old),
+                " to ",
+                n(new),
+                " (the tailnet or the machine was renamed). dux now answers to ",
+                n(new),
+                " and no longer to ",
+                n(old),
+                ".",
+            ],
         )),
         (Some(old), None) if !next.funnel => news.push((
             StatusTone::Info,
-            format!(
-                "Tailscale no longer reports {old} as this machine's name (logged out, renamed \
-                 outside the tailnet's domain, or MagicDNS off), so dux stopped answering to it."
-            )
-            .into(),
+            dux_core::status_text![
+                "Tailscale no longer reports ",
+                n(old),
+                " as this machine's name (logged out, renamed outside the tailnet's domain, or \
+                 MagicDNS off), so dux stopped answering to it.",
+            ],
         )),
         _ => {}
     }
@@ -1052,10 +1085,11 @@ fn funnel_elsewhere_news(
     password: Password,
 ) -> (dux_core::statusline::StatusTone, StatusText) {
     use dux_core::statusline::StatusTone;
-    let name = next
-        .status
-        .tailscale_assigned_name()
-        .unwrap_or("this machine's tailnet name");
+    // A name Tailscale reported is a chip; the stand-in for a missing one is words.
+    let name = next.status.tailscale_assigned_name().map_or_else(
+        || StatusText::from("this machine's tailnet name"),
+        |name| dux_core::status_text![n(name)],
+    );
     if password == Password::Set {
         (
             StatusTone::Warning,
@@ -1072,18 +1106,18 @@ fn funnel_elsewhere_news(
         (
             StatusTone::Warning,
             dux_core::status_text![
-                format!(
-                    "A Tailscale Funnel route on this machine publishes it to the public \
-                     internet and no password is set, so dux stopped answering to {name}. \
-                     That Funnel does not forward to dux's port, but dux cannot tell \
-                     whether it reaches dux through another program on this machine; if it \
-                     does, anyone on the internet can drive your terminals. Set a password \
-                     ("
-                ),
+                "A Tailscale Funnel route on this machine publishes it to the public internet \
+                 and no password is set, so dux stopped answering to ",
+                &name,
+                ". That Funnel does not forward to dux's port, but dux cannot tell whether it \
+                 reaches dux through another program on this machine; if it does, anyone on \
+                 the internet can drive your terminals. Set a password (",
                 q(dux_core::config_auth::SET_PASSWORD_COMMAND),
                 "), or turn the Funnel route off (",
                 q(FUNNEL_STATUS),
-                format!(" lists it) and dux answers to {name} again by itself."),
+                " lists it) and dux answers to ",
+                &name,
+                " again by itself.",
             ],
         )
     }
@@ -1106,22 +1140,22 @@ fn serve_route_news(
     for url in after.iter().filter(|url| !before_any.contains(url)) {
         news.push((
             StatusTone::Info,
-            format!(
-                "tailscale serve now forwards {url} to dux: open it from any device on your \
-                 tailnet. The first visit can take about 30 seconds while Tailscale issues \
-                 the certificate."
-            )
-            .into(),
+            dux_core::status_text![
+                "tailscale serve now forwards ",
+                n(url),
+                " to dux: open it from any device on your tailnet. The first visit can take \
+                 about 30 seconds while Tailscale issues the certificate.",
+            ],
         ));
     }
     for url in before.iter().filter(|url| !after.contains(url)) {
         news.push((
             StatusTone::Info,
-            format!(
-                "{url} no longer reaches dux: its tailscale serve route was removed or now \
-                 points somewhere else."
-            )
-            .into(),
+            dux_core::status_text![
+                n(url),
+                " no longer reaches dux: its tailscale serve route was removed or now points \
+                 somewhere else.",
+            ],
         ));
     }
     news
@@ -1289,13 +1323,15 @@ pub(crate) fn funnel_state_news(
         )),
         (_, CliNotFound) => Some((
             StatusTone::Warning,
-            sentence(
+            sentence(dux_core::status_text![
                 "Tailscale is running on this machine, but dux cannot find the tailscale \
                  command to ask it whether a Tailscale Funnel publishes this server to the \
-                 public internet. dux looks for it on your PATH, in /usr/local/bin, and in \
-                 /Applications/Tailscale.app/Contents/MacOS/Tailscale."
-                    .into(),
-            ),
+                 public internet. dux looks for it on your PATH, in ",
+                n("/usr/local/bin"),
+                ", and in ",
+                n("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+                ".",
+            ]),
         )),
         (Funnel | FunnelSaved | Unconfirmed | CliNotFound, Open) => Some((
             StatusTone::Info,
@@ -3167,5 +3203,220 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), wait_for_shutdown(first))
             .await
             .expect("the replaced lane must be tripped");
+    }
+
+    // ── Names in the Tailscale statuses ───────────────────────────────────
+
+    /// The names a status marks for the web to draw as chips, in reading order.
+    fn chipped(text: &StatusText) -> Vec<&str> {
+        text.segments()
+            .expect("built from parts")
+            .iter()
+            .filter_map(|segment| match segment {
+                dux_core::prose::ProseSegment::Name { name, .. } => Some(name.as_str()),
+                dux_core::prose::ProseSegment::Text(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every leg sentence keeps the exact bytes the console, the log and the
+    /// terminal UI's status line printed before it carried parts, and marks the
+    /// address or URL it names.
+    #[test]
+    fn the_leg_sentences_keep_their_words_and_chip_the_address() {
+        let addr: SocketAddr = "100.64.0.1:3890".parse().unwrap();
+        let err = anyhow::anyhow!("connection reset");
+        let back = leg_back_message(addr);
+        let watched_recovery = format!(
+            "dux is watching the Tailscale interface, so it binds this address again by itself \
+             within about {}s of the interface being back; nothing to do.",
+            WATCH_PERIOD.as_secs()
+        );
+        let cases: Vec<(StatusText, String, Vec<&str>)> = vec![
+            (
+                back.clone(),
+                format!(
+                    "Tailscale interface is back: dux is now also serving on http://{addr}. \
+                     Nothing else changed; your other address is untouched."
+                ),
+                vec!["http://100.64.0.1:3890"],
+            ),
+            (
+                leg_gone_message(addr),
+                format!(
+                    "Tailscale interface went away: dux stopped serving on {addr} and is still \
+                     serving on its other address(es). Browsers that were on the tailnet \
+                     reconnect by themselves when it comes back."
+                ),
+                vec!["100.64.0.1:3890"],
+            ),
+            (
+                dux_core::serve_log::tailscale_bind_warning_text(addr, &"address in use"),
+                format!(
+                    "could not bind the Tailscale address {addr}: address in use. Something \
+                     else is already listening there, so dux is serving on the remaining \
+                     address(es) only. Stop that process or change [server].port to also \
+                     serve on Tailscale."
+                ),
+                vec!["100.64.0.1:3890"],
+            ),
+            (
+                best_effort_death_warning(addr, &err, LegWatch::Watched),
+                format!(
+                    "the listener on the Tailscale address {addr} stopped serving: {err}. dux \
+                     is still serving on its other address(es). {watched_recovery}"
+                ),
+                vec!["100.64.0.1:3890"],
+            ),
+            (
+                leg_settled_message(&back),
+                format!("The Tailscale interface has settled. {}", back.message()),
+                vec!["http://100.64.0.1:3890"],
+            ),
+        ];
+        for (text, plain, names) in &cases {
+            assert_eq!(text.message(), plain);
+            assert_eq!(&chipped(text), names, "{plain}");
+        }
+        assert_eq!(
+            dux_core::serve_log::tailscale_bind_warning(addr, &"address in use"),
+            cases[2].1,
+            "the console's copy is the same sentence"
+        );
+    }
+
+    /// The one sentence a look produced.
+    fn only(news: Vec<(dux_core::statusline::StatusTone, StatusText)>) -> StatusText {
+        assert_eq!(news.len(), 1, "{news:?}");
+        news.into_iter().next().expect("one").1
+    }
+
+    /// Every identity sentence that names this machine's tailnet name or a
+    /// serve URL keeps its exact words and marks those names.
+    #[test]
+    fn the_identity_sentences_keep_their_words_and_chip_the_names() {
+        let old = "box.old-tailnet.ts.net";
+        let new = "box.example-tailnet.ts.net";
+        let url = "https://box.example-tailnet.ts.net";
+        let renamed = only(identity_news(
+            Some(&identity(old, &[])),
+            &identity(new, &[]),
+            Password::Unset,
+        ));
+        let mut nameless = identity(old, &[]);
+        nameless.status.dns_name = None;
+        nameless.status.cert_domains.clear();
+        let gone = only(identity_news(
+            Some(&identity(old, &[])),
+            &nameless,
+            Password::Unset,
+        ));
+        let funnel_off = identity_news(
+            Some(&funnelled_elsewhere(new)),
+            &identity(new, &[]),
+            Password::Unset,
+        )
+        .into_iter()
+        .map(|(_, text)| text)
+        .find(|text| text.starts_with("The Tailscale Funnel route is off"))
+        .expect("the Funnel route going off is said");
+        let route_on = only(identity_news(
+            Some(&identity(new, &[])),
+            &identity(new, &[(url, false)]),
+            Password::Unset,
+        ));
+        let route_off = only(identity_news(
+            Some(&identity(new, &[(url, false)])),
+            &identity(new, &[]),
+            Password::Unset,
+        ));
+        let funnel_elsewhere = funnel_elsewhere_news(&funnelled_elsewhere(new), Password::Unset).1;
+        let set_password = dux_core::config_auth::SET_PASSWORD_COMMAND;
+        let cases: Vec<(StatusText, String, Vec<&str>)> = vec![
+            (
+                renamed,
+                format!(
+                    "This machine's tailnet name changed from {old} to {new} (the tailnet or \
+                     the machine was renamed). dux now answers to {new} and no longer to {old}."
+                ),
+                vec![old, new, new, old],
+            ),
+            (
+                gone,
+                format!(
+                    "Tailscale no longer reports {old} as this machine's name (logged out, \
+                     renamed outside the tailnet's domain, or MagicDNS off), so dux stopped \
+                     answering to it."
+                ),
+                vec![old],
+            ),
+            (
+                funnel_off,
+                format!("The Tailscale Funnel route is off, so dux answers to {new} again."),
+                vec![new],
+            ),
+            (
+                route_on,
+                format!(
+                    "tailscale serve now forwards {url} to dux: open it from any device on \
+                     your tailnet. The first visit can take about 30 seconds while Tailscale \
+                     issues the certificate."
+                ),
+                vec![url],
+            ),
+            (
+                route_off,
+                format!(
+                    "{url} no longer reaches dux: its tailscale serve route was removed or \
+                     now points somewhere else."
+                ),
+                vec![url],
+            ),
+            (
+                funnel_elsewhere,
+                format!(
+                    "A Tailscale Funnel route on this machine publishes it to the public \
+                     internet and no password is set, so dux stopped answering to {new}. \
+                     That Funnel does not forward to dux's port, but dux cannot tell \
+                     whether it reaches dux through another program on this machine; if it \
+                     does, anyone on the internet can drive your terminals. Set a password \
+                     (\"{set_password}\"), or turn the Funnel route off (\"{FUNNEL_STATUS}\" \
+                     lists it) and dux answers to {new} again by itself."
+                ),
+                vec![new, set_password, FUNNEL_STATUS, new],
+            ),
+        ];
+        for (text, plain, names) in &cases {
+            assert_eq!(text.message(), plain);
+            assert_eq!(&chipped(text), names, "{plain}");
+        }
+    }
+
+    /// The missing-CLI warning keeps its words and marks the places it names.
+    #[test]
+    fn the_missing_cli_sentence_keeps_its_words_and_chips_the_paths() {
+        let (_, missing_cli) = funnel_state_news(
+            crate::exposure::FunnelState::Open,
+            crate::exposure::FunnelState::CliNotFound,
+            Because::Look,
+            Password::Unset,
+        )
+        .expect("news");
+        assert!(
+            missing_cli.starts_with(
+                "Tailscale is running on this machine, but dux cannot find the tailscale \
+                 command to ask it whether a Tailscale Funnel publishes this server to the \
+                 public internet. dux looks for it on your PATH, in /usr/local/bin, and in \
+                 /Applications/Tailscale.app/Contents/MacOS/Tailscale. "
+            ),
+            "{missing_cli}"
+        );
+        assert_eq!(
+            chipped(&missing_cli)[..2],
+            [
+                "/usr/local/bin",
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            ]
+        );
     }
 }

@@ -471,11 +471,24 @@ fn same_file(a: BorrowedFd<'_>, b: BorrowedFd<'_>) -> bool {
 /// because something else holds that address. Names the address, the cause and
 /// both remedies. One wording for every serving mode.
 pub fn tailscale_bind_warning(addr: SocketAddr, err: &dyn Display) -> String {
-    format!(
-        "could not bind the Tailscale address {addr}: {err}. Something else is already \
-         listening there, so dux is serving on the remaining address(es) only. Stop that \
-         process or change [server].port to also serve on Tailscale."
-    )
+    tailscale_bind_warning_text(addr, err).into()
+}
+
+/// [`tailscale_bind_warning`] with the address marked as a name, for a surface
+/// that draws names as chips. The plain spelling is the same sentence.
+pub fn tailscale_bind_warning_text(
+    addr: SocketAddr,
+    err: &dyn Display,
+) -> crate::status_text::StatusText {
+    crate::status_text![
+        "could not bind the Tailscale address ",
+        n(addr),
+        format!(
+            ": {err}. Something else is already listening there, so dux is serving on the \
+             remaining address(es) only. Stop that process or change [server].port to also \
+             serve on Tailscale."
+        ),
+    ]
 }
 
 #[cfg(test)]
