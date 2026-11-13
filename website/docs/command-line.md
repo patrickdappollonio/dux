@@ -49,7 +49,7 @@ environment) do not need dux running; [see below](#resources-kept-in-configtoml)
 |---|---|
 | [`dux projects ls`](/docs/cli-reference#dux-projects-ls), `show <project>` | Projects, with their branch and how many agents each has. |
 | [`dux projects add <path>`](/docs/cli-reference#dux-projects-add) | Adds a project. `--name` names it, `--checkout-default` checks the repository's default branch out first, and `--init` makes a plain folder a git repository with a first commit. |
-| [`dux projects rm <project>`](/docs/cli-reference#dux-projects-rm) | Removes a project and its agents from dux. Their worktrees stay on disk unless you add `--delete-worktrees`. |
+| [`dux projects rm <project>`](/docs/cli-reference#dux-projects-rm) | Removes a project and its agents from dux. Their worktrees stay on disk unless you add `--delete-worktrees`; then the lines before the confirmation say, for each worktree, how many of its files are not committed and will be deleted with it, as the agent delete dialogs do, whenever that is any at all (or that dux could not look). |
 | [`dux projects worktrees ls <project>`](/docs/cli-reference#dux-projects-worktrees-ls) | Every worktree the project has, which agent holds it, and whether it is dirty, in use, or being removed. |
 | [`dux agents ls`](/docs/cli-reference#dux-agents-ls), `show <agent>` | Agents and their state. `--project` keeps one project's; `--worktrees` prints just each agent's id and folder. |
 | [`dux agents add`](/docs/cli-reference#dux-agents-add) | Creates an agent: in a project, from a pull request, as a fork, or in a folder of your own. See [Creating an agent](#creating-an-agent). |

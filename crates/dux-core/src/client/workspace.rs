@@ -1212,6 +1212,12 @@ pub fn projects_add(
 
 /// `dux projects rm <p>`.
 ///
+/// Deleting the worktrees first reads, for each of the project's agents, how
+/// many files in its worktree are not committed, and says it before the
+/// question in the agent delete dialogs' words, one line per worktree that has
+/// any (or that dux could not look in). The count is read on its own, with no
+/// branch read, and a failed one is said rather than stopping the removal.
+///
 /// # Errors
 ///
 /// Fails when the dux cannot be reached or refuses, or `query` names no single project.
@@ -1235,7 +1241,7 @@ pub fn projects_rm(
             project.name
         )
     };
-    Ok(Planned::new(
+    let mut planned = Planned::new(
         question,
         Method::Delete,
         format!(
@@ -1244,7 +1250,21 @@ pub fn projects_rm(
         ),
         None,
     )
-    .forced(if_attached))
+    .forced(if_attached);
+    if delete_worktrees {
+        let notes: Vec<String> = agents(client)?
+            .iter()
+            .filter(|agent| {
+                matches!(&agent.workspace, Workspace::Managed { project_id, .. }
+                    if *project_id == project.id)
+            })
+            .filter_map(|agent| {
+                uncommitted_note(&agent.name(), &read_uncommitted_files(client, agent))
+            })
+            .collect();
+        planned.notice = (!notes.is_empty()).then(|| notes.join("\n"));
+    }
+    Ok(planned)
 }
 
 /// How `dux agents add` makes its agent.
@@ -3833,6 +3853,99 @@ mod agents_rm_tests {
             refused.message,
             "dux could not count the unpushed commits on spike (git timed out); check it before \
              deleting it."
+        );
+    }
+}
+
+#[cfg(test)]
+mod projects_rm_tests {
+    use super::*;
+    use crate::client::connect::{Target, connect};
+    use crate::client::test_server::{FakeDux, Reply, private_dir};
+
+    const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
+    const PROJECTS: &str = r#"[{"id":"p1","name":"app","path":"/src/app"},{"id":"p2","name":"other","path":"/src/other"}]"#;
+    const AGENTS: &str = r#"[
+        {"id":"dirty","title":"dirty","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p1","branch_name":"dirty","worktree_path":"/wt/dirty"}},
+        {"id":"clean","title":"clean","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p1","branch_name":"clean","worktree_path":"/wt/clean"}},
+        {"id":"stuck","title":"stuck","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p1","branch_name":"stuck","worktree_path":"/wt/stuck"}},
+        {"id":"elsewhere","title":"elsewhere","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p2","branch_name":"elsewhere","worktree_path":"/wt/elsewhere"}},
+        {"id":"folder","title":"folder","provider":"claude","status":"detached","workspace":{"kind":"folder","folder_path":"/home/me/f","folder_label":"~/f"}}
+    ]"#;
+
+    /// `dux projects rm app` against a dux with three agents in `app`, one in
+    /// another project and one standalone, and every path it asked for.
+    fn plan(worktrees: Worktrees) -> (Planned, Vec<String>) {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let fake = FakeDux::unix(&socket, move |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/projects" => Reply::json(200, PROJECTS),
+            "/api/v1/sessions" => Reply::json(200, AGENTS),
+            "/api/v1/sessions/dirty/uncommitted-files"
+            | "/api/v1/sessions/elsewhere/uncommitted-files"
+            | "/api/v1/sessions/folder/uncommitted-files" => Reply::json(
+                200,
+                r#"{"uncommitted_files":3,"uncommitted_files_error":null}"#,
+            ),
+            "/api/v1/sessions/clean/uncommitted-files" => Reply::json(
+                200,
+                r#"{"uncommitted_files":0,"uncommitted_files_error":null}"#,
+            ),
+            "/api/v1/sessions/stuck/uncommitted-files" => Reply::json(
+                200,
+                r#"{"uncommitted_files":null,"uncommitted_files_error":"git timed out"}"#,
+            ),
+            _ => Reply::json(404, "{}"),
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let _lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+        let planned = projects_rm(&client, "app", worktrees, IfAttached::Refuse).unwrap();
+        let paths = fake.seen().into_iter().map(|seen| seen.path).collect();
+        (planned, paths)
+    }
+
+    /// Deleting the worktrees says first, one line per worktree of the
+    /// project's agents, how many files in it are not committed, in the
+    /// delete dialogs' words, or that dux could not look; a clean worktree,
+    /// another project's agent and a standalone agent say nothing.
+    #[test]
+    fn deleting_the_worktrees_says_how_many_uncommitted_files_go_with_them() {
+        let (planned, asked) = plan(Worktrees::Delete);
+        assert_eq!(
+            planned.notice.as_deref(),
+            Some(
+                "3 files in dirty aren't committed and will be deleted.\n\
+                 dux could not look for uncommitted files in stuck (git timed out); check it \
+                 before deleting it."
+            )
+        );
+        assert!(
+            !asked.iter().any(|path| path.contains("elsewhere")
+                || path.contains("folder")
+                || path.contains("branch-unpushed")),
+            "only the project's own worktrees are counted, and no branch is read: {asked:?}"
+        );
+    }
+
+    /// Worktrees that stay lose nothing, so nothing is counted.
+    #[test]
+    fn keeping_the_worktrees_counts_nothing() {
+        let (planned, asked) = plan(Worktrees::Keep);
+        assert!(planned.notice.is_none());
+        assert!(
+            !asked.iter().any(|path| path.contains("uncommitted-files")),
+            "{asked:?}"
         );
     }
 }
