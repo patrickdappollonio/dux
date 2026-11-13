@@ -41,7 +41,7 @@ import {
   terminalRowKey,
   useRevealSelectedRow,
 } from "@/hooks/use-reveal-selected-row"
-import { useMoreBelow } from "@/hooks/use-more-below"
+import { useScrollEdges } from "@/hooks/use-scroll-edges"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { PaneMenuBody } from "@/components/PaneMenu"
@@ -939,13 +939,13 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
   // A newly selected row is scrolled into view, a just-created one as soon as
   // its row arrives, so a launch never happens out of sight below the fold.
   const revealRef = useRevealSelectedRow(selectedRowKey(selectedTarget))
-  const { ref: moreBelowRef, moreBelow } = useMoreBelow<HTMLDivElement>()
+  const { ref: edgesRef, moreAbove, moreBelow } = useScrollEdges<HTMLDivElement>()
   const setListNode = useCallback(
     (node: HTMLDivElement | null) => {
       revealRef(node)
-      moreBelowRef(node)
+      edgesRef(node)
     },
-    [revealRef, moreBelowRef],
+    [revealRef, edgesRef],
   )
   // Mouse drags on a 6px pull; touch drags on a HOLD, or it fights the list's
   // scroll gesture. The values live in lib/dragActivation.ts.
@@ -1051,10 +1051,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         </div>
       </div>
 
-      {/* Fades out at its bottom edge while more rows are hidden below; see
-          `.dux-list-fade` for why that is a mask. */}
+      {/* Fades out at its top edge while rows are hidden above and at its
+          bottom edge while more are hidden below; see `.dux-list-fade` for
+          why that is a mask. */}
       <div
         ref={setListNode}
+        data-more-above={moreAbove ? "" : undefined}
         data-more-below={moreBelow ? "" : undefined}
         className="dux-list-fade min-h-0 flex-1 overflow-y-auto px-2 pb-2 no-scrollbar"
       >

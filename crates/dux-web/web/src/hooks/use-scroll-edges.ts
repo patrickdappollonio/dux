@@ -7,6 +7,21 @@ export interface ScrollMetrics {
   clientHeight: number
 }
 
+/** Which edges of a scroll container have content hidden past them. */
+export interface ScrollEdges {
+  moreAbove: boolean
+  moreBelow: boolean
+}
+
+/**
+ * Is part of the content hidden above the container's top edge? The 1px
+ * tolerance matches `hasMoreBelow`, so a sub-pixel scroll offset left behind by
+ * a fractional device pixel ratio does not read as scrolled.
+ */
+export function hasMoreAbove(m: ScrollMetrics): boolean {
+  return m.scrollTop > 1
+}
+
 /**
  * Is part of the content hidden below the container's bottom edge? A
  * fractional device pixel ratio can leave the fully scrolled position a pixel
@@ -17,8 +32,22 @@ export function hasMoreBelow(m: ScrollMetrics): boolean {
   return m.scrollHeight - m.clientHeight - m.scrollTop > 1
 }
 
+const NO_EDGES: ScrollEdges = { moreAbove: false, moreBelow: false }
+
+function readEdges(m: ScrollMetrics): ScrollEdges {
+  return { moreAbove: hasMoreAbove(m), moreBelow: hasMoreBelow(m) }
+}
+
+// Keeps the previous object while nothing changed, so a scroll that leaves both
+// answers as they were does not re-render the list.
+function keepIfSame(prev: ScrollEdges, next: ScrollEdges): ScrollEdges {
+  return prev.moreAbove === next.moreAbove && prev.moreBelow === next.moreBelow
+    ? prev
+    : next
+}
+
 /**
- * Tracks whether a scroll container has content hidden below it.
+ * Tracks whether a scroll container has content hidden above and below it.
  *
  * The callback ref goes on the scroll container. The answer is re-measured on
  * a scroll, on the container changing size, and on any of its direct children
@@ -27,24 +56,23 @@ export function hasMoreBelow(m: ScrollMetrics): boolean {
  * There is no polling. A missing `ResizeObserver` (jsdom) is supported: the
  * hook then answers from scrolls and child-list changes alone.
  */
-export function useMoreBelow<T extends HTMLElement = HTMLElement>(): {
+export function useScrollEdges<T extends HTMLElement = HTMLElement>(): ScrollEdges & {
   ref: (node: T | null) => void
-  moreBelow: boolean
 } {
   const [node, setNode] = React.useState<T | null>(null)
-  const [moreBelow, setMoreBelow] = React.useState(false)
+  const [edges, setEdges] = React.useState<ScrollEdges>(NO_EDGES)
 
   // The first answer is read as the node attaches, when its children are
   // already in place; the effect below only subscribes to changes.
   const ref = React.useCallback((next: T | null) => {
     setNode(next)
-    setMoreBelow(next === null ? false : hasMoreBelow(next))
+    setEdges((prev) => keepIfSame(prev, next === null ? NO_EDGES : readEdges(next)))
   }, [])
 
   React.useEffect(() => {
     if (node === null) return
     const el = node
-    const measure = () => setMoreBelow(hasMoreBelow(el))
+    const measure = () => setEdges((prev) => keepIfSame(prev, readEdges(el)))
 
     const resize =
       typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null
@@ -68,5 +96,5 @@ export function useMoreBelow<T extends HTMLElement = HTMLElement>(): {
     }
   }, [node])
 
-  return { ref, moreBelow }
+  return { ref, ...edges }
 }

@@ -880,38 +880,56 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
   }
 }
 
-/* The agents list dissolves at its bottom edge while more of it is hidden
-   below, rather than being cut flat against the launcher corner. It is a mask
-   on the scroll container, not an overlay painted over it: the mask fades the
-   rows to transparent, so what shows through is whatever surface the list sits
-   on (the sidebar's on a computer, the app background on the phone hub) with
-   no colour named here, nothing sits between a pointer and the rows, and the
-   scroll height is untouched. The mask box is the container's own box, so it
-   stays put while the content scrolls under it.
+/* The agents list dissolves at its top edge while rows are hidden above it
+   (under the section header) and at its bottom edge while more of it is hidden
+   below, rather than being cut flat against the header or the launcher corner;
+   in the middle of a long list both edges fade. It is a mask on the scroll
+   container, not an overlay painted over it: the mask fades the rows to
+   transparent, so what shows through is whatever surface the list sits on (the
+   sidebar's on a computer, the app background on the phone hub) with no colour
+   named here, nothing sits between a pointer and the rows, and the scroll
+   height is untouched. The mask box is the container's own box, so it stays put
+   while the content scrolls under it.
 
-   The fade depth is a registered length so it can transition; with the list at
-   its bottom, or fitting, the depth is zero and the mask is fully opaque. */
-@property --dux-list-fade {
+   Each edge's fade depth is a registered length so it can transition; at an
+   edge with nothing past it the depth is zero, and with both at zero the mask
+   is fully opaque. */
+@property --dux-list-fade-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --dux-list-fade-bottom {
   syntax: "<length>";
   inherits: false;
   initial-value: 0px;
 }
 .dux-list-fade {
-  --dux-list-fade: 0px;
+  --dux-list-fade-top: 0px;
+  --dux-list-fade-bottom: 0px;
   -webkit-mask-image: linear-gradient(
     to bottom,
-    #000 calc(100% - var(--dux-list-fade)),
+    transparent,
+    #000 var(--dux-list-fade-top),
+    #000 calc(100% - var(--dux-list-fade-bottom)),
     transparent
   );
   mask-image: linear-gradient(
     to bottom,
-    #000 calc(100% - var(--dux-list-fade)),
+    transparent,
+    #000 var(--dux-list-fade-top),
+    #000 calc(100% - var(--dux-list-fade-bottom)),
     transparent
   );
-  transition: --dux-list-fade 150ms ease-out;
+  transition:
+    --dux-list-fade-top 150ms ease-out,
+    --dux-list-fade-bottom 150ms ease-out;
+}
+.dux-list-fade[data-more-above] {
+  --dux-list-fade-top: 2.5rem;
 }
 .dux-list-fade[data-more-below] {
-  --dux-list-fade: 2.5rem;
+  --dux-list-fade-bottom: 2.5rem;
 }
 @media (prefers-reduced-motion: reduce) {
   .dux-list-fade {
