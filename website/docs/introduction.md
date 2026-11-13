@@ -100,7 +100,10 @@ agent streams its work and the sidebar marks the agent as typing.
 >   moves between panes rather than typing. Turn it on and Tab and Shift-Tab go to the
 >   agent, with `Ctrl-o` and `Ctrl-y` moving between panes instead.
 > - **See what dux receives.** The `input-debugging` palette command shows exactly what
->   dux gets for each keypress, which is what you want open while crafting a binding.
+>   dux gets for each keypress: the key it reads and the bytes your terminal sent for it.
+>   Two chords that show the same key and the same bytes are two dux cannot tell apart,
+>   and a key dux cannot read at all says so. It is what you want open while crafting a
+>   binding.
 
 In the terminal UI, focus-next and focus-previous keys move between panes, and every
 pane has its own local key combinations; the in-app help overlay is the authoritative

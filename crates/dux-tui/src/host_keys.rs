@@ -654,16 +654,93 @@ pub(crate) fn kitty_answer_once(
 pub(crate) static KITTY_ANSWER: OnceLock<KittyAnswer> = OnceLock::new();
 
 /// The App's part in the negotiation: the mode this run started with, its
-/// tmux probes, the last tmux report, and the keys typed during the Kitty
-/// query, which the first loop iteration handles.
-#[derive(Debug, Default)]
+/// tmux probes, the host's Kitty answer and the last tmux report, and the keys
+/// typed during the Kitty query, which the first loop iteration handles.
+#[derive(Debug)]
 pub(crate) struct HostKeysState {
     pub(crate) mode: ExtendedKeysMode,
-    /// Where this run is, verified once at start ([`verified_host`]).
+    /// Where this run is: `Tmux` only when [`verified_host`] confirmed it at
+    /// start; `Terminal` otherwise, which includes a run with
+    /// `[ui] extended_keys` off, where nothing was checked.
     pub(crate) host: Host,
     pub(crate) probes: TmuxProbes,
+    /// The host's answer to the Kitty query, when this run asked it.
+    pub(crate) kitty_answer: Option<KittyAnswer>,
     pub(crate) last_tmux_report: Option<TmuxReport>,
     pub(crate) startup_keys: Vec<KeyEvent>,
+    /// The record this run switches extended keys on in: the process's own
+    /// [`HOST_KEYS`], which the panic hook and the teardown also read. A test
+    /// gives a run a record of its own.
+    pub(crate) record: &'static HostKeysRecord,
+}
+
+impl Default for HostKeysState {
+    fn default() -> Self {
+        Self {
+            mode: ExtendedKeysMode::default(),
+            host: Host::default(),
+            probes: TmuxProbes::default(),
+            kitty_answer: None,
+            last_tmux_report: None,
+            startup_keys: Vec::new(),
+            record: &HOST_KEYS,
+        }
+    }
+}
+
+/// The input debugger's header when dux reads classic keys because the setting
+/// says so.
+const ASKED_NOTHING_OFF: &str = "Extended keys are off ([ui] extended_keys): Shift-Enter, Ctrl-i \
+     and Ctrl-Shift chords look like Enter, Tab and Ctrl chords.";
+/// The header when the host terminal did not say it speaks Kitty keys.
+const ASKED_NO_KITTY: &str = "Your terminal did not say it speaks the Kitty keyboard protocol: \
+     Shift-Enter, Ctrl-i and Ctrl-Shift chords look like Enter, Tab and Ctrl chords.";
+
+impl HostKeysState {
+    /// What dux asked the host for in this run, for the input debugger's
+    /// header: the setting, what the record says was switched on, the host's
+    /// Kitty answer and tmux's last report. The entries under it say what
+    /// arrived.
+    pub(crate) fn asked_for(&self) -> String {
+        if self.mode == ExtendedKeysMode::Off {
+            return ASKED_NOTHING_OFF.to_string();
+        }
+        let switched_on = self.record.current();
+        match self.host {
+            Host::Terminal => {
+                let answered_yes = self.kitty_answer == Some(KittyAnswer::Yes);
+                if switched_on.kitty_pushed && answered_yes {
+                    "dux asked your terminal for Kitty keys, and it said yes.".to_string()
+                } else if switched_on.kitty_pushed {
+                    "dux turned on Kitty keys without asking your terminal first \
+                     ([ui] extended_keys is on)."
+                        .to_string()
+                } else if answered_yes || self.mode == ExtendedKeysMode::On {
+                    "dux could not switch on Kitty keys in your terminal; dux.log has the \
+                     details."
+                        .to_string()
+                } else {
+                    ASKED_NO_KITTY.to_string()
+                }
+            }
+            Host::Tmux => {
+                if switched_on.tmux_extended {
+                    return "dux asked tmux for extended keys in its csi-u format.".to_string();
+                }
+                match &self.last_tmux_report {
+                    None => "dux is still reading tmux's settings.".to_string(),
+                    Some(report) => report.reason().map_or_else(
+                        || {
+                            "tmux is set up for extended keys, but dux could not ask it for \
+                             them; dux.log has the details."
+                                .to_string()
+                        },
+                        |reason| format!("{reason}."),
+                    ),
+                }
+            }
+        }
+    }
 }
 
 /// Tags each tmux probe so only the newest answer is applied: every force

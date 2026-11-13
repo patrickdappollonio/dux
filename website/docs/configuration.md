@@ -683,7 +683,9 @@ key, and `dux.log` gets a warning naming both actions.
 > [!IMPORTANT]
 > While you type into an agent in the windowed pane, any chord bound here belongs to dux
 > and never reaches the agent. Rebinding dux's side is how you free a chord the agent
-> needs. The `input-debugging` palette command shows what dux receives for each keypress.
+> needs. The `input-debugging` palette command shows what dux receives for each keypress:
+> the key and the bytes your terminal sent for it, so two chords that arrive alike show
+> alike.
 > Full story in [Introduction](/docs/introduction#the-three-panes).
 
 A classic terminal sends some chords as the same bytes as others: `ctrl-shift-l` arrives as

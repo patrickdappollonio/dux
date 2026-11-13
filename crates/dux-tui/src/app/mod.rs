@@ -816,6 +816,8 @@ pub(crate) struct App {
     pub(crate) dormant_tab_press: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
+    /// The input debugger's own raw reader, apart from the forwarding path's.
+    pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
     /// Separate buffer for scanning `ToggleFullscreen` during the loading phase.
     /// Kept independent of `raw_input_buf` so that suppressed keystrokes
@@ -4240,6 +4242,17 @@ pub(crate) struct PendingMacroDelete {
     pub(crate) focus: ConfirmFocus,
 }
 
+/// Which reader takes the run loop's input on one iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunInputReader {
+    /// The input debugger's own raw reader.
+    Debugger,
+    /// The raw path that forwards typing to a program.
+    Forwarding,
+    /// crossterm's decoded events.
+    Structured,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InputTarget {
     None,
@@ -5159,6 +5172,7 @@ pub(crate) use background_server::BackgroundServerStart;
 mod changes_tree;
 pub(crate) mod components;
 mod confirm_dialog;
+mod debug_input;
 mod dock;
 mod first_load;
 mod input;
@@ -5577,6 +5591,7 @@ impl App {
             dormant_tab_press: None,
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
+            debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             terminal_focus: crate::focus::TerminalFocus::new(),
@@ -5804,6 +5819,7 @@ impl App {
     fn negotiate_host_keys(&mut self, mode: dux_core::config::ExtendedKeysMode) {
         use crate::host_keys;
         self.host_keys.host = host_keys::Host::Terminal;
+        self.host_keys.kitty_answer = None;
         if mode == dux_core::config::ExtendedKeysMode::Off {
             return;
         }
@@ -5831,10 +5847,11 @@ impl App {
             self.host_keys.startup_keys = query.keys;
             query.answer
         });
+        self.host_keys.kitty_answer = kitty;
         let plan = host_keys::plan(mode, host, kitty, None);
         log_host_keys_plan(&plan);
         if plan.push_kitty
-            && let Err(err) = host_keys::switch_on_kitty(&mut stdout(), &host_keys::HOST_KEYS)
+            && let Err(err) = host_keys::switch_on_kitty(&mut stdout(), self.host_keys.record)
         {
             logger::warn(&format!(
                 "could not switch on the Kitty keyboard protocol, so dux reads classic keys: {err}"
@@ -5864,13 +5881,7 @@ impl App {
         mode: dux_core::config::ExtendedKeysMode,
         report: Option<crate::host_keys::TmuxReport>,
     ) {
-        self.apply_tmux_report_to(
-            &mut stdout(),
-            &crate::host_keys::HOST_KEYS,
-            probe,
-            mode,
-            report,
-        );
+        self.apply_tmux_report_to(&mut stdout(), self.host_keys.record, probe, mode, report);
     }
 
     /// [`Self::apply_tmux_report`] writing to `out` and recording in `record`.
@@ -6015,7 +6026,7 @@ impl App {
         // The host terminal does not change mid-session, so Kitty keys are
         // re-asserted rather than asked about again; tmux's settings may have
         // been reloaded, so they are read again.
-        crate::host_keys::reassert_kitty(&mut stdout(), &crate::host_keys::HOST_KEYS);
+        crate::host_keys::reassert_kitty(&mut stdout(), self.host_keys.record);
         if self.host_keys.mode != dux_core::config::ExtendedKeysMode::Off
             && self.host_keys.host == crate::host_keys::Host::Tmux
         {
@@ -6095,11 +6106,39 @@ impl App {
         }
     }
 
-    fn poll_run_input(&mut self) -> bool {
-        if self.should_poll_raw_input() {
-            return self.poll_raw_run_input();
+    /// Which reader takes this iteration's input: the input debugger's own
+    /// while it is open, or while it still holds input read after it closed (a
+    /// paste still arriving, an unfinished sequence); else the forwarding path
+    /// when it is typing into a program; else crossterm's.
+    fn run_input_reader(&self) -> RunInputReader {
+        if self.input_debugger_open() || self.debug_raw_input.holds_input_for_main_ui() {
+            RunInputReader::Debugger
+        } else if self.should_poll_raw_input() {
+            RunInputReader::Forwarding
+        } else {
+            RunInputReader::Structured
         }
-        self.poll_structured_run_input()
+    }
+
+    fn poll_run_input(&mut self) -> bool {
+        let reader = self.run_input_reader();
+        if reader != RunInputReader::Debugger {
+            self.end_debug_raw_input();
+        }
+        match reader {
+            RunInputReader::Debugger => match self.poll_debug_raw_input(std::io::stdin()) {
+                Ok(should_exit) => should_exit,
+                Err(err) => {
+                    self.report_runtime_error(
+                        "the input debugger could not read the terminal's input",
+                        err.as_ref(),
+                    );
+                    false
+                }
+            },
+            RunInputReader::Forwarding => self.poll_raw_run_input(),
+            RunInputReader::Structured => self.poll_structured_run_input(),
+        }
     }
 
     fn poll_raw_run_input(&mut self) -> bool {
@@ -6442,11 +6481,9 @@ impl App {
     }
 
     /// The key `handle_key` sees for a key crossterm decoded, or `None` when it
-    /// is dropped. The input debugger gets every key as it came, kind and all.
-    /// Elsewhere a release is dropped, because no dux action fires on one
-    /// (crokey drops the kind, so it would fire the action a second time), and
-    /// a repeat counts as a press, as a classic terminal sends it. With extended
-    /// keys on, Ctrl-`[` held with Ctrl alone becomes Esc.
+    /// is dropped. The input debugger gets every key as it came, kind and all;
+    /// everywhere else gets the key dux acts on
+    /// ([`crate::key_encode::acted_on_key`]).
     fn structured_key(
         &self,
         key: crossterm::event::KeyEvent,
@@ -6454,21 +6491,7 @@ impl App {
         if matches!(self.prompt, PromptState::DebugInput { .. }) {
             return Some(key);
         }
-        let key = match key.kind {
-            crossterm::event::KeyEventKind::Release => return None,
-            crossterm::event::KeyEventKind::Repeat => crossterm::event::KeyEvent {
-                kind: crossterm::event::KeyEventKind::Press,
-                ..key
-            },
-            crossterm::event::KeyEventKind::Press => key,
-        };
-        Some(
-            if self.extended_keys == crate::keybindings::ExtendedKeys::On {
-                crate::key_encode::fold_ctrl_bracket(key)
-            } else {
-                key
-            },
-        )
+        crate::key_encode::acted_on_key(key, self.extended_keys)
     }
 
     /// Route one crossterm event to its handler. Returns whether the app should

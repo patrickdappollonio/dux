@@ -6,7 +6,6 @@ use super::modal::{
 };
 use super::*;
 use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
-use chrono::Local;
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
 use dux_core::project_browser::AddPathProbe;
 use dux_core::statusline::StatusTone;
@@ -116,7 +115,7 @@ const MIN_RIGHT_WIDTH_PCT: u16 = 14;
 const MAX_RIGHT_WIDTH_PCT: u16 = 50;
 const MIN_CENTER_WIDTH_PCT: u16 = 20;
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
-const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
+pub(super) const ESC_AMBIGUITY_TIMEOUT: Duration = Duration::from_millis(25);
 
 /// The full-text field of whichever `Configure*` modal is open, read-only.
 pub(super) fn configure_project_text_input(prompt: &PromptState) -> Option<&TextInput> {
@@ -163,9 +162,16 @@ pub(super) fn configure_project_text_input_mut(prompt: &mut PromptState) -> Opti
 pub(super) const DEBUG_INPUT_MAX_LINES: usize = 1_000;
 
 /// Drop the input debugger's oldest lines past [`DEBUG_INPUT_MAX_LINES`] and
-/// return the scroll offset that pins its newest line on screen.
-fn trim_debug_input_lines(lines: &mut Vec<Line<'static>>) -> u16 {
-    let excess = lines.len().saturating_sub(DEBUG_INPUT_MAX_LINES);
+/// return the scroll offset that pins its newest line on screen. A key's bytes
+/// row left at the top without the key row above it goes too.
+pub(super) fn trim_debug_input_lines(lines: &mut Vec<Line<'static>>) -> u16 {
+    let mut excess = lines.len().saturating_sub(DEBUG_INPUT_MAX_LINES);
+    if excess > 0 {
+        excess += lines[excess..]
+            .iter()
+            .take_while(|line| super::debug_input::is_bytes_row(line))
+            .count();
+    }
     lines.drain(..excess);
     u16::try_from(lines.len()).unwrap_or(u16::MAX)
 }
@@ -211,8 +217,30 @@ enum RawKeyDecode {
 /// The raw-input loop decides when to read by polling the descriptor, so a
 /// user-space buffer in between (std's `StdinLock` keeps one) would hold bytes
 /// the next poll cannot see: they would wait for the next keypress.
-fn read_raw_chunk(fd: impl std::os::fd::AsFd, buf: &mut [u8]) -> rustix::io::Result<usize> {
+pub(super) fn read_raw_chunk(
+    fd: impl std::os::fd::AsFd,
+    buf: &mut [u8],
+) -> rustix::io::Result<usize> {
     crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
+}
+
+/// Wait up to `timeout` for `fd` to have something to read, and say whether it
+/// does. A zero timeout only looks.
+pub(super) fn wait_for_input(
+    fd: &impl std::os::fd::AsFd,
+    timeout: Duration,
+) -> rustix::io::Result<bool> {
+    use rustix::event::{PollFd, PollFlags, poll};
+
+    let timeout = rustix::time::Timespec {
+        tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
+        tv_nsec: i64::from(timeout.subsec_nanos()),
+    };
+    let ready = crate::io_retry::retry_on_interrupt_errno(|| {
+        let mut pollfd = [PollFd::new(fd, PollFlags::IN)];
+        poll(&mut pollfd, Some(&timeout))
+    })?;
+    Ok(ready != 0)
 }
 
 /// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
@@ -1966,6 +1994,11 @@ impl App {
     /// hotkeys.
     pub(crate) fn handle_paste(&mut self, text: &str) {
         if text.is_empty() {
+            return;
+        }
+        // The input debugger counts a paste and never shows it.
+        if self.input_debugger_open() {
+            self.record_debug_paste(text.len());
             return;
         }
         // An open modal owns the paste (the ladder's first rung).
@@ -4244,58 +4277,14 @@ impl App {
         None
     }
 
+    /// A key crossterm decoded while the debugger is open: one queued before
+    /// it took over reading, kind and all. Its bytes were never seen.
     fn handle_debug_input_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
-        if let PromptState::DebugInput {
-            lines,
-            scroll_offset,
-        } = &mut self.prompt
-        {
-            // Escape remains unconditional so an unusable binding cannot trap
-            // the user in the input debugger.
-            if key.code == KeyCode::Esc {
-                self.prompt = PromptState::None;
-                return Some(false);
-            }
-
-            let kc = crokey::KeyCombination::from(key).normalized();
-            let label = crate::keybindings::display_format().to_string(kc);
-
-            let resolved: Vec<String> = BindingScope::ALL
-                .iter()
-                .filter_map(|&scope| {
-                    self.bindings
-                        .lookup(&key, scope)
-                        .map(|action| format!("{}: {}", scope.display_name(), action.config_name()))
-                })
-                .collect();
-            let action_text = if resolved.is_empty() {
-                "(none)".to_string()
-            } else {
-                resolved.join(", ")
-            };
-
-            let ts = Local::now().format("%H:%M:%S%.3f").to_string();
-            lines.push(Line::from(vec![
-                Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
-                Span::raw(" │ "),
-                Span::styled(
-                    "Key   ",
-                    Style::default().fg(self.theme.help_section_header_fg),
-                ),
-                Span::raw(" │ "),
-                Span::styled(
-                    format!("{label:<18}"),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" │ "),
-                Span::styled(action_text, Style::default().add_modifier(Modifier::DIM)),
-            ]));
-            *scroll_offset = trim_debug_input_lines(lines);
-
-            return Some(false);
+        if !self.input_debugger_open() {
+            return None;
         }
-
-        None
+        self.record_debug_key(key, None);
+        Some(false)
     }
 
     fn selected_command_palette_completion(&self, key: KeyEvent) -> Option<String> {
@@ -10538,18 +10527,18 @@ impl App {
             _ => {}
         }
 
+        // `MouseEventKind`'s debug text is ASCII, so padding by characters is
+        // padding by cells.
         let kind_label = format!("{:?}", mouse.kind);
-        let ts = Local::now().format("%H:%M:%S%.3f").to_string();
-        lines.push(Line::from(vec![
-            Span::styled(ts, Style::default().add_modifier(Modifier::DIM)),
-            Span::raw(" │ "),
+        let width = super::debug_input::LABEL_COLUMN_WIDTH;
+        let mut spans = super::debug_input::debug_row_prefix(
+            &self.theme,
+            "Mouse",
+            super::debug_input::RowStart::Now,
+        );
+        spans.extend([
             Span::styled(
-                "Mouse",
-                Style::default().fg(self.theme.help_section_header_fg),
-            ),
-            Span::raw(" │ "),
-            Span::styled(
-                format!("{kind_label:<18}"),
+                format!("{kind_label:<width$}"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::raw(" │ "),
@@ -10557,7 +10546,8 @@ impl App {
                 format!("col={} row={}", mouse.column, mouse.row),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-        ]));
+        ]);
+        lines.push(Line::from(spans));
         *scroll_offset = trim_debug_input_lines(lines);
         Some(false)
     }
@@ -26238,6 +26228,38 @@ cyan = "#00ffff"
         let recorded = lines.last().expect("mouse event line").to_string();
         assert!(recorded.contains("Down(Left)"));
         assert!(recorded.contains("col=12 row=7"));
+
+        // The same gestures as raw SGR reports through the debugger's own
+        // reader (1-based on the wire).
+        app.prompt = PromptState::DebugInput {
+            lines: (0..5)
+                .map(|index| Line::raw(format!("event {index}")))
+                .collect(),
+            scroll_offset: 0,
+        };
+        app.record_debug_input_bytes(b"\x1b[<65;13;8M");
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("expected debug-input prompt");
+        };
+        assert_eq!(lines.len(), 5);
+        assert_eq!(*scroll_offset, 3);
+        app.record_debug_input_bytes(b"\x1b[<0;13;8M");
+        let PromptState::DebugInput {
+            lines,
+            scroll_offset,
+        } = &app.prompt
+        else {
+            panic!("expected debug-input prompt");
+        };
+        assert_eq!(lines.len(), 6);
+        assert_eq!(*scroll_offset, 6);
+        let recorded = lines.last().expect("mouse event line").to_string();
+        assert!(recorded.contains("Down(Left)"));
+        assert!(recorded.contains("col=12 row=7"));
     }
 
     #[test]
@@ -41842,10 +41864,9 @@ cyan = "#00ffff"
             KeyModifiers::NONE,
             crossterm::event::KeyEventKind::Release,
         );
-        let PromptState::DebugInput { lines, .. } = &app.prompt else {
-            panic!("expected the input debugger");
-        };
-        assert_eq!(lines.len(), 1, "the debugger records the release");
+        let rows = debugger_rows(&app);
+        assert_eq!(rows.len(), 2, "the debugger records the release: {rows:#?}");
+        assert!(rows[0].contains("release"), "{rows:#?}");
     }
 
     /// With extended keys, Ctrl-`[` is Esc wherever dux handles keys, as a
@@ -41870,33 +41891,125 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
     }
 
-    #[test]
-    fn debug_input_records_a_key_then_escape_closes_it() {
-        let mut app = test_app(default_bindings());
+    fn open_input_debugger(app: &mut App) {
         app.prompt = PromptState::DebugInput {
             lines: Vec::new(),
             scroll_offset: 0,
         };
+    }
 
-        tap(&mut app, KeyCode::Char('x'));
-        let PromptState::DebugInput {
-            lines,
-            scroll_offset,
-        } = &app.prompt
-        else {
+    fn debugger_rows(app: &App) -> Vec<String> {
+        let PromptState::DebugInput { lines, .. } = &app.prompt else {
             panic!("expected the input debugger");
         };
-        assert_eq!(lines.len(), 1);
-        assert_eq!(*scroll_offset, 1);
-        let recorded = lines[0]
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(recorded.contains('x'));
+        lines.iter().map(ToString::to_string).collect()
+    }
 
-        tap(&mut app, KeyCode::Esc);
+    /// The debugger reads the terminal's raw bytes itself, with no agent
+    /// selected: each key shows its label, its kind and its bytes, a key
+    /// crossterm held when the debugger took over shows first with its bytes
+    /// not seen, and only an unmodified Escape closes it.
+    #[test]
+    fn debug_input_records_a_key_then_escape_closes_it() {
+        let mut app = test_app(default_bindings());
+        app.selected_left = 0;
+        assert!(app.selected_session().is_none());
+        open_input_debugger(&mut app);
+
+        let mut held = vec![crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))]
+        .into_iter();
+        assert!(!app.hand_debug_input_over(|| held.next()));
+        assert!(!app.record_debug_input_bytes(b"\x1b[108;6u"));
+        let rows = debugger_rows(&app);
+        assert_eq!(rows.len(), 4, "two entries of two rows each: {rows:#?}");
+        assert!(rows[0].contains(" x "), "{rows:#?}");
+        assert!(rows[1].contains("(bytes not seen)"), "{rows:#?}");
+        assert!(rows[2].contains("Ctrl-Shift-l"), "{rows:#?}");
+        assert!(rows[2].contains("press"), "{rows:#?}");
+        assert!(rows[3].contains("1b 5b 31 30 38 3b 36 75"), "{rows:#?}");
+        assert!(rows[3].contains("^[[108;6u"), "{rows:#?}");
+
+        // tmux's xterm format: dux cannot read it, and says what fixes it.
+        app.record_debug_input_bytes(b"\x1b[27;2;13~");
+        let rows = debugger_rows(&app);
+        assert!(rows[4].contains("dux cannot read this key"), "{rows:#?}");
+        assert!(
+            rows[4].contains("set -s extended-keys-format csi-u"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[5].contains("1b 5b 32 37 3b 32 3b 31 33 7e"),
+            "{rows:#?}"
+        );
+
+        // A modified Escape is a key to inspect, raw or structured.
+        app.record_debug_input_bytes(b"\x1b[27;5u");
+        app.handle_terminal_event(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::CONTROL,
+        )));
+        let rows = debugger_rows(&app);
+        assert_eq!(rows.len(), 10, "{rows:#?}");
+        assert!(
+            rows[6].contains("Ctrl-Esc") && rows[8].contains("Ctrl-Esc"),
+            "{rows:#?}"
+        );
+
+        // A device report is a reply to dux's own query, not a key; a focus
+        // report is logged and applied; a paste is counted, raw or structured.
+        app.record_debug_input_bytes(b"\x1b[?62;22c\x1b[?1u");
+        assert_eq!(debugger_rows(&app).len(), 10);
+        app.record_debug_input_bytes(b"\x1b[O");
+        assert!(
+            !app.terminal_focus
+                .should_stamp_viewed(std::time::Instant::now(), std::time::Duration::ZERO),
+            "the focus report reached the focus state"
+        );
+        app.record_debug_input_bytes(b"\x1b[200~hello world!\x1b[201~");
+        app.handle_terminal_event(crossterm::event::Event::Paste("pasted".to_string()));
+        let rows = debugger_rows(&app);
+        assert_eq!(rows.len(), 13, "{rows:#?}");
+        assert!(rows[10].contains("Focus lost"), "{rows:#?}");
+        assert!(
+            rows[11].contains("Paste") && rows[11].contains("12 bytes"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[12].contains("Paste") && rows[12].contains("6 bytes"),
+            "{rows:#?}"
+        );
+
+        // A lone Escape waits out the ambiguity, then closes.
+        app.record_debug_input_bytes(b"\x1b");
+        assert!(
+            app.input_debugger_open(),
+            "a lone Escape waits for the timeout"
+        );
+        app.record_debug_input_bytes(b"");
         assert!(matches!(app.prompt, PromptState::None));
+
+        open_input_debugger(&mut app);
+        assert!(!app.hand_debug_input_over(|| None));
+        app.record_debug_input_bytes(b"\x1b[27u");
+        assert!(matches!(app.prompt, PromptState::None));
+    }
+
+    /// The debugger's reader never types into a program, even over a live,
+    /// typeable agent.
+    #[test]
+    fn the_input_debugger_writes_nothing_to_the_agent_under_it() {
+        let mut app = app_with_minimized_typeable_caret_child("");
+        app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
+        open_input_debugger(&mut app);
+        assert!(!app.hand_debug_input_over(|| None));
+        app.record_debug_input_bytes(b"\x1b[108;6uab\x1b[13;2u\x1b[200~text\x1b[201~");
+        app.record_debug_input_bytes(b"\x1b[27u");
+        assert!(matches!(app.prompt, PromptState::None));
+        tap_center(&mut app, KeyCode::Char('z'), KeyModifiers::NONE);
+        wait_for_grid_row(&mut app, "READYz");
     }
 
     #[test]

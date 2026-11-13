@@ -11271,8 +11271,36 @@ impl App {
         let inner = block.inner(content_area);
         block.render(content_area, frame.buffer_mut());
 
-        // Compute the visible window.
-        let visible_h = usize::from(inner.height);
+        // The header says what dux asked the host for; it stays in place above
+        // the log, which says what arrived. It wraps rather than being cut,
+        // and always leaves the log at least one row.
+        let header = wrap_styled_lines(
+            &[Line::styled(
+                self.host_keys.asked_for(),
+                Style::default().fg(self.theme.text_fg),
+            )],
+            usize::from(inner.width),
+        );
+        let header_rows = u16::try_from(header.len())
+            .unwrap_or(u16::MAX)
+            .min(inner.height.saturating_sub(2));
+        let [header_area, rule_area, log_area] = Layout::vertical([
+            Constraint::Length(header_rows),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        Paragraph::new(header).render(header_area, frame.buffer_mut());
+        Paragraph::new(Line::styled(
+            "─".repeat(usize::from(rule_area.width)),
+            Style::default().fg(self.theme.overlay_border),
+        ))
+        .render(rule_area, frame.buffer_mut());
+
+        // Compute the visible window. Each row is one stored line, so
+        // scrolling counts rows; a row wider than the dialog is cut with an
+        // ellipsis rather than wrapped.
+        let visible_h = usize::from(log_area.height);
         let total = lines.len();
         let max_offset = total.saturating_sub(visible_h);
         let offset = usize::from(*scroll_offset).min(max_offset);
@@ -11284,10 +11312,15 @@ impl App {
             offset
         };
 
-        let visible: Vec<Line<'_>> = lines.iter().skip(start).take(visible_h).cloned().collect();
+        let visible: Vec<Line<'_>> = lines
+            .iter()
+            .skip(start)
+            .take(visible_h)
+            .map(|line| Line::from(ellipsize_spans(line.spans.clone(), log_area.width)))
+            .collect();
 
         let paragraph = Paragraph::new(visible);
-        paragraph.render(inner, frame.buffer_mut());
+        paragraph.render(log_area, frame.buffer_mut());
 
         // Footer hint.
         // Escape closes the input debugger unconditionally, outside the
@@ -15925,6 +15958,250 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn debugger_screen(app: &mut App) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // 100 columns, so the dialog (80% of the width) is 80 columns wide.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer().clone();
+        let width = usize::from(buffer.area.width);
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<Vec<_>>()
+            .chunks(width)
+            .map(<[std::string::String]>::concat)
+            .collect()
+    }
+
+    /// What a test's host-keys record has switched on.
+    #[derive(Clone, Copy)]
+    enum Switched {
+        Nothing,
+        Kitty,
+        Tmux,
+    }
+
+    /// A host-keys record with `switched` switched on, of its own so no test
+    /// touches the process's.
+    fn switched_record(switched: Switched) -> &'static crate::host_keys::HostKeysRecord {
+        let record: &'static crate::host_keys::HostKeysRecord =
+            Box::leak(Box::new(crate::host_keys::HostKeysRecord::new()));
+        match switched {
+            Switched::Nothing => {}
+            Switched::Kitty => {
+                crate::host_keys::switch_on_kitty(&mut Vec::new(), record).expect("write");
+            }
+            Switched::Tmux => {
+                crate::host_keys::switch_on_tmux(&mut Vec::new(), record).expect("write");
+            }
+        }
+        record
+    }
+
+    /// A run verified inside tmux, with `report` its last tmux report.
+    fn under_tmux(report: crate::host_keys::TmuxReport) -> crate::host_keys::HostKeysState {
+        crate::host_keys::HostKeysState {
+            mode: dux_core::config::ExtendedKeysMode::Auto,
+            host: crate::host_keys::Host::Tmux,
+            last_tmux_report: Some(report),
+            record: switched_record(Switched::Nothing),
+            ..crate::host_keys::HostKeysState::default()
+        }
+    }
+
+    /// Each state's header is its sentence, word for word, and the debugger
+    /// draws it.
+    fn assert_debugger_headers(states: Vec<(crate::host_keys::HostKeysState, &str)>) {
+        for (state, expected) in states {
+            let mut app = test_app(default_bindings());
+            app.host_keys = state;
+            assert_eq!(app.host_keys.asked_for(), expected);
+            app.prompt = PromptState::DebugInput {
+                lines: Vec::new(),
+                scroll_offset: 0,
+            };
+            let screen = debugger_screen(&mut app).join("\n");
+            let opening: String = expected.chars().take(30).collect();
+            assert!(screen.contains(&opening), "{expected}\n{screen}");
+        }
+    }
+
+    /// The input debugger's header says what dux asked the host for: Kitty
+    /// keys answered yes, tmux's extended keys on, the setting off, no Kitty
+    /// answer, and each tmux report.
+    #[test]
+    fn the_input_debugger_header_names_what_dux_asked_for() {
+        use crate::host_keys::{HostKeysState, KittyAnswer, TmuxReport};
+        use dux_core::config::ExtendedKeysMode;
+
+        assert_debugger_headers(vec![
+            (
+                HostKeysState {
+                    mode: ExtendedKeysMode::Auto,
+                    kitty_answer: Some(KittyAnswer::Yes),
+                    record: switched_record(Switched::Kitty),
+                    ..HostKeysState::default()
+                },
+                "dux asked your terminal for Kitty keys, and it said yes.",
+            ),
+            (
+                HostKeysState {
+                    record: switched_record(Switched::Tmux),
+                    ..under_tmux(TmuxReport::Ready)
+                },
+                "dux asked tmux for extended keys in its csi-u format.",
+            ),
+            (
+                HostKeysState {
+                    mode: ExtendedKeysMode::Off,
+                    record: switched_record(Switched::Nothing),
+                    ..HostKeysState::default()
+                },
+                "Extended keys are off ([ui] extended_keys): Shift-Enter, Ctrl-i and \
+                 Ctrl-Shift chords look like Enter, Tab and Ctrl chords.",
+            ),
+            (
+                HostKeysState {
+                    mode: ExtendedKeysMode::Auto,
+                    kitty_answer: Some(KittyAnswer::NoAnswer),
+                    record: switched_record(Switched::Nothing),
+                    ..HostKeysState::default()
+                },
+                "Your terminal did not say it speaks the Kitty keyboard protocol: \
+                 Shift-Enter, Ctrl-i and Ctrl-Shift chords look like Enter, Tab and Ctrl \
+                 chords.",
+            ),
+            (
+                under_tmux(TmuxReport::XtermFormat),
+                "dux left tmux's extended keys off: tmux sends them in its xterm format, \
+                 which dux cannot read (set -s extended-keys-format csi-u).",
+            ),
+            (
+                under_tmux(TmuxReport::ExtendedKeysOff { needs_format: true }),
+                "dux left tmux's extended keys off: tmux's extended-keys option is off \
+                 (set -s extended-keys on, and set -s extended-keys-format csi-u).",
+            ),
+            (
+                under_tmux(TmuxReport::ExtendedKeysOff {
+                    needs_format: false,
+                }),
+                "dux left tmux's extended keys off: tmux's extended-keys option is off \
+                 (set -s extended-keys on).",
+            ),
+            (
+                under_tmux(TmuxReport::OlderThan32),
+                "dux left tmux's extended keys off: this tmux has none, because extended \
+                 keys need tmux 3.2 or newer.",
+            ),
+            (
+                under_tmux(TmuxReport::CommandFailed("tmux exited with 1".to_string())),
+                "dux left tmux's extended keys off: it could not read tmux's settings \
+                 (tmux exited with 1).",
+            ),
+        ]);
+    }
+
+    /// The header also says when dux switched Kitty keys on without asking,
+    /// when it could not switch them on, when tmux is ready but dux could not
+    /// ask it, and while tmux's settings are still being read.
+    #[test]
+    fn the_input_debugger_header_names_what_dux_could_not_do_or_has_not_done_yet() {
+        use crate::host_keys::{HostKeysState, KittyAnswer, TmuxReport};
+        use dux_core::config::ExtendedKeysMode;
+
+        assert_debugger_headers(vec![
+            (
+                HostKeysState {
+                    mode: ExtendedKeysMode::On,
+                    record: switched_record(Switched::Kitty),
+                    ..HostKeysState::default()
+                },
+                "dux turned on Kitty keys without asking your terminal first \
+                 ([ui] extended_keys is on).",
+            ),
+            (
+                HostKeysState {
+                    mode: ExtendedKeysMode::Auto,
+                    kitty_answer: Some(KittyAnswer::Yes),
+                    record: switched_record(Switched::Nothing),
+                    ..HostKeysState::default()
+                },
+                "dux could not switch on Kitty keys in your terminal; dux.log has the details.",
+            ),
+            (
+                under_tmux(TmuxReport::Ready),
+                "tmux is set up for extended keys, but dux could not ask it for them; dux.log \
+                 has the details.",
+            ),
+            (
+                HostKeysState {
+                    last_tmux_report: None,
+                    ..under_tmux(TmuxReport::Ready)
+                },
+                "dux is still reading tmux's settings.",
+            ),
+        ]);
+    }
+
+    /// The header holds its place above a log that scrolls under it, and a
+    /// row wider than the 80-column dialog is cut with an ellipsis, by
+    /// character and display width, never by byte.
+    #[test]
+    fn the_input_debugger_header_stays_above_the_log_and_long_rows_are_cut() {
+        use dux_core::config::ExtendedKeysMode;
+
+        // The header holds its rows while the log scrolls under it.
+        let mut app = test_app(default_bindings());
+        app.host_keys.mode = ExtendedKeysMode::Off;
+        let long_row = format!("bytes {}", "é漢".repeat(60));
+        let mut lines: Vec<Line<'static>> = (0..200)
+            .map(|index| Line::raw(format!("row {index:03}")))
+            .collect();
+        lines.push(Line::raw(long_row));
+        app.prompt = PromptState::DebugInput {
+            lines,
+            scroll_offset: 0,
+        };
+        let top = debugger_screen(&mut app);
+        let header_row = top
+            .iter()
+            .position(|row| row.contains("Extended keys are off"))
+            .expect("the header is drawn");
+        let first_log_row = top
+            .iter()
+            .position(|row| row.contains("row 000"))
+            .expect("the log starts at its top");
+        assert!(header_row < first_log_row, "{top:#?}");
+        let PromptState::DebugInput { scroll_offset, .. } = &mut app.prompt else {
+            panic!("expected the input debugger");
+        };
+        *scroll_offset = u16::MAX;
+        let bottom = debugger_screen(&mut app);
+        assert_eq!(bottom[header_row], top[header_row], "{bottom:#?}");
+        assert!(
+            !bottom.iter().any(|row| row.contains("row 000")),
+            "{bottom:#?}"
+        );
+        let cut = bottom
+            .iter()
+            .find(|row| row.contains("bytes é"))
+            .expect("the long row is drawn");
+        // The row ends in the ellipsis at the dialog's right border; a wide
+        // glyph that would straddle it leaves its column blank rather than
+        // half drawn.
+        assert!(cut.contains("…│") || cut.contains("… │"), "{cut:?}");
+        assert!(
+            cut.chars().all(|ch| ch != '\u{fffd}'),
+            "no character was split: {cut:?}"
+        );
     }
 
     /// Two messages posted between one pair of frames are BOTH readable: the

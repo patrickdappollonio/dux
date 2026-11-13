@@ -385,6 +385,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
             bindings: Vec::new(),
         },
         raw_input_parser: crate::raw_input::RawInputParser::default(),
+        debug_raw_input: super::debug_input::DebugRawInput::default(),
         raw_input_buf: Vec::new(),
         loading_input_buf: Vec::new(),
         terminal_focus: crate::focus::TerminalFocus::new(),

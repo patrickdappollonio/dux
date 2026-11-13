@@ -219,6 +219,30 @@ pub(crate) fn fold_ctrl_bracket(key: KeyEvent) -> KeyEvent {
     }
 }
 
+/// The key dux acts on for `key` as it arrived, or `None` for a release, on
+/// which no dux action fires (crokey drops the kind, so it would fire the
+/// action a second time). A repeat counts as a press, as a classic terminal
+/// sends it, and with extended keys on Ctrl-`[` is Esc. The input debugger's
+/// bindings column asks this too, so it shows what fires.
+pub(crate) fn acted_on_key(
+    key: KeyEvent,
+    extended_keys: crate::keybindings::ExtendedKeys,
+) -> Option<KeyEvent> {
+    let key = match key.kind {
+        KeyEventKind::Release => return None,
+        KeyEventKind::Repeat => KeyEvent {
+            kind: KeyEventKind::Press,
+            ..key
+        },
+        KeyEventKind::Press => key,
+    };
+    Some(if extended_keys == crate::keybindings::ExtendedKeys::On {
+        fold_ctrl_bracket(key)
+    } else {
+        key
+    })
+}
+
 /// The modifiers the classic encoding has no bytes for.
 const NON_CLASSIC_MODIFIERS: KeyModifiers = KeyModifiers::SUPER
     .union(KeyModifiers::HYPER)

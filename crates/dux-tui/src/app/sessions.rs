@@ -5680,6 +5680,7 @@ mod tests {
                 bindings: Vec::new(),
             },
             raw_input_parser: crate::raw_input::RawInputParser::default(),
+            debug_raw_input: crate::app::debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
             terminal_focus: crate::focus::TerminalFocus::new(),
