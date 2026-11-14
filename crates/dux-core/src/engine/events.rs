@@ -2386,7 +2386,7 @@ impl Engine {
 
     /// Mirror a saved project change in memory and answer the view that reports
     /// it.
-    fn apply_persisted_project_action(
+    pub(crate) fn apply_persisted_project_action(
         &mut self,
         action: &ProjectPersistenceAction,
     ) -> ProjectPersistenceView {

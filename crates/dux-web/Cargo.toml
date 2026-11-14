@@ -58,6 +58,9 @@ tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "json"] }
+# Breaks one column's writes in a test's session database, so a route can be
+# shown answering a write that failed partway through.
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 [lints]
 workspace = true

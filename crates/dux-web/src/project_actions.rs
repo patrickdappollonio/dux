@@ -528,67 +528,69 @@ async fn patch_project(
         return rejection.into_response();
     }
 
-    if body.provider.sent()
-        && let Err(e) = state
-            .engine
-            .apply_wire_scoped(
-                WireCommand::UpdateProjectProvider {
-                    project_id: id.clone(),
-                    provider: body.provider.into_value(),
-                },
-                scope.clone(),
-            )
-            .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
+    // Each field is its own command, saved before the next is sent and before
+    // this answers, so a 200 means every field was written. They are not one
+    // transaction: a field that fails stops the rest, and the answer names the
+    // fields saved before it, which stay saved.
+    let mut steps: Vec<(&'static str, WireCommand)> = Vec::new();
+    if body.provider.sent() {
+        steps.push((
+            "default provider",
+            WireCommand::UpdateProjectProvider {
+                project_id: id.clone(),
+                provider: body.provider.into_value(),
+            },
+        ));
+    }
+    if body.auto_reopen_agents.sent() {
+        steps.push((
+            "auto-reopen setting",
+            WireCommand::UpdateProjectAutoReopen {
+                project_id: id.clone(),
+                auto_reopen_agents: body.auto_reopen_agents.into_value(),
+            },
+        ));
+    }
+    if body.startup_command.sent() {
+        steps.push((
+            "startup command",
+            WireCommand::UpdateProjectStartupCommand {
+                project_id: id.clone(),
+                startup_command: body.startup_command.into_value(),
+            },
+        ));
+    }
+    if let Some(env) = body.env {
+        steps.push((
+            "environment",
+            WireCommand::UpdateProjectEnv {
+                project_id: id.clone(),
+                env,
+            },
+        ));
     }
 
-    if body.auto_reopen_agents.sent()
-        && let Err(e) = state
-            .engine
-            .apply_wire_scoped(
-                WireCommand::UpdateProjectAutoReopen {
-                    project_id: id.clone(),
-                    auto_reopen_agents: body.auto_reopen_agents.into_value(),
-                },
-                scope.clone(),
-            )
-            .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-
-    if body.startup_command.sent()
-        && let Err(e) = state
-            .engine
-            .apply_wire_scoped(
-                WireCommand::UpdateProjectStartupCommand {
-                    project_id: id.clone(),
-                    startup_command: body.startup_command.into_value(),
-                },
-                scope.clone(),
-            )
-            .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-
-    if let Some(env) = body.env
-        && let Err(e) = state
-            .engine
-            .apply_wire_scoped(
-                WireCommand::UpdateProjectEnv {
-                    project_id: id.clone(),
-                    env,
-                },
-                scope,
-            )
-            .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
+    let mut saved: Vec<&'static str> = Vec::new();
+    for (setting, command) in steps {
+        if let Err(error) = state.engine.apply_wire_scoped(command, scope.clone()).await {
+            return (StatusCode::BAD_REQUEST, with_saved_before(error, &saved)).into_response();
+        }
+        saved.push(setting);
     }
 
     StatusCode::OK.into_response()
+}
+
+/// A field's failure, followed by the fields the same PATCH saved before it.
+fn with_saved_before(error: String, saved: &[&str]) -> String {
+    match saved {
+        [] => error,
+        [one] => format!("{error} Already saved before that: the {one}."),
+        [init @ .., last] => format!(
+            "{error} Already saved before that: the {} and {last}.",
+            init.join(", ")
+        ),
+    }
 }
 
 // ── Reorder ──────────────────────────────────────────────────────────────────

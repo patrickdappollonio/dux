@@ -2395,6 +2395,21 @@ impl Engine {
     /// Answer the commands that add a project or prepare its checkout.
     fn dispatch_project_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
+            // Saved before the answer, so a client told it succeeded can trust
+            // it and one whose write failed is told why. No status of its own:
+            // the client that asked confirms it.
+            command @ (WireCommand::UpdateProjectProvider { .. }
+            | WireCommand::UpdateProjectAutoReopen { .. }
+            | WireCommand::UpdateProjectStartupCommand { .. }
+            | WireCommand::UpdateProjectEnv { .. }) => {
+                let WireCommandMapping::Mapped(Command::PersistProject { action, .. }) =
+                    self.map_project_command(command)?
+                else {
+                    unreachable!("a project setting maps to a project persistence action")
+                };
+                self.save_project_setting_now(&action)?;
+                Ok(WireDispatch::handled(WireCommandOutcome::default()))
+            }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
@@ -13307,6 +13322,69 @@ mod tests {
         });
         let err = result.map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("unknown project"), "err: {err}");
+    }
+
+    /// A project setting is written before the command answers, so the answer
+    /// is the write's own outcome rather than a promise a worker may break.
+    #[test]
+    fn a_project_setting_is_in_the_database_when_the_command_answers() {
+        let (mut engine, _tmp) = test_engine();
+        std::fs::write(&engine.paths.config_path, "# dux config\n").expect("seed config");
+        engine
+            .session_store
+            .upsert_project(&crate::config::ProjectConfig {
+                id: "p1".to_string(),
+                path: "/repo".to_string(),
+                name: Some("p1-name".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: BTreeMap::new(),
+            })
+            .expect("seed the project row");
+        engine.projects.push(sample_project("p1", "/repo"));
+
+        engine
+            .apply_wire(WireCommand::UpdateProjectStartupCommand {
+                project_id: "p1".to_string(),
+                startup_command: Some("make setup".to_string()),
+            })
+            .expect("the save succeeds");
+
+        let stored = engine.session_store.load_projects().expect("read back");
+        assert_eq!(stored[0].startup_command.as_deref(), Some("make setup"));
+        assert_eq!(
+            engine.config.projects[0].startup_command.as_deref(),
+            Some("make setup"),
+            "mirrored into config.toml's projects too"
+        );
+    }
+
+    /// A save whose database write fails is answered as that failure, naming
+    /// the setting and the project, and changes nothing in memory.
+    #[test]
+    fn a_project_setting_whose_database_write_fails_is_answered_as_a_failure() {
+        let (mut engine, _tmp) = test_engine();
+        engine.projects.push(sample_project("p1", "/repo"));
+        rusqlite::Connection::open(&engine.paths.sessions_db_path)
+            .unwrap()
+            .execute("DROP TABLE projects", [])
+            .unwrap();
+
+        let err = engine
+            .apply_wire(WireCommand::UpdateProjectStartupCommand {
+                project_id: "p1".to_string(),
+                startup_command: Some("make setup".to_string()),
+            })
+            .expect_err("a failed write is not a success");
+
+        assert!(
+            err.to_string()
+                .starts_with("The startup command for project \"p1-name\" was not saved"),
+            "{err:#}"
+        );
+        assert_eq!(engine.projects[0].startup_command, None);
     }
 
     #[test]

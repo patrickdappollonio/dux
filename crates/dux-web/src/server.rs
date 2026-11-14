@@ -4834,6 +4834,49 @@ mod tests {
         );
     }
 
+    /// A project PATCH answers only once each field is written: a field whose
+    /// write fails is a refusal naming it, and the fields saved before it are
+    /// named too, rather than a 200 for a change that never landed.
+    #[tokio::test]
+    async fn project_patch_reports_a_field_whose_write_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        rusqlite::Connection::open(tmp.path().join("sessions.sqlite3"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_env BEFORE UPDATE OF env ON projects \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let app = router(handle);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/projects/p1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"provider":"claude","env":{"A":"1"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let message = String::from_utf8_lossy(&body);
+        assert!(
+            message.starts_with("The environment for project \"p1\" was not saved")
+                && message.contains("disk full")
+                && message.ends_with("Already saved before that: the default provider."),
+            "{message}"
+        );
+    }
+
     /// The session PATCH applies the same up-front provider guard: for a resolvable
     /// session, an unconfigured provider is rejected with 400 before the
     /// rename/auto-reopen sub-commands run, so a bad provider cannot land after an

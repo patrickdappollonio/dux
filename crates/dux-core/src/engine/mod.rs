@@ -2452,6 +2452,66 @@ pub(crate) fn portable_project_path(path: &str) -> String {
     }
 }
 
+/// Write one project change to the session database. The project-persistence
+/// worker and [`Engine::save_project_setting_now`] share it, so the two paths
+/// cannot drift on which column a setting lands in.
+fn write_project_action(
+    store: &SessionStore,
+    action: &ProjectPersistenceAction,
+) -> anyhow::Result<()> {
+    match action {
+        ProjectPersistenceAction::Add { project, .. } => {
+            store.upsert_project(&ProjectConfig {
+                id: project.id.clone(),
+                path: project.path.clone(),
+                name: Some(project.name.clone()),
+                default_provider: project
+                    .explicit_default_provider
+                    .as_ref()
+                    .map(|provider| provider.as_str().to_string()),
+                leading_branch: project.leading_branch.clone(),
+                auto_reopen_agents: project.auto_reopen_agents,
+                startup_command: project.startup_command.clone(),
+                env: project.env.clone(),
+            })?;
+        }
+        ProjectPersistenceAction::Remove { project_id, .. }
+        | ProjectPersistenceAction::Delete { project_id, .. } => {
+            store.delete_project(project_id)?;
+        }
+        ProjectPersistenceAction::UpdateDefaultProvider {
+            project_id,
+            provider,
+            ..
+        } => {
+            store.update_project_default_provider(
+                project_id,
+                provider.as_ref().map(super::model::ProviderKind::as_str),
+            )?;
+        }
+        ProjectPersistenceAction::UpdateAutoReopen {
+            project_id,
+            auto_reopen_agents,
+            ..
+        } => {
+            store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
+        }
+        ProjectPersistenceAction::UpdateStartupCommand {
+            project_id,
+            startup_command,
+            ..
+        } => {
+            store.update_project_startup_command(project_id, startup_command.as_deref())?;
+        }
+        ProjectPersistenceAction::UpdateEnv {
+            project_id, env, ..
+        } => {
+            store.update_project_env(project_id, env)?;
+        }
+    }
+    Ok(())
+}
+
 /// Map a runtime [`Project`] to a portable [`ProjectConfig`] for config.toml.
 /// Uses the same field mapping as the persistence worker's `Add` arm so the
 /// on-disk shape stays consistent regardless of which path wrote it. The path is
@@ -3099,64 +3159,9 @@ impl Engine {
                 })),
             },
             move |tx| {
-                let result = (|| -> anyhow::Result<()> {
-                    let store = SessionStore::open_live(&db_path)?;
-                    match &action {
-                        ProjectPersistenceAction::Add { project, .. } => {
-                            store.upsert_project(&ProjectConfig {
-                                id: project.id.clone(),
-                                path: project.path.clone(),
-                                name: Some(project.name.clone()),
-                                default_provider: project
-                                    .explicit_default_provider
-                                    .as_ref()
-                                    .map(|provider| provider.as_str().to_string()),
-                                leading_branch: project.leading_branch.clone(),
-                                auto_reopen_agents: project.auto_reopen_agents,
-                                startup_command: project.startup_command.clone(),
-                                env: project.env.clone(),
-                            })?;
-                        }
-                        ProjectPersistenceAction::Remove { project_id, .. }
-                        | ProjectPersistenceAction::Delete { project_id, .. } => {
-                            store.delete_project(project_id)?;
-                        }
-                        ProjectPersistenceAction::UpdateDefaultProvider {
-                            project_id,
-                            provider,
-                            ..
-                        } => {
-                            store.update_project_default_provider(
-                                project_id,
-                                provider.as_ref().map(super::model::ProviderKind::as_str),
-                            )?;
-                        }
-                        ProjectPersistenceAction::UpdateAutoReopen {
-                            project_id,
-                            auto_reopen_agents,
-                            ..
-                        } => {
-                            store.update_project_auto_reopen(project_id, *auto_reopen_agents)?;
-                        }
-                        ProjectPersistenceAction::UpdateStartupCommand {
-                            project_id,
-                            startup_command,
-                            ..
-                        } => {
-                            store.update_project_startup_command(
-                                project_id,
-                                startup_command.as_deref(),
-                            )?;
-                        }
-                        ProjectPersistenceAction::UpdateEnv {
-                            project_id, env, ..
-                        } => {
-                            store.update_project_env(project_id, env)?;
-                        }
-                    }
-                    Ok(())
-                })()
-                .map_err(|err| format!("{err:#}"));
+                let result = SessionStore::open_live(&db_path)
+                    .and_then(|store| write_project_action(&store, &action))
+                    .map_err(|err| format!("{err:#}"));
                 let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted {
                     action,
                     result,
@@ -3177,6 +3182,67 @@ impl Engine {
                     status_op_id: status_op_id_if_unspawned,
                 });
         }
+    }
+
+    /// Save one project setting a client asked for and answer how it went,
+    /// before the call returns: the database row, the project in memory, then
+    /// `config.toml`.
+    ///
+    /// Inline rather than on the project-persistence worker, as a project add
+    /// already is, because the web's PATCH answers with this call's result and a
+    /// change handed to a worker would be answered before it was written; a
+    /// failed write would then reach nobody. The terminal UI keeps the worker,
+    /// whose completion it reports on its own status line.
+    ///
+    /// # Errors
+    ///
+    /// Returns the sentence the client shows, naming the setting and the
+    /// project: refused while a config reload is open (the reload would
+    /// overwrite the mirror), not saved when the database write fails (nothing
+    /// changed), or saved to the database but not to `config.toml`.
+    pub(crate) fn save_project_setting_now(
+        &mut self,
+        action: &ProjectPersistenceAction,
+    ) -> anyhow::Result<()> {
+        let (setting, project_name) = match action {
+            ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
+                ("default provider", project_name)
+            }
+            ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => {
+                ("auto-reopen setting", project_name)
+            }
+            ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
+                ("startup command", project_name)
+            }
+            ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
+                ("environment", project_name)
+            }
+            ProjectPersistenceAction::Add { .. }
+            | ProjectPersistenceAction::Remove { .. }
+            | ProjectPersistenceAction::Delete { .. } => {
+                anyhow::bail!("only a project setting is saved this way")
+            }
+        };
+        if self.reloading {
+            anyhow::bail!(
+                "The {setting} for project \"{project_name}\" was not saved: dux is reloading \
+                 config.toml right now. Save again in a moment."
+            );
+        }
+        write_project_action(&self.session_store, action).map_err(|error| {
+            anyhow::anyhow!(
+                "The {setting} for project \"{project_name}\" was not saved: the session \
+                 database could not be written: {error:#}"
+            )
+        })?;
+        self.apply_persisted_project_action(action);
+        self.persist_projects_to_config().map_err(|error| {
+            anyhow::anyhow!(
+                "The {setting} for project \"{project_name}\" was saved to the database, but \
+                 config.toml could not be updated, so it can revert the next time dux starts: \
+                 {error:#}"
+            )
+        })
     }
 
     /// Validate a raw path string before registering it as a project. Checks
