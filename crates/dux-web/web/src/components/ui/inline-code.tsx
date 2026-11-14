@@ -105,21 +105,37 @@ function rowWidth(block: HTMLElement): number {
   return block.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0)
 }
 
+// Layout pixels per screen pixel for the block: 1 unless a transform scales it
+// or an ancestor. A block not laid out at all (jsdom, a hidden row) reads 1.
+function layoutScale(block: HTMLElement): number {
+  const drawn = block.getBoundingClientRect().width
+  const laidOut = block.offsetWidth
+  return drawn > 0 && laidOut > 0 ? laidOut / drawn : 1
+}
+
 // Two synchronous reads inside the layout effect, so neither probe is ever
 // painted. The row is read with the chip flowing, because a chip that is kept
 // whole sets the minimum width of a block sized by its content (a flex item):
 // read with the chip whole, a block the chip has stretched past its container
 // would always report room for it and the chip would never flow. The chip is
 // then laid out at its widest for its one-line width, padding included.
+//
+// The row is read in layout pixels (`clientWidth`), which a transform does not
+// touch, while a rectangle is read on screen, which it does: a dialog or a menu
+// opens with a zoom from 95%, and the first measure runs inside it. Every
+// rectangle is therefore scaled back to layout pixels by how much the block is
+// drawn smaller or larger than it is laid out, or a chip a little wider than
+// the row would measure as fitting, stay whole and overflow once the zoom ends.
 function measureLonger(el: HTMLElement, block: HTMLElement): boolean {
   const { display, width, maxWidth, whiteSpace, overflowWrap } = el.style
+  const scale = layoutScale(block)
   el.style.whiteSpace = "pre-wrap"
   el.style.overflowWrap = "anywhere"
-  const row = rowWidth(block) - trailingWidth(el)
+  const row = rowWidth(block) - trailingWidth(el) * scale
   el.style.display = "inline-block"
   el.style.width = "max-content"
   el.style.maxWidth = "none"
-  const oneLine = el.getBoundingClientRect().width
+  const oneLine = el.getBoundingClientRect().width * scale
   el.style.display = display
   el.style.width = width
   el.style.maxWidth = maxWidth

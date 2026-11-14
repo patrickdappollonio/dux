@@ -75,6 +75,26 @@ describe("the inline code chip for a name in prose", () => {
     expect(screen.getByText("demo-web").dataset.wrap).toBe("whole")
   })
 
+  // A dialog opens with a zoom from 95%, and the chip is first measured inside
+  // it: the row's width is a layout width, the chip's an on-screen one.
+  it("measures a chip in a zooming dialog at its laid-out width, so one a little wider than the row flows", () => {
+    const zoom = 0.95
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(200)
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(200)
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const laidOut = this.tagName === "P" ? 200 : (this.textContent ?? "").length * 8
+      return { width: laidOut * zoom } as DOMRect
+    })
+    render(
+      <p>
+        Delete <InlineCode>feature-branch-name-xxxxxx</InlineCode> now
+      </p>,
+    )
+    // 26 characters lay out at 208px against a 200px row, but are drawn at
+    // under 198px while the zoom runs.
+    expect(screen.getByText("feature-branch-name-xxxxxx").dataset.wrap).toBe("flow")
+  })
+
   it("keeps the spaces inside a value instead of collapsing them", () => {
     const { container } = render(<InlineCode>npm  run   dev</InlineCode>)
     const code = container.querySelector("code")
