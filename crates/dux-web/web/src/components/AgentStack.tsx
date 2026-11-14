@@ -133,12 +133,11 @@ export function AgentStack({
 
   const overlay = theater ? (
     <TheaterPill target={target} session={session} />
-  ) : model.stripsShown ? null : (
+  ) : model.stripsShown || !hasDock ? null : (
     <StackLayoutPill
       session={session}
       layout={layout}
-      hasDock={hasDock}
-      placement={pillPlacement(hasDock, layout, splitPercent)}
+      placement={pillPlacement(layout, splitPercent)}
       onLayoutAction={onLayoutAction}
     />
   )
@@ -222,12 +221,7 @@ export function AgentStack({
   )
 }
 
-function pillPlacement(
-  hasDock: boolean,
-  layout: ComputerLayout,
-  splitPercent: number,
-): LayoutPillPlacement {
-  if (!hasDock) return { kind: "bottom" }
+function pillPlacement(layout: ComputerLayout, splitPercent: number): LayoutPillPlacement {
   switch (layout) {
     case "split":
       return { kind: "divider", agentPercent: splitPercent }

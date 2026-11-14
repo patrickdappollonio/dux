@@ -2004,6 +2004,8 @@ describe("MobileShell one part of an agent at a time", () => {
     expect(screen.queryByTestId("dock-strip")).toBeNull()
     expect(screen.queryByLabelText("New tab")).toBeNull()
     expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+    // Nor the computer header's New tab…: the flap's menu is the phone's way.
+    expect(screen.queryByRole("button", { name: "New tab…" })).toBeNull()
   })
 
   it("offers another tab and another terminal from the flap's menu", async () => {

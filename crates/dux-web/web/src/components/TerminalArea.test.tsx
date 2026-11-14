@@ -724,8 +724,8 @@ describe("TerminalArea dock", () => {
     await screen.findByTestId("stack-agent-box")
     expect(screen.queryByTestId("stack-dock-box")).toBeNull()
     expect(screen.queryByRole("separator")).toBeNull()
-    // The strips are hidden, so the + floats alone at the agent's corner.
-    expect(pillLabels()).toEqual(["New agent tab or terminal…"])
+    // The strips are hidden and the + lives in the header, so nothing floats.
+    expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
   })
 
   it.each([
@@ -747,9 +747,9 @@ describe("TerminalArea dock", () => {
   })
 
   it.each([
-    ["split", ["New agent tab or terminal…", "Hide terminals", "Maximize terminal"]],
-    ["agent", ["New agent tab or terminal…", "Show terminals"]],
-    ["terminal", ["New agent tab or terminal…", "Restore the split"]],
+    ["split", ["Hide terminals", "Maximize terminal"]],
+    ["agent", ["Show terminals"]],
+    ["terminal", ["Restore the split"]],
   ] as const)(
     "with the strips hidden floats the %s layout's controls on the divider",
     async (layout, labels) => {
@@ -843,21 +843,6 @@ describe("TerminalArea dock", () => {
     const parts = await screen.findAllByTestId("stack-part-stub")
     fireEvent.pointerDown(parts[1])
     expect(chooseStackPartMock).toHaveBeenCalledWith("s1", "t1")
-  })
-
-  it("asks before adding: a tab on the default provider, or a terminal", async () => {
-    mockState = dockState({ layout: "split" })
-    render(<TerminalArea />)
-    fireEvent.click(await screen.findByLabelText("New agent tab or terminal…"))
-    const dialog = await screen.findByRole("dialog")
-    // The provider is named as a chip, never in quotes.
-    expect(dialog.querySelector("code")?.textContent).toBe("claude")
-    fireEvent.click(screen.getByText("New agent tab"))
-    expect(addTabMock).toHaveBeenCalledWith("s1")
-
-    fireEvent.click(screen.getByLabelText("New agent tab or terminal…"))
-    fireEvent.click(await screen.findByText("New terminal"))
-    expect(createTerminalMock).toHaveBeenCalledWith("s1")
   })
 
   it("tells the store when typing has to move to a part on screen", async () => {

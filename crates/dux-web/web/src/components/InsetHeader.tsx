@@ -10,6 +10,7 @@ import {
   insetHeaderPaneSubject,
 } from "@/components/insetHeaderView"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { NewTabButton } from "@/components/StackNewDialog"
 import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
 import { useIsTruncated } from "@/hooks/use-truncated"
@@ -123,9 +124,17 @@ export function InsetHeader() {
           Labelled on desktop because
           there is room and macros are a feature people forget exists; the phone
           keeps the icon variant (MobileShell), where there is not. */}
-      {/* Theater first in the right-hand cluster, next to the macros trigger:
-          the two are the pane's own controls, and the mode change is the one
-          the eye should land on first. Same `h-8` token as its neighbours. */}
+      {/* New tab… leads the pane's own controls on an agent's pane, ahead of
+          Theater, in the same outline family at the same `h-8` token. It is
+          the stack's way to add a tab or a terminal, so a project or
+          standalone terminal's pane has none. Leading the cluster, its arrival
+          with the agent's spine row shifts nothing to its right. */}
+      {paneSubject?.kind === "agent" ? (
+        <NewTabButton session={paneSubject.session} />
+      ) : null}
+      {/* Theater next, beside the macros trigger: the mode change is the
+          one the eye should land on among the pane's controls. Same `h-8`
+          token as its neighbours. */}
       <TheaterToggle />
       {/* The pane's own pair, rendered together or not at all: gating them
           separately lets Macros paint alone for the frame between a target
