@@ -960,7 +960,10 @@ fn join_engine_thread(
             OwnerExit::Normal => {}
             // A second signal forced the quit and this thread took the exit:
             // the engine is dropped and the log flushed, so it can go.
-            OwnerExit::Forced => std::process::exit(130),
+            OwnerExit::Forced => {
+                dux_core::kill_live_child_groups();
+                std::process::exit(130)
+            }
             // The hatch took the exit because this thread was late; it is
             // exiting now, and a second exit must not race it.
             OwnerExit::HatchExiting => loop {
@@ -3469,7 +3472,10 @@ async fn shutdown_signal(force_exit: ForceExit) {
     // the conventional interrupted-exit code.
     tokio::spawn(async move {
         next_terminate_signal(&mut interrupt, &mut terminate).await;
-        fire_force_exit(force_exit, |code| std::process::exit(code));
+        fire_force_exit(force_exit, |code| {
+            dux_core::kill_live_child_groups();
+            std::process::exit(code)
+        });
     });
 }
 
@@ -3486,6 +3492,7 @@ pub(crate) fn fire_force_exit(force_exit: ForceExit, exit: impl FnOnce(i32) + Se
         dux_core::logger::error(&format!(
             "[server] could not start the forced-exit thread ({err}); exiting now"
         ));
+        dux_core::kill_live_child_groups();
         std::process::exit(130);
     }
 }

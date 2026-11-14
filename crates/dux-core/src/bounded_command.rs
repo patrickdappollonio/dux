@@ -9,9 +9,77 @@
 //! Deliberately NOT `git::wait_child_or_kill`, which pipes only a tiny stderr
 //! and never drains stdout, so it cannot be used where the output is the answer.
 
+use std::collections::BTreeSet;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
+
+/// The process groups of the children [`run_command_with_timeout`] is running
+/// right now, by leader pid. A child in a group of its own gets none of the
+/// terminal's Ctrl-C or hangup, so without this a wedged one keeps running
+/// after dux exits; [`kill_live_child_groups`] ends them on dux's way out.
+static LIVE_CHILD_GROUPS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
+
+/// Kill every process group a bounded call is running right now, on dux's way
+/// out (a quit, a forced exit, a panic that ends the terminal UI), so a wedged
+/// git, gh or tailscale call and whatever it started do not outlive dux.
+///
+/// Safe in a panic hook: it never blocks on the registry (a call holding it
+/// for its insert or remove is skipped, as that child is ending anyway) and
+/// allocates nothing.
+pub fn kill_live_child_groups() {
+    kill_groups_in(&LIVE_CHILD_GROUPS);
+}
+
+/// [`kill_live_child_groups`] over `registry`.
+fn kill_groups_in(registry: &Mutex<BTreeSet<i32>>) {
+    let groups = match registry.try_lock() {
+        Ok(groups) => groups,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    for &leader in groups.iter() {
+        if let Some(pid) = rustix::process::Pid::from_raw(leader) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// A child's group in [`LIVE_CHILD_GROUPS`] for as long as this lives. Dropped
+/// right after the leader is reaped, so a pid the system hands out again is
+/// never killed in its place.
+struct LiveChildGroup(Option<i32>);
+
+impl LiveChildGroup {
+    /// Register `child`'s group when it leads one of its own (every
+    /// [`ChildGroup`] arranges that); a child sharing dux's group is not
+    /// registered, so dux never kills its own group.
+    fn register(child: &std::process::Child) -> Self {
+        let leader = child.id().cast_signed();
+        let leads_its_group = rustix::process::Pid::from_raw(leader)
+            .is_some_and(|pid| rustix::process::getpgid(Some(pid)).is_ok_and(|group| group == pid));
+        if !leads_its_group {
+            return Self(None);
+        }
+        LIVE_CHILD_GROUPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(leader);
+        Self(Some(leader))
+    }
+}
+
+impl Drop for LiveChildGroup {
+    fn drop(&mut self) {
+        if let Some(leader) = self.0.take() {
+            LIVE_CHILD_GROUPS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&leader);
+        }
+    }
+}
 
 /// Where the child's process group comes from. The cap kills the child's whole
 /// group, so a program it started (a git hook, a per-submodule git, a
@@ -96,6 +164,7 @@ pub(crate) fn run_command_with_timeout(
         }
         Err(err) => return CommandOutcome::Failed(err.to_string()),
     };
+    let live = LiveChildGroup::register(&child);
 
     // Drain the pipes on their own threads (so a full pipe buffer can't wedge the
     // child) and hand each buffer back over a channel, so we can wait for them
@@ -120,6 +189,7 @@ pub(crate) fn run_command_with_timeout(
         // spawned child if a pipe handle is somehow missing.
         kill_with_group(&mut child);
         let _ = child.wait();
+        drop(live);
         return CommandOutcome::Failed(format!("{label} stdout/stderr pipe unavailable"));
     }
 
@@ -138,6 +208,7 @@ pub(crate) fn run_command_with_timeout(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                drop(live);
                 return CommandOutcome::Completed(Output {
                     status,
                     stdout: drain(&out_rx),
@@ -148,6 +219,7 @@ pub(crate) fn run_command_with_timeout(
                 if start.elapsed() >= timeout {
                     kill_with_group(&mut child);
                     let _ = child.wait();
+                    drop(live);
                     // Best-effort drain; the readers unblock once the killed
                     // child's pipes close.
                     let _ = drain(&out_rx);
@@ -159,6 +231,7 @@ pub(crate) fn run_command_with_timeout(
             Err(err) => {
                 kill_with_group(&mut child);
                 let _ = child.wait();
+                drop(live);
                 let _ = drain(&out_rx);
                 let _ = drain(&err_rx);
                 return CommandOutcome::Failed(format!("waiting for {label} failed: {err}"));
@@ -188,6 +261,72 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bounded call's group is in the registry while the call runs and
+    /// gone once it returns.
+    #[test]
+    fn a_running_call_registers_its_group_until_it_returns() {
+        let dir = crate::test_scratch::ScratchDir::new();
+        let pid_file = dir.path().join("pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&pid_file);
+        let call = std::thread::spawn(move || {
+            run_command_with_timeout(
+                cmd,
+                ChildGroup::New,
+                Duration::from_secs(3),
+                DEFAULT_READER_DRAIN,
+                "sh",
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let leader = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the child never started");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            LIVE_CHILD_GROUPS.lock().unwrap().contains(&leader),
+            "a running call's group is registered"
+        );
+
+        let outcome = call.join().unwrap();
+
+        assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
+        assert!(
+            !LIVE_CHILD_GROUPS.lock().unwrap().contains(&leader),
+            "a call that returned leaves nothing to kill"
+        );
+    }
+
+    /// The shutdown helper kills a registered group. Run over a registry of
+    /// the test's own, so it cannot reach a call another test has running;
+    /// nothing signals the leader by its pid, so its death is the group kill.
+    #[test]
+    fn the_shutdown_helper_kills_a_registered_group() {
+        let mut leader = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let registry = Mutex::new(BTreeSet::from([leader.id().cast_signed()]));
+
+        kill_groups_in(&registry);
+
+        let status = leader.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(9)
+        );
+    }
 
     #[test]
     fn only_a_program_that_is_not_there_is_told_apart_as_not_found() {

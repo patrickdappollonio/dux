@@ -9772,6 +9772,9 @@ fn install_terminal_restore_panic_hook() {
             if panic_takes_the_tui_down(thread::current().id()) {
                 disable_input_modes();
                 ratatui::restore();
+                // The process is on its way out: a bounded git, gh or
+                // tailscale call in a group of its own would outlive it.
+                dux_core::kill_live_child_groups();
             }
             previous(info);
         }));

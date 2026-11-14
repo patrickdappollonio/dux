@@ -18,6 +18,9 @@ pub mod background_serve;
 pub mod base_branch;
 pub mod bidi;
 pub(crate) mod bounded_command;
+/// Kill the process groups of the bounded git, gh and tailscale calls still
+/// running, on dux's way out.
+pub use bounded_command::kill_live_child_groups;
 pub mod branch_history;
 pub mod browser;
 pub mod changes_lane;

@@ -60,7 +60,7 @@ fn main() -> Result<()> {
             {
                 usage_error(&message);
             }
-            run_tui_with_flip()
+            killing_live_child_groups(run_tui_with_flip())
         }
         Some(commands::Command::Server(server)) => {
             if let Err(message) = commands::listener_flags_with_subcommand(&server) {
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
                 usage_error(&message);
             }
             match server.command {
-                None => run_server(&server.into_overrides()),
+                None => killing_live_child_groups(run_server(&server.into_overrides())),
                 Some(command) => client_commands::finish_with(|out, err| {
                     client_commands::server(command, &selection, out, err)
                 }),
@@ -115,6 +115,15 @@ fn main() -> Result<()> {
             client_commands::terminals(terminals.command, &selection, err)
         }),
     }
+}
+
+/// Hand back what a serving mode returned once the bounded git, gh and
+/// tailscale calls still running are killed: each runs in a process group of
+/// its own, which the terminal's Ctrl-C and hangup never reach, so a wedged
+/// one would otherwise outlive dux.
+fn killing_live_child_groups(ran: Result<()>) -> Result<()> {
+    dux_core::kill_live_child_groups();
+    ran
 }
 
 /// A refusal found while checking the command line, before anything starts.
@@ -231,6 +240,7 @@ fn run_tui_with_flip() -> Result<()> {
                         // dropped), so the reason lands on its own screen; the
                         // engine goes first so queued config writes land.
                         dux_web::finish_forced_quit(engine, &handle, |code| {
+                            dux_core::kill_live_child_groups();
                             std::process::exit(code)
                         });
                         // Still here: the signal hatch took the exit and is
