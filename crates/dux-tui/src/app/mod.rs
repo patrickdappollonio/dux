@@ -575,6 +575,10 @@ pub(crate) struct App {
     /// when the dialog opens on branches its warning would say something about,
     /// cleared by `drain_unpushed_count` when the answer lands.
     pub(crate) unpushed_count_rx: Option<mpsc::Receiver<BranchOfferAnswer>>,
+    /// The Delete Project dialog's uncommitted-file counts, one answer per
+    /// agent worktree as each lands. Set when the dialog opens, cleared once
+    /// the worker has sent them all.
+    pub(crate) project_worktree_files_rx: Option<mpsc::Receiver<ProjectWorktreeFilesAnswer>>,
     /// The rename dialog's pending "was this branch pushed?" answer, tagged
     /// with the agent it was asked for. One-shot, like the count above.
     pub(crate) rename_pushed_rx: Option<mpsc::Receiver<(String, bool)>>,
@@ -3149,6 +3153,26 @@ impl DeleteBranchOffer {
     }
 }
 
+/// One agent worktree the Delete Project dialog warns about: the agent it
+/// belongs to and how many of its files are not committed, `None` while git is
+/// still being asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectWorktreeFiles {
+    pub(crate) session_id: String,
+    pub(crate) agent_label: String,
+    pub(crate) answer: Option<dux_core::delete_agent_prose::UncommittedAnswer>,
+}
+
+/// One worktree's uncommitted-file count, tagged with the project whose
+/// dialog asked and the agent it was read for, so a count from a dialog since
+/// closed cannot land in another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectWorktreeFilesAnswer {
+    pub(crate) project_id: String,
+    pub(crate) session_id: String,
+    pub(crate) answer: dux_core::delete_agent_prose::UncommittedAnswer,
+}
+
 /// A landed branch offer, tagged with the agent it was read for so a stale one
 /// cannot be rendered against a different agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3672,6 +3696,9 @@ pub(crate) enum PromptState {
         return_to: Option<Box<ProjectActionsPrompt>>,
         /// Who confirming would cut off, named once the guard refuses it.
         attached: Vec<dux_core::attachments::Blocker>,
+        /// Every agent worktree the cascade removes, each with its
+        /// uncommitted-file count once a worker has read it.
+        worktree_files: Vec<ProjectWorktreeFiles>,
     },
     /// Asked before `remove-project` runs anything, the same question the
     /// browser's Remove project dialog asks: the project leaves dux and every
@@ -5531,6 +5558,7 @@ impl App {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            project_worktree_files_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
             ui_jobs: ui_jobs::UiJobs::default(),

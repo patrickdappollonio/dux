@@ -824,6 +824,9 @@ const CHANGE_BASE_BRANCH_LABEL: &str = "Change base branch";
 struct ProjectConfirmDialog<'a> {
     title: &'static str,
     body: &'a dux_core::prose::Prose,
+    /// Rows under the body before the attached list: the Delete Project
+    /// dialog's uncommitted-file lines.
+    notes: Vec<Line<'static>>,
     /// Who the guard named when it refused the confirm, listed under the body.
     attached: &'a [dux_core::attachments::Blocker],
     confirm_label: &'a str,
@@ -9859,6 +9862,7 @@ impl App {
             agent_count,
             focus,
             attached,
+            worktree_files,
             ..
         } = &self.prompt
         else {
@@ -9868,11 +9872,14 @@ impl App {
             dux_core::project_prose::delete_project_confirm_prose(Some(project_name), *agent_count);
         let confirm_focused = focus.is_confirm();
         let attached = attached.clone();
+        let notes =
+            self.project_worktree_files_lines(worktree_files, confirm_inner_width(frame.area()));
         let (cancel_button, confirm_button) = self.render_project_confirm(
             frame,
             &ProjectConfirmDialog {
                 title: "Delete Project",
                 body: &body,
+                notes,
                 attached: &attached,
                 confirm_label: &guarded_confirm_label("Delete", &attached),
                 confirm_focused,
@@ -9911,6 +9918,7 @@ impl App {
             &ProjectConfirmDialog {
                 title: "Remove Project",
                 body: &body,
+                notes: Vec::new(),
                 attached: &attached,
                 confirm_label: &guarded_confirm_label("Remove", &attached),
                 confirm_focused,
@@ -9958,6 +9966,10 @@ impl App {
         dialog: &ProjectConfirmDialog<'_>,
     ) -> (Rect, Rect) {
         let mut body = self.prose_body(dialog.body);
+        if !dialog.notes.is_empty() {
+            body.push(Line::from(""));
+            body.extend(dialog.notes.iter().cloned());
+        }
         body.extend(self.attached_section(dialog.attached, confirm_inner_width(frame.area())));
         let layout = self.render_confirm_dialog(
             frame,
@@ -12792,24 +12804,59 @@ impl App {
         offer: &crate::app::DeleteBranchOffer,
         inner_width: u16,
     ) -> Vec<Line<'static>> {
+        let failed;
+        let answer = match offer {
+            crate::app::DeleteBranchOffer::Pending => None,
+            crate::app::DeleteBranchOffer::Failed(reason) => {
+                failed = Err(reason.clone());
+                Some(&failed)
+            }
+            crate::app::DeleteBranchOffer::Ready(offer) => Some(&offer.uncommitted_files),
+        };
+        self.worktree_files_lines(agent, answer, inner_width)
+    }
+
+    /// One worktree's uncommitted-files line, shared by the agent and the
+    /// project delete dialogs: muted while git is still being asked (`None`),
+    /// in the warning colour once it counted some files or could not look, and
+    /// nothing once it counted none.
+    fn worktree_files_lines(
+        &self,
+        agent: &str,
+        answer: Option<&dux_core::delete_agent_prose::UncommittedAnswer>,
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
         use dux_core::delete_agent_prose as copy;
-        let (prose, style) = match offer {
-            crate::app::DeleteBranchOffer::Pending => (
+        let (prose, style) = match answer {
+            None => (
                 Some(copy::worktree_files_checking_prose(agent)),
                 Style::default().fg(self.theme.hint_desc_fg),
             ),
-            crate::app::DeleteBranchOffer::Failed(reason) => (
-                copy::worktree_files_prose(agent, &Err(reason.clone())),
-                Style::default().fg(self.theme.warning_fg),
-            ),
-            crate::app::DeleteBranchOffer::Ready(offer) => (
-                copy::worktree_files_prose(agent, &offer.uncommitted_files),
+            Some(answer) => (
+                copy::worktree_files_prose(agent, answer),
                 Style::default().fg(self.theme.warning_fg),
             ),
         };
         prose
             .map(|prose| self.indented_prose_lines(&prose, style, inner_width))
             .unwrap_or_default()
+    }
+
+    /// The Delete Project dialog's line per agent worktree, in the agent
+    /// delete dialog's words and colours: that git is still being asked, how
+    /// many files are not committed and go with it, or that git could not
+    /// look. A clean worktree says nothing.
+    fn project_worktree_files_lines(
+        &self,
+        worktree_files: &[crate::app::ProjectWorktreeFiles],
+        inner_width: u16,
+    ) -> Vec<Line<'static>> {
+        worktree_files
+            .iter()
+            .flat_map(|entry| {
+                self.worktree_files_lines(&entry.agent_label, entry.answer.as_ref(), inner_width)
+            })
+            .collect()
     }
 
     /// What stands in for the branch boxes while git has not answered about

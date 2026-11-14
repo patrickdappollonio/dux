@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import { Check, CircleAlert, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
 import {
   Dialog,
   DialogContent,
@@ -34,10 +35,9 @@ import {
   otherBranchesLabelProse,
   otherBranchesWarningProse,
   protectedBranchesProse,
-  type UncommittedAnswer,
   type UnpushedAnswer,
-  worktreeFilesCheckingProse,
-  worktreeFilesProse,
+  uncommittedAnswer,
+  worktreeFilesNote,
 } from "@/lib/deleteAgent"
 import { type Prose, renderProse } from "@/lib/prose"
 import { cn } from "@/lib/utils"
@@ -144,20 +144,18 @@ function countFailures(offer: BranchOffer): [string | null, string | null] {
 // many uncommitted files go with it or that git could not look. `null` once
 // git counted none, as the loss warning says nothing about a branch that
 // loses no commit.
-function worktreeFiles(
-  offer: OfferState,
-  agent: string,
-): { prose: Prose; tone: "quiet" | "warning" } | null {
-  if (offer.state === "pending")
-    return { prose: worktreeFilesCheckingProse(agent), tone: "quiet" }
-  const answer: UncommittedAnswer =
-    offer.state === "failed"
-      ? { failed: offer.reason }
-      : typeof offer.offer.uncommitted_files === "number"
-        ? { count: offer.offer.uncommitted_files }
-        : { failed: offer.offer.uncommitted_files_error ?? "no count came back" }
-  const prose = worktreeFilesProse(agent, answer)
-  return prose === null ? null : { prose, tone: "warning" }
+function worktreeFiles(offer: OfferState, agent: string) {
+  return worktreeFilesNote(
+    agent,
+    offer.state === "pending"
+      ? null
+      : offer.state === "failed"
+        ? { failed: offer.reason }
+        : uncommittedAnswer(
+            offer.offer.uncommitted_files,
+            offer.offer.uncommitted_files_error,
+          ),
+  )
 }
 
 // What deleting the boxes ticked right now loses, or `null` with nothing
@@ -558,14 +556,7 @@ export function DeleteSessionDialog() {
                 git will not delete a branch still checked out, so there is
                 nothing to offer. */}
             <Collapse open={deleteWorktree}>
-              {files &&
-                (files.tone === "quiet" ? (
-                  <p className="text-sm text-muted-foreground">
-                    {renderProse(files.prose)}
-                  </p>
-                ) : (
-                  <BranchWarning prose={files.prose} />
-                ))}
+              <WorktreeFilesNote note={files} />
               {firstBoxShown && (
                 <CheckboxRow
                   id="delete-branch"

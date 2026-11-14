@@ -226,6 +226,60 @@ fn the_checkout_default_branch_dialog_chips_the_project_and_its_base() {
     assert_chipped(&app, &buf, "base-co");
 }
 
+/// The delete-project dialog says, per agent worktree the cascade removes, how
+/// many uncommitted files go with it in the agent delete dialog's words: muted
+/// while git is asked, in the warning colour with the agent chipped once it
+/// answered, and nothing for a clean worktree.
+#[test]
+fn the_delete_project_dialog_counts_the_uncommitted_files_per_worktree() {
+    let mut app = test_app(default_bindings());
+    let project_id = project_with_agents(&mut app, 2);
+    let entry = |id: &str, label: &str, answer| crate::app::ProjectWorktreeFiles {
+        session_id: id.to_string(),
+        agent_label: label.to_string(),
+        answer,
+    };
+    let buf = open(
+        &mut app,
+        PromptState::ConfirmDeleteProject {
+            attached: Vec::new(),
+            project_id,
+            project_name: "proj-del".to_string(),
+            agent_count: 2,
+            focus: ConfirmFocus::Cancel,
+            return_to: None,
+            worktree_files: vec![
+                entry("s1", "dirty-duck", Some(Ok(3))),
+                entry("s2", "clean-duck", Some(Ok(0))),
+                entry("s3", "stuck-duck", Some(Err("git timed out".to_string()))),
+                entry("s4", "slow-duck", None),
+            ],
+        },
+    );
+    let text = dialog_text(&buf, "Delete Project");
+    assert!(
+        text.contains("3 files in dirty-duck aren't committed and will be deleted."),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "dux could not look for uncommitted files in stuck-duck (git timed out); \
+             check it before deleting it."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Looking for uncommitted files in slow-duck \u{2026}"),
+        "{text}"
+    );
+    assert!(!text.contains("clean-duck"), "{text}");
+    assert_chipped_on_row(&app, &buf, "3 files in", "dirty-duck");
+    let warning = occurrences(&buf, "3 files in")[0];
+    assert_eq!(buf[warning].fg, app.theme.warning_fg, "{}", screen(&buf));
+    let looking = occurrences(&buf, "Looking for")[0];
+    assert_eq!(buf[looking].fg, app.theme.hint_desc_fg, "{}", screen(&buf));
+}
+
 /// The delete-project dialog prints the core body (the browser's words),
 /// chips the project, names the cascade, and publishes a Cancel / Delete pair
 /// whose Delete is the Danger kind.
@@ -242,6 +296,7 @@ fn the_delete_project_dialog_chips_the_project_and_names_the_cascade() {
             agent_count: 2,
             focus: ConfirmFocus::Cancel,
             return_to: None,
+            worktree_files: Vec::new(),
         },
     );
     assert_chipped(&app, &buf, "proj-del");
@@ -1777,6 +1832,7 @@ fn dialog_body_text_is_the_themes_text_color_on_a_light_theme() {
             agent_count: 2,
             focus: ConfirmFocus::Cancel,
             return_to: None,
+            worktree_files: Vec::new(),
         },
     );
     assert_body_text(&app, &buf, "This is irreversible.");

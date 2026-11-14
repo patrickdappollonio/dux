@@ -385,3 +385,34 @@ export function worktreeFilesProse(
         " aren't committed and will be deleted.",
       ]
 }
+
+/**
+ * A worktree count as the wire carries it, read as an answer: the count, or
+ * the reason git could not look (a missing reason still reads as a failed
+ * look, never as a clean worktree).
+ */
+export function uncommittedAnswer(
+  count: number | null,
+  error: string | null,
+): UncommittedAnswer {
+  return typeof count === "number"
+    ? { count }
+    : { failed: error ?? "no count came back" }
+}
+
+/**
+ * What a dialog that removes `agent`'s worktree says about the files in it:
+ * quietly that git is still being asked (`answer` `null`), then as a warning
+ * how many uncommitted files go with it or that git could not look; `null`
+ * once git counted none. The agent delete dialog says it under its ticked
+ * worktree box, the project delete dialog once per agent.
+ */
+export function worktreeFilesNote(
+  agent: string,
+  answer: UncommittedAnswer | null,
+): { prose: Prose; tone: "quiet" | "warning" } | null {
+  if (answer === null)
+    return { prose: worktreeFilesCheckingProse(agent), tone: "quiet" }
+  const prose = worktreeFilesProse(agent, answer)
+  return prose === null ? null : { prose, tone: "warning" }
+}

@@ -217,6 +217,12 @@ export interface BranchOffer {
   uncommitted_files_error: string | null
 }
 
+// How many files in a worktree are not committed, or why git could not look.
+export type UncommittedFiles = Pick<
+  BranchOffer,
+  "uncommitted_files" | "uncommitted_files_error"
+>
+
 // One box's answer on a delete. A ticked box carries exactly the entries the
 // offer pinned; an unticked one carries none. `unchecked` says why a box had
 // no offer to answer from (still checking, or the check failed), and the
@@ -288,6 +294,13 @@ export const sessionsApi = {
     request<BranchOffer>(
       "GET",
       `/api/v1/sessions/${encodeURIComponent(id)}/branch-unpushed`,
+    ),
+  // How many files in the agent's worktree are not committed, on its own: no
+  // branch is read, so asking leaves the delete that follows as it was.
+  uncommittedFiles: (id: string) =>
+    request<UncommittedFiles>(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(id)}/uncommitted-files`,
     ),
   // Whether renaming the agent's branch would leave a pushed copy behind on the
   // old name. `null` when git could not answer; the dialog then warns about

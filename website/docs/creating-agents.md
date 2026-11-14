@@ -832,7 +832,12 @@ project's name, its folder, its base branch and the branch the folder is on righ
   agent's worktree in the background, the same way deleting one agent with its worktree
   does: each one waits for its agent to stop and for anything still running in it. One
   status follows the whole delete and, when it ends, names any worktree that could not be
-  removed and why.
+  removed and why. Before you confirm, its dialog says, for each agent's worktree that
+  holds uncommitted files, how many there are, in the same words the agent delete dialog
+  uses ("3 files in … aren't committed and will be deleted"). Each line reads "Looking for
+  uncommitted files in …" while git is being asked, and says so when git could not look; a
+  worktree with every file committed gets no line. You can confirm without waiting for
+  the counts.
 - **Remove project…** forgets the project and its agents and leaves every worktree on
   disk.
 

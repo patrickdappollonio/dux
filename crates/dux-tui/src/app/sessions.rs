@@ -4252,6 +4252,18 @@ impl App {
         project: &Project,
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) {
+        // Every agent worktree the cascade removes, as `projects rm
+        // --delete-worktrees` counts them: the project's managed agents.
+        let worktrees: Vec<(String, String, String)> = self
+            .engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project.id.as_str()))
+            .filter_map(|s| {
+                s.managed_worktree()
+                    .map(|path| (s.id.clone(), s.display_label(), path.to_string()))
+            })
+            .collect();
         self.prompt = PromptState::ConfirmDeleteProject {
             attached: Vec::new(),
             agent_count: self.project_agent_count(&project.id),
@@ -4259,7 +4271,104 @@ impl App {
             project_name: project.name.clone(),
             focus: ConfirmFocus::Cancel, // Cancel is the safe default
             return_to,
+            worktree_files: worktrees
+                .iter()
+                .map(
+                    |(session_id, agent_label, _)| crate::app::ProjectWorktreeFiles {
+                        session_id: session_id.clone(),
+                        agent_label: agent_label.clone(),
+                        answer: None,
+                    },
+                )
+                .collect(),
         };
+        self.spawn_project_worktree_files(&project.id, worktrees);
+    }
+
+    /// Count, off the UI thread, the uncommitted files in each worktree a
+    /// project delete removes. One worker reads them in turn and sends each
+    /// answer as it lands, so the dialog fills in line by line; until then each
+    /// says it is still looking, and nothing holds the confirm.
+    fn spawn_project_worktree_files(
+        &mut self,
+        project_id: &str,
+        worktrees: Vec<(String, String, String)>,
+    ) {
+        if worktrees.is_empty() {
+            self.project_worktree_files_rx = None;
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.project_worktree_files_rx = Some(rx);
+        let project_id = project_id.to_string();
+        std::thread::spawn(move || {
+            for (session_id, _, path) in worktrees {
+                let answer = dux_core::branch_history::worktree_uncommitted_files(
+                    std::path::Path::new(&path),
+                );
+                let sent = tx.send(crate::app::ProjectWorktreeFilesAnswer {
+                    project_id: project_id.clone(),
+                    session_id,
+                    answer,
+                });
+                if sent.is_err() {
+                    // The dialog is gone; nobody reads the rest.
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Fold every landed uncommitted-file count into the Delete Project dialog
+    /// that asked for it. Tagged with the project and the agent, and dropped
+    /// when the dialog on screen is not the one that asked. A worker that
+    /// stopped before answering every worktree leaves the rest saying so
+    /// rather than still looking.
+    pub(crate) fn drain_project_worktree_files(&mut self) {
+        let Some(rx) = self.project_worktree_files_rx.as_ref() else {
+            return;
+        };
+        let mut landed = Vec::new();
+        let stopped = loop {
+            match rx.try_recv() {
+                Ok(answer) => landed.push(answer),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        if stopped {
+            self.project_worktree_files_rx = None;
+        }
+        if landed.is_empty() && !stopped {
+            return;
+        }
+        self.mark_frame_dirty();
+        let PromptState::ConfirmDeleteProject {
+            project_id,
+            worktree_files,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        for answer in landed {
+            if answer.project_id != *project_id {
+                continue;
+            }
+            if let Some(entry) = worktree_files
+                .iter_mut()
+                .find(|entry| entry.session_id == answer.session_id)
+            {
+                entry.answer = Some(answer.answer);
+            }
+        }
+        if stopped {
+            for entry in worktree_files.iter_mut().filter(|e| e.answer.is_none()) {
+                entry.answer = Some(Err(
+                    "the uncommitted-file check stopped unexpectedly".to_string()
+                ));
+            }
+        }
     }
 
     /// How many agents belong to `project_id`, a real project's or an
@@ -5616,6 +5725,7 @@ mod tests {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
+            project_worktree_files_rx: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
             ui_jobs: crate::app::ui_jobs::UiJobs::default(),
@@ -10305,6 +10415,31 @@ mod tests {
         assert!(worktree.is_dir(), "the agent's worktree is on disk");
         select_the_agent_row(&mut app);
         (root, app, worktree)
+    }
+
+    /// The delete-project dialog counts each agent worktree's uncommitted
+    /// files on a worker, saying it is still looking until the count lands.
+    #[test]
+    fn the_delete_project_dialog_counts_each_worktrees_uncommitted_files_on_a_worker() {
+        let (_root, mut app, worktree) = project_with_a_real_agent();
+        std::fs::write(worktree.join("NOTES.md"), "draft").unwrap();
+
+        app.execute_command("delete-project")
+            .expect("open the confirmation");
+        let answers = |app: &App| match &app.prompt {
+            PromptState::ConfirmDeleteProject { worktree_files, .. } => worktree_files
+                .iter()
+                .map(|entry| entry.answer.clone())
+                .collect::<Vec<_>>(),
+            other => panic!("expected the delete-project confirmation, got {other:?}"),
+        };
+        assert_eq!(answers(&app), vec![None], "still looking as it opens");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while answers(&app) == vec![None] && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.drain_project_worktree_files();
+        }
+        assert_eq!(answers(&app), vec![Some(Ok(1))]);
     }
 
     #[test]

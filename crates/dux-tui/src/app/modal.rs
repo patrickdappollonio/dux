@@ -1265,6 +1265,7 @@ pub(super) mod tests {
                     agent_count: 2,
                     focus: ConfirmFocus::Cancel,
                     return_to: None,
+                    worktree_files: Vec::new(),
                 },
             ),
             (

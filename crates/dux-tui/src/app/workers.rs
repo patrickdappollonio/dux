@@ -200,6 +200,7 @@ impl App {
         // `StatusOpCompleted`), so fold it in on the same tick.
         self.drain_notes_fetch();
         self.drain_unpushed_count();
+        self.drain_project_worktree_files();
         self.drain_rename_pushed_probe();
         self.drain_pr_clone_folder_check();
         self.drain_ui_jobs();
