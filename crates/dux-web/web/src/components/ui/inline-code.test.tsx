@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, screen } from "@testing-library/react"
 
 import { InlineCode } from "./inline-code"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 // A name inside a sentence (a branch, a path, a command) is told apart from the
 // prose around it by this chip, and by nothing else: no quotes.
@@ -30,29 +33,43 @@ describe("the inline code chip for a name in prose", () => {
     expect(code.className).toContain("wrap-anywhere")
   })
 
-  it("flows like text when it wraps, each row's background hugging that row", () => {
-    // jsdom cannot lay a line out, so the classes that decide the layout are
-    // pinned instead. An inline block that wraps takes the whole line width and
-    // pushes the rest of the sentence below it, and `box-decoration-clone`
-    // means nothing on one; an inline box gives every wrapped row its own
-    // padded, rounded background and lets the sentence continue after it.
+  // jsdom cannot lay a line out, so the classes that decide the layout are
+  // pinned, and the chip's width against its row is stubbed.
+  it("moves to the next row whole when it fits on one, so a hyphen never splits it", () => {
+    render(
+      <p>
+        Saved the startup command for project <InlineCode>demo-web</InlineCode>.
+      </p>,
+    )
+    const code = screen.getByText("demo-web")
+    const classes = code.className.split(/\s+/)
+    expect(code.dataset.wrap).toBe("whole")
+    expect(classes).toContain("inline-block")
+    expect(classes).toContain("max-w-full")
+  })
+
+  it("flows like text when it is longer than a row, each row's background hugging that row", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(200)
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return { width: (this.textContent ?? "").length * 8 } as DOMRect
+    })
     render(
       <p>
         Saved it to <InlineCode>~/.config/dux/worktrees/dux/server-mode/.dux/uploads</InlineCode>{" "}
-        and sent its path.
+        and sent its path, then <InlineCode>demo-web</InlineCode> took it.
       </p>,
     )
-    const code = screen.getByText(/\.dux\/uploads/)
-    const classes = code.className.split(/\s+/)
+    const long = screen.getByText(/\.dux\/uploads/)
+    const classes = long.className.split(/\s+/)
+    expect(long.dataset.wrap).toBe("flow")
     expect(classes).toContain("inline")
     expect(classes).not.toContain("inline-block")
-    expect(classes).not.toContain("block")
     expect(classes).toContain("box-decoration-clone")
-    // Breaking mid-run is the last resort: a run with no break point moves to
-    // the next row whole when it fits there, and splits only when it is longer
-    // than a row. `break-all` would split every name at the edge of the line.
+    // Breaking mid-run is the last resort: `break-all` would split every name
+    // at the edge of the line.
     expect(classes).toContain("wrap-anywhere")
     expect(classes).not.toContain("break-all")
+    expect(screen.getByText("demo-web").dataset.wrap).toBe("whole")
   })
 
   it("keeps the spaces inside a value instead of collapsing them", () => {
