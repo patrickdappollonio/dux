@@ -47,7 +47,7 @@ describe("the inline code chip for a name in prose", () => {
     expect(classes).not.toContain("wrap-anywhere")
   })
 
-  it("flows like text when it is longer than a row, each row's background hugging that row", () => {
+  it("flows like text when it is longer than a row, as one ribbon that stays inside the rows", () => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(200)
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       return { width: (this.textContent ?? "").length * 8 } as DOMRect
@@ -63,14 +63,18 @@ describe("the inline code chip for a name in prose", () => {
     expect(long.dataset.wrap).toBe("flow")
     expect(classes).toContain("inline")
     expect(classes).not.toContain("inline-block")
-    expect(classes).toContain("box-decoration-clone")
+    // Sliced, not cloned: a browser does not keep room for a cloned end
+    // padding where it breaks the line, so each row would overhang its end.
+    expect(classes).toContain("box-decoration-slice")
+    expect(classes).not.toContain("box-decoration-clone")
     // Breaking mid-run is the last resort: `break-all` would split every name
     // at the edge of the line.
     expect(classes).toContain("wrap-anywhere")
     expect(classes).not.toContain("break-all")
-    // Its spaces are kept, but whether it wraps at all is its row's to say, so
+    // Its spaces are kept, and one it breaks at wraps rather than hanging
+    // past the row's end, but whether it wraps at all is its row's to say, so
     // in a row that truncates it stays on one line.
-    expect(classes).toContain("[white-space-collapse:preserve]")
+    expect(classes).toContain("[white-space-collapse:break-spaces]")
     expect(classes.some((c) => c.startsWith("whitespace-"))).toBe(false)
     expect(screen.getByText("demo-web").dataset.wrap).toBe("whole")
   })

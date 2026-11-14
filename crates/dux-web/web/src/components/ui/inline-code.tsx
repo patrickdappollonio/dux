@@ -27,17 +27,22 @@ import { cn } from "@/lib/utils"
 // row that truncates it stays on one line and is cut by the ellipsis), and
 // anywhere as a last resort (`anywhere` rather than `break-word`, because it also shrinks the
 // chip's minimum width, so a long path cannot stretch a flex or grid cell, or
-// a toast, past the screen). Every row it spans gets a background of its own
-// that hugs that row's text (`box-decoration-clone`), and the sentence carries
-// on right after it. Which of the two a chip is depends on how wide it is
-// against the row it sits in, which only layout knows, so it is measured, and
-// measured again whenever that row changes width.
+// a toast, past the screen). Its background is one ribbon broken at each row
+// end, padded and rounded only where the name itself starts and ends, and the
+// sentence carries on right after it. The ribbon is sliced rather than each
+// row cloned as a pill of its own because a browser does not keep room for a
+// cloned end padding when it breaks the line, so every row but the last
+// overhung the text column by that padding; and a space it breaks at wraps
+// rather than hanging past the row's end (`break-spaces`), for the same
+// reason. Which of the two a chip is depends on how wide it is against the
+// row it sits in, which only layout knows, so it is measured, and measured
+// again whenever that row changes width.
 //
 // Nothing is substituted for its spaces in either mode, so a copied chip is
 // byte for byte the value.
-const CHIP_CLASSES = "inline rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] box-decoration-clone"
+const CHIP_CLASSES = "inline rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em]"
 const WHOLE_CLASSES = "whitespace-pre"
-const FLOW_CLASSES = "[white-space-collapse:preserve] wrap-anywhere"
+const FLOW_CLASSES = "[white-space-collapse:break-spaces] wrap-anywhere box-decoration-slice"
 
 function InlineCode({ className, ref, children, ...props }: React.ComponentProps<"code">) {
   const own = useRef<HTMLElement>(null)
