@@ -165,6 +165,15 @@ pub(crate) enum EngineRequest {
     /// Reload `config.toml` after dux wrote it itself, as `ApplyWire` with
     /// `ReloadConfig` does, but as dux's own reload, which is not announced.
     ReloadAfterOwnConfigWrite(oneshot::Sender<Result<WireCommandOutcome, WireError>>),
+    /// Save one project setting (one of the four `UpdateProject*` commands)
+    /// through the project-persistence worker the terminal UI saves the same
+    /// settings through, and answer only once the write has completed and
+    /// `config.toml` was updated after it. See [`PendingProjectSave`].
+    SaveProjectSetting(
+        WireCommand,
+        StatusScope,
+        oneshot::Sender<Result<(), ProjectSaveFailure>>,
+    ),
     /// A status from a non-engine producer (the changed-files `ChangesService`)
     /// to broadcast through the shared status controller so it auto-clears and
     /// reaches every client, exactly like engine-originated statuses.
@@ -1032,6 +1041,51 @@ struct PendingSubscribe {
     deadline: Instant,
 }
 
+/// Why a project setting a browser asked for was not wholly saved, in the
+/// sentence the browser shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProjectSaveFailure {
+    /// Nothing changed: the change was refused before it reached the worker,
+    /// or the session database could not be written.
+    NotSaved(String),
+    /// The session database holds the change and memory follows it, but
+    /// `config.toml` could not be updated, so the change can revert the next
+    /// time dux starts. Half done, and the browser says so until dismissed.
+    HalfSaved(String),
+}
+
+/// A project setting saved on the project-persistence worker, whose route waits
+/// for the worker's completion, matched by the id the dispatch handed out. The
+/// reply is held until that completion is drained and `config.toml` mirrors it,
+/// as [`PendingSubscribe`] holds a subscribe until its launch reports back. No
+/// deadline of its own: the worker always reports back, a panic and a thread
+/// that never started included, and a change a config reload holds back is
+/// saved, and reported, when the reload lands.
+struct PendingProjectSave {
+    reply: oneshot::Sender<Result<(), ProjectSaveFailure>>,
+}
+
+/// The setting a project change saves and the project it belongs to, for the
+/// sentences a browser is answered with; `None` for an add or a removal.
+fn project_setting_named(
+    action: &dux_core::worker::ProjectPersistenceAction,
+) -> Option<(&'static str, &str)> {
+    use dux_core::worker::ProjectPersistenceAction as Action;
+    match action {
+        Action::UpdateDefaultProvider { project_name, .. } => {
+            Some(("default provider", project_name))
+        }
+        Action::UpdateAutoReopen { project_name, .. } => {
+            Some(("auto-reopen setting", project_name))
+        }
+        Action::UpdateStartupCommand { project_name, .. } => {
+            Some(("startup command", project_name))
+        }
+        Action::UpdateEnv { project_name, .. } => Some(("environment", project_name)),
+        Action::Add { .. } | Action::Remove { .. } | Action::Delete { .. } => None,
+    }
+}
+
 /// The caller-facing end of the engine actor: every route reaches the `!Send`
 /// engine through this cheap, cloneable handle, by request over a channel or
 /// through the registries it shares by handle.
@@ -1308,6 +1362,24 @@ impl EngineHandle {
         rx.await
             .map_err(|_| "engine reply dropped".to_string())?
             .map_err(|e| e.message)
+    }
+
+    /// Save one project setting and answer once it is written: the session
+    /// database by the project-persistence worker, then memory and
+    /// `config.toml` on the engine thread. See
+    /// [`EngineRequest::SaveProjectSetting`].
+    pub(crate) async fn save_project_setting(
+        &self,
+        command: WireCommand,
+        origin: StatusScope,
+    ) -> Result<(), ProjectSaveFailure> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::SaveProjectSetting(command, origin, tx))
+            .await
+            .map_err(|_| ProjectSaveFailure::NotSaved("engine thread gone".to_string()))?;
+        rx.await
+            .map_err(|_| ProjectSaveFailure::NotSaved("engine reply dropped".to_string()))?
     }
 
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
@@ -2550,6 +2622,9 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         // check and stamps the viewed/attention state.
         EngineRequest::ApplyWire(..)
         | EngineRequest::ReloadAfterOwnConfigWrite(..)
+        // Hands a project change to a worker; its completion moves the spine
+        // again when it is drained.
+        | EngineRequest::SaveProjectSetting(..)
         | EngineRequest::SubscribePty(..)
         // Clears attention and starts a pull-request check, as a subscribe
         // from a pane on screen does.
@@ -2818,6 +2893,9 @@ pub(crate) struct EngineService {
     /// Subscribes waiting for their provider to come up via the worker-event
     /// drain.
     pending: Vec<PendingSubscribe>,
+    /// Project settings waiting for their worker's completion, by the id the
+    /// dispatch handed out.
+    pending_project_saves: std::collections::HashMap<String, PendingProjectSave>,
     /// The session most recently brought to the foreground via a PTY subscribe.
     /// Workspace-global (single-tenant server), last-subscribe-wins across
     /// browser clients, deliberately NOT the engine's `watched_session_id` (that
@@ -2911,6 +2989,7 @@ impl EngineService {
             live_limits,
             tailscale_mode_control,
             pending: Vec::new(),
+            pending_project_saves: std::collections::HashMap::new(),
             last_pr_foregrounded: None,
             spine_check,
             mutation_version: 0,
@@ -3030,33 +3109,88 @@ impl EngineService {
             self.status.clear(key.clone());
         }
 
-        // A project mutation just updated SQLite + in-memory projects; mirror
-        // it into the portable config.toml so a later TUI start doesn't clobber it.
-        // Skip for `Added`, since that arm already wrote config inline in command.rs,
-        // and Skip for `PersistenceFailed`, since nothing was saved.
-        if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
-            && !matches!(
-                outcome.view,
-                ProjectPersistenceView::PersistenceFailed { .. }
-                    | ProjectPersistenceView::Added { .. }
-            )
-            && let Err(e) = engine.persist_projects_to_config()
-        {
-            // STICKY: SQLite and the portable config now disagree about
-            // the same project. That is textbook half-done, and dux treats
-            // config/DB divergence as a first-class hazard elsewhere (a
-            // later TUI start reads the config, not the database, so the
-            // change silently reverts). Fixing it means editing config.toml,
-            // outside anything the toast can offer.
-            let _ = self.status.send(
-                WireStatus::keyed(
-                    "config-write",
-                    "error",
-                    format!("Saved to the database, but config.toml could not be updated: {e:#}"),
-                )
-                .sticky(),
-            );
+        if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction {
+            self.mirror_project_change(engine, outcome);
         }
+    }
+
+    /// A project change was saved to SQLite, or failed to be, and memory
+    /// already follows a saved one: mirror it into the portable `config.toml`
+    /// so a later TUI start doesn't clobber it, and answer the browser waiting
+    /// on it, if one is. `Added` wrote config inline in command.rs, and a
+    /// `PersistenceFailed` saved nothing, so neither writes here.
+    fn mirror_project_change(
+        &mut self,
+        engine: &mut Engine,
+        outcome: &dux_core::engine::ProjectPersistenceOutcome,
+    ) {
+        let waiting = outcome
+            .status_op_id
+            .as_deref()
+            .and_then(|id| self.pending_project_saves.remove(id));
+        let config_written = match &outcome.view {
+            ProjectPersistenceView::PersistenceFailed { error } => {
+                if let Some(waiting) = waiting {
+                    let message = match project_setting_named(&outcome.action) {
+                        Some((setting, project_name)) => format!(
+                            "The {setting} for project \"{project_name}\" was not saved: the \
+                             session database could not be written: {error}"
+                        ),
+                        None => error.clone(),
+                    };
+                    // A request that has gone (the browser hung up) cannot be
+                    // answered, so the failure goes to the people on screen.
+                    if waiting
+                        .reply
+                        .send(Err(ProjectSaveFailure::NotSaved(message.clone())))
+                        .is_err()
+                    {
+                        let _ = self.status.send(WireStatus::new("error", message));
+                    }
+                }
+                return;
+            }
+            ProjectPersistenceView::Added { .. } => Ok(()),
+            _ => engine.persist_projects_to_config(),
+        };
+        let Err(e) = config_written else {
+            if let Some(waiting) = waiting {
+                let _ = waiting.reply.send(Ok(()));
+            }
+            return;
+        };
+        if let Some(waiting) = waiting
+            && let Some((setting, project_name)) = project_setting_named(&outcome.action)
+        {
+            // The browser that asked raises this sticky itself, so no status
+            // here unless that request is gone.
+            let message = format!(
+                "The {setting} for project \"{project_name}\" was saved to the database, but \
+                 config.toml could not be updated, so it can revert the next time dux starts: \
+                 {e:#}"
+            );
+            if waiting
+                .reply
+                .send(Err(ProjectSaveFailure::HalfSaved(message)))
+                .is_ok()
+            {
+                return;
+            }
+        }
+        // STICKY: SQLite and the portable config now disagree about
+        // the same project. That is textbook half-done, and dux treats
+        // config/DB divergence as a first-class hazard elsewhere (a
+        // later TUI start reads the config, not the database, so the
+        // change silently reverts). Fixing it means editing config.toml,
+        // outside anything the toast can offer.
+        let _ = self.status.send(
+            WireStatus::keyed(
+                "config-write",
+                "error",
+                format!("Saved to the database, but config.toml could not be updated: {e:#}"),
+            )
+            .sticky(),
+        );
     }
 
     /// Whether the web owns the routable follow-ups for `reaction`.
@@ -3610,6 +3744,21 @@ impl EngineService {
                 }
                 EngineRequest::PtyShown(tab_id) => {
                     note_tab_looked_at(engine, &mut self.last_pr_foregrounded, &tab_id);
+                }
+                EngineRequest::SaveProjectSetting(cmd, origin, reply) => {
+                    engine.current_origin = origin;
+                    let dispatched = engine.dispatch_project_setting(cmd);
+                    engine.current_origin = StatusScope::All;
+                    match dispatched {
+                        Ok(save_id) => {
+                            self.pending_project_saves
+                                .insert(save_id, PendingProjectSave { reply });
+                        }
+                        Err(error) => {
+                            let _ =
+                                reply.send(Err(ProjectSaveFailure::NotSaved(error.to_string())));
+                        }
+                    }
                 }
                 EngineRequest::SpineJson(reply) => {
                     // Serve the loop-local cache (handled here, not in
@@ -4758,6 +4907,10 @@ fn handle_request(
         // and PtyShown with it (it needs the loop's foreground memory).
         EngineRequest::SubscribePty(..) => unreachable!("SubscribePty handled in the loop"),
         EngineRequest::PtyShown(_) => unreachable!("PtyShown handled in the loop"),
+        // Handled inline in the loop (it needs the pending project saves).
+        EngineRequest::SaveProjectSetting(..) => {
+            unreachable!("SaveProjectSetting handled in the loop")
+        }
         // Shutdown is handled inline in the loop (it must stop the thread).
         EngineRequest::Shutdown(_) => unreachable!("Shutdown handled in the loop"),
         EngineRequest::WritePty(id, bytes) => handle_pty_write(engine, &id, &bytes),

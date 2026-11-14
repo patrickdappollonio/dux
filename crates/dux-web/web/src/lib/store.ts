@@ -7878,8 +7878,16 @@ export async function updateProjectSettings(
     notifySuccess(projectSettingsSaved(projectName, patch))
     return true
   } catch (e) {
+    // Sticky (weighed): a 500 is the one answer that means a field reached
+    // the session database but not config.toml, so it can quietly revert the
+    // next time dux starts, and fixing that means editing config.toml, outside
+    // anything the toast can offer. Every other refusal names what it saved
+    // and what it did not, and the dialog shows the settings as they now
+    // stand, so it is not sticky.
+    const halfSaved = e instanceof ProjectsApiError && e.status === 500
     notifyError(
       e instanceof Error ? e.message : "Could not update project settings.",
+      { sticky: halfSaved },
     )
     return false
   }

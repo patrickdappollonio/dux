@@ -718,8 +718,10 @@ pub struct ProjectPersistenceOutcome {
     pub view: ProjectPersistenceView,
     /// Correlation id for a TUI `HandlerStatusOp` whose final is resolved in the
     /// completion handler (the post-worker config write is fallible, producing a
-    /// third outcome the worker never sees). `None` for callers that don't drive
-    /// a handler-resolved status (web/wire, engine internals).
+    /// third outcome the worker never sees), or for a web project-settings save
+    /// whose route waits for this completion
+    /// ([`Engine::dispatch_project_setting`]). `None` for callers that wait on
+    /// neither (engine internals).
     pub status_op_id: Option<String>,
 }
 
@@ -2386,7 +2388,7 @@ impl Engine {
 
     /// Mirror a saved project change in memory and answer the view that reports
     /// it.
-    pub(crate) fn apply_persisted_project_action(
+    fn apply_persisted_project_action(
         &mut self,
         action: &ProjectPersistenceAction,
     ) -> ProjectPersistenceView {

@@ -388,6 +388,16 @@ fn focused_tab_lane(db_path: &Path) -> PathBuf {
     db_path.with_extension("focused-tab")
 }
 
+/// The lane every project change the project-persistence worker saves to
+/// `db_path` waits in, so the changes land in the order they were asked for
+/// and their completions are drained in that same order: memory and
+/// `config.toml`, mirrored from the completions, can never end on an older
+/// change than the database holds. The path never exists, and no worktree
+/// records it, so it is its own key as given.
+pub(crate) fn project_persistence_lane(db_path: &Path) -> PathBuf {
+    db_path.with_extension("project-persistence")
+}
+
 /// See [`Engine::serve_memory`].
 pub(crate) type ServeMemory = Arc<std::sync::OnceLock<Arc<dyn std::any::Any + Send + Sync>>>;
 
@@ -2452,9 +2462,8 @@ pub(crate) fn portable_project_path(path: &str) -> String {
     }
 }
 
-/// Write one project change to the session database. The project-persistence
-/// worker and [`Engine::save_project_setting_now`] share it, so the two paths
-/// cannot drift on which column a setting lands in.
+/// Write one project change to the session database, on the
+/// project-persistence worker.
 fn write_project_action(
     store: &SessionStore,
     action: &ProjectPersistenceAction,
@@ -3142,6 +3151,9 @@ impl Engine {
         status_op_id: Option<String>,
     ) {
         let db_path = self.paths.sessions_db_path.clone();
+        // Taken here, on the engine thread, in the order the changes are
+        // asked for; a worker that never runs gives its turn up.
+        let ticket = crate::changes_lane::ticket(&project_persistence_lane(&db_path));
         let action_for_panic = action.clone();
         let status_op_id_for_panic = status_op_id.clone();
         let action_if_unspawned = action.clone();
@@ -3159,9 +3171,12 @@ impl Engine {
                 })),
             },
             move |tx| {
+                let _turn = ticket.wait();
                 let result = SessionStore::open_live(&db_path)
                     .and_then(|store| write_project_action(&store, &action))
                     .map_err(|err| format!("{err:#}"));
+                // Sent while the turn is held, so the next change's completion
+                // cannot be drained ahead of this one.
                 let _ = tx.send(WorkerEvent::ProjectPersistenceCompleted {
                     action,
                     result,
@@ -3182,67 +3197,6 @@ impl Engine {
                     status_op_id: status_op_id_if_unspawned,
                 });
         }
-    }
-
-    /// Save one project setting a client asked for and answer how it went,
-    /// before the call returns: the database row, the project in memory, then
-    /// `config.toml`.
-    ///
-    /// Inline rather than on the project-persistence worker, as a project add
-    /// already is, because the web's PATCH answers with this call's result and a
-    /// change handed to a worker would be answered before it was written; a
-    /// failed write would then reach nobody. The terminal UI keeps the worker,
-    /// whose completion it reports on its own status line.
-    ///
-    /// # Errors
-    ///
-    /// Returns the sentence the client shows, naming the setting and the
-    /// project: refused while a config reload is open (the reload would
-    /// overwrite the mirror), not saved when the database write fails (nothing
-    /// changed), or saved to the database but not to `config.toml`.
-    pub(crate) fn save_project_setting_now(
-        &mut self,
-        action: &ProjectPersistenceAction,
-    ) -> anyhow::Result<()> {
-        let (setting, project_name) = match action {
-            ProjectPersistenceAction::UpdateDefaultProvider { project_name, .. } => {
-                ("default provider", project_name)
-            }
-            ProjectPersistenceAction::UpdateAutoReopen { project_name, .. } => {
-                ("auto-reopen setting", project_name)
-            }
-            ProjectPersistenceAction::UpdateStartupCommand { project_name, .. } => {
-                ("startup command", project_name)
-            }
-            ProjectPersistenceAction::UpdateEnv { project_name, .. } => {
-                ("environment", project_name)
-            }
-            ProjectPersistenceAction::Add { .. }
-            | ProjectPersistenceAction::Remove { .. }
-            | ProjectPersistenceAction::Delete { .. } => {
-                anyhow::bail!("only a project setting is saved this way")
-            }
-        };
-        if self.reloading {
-            anyhow::bail!(
-                "The {setting} for project \"{project_name}\" was not saved: dux is reloading \
-                 config.toml right now. Save again in a moment."
-            );
-        }
-        write_project_action(&self.session_store, action).map_err(|error| {
-            anyhow::anyhow!(
-                "The {setting} for project \"{project_name}\" was not saved: the session \
-                 database could not be written: {error:#}"
-            )
-        })?;
-        self.apply_persisted_project_action(action);
-        self.persist_projects_to_config().map_err(|error| {
-            anyhow::anyhow!(
-                "The {setting} for project \"{project_name}\" was saved to the database, but \
-                 config.toml could not be updated, so it can revert the next time dux starts: \
-                 {error:#}"
-            )
-        })
     }
 
     /// Validate a raw path string before registering it as a project. Checks

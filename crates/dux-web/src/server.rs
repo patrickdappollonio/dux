@@ -4834,9 +4834,45 @@ mod tests {
         );
     }
 
-    /// A project PATCH answers only once each field is written: a field whose
-    /// write fails is a refusal naming it, and the fields saved before it are
-    /// named too, rather than a 200 for a change that never landed.
+    async fn patch_project_p1(app: Router, body: &'static str) -> (StatusCode, String) {
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/projects/p1")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// A project PATCH answers 200 only once the worker has written the field:
+    /// the database holds it the moment the answer arrives.
+    #[tokio::test]
+    async fn project_patch_answers_once_the_field_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = router(seeded_engine_handle(tmp.path()));
+
+        let (status, message) = patch_project_p1(app, r#"{"startup_command":"make setup"}"#).await;
+
+        assert_eq!(status, StatusCode::OK, "{message}");
+        let stored = dux_core::storage::SessionStore::open(&tmp.path().join("sessions.sqlite3"))
+            .unwrap()
+            .load_projects()
+            .unwrap();
+        assert_eq!(stored[0].startup_command.as_deref(), Some("make setup"));
+    }
+
+    /// A field whose write fails is a refusal naming it, the fields saved
+    /// before it and the ones never tried, rather than a 200 for a change that
+    /// never landed.
     #[tokio::test]
     async fn project_patch_reports_a_field_whose_write_failed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4844,35 +4880,48 @@ mod tests {
         rusqlite::Connection::open(tmp.path().join("sessions.sqlite3"))
             .unwrap()
             .execute_batch(
-                "CREATE TRIGGER fail_env BEFORE UPDATE OF env ON projects \
+                "CREATE TRIGGER fail_startup BEFORE UPDATE OF startup_command ON projects \
                  BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
             )
             .unwrap();
-        let app = router(handle);
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("PATCH")
-                    .uri("/api/v1/projects/p1")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"provider":"claude","env":{"A":"1"}}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let (status, message) = patch_project_p1(
+            router(handle),
+            r#"{"provider":"claude","startup_command":"make","env":{"A":"1"}}"#,
+        )
+        .await;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        let message = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(
-            message.starts_with("The environment for project \"p1\" was not saved")
+            message.starts_with("The startup command for project \"p1\" was not saved")
                 && message.contains("disk full")
-                && message.ends_with("Already saved before that: the default provider."),
+                && message.ends_with(
+                    "Already saved before that: the default provider. \
+                     Not attempted: the environment."
+                ),
+            "{message}"
+        );
+    }
+
+    /// A field saved to the database whose config.toml write failed is told
+    /// apart from one that was not saved, by its own status.
+    #[tokio::test]
+    async fn project_patch_tells_a_half_saved_field_apart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = seeded_engine_handle(tmp.path());
+        let config = tmp.path().join("config.toml");
+        let _ = std::fs::remove_file(&config);
+        std::fs::create_dir(&config).unwrap();
+
+        let (status, message) =
+            patch_project_p1(router(handle), r#"{"startup_command":"make"}"#).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{message}");
+        assert!(
+            message.starts_with(
+                "The startup command for project \"p1\" was saved to the database, but \
+                 config.toml could not be updated"
+            ),
             "{message}"
         );
     }

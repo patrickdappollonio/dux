@@ -2395,21 +2395,6 @@ impl Engine {
     /// Answer the commands that add a project or prepare its checkout.
     fn dispatch_project_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
-            // Saved before the answer, so a client told it succeeded can trust
-            // it and one whose write failed is told why. No status of its own:
-            // the client that asked confirms it.
-            command @ (WireCommand::UpdateProjectProvider { .. }
-            | WireCommand::UpdateProjectAutoReopen { .. }
-            | WireCommand::UpdateProjectStartupCommand { .. }
-            | WireCommand::UpdateProjectEnv { .. }) => {
-                let WireCommandMapping::Mapped(Command::PersistProject { action, .. }) =
-                    self.map_project_command(command)?
-                else {
-                    unreachable!("a project setting maps to a project persistence action")
-                };
-                self.save_project_setting_now(&action)?;
-                Ok(WireDispatch::handled(WireCommandOutcome::default()))
-            }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
@@ -5418,6 +5403,41 @@ impl Engine {
             }),
             status_op_id: None,
         })
+    }
+
+    /// Hand one project setting a client asked for (a default provider, an
+    /// auto-reopen choice, a startup command or an environment) to the
+    /// project-persistence worker the terminal UI saves the same settings
+    /// through, and answer the id its `ProjectPersistenceCompleted` will
+    /// carry, so the caller can wait for the write and answer with how it went.
+    /// A change a config reload holds back keeps that id and is saved when the
+    /// reload lands.
+    ///
+    /// # Errors
+    ///
+    /// Refuses any other command, an unknown project, and a change refused
+    /// before it was handed to the worker; nothing was saved.
+    pub fn dispatch_project_setting(&mut self, command: WireCommand) -> anyhow::Result<String> {
+        if !matches!(
+            command,
+            WireCommand::UpdateProjectProvider { .. }
+                | WireCommand::UpdateProjectAutoReopen { .. }
+                | WireCommand::UpdateProjectStartupCommand { .. }
+                | WireCommand::UpdateProjectEnv { .. }
+        ) {
+            anyhow::bail!("only a project setting is saved this way");
+        }
+        let WireCommandMapping::Mapped(Command::PersistProject { action, .. }) =
+            self.map_project_command(command)?
+        else {
+            anyhow::bail!("a project setting did not map to a project change");
+        };
+        let save_id = crate::operations::mint_operation_id();
+        self.apply(Command::PersistProject {
+            action,
+            status_op_id: Some(save_id.clone()),
+        })?;
+        Ok(save_id)
     }
 
     fn map_project_command(&self, command: WireCommand) -> anyhow::Result<WireCommandMapping> {
@@ -13324,11 +13344,9 @@ mod tests {
         assert!(err.to_string().contains("unknown project"), "err: {err}");
     }
 
-    /// A project setting is written before the command answers, so the answer
-    /// is the write's own outcome rather than a promise a worker may break.
-    #[test]
-    fn a_project_setting_is_in_the_database_when_the_command_answers() {
-        let (mut engine, _tmp) = test_engine();
+    /// The project row `p1` (named `p1-name`) in the database and in memory.
+    fn engine_with_project_p1() -> (Engine, crate::test_scratch::ScratchDir) {
+        let (mut engine, tmp) = test_engine();
         std::fs::write(&engine.paths.config_path, "# dux config\n").expect("seed config");
         engine
             .session_store
@@ -13344,47 +13362,116 @@ mod tests {
             })
             .expect("seed the project row");
         engine.projects.push(sample_project("p1", "/repo"));
+        (engine, tmp)
+    }
 
+    fn set_startup_command(engine: &mut Engine, command: &str) -> String {
         engine
-            .apply_wire(WireCommand::UpdateProjectStartupCommand {
+            .dispatch_project_setting(WireCommand::UpdateProjectStartupCommand {
                 project_id: "p1".to_string(),
-                startup_command: Some("make setup".to_string()),
+                startup_command: Some(command.to_string()),
             })
-            .expect("the save succeeds");
+            .expect("handed to the worker")
+    }
 
-        let stored = engine.session_store.load_projects().expect("read back");
-        assert_eq!(stored[0].startup_command.as_deref(), Some("make setup"));
+    /// The next project-persistence completion, as the drain hands it on.
+    fn next_project_saved(engine: &mut Engine) -> crate::engine::ProjectPersistenceOutcome {
+        loop {
+            let event = engine
+                .worker_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the save completes");
+            if let EventReaction::ProjectPersistenceOutcome(outcome) =
+                engine.process_worker_event(event)
+            {
+                return *outcome;
+            }
+        }
+    }
+
+    fn stored_startup_command(engine: &Engine) -> Option<String> {
+        engine.session_store.load_projects().expect("read back")[0]
+            .startup_command
+            .clone()
+    }
+
+    /// A project setting a client asked for completes under the id it was
+    /// handed, and only once the database holds it, so a caller waiting on
+    /// that id answers with the write's own outcome.
+    #[test]
+    fn a_project_setting_completes_under_its_id_once_it_is_in_the_database() {
+        let (mut engine, _tmp) = engine_with_project_p1();
+
+        let id = set_startup_command(&mut engine, "make setup");
+        let outcome = next_project_saved(&mut engine);
+
+        assert_eq!(outcome.status_op_id.as_deref(), Some(id.as_str()));
+        assert!(matches!(
+            outcome.view,
+            ProjectPersistenceView::StartupCommandUpdated { .. }
+        ));
         assert_eq!(
-            engine.config.projects[0].startup_command.as_deref(),
-            Some("make setup"),
-            "mirrored into config.toml's projects too"
+            stored_startup_command(&engine).as_deref(),
+            Some("make setup")
+        );
+        assert_eq!(
+            engine.projects[0].startup_command.as_deref(),
+            Some("make setup")
         );
     }
 
-    /// A save whose database write fails is answered as that failure, naming
-    /// the setting and the project, and changes nothing in memory.
+    /// A save whose database write fails completes as that failure under its
+    /// id, and changes nothing in memory.
     #[test]
-    fn a_project_setting_whose_database_write_fails_is_answered_as_a_failure() {
-        let (mut engine, _tmp) = test_engine();
-        engine.projects.push(sample_project("p1", "/repo"));
+    fn a_project_setting_whose_database_write_fails_completes_as_a_failure() {
+        let (mut engine, _tmp) = engine_with_project_p1();
         rusqlite::Connection::open(&engine.paths.sessions_db_path)
             .unwrap()
             .execute("DROP TABLE projects", [])
             .unwrap();
 
-        let err = engine
-            .apply_wire(WireCommand::UpdateProjectStartupCommand {
-                project_id: "p1".to_string(),
-                startup_command: Some("make setup".to_string()),
-            })
-            .expect_err("a failed write is not a success");
+        let id = set_startup_command(&mut engine, "make setup");
+        let outcome = next_project_saved(&mut engine);
 
+        assert_eq!(outcome.status_op_id.as_deref(), Some(id.as_str()));
         assert!(
-            err.to_string()
-                .starts_with("The startup command for project \"p1-name\" was not saved"),
-            "{err:#}"
+            matches!(
+                outcome.view,
+                ProjectPersistenceView::PersistenceFailed { .. }
+            ),
+            "{:?}",
+            outcome.view
         );
         assert_eq!(engine.projects[0].startup_command, None);
+    }
+
+    /// Project saves wait their turn in one lane and complete in the order
+    /// they were asked for, so an older save can never land after a newer
+    /// one, in the database or in the memory its completion mirrors.
+    #[test]
+    fn an_older_project_save_cannot_land_after_a_newer_one() {
+        let (mut engine, _tmp) = engine_with_project_p1();
+        let held = crate::changes_lane::ticket(&crate::engine::project_persistence_lane(
+            &engine.paths.sessions_db_path,
+        ))
+        .wait();
+
+        let older = set_startup_command(&mut engine, "older");
+        let newer = set_startup_command(&mut engine, "newer");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(
+            stored_startup_command(&engine),
+            None,
+            "neither save may write while an earlier one holds the lane"
+        );
+        drop(held);
+
+        let first = next_project_saved(&mut engine);
+        let second = next_project_saved(&mut engine);
+        assert_eq!(first.status_op_id.as_deref(), Some(older.as_str()));
+        assert_eq!(second.status_op_id.as_deref(), Some(newer.as_str()));
+        assert_eq!(stored_startup_command(&engine).as_deref(), Some("newer"));
+        assert_eq!(engine.projects[0].startup_command.as_deref(), Some("newer"));
     }
 
     #[test]

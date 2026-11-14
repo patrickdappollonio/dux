@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use dux_core::operations::OperationKind;
 use dux_core::wire::WireCommand;
 
+use crate::engine_actor::ProjectSaveFailure;
 use crate::rest_common::{
     Accepted, AwaitedCreate, CREATE_AWAIT_TIMEOUT, ForceConnectedQuery, OperationQuery,
     await_new_project, create_failed, delete_operation_response, delete_wire_response,
@@ -528,10 +529,13 @@ async fn patch_project(
         return rejection.into_response();
     }
 
-    // Each field is its own command, saved before the next is sent and before
-    // this answers, so a 200 means every field was written. They are not one
-    // transaction: a field that fails stops the rest, and the answer names the
-    // fields saved before it, which stay saved.
+    // Each field is its own save, on the project-persistence worker the
+    // terminal UI saves the same settings through, in one order with every
+    // other project change; this waits for each to be written, and for
+    // config.toml to follow it, before sending the next and before answering,
+    // so a 200 means every field was written. They are not one transaction: a
+    // field that fails stops the rest, and the answer names the fields saved
+    // before it, which stay saved, and the ones not attempted.
     let mut steps: Vec<(&'static str, WireCommand)> = Vec::new();
     if body.provider.sent() {
         steps.push((
@@ -570,26 +574,47 @@ async fn patch_project(
         ));
     }
 
-    let mut saved: Vec<&'static str> = Vec::new();
-    for (setting, command) in steps {
-        if let Err(error) = state.engine.apply_wire_scoped(command, scope.clone()).await {
-            return (StatusCode::BAD_REQUEST, with_saved_before(error, &saved)).into_response();
+    let settings: Vec<&'static str> = steps.iter().map(|(setting, _)| *setting).collect();
+    for (index, (_, command)) in steps.into_iter().enumerate() {
+        if let Err(failure) = state
+            .engine
+            .save_project_setting(command, scope.clone())
+            .await
+        {
+            // A field saved to the database but not to config.toml is the one
+            // 500 this route answers, so the browser can tell half-done from
+            // not done at all.
+            let (status, error) = match failure {
+                ProjectSaveFailure::NotSaved(error) => (StatusCode::BAD_REQUEST, error),
+                ProjectSaveFailure::HalfSaved(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+            };
+            let message = with_the_other_fields(error, &settings[..index], &settings[index + 1..]);
+            return (status, message).into_response();
         }
-        saved.push(setting);
     }
 
     StatusCode::OK.into_response()
 }
 
-/// A field's failure, followed by the fields the same PATCH saved before it.
-fn with_saved_before(error: String, saved: &[&str]) -> String {
-    match saved {
-        [] => error,
-        [one] => format!("{error} Already saved before that: the {one}."),
-        [init @ .., last] => format!(
-            "{error} Already saved before that: the {} and {last}.",
-            init.join(", ")
-        ),
+/// A field's failure, followed by the fields the same PATCH saved before it
+/// and the ones after it that it never tried.
+fn with_the_other_fields(error: String, saved: &[&str], not_attempted: &[&str]) -> String {
+    let mut message = error;
+    if let Some(saved) = the_settings(saved) {
+        message = format!("{message} Already saved before that: {saved}.");
+    }
+    if let Some(not_attempted) = the_settings(not_attempted) {
+        message = format!("{message} Not attempted: {not_attempted}.");
+    }
+    message
+}
+
+/// `the a`, `the a and b`, `the a, b and c`; `None` for no settings.
+fn the_settings(settings: &[&str]) -> Option<String> {
+    match settings {
+        [] => None,
+        [one] => Some(format!("the {one}")),
+        [init @ .., last] => Some(format!("the {} and {last}", init.join(", "))),
     }
 }
 

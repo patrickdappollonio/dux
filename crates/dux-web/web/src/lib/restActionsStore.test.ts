@@ -276,6 +276,25 @@ describe("store write actions route to REST", () => {
     expect(raised).toEqual([])
   })
 
+  it("updateProjectSettings keeps a half-saved field on screen until dismissed", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    actionStatus = 500
+    expect(await mod.updateProjectSettings("p1", { startup_command: "make" })).toBe(false)
+    expect(toast.error).toHaveBeenCalledWith(
+      "the server said no",
+      expect.objectContaining({ duration: Infinity }),
+    )
+    vi.mocked(toast.error).mockClear()
+
+    actionStatus = 400
+    expect(await mod.updateProjectSettings("p1", { startup_command: "make" })).toBe(false)
+    expect(toast.error).toHaveBeenCalledWith(
+      "the server said no",
+      expect.objectContaining({ duration: ERROR_DURATION }),
+    )
+  })
+
   it("submitAttachPullRequest POSTs the typed reference and goes back to the Pull requests dialog", async () => {
     const mod = await loadStore()
     mod.openPullRequests("s1")
