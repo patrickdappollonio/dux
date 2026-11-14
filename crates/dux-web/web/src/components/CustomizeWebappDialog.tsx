@@ -818,10 +818,21 @@ function buildWrites(
   }
 }
 
+// What a persist came to: `ok` is false when any write was refused (each refusal
+// raised its own error), and `wrote` is false when no row differed from what is
+// in force, so nothing was sent at all.
+interface PersistResult {
+  ok: boolean
+  wrote: boolean
+}
+
+// Every write below answers its own outcome on the wire (an engine status for
+// the settings PATCH, identity, changes-pane and GitHub writes; a reply sentence
+// for Tailscale), so only the nothing-was-sent case is said by the dialog.
 async function persist(
   entries: [SettingDescriptor, SettingValue][],
   originalOf: (d: SettingDescriptor) => SettingValue,
-): Promise<boolean> {
+): Promise<PersistResult> {
   const { identity, settings, changesPane, github, tailscale } = buildWrites(
     entries,
     originalOf,
@@ -868,8 +879,8 @@ async function persist(
         }),
     )
   }
-  if (writes.length === 0) return true
-  return (await Promise.all(writes)).every(Boolean)
+  if (writes.length === 0) return { ok: true, wrote: false }
+  return { ok: (await Promise.all(writes)).every(Boolean), wrote: true }
 }
 
 function CustomizeWebappForm({
@@ -1026,7 +1037,8 @@ function CustomizeWebappForm({
       const touched: [SettingDescriptor, SettingValue][] = allSettingDescriptors()
         .filter((d) => d.key in overrides)
         .map((d) => [d, overrides[d.key]])
-      if (!(await persist(touched, originalOf))) return
+      const persisted = await persist(touched, originalOf)
+      if (!persisted.ok) return
       if (pw.kind === "write") {
         const write =
           pw.current === undefined ? { next: pw.next } : { current: pw.current, next: pw.next }
@@ -1034,6 +1046,9 @@ function CustomizeWebappForm({
         closeCustomizeWebapp()
         return
       }
+      // The action did nothing because every row already held: said, because a
+      // dialog closing in silence reads the same as a save that went nowhere.
+      if (!persisted.wrote) notifyInfo("Nothing to save: no preference was changed.")
       closeCustomizeWebapp()
     } finally {
       savingRef.current = false
@@ -1058,12 +1073,16 @@ function CustomizeWebappForm({
         .map((d) => [d, resetValue(d)])
       // Reflect the reset defaults only AFTER the write lands: an optimistic
       // override would show a failed reset as saved. The dialog stays open either way.
-      if (await persist(entries, originalOf)) {
+      const persisted = await persist(entries, originalOf)
+      if (persisted.ok) {
         setOverrides((o) => {
           const next = { ...o }
           for (const [d, value] of entries) next[d.key] = value
           return next
         })
+        if (!persisted.wrote) {
+          notifyInfo("Nothing to reset: every setting in this section is already at its default.")
+        }
       }
     } finally {
       savingRef.current = false

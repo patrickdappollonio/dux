@@ -51,8 +51,8 @@ function ProjectSettingsForm({
   async function handleSave() {
     // Build one tri-state PATCH body: include only the fields that changed (the
     // server leaves an omitted field untouched), with `null` clearing a scalar
-    // back to the inherited default. `updateProjectSettings` no-ops on an empty
-    // patch, so saving with nothing changed sends no request.
+    // back to the inherited default. `updateProjectSettings` sends no request for
+    // an empty patch and says there was nothing to save.
     const patch: PatchProjectBody = {}
 
     const newProvider = provider === "" ? null : provider

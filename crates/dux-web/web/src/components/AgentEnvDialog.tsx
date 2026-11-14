@@ -32,10 +32,10 @@ function AgentEnvForm({
 
   async function handleSave() {
     const env = parseEnv(text)
-    // No-op when unchanged (skips the request and just closes).
+    // Unchanged is an empty patch: no request, a nothing-to-save notice, close.
     const patch =
       JSON.stringify(env) === JSON.stringify(project.env) ? {} : { env }
-    if (await updateProjectSettings(project.id, patch)) closeAgentEnv()
+    if (await updateProjectSettings(project.id, patch, "environment")) closeAgentEnv()
   }
 
   return (

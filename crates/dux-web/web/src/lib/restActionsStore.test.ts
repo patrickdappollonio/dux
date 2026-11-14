@@ -14,6 +14,7 @@ import "./store"
 vi.mock("sonner", () => {
   const toast = Object.assign(vi.fn(), {
     success: vi.fn(),
+    info: vi.fn(),
     error: vi.fn(),
     warning: vi.fn(),
     loading: vi.fn(),
@@ -24,6 +25,24 @@ vi.mock("sonner", () => {
 })
 
 import { toast } from "sonner"
+
+// The confirmations the browser raises itself, read as their plain spelling.
+// The real raisers still run, so the sonner spies above see every toast.
+const raised: { tone: string; text: string }[] = []
+vi.mock("./notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./notify")>()
+  const spy =
+    (tone: string, raise: typeof actual.notifyInfo) =>
+    (...args: Parameters<typeof actual.notifyInfo>) => {
+      raised.push({ tone, text: actual.noticeText(args[0]) })
+      raise(...args)
+    }
+  return {
+    ...actual,
+    notifyInfo: spy("info", actual.notifyInfo),
+    notifySuccess: spy("success", actual.notifySuccess),
+  }
+})
 
 // The window `lib/notify.ts` gives an error: four times the 6s default the
 // bootstrap document carries here. Asserting it (rather than the message alone)
@@ -65,7 +84,7 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
         ok: true,
         status: 200,
         json: async () => ({
-          projects: [],
+          projects: [{ id: "p1", name: "web" }],
           sessions: [],
           sidebar: { groups: [], agentless_start: null },
         }),
@@ -136,6 +155,7 @@ beforeEach(() => {
   actionStatus = 400
   actionCalls.length = 0
   bootstrapExtra = {}
+  raised.length = 0
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -221,6 +241,39 @@ describe("store write actions route to REST", () => {
     expect(actionCalls[0].url).toBe("/api/v1/projects/p1")
     expect(actionCalls[0].method).toBe("PATCH")
     expect(actionCalls[0].body).toEqual({ provider: "codex" })
+  })
+
+  it("updateProjectSettings says what it saved, and that an empty patch saved nothing", async () => {
+    const mod = await loadStore()
+    expect(await mod.updateProjectSettings("p1", {}, "environment")).toBe(true)
+    expect(raised).toEqual([
+      { tone: "info", text: "Nothing to save: the environment for project web is unchanged." },
+    ])
+    raised.length = 0
+
+    expect(await mod.updateProjectSettings("p1", {})).toBe(true)
+    expect(raised).toEqual([
+      { tone: "info", text: "Nothing to save: the settings for project web are unchanged." },
+    ])
+    raised.length = 0
+
+    expect(
+      await mod.updateProjectSettings("p1", { provider: null, startup_command: "make", env: {} }),
+    ).toBe(true)
+    expect(raised).toEqual([
+      {
+        tone: "success",
+        text: "Saved the default provider, startup command and environment for project web.",
+      },
+    ])
+  })
+
+  it("updateProjectSettings reports a refusal and never claims it saved", async () => {
+    const mod = await loadStore()
+    actionFails = true
+    expect(await mod.updateProjectSettings("p1", { startup_command: "make" })).toBe(false)
+    expect(toast.error).toHaveBeenCalledWith("the server said no", expect.anything())
+    expect(raised).toEqual([])
   })
 
   it("submitAttachPullRequest POSTs the typed reference and goes back to the Pull requests dialog", async () => {

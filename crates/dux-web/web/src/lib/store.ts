@@ -96,6 +96,11 @@ import {
 } from "./notify"
 import { chip, type Prose, type ProseName, prose, wireProse } from "./prose"
 import {
+  type ProjectSettingsSubject,
+  projectSettingsSaved,
+  projectSettingsUnchanged,
+} from "./projectSettingsNotice"
+import {
   type CloneProjectPr,
   foldFolderAnswer,
   looksLikeReviewCopy,
@@ -7836,14 +7841,26 @@ export function deleteProject(
 }
 
 // Update a project's settings (provider / auto-reopen / startup-command / env)
-// in one tri-state PATCH. The caller (ProjectSettingsDialog) includes only the
-// fields that changed; an omitted field is left untouched, `null` clears it.
+// in one tri-state PATCH. The caller includes only the fields that changed; an
+// omitted field is left untouched, `null` clears it. `subject` names what the
+// calling dialog edits, for the nothing-to-save sentence.
+//
+// Every outcome is said here, because the engine raises no status for a project
+// settings change and the dialog closing is not proof that anything was saved:
+// success names what was saved, an empty patch says nothing changed (the state
+// already held), and a refusal keeps its error.
 export async function updateProjectSettings(
   projectId: string,
   patch: PatchProjectBody,
+  subject: ProjectSettingsSubject = "settings",
 ): Promise<boolean> {
+  const projectName =
+    state.spine?.projects.find((p) => p.id === projectId)?.name ?? projectId
   // Empty patch (nothing changed) is a successful no-op, let the dialog close.
-  if (Object.keys(patch).length === 0) return true
+  if (Object.keys(patch).length === 0) {
+    notifyInfo(projectSettingsUnchanged(projectName, subject))
+    return true
+  }
   // Validate a provider SET (a non-null provider) up front: the PATCH dispatches
   // its fields as independent wire sub-commands with no rollback, so a provider the
   // server rejects mid-sequence would leave the earlier fields already committed.
@@ -7858,6 +7875,7 @@ export async function updateProjectSettings(
   }
   try {
     await projectsApi.patch(projectId, patch)
+    notifySuccess(projectSettingsSaved(projectName, patch))
     return true
   } catch (e) {
     notifyError(

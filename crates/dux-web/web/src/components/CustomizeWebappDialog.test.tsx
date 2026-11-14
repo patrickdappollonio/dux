@@ -334,6 +334,36 @@ describe("CustomizeWebappDialog", () => {
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     expect(setInstanceIdentity).not.toHaveBeenCalled()
     expect(saveSettings).not.toHaveBeenCalled()
+    // Nothing was sent, so nothing on the wire will answer: the dialog says so.
+    expect(notifyInfo).toHaveBeenCalledWith("Nothing to save: no preference was changed.")
+  })
+
+  it("leaves a real save's confirmation to the server's status", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(notifyInfo).not.toHaveBeenCalled()
+  })
+
+  it("says so when a section reset finds every row already at its default", async () => {
+    // The fixture's instance name is the one Web row off its default.
+    seed({ title: "", favicon: "" })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
+
+    await waitFor(() =>
+      expect(notifyInfo).toHaveBeenCalledWith(
+        "Nothing to reset: every setting in this section is already at its default.",
+      ),
+    )
+    expect(setInstanceIdentity).not.toHaveBeenCalled()
+    expect(saveSettings).not.toHaveBeenCalled()
   })
 
   it("disables the form while a save is in flight", async () => {

@@ -35,11 +35,13 @@ function AgentStartupCommandForm({
 
   async function handleSave() {
     const next = startup.trim() === "" ? null : startup
-    // No-op when unchanged; `updateProjectSettings` skips the request on an empty
-    // patch, so saving without a change just closes.
+    // Unchanged is an empty patch: `updateProjectSettings` sends no request,
+    // says there was nothing to save, and the dialog closes.
     const patch =
       next === (project.startup_command ?? null) ? {} : { startup_command: next }
-    if (await updateProjectSettings(project.id, patch)) closeAgentStartupCommand()
+    if (await updateProjectSettings(project.id, patch, "startup command")) {
+      closeAgentStartupCommand()
+    }
   }
 
   return (
