@@ -2,7 +2,6 @@ import type { ReactNode } from "react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { InlineCode } from "@/components/ui/inline-code"
-import { chip, type Prose, type ProseSegment } from "@/lib/prose"
 import { matchCharRanges, type CharRange } from "@/lib/searchMatch"
 
 interface InlineSegment {
@@ -38,14 +37,6 @@ export function inlineCodeDisplayText(text: string): string {
   return inlineSegments(text)
     .map((segment) => segment.text)
     .join("")
-}
-
-/** The text as a `Prose`, each backtick span a name, so a sentence written for a
- * dialog row can be said in a toast with the same chips. */
-export function inlineCodeProse(text: string): Prose {
-  return inlineSegments(text).map(
-    (segment): ProseSegment => (segment.code ? chip(segment.text) : segment.text),
-  )
 }
 
 // Renders single-backtick-delimited spans as <code> elements. Deliberately not a markdown

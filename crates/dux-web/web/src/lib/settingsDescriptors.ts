@@ -72,7 +72,8 @@ export interface SettingDescriptor {
   inverted?: boolean
   /** Why this run of the server cannot honour the value until it restarts, or
    * `null` when it can. A locked row renders disabled and shows this sentence
-   * instead of `description`. */
+   * instead of `description`. The server still saves a value for a locked row,
+   * for the next run, so a section reset writes it like any other row. */
   lockedBy?: (b: Bootstrap) => string | null
   /** Reads the current value out of the live Bootstrap document, falling back
    * to `default` when an older server omits the field. For the `"changesPane"`

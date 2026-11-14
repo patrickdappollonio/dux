@@ -5,7 +5,6 @@ import type { ReactNode } from "react"
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
 import type { DuxState } from "@/lib/store"
-import { chip, type Prose, proseText } from "@/lib/prose"
 
 // Override `useDux` so the dialog reads our seeded bootstrap, and replace the
 // store actions the dialog dispatches with spies so we can assert the exact
@@ -771,11 +770,19 @@ describe("CustomizeWebappDialog", () => {
     )
   })
 
-  // Reset-to-defaults writes every row in the section at once, which would
-  // otherwise post a value past a control the user cannot reach.
-  it("skips the locked Tailscale row when the section is reset", async () => {
-    // `hyperlinks` is in the same section and differs from its default, so the
-    // reset has real work to do and its completion is observable.
+  // A lock says this run cannot put the value in force, not that it cannot be
+  // saved: the server saves it for the next run and its reply says so, so a
+  // reset writes the locked row like any other and that reply is the outcome.
+  const FORCED_NO_REPLY = {
+    mode: "auto",
+    warning: true,
+    message:
+      '[server] tailscale is saved as "auto". This run was started with --no-tailscale, which wins for as long as it runs, so nothing changed on the listeners; restart dux without that flag to use the saved mode.',
+  }
+
+  it("writes the locked Tailscale row's default when its section is reset", async () => {
+    setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)
+    // `hyperlinks` is in the same section and differs from its default too.
     seed({ tailscale_mode: "no", tailscale_forced_no: true, hyperlinks: false })
     render(<CustomizeWebappDialog />)
 
@@ -784,41 +791,25 @@ describe("CustomizeWebappDialog", () => {
     const caption = screen.getByText(/^Both surfaces\./)
     fireEvent.click(caption.parentElement!.querySelector("button")!)
 
-    await waitFor(() => expect(saveSettings).toHaveBeenCalled())
+    await waitFor(() => expect(notifyWarning).toHaveBeenCalledWith(FORCED_NO_REPLY.message))
+    expect(setTailscaleMode).toHaveBeenCalledWith("auto")
     expect(saveSettings.mock.calls[0][0].capabilities).toEqual({ hyperlinks: true })
-    expect(setTailscaleMode).not.toHaveBeenCalled()
+    expect(notifyInfo).not.toHaveBeenCalled()
   })
 
-  it("names the locked row when a reset finds only it off its default", async () => {
-    // Every unlocked row of the section is at its default; the Tailscale row is
-    // not, and stays showing "Yes" because this run cannot change it.
+  it("does not say there was nothing to reset when only the locked row was off its default", async () => {
+    setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)
     seed({ github_integration: true, tailscale_mode: "yes", tailscale_forced_no: true })
     render(<CustomizeWebappDialog />)
 
     const caption = screen.getByText(/^Both surfaces\./)
     fireEvent.click(caption.parentElement!.querySelector("button")!)
 
-    await waitFor(() => expect(notifyInfo).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(notifyWarning).toHaveBeenCalledWith(FORCED_NO_REPLY.message))
+    expect(setTailscaleMode).toHaveBeenCalledTimes(1)
+    expect(setTailscaleMode).toHaveBeenCalledWith("auto")
     expect(saveSettings).not.toHaveBeenCalled()
-    expect(setTailscaleMode).not.toHaveBeenCalled()
-    expect(proseText(notifyInfo.mock.calls[0][0] as Prose)).toBe(
-      "Nothing to reset: the Bind your Tailscale address setting is locked, and every other setting in this section is already at its default. This run of dux was started with --no-tailscale, so the Tailscale address stays unbound however this is set. Your choice is saved and used the next time dux starts without that flag.",
-    )
-    expect(notifyInfo.mock.calls[0][0]).toContainEqual(chip("--no-tailscale"))
-  })
-
-  it("says why a locked row still shows its value after a reset that wrote the others", async () => {
-    seed({ tailscale_mode: "no", tailscale_forced_no: true, hyperlinks: false })
-    render(<CustomizeWebappDialog />)
-
-    const caption = screen.getByText(/^Both surfaces\./)
-    fireEvent.click(caption.parentElement!.querySelector("button")!)
-
-    await waitFor(() => expect(notifyInfo).toHaveBeenCalledTimes(1))
-    expect(saveSettings).toHaveBeenCalledTimes(1)
-    expect(proseText(notifyInfo.mock.calls[0][0] as Prose)).toMatch(
-      /^The Bind your Tailscale address setting is locked, so the reset left it as it is\. This run of dux was started with --no-tailscale,/,
-    )
+    expect(notifyInfo).not.toHaveBeenCalled()
   })
 
   // THE HAZARD PIN. The endpoint is a blind read-and-flip while this modal saves
