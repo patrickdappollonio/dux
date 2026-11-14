@@ -583,10 +583,16 @@ async fn patch_project(
         {
             // A field saved to the database but not to config.toml is the one
             // 500 this route answers, so the browser can tell half-done from
-            // not done at all.
+            // not done at all; an engine that stopped answering is the 503 a
+            // route answers for an unavailable engine, and nobody knows
+            // whether that field landed.
             let (status, error) = match failure {
                 ProjectSaveFailure::NotSaved(error) => (StatusCode::BAD_REQUEST, error),
                 ProjectSaveFailure::HalfSaved(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+                ProjectSaveFailure::NoAnswer => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    no_answer_message(settings[index]),
+                ),
             };
             let message = with_the_other_fields(error, &settings[..index], &settings[index + 1..]);
             return (status, message).into_response();
@@ -594,6 +600,15 @@ async fn patch_project(
     }
 
     StatusCode::OK.into_response()
+}
+
+/// The sentence for a field the server stopped answering about: it may
+/// already be on the worker, so it may or may not have been saved.
+fn no_answer_message(setting: &str) -> String {
+    format!(
+        "The server stopped answering before it said whether the {setting} was saved, so it \
+         may or may not have been. Reopen Project settings to check what is saved now."
+    )
 }
 
 /// A field's failure, followed by the fields the same PATCH saved before it

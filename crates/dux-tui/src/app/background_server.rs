@@ -179,7 +179,7 @@ impl App {
     /// remove the pending-op entries the verdict reads. No core up routes everything here.
     pub(crate) fn companion_routing(&self) -> CompanionRouting {
         if self.companion_has_core() {
-            CompanionRouting::Serving(self.engine.web_followup_ops())
+            CompanionRouting::Serving(Box::new(self.engine.web_followup_ops()))
         } else {
             CompanionRouting::NotServing
         }
@@ -1099,7 +1099,7 @@ pub(crate) enum CompanionRouting {
     NotServing,
     /// Serving: route against the ids that were in flight when the batch was
     /// drained.
-    Serving(dux_core::engine::WebFollowupOps),
+    Serving(Box<dux_core::engine::WebFollowupOps>),
 }
 
 impl CompanionRouting {
@@ -2951,6 +2951,69 @@ pub(crate) mod tests {
             "a web-owned follow-up that mutated the workspace must trigger this surface's \
              post-mutation refresh; the cursor is still at {}",
             app.selected_left
+        );
+    }
+
+    fn startup_command_saved(status_op_id: &str) -> EventReaction {
+        EventReaction::ProjectPersistenceOutcome(Box::new(
+            dux_core::engine::ProjectPersistenceOutcome {
+                action: dux_core::worker::ProjectPersistenceAction::UpdateStartupCommand {
+                    project_id: "p1".to_string(),
+                    project_name: "p1-name".to_string(),
+                    startup_command: Some("make setup".to_string()),
+                },
+                view: dux_core::engine::ProjectPersistenceView::StartupCommandUpdated {
+                    project_name: "p1-name".to_string(),
+                    startup_command: Some("make setup".to_string()),
+                },
+                status_op_id: Some(status_op_id.to_string()),
+            },
+        ))
+    }
+
+    /// A project setting a browser saved is the web layer's to mirror into
+    /// config.toml and report: this surface neither writes the file a second
+    /// time nor puts the browser's outcome on its status line, and it still
+    /// refreshes its view of the project. Its own save it reports as before.
+    #[test]
+    fn a_browsers_project_save_is_not_written_or_reported_here() {
+        let mut app = test_app(default_bindings());
+        let (companion, _recorded) = FakeCompanion::serving();
+        app.companion = Some(companion);
+        let config_path = app.engine.paths.config_path.clone();
+        let config_before = std::fs::read(&config_path).ok();
+        app.engine
+            .pending_web_project_saves
+            .insert("a-web-save".to_string());
+        app.rebuild_left_items();
+        app.selected_left = 99;
+
+        let reaction = startup_command_saved("a-web-save");
+        let routing = app.companion_routing();
+        app.notify_companion(&reaction);
+        app.apply_routed_reaction(reaction, &routing);
+        app.service_companion();
+
+        assert_eq!(
+            app.status.message(),
+            "",
+            "a browser's save is not news here"
+        );
+        assert_eq!(
+            std::fs::read(&config_path).ok(),
+            config_before,
+            "config.toml is the web layer's to write for a browser's save"
+        );
+        assert!(
+            app.selected_left < app.left_items_cache.len().max(1),
+            "the project list is still refreshed"
+        );
+
+        app.apply_reaction(startup_command_saved("a-tui-op"));
+        assert!(
+            app.status.message().contains("make setup"),
+            "this surface's own save is reported here: {}",
+            app.status.message()
         );
     }
 

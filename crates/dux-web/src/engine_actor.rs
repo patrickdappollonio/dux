@@ -1052,6 +1052,10 @@ pub(crate) enum ProjectSaveFailure {
     /// `config.toml` could not be updated, so the change can revert the next
     /// time dux starts. Half done, and the browser says so until dismissed.
     HalfSaved(String),
+    /// The engine stopped answering after the request was sent (its thread
+    /// went, or it dropped the reply), so the change may already be on the
+    /// worker: nobody can say whether it was saved.
+    NoAnswer,
 }
 
 /// A project setting saved on the project-persistence worker, whose route waits
@@ -1377,9 +1381,8 @@ impl EngineHandle {
         self.req_tx
             .send(EngineRequest::SaveProjectSetting(command, origin, tx))
             .await
-            .map_err(|_| ProjectSaveFailure::NotSaved("engine thread gone".to_string()))?;
-        rx.await
-            .map_err(|_| ProjectSaveFailure::NotSaved("engine reply dropped".to_string()))?
+            .map_err(|_| ProjectSaveFailure::NoAnswer)?;
+        rx.await.map_err(|_| ProjectSaveFailure::NoAnswer)?
     }
 
     /// Like [`apply_wire_scoped`](Self::apply_wire_scoped), followed as an
@@ -3109,7 +3112,12 @@ impl EngineService {
             self.status.clear(key.clone());
         }
 
-        if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction {
+        // Routed: while the terminal UI drains, a save it asked for is its own
+        // to mirror into config.toml and report, and a browser's is this
+        // layer's alone, so config.toml is written once either way.
+        if let EventReaction::ProjectPersistenceOutcome(outcome) = reaction
+            && Self::web_owns(engine, reaction, routing)
+        {
             self.mirror_project_change(engine, outcome);
         }
     }
@@ -3124,25 +3132,32 @@ impl EngineService {
         engine: &mut Engine,
         outcome: &dux_core::engine::ProjectPersistenceOutcome,
     ) {
-        let waiting = outcome
-            .status_op_id
-            .as_deref()
-            .and_then(|id| self.pending_project_saves.remove(id));
+        let waiting = outcome.status_op_id.as_deref().and_then(|id| {
+            engine.pending_web_project_saves.remove(id);
+            self.pending_project_saves.remove(id)
+        });
+        let named = project_setting_named(&outcome.action);
         let config_written = match &outcome.view {
             ProjectPersistenceView::PersistenceFailed { error } => {
                 if let Some(waiting) = waiting {
-                    let message = match project_setting_named(&outcome.action) {
-                        Some((setting, project_name)) => format!(
-                            "The {setting} for project \"{project_name}\" was not saved: the \
-                             session database could not be written: {error}"
-                        ),
-                        None => error.clone(),
+                    let message = match named {
+                        Some((setting, project_name)) => dux_core::status_text![
+                            "The ",
+                            setting,
+                            " for project ",
+                            q(project_name),
+                            " was not saved: the session database could not be written: ",
+                            error.as_str(),
+                        ],
+                        None => StatusText::plain(error.clone()),
                     };
                     // A request that has gone (the browser hung up) cannot be
                     // answered, so the failure goes to the people on screen.
                     if waiting
                         .reply
-                        .send(Err(ProjectSaveFailure::NotSaved(message.clone())))
+                        .send(Err(ProjectSaveFailure::NotSaved(
+                            message.message().to_string(),
+                        )))
                         .is_err()
                     {
                         let _ = self.status.send(WireStatus::new("error", message));
@@ -3159,23 +3174,32 @@ impl EngineService {
             }
             return;
         };
+        let message = match named {
+            Some((setting, project_name)) => dux_core::status_text![
+                "The ",
+                setting,
+                " for project ",
+                q(project_name),
+                " was saved to the database, but config.toml could not be updated, so it can \
+                 revert the next time dux starts: ",
+                format!("{e:#}"),
+            ],
+            None => StatusText::plain(format!(
+                "Saved to the database, but config.toml could not be updated: {e:#}"
+            )),
+        };
+        // The browser that asked raises this sticky itself, so no status here
+        // unless that request is gone.
         if let Some(waiting) = waiting
-            && let Some((setting, project_name)) = project_setting_named(&outcome.action)
-        {
-            // The browser that asked raises this sticky itself, so no status
-            // here unless that request is gone.
-            let message = format!(
-                "The {setting} for project \"{project_name}\" was saved to the database, but \
-                 config.toml could not be updated, so it can revert the next time dux starts: \
-                 {e:#}"
-            );
-            if waiting
+            && named.is_some()
+            && waiting
                 .reply
-                .send(Err(ProjectSaveFailure::HalfSaved(message)))
+                .send(Err(ProjectSaveFailure::HalfSaved(
+                    message.message().to_string(),
+                )))
                 .is_ok()
-            {
-                return;
-            }
+        {
+            return;
         }
         // STICKY: SQLite and the portable config now disagree about
         // the same project. That is textbook half-done, and dux treats
@@ -3183,14 +3207,9 @@ impl EngineService {
         // later TUI start reads the config, not the database, so the
         // change silently reverts). Fixing it means editing config.toml,
         // outside anything the toast can offer.
-        let _ = self.status.send(
-            WireStatus::keyed(
-                "config-write",
-                "error",
-                format!("Saved to the database, but config.toml could not be updated: {e:#}"),
-            )
-            .sticky(),
-        );
+        let _ = self
+            .status
+            .send(WireStatus::keyed("config-write", "error", message).sticky());
     }
 
     /// Whether the web owns the routable follow-ups for `reaction`.
@@ -5888,6 +5907,168 @@ mod tests {
     use crate::test_support::bootstrap_test_engine as bootstrap_engine;
     use dux_core::config::{DuxPaths, server_restart_settings_changed};
     use dux_core::statusline::FINAL_REPLAY_WINDOW;
+
+    /// An engine whose project `p1` (named `p1`) is in the database and in
+    /// memory, its startup command already set to `make setup` in memory, as
+    /// a saved change leaves it before the completion is mirrored.
+    fn engine_with_a_saved_startup_command(paths: &DuxPaths) -> Engine {
+        dux_core::storage::SessionStore::open(&paths.sessions_db_path)
+            .unwrap()
+            .upsert_project(&dux_core::config::ProjectConfig {
+                id: "p1".to_string(),
+                path: paths.root.to_string_lossy().into_owned(),
+                name: Some("p1".to_string()),
+                default_provider: None,
+                leading_branch: None,
+                auto_reopen_agents: None,
+                startup_command: None,
+                env: std::collections::BTreeMap::new(),
+            })
+            .unwrap();
+        let mut engine = bootstrap_engine(paths).expect("engine");
+        engine.projects[0].startup_command = Some("make setup".to_string());
+        engine
+    }
+
+    fn startup_command_saved(status_op_id: &str, view: ProjectPersistenceView) -> EventReaction {
+        EventReaction::ProjectPersistenceOutcome(Box::new(
+            dux_core::engine::ProjectPersistenceOutcome {
+                action: dux_core::worker::ProjectPersistenceAction::UpdateStartupCommand {
+                    project_id: "p1".to_string(),
+                    project_name: "p1".to_string(),
+                    startup_command: Some("make setup".to_string()),
+                },
+                view,
+                status_op_id: Some(status_op_id.to_string()),
+            },
+        ))
+    }
+
+    fn startup_command_updated() -> ProjectPersistenceView {
+        ProjectPersistenceView::StartupCommandUpdated {
+            project_name: "p1".to_string(),
+            startup_command: Some("make setup".to_string()),
+        }
+    }
+
+    fn config_names_the_command(paths: &DuxPaths) -> bool {
+        std::fs::read_to_string(&paths.config_path)
+            .unwrap_or_default()
+            .contains("make setup")
+    }
+
+    /// While the terminal UI drains, a project save it asked for is its own to
+    /// mirror into config.toml: this layer writes nothing for it, so the file
+    /// is written once. With nothing else draining, this layer mirrors it.
+    #[test]
+    fn a_project_save_the_terminal_ui_asked_for_is_not_mirrored_by_origin() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = engine_with_a_saved_startup_command(&paths);
+        let (_handle, ends) = build_actor_channels(&engine);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        let reaction = startup_command_saved("a-tui-op", startup_command_updated());
+
+        svc.fanout_reaction(&mut engine, &reaction, FollowupRouting::ByOrigin);
+        assert!(!config_names_the_command(&paths));
+
+        svc.fanout_reaction(&mut engine, &reaction, FollowupRouting::RunEverything);
+        assert!(config_names_the_command(&paths));
+    }
+
+    /// A browser's project save is this layer's alone while the terminal UI
+    /// drains: mirrored into config.toml, answered, and no longer routed to
+    /// the web once answered.
+    #[test]
+    fn a_browsers_project_save_is_mirrored_and_answered_by_origin() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = engine_with_a_saved_startup_command(&paths);
+        let (_handle, ends) = build_actor_channels(&engine);
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        engine
+            .pending_web_project_saves
+            .insert("a-web-save".to_string());
+        let (reply, mut answer) = oneshot::channel();
+        svc.pending_project_saves
+            .insert("a-web-save".to_string(), PendingProjectSave { reply });
+
+        svc.fanout_reaction(
+            &mut engine,
+            &startup_command_saved("a-web-save", startup_command_updated()),
+            FollowupRouting::ByOrigin,
+        );
+
+        assert_eq!(answer.try_recv().expect("answered"), Ok(()));
+        assert!(config_names_the_command(&paths));
+        assert!(engine.pending_web_project_saves.is_empty());
+    }
+
+    /// A failed save whose browser hung up goes to the people on screen, the
+    /// project's name a chip rather than a quotation.
+    #[test]
+    fn a_failed_project_save_nobody_waits_for_names_the_project_as_a_chip() {
+        let (_tmp, paths) = temp_paths();
+        let mut engine = engine_with_a_saved_startup_command(&paths);
+        let (handle, ends) = build_actor_channels(&engine);
+        let mut statuses = handle.subscribe_status();
+        let mut svc = EngineService::new(&engine, ends, ShutdownEcho::Silent);
+        engine
+            .pending_web_project_saves
+            .insert("a-web-save".to_string());
+        let (reply, answer) = oneshot::channel();
+        drop(answer);
+        svc.pending_project_saves
+            .insert("a-web-save".to_string(), PendingProjectSave { reply });
+
+        svc.fanout_reaction(
+            &mut engine,
+            &startup_command_saved(
+                "a-web-save",
+                ProjectPersistenceView::PersistenceFailed {
+                    error: "disk full".to_string(),
+                },
+            ),
+            FollowupRouting::ByOrigin,
+        );
+
+        let status = statuses.try_recv().expect("broadcast");
+        assert_eq!(
+            status.message,
+            "The startup command for project \"p1\" was not saved: the session database \
+             could not be written: disk full"
+        );
+        assert!(
+            status
+                .segments
+                .unwrap_or_default()
+                .contains(&dux_core::prose::ProseSegment::Name {
+                    name: "p1".to_string(),
+                    quoted: true,
+                }),
+            "the project is a chip"
+        );
+    }
+
+    /// A save the engine stopped answering about is neither saved nor not
+    /// saved: it is the third outcome.
+    #[tokio::test]
+    async fn a_project_save_the_engine_never_answers_is_told_apart() {
+        let (_tmp, paths) = temp_paths();
+        let engine = bootstrap_engine(&paths).expect("engine");
+        let (handle, ends) = build_actor_channels(&engine);
+        drop(ends);
+
+        let answer = handle
+            .save_project_setting(
+                WireCommand::UpdateProjectStartupCommand {
+                    project_id: "p1".to_string(),
+                    startup_command: None,
+                },
+                StatusScope::All,
+            )
+            .await;
+
+        assert_eq!(answer, Err(ProjectSaveFailure::NoAnswer));
+    }
 
     fn temp_paths() -> (tempfile::TempDir, DuxPaths) {
         let tmp = tempfile::tempdir().expect("tempdir");

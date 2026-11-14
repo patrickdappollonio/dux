@@ -258,6 +258,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         agent_viewed: std::collections::HashMap::new(),
         last_foreground_refresh: None,
         pending_web_checkout_ops: std::collections::HashMap::new(),
+        pending_web_project_saves: std::collections::HashSet::new(),
         pending_change_base_ops: std::collections::HashMap::new(),
         pending_web_add_project_ops: std::collections::HashMap::new(),
         pending_web_pr_lookup_ops: std::collections::HashMap::new(),

@@ -2395,6 +2395,19 @@ impl Engine {
     /// Answer the commands that add a project or prepare its checkout.
     fn dispatch_project_command(&mut self, command: WireCommand) -> anyhow::Result<WireDispatch> {
         match command {
+            // Saved on the project-persistence worker, so the generic tail
+            // would answer success before anything was written. Refused here,
+            // so no caller can be told a setting was saved that was not.
+            WireCommand::UpdateProjectProvider { .. }
+            | WireCommand::UpdateProjectAutoReopen { .. }
+            | WireCommand::UpdateProjectStartupCommand { .. }
+            | WireCommand::UpdateProjectEnv { .. } => {
+                anyhow::bail!(
+                    "a project setting is not saved through apply_wire, which would answer \
+                     before the write: use Engine::dispatch_project_setting and wait for the \
+                     ProjectPersistenceCompleted carrying the id it returns"
+                )
+            }
             WireCommand::CheckoutProjectDefaultBranch { project_id } => {
                 let status = self.checkout_project_default_branch(&project_id)?;
                 Ok(WireDispatch::handled(WireCommandOutcome::with_status(
@@ -5433,10 +5446,16 @@ impl Engine {
             anyhow::bail!("a project setting did not map to a project change");
         };
         let save_id = crate::operations::mint_operation_id();
-        self.apply(Command::PersistProject {
+        // Registered before the change is handed over, so the completion can
+        // never be routed before the web layer is known to be waiting on it.
+        self.pending_web_project_saves.insert(save_id.clone());
+        if let Err(error) = self.apply(Command::PersistProject {
             action,
             status_op_id: Some(save_id.clone()),
-        })?;
+        }) {
+            self.pending_web_project_saves.remove(&save_id);
+            return Err(error);
+        }
         Ok(save_id)
     }
 
@@ -13472,6 +13491,56 @@ mod tests {
         assert_eq!(second.status_op_id.as_deref(), Some(newer.as_str()));
         assert_eq!(stored_startup_command(&engine).as_deref(), Some("newer"));
         assert_eq!(engine.projects[0].startup_command.as_deref(), Some("newer"));
+    }
+
+    /// `apply_wire` cannot answer a project setting before it is written: it
+    /// refuses one, naming the call that waits for the write, and nothing is
+    /// handed to the worker.
+    #[test]
+    fn apply_wire_refuses_a_project_setting_it_would_answer_before_the_write() {
+        let (mut engine, _tmp) = engine_with_project_p1();
+
+        let err = engine
+            .apply_wire(WireCommand::UpdateProjectStartupCommand {
+                project_id: "p1".to_string(),
+                startup_command: Some("make setup".to_string()),
+            })
+            .expect_err("answering before the write is refused");
+
+        assert!(
+            err.to_string().contains("dispatch_project_setting"),
+            "{err:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            engine.worker_rx.try_recv().is_err(),
+            "nothing was handed to the worker"
+        );
+        assert_eq!(stored_startup_command(&engine), None);
+    }
+
+    /// A browser's project setting is registered as the web's own until its
+    /// completion, so the drainer leaves its config.toml write and its report
+    /// to the web layer.
+    #[test]
+    fn a_dispatched_project_setting_routes_its_completion_to_the_web() {
+        let (mut engine, _tmp) = engine_with_project_p1();
+
+        let id = set_startup_command(&mut engine, "make setup");
+        assert!(engine.pending_web_project_saves.contains(&id));
+        let reaction =
+            EventReaction::ProjectPersistenceOutcome(Box::new(next_project_saved(&mut engine)));
+
+        assert_eq!(
+            engine.followup_owner(&reaction),
+            crate::engine::FollowupOwner::Web
+        );
+        // Once the web has answered it, the same id is nobody's to skip.
+        engine.pending_web_project_saves.remove(&id);
+        assert_eq!(
+            engine.followup_owner(&reaction),
+            crate::engine::FollowupOwner::Drainer
+        );
     }
 
     #[test]

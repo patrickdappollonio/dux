@@ -39,6 +39,9 @@ pub trait WebFollowupOpsView {
     fn has_checkout(&self, id: &str) -> bool;
     /// A clone a browser asked for: one the terminal UI started is its own.
     fn has_web_clone(&self, id: &str) -> bool;
+    /// Whether a project setting a browser asked for, with this id, is waiting
+    /// for its worker.
+    fn has_web_project_save(&self, id: &str) -> bool;
 }
 
 impl WebFollowupOpsView for Engine {
@@ -57,6 +60,9 @@ impl WebFollowupOpsView for Engine {
             .get(id)
             .is_some_and(|pending| pending.from_web)
     }
+    fn has_web_project_save(&self, id: &str) -> bool {
+        self.pending_web_project_saves.contains(id)
+    }
 }
 
 /// A point-in-time copy of the web pending-op ids, so an ownership verdict is
@@ -68,6 +74,7 @@ pub struct WebFollowupOps {
     add_project: HashSet<String>,
     checkout: HashSet<String>,
     web_clone: HashSet<String>,
+    web_project_save: HashSet<String>,
 }
 
 impl WebFollowupOps {
@@ -89,6 +96,9 @@ impl WebFollowupOpsView for WebFollowupOps {
     }
     fn has_web_clone(&self, id: &str) -> bool {
         self.web_clone.contains(id)
+    }
+    fn has_web_project_save(&self, id: &str) -> bool {
+        self.web_project_save.contains(id)
     }
 }
 
@@ -131,6 +141,7 @@ impl Engine {
                 .filter(|(_, pending)| pending.from_web)
                 .map(|(id, _)| id.clone())
                 .collect(),
+            web_project_save: self.pending_web_project_saves.clone(),
         }
     }
 }
@@ -162,6 +173,16 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             // its agent create. Twice is two projects and two agents.
             EventReaction::AddProjectAfterClone(done) => {
                 owner_by_id(done.status_op_id.as_deref(), |id| ops.has_web_clone(id))
+            }
+
+            // A project setting saved. A browser's save is answered, mirrored
+            // into config.toml and reported by the web layer; the terminal UI
+            // running its own arm too wrote config.toml a second time and put
+            // the browser's outcome on its status line.
+            EventReaction::ProjectPersistenceOutcome(outcome) => {
+                owner_by_id(outcome.status_op_id.as_deref(), |id| {
+                    ops.has_web_project_save(id)
+                })
             }
 
             // Worker 1 inspected the default branch and the follow-up SPAWNS
@@ -226,9 +247,6 @@ pub fn owner_of_reaction(ops: &impl WebFollowupOpsView, reaction: &EventReaction
             | EventReaction::ApplyReloadedConfig(_)
             | EventReaction::OpenConfigReloadFailedModal(_)
             | EventReaction::ConfigAdopted { .. }
-            // Project persistence: the engine already performed the mutation;
-            // both arms only report and mirror it.
-            | EventReaction::ProjectPersistenceOutcome(_)
             // Launch/terminal dispatch views: the engine did the work, the arms
             // describe it to their own surface.
             | EventReaction::DispatchAgentLaunchView(_)

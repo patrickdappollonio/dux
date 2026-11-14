@@ -962,6 +962,12 @@ pub struct Engine {
     /// lookup FAILURE is resolved in `process_worker_event`'s `PullRequestResolved`
     /// Err handler.
     pub pending_web_pr_lookup_ops: HashMap<String, HandlerStatusOp<WebPrLookupOutcome>>,
+    /// Project settings a browser asked for, by the id their
+    /// `ProjectPersistenceCompleted` carries: added by
+    /// [`Engine::dispatch_project_setting`] and removed by the web layer when
+    /// it answers the browser. Routing reads it, so the web is the one surface
+    /// that mirrors such a save into `config.toml` and reports it.
+    pub pending_web_project_saves: HashSet<String>,
     /// Repository clones, for either surface: each one's op waiting on its
     /// worker, and the git processes quitting dux stops. A clone that stops
     /// short of a project resolves its op in `process_worker_event`; one ready
