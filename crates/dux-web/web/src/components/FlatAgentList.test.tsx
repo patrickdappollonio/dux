@@ -1208,6 +1208,18 @@ describe("FlatAgentList section counters", () => {
     )
   })
 
+  it("never breaks the title or the count mid-word, and lets the count drop below the title", () => {
+    mockState = { ...makeState("name"), agentSearch: "z" } as DuxState
+    render(<FlatAgentList handlers={handlers} />)
+    const title = screen.getByText("Agents & Terminals")
+    const count = title.nextElementSibling as HTMLElement
+    expect(title.className).toContain("truncate")
+    expect(count.className).toContain("whitespace-nowrap")
+    const heading = screen.getByTestId("list-heading")
+    expect(heading.className).toContain("flex-wrap")
+    expect(heading.contains(screen.getByRole("button", { name: "Sort agents" }))).toBe(false)
+  })
+
   it("keeps the Inactive count in its pill", () => {
     render(<FlatAgentList handlers={handlers} />)
     const pill = screen.getByText("Inactive").nextElementSibling as HTMLElement

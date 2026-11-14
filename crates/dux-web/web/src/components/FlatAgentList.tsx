@@ -768,7 +768,10 @@ function SortControl() {
           }
         >
           <ArrowDownWideNarrow className="size-3 shrink-0" />
-          <span className="text-foreground/90">Sort</span>
+          {/* At the narrowest sidebar the word goes and the glyphs stay, so the
+              section title keeps its full width beside the trigger; the
+              accessible name and the tooltip still say what it is. */}
+          <span className="text-foreground/90 @max-[15rem]/list-header:hidden">Sort</span>
           <ChevronDown className="size-3 shrink-0 opacity-60" />
         </DropdownMenuTrigger>
       </SimpleTooltip>
@@ -1018,22 +1021,32 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
           the sidebar header (the logo row's p-2) and the list below, so the search
           box and the agent rows share one inset and none of it hugs the edge. */}
       <div className="flex flex-col gap-2 px-2 pt-2 pb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Agents &amp; Terminals</span>
-          {/* Right after the words, like every section count; while a search
-              is on it says how many of each the search leaves. */}
-          <span
-            aria-label={count.label}
-            className="text-xs tabular-nums text-muted-foreground"
+        <div className="@container/list-header flex items-center gap-2">
+          {/* Neither the title nor the count ever breaks inside itself: when the
+              two no longer fit beside Sort the count drops to a line of its
+              own, and only a title that cannot fit even alone truncates. */}
+          <div
+            data-testid="list-heading"
+            className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2"
           >
-            {count.text}
-          </span>
+            <span className="min-w-0 max-w-full truncate text-sm font-semibold">
+              Agents &amp; Terminals
+            </span>
+            {/* Right after the words, like every section count; while a search
+                is on it says how many of each the search leaves. */}
+            <span
+              aria-label={count.label}
+              className="whitespace-nowrap text-xs tabular-nums text-muted-foreground"
+            >
+              {count.text}
+            </span>
+          </div>
           {/* Sort rides the same gate as the list it sorts: with no row there
               is nothing to order, and the empty state below carries its own
               hero button. Creating lives behind the launcher corner, so the
               header carries no + of its own. */}
           {hasRows ? (
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex shrink-0 items-center gap-2">
               <SortControl />
             </div>
           ) : null}
