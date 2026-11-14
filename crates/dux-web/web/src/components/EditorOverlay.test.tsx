@@ -16,7 +16,7 @@ import {
   EXPLORER_LAYOUT_KEY,
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
-import { useEffect } from "react"
+import { type ReactNode, useEffect } from "react"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
 import { OPEN_IN_EDITORS } from "@/lib/editors"
 import { openModals } from "@/lib/modalHistory"
@@ -1910,13 +1910,17 @@ describe("file mutations confirm themselves when nothing else does", () => {
     expect(toastError).not.toHaveBeenCalled()
   })
 
-  it("renames without a word, because the row and the tab carry the new name", async () => {
+  it("says what it renamed, because the re-sorted row can leave the part of the tree in view", async () => {
     await rowMenu(/^Rename…$/)
     const field = await screen.findByDisplayValue("notes.md")
     fireEvent.change(field, { target: { value: "notes.txt" } })
     fireEvent.click(screen.getByRole("button", { name: /^rename$/i }))
     await waitFor(() => expect(renameMock).toHaveBeenCalled())
-    expect(toastSuccess).not.toHaveBeenCalled()
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1))
+    const said = render(<>{toastSuccess.mock.calls[0][0] as ReactNode}</>)
+    expect(said.container.textContent).toBe("Renamed notes.md to notes.txt.")
+    // Both names are chips, not quotations.
+    expect(said.container.querySelectorAll("code")).toHaveLength(2)
     expect(toastError).not.toHaveBeenCalled()
   })
 

@@ -78,7 +78,7 @@ import {
   renameTarget as computeRenameTarget,
 } from "@/lib/fileTreeOps"
 import { performMove } from "@/lib/moveEntry"
-import { deletedMessage } from "@/lib/editorMutations"
+import { deletedMessage, renamedMessage } from "@/lib/editorMutations"
 import {
   effectiveLanguageLabel,
   languageOverrideFor,
@@ -1365,9 +1365,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       .rename(root, from, to)
       .then(() => {
         setRenameEntryTarget(null)
-        // No toast: the tree row and the open tab both carry the new name. A
-        // MOVE keeps its toast (see `handleMoveSubmit`), because the entry
-        // leaves the folder the user was looking at.
+        // Said before the refetches, as a move's is: the rename has landed, and
+        // the re-sorted row can sit outside the part of the tree in view.
+        notifySuccess(renamedMessage(from, newName))
         editorRenameTabPaths(root, from, to)
         retargetOverrides(from, to)
         revalidateDirs([parentDir(from), parentDir(to)])
