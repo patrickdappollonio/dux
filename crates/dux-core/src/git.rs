@@ -4529,27 +4529,53 @@ pub(crate) fn worktree_is_dirty(worktree_path: &Path) -> Result<bool> {
 ///
 /// # Errors
 ///
-/// Fails when git cannot be run or `git status` fails.
+/// Fails when git cannot be run, `git status` fails, or it does not answer
+/// within [`UNCOMMITTED_COUNT_TIMEOUT`] (then with "git timed out").
 pub fn uncommitted_file_count(worktree_path: &Path) -> Result<u32> {
+    uncommitted_file_count_within(worktree_path, UNCOMMITTED_COUNT_TIMEOUT)
+}
+
+/// How long one worktree's uncommitted-file count waits for `git status`
+/// before giving up. A delete dialog and `dux projects rm --delete-worktrees`
+/// ask it once per worktree, so a wedged filesystem or lock must cost a failed
+/// count, said as "dux could not look", rather than holding the question.
+/// Longer than the ref probes' bound, because a status walks the whole tree.
+pub(crate) const UNCOMMITTED_COUNT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
+fn uncommitted_file_count_within(
+    worktree_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<u32> {
     if !worktree_path.is_dir() {
         return Ok(0);
     }
     // A scan that only reads: it never takes the index lock.
-    let output = Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "-C",
-            worktree_path.to_string_lossy().as_ref(),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--renames",
-            "--ignore-submodules=none",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| anyhow!("git could not be run: {err}"))?;
+    let mut command = Command::new("git");
+    command.args([
+        "--no-optional-locks",
+        "-C",
+        worktree_path.to_string_lossy().as_ref(),
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--renames",
+        "--ignore-submodules=none",
+    ]);
+    let output = match crate::bounded_command::run_command_with_timeout(
+        command,
+        timeout,
+        crate::bounded_command::DEFAULT_READER_DRAIN,
+        "git",
+    ) {
+        crate::bounded_command::CommandOutcome::Completed(output) => output,
+        crate::bounded_command::CommandOutcome::TimedOut => return Err(anyhow!("git timed out")),
+        crate::bounded_command::CommandOutcome::Failed(err)
+        | crate::bounded_command::CommandOutcome::NotFound(err) => {
+            return Err(anyhow!("git could not be run: {err}"));
+        }
+    };
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
         return Err(match said.trim() {
@@ -12406,6 +12432,27 @@ mod tests {
             uncommitted_file_count(&repo.path().join("not-there")).unwrap(),
             0
         );
+    }
+
+    /// A `git status` that does not answer in time is stopped and reported
+    /// as "git timed out", the reason the dialogs and the command line print
+    /// as "dux could not look", never waited on. The fsmonitor hook is what
+    /// `git status` runs first; one that sleeps stands in for a wedged
+    /// filesystem.
+    #[test]
+    fn uncommitted_file_count_stops_a_git_that_does_not_answer() {
+        let repo = init_test_repo();
+        let wt = add_worktree(repo.path(), "wedged");
+        let hook = repo.path().join("slow-fsmonitor");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        worktree_git(&wt)(&["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        let started = std::time::Instant::now();
+        let err = uncommitted_file_count_within(&wt, std::time::Duration::from_millis(500))
+            .expect_err("a git that does not answer is a failed count");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(unpushed_count_failure_reason(&err), "git timed out");
     }
 
     /// A folder that is no repository is a failure to check, never a clean
