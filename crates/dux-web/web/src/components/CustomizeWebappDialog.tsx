@@ -498,7 +498,7 @@ function SettingRow({
           d={d}
           value={value}
           onChange={onChange}
-          disabled={disabled || lock !== null}
+          disabled={disabled}
           availableProviders={availableProviders}
         />
       </div>
@@ -960,7 +960,8 @@ function CustomizeWebappForm({
   const setOverride = (key: string, value: SettingValue) =>
     setOverrides((o) => ({ ...o, [key]: value }))
 
-  // What this RUN of the server refuses to let the row change, if anything.
+  // What this RUN of the server cannot put in force for the row, if anything.
+  // The row stays editable: the value is saved for the next run.
   const lockOn = (d: SettingDescriptor): string | null =>
     bootstrap ? (d.lockedBy?.(bootstrap) ?? null) : null
 

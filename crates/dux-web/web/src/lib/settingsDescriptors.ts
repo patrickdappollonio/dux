@@ -71,9 +71,10 @@ export interface SettingDescriptor {
    * unchanged-row skip compares shown value to shown value. Bool rows only. */
   inverted?: boolean
   /** Why this run of the server cannot honour the value until it restarts, or
-   * `null` when it can. A locked row renders disabled and shows this sentence
-   * instead of `description`. The server still saves a value for a locked row,
-   * for the next run, so a section reset writes it like any other row. */
+   * `null` when it can. A locked row stays editable and shows this sentence
+   * instead of `description`, so the user knows a change only applies on the
+   * next run. The server saves a value for a locked row for the next run and
+   * says so in its reply, and a section reset writes it like any other row. */
   lockedBy?: (b: Bootstrap) => string | null
   /** Reads the current value out of the live Bootstrap document, falling back
    * to `default` when an older server omits the field. For the `"changesPane"`
@@ -410,7 +411,8 @@ export const SETTING_GROUPS: SettingGroup[] = [
         // only half of it; the other half moves a live listener.
         writeTarget: "tailscale",
         // `--no-tailscale` wins over the config for as long as the run lasts,
-        // so the listener would refuse every value but "no".
+        // so the listener would refuse every value but "no" this run. The row stays
+        // editable: the value is saved for the next run.
         lockedBy: (b) =>
           b.tailscale_forced_no
             ? "This run of dux was started with `--no-tailscale`, so the Tailscale address stays unbound however this is set. Your choice is saved and used the next time dux starts without that flag."

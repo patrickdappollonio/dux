@@ -746,17 +746,30 @@ describe("CustomizeWebappDialog", () => {
     expect(notifyWarning).not.toHaveBeenCalled()
   })
 
+  const FORCED_NO_REPLY = {
+    mode: "auto",
+    warning: true,
+    message:
+      '[server] tailscale is saved as "auto". This run was started with --no-tailscale, which wins for as long as it runs, so nothing changed on the listeners; restart dux without that flag to use the saved mode.',
+  }
+
   // ── The run-scoped lock ───────────────────────────────────────────────────
 
-  it("locks the Tailscale row on a run started with --no-tailscale", () => {
+  it("keeps the Tailscale row editable on a run started with --no-tailscale and says the change waits for the next run", async () => {
+    setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)
     seed({ tailscale_mode: "no", tailscale_forced_no: true })
     render(<CustomizeWebappDialog />)
 
     const trigger = screen.getByLabelText("Bind your Tailscale address")
-    expect(trigger.hasAttribute("disabled")).toBe(true)
+    expect(trigger.hasAttribute("disabled")).toBe(false)
     const row = trigger.closest(".flex-col.gap-2")
     expect(row!.textContent).toContain("--no-tailscale")
     expect(row!.textContent).toContain("next time")
+
+    await pickTailscaleMode("Auto")
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(setTailscaleMode).toHaveBeenCalledWith("auto"))
+    await waitFor(() => expect(notifyWarning).toHaveBeenCalledWith(FORCED_NO_REPLY.message))
   })
 
   it("leaves the row editable on an ordinary run", () => {
@@ -773,12 +786,6 @@ describe("CustomizeWebappDialog", () => {
   // A lock says this run cannot put the value in force, not that it cannot be
   // saved: the server saves it for the next run and its reply says so, so a
   // reset writes the locked row like any other and that reply is the outcome.
-  const FORCED_NO_REPLY = {
-    mode: "auto",
-    warning: true,
-    message:
-      '[server] tailscale is saved as "auto". This run was started with --no-tailscale, which wins for as long as it runs, so nothing changed on the listeners; restart dux without that flag to use the saved mode.',
-  }
 
   it("writes the locked Tailscale row's default when its section is reset", async () => {
     setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)

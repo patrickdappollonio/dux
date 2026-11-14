@@ -344,8 +344,8 @@ describe("settingsDescriptors", () => {
   })
 
   // `--no-tailscale` outranks the config for as long as the run lasts, so the
-  // row would save a value the listener refuses. It locks instead and says why.
-  it("locks the Tailscale row on a run started with --no-tailscale", () => {
+  // row would save a value the listener refuses. It stays editable and says why a change waits.
+  it("flags the Tailscale row on a run started with --no-tailscale", () => {
     const d = allSettingDescriptors().find((x) => x.key === "server.tailscale")!
     expect(d.lockedBy).toBeTypeOf("function")
     expect(d.lockedBy!({ ...sampleBootstrap, tailscale_forced_no: false })).toBeNull()
