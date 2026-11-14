@@ -575,10 +575,10 @@ pub(crate) struct App {
     /// when the dialog opens on branches its warning would say something about,
     /// cleared by `drain_unpushed_count` when the answer lands.
     pub(crate) unpushed_count_rx: Option<mpsc::Receiver<BranchOfferAnswer>>,
-    /// The Delete Project dialog's uncommitted-file counts, one answer per
-    /// agent worktree as each lands. Set when the dialog opens, cleared once
-    /// the worker has sent them all.
-    pub(crate) project_worktree_files_rx: Option<mpsc::Receiver<ProjectWorktreeFilesAnswer>>,
+    /// The Delete Project dialog's uncommitted-file counter, one answer per
+    /// agent worktree as each lands. Set when the dialog opens, dropped (which
+    /// stops it) once that dialog is no longer on screen.
+    pub(crate) project_worktree_files: Option<ProjectWorktreeFilesJob>,
     /// The rename dialog's pending "was this branch pushed?" answer, tagged
     /// with the agent it was asked for. One-shot, like the count above.
     pub(crate) rename_pushed_rx: Option<mpsc::Receiver<(String, bool)>>,
@@ -3173,6 +3173,30 @@ pub(crate) struct ProjectWorktreeFilesAnswer {
     pub(crate) answer: dux_core::delete_agent_prose::UncommittedAnswer,
 }
 
+/// The worker counting the Delete Project dialog's worktrees, one at a time,
+/// in the order they are queued: every agent worktree when the dialog opens,
+/// then each agent that joins the project while it is open.
+///
+/// Dropping it is how the count stops: `cancelled` is set, so the worker starts
+/// no further `git status`, and the queue closes, so the worker exits. A
+/// `git status` already running finishes on its own cap.
+#[derive(Debug)]
+pub(crate) struct ProjectWorktreeFilesJob {
+    /// The project whose dialog asked.
+    pub(crate) project_id: String,
+    /// Worktrees still to count: the agent's session id and the path.
+    pub(crate) queue: mpsc::Sender<(String, String)>,
+    pub(crate) answers: mpsc::Receiver<ProjectWorktreeFilesAnswer>,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for ProjectWorktreeFilesJob {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// A landed branch offer, tagged with the agent it was read for so a stale one
 /// cannot be rendered against a different agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5558,7 +5582,7 @@ impl App {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
-            project_worktree_files_rx: None,
+            project_worktree_files: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
             ui_jobs: ui_jobs::UiJobs::default(),

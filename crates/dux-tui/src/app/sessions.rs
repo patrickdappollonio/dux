@@ -4252,18 +4252,8 @@ impl App {
         project: &Project,
         return_to: Option<Box<ProjectActionsPrompt>>,
     ) {
-        // Every agent worktree the cascade removes, as `projects rm
-        // --delete-worktrees` counts them: the project's managed agents.
-        let worktrees: Vec<(String, String, String)> = self
-            .engine
-            .sessions
-            .iter()
-            .filter(|s| s.project_id() == Some(project.id.as_str()))
-            .filter_map(|s| {
-                s.managed_worktree()
-                    .map(|path| (s.id.clone(), s.display_label(), path.to_string()))
-            })
-            .collect();
+        // A counter left by an earlier dialog stops before this one asks.
+        self.project_worktree_files = None;
         self.prompt = PromptState::ConfirmDeleteProject {
             attached: Vec::new(),
             agent_count: self.project_agent_count(&project.id),
@@ -4271,73 +4261,136 @@ impl App {
             project_name: project.name.clone(),
             focus: ConfirmFocus::Cancel, // Cancel is the safe default
             return_to,
-            worktree_files: worktrees
-                .iter()
-                .map(
-                    |(session_id, agent_label, _)| crate::app::ProjectWorktreeFiles {
-                        session_id: session_id.clone(),
-                        agent_label: agent_label.clone(),
-                        answer: None,
-                    },
-                )
-                .collect(),
+            worktree_files: Vec::new(),
         };
-        self.spawn_project_worktree_files(&project.id, worktrees);
+        self.follow_project_worktrees();
     }
 
-    /// Count, off the UI thread, the uncommitted files in each worktree a
-    /// project delete removes. One worker reads them in turn and sends each
-    /// answer as it lands, so the dialog fills in line by line; until then each
-    /// says it is still looking, and nothing holds the confirm.
-    fn spawn_project_worktree_files(
-        &mut self,
-        project_id: &str,
-        worktrees: Vec<(String, String, String)>,
-    ) {
-        if worktrees.is_empty() {
-            self.project_worktree_files_rx = None;
+    /// Every agent worktree a delete of `project_id` removes, as `projects rm
+    /// --delete-worktrees` counts them: the project's managed agents, each as
+    /// its session id, label and path.
+    fn project_worktrees(&self, project_id: &str) -> Vec<(String, String, String)> {
+        self.engine
+            .sessions
+            .iter()
+            .filter(|s| s.project_id() == Some(project_id))
+            .filter_map(|s| {
+                s.managed_worktree()
+                    .map(|path| (s.id.clone(), s.display_label(), path.to_string()))
+            })
+            .collect()
+    }
+
+    /// Keep the open Delete Project dialog's worktree lines in step with the
+    /// project's agents, as the browser's dialog does: an agent that joins
+    /// while it is open gets a line and a count of its own (Delete would remove
+    /// its worktree too), one that leaves loses its line, and every answer
+    /// already in is kept. Cheap when nothing changed, because it runs on every
+    /// drain while the dialog is open.
+    fn follow_project_worktrees(&mut self) {
+        let PromptState::ConfirmDeleteProject {
+            project_id,
+            worktree_files,
+            ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let current = self
+            .engine
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.project_id() == Some(project_id.as_str()) && s.managed_worktree().is_some()
+            })
+            .map(|s| s.id.as_str());
+        let unchanged = worktree_files
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .eq(current);
+        if unchanged {
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.project_worktree_files_rx = Some(rx);
-        let project_id = project_id.to_string();
-        std::thread::spawn(move || {
-            for (session_id, _, path) in worktrees {
-                let answer = dux_core::branch_history::worktree_uncommitted_files(
-                    std::path::Path::new(&path),
-                );
-                let sent = tx.send(crate::app::ProjectWorktreeFilesAnswer {
-                    project_id: project_id.clone(),
-                    session_id,
-                    answer,
-                });
-                if sent.is_err() {
-                    // The dialog is gone; nobody reads the rest.
-                    return;
-                }
-            }
-        });
+        let project_id = project_id.clone();
+        let worktrees = self.project_worktrees(&project_id);
+        let PromptState::ConfirmDeleteProject { worktree_files, .. } = &mut self.prompt else {
+            return;
+        };
+        let mut previous = std::mem::take(worktree_files);
+        let mut to_count = Vec::new();
+        for (session_id, agent_label, path) in worktrees {
+            let answer = previous
+                .iter_mut()
+                .find(|entry| entry.session_id == session_id)
+                .map(|entry| entry.answer.take());
+            let answer = answer.unwrap_or_else(|| {
+                to_count.push((session_id.clone(), path));
+                None
+            });
+            worktree_files.push(crate::app::ProjectWorktreeFiles {
+                session_id,
+                agent_label,
+                answer,
+            });
+        }
+        self.mark_frame_dirty();
+        for job in to_count {
+            self.queue_project_worktree_count(&project_id, job);
+        }
+    }
+
+    /// Hand one worktree to the Delete Project dialog's counter, starting it
+    /// when this dialog has none running yet. A send fails only when the
+    /// worker has died, and then the counter is kept so the drain sees it
+    /// stopped and says so on every line still waiting, this one included.
+    fn queue_project_worktree_count(&mut self, project_id: &str, job: (String, String)) {
+        let counter = match self.project_worktree_files.take() {
+            Some(counter) if counter.project_id == project_id => counter,
+            _ => spawn_project_worktree_counter(
+                project_id,
+                dux_core::branch_history::worktree_uncommitted_files,
+            ),
+        };
+        let _ = counter.queue.send(job);
+        self.project_worktree_files = Some(counter);
     }
 
     /// Fold every landed uncommitted-file count into the Delete Project dialog
-    /// that asked for it. Tagged with the project and the agent, and dropped
-    /// when the dialog on screen is not the one that asked. A worker that
-    /// stopped before answering every worktree leaves the rest saying so
-    /// rather than still looking.
+    /// that asked for it, and stop the counter the moment that dialog is no
+    /// longer on screen, so a cancelled dialog runs no further `git status`.
+    /// Answers are tagged with the project and the agent, and dropped when the
+    /// dialog on screen is not the one that asked. A worker that stopped before
+    /// answering every worktree leaves the rest saying so rather than still
+    /// looking.
     pub(crate) fn drain_project_worktree_files(&mut self) {
-        let Some(rx) = self.project_worktree_files_rx.as_ref() else {
+        let open_project = match &self.prompt {
+            PromptState::ConfirmDeleteProject { project_id, .. } => Some(project_id.as_str()),
+            _ => None,
+        };
+        if self
+            .project_worktree_files
+            .as_ref()
+            .is_some_and(|counter| open_project != Some(counter.project_id.as_str()))
+        {
+            self.project_worktree_files = None;
+        }
+        if open_project.is_none() {
+            return;
+        }
+        self.follow_project_worktrees();
+        let Some(counter) = self.project_worktree_files.as_ref() else {
             return;
         };
         let mut landed = Vec::new();
         let stopped = loop {
-            match rx.try_recv() {
+            match counter.answers.try_recv() {
                 Ok(answer) => landed.push(answer),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break false,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => break true,
             }
         };
         if stopped {
-            self.project_worktree_files_rx = None;
+            self.project_worktree_files = None;
         }
         if landed.is_empty() && !stopped {
             return;
@@ -5430,6 +5483,46 @@ impl App {
     }
 }
 
+/// Start the Delete Project dialog's counter: one worker that counts, with
+/// `count`, the uncommitted files of each worktree queued on it, in turn, off
+/// the UI thread, and sends each answer as it lands, so the dialog fills in line
+/// by line and nothing holds the confirm. It checks the job's cancel flag
+/// before each worktree, so dropping the job stops it before the next `git
+/// status`, and it exits once the queue closes.
+fn spawn_project_worktree_counter(
+    project_id: &str,
+    count: impl Fn(&std::path::Path) -> dux_core::delete_agent_prose::UncommittedAnswer + Send + 'static,
+) -> crate::app::ProjectWorktreeFilesJob {
+    let (queue, jobs) = std::sync::mpsc::channel::<(String, String)>();
+    let (answer_tx, answers) = std::sync::mpsc::channel();
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = std::sync::Arc::clone(&cancelled);
+    let tagged = project_id.to_string();
+    std::thread::spawn(move || {
+        while let Ok((session_id, path)) = jobs.recv() {
+            if stop.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let answer = count(std::path::Path::new(&path));
+            let sent = answer_tx.send(crate::app::ProjectWorktreeFilesAnswer {
+                project_id: tagged.clone(),
+                session_id,
+                answer,
+            });
+            if sent.is_err() {
+                // The dialog is gone; nobody reads the rest.
+                return;
+            }
+        }
+    });
+    crate::app::ProjectWorktreeFilesJob {
+        project_id: project_id.to_string(),
+        queue,
+        answers,
+        cancelled,
+    }
+}
+
 /// Run `job` on a thread of its own. A panic in it is logged and its message
 /// handed to `on_panic`, which sends whatever event the job owed: the job's
 /// keyed busy is live until a final lands, so a job that dies silently would
@@ -5725,7 +5818,7 @@ mod tests {
             last_error_dialog_lines: 0,
             pending_first_load: None,
             unpushed_count_rx: None,
-            project_worktree_files_rx: None,
+            project_worktree_files: None,
             rename_pushed_rx: None,
             pr_clone_check_rx: None,
             ui_jobs: crate::app::ui_jobs::UiJobs::default(),
@@ -10440,6 +10533,114 @@ mod tests {
             app.drain_project_worktree_files();
         }
         assert_eq!(answers(&app), vec![Some(Ok(1))]);
+    }
+
+    /// Cancelling the dialog stops its counter on the next drain, so nothing
+    /// is left counting the project's worktrees for a dialog that is gone.
+    #[test]
+    fn cancelling_the_delete_project_dialog_stops_its_counter() {
+        let (_root, mut app, _worktree) = project_with_a_real_agent();
+        app.execute_command("delete-project")
+            .expect("open the confirmation");
+        let cancelled = Arc::clone(
+            &app.project_worktree_files
+                .as_ref()
+                .expect("the dialog starts a counter")
+                .cancelled,
+        );
+
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        app.drain_project_worktree_files();
+
+        assert!(app.project_worktree_files.is_none());
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// A dropped counter starts no further count: the one in flight finishes
+    /// and every worktree still queued behind it is left alone.
+    #[test]
+    fn a_dropped_project_worktree_counter_counts_nothing_more() {
+        let counted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let seen = Arc::clone(&counted);
+        let job = spawn_project_worktree_counter("p", move |path| {
+            seen.lock().unwrap().push(path.to_path_buf());
+            let _ = gate.lock().unwrap().recv();
+            Ok(0)
+        });
+        for name in ["a", "b", "c"] {
+            job.queue
+                .send((name.to_string(), format!("/wt/{name}")))
+                .unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while counted.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first count starts"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        drop(job);
+        release.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert_eq!(*counted.lock().unwrap(), vec![PathBuf::from("/wt/a")]);
+    }
+
+    /// An agent that joins the project while the dialog is open gets a line
+    /// and a count of its own, because Delete removes its worktree too, and
+    /// one that leaves loses its line, as in the browser's dialog.
+    #[test]
+    fn the_delete_project_dialog_counts_an_agent_that_joins_while_it_is_open() {
+        let (_root, mut app, worktree) = project_with_a_real_agent();
+        std::fs::write(worktree.join("NOTES.md"), "draft").unwrap();
+        app.execute_command("delete-project")
+            .expect("open the confirmation");
+        let lines = |app: &App| match &app.prompt {
+            PromptState::ConfirmDeleteProject { worktree_files, .. } => worktree_files
+                .iter()
+                .map(|entry| (entry.session_id.clone(), entry.answer.clone()))
+                .collect::<Vec<_>>(),
+            other => panic!("expected the delete-project confirmation, got {other:?}"),
+        };
+        let first = app.engine.sessions[0].id.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while lines(&app) != vec![(first.clone(), Some(Ok(1)))] {
+            assert!(std::time::Instant::now() < deadline, "{:?}", lines(&app));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.drain_project_worktree_files();
+        }
+
+        let mut joiner = app.engine.sessions[0].clone();
+        joiner.id = "joined-while-open".to_string();
+        app.engine.sessions.push(joiner);
+        app.drain_project_worktree_files();
+        assert_eq!(
+            lines(&app),
+            vec![
+                (first.clone(), Some(Ok(1))),
+                ("joined-while-open".to_string(), None),
+            ],
+            "the joiner is asked about, and the first answer is kept"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while lines(&app)[1].1.is_none() {
+            assert!(std::time::Instant::now() < deadline, "{:?}", lines(&app));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            app.drain_project_worktree_files();
+        }
+        assert_eq!(lines(&app)[1].1, Some(Ok(1)));
+
+        app.engine.sessions.retain(|s| s.id != first);
+        app.drain_project_worktree_files();
+        assert_eq!(
+            lines(&app),
+            vec![("joined-while-open".to_string(), Some(Ok(1)))]
+        );
     }
 
     #[test]
