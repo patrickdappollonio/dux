@@ -44,7 +44,6 @@ describe("the inline code chip for a name in prose", () => {
     expect(classes).toContain("whitespace-pre")
     expect(classes).toContain("inline")
     expect(classes).not.toContain("inline-block")
-    expect(classes).not.toContain("whitespace-pre-wrap")
     expect(classes).not.toContain("wrap-anywhere")
   })
 
@@ -69,7 +68,10 @@ describe("the inline code chip for a name in prose", () => {
     // at the edge of the line.
     expect(classes).toContain("wrap-anywhere")
     expect(classes).not.toContain("break-all")
-    expect(classes).toContain("whitespace-pre-wrap")
+    // Its spaces are kept, but whether it wraps at all is its row's to say, so
+    // in a row that truncates it stays on one line.
+    expect(classes).toContain("[white-space-collapse:preserve]")
+    expect(classes.some((c) => c.startsWith("whitespace-"))).toBe(false)
     expect(screen.getByText("demo-web").dataset.wrap).toBe("whole")
   })
 

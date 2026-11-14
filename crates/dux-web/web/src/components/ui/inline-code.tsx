@@ -22,8 +22,10 @@ import { cn } from "@/lib/utils"
 // is cut mid-name and stays readable.
 //
 // A chip longer than a whole row cannot move anywhere whole. That chip, and
-// only that one, flows like the words around it, breaking anywhere as a last
-// resort (`anywhere` rather than `break-word`, because it also shrinks the
+// only that one, flows like the words around it, breaking where they may
+// (it keeps its spaces but takes whether to wrap at all from its row, so in a
+// row that truncates it stays on one line and is cut by the ellipsis), and
+// anywhere as a last resort (`anywhere` rather than `break-word`, because it also shrinks the
 // chip's minimum width, so a long path cannot stretch a flex or grid cell, or
 // a toast, past the screen). Every row it spans gets a background of its own
 // that hugs that row's text (`box-decoration-clone`), and the sentence carries
@@ -35,7 +37,7 @@ import { cn } from "@/lib/utils"
 // byte for byte the value.
 const CHIP_CLASSES = "inline rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] box-decoration-clone"
 const WHOLE_CLASSES = "whitespace-pre"
-const FLOW_CLASSES = "whitespace-pre-wrap wrap-anywhere"
+const FLOW_CLASSES = "[white-space-collapse:preserve] wrap-anywhere"
 
 function InlineCode({ className, ref, children, ...props }: React.ComponentProps<"code">) {
   const own = useRef<HTMLElement>(null)
