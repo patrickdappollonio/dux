@@ -58,12 +58,12 @@ import {
   type Strength,
 } from "@/lib/passwordStrength"
 import { firstPasswordUnavailable, storedNotInForceSentence } from "@/lib/authErrors"
-import { inlineCodeDisplayText, renderInlineCode } from "@/lib/inlineMarkdown"
+import { inlineCodeDisplayText, inlineCodeProse, renderInlineCode } from "@/lib/inlineMarkdown"
 import { haystackHas, normalizeQuery } from "@/lib/agentSearch"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { wireProse } from "@/lib/prose"
+import { joinProse, type Prose, wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
@@ -818,6 +818,51 @@ function buildWrites(
   }
 }
 
+interface LockedRow {
+  d: SettingDescriptor
+  lock: string
+}
+
+// "the A setting" / "the A and B settings", and whether it reads as one or many.
+function lockedRowsPhrase(rows: LockedRow[]): string {
+  const labels = rows.map((r) => r.d.label)
+  const listed =
+    labels.length === 1
+      ? labels[0]
+      : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`
+  return `the ${listed} ${labels.length === 1 ? "setting is" : "settings are"}`
+}
+
+// Each locked row's own reason, as its row shows it, chips included.
+function lockReasons(rows: LockedRow[]): Prose {
+  return joinProse(
+    rows.map((r) => inlineCodeProse(r.lock)),
+    " ",
+  )
+}
+
+// A section reset that wrote nothing because the only rows off their default
+// are locked: "already at its default" would be false while those rows show
+// another value.
+function nothingToResetPastLocks(rows: LockedRow[], others: boolean): Prose {
+  const head = `Nothing to reset: ${lockedRowsPhrase(rows)} locked`
+  return joinProse(
+    [
+      [others ? `${head}, and every other setting in this section is already at its default.` : `${head}.`],
+      lockReasons(rows),
+    ],
+    " ",
+  )
+}
+
+// A section reset that wrote the other rows: the wire confirms those, and this
+// says why the locked ones still show a value that is not their default.
+function resetLeftLocked(rows: LockedRow[]): Prose {
+  const phrase = lockedRowsPhrase(rows)
+  const sentence = `${phrase[0].toUpperCase()}${phrase.slice(1)} locked, so the reset left ${rows.length === 1 ? "it" : "them"} as ${rows.length === 1 ? "it is" : "they are"}.`
+  return joinProse([[sentence], lockReasons(rows)], " ")
+}
+
 // What a persist came to: `ok` is false when any write was refused (each refusal
 // raised its own error), and `wrote` is false when no row differed from what is
 // in force, so nothing was sent at all.
@@ -1068,9 +1113,16 @@ function CustomizeWebappForm({
         d.writeTarget === "identity" ? "" : d.default
       // A locked row's control is unreachable, and a reset must not write past it:
       // the run would refuse the value and the toast would contradict the dialog.
-      const entries: [SettingDescriptor, SettingValue][] = settings
-        .filter((d) => lockOn(d) === null && d.writeTarget !== "password")
+      const resettable = settings.filter((d) => d.writeTarget !== "password")
+      const entries: [SettingDescriptor, SettingValue][] = resettable
+        .filter((d) => lockOn(d) === null)
         .map((d) => [d, resetValue(d)])
+      // The locked rows a reset leaves off their default, which stay on screen
+      // showing that value, so the outcome says why they did not move.
+      const lockedOff = resettable.flatMap((d) => {
+        const lock = lockOn(d)
+        return lock !== null && originalOf(d) !== resetValue(d) ? [{ d, lock }] : []
+      })
       // Reflect the reset defaults only AFTER the write lands: an optimistic
       // override would show a failed reset as saved. The dialog stays open either way.
       const persisted = await persist(entries, originalOf)
@@ -1081,7 +1133,13 @@ function CustomizeWebappForm({
           return next
         })
         if (!persisted.wrote) {
-          notifyInfo("Nothing to reset: every setting in this section is already at its default.")
+          notifyInfo(
+            lockedOff.length === 0
+              ? "Nothing to reset: every setting in this section is already at its default."
+              : nothingToResetPastLocks(lockedOff, entries.length > 0),
+          )
+        } else if (lockedOff.length > 0) {
+          notifyInfo(resetLeftLocked(lockedOff))
         }
       }
     } finally {
