@@ -1419,7 +1419,13 @@ fn run_program_with_timeout(program: &OsStr, args: &[&str], timeout: Duration) -
 /// pipes only a tiny stderr and never drains stdout, so it cannot be used where
 /// the output is the answer.)
 fn run_command_with_timeout(cmd: std::process::Command, timeout: Duration) -> GhCallOutcome {
-    match crate::bounded_command::run_command_with_timeout(cmd, timeout, GH_READER_DRAIN, "gh") {
+    match crate::bounded_command::run_command_with_timeout(
+        cmd,
+        crate::bounded_command::ChildGroup::New,
+        timeout,
+        GH_READER_DRAIN,
+        "gh",
+    ) {
         crate::bounded_command::CommandOutcome::Completed(output) => {
             GhCallOutcome::Completed(output)
         }

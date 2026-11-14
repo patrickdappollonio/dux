@@ -154,6 +154,7 @@ pub(crate) fn remote_default_branch_from_remote(
     let crate::bounded_command::CommandOutcome::Completed(output) =
         crate::bounded_command::run_command_with_timeout(
             command,
+            crate::bounded_command::ChildGroup::SessionSetByCaller,
             crate::gh::GH_CALL_TIMEOUT,
             crate::bounded_command::DEFAULT_READER_DRAIN,
             "git ls-remote",

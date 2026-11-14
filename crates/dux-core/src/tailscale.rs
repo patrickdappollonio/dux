@@ -782,6 +782,7 @@ fn run_cli_raw(
     cmd.env("TAILSCALE_BE_CLI", "1");
     let output = match crate::bounded_command::run_command_with_timeout(
         cmd,
+        crate::bounded_command::ChildGroup::New,
         timeout,
         crate::bounded_command::DEFAULT_READER_DRAIN,
         "tailscale",

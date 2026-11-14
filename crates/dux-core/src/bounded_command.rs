@@ -9,8 +9,25 @@
 //! Deliberately NOT `git::wait_child_or_kill`, which pipes only a tiny stderr
 //! and never drains stdout, so it cannot be used where the output is the answer.
 
+use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+/// Where the child's process group comes from. The cap kills the child's whole
+/// group, so a program it started (a git hook, a per-submodule git, a
+/// credential helper) cannot outlive the cap holding the pipes open; that only
+/// works when the child leads a group of its own, so every caller says how it
+/// gets one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildGroup {
+    /// The runner starts the child in a new process group of its own.
+    New,
+    /// The command already starts a session of its own (`setsid` in a
+    /// `pre_exec` hook, as the no-prompt git command does), which makes it lead
+    /// a group. The runner must not also give it one: a group leader cannot
+    /// start a session, so the `setsid` would fail and the spawn with it.
+    SessionSetByCaller,
+}
 
 /// The FLOOR on how long to wait for the output-reader threads once the child is
 /// gone before abandoning them. They finish on their own when the pipe closes;
@@ -51,13 +68,22 @@ pub(crate) enum CommandOutcome {
 /// being dropped on a loaded machine, where handing the buffer over is a
 /// scheduling race rather than a wedge.
 ///
-/// `label` names the program in failure text and is only used for messages.
+/// `group` says how the child comes to lead the process group the cap kills
+/// (see [`ChildGroup`]). `label` names the program in failure text and is only
+/// used for messages.
 pub(crate) fn run_command_with_timeout(
     mut cmd: Command,
+    group: ChildGroup,
     timeout: Duration,
     reader_drain: Duration,
     label: &str,
 ) -> CommandOutcome {
+    match group {
+        ChildGroup::New => {
+            cmd.process_group(0);
+        }
+        ChildGroup::SessionSetByCaller => {}
+    }
     let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -141,10 +167,10 @@ pub(crate) fn run_command_with_timeout(
     }
 }
 
-/// Kill `child`, and its whole process group when it leads one of its own (it
-/// started a session, as the no-prompt git command does), so a program it
-/// started and left running does not outlive the cap holding the pipes. A child
-/// that shares dux's own group is never group-killed.
+/// Kill `child`, and its whole process group when it leads one of its own
+/// (every [`ChildGroup`] arranges that), so a program it started and left
+/// running does not outlive the cap holding the pipes. The leader check stays
+/// so a child that somehow shares dux's own group is never group-killed.
 fn kill_with_group(child: &mut std::process::Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id().cast_signed())
         && rustix::process::getpgid(Some(pid)).is_ok_and(|group| group == pid)
@@ -167,7 +193,13 @@ mod tests {
     fn only_a_program_that_is_not_there_is_told_apart_as_not_found() {
         let missing = Command::new("/nonexistent/dux/no-such-program");
         assert!(matches!(
-            run_command_with_timeout(missing, Duration::from_secs(5), DEFAULT_READER_DRAIN, "t"),
+            run_command_with_timeout(
+                missing,
+                ChildGroup::New,
+                Duration::from_secs(5),
+                DEFAULT_READER_DRAIN,
+                "t"
+            ),
             CommandOutcome::NotFound(_)
         ));
         // A file that is there but cannot be executed is a failure, not absent.
@@ -176,6 +208,7 @@ mod tests {
         std::fs::write(&plain, "#!/bin/sh\n").unwrap();
         let outcome = run_command_with_timeout(
             Command::new(&plain),
+            ChildGroup::New,
             Duration::from_secs(5),
             DEFAULT_READER_DRAIN,
             "t",
@@ -187,7 +220,13 @@ mod tests {
     fn a_completed_command_returns_its_output() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "printf hello; printf oops >&2"]);
-        match run_command_with_timeout(cmd, Duration::from_secs(5), DEFAULT_READER_DRAIN, "sh") {
+        match run_command_with_timeout(
+            cmd,
+            ChildGroup::New,
+            Duration::from_secs(5),
+            DEFAULT_READER_DRAIN,
+            "sh",
+        ) {
             CommandOutcome::Completed(output) => {
                 assert!(output.status.success());
                 assert_eq!(String::from_utf8_lossy(&output.stdout), "hello");
@@ -206,8 +245,13 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "sleep 30"]);
         let start = Instant::now();
-        let outcome =
-            run_command_with_timeout(cmd, Duration::from_millis(200), DEFAULT_READER_DRAIN, "sh");
+        let outcome = run_command_with_timeout(
+            cmd,
+            ChildGroup::New,
+            Duration::from_millis(200),
+            DEFAULT_READER_DRAIN,
+            "sh",
+        );
         assert!(
             matches!(outcome, CommandOutcome::TimedOut),
             "expected a timeout, got {outcome:?}"
@@ -236,9 +280,54 @@ mod tests {
                 Ok(())
             });
         }
-        let outcome =
-            run_command_with_timeout(cmd, Duration::from_millis(500), DEFAULT_READER_DRAIN, "sh");
+        let outcome = run_command_with_timeout(
+            cmd,
+            ChildGroup::SessionSetByCaller,
+            Duration::from_millis(500),
+            DEFAULT_READER_DRAIN,
+            "sh",
+        );
         assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the grandchild started")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::file_drop::process_can_answer(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the grandchild outlived the command's group"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_plain_command_takes_its_whole_group_down_on_the_cap() {
+        // The grandchild keeps stderr open, so if it survived the kill the call
+        // would also overrun its cap by the drain floor.
+        let dir = crate::test_scratch::ScratchDir::new();
+        let pid_file = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 60 & echo $! > '{}'; wait",
+            pid_file.display()
+        ));
+        let start = Instant::now();
+        let outcome = run_command_with_timeout(
+            cmd,
+            ChildGroup::New,
+            Duration::from_millis(500),
+            DEFAULT_READER_DRAIN,
+            "sh",
+        );
+        let took = start.elapsed();
+        assert!(matches!(outcome, CommandOutcome::TimedOut), "{outcome:?}");
+        assert!(
+            took < Duration::from_millis(500) + DEFAULT_READER_DRAIN,
+            "nothing may hold the pipe past the cap, took {took:?}"
+        );
         let pid: u32 = std::fs::read_to_string(&pid_file)
             .expect("the grandchild started")
             .trim()
@@ -265,6 +354,7 @@ mod tests {
         let start = Instant::now();
         let outcome = run_command_with_timeout(
             cmd,
+            ChildGroup::New,
             Duration::from_millis(300),
             Duration::from_millis(100),
             "sh",
@@ -283,8 +373,13 @@ mod tests {
     #[test]
     fn a_missing_program_fails_rather_than_timing_out() {
         let cmd = Command::new("dux-no-such-program-9f3a");
-        let outcome =
-            run_command_with_timeout(cmd, Duration::from_secs(5), DEFAULT_READER_DRAIN, "nope");
+        let outcome = run_command_with_timeout(
+            cmd,
+            ChildGroup::New,
+            Duration::from_secs(5),
+            DEFAULT_READER_DRAIN,
+            "nope",
+        );
         assert!(
             matches!(outcome, CommandOutcome::NotFound(_)),
             "a missing program is NotFound, never TimedOut: {outcome:?}"

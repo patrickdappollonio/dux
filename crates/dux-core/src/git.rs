@@ -1155,6 +1155,7 @@ fn network_git(
     };
     match crate::bounded_command::run_command_with_timeout(
         command,
+        crate::bounded_command::ChildGroup::SessionSetByCaller,
         timeout,
         crate::bounded_command::DEFAULT_READER_DRAIN,
         label,
@@ -1538,6 +1539,7 @@ fn run_git_capture_bounded(
     cmd.arg("-C").arg(path).args(args);
     let output = match crate::bounded_command::run_command_with_timeout(
         cmd,
+        crate::bounded_command::ChildGroup::New,
         timeout,
         crate::bounded_command::DEFAULT_READER_DRAIN,
         "git",
@@ -4565,6 +4567,7 @@ fn uncommitted_file_count_within(
     ]);
     let output = match crate::bounded_command::run_command_with_timeout(
         command,
+        crate::bounded_command::ChildGroup::New,
         timeout,
         crate::bounded_command::DEFAULT_READER_DRAIN,
         "git",
@@ -12438,21 +12441,50 @@ mod tests {
     /// as "git timed out", the reason the dialogs and the command line print
     /// as "dux could not look", never waited on. The fsmonitor hook is what
     /// `git status` runs first; one that sleeps stands in for a wedged
-    /// filesystem.
+    /// filesystem. The hook is git's own child: it must go down with git, or
+    /// it outlives the cap and holds git's stderr open past it.
     #[test]
     fn uncommitted_file_count_stops_a_git_that_does_not_answer() {
         let repo = init_test_repo();
         let wt = add_worktree(repo.path(), "wedged");
         let hook = repo.path().join("slow-fsmonitor");
-        std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        let hook_pid = repo.path().join("slow-fsmonitor.pid");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+                hook_pid.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         worktree_git(&wt)(&["config", "core.fsmonitor", hook.to_str().unwrap()]);
+        let cap = std::time::Duration::from_millis(500);
         let started = std::time::Instant::now();
-        let err = uncommitted_file_count_within(&wt, std::time::Duration::from_millis(500))
+        let err = uncommitted_file_count_within(&wt, cap)
             .expect_err("a git that does not answer is a failed count");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let took = started.elapsed();
         assert_eq!(unpushed_count_failure_reason(&err), "git timed out");
+        // Well short of the cap plus the reader drain floor, which is what a
+        // surviving hook holding the pipe costs.
+        assert!(
+            took < cap + std::time::Duration::from_millis(1500),
+            "the count must return close to its cap, took {took:?}"
+        );
+        let pid: u32 = std::fs::read_to_string(&hook_pid)
+            .expect("git ran the fsmonitor hook")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::file_drop::process_can_answer(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the fsmonitor hook outlived the stopped git"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// A folder that is no repository is a failure to check, never a clean
