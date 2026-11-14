@@ -27,12 +27,6 @@ describe("the inline code chip for a name in prose", () => {
     expect(code.className).not.toMatch(/#[0-9a-f]{3,6}|rgb\(/i)
   })
 
-  it("wraps a long value anywhere, so a path never scrolls a phone sideways", () => {
-    render(<InlineCode>/home/someone/a/very/long/path/without/any/spaces/at/all</InlineCode>)
-    const code = screen.getByText(/very\/long/)
-    expect(code.className).toContain("wrap-anywhere")
-  })
-
   // jsdom cannot lay a line out, so the classes that decide the layout are
   // pinned, and the chip's width against its row is stubbed.
   it("moves to the next row whole when it fits on one, so a hyphen never splits it", () => {
@@ -44,8 +38,14 @@ describe("the inline code chip for a name in prose", () => {
     const code = screen.getByText("demo-web")
     const classes = code.className.split(/\s+/)
     expect(code.dataset.wrap).toBe("whole")
-    expect(classes).toContain("inline-block")
-    expect(classes).toContain("max-w-full")
+    // No break inside it, and it stays an inline box: an inline block is a
+    // break point before whatever follows it, so the closing `.` could start
+    // a row alone, and a truncating row would swallow it whole.
+    expect(classes).toContain("whitespace-pre")
+    expect(classes).toContain("inline")
+    expect(classes).not.toContain("inline-block")
+    expect(classes).not.toContain("whitespace-pre-wrap")
+    expect(classes).not.toContain("wrap-anywhere")
   })
 
   it("flows like text when it is longer than a row, each row's background hugging that row", () => {
@@ -69,6 +69,7 @@ describe("the inline code chip for a name in prose", () => {
     // at the edge of the line.
     expect(classes).toContain("wrap-anywhere")
     expect(classes).not.toContain("break-all")
+    expect(classes).toContain("whitespace-pre-wrap")
     expect(screen.getByText("demo-web").dataset.wrap).toBe("whole")
   })
 
@@ -76,7 +77,16 @@ describe("the inline code chip for a name in prose", () => {
     const { container } = render(<InlineCode>npm  run   dev</InlineCode>)
     const code = container.querySelector("code")
     expect(code?.textContent).toBe("npm  run   dev")
-    expect(code?.className).toContain("whitespace-pre-wrap")
+    expect(code?.className.split(/\s+/)).toContain("whitespace-pre")
+  })
+
+  it("leaves the measuring probe off the chip once it has measured", () => {
+    render(
+      <p>
+        Saved <InlineCode>demo-web</InlineCode>.
+      </p>,
+    )
+    expect(screen.getByText("demo-web").getAttribute("style")).toBeFalsy()
   })
 
   it("is plain inline text to a screen reader", () => {
