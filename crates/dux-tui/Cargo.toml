@@ -37,7 +37,6 @@ indexmap.workspace = true
 # Counts the newlines in a diff side without a byte-at-a-time loop.
 memchr = "2.8"
 sysinfo.workspace = true
-notify.workspace = true
 opaline = { version = "0.4", features = ["ratatui", "builtin-themes"] }
 # Text is cut and wrapped by extended grapheme cluster, the unit ratatui draws in,
 # so an emoji sequence is never split and is measured as one glyph. Pinned to the

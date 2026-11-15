@@ -25,7 +25,6 @@ uuid = { version = "1.17.0", features = ["v4"] }
 home = "0.5.11"
 content_inspector = "0.2.4"
 tempfile = "3.20.0"
-notify = "7"
 flate2 = "1"
 sysinfo = "0.35"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "signal"] }
