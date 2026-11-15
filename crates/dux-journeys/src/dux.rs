@@ -713,13 +713,25 @@ impl Dux {
     }
 
     /// Wait until the terminal UI shows `needle`.
+    ///
+    /// # Panics
+    ///
+    /// When the screen has not shown `needle` within `within`, printing the
+    /// last screen it did show.
     pub async fn wait_for_screen(&self, needle: &str, within: Duration) {
-        eventually(
-            &format!("the screen to show {needle:?}"),
-            within,
-            || async { self.tmux_screen().await.contains(needle).then_some(()) },
-        )
-        .await;
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let screen = self.tmux_screen().await;
+            if screen.contains(needle) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out after {within:?} waiting for the screen to show {needle:?}; \
+                 it shows:\n{screen}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 }
 
