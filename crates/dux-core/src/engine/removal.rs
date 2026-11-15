@@ -478,8 +478,7 @@ impl Engine {
                 .sessions
                 .iter()
                 .find(|session| &session.id == session_id)
-                .map(|session| session.directory().to_string())
-                .unwrap_or_default();
+                .map_or_default(|session| session.directory().to_string());
             // `None` for the branch: the project-removal dialog asks about the
             // project rather than each agent's branch, so the provenance default
             // stands. That is what keeps a project removal from taking a user's
@@ -634,8 +633,7 @@ impl Engine {
         let path = deletion
             .paths
             .get(session_id)
-            .map(|path| crate::home_path::shorten_home(Path::new(path)))
-            .unwrap_or_default();
+            .map_or_default(|path| crate::home_path::shorten_home(Path::new(path)));
         let op = deletion.op.as_ref()?;
         Some(EventReaction::Status(op.progress(crate::status_text![
             "Deleting project ",

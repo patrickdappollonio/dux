@@ -1723,8 +1723,7 @@ pub fn delete_branch_offer(inputs: &crate::engine::BranchDeleteInputs) -> Branch
     let worktree = Path::new(&inputs.worktree_path);
     let mut history = inputs.history.clone();
     let fresh: Vec<String> = scan_head_reflog(worktree, inputs.created_at, None)
-        .map(|(seen, _)| seen)
-        .unwrap_or_default()
+        .map_or_default(|(seen, _)| seen)
         .into_iter()
         .filter(|name| !history.iter().any(|entry| entry.name == *name))
         .collect();

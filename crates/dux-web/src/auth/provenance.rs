@@ -594,8 +594,7 @@ fn on_own_network(arrival: Tcp, exposure: &Exposure, interfaces: &[IpAddr]) -> b
     let own_tailscale = exposure
         .identity
         .as_ref()
-        .map(|facts| facts.own_ips.clone())
-        .unwrap_or_default();
+        .map_or_default(|facts| facts.own_ips.clone());
     std::iter::once(arrival.local.ip())
         .chain(interfaces.iter().copied())
         .chain(own_tailscale)

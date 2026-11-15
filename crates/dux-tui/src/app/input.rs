@@ -8652,8 +8652,7 @@ impl App {
                 .unwrap_or_else(|| std::path::Path::new("/"));
             let file_name = input_path
                 .file_name()
-                .map(|f| f.to_string_lossy().to_string())
-                .unwrap_or_default();
+                .map_or_default(|f| f.to_string_lossy().to_string());
             (parent.to_path_buf(), file_name)
         };
 
@@ -13478,8 +13477,7 @@ mod tests {
             BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default()
+                .map_or_default(|d| d.default_keys.to_vec())
         })
     }
 
@@ -39313,8 +39311,7 @@ cyan = "#00ffff"
         let status = app
             .status
             .most_recent_tui()
-            .map(|(_, text)| text)
-            .unwrap_or_default();
+            .map_or_default(|(_, text)| text);
         assert!(
             status.starts_with("Closed the Codex") && !status.contains("took its place"),
             "the line names the tab that went: {status}"
@@ -39443,8 +39440,7 @@ cyan = "#00ffff"
         let status = app
             .status
             .most_recent_tui()
-            .map(|(_, text)| text)
-            .unwrap_or_default();
+            .map_or_default(|(_, text)| text);
         assert!(
             status == dux_core::agent_tabs::ONLY_TAB_CLOSE_REFUSAL,
             "the refusal is the one core-owned sentence, verbatim: {status}"
@@ -39521,8 +39517,7 @@ cyan = "#00ffff"
         let status = app
             .status
             .most_recent_tui()
-            .map(|(_, text)| text)
-            .unwrap_or_default();
+            .map_or_default(|(_, text)| text);
         assert!(
             status.contains("Closed the first tab, Codex.")
                 && status.contains("Codex 2 took its place as the agent's first tab.")
@@ -41109,8 +41104,7 @@ cyan = "#00ffff"
                 _ => crate::keybindings::BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default(),
+                    .map_or_default(|d| d.default_keys.to_vec()),
             })
         };
         let press = |app: &mut App, n: u8| {
@@ -41351,8 +41345,7 @@ cyan = "#00ffff"
             _ => crate::keybindings::BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default(),
+                .map_or_default(|d| d.default_keys.to_vec()),
         });
         let mut app = startup_log_viewer_app();
         app.bindings = rebound;

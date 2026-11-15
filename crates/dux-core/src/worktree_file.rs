@@ -492,7 +492,7 @@ pub fn read_file_as(
         mixed_line_endings: endings.is_some_and(|e| e.mixed),
         eol: endings.map(|e| e.saves_as.label()),
         looks_like_utf8,
-        content: text.map(|t| t.text).unwrap_or_default(),
+        content: text.map_or_default(|t| t.text),
         // A text the encoding cannot write back unchanged is shown, never
         // saved in it: the same read-only the editor gives a symlink.
         read_only: read_only || unwritable.is_some(),

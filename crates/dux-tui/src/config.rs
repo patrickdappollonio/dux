@@ -353,8 +353,7 @@ fn fold_legacy_key_actions(doc: &mut DocumentMut) -> bool {
                     &FOLDED_KEY_ACTIONS
                         .iter()
                         .find(|fold| fold.legacy == *legacy)
-                        .map(FoldedKeyAction::rename_sentence)
-                        .unwrap_or_default(),
+                        .map_or_default(FoldedKeyAction::rename_sentence),
                 );
             }
             // The new name is present but is not a key list (or the legacy value

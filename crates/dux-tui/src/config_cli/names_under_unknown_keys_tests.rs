@@ -20,7 +20,7 @@ fn get_all(body: &str, key: &str) -> String {
         "{}{}{}",
         String::from_utf8(out).unwrap(),
         String::from_utf8(err).unwrap(),
-        result.err().map(|e| format!("{e:#}")).unwrap_or_default()
+        result.err().map_or_default(|e| format!("{e:#}"))
     )
 }
 

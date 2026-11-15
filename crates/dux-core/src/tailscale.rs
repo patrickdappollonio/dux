@@ -887,8 +887,7 @@ pub(crate) fn parse_funnel_to_port(text: &str, dux_port: u16) -> Option<bool> {
     let foreground: Vec<&serde_json::Map<String, serde_json::Value>> = top
         .get("Foreground")
         .and_then(|sessions| sessions.as_object())
-        .map(|sessions| sessions.values().filter_map(|s| s.as_object()).collect())
-        .unwrap_or_default();
+        .map_or_default(|sessions| sessions.values().filter_map(|s| s.as_object()).collect());
     let configs: Vec<&serde_json::Map<String, serde_json::Value>> = std::iter::once(top)
         .chain(foreground.iter().copied())
         .collect();
@@ -1109,26 +1108,24 @@ pub(crate) fn parse_status_json(text: &str) -> Option<SelfStatus> {
     let cert_domains = root
         .get("CertDomains")
         .and_then(|v| v.as_array())
-        .map(|domains| {
+        .map_or_default(|domains| {
             domains
                 .iter()
                 .filter_map(|d| d.as_str())
                 .filter_map(normalize_dns_name)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let tailscale_ips = root
         .get("Self")
         .and_then(|s| s.get("TailscaleIPs"))
         .or_else(|| root.get("TailscaleIPs"))
         .and_then(|v| v.as_array())
-        .map(|ips| {
+        .map_or_default(|ips| {
             ips.iter()
                 .filter_map(|ip| ip.as_str())
                 .filter_map(|ip| ip.parse().ok())
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     Some(SelfStatus {
         dns_name,
         magic_dns_enabled,

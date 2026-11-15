@@ -7760,8 +7760,7 @@ impl App {
                     self.engine
                         .sessions
                         .get(*index)
-                        .map(|session| session.id.clone())
-                        .unwrap_or_default(),
+                        .map_or_default(|session| session.id.clone()),
                 ),
                 LeftItem::Terminal(index) => {
                     LeftRow::Terminal(self.left_terminals.get(*index).cloned().unwrap_or_default())
@@ -8798,8 +8797,7 @@ impl App {
     /// The selected agent's dock terminals, or none when no agent is selected.
     pub(crate) fn selected_dock_terminal_ids(&self) -> Vec<String> {
         self.selected_session()
-            .map(|session| self.dock_terminal_ids(&session.id))
-            .unwrap_or_default()
+            .map_or_default(|session| self.dock_terminal_ids(&session.id))
     }
 
     /// Whether any of the selected agent's tabs has a live process, which is
@@ -9052,8 +9050,7 @@ impl App {
             .projects
             .iter()
             .find(|p| p.id == project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default()
+            .map_or_default(|p| p.name.clone())
     }
 
     /// Returns the number of running companion terminals for a given session.
@@ -12611,8 +12608,7 @@ mod pinned_warning_tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("Project path not found"),
             "the warning must be on the line: {message}"
@@ -12716,8 +12712,7 @@ mod pinned_warning_tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("could not be loaded"),
             "the theme warning must be on the line: {message}"

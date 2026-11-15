@@ -325,8 +325,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(crate::model::AgentSession::display_label)
-            .unwrap_or_default()
+            .map_or_default(crate::model::AgentSession::display_label)
     }
 
     pub(crate) fn set_pull_requests_cursor(&mut self, cursor: usize) {

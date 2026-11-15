@@ -72,13 +72,13 @@ impl PruneViewContext {
         });
         // The strip as last drawn when it is this agent's: a tab another screen
         // closed is already gone from the engine, but not from that drawing.
-        let strip_before = selected_session
-            .as_ref()
-            .map(|session_id| match &app.last_tab_strip {
-                Some(drawn) if drawn.session_id == *session_id => drawn.tabs.clone(),
-                _ => app.session_tab_ids(session_id),
-            })
-            .unwrap_or_default();
+        let strip_before =
+            selected_session
+                .as_ref()
+                .map_or_default(|session_id| match &app.last_tab_strip {
+                    Some(drawn) if drawn.session_id == *session_id => drawn.tabs.clone(),
+                    _ => app.session_tab_ids(session_id),
+                });
         Self {
             selected_session,
             focused_tab,

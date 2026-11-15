@@ -991,8 +991,7 @@ async fn apply_batch(
         let sentence = partition
             .refused
             .first()
-            .map(|(_, sentence)| sentence.clone())
-            .unwrap_or_default();
+            .map_or_default(|(_, sentence)| sentence.clone());
         return Err((
             StatusCode::BAD_REQUEST,
             dux_core::git::redact_resolved_worktree_path(&sentence, worktree, canonical.as_deref()),
@@ -1058,7 +1057,7 @@ async fn files_op(
             no_selected_files_left_message(
                 refused.len(),
                 section,
-                refused.first().map(String::as_str).unwrap_or_default(),
+                refused.first().map_or_default(String::as_str),
             ),
         )
             .into_response();

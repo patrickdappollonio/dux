@@ -1387,7 +1387,7 @@ impl ProjectView {
             .to_string(),
             path_missing: p.path_missing,
             leading_branch: p.leading_branch.clone(),
-            created_at: p.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            created_at: p.created_at.map_or_default(|dt| dt.to_rfc3339()),
         }
     }
 }

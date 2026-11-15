@@ -210,8 +210,7 @@ impl BackgroundServeCompanion for WebCompanion {
 
     fn urls(&self) -> Vec<String> {
         self.serving()
-            .map(dux_web::background::BackgroundServer::urls)
-            .unwrap_or_default()
+            .map_or_default(dux_web::background::BackgroundServer::urls)
     }
 
     fn browsers(&self) -> usize {

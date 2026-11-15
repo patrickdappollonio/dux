@@ -1411,8 +1411,7 @@ impl Engine {
                 None => self
                     .agent_tabs
                     .get(tab_id)
-                    .map(|t| t.provider.as_str().to_string())
-                    .unwrap_or_default(),
+                    .map_or_default(|t| t.provider.as_str().to_string()),
             };
             format!("{provider} on {branch}")
         };

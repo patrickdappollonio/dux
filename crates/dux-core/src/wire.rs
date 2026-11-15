@@ -6252,11 +6252,7 @@ mod tests {
         // No session exists yet: the folder refusal has nothing to find.
         assert!(engine.sessions.is_empty());
         let second = engine.apply_wire(create()).expect("the second is answered");
-        let message = second
-            .status
-            .as_ref()
-            .map(|s| s.message.clone())
-            .unwrap_or_default();
+        let message = second.status.as_ref().map_or_default(|s| s.message.clone());
         assert_eq!(
             second.status.as_ref().map(|s| s.tone.as_str()),
             Some("error"),

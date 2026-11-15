@@ -303,16 +303,13 @@ pub fn strength(password: &Password, user_inputs: &[&str]) -> Strength {
         .feedback()
         .and_then(zxcvbn::feedback::Feedback::warning)
         .map(|warning| warning.to_string());
-    let suggestions: Vec<String> = entropy
-        .feedback()
-        .map(|feedback| {
-            feedback
-                .suggestions()
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let suggestions: Vec<String> = entropy.feedback().map_or_default(|feedback| {
+        feedback
+            .suggestions()
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    });
     let parts: Vec<String> = warning
         .iter()
         .cloned()

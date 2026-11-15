@@ -721,8 +721,7 @@ impl Engine {
             rows,
             self.pr_prefs
                 .get(session_id)
-                .map(|prefs| prefs.sort_mode)
-                .unwrap_or_default(),
+                .map_or_default(|prefs| prefs.sort_mode),
         );
         let every: Vec<&AgentPr> = ordered.visible.into_iter().chain(ordered.hidden).collect();
         let mut history: Vec<crate::branch_history::BranchHistoryEntry> = self
@@ -805,15 +804,13 @@ impl Engine {
             .branch_histories
             .get(session_id)
             .and_then(|history| history.iter().find(|entry| entry.name == current))
-            .map(|entry| entry.former_names.clone())
-            .unwrap_or_default();
+            .map_or_default(|entry| entry.former_names.clone());
         let rows = self.agent_prs.get(session_id)?;
         let ordered = pr_list::order(
             rows,
             self.pr_prefs
                 .get(session_id)
-                .map(|prefs| prefs.sort_mode)
-                .unwrap_or_default(),
+                .map_or_default(|prefs| prefs.sort_mode),
         );
         let own = OwnRepository::of(self.pr_own_repos.get(session_id), rows);
         let open = |row: &AgentPr| matches!(row.state, PrState::Open | PrState::Draft);

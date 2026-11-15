@@ -677,8 +677,7 @@ impl App {
             .map_or_else(|| "Terminal".to_string(), |t| t.label.clone());
         let remote = id
             .and_then(|id| super::render::remote_viewers_segment(self.pty_browser_count(&id)))
-            .map(|segment| format!(" · {segment}"))
-            .unwrap_or_default();
+            .map_or_default(|segment| format!(" · {segment}"));
         format!(" {label}{remote} ")
     }
 

@@ -1020,8 +1020,7 @@ impl RemovalLease {
             .get(&self.key)
             .and_then(|entry| entry.removal.as_ref())
             .filter(|removal| removal.id == self.id)
-            .map(|removal| removal.renames.clone())
-            .unwrap_or_default();
+            .map_or_default(|removal| removal.renames.clone());
         drop(state);
         let mut current = branch.to_string();
         for (old, new) in renames {

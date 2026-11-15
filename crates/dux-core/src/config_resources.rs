@@ -265,15 +265,12 @@ pub fn keys(raw: &str) -> Result<Vec<KeyItem>, String> {
     let used = crate::config::terminal_ui_keys(raw).ok_or_else(unreadable)?;
     let defaults = crate::config::terminal_ui_keys("").ok_or_else(unreadable)?;
     let strings = |value: &toml::Value| -> Vec<String> {
-        value
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
+        value.as_array().map_or_default(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
     };
     Ok(used
         .iter()

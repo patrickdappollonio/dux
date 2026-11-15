@@ -216,8 +216,7 @@ fn host_glibc() -> String {
         .arg("GNU_LIBC_VERSION")
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        .map_or_default(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
 /// The image tag for this tree and this host.

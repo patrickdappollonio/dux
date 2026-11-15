@@ -171,10 +171,7 @@ fn section(
     if !subcommands.is_empty() {
         page.push('\n');
         for (listed, _, sub_path) in &subcommands {
-            let about = listed
-                .get_about()
-                .map(ToString::to_string)
-                .unwrap_or_default();
+            let about = listed.get_about().map_or_default(ToString::to_string);
             let _ = writeln!(
                 page,
                 "- [`{sub_path}`](#{}): {}",
@@ -207,8 +204,7 @@ fn value_name(arg: &Arg) -> String {
 fn help_of(arg: &Arg) -> String {
     arg.get_long_help()
         .or_else(|| arg.get_help())
-        .map(ToString::to_string)
-        .unwrap_or_default()
+        .map_or_default(ToString::to_string)
 }
 
 /// An argument's help with the sentences about its values after it.

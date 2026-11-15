@@ -458,8 +458,7 @@ pub fn worktrees_ls(client: &Client, query: &str, shape: Shape) -> Result<String
             let held_by = entry
                 .get("agent_id")
                 .and_then(Value::as_str)
-                .map(|id| names.get(id).cloned().unwrap_or_else(|| id.to_string()))
-                .unwrap_or_default();
+                .map_or_default(|id| names.get(id).cloned().unwrap_or_else(|| id.to_string()));
             Row {
                 id: text(&entry, "worktree_path"),
                 cells: vec![
@@ -3089,15 +3088,13 @@ mod pull_request_anywhere_tests {
 
     fn resolve_reply(projects: &str, clone: Option<&str>, unavailable: Option<&str>) -> String {
         let clone = clone
-            .map(|review| {
+            .map_or_default(|review| {
                 format!(
                     r#","clone":{{"address":"git@github.com:octo/other.git","host":"github.com","owner_repo":"octo/other","number":5,"title":"T","state":"OPEN","head_branch":"fix","head_oid":"abc","review_copy":{review}}}"#
                 )
-            })
-            .unwrap_or_default();
-        let unavailable = unavailable
-            .map(|why| format!(r#","clone_unavailable":"{why}""#))
-            .unwrap_or_default();
+            });
+        let unavailable =
+            unavailable.map_or_default(|why| format!(r#","clone_unavailable":"{why}""#));
         format!(
             r#"{{"repository":"github.com/octo/other","number":5,"projects":{projects},"uninspected_count":0,"uninspected_summary":null{clone}{unavailable}}}"#
         )

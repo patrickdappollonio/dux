@@ -115,11 +115,7 @@ fn cut_card_lines(
         return cut;
     }
     if let Some(last) = cut.last_mut() {
-        let style = last
-            .spans
-            .first()
-            .map(|span| span.style)
-            .unwrap_or_default();
+        let style = last.spans.first().map_or_default(|span| span.style);
         let text: String = last
             .spans
             .iter()
@@ -534,7 +530,7 @@ fn resource_parent_row(
 ) -> ratatui::widgets::Row<'static> {
     use ratatui::widgets::{Cell, Row};
     let name_w = usize::from(columns.name_w);
-    let pid_str = stat.pid.map(|p| p.to_string()).unwrap_or_default();
+    let pid_str = stat.pid.map_or_default(|p| p.to_string());
     // `~` marks a sample the collector had to re-establish its CPU
     // baseline for, so the reading spans only sysinfo's short
     // `MINIMUM_CPU_UPDATE_INTERVAL` window rather than the
@@ -784,7 +780,7 @@ pub(crate) fn agent_row_owner_tag(
         }
         dux_core::model::AgentWorkspace::Managed(_) => AgentRowOwnerTag::Project(
             project_tag_kind(project),
-            project.map(|p| p.name.clone()).unwrap_or_default(),
+            project.map_or_default(|p| p.name.clone()),
         ),
         dux_core::model::AgentWorkspace::Folder(folder) => AgentRowOwnerTag::Folder {
             label: dux_core::home_path::shorten_home(std::path::Path::new(&folder.folder_path)),
@@ -3412,8 +3408,7 @@ impl App {
             let (text, cursor) = self
                 .agent_filter
                 .as_ref()
-                .map(|input| (input.text.clone(), input.cursor))
-                .unwrap_or_default();
+                .map_or_default(|input| (input.text.clone(), input.cursor));
             Paragraph::new(render_single_line_field(
                 "/ ",
                 &text,
@@ -3690,8 +3685,7 @@ impl App {
         let visible: Vec<Line<'static>> = self
             .diff_rows
             .as_ref()
-            .map(|cache| cache.rows[start.min(end)..end].to_vec())
-            .unwrap_or_default();
+            .map_or_default(|cache| cache.rows[start.min(end)..end].to_vec());
         Paragraph::new(visible).render(content_area, frame.buffer_mut());
 
         // Scroll marker in the pane's right border column, on the content
@@ -8393,8 +8387,7 @@ impl App {
         let session_suffix = entry
             .existing_session_id
             .as_ref()
-            .map(|id| format!("  agent {id}"))
-            .unwrap_or_default();
+            .map_or_default(|id| format!("  agent {id}"));
         let kind_style = if !entry.is_selectable() {
             Style::default().fg(self.theme.hint_dim_desc_fg)
         } else if entry.is_managed_by_dux {
@@ -12731,17 +12724,9 @@ impl App {
     ) -> [Vec<Line<'static>>; 2] {
         let warning = Style::default().fg(self.theme.warning_fg);
         let lines = |prose: &Option<Prose>| {
-            prose
-                .as_ref()
-                .map(|prose| {
-                    self.hanging_prose_lines(
-                        prose,
-                        warning,
-                        DELETE_AGENT_WARNING_INDENT,
-                        inner_width,
-                    )
-                })
-                .unwrap_or_default()
+            prose.as_ref().map_or_default(|prose| {
+                self.hanging_prose_lines(prose, warning, DELETE_AGENT_WARNING_INDENT, inner_width)
+            })
         };
         // What the ticks lose goes last, under whichever boxes are there.
         let mut last = lines(&branches.others_warning);
@@ -12837,9 +12822,7 @@ impl App {
                 Style::default().fg(self.theme.warning_fg),
             ),
         };
-        prose
-            .map(|prose| self.indented_prose_lines(&prose, style, inner_width))
-            .unwrap_or_default()
+        prose.map_or_default(|prose| self.indented_prose_lines(&prose, style, inner_width))
     }
 
     /// The Delete Project dialog's line per agent worktree, in the agent
@@ -14109,8 +14092,7 @@ impl App {
                 let pr_suffix = self
                     .engine
                     .shown_pr(&session.id)
-                    .map(|pr| format!(" · {}#{}", pr.owner_repo, pr.number))
-                    .unwrap_or_default();
+                    .map_or_default(|pr| format!(" · {}#{}", pr.owner_repo, pr.number));
                 format!(" {provider} agent · {name}{pr_suffix} ")
             }
             None => " Agent ".to_string(),
@@ -14714,8 +14696,7 @@ impl App {
             // belongs.
             let remote =
                 remote_viewers_segment(self.pty_browser_count(&self.focused_tab_id(&session.id)))
-                    .map(|segment| format!(" · {segment}"))
-                    .unwrap_or_default();
+                    .map_or_default(|segment| format!(" · {segment}"));
             let base = format!("{base}{remote}");
             let count = self.session_terminal_count(&session.id);
             if count > 0 {
@@ -16366,8 +16347,7 @@ mod tests {
                 crate::keybindings::BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         })
     }
@@ -19980,8 +19960,7 @@ mod tests {
             _ => crate::keybindings::BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default(),
+                .map_or_default(|d| d.default_keys.to_vec()),
         });
         let mut app = test_app(bindings);
         app.engine.config.ui.tab_reaches_agent = true;
@@ -27047,8 +27026,7 @@ mod tests {
                 crate::keybindings::BINDING_DEFS
                     .iter()
                     .find(|d| d.action == a)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         })
     }
@@ -28214,8 +28192,7 @@ mod tests {
             other => crate::keybindings::BINDING_DEFS
                 .iter()
                 .find(|d| d.action == other)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default(),
+                .map_or_default(|d| d.default_keys.to_vec()),
         });
         let mut app = macro_list_app(bindings);
         let buf = render_to_buffer(&mut app);
@@ -28609,11 +28586,7 @@ mod tests {
             .skip(1)
             .map(|line| {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                let first = line
-                    .spans
-                    .first()
-                    .map(|s| s.content.to_string())
-                    .unwrap_or_default();
+                let first = line.spans.first().map_or_default(|s| s.content.to_string());
                 (first, text)
             })
             .collect();

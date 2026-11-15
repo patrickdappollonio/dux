@@ -401,10 +401,7 @@ pub(crate) fn delete_operation_response(
     match result {
         Ok((outcome, _)) if outcome_is_error(&outcome) => (
             StatusCode::CONFLICT,
-            outcome
-                .status
-                .map(|status| status.message)
-                .unwrap_or_default(),
+            outcome.status.map_or_default(|status| status.message),
         )
             .into_response(),
         Ok((_, record)) => operation_accepted(&record),

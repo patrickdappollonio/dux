@@ -1127,8 +1127,7 @@ pub fn rows_answering(
             Some(row) => {
                 let repositories = row
                     .folder_contents()
-                    .map(|contents| contents.repositories_inside.as_slice())
-                    .unwrap_or_default();
+                    .map_or_default(|contents| contents.repositories_inside.as_slice());
                 if repositories
                     .iter()
                     .any(|repository| is_inside(path.as_bytes(), repository.as_bytes()))
@@ -1517,8 +1516,7 @@ fn staged_numstat_in(worktree: &Path, dir: &str, skip: &[String]) -> HashMap<Str
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .map(|out| parse_numstat(&out.stdout))
-        .unwrap_or_default()
+        .map_or_default(|out| parse_numstat(&out.stdout))
 }
 
 #[cfg(test)]

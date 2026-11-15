@@ -1805,8 +1805,7 @@ impl AgentProcessRegistry {
                         report
                             .failure
                             .as_deref()
-                            .map(|why| format!(" ({why})"))
-                            .unwrap_or_default()
+                            .map_or_default(|why| format!(" ({why})"))
                     ));
                 }
             }
@@ -1834,8 +1833,7 @@ impl AgentProcessRegistry {
             inner
                 .sessions
                 .get(agent_id)
-                .map(|list| list.iter().map(|(_, folder)| folder.clone()).collect())
-                .unwrap_or_default()
+                .map_or_default(|list| list.iter().map(|(_, folder)| folder.clone()).collect())
         };
         for folder in folders {
             self.sync_pending(&folder);
@@ -2252,8 +2250,7 @@ impl AgentProcessRegistry {
                 survivors: inner
                     .survivors
                     .get(session)
-                    .map(|identities| vec![(*session, identities.clone())])
-                    .unwrap_or_default(),
+                    .map_or_default(|identities| vec![(*session, identities.clone())]),
             });
         }
         snapshot
@@ -2359,8 +2356,7 @@ impl AgentProcessRegistry {
         self.lock()
             .sessions
             .get(agent_id)
-            .map(|list| list.iter().map(|(session, _)| *session).collect())
-            .unwrap_or_default()
+            .map_or_default(|list| list.iter().map(|(session, _)| *session).collect())
     }
 
     /// Every session started in `folder` or anywhere inside it, whoever started

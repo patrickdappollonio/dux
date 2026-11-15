@@ -379,8 +379,7 @@ impl App {
             let urls = self
                 .companion
                 .as_ref()
-                .map(|companion| companion.urls())
-                .unwrap_or_default();
+                .map_or_default(|companion| companion.urls());
             return Err(StartRefusal::warning(format!(
                 "The web UI is already serving in the background on {}. Use \
                  stop-background-server to stop it.",
@@ -2300,8 +2299,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("already serving in the background"),
             "the refusal must be on the line first: {message}"
@@ -2340,8 +2338,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("already serving in the background"),
             "the refusal must say why: {message}"
@@ -2372,8 +2369,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("already starting the web server in the background"),
             "the refusal must name the start that is in flight: {message}"
@@ -2397,8 +2393,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("127.0.0.1:8080"),
             "the message must name the address: {message}"
@@ -2677,8 +2672,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("agents"),
             "the message must say the agents are unaffected: {message}"
@@ -3089,8 +3083,7 @@ pub(crate) mod tests {
         let message = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(
             message.contains("Cancelled"),
             "the keyed busy must resolve to an honest final: {message}"
@@ -3371,8 +3364,7 @@ pub(crate) mod tests {
     fn tailscale_status(app: &App) -> String {
         app.status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default()
+            .map_or_default(|(_, message)| message)
     }
 
     #[test]

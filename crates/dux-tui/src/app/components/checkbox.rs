@@ -222,8 +222,7 @@ impl Widget for CheckboxLayout {
         let area = area.intersection(buf.area);
         let clear_style = self
             .background
-            .map(|background| Style::default().bg(background))
-            .unwrap_or_default();
+            .map_or_default(|background| Style::default().bg(background));
         for clear_offset in 0..area.height {
             let y = area.y.saturating_add(clear_offset);
             for x_offset in 0..area.width {

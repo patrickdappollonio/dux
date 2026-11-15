@@ -237,11 +237,8 @@ const STARTING_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// [`find_local`], with `None` for a free lock.
 fn find_running_local(lock_path: &Path) -> Result<Option<UnixTransport>, CliError> {
-    let read = || {
-        std::fs::read_to_string(lock_path)
-            .map(|text| LockFileContents::parse(&text))
-            .unwrap_or_default()
-    };
+    let read =
+        || std::fs::read_to_string(lock_path).map_or_default(|text| LockFileContents::parse(&text));
     let says_nothing = |lock: &LockFileContents| {
         lock.control_socket.is_none()
             && lock.control_socket_unavailable.is_none()

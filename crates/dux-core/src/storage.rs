@@ -3215,18 +3215,12 @@ impl SessionStore {
         let managed = session.workspace.as_managed();
         let workspace_kind = session.workspace.kind().as_str();
         let folder_path = session.workspace.folder_path();
-        let project_id = managed.map(|m| m.project_id.as_str()).unwrap_or_default();
+        let project_id = managed.map_or_default(|m| m.project_id.as_str());
         let project_path = managed.and_then(|m| m.project_path.as_deref());
-        let source_branch = managed
-            .map(|m| m.source_branch.as_str())
-            .unwrap_or_default();
-        let branch_name = managed.map(|m| m.branch_name.as_str()).unwrap_or_default();
-        let initial_branch = managed
-            .map(|m| m.initial_branch.as_str())
-            .unwrap_or_default();
-        let worktree_path = managed
-            .map(|m| m.worktree_path.as_str())
-            .unwrap_or_default();
+        let source_branch = managed.map_or_default(|m| m.source_branch.as_str());
+        let branch_name = managed.map_or_default(|m| m.branch_name.as_str());
+        let initial_branch = managed.map_or_default(|m| m.initial_branch.as_str());
+        let worktree_path = managed.map_or_default(|m| m.worktree_path.as_str());
         let branch_provenance = managed.map_or("unknown", |m| m.branch_provenance.as_str());
         // UPDATE first: existing sessions are re-upserted constantly (status
         // changes, provider starts), and that hot path must not pay the

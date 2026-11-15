@@ -347,15 +347,12 @@ mod tests {
     }
 
     fn strings(value: &Value) -> Vec<String> {
-        value
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .map(|item| item.as_str().expect("a string").to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        value.as_array().map_or_default(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().expect("a string").to_string())
+                .collect()
+        })
     }
 
     /// Merge adjacent strings, the normalization the fixture's note promises,

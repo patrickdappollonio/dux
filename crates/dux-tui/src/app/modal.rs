@@ -369,8 +369,7 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         } => vec![filter, path_input],
         PromptState::EditMacros { editing, .. } => editing
             .as_ref()
-            .map(|state| vec![&state.name_input, &state.text_input])
-            .unwrap_or_default(),
+            .map_or_default(|state| vec![&state.name_input, &state.text_input]),
     }
 }
 

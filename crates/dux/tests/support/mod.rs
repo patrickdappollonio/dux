@@ -107,8 +107,7 @@ pub(crate) fn serve(root: &Path) -> u16 {
             }
         }
         let socket = std::fs::read_to_string(&lock_path)
-            .map(|text| LockFileContents::parse(&text).control_socket)
-            .unwrap_or_default();
+            .map_or_default(|text| LockFileContents::parse(&text).control_socket);
         // The control socket is bound before the port is, so the port is
         // ready only once it answers as this process's dux.
         if socket.is_some_and(|socket| std::os::unix::net::UnixStream::connect(socket).is_ok())

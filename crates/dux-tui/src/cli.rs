@@ -213,15 +213,11 @@ fn reject_unknown_flags(args: &[String], known: &[&str]) -> Result<()> {
 fn print_config_help(out: &mut dyn std::io::Write) -> Result<()> {
     let mut command = crate::config_spec::config_command();
     command.build();
-    let about = command
-        .get_about()
-        .map(ToString::to_string)
-        .unwrap_or_default();
+    let about = command.get_about().map_or_default(ToString::to_string);
     let mut about = about.chars();
     let lowered: String = about
         .next()
-        .map(|first| first.to_lowercase().chain(about).collect())
-        .unwrap_or_default();
+        .map_or_default(|first| first.to_lowercase().chain(about).collect());
     let root = command
         .clone()
         .help_template("{usage-heading} {usage}\n\n{all-args}")

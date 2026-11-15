@@ -1407,8 +1407,7 @@ mod tests {
             BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default()
+                .map_or_default(|d| d.default_keys.to_vec())
         })
     }
 

@@ -2601,14 +2601,13 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.id == session_id)
-            .map(|session| {
+            .map_or_default(|session| {
                 let project_name = session
                     .project_id()
                     .and_then(|project_id| self.engine.projects.iter().find(|p| p.id == project_id))
                     .map(|p| p.name.clone());
                 dux_core::wire::DeleteReportFacts::from_session(session, project_name)
-            })
-            .unwrap_or_default();
+            });
         dux_core::engine::status_op(busy_message).resolve_in_handler(move |o: &TuiDeleteOutcome| {
             match o {
                 TuiDeleteOutcome::SucceededPresent { branches } => {
@@ -5228,8 +5227,7 @@ impl App {
         let target_ids = match action {
             KillRunningAction::Hovered => visible_indices
                 .get(prompt.list.selected)
-                .map(|&index| vec![prompt.runtimes[index].id.clone()])
-                .unwrap_or_default(),
+                .map_or_default(|&index| vec![prompt.runtimes[index].id.clone()]),
             KillRunningAction::Selected => prompt
                 .runtimes
                 .iter()
@@ -5389,8 +5387,7 @@ impl App {
             let urls = self
                 .companion
                 .as_ref()
-                .map(|companion| companion.urls())
-                .unwrap_or_default();
+                .map_or_default(|companion| companion.urls());
             self.set_warning(format!(
                 "The web UI is already serving in the background on {}, so just open it. If you \
                  want the terminal handed over to it instead, run stop-background-server first \
@@ -5639,8 +5636,7 @@ mod tests {
             BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default()
+                .map_or_default(|d| d.default_keys.to_vec())
         })
     }
 
@@ -7244,8 +7240,7 @@ mod tests {
         let said = app
             .status
             .most_recent_tui()
-            .map(|(_, message)| message)
-            .unwrap_or_default();
+            .map_or_default(|(_, message)| message);
         assert!(said.contains("another dialog is open"), "{said}");
     }
 

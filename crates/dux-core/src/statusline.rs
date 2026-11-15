@@ -1807,7 +1807,7 @@ impl KeyedStatusController {
     /// prepended for `Busy`), or an empty string when nothing is open.
     /// Mirrors the previous `StatusLine::text()` API.
     pub fn text(&self) -> String {
-        self.most_recent_tui().map(|(_, t)| t).unwrap_or_default()
+        self.most_recent_tui().map_or_default(|(_, t)| t)
     }
 
     /// The raw message of the status on the line without any
@@ -1815,8 +1815,7 @@ impl KeyedStatusController {
     /// previous `StatusLine::message()` API.
     pub fn message(&self) -> String {
         self.most_recent_entry()
-            .map(|winner| winner.message.clone())
-            .unwrap_or_default()
+            .map_or_default(|winner| winner.message.clone())
     }
 
     /// Whether no status is currently open. Mirrors the previous

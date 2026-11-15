@@ -2342,15 +2342,12 @@ pub(crate) fn pr_pause_notice(
             u64::try_from((t - now).num_seconds().clamp(0, 3600))
                 .expect("clamped to a non-negative number of seconds")
         });
-        let when = r
-            .reset_at
-            .map(|t| {
-                format!(
-                    " around {}",
-                    t.with_timezone(&chrono::Local).format("%H:%M")
-                )
-            })
-            .unwrap_or_default();
+        let when = r.reset_at.map_or_default(|t| {
+            format!(
+                " around {}",
+                t.with_timezone(&chrono::Local).format("%H:%M")
+            )
+        });
         return Some(PrPauseNotice {
             pause: Duration::from_secs(secs_until),
             tone: StatusTone::Info,
@@ -5183,8 +5180,7 @@ impl Engine {
     pub fn pr_sort_mode(&self, session_id: &str) -> crate::pr_list::PrSortMode {
         self.pr_prefs
             .get(session_id)
-            .map(|prefs| prefs.sort_mode)
-            .unwrap_or_default()
+            .map_or_default(|prefs| prefs.sort_mode)
     }
 
     /// A pull request the user attached to an agent, if any.

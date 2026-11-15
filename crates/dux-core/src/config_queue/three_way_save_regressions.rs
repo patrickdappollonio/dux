@@ -48,7 +48,7 @@ fn names_and_notes(text: &str) -> Vec<(Option<String>, Option<String>)> {
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     doc.get("projects")
         .and_then(|projects| projects.as_array_of_tables())
-        .map(|projects| {
+        .map_or_default(|projects| {
             projects
                 .iter()
                 .map(|entry| {
@@ -62,7 +62,6 @@ fn names_and_notes(text: &str) -> Vec<(Option<String>, Option<String>)> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +274,7 @@ fn project_rows(text: &str) -> Vec<(Option<String>, Option<String>, Option<Strin
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     doc.get("projects")
         .and_then(|projects| projects.as_array_of_tables())
-        .map(|projects| {
+        .map_or_default(|projects| {
             projects
                 .iter()
                 .map(|entry| {
@@ -289,7 +288,6 @@ fn project_rows(text: &str) -> Vec<(Option<String>, Option<String>, Option<Strin
                 })
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// Load `initial`, let a save fill in `diff_tab_width`, delete it by hand,
@@ -1936,14 +1934,13 @@ fn macro_sections(text: &str) -> Vec<String> {
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     doc.get("macros")
         .and_then(toml_edit::Item::as_table)
-        .map(|macros| {
+        .map_or_default(|macros| {
             macros
                 .iter()
                 .filter(|(_, item)| item.as_table().is_some_and(|table| !table.is_dotted()))
                 .map(|(name, _)| name.to_string())
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 /// Within each form a macro can be written in, `text` reads its macros back

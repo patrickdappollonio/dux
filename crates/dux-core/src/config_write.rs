@@ -196,7 +196,7 @@ fn check_auth_added_by(path: &Path, before: Option<&str>, contents: &str, act: &
     if after.is_empty() {
         return Ok(());
     }
-    let had = before.map(auth_problem_identities).unwrap_or_default();
+    let had = before.map_or_default(auth_problem_identities);
     if after.iter().any(|problem| !had.contains(problem)) {
         // Each problem the write would add, named by the setting it is about
         // and never by a line: the result is dux's text, which was never
@@ -604,8 +604,7 @@ fn forget_gone_projects(seen: &mut DocumentMut, written: &DocumentMut, projects:
     let written_entries: Vec<&Table> = written
         .get("projects")
         .and_then(Item::as_array_of_tables)
-        .map(|entries| entries.iter().collect())
-        .unwrap_or_default();
+        .map_or_default(|entries| entries.iter().collect());
     let field =
         |entry: &Table, name: &str| entry.get(name).and_then(Item::as_str).map(str::to_string);
     seen_projects.retain(|entry| {
@@ -1404,7 +1403,7 @@ fn merge_array_of_tables(
     let bases_managed: Vec<Table> = base.iter().map(managed_keys).collect();
     let disks: Vec<&Table> = disk.iter().collect();
     let bases: Vec<&Table> = bases_managed.iter().collect();
-    let raws: Vec<&Table> = raw.map(|raw| raw.iter().collect()).unwrap_or_default();
+    let raws: Vec<&Table> = raw.map_or_default(|raw| raw.iter().collect());
     let ours: Vec<&Table> = ours_managed.iter().collect();
     // Every side is matched on the keys dux manages too, so how alike two
     // entries are never depends on keys only the file has: two id-less

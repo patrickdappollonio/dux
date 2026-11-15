@@ -1864,8 +1864,7 @@ impl PtyClient {
     pub fn visible_text_excerpt(&self, max_lines: usize) -> String {
         self.terminal
             .lock()
-            .map(|t| t.visible_text_excerpt(max_lines))
-            .unwrap_or_default()
+            .map_or_default(|t| t.visible_text_excerpt(max_lines))
     }
 
     /// Whether the grid has changes the next snapshot would pick up, WITHOUT
@@ -1914,8 +1913,7 @@ impl PtyClient {
     pub(crate) fn take_passthrough(&self) -> Vec<crate::attention::CapturedSeq> {
         self.passthrough
             .lock()
-            .map(|mut ring| ring.drain(..).collect())
-            .unwrap_or_default()
+            .map_or_default(|mut ring| ring.drain(..).collect())
     }
 
     /// How many captured passthrough sequences are currently buffered (not yet
@@ -3273,8 +3271,7 @@ impl EventProxy {
     fn take_pending(&self) -> Vec<PendingReply> {
         self.pending
             .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
-            .unwrap_or_default()
+            .map_or_default(|mut pending| std::mem::take(&mut *pending))
     }
 }
 

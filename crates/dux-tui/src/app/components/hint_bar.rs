@@ -105,7 +105,7 @@ impl Hint {
         key: Option<impl Into<String>>,
         desc: impl Into<Cow<'static, str>>,
     ) -> Self {
-        Self::key(key.map(Into::into).unwrap_or_default(), desc)
+        Self::key(key.map_or_default(Into::into), desc)
     }
 
     /// Several bound keys that do the same thing.

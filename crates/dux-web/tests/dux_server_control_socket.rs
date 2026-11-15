@@ -67,8 +67,7 @@ fn dux_server_answers_on_its_control_socket_and_removes_it_on_exit() {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         let named = std::fs::read_to_string(&lock_path)
-            .map(|text| LockFileContents::parse(&text).control_socket)
-            .unwrap_or_default();
+            .map_or_default(|text| LockFileContents::parse(&text).control_socket);
         if named.as_deref() == Some(socket.as_path()) {
             break;
         }

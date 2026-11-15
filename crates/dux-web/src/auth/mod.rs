@@ -495,10 +495,7 @@ impl AuthState {
     }
 
     pub(crate) fn exposure(&self) -> Exposure {
-        self.exposure
-            .as_ref()
-            .map(ExposureCell::get)
-            .unwrap_or_default()
+        self.exposure.as_ref().map_or_default(ExposureCell::get)
     }
 
     /// This machine's interface addresses as last read.

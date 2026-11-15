@@ -1493,8 +1493,7 @@ fn run_chunk(
         let errors = data_json
             .as_ref()
             .and_then(|j| j.get("errors"))
-            .map(std::string::ToString::to_string)
-            .unwrap_or_default();
+            .map_or_default(std::string::ToString::to_string);
         // Distinguish rate-limiting (a 403 / secondary limit, or a RATE_LIMITED
         // GraphQL error) from a generic network/gh failure so the status message
         // can say which. Scan gh's stderr and the GraphQL errors payload.

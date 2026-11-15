@@ -1977,8 +1977,7 @@ impl RuntimeBindings {
             resolved
                 .iter()
                 .find(|(resolved_action, ..)| *resolved_action == action)
-                .map(|(_, keys, _)| keys.clone())
-                .unwrap_or_default()
+                .map_or_default(|(_, keys, _)| keys.clone())
         })
     }
 
@@ -2108,8 +2107,7 @@ impl RuntimeBindings {
             .iter()
             .find(|b| b.action == action)
             .and_then(|b| b.keys.first())
-            .map(|k| self.format.to_string(*k))
-            .unwrap_or_default()
+            .map_or_default(|k| self.format.to_string(*k))
     }
 
     /// Display labels for all key combos of an action, one per key, for a
@@ -2118,8 +2116,7 @@ impl RuntimeBindings {
         self.bindings
             .iter()
             .find(|b| b.action == action)
-            .map(|b| b.keys.iter().map(|k| self.format.to_string(*k)).collect())
-            .unwrap_or_default()
+            .map_or_default(|b| b.keys.iter().map(|k| self.format.to_string(*k)).collect())
     }
 
     /// Display labels for all key combos of an action, joined with `/`.
@@ -2128,14 +2125,13 @@ impl RuntimeBindings {
         self.bindings
             .iter()
             .find(|b| b.action == action)
-            .map(|b| {
+            .map_or_default(|b| {
                 b.keys
                     .iter()
                     .map(|k| self.format.to_string(*k))
                     .collect::<Vec<_>>()
                     .join("/")
             })
-            .unwrap_or_default()
     }
 
     /// Display labels for every key of an action that satisfies `reachable`.
@@ -2147,7 +2143,7 @@ impl RuntimeBindings {
         self.bindings
             .iter()
             .find(|b| b.action == action)
-            .map(|b| {
+            .map_or_default(|b| {
                 b.keys
                     .iter()
                     .copied()
@@ -2155,7 +2151,6 @@ impl RuntimeBindings {
                     .map(|k| self.format.to_string(k))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// The server status screen's entries for the `?` help: its scroll keys,
@@ -2604,8 +2599,7 @@ pub(crate) fn late_default_warnings(keys: &crate::config::KeysConfig) -> Vec<Str
             let key = def
                 .default_keys
                 .first()
-                .map(|key| display_format().to_string(*key))
-                .unwrap_or_default();
+                .map_or_default(|key| display_format().to_string(*key));
             Some(format!(
                 "[keys] {action} starts unbound: its default key, {key}, is already bound to \
                  {holder} in your config. Add a {action} row under [keys] with a key of your own \
@@ -2910,8 +2904,7 @@ mod tests {
             BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default()
+                .map_or_default(|d| d.default_keys.to_vec())
         })
     }
 
@@ -3184,8 +3177,7 @@ mod tests {
             _ => BINDING_DEFS
                 .iter()
                 .find(|d| d.action == action)
-                .map(|d| d.default_keys.to_vec())
-                .unwrap_or_default(),
+                .map_or_default(|d| d.default_keys.to_vec()),
         });
         assert!(
             tab_only.typeable_center_traps_focus(TabKey::ReachesAgent),
@@ -3218,8 +3210,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         assert_eq!(
@@ -3390,8 +3381,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         assert_eq!(
@@ -3724,8 +3714,7 @@ mod tests {
             SELECT_TAB_ACTIONS
                 .iter()
                 .position(|a| *a == action)
-                .map(|i| vec![crokey::parse(&format!("alt-{}", i + 1)).unwrap()])
-                .unwrap_or_default()
+                .map_or_default(|i| vec![crokey::parse(&format!("alt-{}", i + 1)).unwrap()])
         });
         let (label, desc) = tab_number_row(&all_bound);
         assert_eq!(
@@ -3748,8 +3737,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         let (label, desc) = tab_number_row(&none_bound);
@@ -4710,8 +4698,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
@@ -4733,8 +4720,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
@@ -4755,8 +4741,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
@@ -4779,8 +4764,7 @@ mod tests {
                 BINDING_DEFS
                     .iter()
                     .find(|d| d.action == action)
-                    .map(|d| d.default_keys.to_vec())
-                    .unwrap_or_default()
+                    .map_or_default(|d| d.default_keys.to_vec())
             }
         });
         let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);

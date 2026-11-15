@@ -147,8 +147,7 @@ impl OwnersState {
     fn members_of(&self, row: &RowKey) -> Vec<String> {
         self.members
             .get(row)
-            .map(|members| members.iter().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|members| members.iter().cloned().collect())
     }
 }
 

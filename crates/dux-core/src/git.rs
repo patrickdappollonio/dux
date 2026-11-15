@@ -5304,8 +5304,7 @@ fn unstaged_numstat(worktree: &str, locks: ListingLocks) -> HashMap<String, Diff
     listing_child::output(&mut command, "git diff")
         .ok()
         .filter(|ns| ns.status.success())
-        .map(|ns| parse_numstat(&ns.stdout))
-        .unwrap_or_default()
+        .map_or_default(|ns| parse_numstat(&ns.stdout))
 }
 
 /// The flags that make a plumbing diff in `worktree` count what `git diff`
@@ -5324,8 +5323,7 @@ fn porcelain_diff_flags(worktree: &str) -> Vec<String> {
     let configured = listing_child::output(&mut command, "git config")
         .ok()
         .filter(|out| out.status.success())
-        .map(|out| out.stdout)
-        .unwrap_or_default();
+        .map_or_default(|out| out.stdout);
     let mut algorithm = None;
     let mut renames = "-M".to_string();
     for record in configured.split(|byte| *byte == 0) {
@@ -5368,8 +5366,7 @@ fn staged_numstat(worktree: &str, skip: &[String]) -> HashMap<String, DiffStat> 
     listing_child::output(&mut command, "git diff --cached")
         .ok()
         .filter(|ns| ns.status.success())
-        .map(|ns| parse_numstat(&ns.stdout))
-        .unwrap_or_default()
+        .map_or_default(|ns| parse_numstat(&ns.stdout))
 }
 
 /// Every path git answered `-\t-` for, across the numstat maps of one sweep.
@@ -7792,8 +7789,7 @@ pub fn standalone_agent_title(typed: &str, folder: &Path) -> String {
 pub(crate) fn standalone_agent_name_from_folder(folder: &Path) -> String {
     let raw = folder
         .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .map_or_default(|name| name.to_string_lossy().to_string());
     let mut out = String::new();
     // Inside a run of characters a name cannot hold, so a literal dash beside
     // it joins that run's one separator instead of doubling it.

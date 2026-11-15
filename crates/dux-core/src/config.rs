@@ -5973,8 +5973,7 @@ pub fn load_corrections_of(raw: &str) -> Vec<(Vec<String>, String)> {
 pub(crate) fn load_corrections_with_sources(raw: &str) -> Vec<LoadCorrection> {
     let mut found: Vec<LoadCorrection> = raw
         .parse::<toml_edit::DocumentMut>()
-        .map(|doc| crate::config_migrate::retired_provider_prunes(&doc))
-        .unwrap_or_default()
+        .map_or_default(|doc| crate::config_migrate::retired_provider_prunes(&doc))
         .into_iter()
         .map(|(path, reason)| LoadCorrection::new(path, reason))
         .collect();

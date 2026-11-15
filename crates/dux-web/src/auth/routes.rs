@@ -476,8 +476,9 @@ async fn expected_hash(
                 let because = a
                     .classification
                     .loopback_distrusted
-                    .map(|cause| format!(" {}", route_refusal(a.classification.via, cause)))
-                    .unwrap_or_default();
+                    .map_or_default(|cause| {
+                        format!(" {}", route_refusal(a.classification.via, cause))
+                    });
                 return WriteOver::Refused(refusal(
                     StatusCode::FORBIDDEN,
                     json!({

@@ -379,14 +379,11 @@ impl Answer {
     }
 
     fn set_cookie(&self) -> String {
-        self.headers
-            .get("set-cookie")
-            .map(|v| {
-                v.to_str()
-                    .expect("the set-cookie header is ASCII")
-                    .to_string()
-            })
-            .unwrap_or_default()
+        self.headers.get("set-cookie").map_or_default(|v| {
+            v.to_str()
+                .expect("the set-cookie header is ASCII")
+                .to_string()
+        })
     }
 
     /// The `name=value` pair of the cookie this answer set.

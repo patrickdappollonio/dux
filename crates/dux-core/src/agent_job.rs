@@ -741,7 +741,7 @@ fn needed(
         reason: kind.to_string(),
         branch: branch.to_string(),
         copy_branch,
-        warning: warning.segments().map(<[_]>::to_vec).unwrap_or_default(),
+        warning: warning.segments().map_or_default(<[_]>::to_vec),
     }
 }
 
@@ -814,7 +814,7 @@ fn no_free_name(
     crate::status_text::ReviewCopyOutlook::NoFreeName {
         reason: kind.to_string(),
         branch: branch.to_string(),
-        message: message.segments().map(<[_]>::to_vec).unwrap_or_default(),
+        message: message.segments().map_or_default(<[_]>::to_vec),
     }
 }
 
@@ -1913,7 +1913,7 @@ impl CreatePlanContext<'_> {
         let ask = crate::status_text::StatusAsk::ReviewCopy(Box::new(
             crate::status_text::ReviewCopyAsk {
                 warned: copy.warned(number),
-                warning: warning.segments().map(<[_]>::to_vec).unwrap_or_default(),
+                warning: warning.segments().map_or_default(<[_]>::to_vec),
                 request: ask_id.map(str::to_string),
                 by_flag,
                 project_id: None,

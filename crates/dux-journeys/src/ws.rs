@@ -85,8 +85,7 @@ pub async fn connect(client: &Client, path: &str) -> Result<Socket, Refused> {
             body: response
                 .body()
                 .as_ref()
-                .map(|b| String::from_utf8_lossy(b).into_owned())
-                .unwrap_or_default(),
+                .map_or_default(|b| String::from_utf8_lossy(b).into_owned()),
         }),
         Err(err) => panic!("the socket {path} failed below HTTP: {err}"),
     }
