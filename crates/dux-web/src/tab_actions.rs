@@ -157,9 +157,11 @@ struct ReorderedTabs {
 /// complete set of the agent's tabs; the engine validates it strictly. Which
 /// tab holds the slot does not change.
 ///
-/// The revision is read after the command has been applied, on the engine's own
-/// thread order: the document published now cannot show the change unless it was
-/// made after it, and the next one is the first certain to.
+/// The revision is read once the engine has answered that the command was
+/// applied: the document published then may or may not show the change, and
+/// every later one was built after it and does. The cached document trails the
+/// engine by up to one spine check, so a read of it right after this answer can
+/// still be the older revision.
 async fn reorder_tabs(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -332,6 +332,39 @@ where
     }
 }
 
+/// Poll `/api/v1/workspace` until its `rev` reaches `min_rev`, failing after
+/// ~5s. The workspace document is the engine's cached serialization, rebuilt on
+/// its periodic spine check, so it trails the live per-session read; a revision
+/// is the only thing a client may wait on it for.
+async fn wait_for_workspace_rev(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    min_rev: u64,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let workspace: serde_json::Value = client
+            .get(format!("http://{addr}/api/v1/workspace"))
+            .send()
+            .await
+            .expect("send the request")
+            .json()
+            .await
+            .expect("the response body is JSON");
+        let rev = workspace["rev"]
+            .as_u64()
+            .expect("the document carries a rev");
+        if rev >= min_rev {
+            return workspace;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the workspace document never reached revision {min_rev}; it is at {rev}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// Assert a change followed as an operation answered `202` with a `Location`
 /// naming its record, then read the record in short waits until it has an
 /// outcome, the way a client that asked for it does.
@@ -557,17 +590,23 @@ async fn reordering_tabs_moves_the_slot_tab_without_moving_the_pointer() {
     .await;
     assert_eq!(session["tabs"][1]["id"].as_str(), Some(slot.as_str()));
     assert_eq!(session["slot_tab_id"].as_str(), Some(slot.as_str()));
-    // The revision named is one that shows the new order: the document served
-    // once the strip has moved is at or past it.
-    let workspace: serde_json::Value = client
-        .get(format!("http://{addr}/api/v1/workspace"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(workspace["rev"].as_u64().unwrap() >= min_rev);
+    // The revision named is one that shows the new order: the workspace document
+    // is a cached serialization that catches up on the engine's spine check, so
+    // it is waited for by revision, and the first one at or past `min_rev`
+    // must already carry the new strip.
+    let workspace = wait_for_workspace_rev(&client, addr, min_rev).await;
+    let in_workspace = workspace["sessions"]
+        .as_array()
+        .expect("the workspace lists its sessions")
+        .iter()
+        .find(|s| s["id"].as_str() == Some("s1"))
+        .expect("the agent is in the workspace document");
+    assert_eq!(
+        in_workspace["tabs"][0]["id"].as_str(),
+        Some(extra.as_str()),
+        "a document at or past the named revision shows the new order: {workspace}"
+    );
+    assert_eq!(in_workspace["tabs"][1]["id"].as_str(), Some(slot.as_str()));
 
     let partial = client
         .post(&url)
