@@ -29,6 +29,7 @@ const refreshChanges = vi.fn()
 const openEditor = vi.fn()
 const toggleChangesPane = vi.fn()
 const openCommit = vi.fn()
+const createTerminal = vi.fn()
 
 let mockState: DuxState
 // The pane subscribes selectively and is memoized, so a new state reaches it
@@ -57,6 +58,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     openEditor: (...args: unknown[]) => openEditor(...args),
     toggleChangesPane: (...args: unknown[]) => toggleChangesPane(...args),
     openCommit: (...args: unknown[]) => openCommit(...args),
+    createTerminal: (...args: unknown[]) => createTerminal(...args),
   }
 })
 
@@ -199,6 +201,7 @@ beforeEach(() => {
   openEditor.mockClear()
   toggleChangesPane.mockClear()
   openCommit.mockClear()
+  createTerminal.mockClear()
   stageMany.mockClear()
   unstageMany.mockClear()
   discardMany.mockClear()
@@ -606,6 +609,7 @@ describe("the Changes pane header in a quiet state", () => {
       expect(reasonOf(item), text).toBe("This working copy no longer exists on disk.")
     }
     expect(screen.getByLabelText("Open editor").hasAttribute("disabled")).toBe(true)
+    expect(screen.getByLabelText("New terminal").hasAttribute("disabled")).toBe(true)
   })
 
   it("keeps the header while the changes load and when they fail to", () => {
@@ -1775,6 +1779,38 @@ describe("the Changes pane header's Open editor button", () => {
 
     expect(screen.queryByLabelText("Open editor")).toBeNull()
     expect(screen.getByText("No session selected")).toBeTruthy()
+  })
+})
+
+// The header's second door to the agent's New terminal: the same shared action
+// the agent menu and the dock strip's + run, for the agent on screen.
+describe("the Changes pane header's New terminal button", () => {
+  const terminalButton = () => screen.getByLabelText("New terminal")
+
+  it("opens a terminal for the selected agent, between the editor and the ⋯", () => {
+    render(<ChangedFiles />)
+    const button = terminalButton()
+    const editor = screen.getByLabelText("Open editor")
+    const ellipsis = screen.getByLabelText("Changes actions")
+    expect(button.parentElement).toBe(ellipsis.parentElement)
+    expect(editor.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(button.compareDocumentPosition(ellipsis) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    for (const token of ["size-8", "max-md:size-11", "border-border"]) {
+      expect(button.className).toContain(token)
+    }
+
+    fireEvent.click(button)
+    expect(createTerminal).toHaveBeenCalledTimes(1)
+    expect(createTerminal).toHaveBeenCalledWith("s1")
+  })
+
+  it("is absent when no agent is selected", () => {
+    mockState = {
+      selectedSessionId: null,
+      changes: loadedChanges(),
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.queryByLabelText("New terminal")).toBeNull()
   })
 })
 

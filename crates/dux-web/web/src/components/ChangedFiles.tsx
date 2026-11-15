@@ -30,6 +30,7 @@ import {
   Search,
   Square,
   SquareCheck,
+  SquareTerminal,
   TriangleAlert,
   Undo2,
 } from "lucide-react"
@@ -93,6 +94,7 @@ import {
   type ChangedFilesRecap,
 } from "@/lib/changedFiles"
 import {
+  createTerminal,
   forceRefreshChanges,
   openCommit,
   openDiscard,
@@ -867,6 +869,43 @@ function OpenEditorButton({
   )
 }
 
+// A second door to the agent's own New terminal, the one its menu and its dock
+// strip's `+` run: a shell owned by this agent, in its worktree or its folder,
+// that docks under it. Same outline square as the editor button beside it, and
+// greyed with the same reason when the directory is gone, since that directory
+// is where the shell would start.
+function NewTerminalButton({
+  sessionId,
+  unavailable,
+}: {
+  sessionId: string
+  unavailable: string | null
+}) {
+  const label = "New terminal"
+  const shared = {
+    size: "icon",
+    variant: "outline",
+    "aria-label": label,
+    className: "max-md:size-11",
+  } as const
+  if (unavailable !== null) {
+    return (
+      <ExplainedWhenIdle why={unavailable}>
+        <Button {...shared} disabled>
+          <SquareTerminal />
+        </Button>
+      </ExplainedWhenIdle>
+    )
+  }
+  return (
+    <SimpleTooltip content={label}>
+      <Button {...shared} onClick={() => createTerminal(sessionId)}>
+        <SquareTerminal />
+      </Button>
+    </SimpleTooltip>
+  )
+}
+
 interface ChangesHeaderProps {
   sessionId: string
   stagedCount: number
@@ -878,14 +917,15 @@ interface ChangesHeaderProps {
   // Why the pane's own git items are greyed out (the pane is quiet), or null
   // when they work.
   gitBlocked: string | null
-  // Why the editor cannot open the agent's directory, or null when it can.
+  // Why the editor cannot open the agent's directory, and so why no terminal
+  // can start in it either, or null when both can.
   editorBlocked: string | null
 }
 
 // The pane's one header, in every state an agent can put the pane in: loaded,
 // loading, failed, and every quiet one. A quiet pane is still a pane the user
-// may want to hide or open the editor from, so the title, the editor button and
-// the ⋯ never leave with the list.
+// may want to hide, open the editor from or open a terminal from, so the title,
+// the editor and terminal buttons and the ⋯ never leave with the list.
 function ChangesHeader({
   sessionId,
   stagedCount,
@@ -925,13 +965,15 @@ function ChangesHeader({
         />
       </div>
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
-        * the editor button and the `⋯`, adjacent icon squares of one size. */}
+        * the editor button, the terminal button and the `⋯`, adjacent icon
+        * squares of one size. */}
       <CardAction className="flex shrink-0 items-center gap-2 self-center">
         <OpenEditorButton
           sessionId={sessionId}
           isMobile={isMobile}
           unavailable={editorBlocked}
         />
+        <NewTerminalButton sessionId={sessionId} unavailable={editorBlocked} />
         <DropdownMenu>
           <DropdownMenuTrigger
             render={

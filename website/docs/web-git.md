@@ -130,7 +130,7 @@ Clicking a row still opens its diff; only the checkbox selects. On a phone the d
 
 ## Commit, push, pull
 
-The changes pane's header carries two controls: an **Open editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone), and the `⋯` menu with the rest:
+The changes pane's header carries three controls: an **Open editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone), a **New terminal** button that opens a shell in that agent's worktree (or its folder, for a standalone agent) and docks it under the agent, and the `⋯` menu with the rest:
 
 - **Commit…** opens a dialog for a multi-line message and commits **only the staged files**. It is disabled until something is staged, and `Cmd/Ctrl+Enter` submits.
 - **Push** and **Pull** are one click each, with a progress toast that reports back to the browser tab you triggered them from.
@@ -146,7 +146,7 @@ The changes pane's header carries two controls: an **Open editor** button that t
 
 - **Commit…** and **Refresh changes** stay in the menu greyed out, with a line at the top saying why. They come back on their own once the folder holds a repository again; there is nothing to press, because dux looks at the folder again within about ten seconds while the agent is selected.
 - **Push** and **Pull** are greyed out the same way when a managed agent's working copy is gone. A [standalone agent](/docs/creating-agents) never has them, so they are absent from its menu rather than greyed out.
-- **Hide Changes pane** and the **Open editor** button keep working, except that the editor button is greyed out too when the directory itself is gone.
+- **Hide Changes pane** and the **Open editor** and **New terminal** buttons keep working, except that both buttons are greyed out too when the directory itself is gone.
 
 ## The PR banner
 
