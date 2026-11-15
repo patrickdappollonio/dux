@@ -34557,7 +34557,7 @@ cyan = "#00ffff"
     }
 
     /// The same fixture over an arbitrary echo command, so a test that needs a
-    /// visible Tab can ask for `cat -vT`.
+    /// visible Tab can ask for `cat -vt` (GNU and BSD alike).
     fn app_with_minimized_typeable_echo_child(prelude: &str, echo_cmd: &str) -> App {
         let mut app = test_app(default_bindings());
         let slot_tab = app.engine.sessions[0].slot_tab_id().to_string();
@@ -34850,7 +34850,7 @@ cyan = "#00ffff"
     }
 
     /// With `tab_reaches_agent` on, both Tab and Shift-Tab are typed into the
-    /// live agent rather than moving between panes. `cat -vT` renders the tab
+    /// live agent rather than moving between panes. `cat -vt` renders the tab
     /// byte as `^I` and the CSI backtab as `^[[Z`, so the echoed row is proof
     /// of the exact bytes.
     #[test]
@@ -35045,7 +35045,7 @@ cyan = "#00ffff"
     #[test]
     fn fullscreen_gives_a_classic_child_classic_keys() {
         for prelude in ["", "\\033[>1u"] {
-            let mut app = fullscreen_caret_app(prelude, "cat -vT");
+            let mut app = fullscreen_caret_app(prelude, "cat -vt");
             app.process_raw_input_bytes(b"\x1b[13;2u");
             app.process_raw_input_bytes(b"\x1b[105;5u");
             app.process_raw_input_bytes(b"\x1b[108;6u");
@@ -35060,7 +35060,7 @@ cyan = "#00ffff"
             app.process_raw_input_bytes(&[0x0f]);
             // Ctrl-Alt-g only extends the Ctrl-g binding, so it reaches the child.
             app.process_raw_input_bytes(b"\x1b[103;7u");
-            // The soft newline starts a new row under `cat -vT`.
+            // The soft newline starts a new row under `cat -vt`.
             wait_for_grid_rows(&mut app, "READY\n^I^L^L^[x^]^[^A^O^[^G");
             assert_eq!(app.input_target, InputTarget::Agent);
         }
