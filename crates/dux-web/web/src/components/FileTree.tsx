@@ -722,7 +722,7 @@ export function FileTree({
                     }
                   >
                     <FileTreeIcon kind={fileIconKind(row.path)} />
-                    <span className="min-w-0 flex-1 truncate font-mono text-sm">
+                    <span className="min-w-0 flex-1 truncate text-sm">
                       {row.name}
                     </span>
                     {changed.get(row.path) && (
