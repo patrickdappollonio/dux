@@ -30,12 +30,10 @@ function ResizablePanel({ ...props }: ResizablePrimitive.PanelProps) {
 }
 
 function ResizableHandle({
-  withHandle,
   className,
+  children,
   ...props
-}: ResizablePrimitive.SeparatorProps & {
-  withHandle?: boolean
-}) {
+}: ResizablePrimitive.SeparatorProps) {
   // The held paint is dux's, not the library's, whose `data-separator` never
   // comes back off after a cancelled touch, leaving the line lit with no finger
   // on the glass. This publishes `data-dux-held` on the same presses and drops it
@@ -53,14 +51,12 @@ function ResizableHandle({
         // nothing new from the neighbouring panes; what it adds is
         // `touch-action: none` across that region rather than the painted line.
         DIVIDER_CHROME,
-        "aria-[orientation=horizontal]:h-px aria-[orientation=horizontal]:w-full aria-[orientation=horizontal]:cursor-row-resize aria-[orientation=horizontal]:after:left-0 aria-[orientation=horizontal]:after:h-1 aria-[orientation=horizontal]:after:w-full aria-[orientation=horizontal]:after:translate-x-0 aria-[orientation=horizontal]:after:-translate-y-1/2 [&[aria-orientation=horizontal]>div]:rotate-90",
+        "aria-[orientation=horizontal]:h-px aria-[orientation=horizontal]:w-full aria-[orientation=horizontal]:cursor-row-resize aria-[orientation=horizontal]:after:left-0 aria-[orientation=horizontal]:after:h-1 aria-[orientation=horizontal]:after:w-full aria-[orientation=horizontal]:after:translate-x-0 aria-[orientation=horizontal]:after:-translate-y-1/2",
         className
       )}
       {...props}
     >
-      {withHandle && (
-        <div className="z-10 flex h-6 w-1 shrink-0 rounded-lg bg-border" />
-      )}
+      {children}
     </ResizablePrimitive.Separator>
   )
 }

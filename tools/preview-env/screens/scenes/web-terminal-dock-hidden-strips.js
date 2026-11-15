@@ -1,5 +1,5 @@
 // An agent with one tab and one terminal and the strips hidden: the divider is
-// a thin grip band and the layout buttons float in a pill on its right end.
+// a thin line with a grip, and the layout buttons float in a pill on its right end.
 const {
   agents,
   clearToasts,
@@ -34,7 +34,7 @@ module.exports = {
     })
     await sleep(800)
     await expectVisible(page, '[data-testid="stack-layout-pill"]', "the floating layout pill")
-    await expectVisible(page, '[role="separator"][aria-orientation="horizontal"]', "the grip band")
+    await expectVisible(page, '[role="separator"][aria-orientation="horizontal"]', "the divider")
     return { x: 0, y: 0, width: 1440, height: 900 }
   },
 }

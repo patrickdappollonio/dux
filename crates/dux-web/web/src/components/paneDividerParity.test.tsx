@@ -58,6 +58,7 @@ const { ResizableHandle, ResizablePanel, ResizablePanelGroup } = await import(
 const {
   DIVIDER_ACTIVE_PAINT,
   DIVIDER_CHROME,
+  DIVIDER_GRAB,
   DIVIDER_DRAG_THRESHOLD_PX,
   DIVIDER_HELD_ATTR,
   DIVIDER_HELD_OFF,
@@ -176,7 +177,9 @@ describe("the two workspace dividers", () => {
 
 // The third divider, between an agent and its terminal dock. It lies the other
 // way, so its band grows in height rather than width, but it is the Changes
-// divider's own handle and wears the same chrome, stacking and held paint.
+// divider's own handle and grabs the same way. It paints differently: its band
+// is 8px tall, so the band itself must stay clear and only its line and grip
+// light up, or it reads as a grey slab and covers the sidebar's edge line.
 describe("the terminal dock's divider", () => {
   function dockDivider(): HTMLElement {
     const { container } = render(
@@ -189,11 +192,17 @@ describe("the terminal dock's divider", () => {
     return container.querySelector('[data-slot="resizable-handle"]')!
   }
 
-  it("wears the same chrome, stacking and held paint as the others", () => {
+  it("grabs like the others and paints only its line and grip", () => {
     const el = dockDivider()
     const tokens = el.className.split(/\s+/)
-    for (const token of DIVIDER_CHROME.split(/\s+/)) expect(tokens).toContain(token)
+    for (const token of DIVIDER_GRAB.split(/\s+/)) expect(tokens).toContain(token)
     expect(tokens).toContain(DIVIDER_STACKING)
+    expect(tokens).not.toContain("bg-border")
+    expect(tokens).not.toContain(DIVIDER_ACTIVE_PAINT)
+    const line = el.querySelector('[data-testid="dock-divider-line"]')!
+    const grip = el.querySelector('[data-testid="dock-divider-grip"]')!
+    expect(line.className).toContain("group-data-[dux-held=true]/divider:")
+    expect(grip.className).toContain("group-data-[dux-held=true]/divider:")
     expect(el.getAttribute(DIVIDER_HELD_ATTR)).toBe(DIVIDER_HELD_OFF)
     expect(el.getAttribute("role")).toBe("separator")
     expect(el.getAttribute("aria-orientation")).toBe("horizontal")
