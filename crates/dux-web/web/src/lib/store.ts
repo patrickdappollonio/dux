@@ -111,10 +111,11 @@ import { publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
 import { leftoverDeleteReport, worktreeDeleteReport } from "./worktreeDelete"
-import { attentionCountForSurface, formatTabTitle } from "./attention"
+import { attentionCountForSurface } from "./attention"
 import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
-import { pageTitle, resolveInstanceTitle } from "./instanceTitle"
+import { resolveInstanceTitle } from "./instanceTitle"
+import { tabPosition, tabTitle } from "./tabTitle"
 import {
   type RawWorkspace,
   type Spine,
@@ -1350,6 +1351,9 @@ function setState(patch: Partial<DuxState>): void {
   if (held !== null && next.endedInViewTab !== held) next.endedInViewTab = held
   state = next
   emit()
+  // Every position change (a selection, the typing target, an editor buffer or
+  // its dirty flag, a rename in the spine) passes through here.
+  refreshTabTitle()
 }
 
 function rememberPhoneView(target: SelectedTarget): void {
@@ -2157,19 +2161,36 @@ function applyBootstrap(b: Bootstrap): void {
 // every spine apply. Self-guards on the DOM.
 function refreshAttentionChrome(): void {
   if (typeof document === "undefined") return
-  // The server stops flagging agents once `ui.attention_indicator` is off, but
-  // a live toggle can arrive before the spine that drops the flags; the setting
-  // wins, so neither the count nor the favicon dot outlives it.
-  const count =
-    state.bootstrap?.attention_indicator === false
-      ? 0
-      : attentionCountForSurface(state.spine?.sessions ?? [], state.standaloneEditor)
-  const base = pageTitle(
+  refreshTabTitle()
+  applyAttentionFavicon(state.bootstrap?.favicon, attentionCount() > 0)
+}
+
+// The flagged agents this surface counts. The server stops flagging agents
+// once `ui.attention_indicator` is off, but a live toggle can arrive before the
+// spine that drops the flags; the setting wins, so neither the count nor the
+// favicon dot outlives it.
+function attentionCount(): number {
+  return state.bootstrap?.attention_indicator === false
+    ? 0
+    : attentionCountForSurface(state.spine?.sessions ?? [], state.standaloneEditor)
+}
+
+// Write the browser-tab title for where this tab is (see `lib/tabTitle.ts`).
+// Runs on every state change, so it writes only when the string moved. The
+// last string written is kept rather than read back from `document.title`,
+// which the browser hands back with its whitespace collapsed.
+let writtenTabTitle: string | null = null
+
+function refreshTabTitle(): void {
+  if (typeof document === "undefined") return
+  const title = tabTitle(
+    tabPosition(state),
     resolveInstanceTitle(state.bootstrap?.title),
-    state.standaloneEditor,
+    attentionCount(),
   )
-  document.title = formatTabTitle(base, count)
-  applyAttentionFavicon(state.bootstrap?.favicon, count > 0)
+  if (title === writtenTabTitle) return
+  writtenTabTitle = title
+  document.title = title
 }
 
 // Monotonic sequence for spine loads: rapid change events fire concurrent
@@ -4416,8 +4437,8 @@ function applyUrlRoute(): void {
   // swap surfaces with no code of its own.
   if (route.standalone !== state.standaloneEditor) {
     setState({ standaloneEditor: route.standalone })
-    // The tab title carries an "Editor" prefix on the standalone surface, so
-    // it must re-render the moment the surface bit flips (the other refresh
+    // The surface bit decides which agents the attention count covers, so the
+    // favicon dot must re-render the moment it flips (the other refresh
     // triggers are spine applies and bootstraps, which need not coincide).
     refreshAttentionChrome()
   }

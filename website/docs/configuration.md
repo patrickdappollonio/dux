@@ -739,7 +739,11 @@ title   = "dux (prod)"   # the browser tab title and the in-app wordmark
 favicon = "blue"         # recolors the duck favicon for this instance
 ```
 
-`title` drives both the browser tab title and the brand wordmark. `favicon` is empty by
+`title` drives both the browser tab title and the brand wordmark. The tab title names where
+the tab is first and ends with the instance name, so `fix-login — dux (prod)` for an agent and
+`main.rs · fix-login · Editor — dux (prod)` for a file in the editor, with a `●` in front of
+the file name while it has unsaved changes. The most specific part leads because browsers cut
+long tab titles off at the end. `favicon` is empty by
 default (the original yellow duck); set it to one of the curated tints: `violet`, `blue`,
 `sky`, `cyan`, `teal`, `green`, `amber`, `orange`, `red`, `pink`, or `rose`.
 

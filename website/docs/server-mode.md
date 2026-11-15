@@ -541,7 +541,7 @@ The details:
 
 | Key | Default | What it does |
 |---|---|---|
-| `title` | `"dux"` | Web-only instance name: the browser tab title and the wordmark in the projects pane. |
+| `title` | `"dux"` | Web-only instance name: the end of the browser tab title (after the agent, terminal or file the tab is on) and the wordmark in the projects pane. |
 | `favicon` | `""` | Web-only favicon tint so several dux tabs are distinguishable. |
 
 - **`title`**: set `"dux (prod)"` to tell tabs apart. Control and bidirectional characters

@@ -1464,7 +1464,8 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "title",
             comment: Some(CommentSource::Static(
                 "# Display name for THIS dux instance in the web UI. It is shown as\n\
-                 # the browser tab title and as the brand wordmark at the top of the\n\
+                 # the end of the browser tab title, after the agent, terminal or\n\
+                 # file the tab is on, and as the brand wordmark at the top of the\n\
                  # projects pane (the version stays on the line below). Give each\n\
                  # instance a distinct value (for example \"dux #1\" or \"dux (prod)\")\n\
                  # so several dux tabs/servers are easy to tell apart. An empty or\n\

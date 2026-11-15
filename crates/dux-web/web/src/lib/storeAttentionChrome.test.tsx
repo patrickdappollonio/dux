@@ -203,18 +203,18 @@ describe("store attention chrome (browser-tab count)", () => {
   })
 
   it("never counts in the standalone editor tab, however many agents are flagged", async () => {
-    // The editor tab is not the thing needing attention, so its title keeps the
-    // "Editor" prefix and never grows a "(N) " one.
+    // The editor tab is not the thing needing attention, so its title names the
+    // editor and never grows a "(N) " prefix. These sessions have no name to show.
     window.location.hash = "#/editor/agent/s1"
     spineBody = makeSpine({ sessions: [session("s1", true), session("s2", true)] })
     const mod = await loadStore()
     expect(mod.getSnapshot().standaloneEditor).toBe(true)
-    expect(document.title).toBe(`Editor: ${BASE_TITLE}`)
+    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
 
     await pushSpine(
       mod,
       makeSpine({ sessions: [session("s1", true), session("s2", true)] }),
     )
-    expect(document.title).toBe(`Editor: ${BASE_TITLE}`)
+    expect(document.title).toBe(`Editor — ${BASE_TITLE}`)
   })
 })

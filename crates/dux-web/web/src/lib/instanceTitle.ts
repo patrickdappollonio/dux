@@ -11,12 +11,3 @@ export function resolveInstanceTitle(raw: string | null | undefined): string {
   const normalized = (raw ?? "").replace(/[\r\n\t]+/g, " ").trim()
   return normalized === "" ? DEFAULT_INSTANCE_TITLE : normalized
 }
-
-/**
- * The browser-tab title for the current surface: the standalone editor tab prefixes "Editor"
- * so two tabs can be told apart in a strip full of dux instances. `formatTabTitle`'s attention
- * prefix wraps outside this, and the editor tab's count is always zero.
- */
-export function pageTitle(base: string, standaloneEditor: boolean): string {
-  return standaloneEditor ? `Editor: ${base}` : base
-}

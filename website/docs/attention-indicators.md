@@ -25,8 +25,8 @@ looking.
   with no dot, so an agent waiting on you is never hidden behind its terminal. A docked
   terminal's pill pulses and bounces while something runs in it, like a tab pill.
   Everything holds still if you have reduced-motion turned on.
-- **The browser tab title** gains a count in front of your configured instance name:
-  `(2) dux` when two agents are waiting. A backgrounded tab updates the count without
+- **The browser tab title** gains a count at its very front: `(2) fix-login — dux` when
+  two agents are waiting. A backgrounded tab updates the count without
   you visiting it.
 - **The favicon** gets a small cyan dot in the corner of the duck while the count is
   above zero, so it catches your eye from the tab strip, even while you are in another tab.
