@@ -364,7 +364,7 @@ async fn smoke_a_browser_loads_the_web_ui_from_the_network_and_this_machine() {
 }
 
 /// What only dux's terminal UI draws: the agent list's frame title.
-pub(crate) const TUI_MARKER: &str = "Agents & Terminals (";
+pub(crate) const TUI_MARKER: &str = "Agents & Terminals";
 
 /// Situation: dux served from the terminal UI, the two ways a TUI serves:
 /// `[server] serve_while_tui = true`, and the `start-web-server` palette

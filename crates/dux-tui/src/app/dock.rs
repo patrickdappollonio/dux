@@ -1158,12 +1158,7 @@ mod tests {
             1,
             "only the standalone terminal is a row"
         );
-        let terminal = draw(&mut app);
-        assert!(
-            screen(&terminal).contains("Agents & Terminals (1 + 1)"),
-            "{}",
-            screen(&terminal)
-        );
+        draw(&mut app);
         let row = app
             .left_items()
             .iter()

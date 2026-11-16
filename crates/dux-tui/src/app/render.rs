@@ -80,6 +80,9 @@ const NO_PROVIDERS: &str = "No providers are configured.";
 /// under a frame; a larger diff is wrapped on a worker.
 const DIFF_WRAP_INLINE_LINES: usize = 5_000;
 
+/// The agent list's frame title, the same words the web sidebar uses.
+const AGENT_SIDEBAR_TITLE: &str = "Agents & Terminals";
+
 /// The width a pane card's button paints at. One rule, read by the planner (to
 /// refuse a layout too narrow for it) and by the painter (to place it), so the
 /// two can never disagree about whether the label fits.
@@ -3234,25 +3237,6 @@ impl App {
             .collect()
     }
 
-    /// "Agents & Terminals (A + T)", or "(a/A + t/T)" while a query prunes
-    /// the list, so a pruned list never reads as the whole roster.
-    fn agent_sidebar_title(&self, left_items: &[LeftItem]) -> String {
-        let agents = self.engine.sessions.len();
-        let terminals = self.left_terminals.len();
-        if self.agent_filter.is_none() {
-            return format!("Agents & Terminals ({agents} + {terminals})");
-        }
-        let visible_agents = left_items
-            .iter()
-            .filter(|item| matches!(item, LeftItem::Session(_)))
-            .count();
-        let visible_terminals = left_items
-            .iter()
-            .filter(|item| matches!(item, LeftItem::Terminal(_)))
-            .count();
-        format!("Agents & Terminals ({visible_agents}/{agents} + {visible_terminals}/{terminals})")
-    }
-
     fn agent_sidebar_items(
         &self,
         left_items: &[LeftItem],
@@ -3373,7 +3357,6 @@ impl App {
     ) -> bool {
         let left_items = self.left_items();
         let projects_focused = focused;
-        let title = self.agent_sidebar_title(left_items);
         // Active rows always sort ahead of the Inactive toggle, so the list
         // leads with a row iff anything is active. The toggle only earns a
         // leading spacer row (separating it from the active agents) when there is
@@ -3388,7 +3371,7 @@ impl App {
         };
         // Build the block up front so the row builder knows the text width left
         // after both gutters are reserved, and can ellipsize overflowing lines.
-        let block = self.themed_block(&title, projects_focused);
+        let block = self.themed_block(AGENT_SIDEBAR_TITLE, projects_focused);
         let inner = block.inner(projects_area);
         let row_text_width = inner.width.saturating_sub(LEFT_PANE_GUTTER * 2);
         let (items, item_heights) =
@@ -18614,10 +18597,6 @@ mod tests {
         assert!(
             !rendered.contains("Terminal 1"),
             "the project's terminal matches nothing and must be gone from the list; got:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("Agents & Terminals (0/1 + 1/2)"),
-            "the pane count must report the filtered list over the total; got:\n{rendered}"
         );
 
         // The visible list itself, which is what selection and the click map are
