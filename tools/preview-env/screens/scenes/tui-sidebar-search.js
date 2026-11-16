@@ -1,5 +1,5 @@
-// The same sidebar filtered: the pane title counts what survived and the
-// matched letters are picked out in each row.
+// The same sidebar filtered: only the matching rows survive, with the matched
+// letters picked out in each row.
 //
 // The workspace is built inline rather than shared with
 // tui-agent-list-two-line.js: the capture container mounts one journey file and
@@ -32,10 +32,11 @@ module.exports = async ({
   // The filter is a sidebar key, and creation left the center pane focused.
   await focusSidebar()
   sendKeys("/")
-  // The pane title counts the filter's matches the moment it opens, which is how
-  // this knows the field is there to type into.
-  await waitFor("/5 +", 10000)
+  await sleep(800)
   sendText("retry")
+  // The field echoes what was typed, which is how this knows the filter opened
+  // and took the text.
+  await waitFor("/ retry", 10000)
   await sleep(800)
   // The filter leaves the selection where it was; the shot is of the second
   // surviving row.
@@ -43,9 +44,9 @@ module.exports = async ({
   await sleep(1000)
 }
 
-// The count the filter leaves in the pane title, and the two rows that survived
-// it. A capture where the filter never took shows five rows and no count.
-module.exports.expectText = ["2/5", "retry-budget", "retry-tests"]
+// The filter field holding the query, and the two rows that survived it. A
+// capture where the filter never took shows no field.
+module.exports.expectText = ["/ retry", "retry-budget", "retry-tests"]
 
 module.exports.file = "tui-sidebar-search.png"
 module.exports.cols = 160
