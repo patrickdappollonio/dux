@@ -1189,37 +1189,9 @@ describe("FlatAgentList sort control", () => {
   })
 })
 
-// One pill style for every section count, immediately after the section word.
-// Right edges carry controls only.
+// The Inactive count sits in its pill right after the section word; right edges
+// carry controls only.
 describe("FlatAgentList section counters", () => {
-  it("counts every agent and every listed terminal in the header", () => {
-    render(<FlatAgentList handlers={handlers} />)
-    const count = screen.getByText("Agents & Terminals").nextElementSibling!
-    expect(count.textContent).toBe("(4 + 2)")
-    expect(count.getAttribute("aria-label")).toBe("4 agents and 2 terminals")
-  })
-
-  it("says how many of each a search leaves", () => {
-    mockState = { ...makeState("name"), agentSearch: "z" } as DuxState
-    render(<FlatAgentList handlers={handlers} />)
-    // "z" finds Zeta and the terminal running zsh.
-    expect(screen.getByText("Agents & Terminals").nextElementSibling!.textContent).toBe(
-      "(1/4 + 1/2)",
-    )
-  })
-
-  it("never breaks the title or the count mid-word, and lets the count drop below the title", () => {
-    mockState = { ...makeState("name"), agentSearch: "z" } as DuxState
-    render(<FlatAgentList handlers={handlers} />)
-    const title = screen.getByText("Agents & Terminals")
-    const count = title.nextElementSibling as HTMLElement
-    expect(title.className).toContain("truncate")
-    expect(count.className).toContain("whitespace-nowrap")
-    const heading = screen.getByTestId("list-heading")
-    expect(heading.className).toContain("flex-wrap")
-    expect(heading.contains(screen.getByRole("button", { name: "Sort agents" }))).toBe(false)
-  })
-
   it("keeps the Inactive count in its pill", () => {
     render(<FlatAgentList handlers={handlers} />)
     const pill = screen.getByText("Inactive").nextElementSibling as HTMLElement

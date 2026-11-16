@@ -416,9 +416,6 @@ describe("AppSidebar agent's own terminals", () => {
     expect(screen.queryByText("Terminals")).toBeNull()
     expect(screen.queryByText("vim")).toBeNull()
     expect(screen.queryByText("Typing")).toBeNull()
-    expect(screen.getByText("Agents & Terminals").nextElementSibling!.textContent).toBe(
-      "(1 + 0)",
-    )
   })
 })
 

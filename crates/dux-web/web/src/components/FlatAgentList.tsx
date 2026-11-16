@@ -654,7 +654,7 @@ function QuietTail({
           )}
         />
         <span>Inactive</span>
-        {/* Right after the word, like every other section count. The Inactive
+        {/* Right after the word; right edges carry controls only. The Inactive
             divider deliberately gains NO button beside it: there is no such
             thing as creating a dormant agent. */}
         <span className={SECTION_COUNT_PILL}>{sessions.length}</span>
@@ -736,8 +736,8 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
 
-// The Inactive divider's counter pill. Like the header's count, it sits right
-// after the section word, and right edges carry controls only.
+// The Inactive divider's counter pill. It sits right after the section word,
+// and right edges carry controls only.
 const SECTION_COUNT_PILL =
   "rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground"
 
@@ -824,28 +824,6 @@ function flatListEmptyState(input: {
   }
 }
 
-// The header's count: every agent and every project or standalone terminal,
-// and while a search is on, how many of each it leaves on screen.
-function listCountText(counts: {
-  agents: number
-  terminals: number
-  shownAgents: number
-  shownTerminals: number
-  searching: boolean
-}): { text: string; label: string } {
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
-  if (!counts.searching) {
-    return {
-      text: `(${counts.agents} + ${counts.terminals})`,
-      label: `${plural(counts.agents, "agent")} and ${plural(counts.terminals, "terminal")}`,
-    }
-  }
-  return {
-    text: `(${counts.shownAgents}/${counts.agents} + ${counts.shownTerminals}/${counts.terminals})`,
-    label: `${counts.shownAgents} of ${plural(counts.agents, "agent")} and ${counts.shownTerminals} of ${plural(counts.terminals, "terminal")} match`,
-  }
-}
-
 function flatAgentListModel(dux: DuxState) {
   const { spine, selectedTarget, agentSearch: rawAgentSearch } = dux
   const agentSort = agentSortValue(dux)
@@ -879,14 +857,6 @@ function flatAgentListModel(dux: DuxState) {
   )
   const agentCount = sessions.length
   const terminalCount = terminals.filter(isListTerminal).length
-  const shownTerminals = visibleMain.filter((row) => row.kind === "terminal").length
-  const count = listCountText({
-    agents: agentCount,
-    terminals: terminalCount,
-    shownAgents: visibleMain.length - shownTerminals + visibleQuiet.length,
-    shownTerminals,
-    searching: normalizeQuery(query) !== "",
-  })
   const { nothing, nothingMatches, emptyVerbIsAddProject } = flatListEmptyState({
     projectCount: spine ? rawProjects.length : null,
     agentCount,
@@ -904,7 +874,6 @@ function flatAgentListModel(dux: DuxState) {
     projectName,
     visibleMain,
     visibleQuiet,
-    count,
     hasRows: agentCount + terminalCount > 0,
     query,
     manual: agentSort === "manual",
@@ -930,7 +899,6 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
     projectName,
     visibleMain,
     visibleQuiet,
-    count,
     hasRows,
     query,
     manual,
@@ -1016,31 +984,15 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Header: the section word and its count on the left, the section's own
-          controls (new agent, sort) at the right edge, then search. px-2 matches
-          the sidebar header (the logo row's p-2) and the list below, so the search
-          box and the agent rows share one inset and none of it hugs the edge. */}
+      {/* Header: the section word on the left, the section's own controls
+          (sort) at the right edge, then search. px-2 matches the sidebar header
+          (the logo row's p-2) and the list below, so the search box and the
+          agent rows share one inset and none of it hugs the edge. */}
       <div className="flex flex-col gap-2 px-2 pt-2 pb-3">
         <div className="@container/list-header flex items-center gap-2">
-          {/* Neither the title nor the count ever breaks inside itself: when the
-              two no longer fit beside Sort the count drops to a line of its
-              own, and only a title that cannot fit even alone truncates. */}
-          <div
-            data-testid="list-heading"
-            className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2"
-          >
-            <span className="min-w-0 max-w-full truncate text-sm font-semibold">
-              Agents &amp; Terminals
-            </span>
-            {/* Right after the words, like every section count; while a search
-                is on it says how many of each the search leaves. */}
-            <span
-              aria-label={count.label}
-              className="whitespace-nowrap text-xs tabular-nums text-muted-foreground"
-            >
-              {count.text}
-            </span>
-          </div>
+          <span className="min-w-0 flex-1 truncate text-sm font-semibold">
+            Agents &amp; Terminals
+          </span>
           {/* Sort rides the same gate as the list it sorts: with no row there
               is nothing to order, and the empty state below carries its own
               hero button. Creating lives behind the launcher corner, so the

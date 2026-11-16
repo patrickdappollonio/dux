@@ -16,10 +16,10 @@ it: pick a sort mode and let dux keep the list in order, or place things by hand
 
 Dormant agents fold away into a collapsible "Inactive" tail at the bottom.
 
-- **Both surfaces:** one list, titled **Agents & Terminals** with a count of each. Project
-  and standalone terminals are rows of it, sorted together with the agents. An agent's own
-  terminals are not rows: they dock under the agent in the center pane (see
-  [Terminals beside their agent](#terminals-beside-their-agent), and in the browser
+- **Both surfaces:** one list, titled **Agents & Terminals**; in the terminal UI the title
+  also counts each. Project and standalone terminals are rows of it, sorted together with
+  the agents. An agent's own terminals are not rows: they dock under the agent in the
+  center pane (see [Terminals beside their agent](#terminals-beside-their-agent), and in the browser
   [the terminal dock](/docs/web-workspace#the-terminal-dock)). An agent you stopped while
   one of its terminals keeps running stays in the list, out of the Inactive tail, until its
   last terminal ends, and terminals are never in the tail.
@@ -35,8 +35,8 @@ it names the directory it opened in instead, shortened with `~`. Whichever it
 shows is what the sidebar search matches on.
 
 Typing in the filter narrows the list to the rows that match, with the matching text
-picked out, and the pane title counts what survived out of how many, for agents and
-terminals each.
+picked out. In the terminal UI the pane title also counts what survived out of how many,
+for agents and terminals each.
 
 ![The same sidebar filtered by the word retry: the title reads Agents & Terminals, 2 of 5 agents and 0 of 0 terminals, and only the two matching agents remain.](/screens/tui-sidebar-search.png)
 
