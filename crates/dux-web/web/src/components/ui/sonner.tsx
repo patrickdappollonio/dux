@@ -76,8 +76,8 @@ const TONE_ICON = {
 
 /// The foot of every toast `lib/notify.ts` raises: a bar draining over `ms`, the
 /// toast's exact sonner duration, and nothing at all when the toast will not
-/// dismiss itself (`ms` null). The bar stopping, dimmed while the stack is open,
-/// is the only sign of a pause. It sits in the toast's own bottom padding,
+/// dismiss itself (`ms` null). The bar stopping is the only sign of a pause:
+/// nothing else about a held toast is drawn differently. It sits in the toast's own bottom padding,
 /// absolutely placed, so it takes no room in it and covers nothing outside it,
 /// and it is hidden from the toaster's live region.
 ///
@@ -92,10 +92,32 @@ const TONE_ICON = {
 /// page). So whenever the bar goes from waiting to running, at mount or on a
 /// release, its start is anchored to that moment instead, keeping what it had
 /// already drained.
-export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }) {
+///
+/// The foot also keeps sonner's idea of the toast's height true (see
+/// `useToastHeightWatch`), reporting a stale one through `onStaleHeight` with
+/// what its bar has left to drain.
+export function ToastCountdown({
+  tone,
+  ms,
+  onStaleHeight,
+}: {
+  tone: string
+  ms: number | null
+  onStaleHeight?: (remainingMs: number | null) => void
+}) {
   // An unknown tone is raised as a success, so it drains in the success color.
   const color = TONE_COLOR[tone as keyof typeof TONE_COLOR] ?? TONE_COLOR.success
   const fillRef = useRef<HTMLSpanElement>(null)
+  const anchorRef = useRef<HTMLSpanElement>(null)
+  useToastHeightWatch(anchorRef, () => {
+    if (!onStaleHeight) return
+    if (ms === null) {
+      onStaleHeight(null)
+      return
+    }
+    const drained = fillRef.current?.getAnimations?.()[0]?.currentTime
+    onStaleHeight(Math.max(0, ms - Number(drained ?? 0)))
+  })
   useLayoutEffect(() => {
     const fill = fillRef.current
     if (!fill || typeof fill.getAnimations !== "function") return
@@ -120,9 +142,11 @@ export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }
     }
     return () => observer.disconnect()
   }, [])
-  if (ms === null) return null
+  // A toast with no timer draws no bar, but still needs a node inside the toast
+  // for the height watch to find it by.
+  if (ms === null) return <span ref={anchorRef} aria-hidden hidden />
   return (
-    <span aria-hidden className="dux-toast-drain">
+    <span ref={anchorRef} aria-hidden className="dux-toast-drain">
       <span
         ref={fillRef}
         className={`dux-toast-drain-fill bg-current ${color}`}
@@ -135,6 +159,65 @@ export function ToastCountdown({ tone, ms }: { tone: string; ms: number | null }
       />
     </span>
   )
+}
+
+/// Watch the toast the `anchor` sits in for its laid-out height drifting from the
+/// one sonner measured, and call `stale` when it has.
+///
+/// sonner measures a toast's height when it mounts and when a raise replaces its
+/// text, publishes it as `--initial-height`, sizes the toast to it while the
+/// stack is expanded, and stacks the toasts behind it by it. Text that changes
+/// height later leaves that number behind: a name chip decides whether it wraps
+/// in a render of its own after sonner measured, and again when a font arrives
+/// or the toast changes width. A hovered toast then shrank to the old number and
+/// clipped its text. So the toast's content is watched for a change of size, and
+/// the toast is measured again the way sonner measures it (its height released
+/// to `auto`, read, and put back), whenever its content resizes and whenever it
+/// comes to the front or the stack expands.
+///
+/// Only a toast drawn at its own size is compared: a collapsed toast behind the
+/// front one is drawn scaled down, and so is one still growing back as the stack
+/// expands, and a rectangle read through that scale would never match (nor would
+/// the one sonner then read itself, so it would record the shrunken height). The
+/// end of its transition is therefore a moment to look as well. One that is
+/// leaving is left alone.
+function useToastHeightWatch(anchor: React.RefObject<HTMLElement | null>, stale: () => void) {
+  const staleRef = useRef(stale)
+  useLayoutEffect(() => {
+    staleRef.current = stale
+  })
+  useEffect(() => {
+    const toast = anchor.current?.closest<HTMLElement>("[data-sonner-toast]")
+    if (!toast) return
+    const check = () => {
+      if (toast.dataset.mounted !== "true" || toast.dataset.removed === "true") return
+      if (Math.abs(toast.getBoundingClientRect().width - toast.offsetWidth) >= 1) return
+      const measured = parseFloat(toast.style.getPropertyValue("--initial-height"))
+      if (!Number.isFinite(measured)) return
+      if (Math.abs(naturalHeight(toast) - measured) > 0.5) staleRef.current()
+    }
+    const attributes = new MutationObserver(check)
+    attributes.observe(toast, { attributeFilter: ["data-front", "data-expanded", "data-mounted"] })
+    const resizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(check)
+    const content = toast.querySelector("[data-content]")
+    if (content) resizes?.observe(content)
+    toast.addEventListener("transitionend", check)
+    return () => {
+      toast.removeEventListener("transitionend", check)
+      attributes.disconnect()
+      resizes?.disconnect()
+    }
+  }, [anchor])
+}
+
+// The toast's height with its content laid out freely, read exactly as sonner
+// reads it so the two numbers compare.
+function naturalHeight(toast: HTMLElement): number {
+  const height = toast.style.height
+  toast.style.height = "auto"
+  const natural = toast.getBoundingClientRect().height
+  toast.style.height = height
+  return natural
 }
 
 /// How many toasts stack before the rest queue behind them. Above sonner's default
