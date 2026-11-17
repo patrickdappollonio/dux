@@ -66,13 +66,28 @@ function StandaloneAgentBrowser() {
   // raise the keyboard). No glide under reduced motion.
   const reducedMotion = usePrefersReducedMotion()
   const nameBlock = useRef<HTMLDivElement | null>(null)
+  // Asked again when the explorer finishes listing the chosen folder (its
+  // rows land a moment after the choice and can push the field back down),
+  // and whenever the block itself changes size: the body gaining a scrollbar
+  // narrows it, a long path then wraps onto another line, and the block grows
+  // after the first reveal was aimed.
   useEffect(() => {
-    if (selected === null) return
-    nameBlock.current?.scrollIntoView?.({
-      block: "nearest",
-      behavior: reducedMotion ? "auto" : "smooth",
+    const block = nameBlock.current
+    if (selected === null || block === null) return
+    const reveal = (behavior: ScrollBehavior) =>
+      block.scrollIntoView?.({ block: "nearest", behavior })
+    reveal(reducedMotion ? "auto" : "smooth")
+    if (typeof ResizeObserver !== "function") return
+    // An observer reports once as it starts; that report is not a change,
+    // and answering it would cut the glide short.
+    let started = false
+    const resized = new ResizeObserver(() => {
+      if (started) reveal("auto")
+      started = true
     })
-  }, [selected, reducedMotion])
+    resized.observe(block)
+    return () => resized.disconnect()
+  }, [selected, browseLoading, browseEntries, reducedMotion])
   const invalidName = name !== "" && !isValidAgentName(name)
 
   function handleCreate() {
