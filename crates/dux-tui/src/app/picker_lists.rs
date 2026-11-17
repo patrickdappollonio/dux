@@ -311,6 +311,7 @@ fn fixture(app: &mut App, name: &str) -> PickerFixture {
                 path_input: TextInput::new(),
                 tab_completions: Vec::new(),
                 tab_index: 0,
+                project_chooser: crate::app::StandaloneProjectChooser::default(),
             };
             PickerFixture {
                 tall: browse(
@@ -368,6 +369,7 @@ fn fixture(app: &mut App, name: &str) -> PickerFixture {
                         path_missing: false,
                         base_branch: None,
                         orphaned: false,
+                        shortcut: None,
                     })
                     .collect(),
                 list: SearchableList::new(),

@@ -365,8 +365,11 @@ pub(crate) fn prompt_text_inputs(prompt: &PromptState) -> Vec<&TextInput> {
         PromptState::KillRunning(prompt) => vec![&prompt.list.filter],
         PromptState::ConfirmKillRunning(prompt) => vec![&prompt.previous.list.filter],
         PromptState::BrowseProjects {
-            filter, path_input, ..
-        } => vec![filter, path_input],
+            filter,
+            path_input,
+            project_chooser,
+            ..
+        } => vec![filter, path_input, &project_chooser.list.filter],
         PromptState::EditMacros { editing, .. } => editing
             .as_ref()
             .map_or_default(|state| vec![&state.name_input, &state.text_input]),
@@ -915,6 +918,7 @@ pub(super) mod tests {
                     path_input: TextInput::new(),
                     tab_completions: Vec::new(),
                     tab_index: 0,
+                    project_chooser: crate::app::StandaloneProjectChooser::default(),
                 },
             ),
             (

@@ -262,6 +262,15 @@ enum MouseTarget {
     CommitText,
 }
 
+/// The two halves of the standalone picker that can hold the keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerHalf {
+    /// The project chooser at the top.
+    Chooser,
+    /// The folder explorer below it.
+    Explorer,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PromptMouseTarget {
     CommandInput,
@@ -270,6 +279,11 @@ enum PromptMouseTarget {
     PickProjectInput,
     StartupCommandLogsInput,
     BrowseProjectItem(usize),
+    /// The search field of the standalone picker's project chooser.
+    StandaloneChooserInput,
+    /// A row of the standalone picker's project chooser, by its place in the
+    /// drawn list.
+    StandaloneChooserItem(usize),
     PickEditorItem(usize),
     PickProjectWorktreeItem(usize),
     ManageWorktreeItem(usize),
@@ -524,6 +538,8 @@ impl ButtonPressedTarget {
             | PromptMouseTarget::PickProjectInput
             | PromptMouseTarget::StartupCommandLogsInput
             | PromptMouseTarget::BrowseProjectItem(_)
+            | PromptMouseTarget::StandaloneChooserInput
+            | PromptMouseTarget::StandaloneChooserItem(_)
             | PromptMouseTarget::PickEditorItem(_)
             | PromptMouseTarget::PickProjectWorktreeItem(_)
             | PromptMouseTarget::ManageWorktreeItem(_)
@@ -2121,11 +2137,22 @@ impl App {
                 searching,
                 filter,
                 selected,
+                project_chooser,
                 ..
             } => {
                 if *editing_path {
                     path_input.insert_str(text);
                     refresh_path_completions = true;
+                } else if project_chooser.is_shown() && project_chooser.focused {
+                    // The chooser has the keys, so its search row is the one
+                    // a paste can land in.
+                    if project_chooser.list.searching {
+                        project_chooser.list.edit_filter(|filter| {
+                            filter.insert_str(text);
+                            true
+                        });
+                        project_chooser.reset_cursor();
+                    }
                 } else if *searching {
                     filter.insert_str(text);
                     *selected = 0;
@@ -4721,6 +4748,78 @@ impl App {
         }
     }
 
+    /// The standalone picker's project chooser sits above the explorer. The
+    /// pane-focus keys move between the two, and so does moving down off the
+    /// chooser's last row or up off the explorer's first; a key either half
+    /// binds for itself stays that half's. While the chooser has the keys,
+    /// every other key is its own.
+    ///
+    /// True when the key was used here, so the explorer must not see it.
+    fn route_standalone_chooser_key(&mut self, key: KeyEvent) -> bool {
+        let Some(chooser_focused) = self.standalone_chooser_focus() else {
+            return false;
+        };
+        let explorer_searching = matches!(
+            self.prompt,
+            PromptState::BrowseProjects {
+                searching: true,
+                ..
+            }
+        );
+        let in_field = if chooser_focused {
+            matches!(
+                &self.prompt,
+                PromptState::BrowseProjects { project_chooser, .. }
+                    if project_chooser.list.searching
+            )
+        } else {
+            explorer_searching
+        };
+        let suppressed = binding_lookup_is_suppressed(
+            key,
+            if in_field {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+            self.extended_keys,
+        );
+        let own = if chooser_focused {
+            self.bindings
+                .lookup(&key, BindingScope::ProjectChooser)
+                .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
+        } else {
+            self.bindings.lookup(&key, BindingScope::Browser)
+        };
+        if !suppressed
+            && own.is_none()
+            && matches!(
+                self.bindings.lookup(&key, BindingScope::Global),
+                Some(Action::FocusNext | Action::FocusPrev)
+            )
+        {
+            self.focus_standalone_picker(if chooser_focused {
+                PickerHalf::Explorer
+            } else {
+                PickerHalf::Chooser
+            });
+            return true;
+        }
+        if chooser_focused {
+            self.handle_standalone_chooser_key(key);
+            return true;
+        }
+        let at_top = matches!(
+            &self.prompt,
+            PromptState::BrowseProjects { selected: 0, filter, .. } if filter.is_empty()
+        );
+        if at_top && !explorer_searching && !suppressed && own == Some(Action::MoveUp) {
+            self.focus_standalone_picker(PickerHalf::Chooser);
+            return true;
+        }
+        false
+    }
+
     fn handle_project_browser_prompt_key(&mut self, key: KeyEvent) -> Option<bool> {
         let PromptState::BrowseProjects {
             editing_path,
@@ -4735,6 +4834,10 @@ impl App {
 
         if is_editing_path {
             self.handle_project_browser_path_editor_key(key);
+            return Some(false);
+        }
+
+        if self.route_standalone_chooser_key(key) {
             return Some(false);
         }
 
@@ -7468,19 +7571,36 @@ impl App {
                 list,
                 items,
                 offset,
-                ..
-            } => Self::searchable_overlay_target(
-                SearchableOverlay {
-                    input,
-                    list,
-                    items,
-                    offset,
-                },
-                PromptMouseTarget::BrowseProjectInput,
-                PromptMouseTarget::BrowseProjectItem,
-                column,
-                row,
-            ),
+                chooser,
+            } => chooser
+                .and_then(|chooser| {
+                    Self::searchable_overlay_target(
+                        SearchableOverlay {
+                            input: chooser.input,
+                            list: chooser.list,
+                            items: chooser.items,
+                            offset: chooser.offset,
+                        },
+                        PromptMouseTarget::StandaloneChooserInput,
+                        PromptMouseTarget::StandaloneChooserItem,
+                        column,
+                        row,
+                    )
+                })
+                .or_else(|| {
+                    Self::searchable_overlay_target(
+                        SearchableOverlay {
+                            input,
+                            list,
+                            items,
+                            offset,
+                        },
+                        PromptMouseTarget::BrowseProjectInput,
+                        PromptMouseTarget::BrowseProjectItem,
+                        column,
+                        row,
+                    )
+                }),
             OverlayMouseLayout::PickEditor {
                 list,
                 items,
@@ -8363,6 +8483,8 @@ impl App {
         else {
             return;
         };
+        // A click into the explorer's field is where the keys go next.
+        self.focus_standalone_picker(PickerHalf::Explorer);
         if let PromptState::BrowseProjects {
             filter,
             searching,
@@ -8639,6 +8761,199 @@ impl App {
         }
         if let Some(dir) = browse_to {
             self.engine.spawn_browser_entries(&dir);
+        }
+    }
+
+    /// Give the keys to one half of the standalone picker. A chooser that is
+    /// not drawn never has them.
+    fn focus_standalone_picker(&mut self, half: PickerHalf) {
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            project_chooser.focused = half == PickerHalf::Chooser && project_chooser.is_shown();
+        }
+    }
+
+    /// Whether the standalone picker's project chooser is drawn, and whether
+    /// it has the keys. It is not drawn while the path editor is up.
+    fn standalone_chooser_focus(&self) -> Option<bool> {
+        match &self.prompt {
+            PromptState::BrowseProjects {
+                project_chooser,
+                editing_path: false,
+                ..
+            } if project_chooser.is_shown() => Some(project_chooser.focused),
+            _ => None,
+        }
+    }
+
+    /// A key while the standalone picker's project chooser has focus: the
+    /// project chooser's own keys, resolved through its scope and then the
+    /// shared picker vocabulary, exactly as the project chooser resolves them.
+    fn handle_standalone_chooser_key(&mut self, key: KeyEvent) {
+        let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let searching = project_chooser.list.searching;
+        let action = if binding_lookup_is_suppressed(
+            key,
+            if searching {
+                crate::app::modal::TextFieldFocus::Field
+            } else {
+                crate::app::modal::TextFieldFocus::Elsewhere
+            },
+            self.extended_keys,
+        ) {
+            None
+        } else {
+            self.bindings
+                .lookup(&key, BindingScope::ProjectChooser)
+                .or_else(|| self.bindings.lookup(&key, BindingScope::Palette))
+        };
+        if action == Some(Action::Confirm) {
+            self.pick_standalone_chooser_entry();
+            return;
+        }
+        let mut close = false;
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            match action {
+                Some(Action::CloseOverlay) => {
+                    if project_chooser.list.exit_search_clearing_filter() {
+                        project_chooser.reset_cursor();
+                    } else {
+                        close = true;
+                    }
+                }
+                Some(Action::SearchToggle) if !searching => project_chooser.list.begin_search(),
+                // Past the last row that can be picked, the way down leads
+                // into the explorer. Not mid-search, where the keys stay with
+                // the query.
+                Some(Action::MoveDown) => {
+                    if !project_chooser.step(ScrollDirection::Down) && !searching {
+                        project_chooser.focused = false;
+                    }
+                }
+                Some(Action::MoveUp) => {
+                    project_chooser.step(ScrollDirection::Up);
+                }
+                _ if searching => {
+                    let before = project_chooser.list.filter.text.clone();
+                    project_chooser
+                        .list
+                        .edit_filter(|filter| filter.handle_key(key));
+                    if project_chooser.list.filter.text != before {
+                        project_chooser.reset_cursor();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if close {
+            self.prompt = PromptState::None;
+        }
+    }
+
+    /// Pick the highlighted project shortcut: the explorer moves to that
+    /// project's folder, as if the user had browsed there, and takes the keys.
+    /// A greyed-out row is not picked; the status line says why.
+    fn pick_standalone_chooser_entry(&mut self) {
+        let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &self.prompt
+        else {
+            return;
+        };
+        let Some(entry) = project_chooser.highlighted().cloned() else {
+            return;
+        };
+        if let Some(reason) = entry.blocked() {
+            self.set_warning(format!(
+                "Project \"{}\" cannot be picked here: {reason}. Pick another project, or \
+                 browse to a folder below.",
+                entry.name
+            ));
+            return;
+        }
+        let new_dir = PathBuf::from(&entry.path);
+        if let PromptState::BrowseProjects {
+            current_dir,
+            entries,
+            loading,
+            selected,
+            filter,
+            searching,
+            project_chooser,
+            ..
+        } = &mut self.prompt
+        {
+            project_chooser.list.exit_search_clearing_filter();
+            project_chooser.reset_cursor();
+            project_chooser.focused = false;
+            current_dir.clone_from(&new_dir);
+            entries.clear();
+            *loading = true;
+            *selected = 0;
+            *searching = false;
+            filter.clear();
+        }
+        self.engine.spawn_browser_entries(&new_dir);
+        let add = self.bindings.label_for(Action::AddCurrentDir);
+        self.set_info(format!(
+            "The folder browser is now in project \"{}\"'s folder. {add} runs a standalone agent \
+             there: it uses the folder only, not the project's environment variables or startup \
+             command.",
+            entry.name
+        ));
+    }
+
+    /// A click on the project chooser's `index`th visible row gives the
+    /// chooser the keys and selects the row; a double click picks it.
+    fn click_standalone_chooser_item(&mut self, index: usize) {
+        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            project_chooser.focused = true;
+            if index < project_chooser.visible().len() {
+                project_chooser.list.selected = index;
+            }
+        }
+        if double_click {
+            self.pick_standalone_chooser_entry();
+        }
+    }
+
+    /// Land the caret in the project chooser's `/`-search field. The renderer
+    /// pads it with the two-cell `"/ "` prefix.
+    fn set_standalone_chooser_filter_cursor_from_mouse(&mut self, column: u16) {
+        let OverlayMouseLayout::BrowseProjects {
+            chooser:
+                Some(crate::app::ChooserMouseLayout {
+                    input: Some(input_area),
+                    ..
+                }),
+            ..
+        } = self.overlay_layout.active
+        else {
+            return;
+        };
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            let filter = &mut project_chooser.list.filter;
+            filter.cursor =
+                cursor_from_single_line_click(&filter.text, filter.cursor, input_area, 2, column);
+            project_chooser.list.searching = true;
+            project_chooser.focused = true;
         }
     }
 
@@ -10659,6 +10974,8 @@ impl App {
 
     fn click_browse_project_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        // A click into the explorer is where the keys go next.
+        self.focus_standalone_picker(PickerHalf::Explorer);
         self.set_browser_selection(index);
         if double_click {
             self.open_selected_browser_entry();
@@ -10863,6 +11180,12 @@ impl App {
             }
             PromptMouseTarget::BrowseProjectItem(index) => {
                 self.click_browse_project_item(index);
+            }
+            PromptMouseTarget::StandaloneChooserInput => {
+                self.set_standalone_chooser_filter_cursor_from_mouse(mouse.column);
+            }
+            PromptMouseTarget::StandaloneChooserItem(index) => {
+                self.click_standalone_chooser_item(index);
             }
             PromptMouseTarget::PickEditorItem(index) => {
                 self.click_editor_item(index);
@@ -14575,6 +14898,7 @@ mod tests {
             list: Rect::new(15, 6, 70, 8),
             items,
             offset: 0,
+            chooser: None,
         };
     }
 
@@ -25854,6 +26178,7 @@ not_a_real_action = ["x"]
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         install_browser_overlay(&mut app, 1);
 
@@ -26246,6 +26571,7 @@ cyan = "#00ffff"
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         install_browser_overlay(&mut app, 0);
 
@@ -26280,6 +26606,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text("abcd".to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         install_browser_overlay(&mut app, 0);
 
@@ -26332,6 +26659,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(typed.to_string_lossy().to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -26378,6 +26706,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(folder.to_string_lossy().to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         }
     }
 
@@ -26606,6 +26935,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(typed.to_string_lossy().to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         app.prompt = browser.clone();
 
@@ -26683,6 +27013,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(root.to_string_lossy().to_string()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
@@ -26750,6 +27081,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(typed.clone()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
@@ -26826,6 +27158,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text(typed.clone()),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
@@ -26858,6 +27191,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text("/tmp/demo".to_string()),
             tab_completions: vec!["/tmp/demo/".to_string(), "/tmp/demo-two/".to_string()],
             tab_index: 1,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
@@ -26909,6 +27243,7 @@ cyan = "#00ffff"
             path_input: TextInput::with_text("/tmp/demo".to_string()),
             tab_completions: vec!["/tmp/demo/".to_string()],
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
@@ -41041,6 +41376,7 @@ cyan = "#00ffff"
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         app
     }
@@ -42440,6 +42776,7 @@ cyan = "#00ffff"
                 path_missing: false,
                 base_branch: None,
                 orphaned: false,
+                shortcut: None,
             }],
             list: SearchableList::new(),
         };

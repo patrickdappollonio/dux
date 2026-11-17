@@ -19,7 +19,7 @@ use super::components::{
 use super::components::{
     HintTone, fitted_hint_spans, hint_line, hint_line_after, pane_hint_line, pane_hint_line_after,
 };
-use super::components::{PickerList, render_scroll_indicator};
+use super::components::{PickerList, PickerListLayout, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
 };
@@ -2019,6 +2019,43 @@ enum HintRow {
     Shown,
     /// It does not.
     Hidden,
+}
+
+/// The rows the standalone picker's project chooser spends on chrome rather
+/// than projects: its header (count line and caption, inside two borders)
+/// and the list's bottom border.
+const STANDALONE_CHOOSER_CHROME_ROWS: u16 = 5;
+
+/// The display width of the longest reason a visible project chooser row
+/// gives for not being pickable, zero when every one can be picked.
+fn widest_blocked_reason(entries: &[ProjectChooserEntry], visible: &[usize]) -> usize {
+    visible
+        .iter()
+        .filter_map(|index| entries.get(*index))
+        .filter_map(ProjectChooserEntry::blocked)
+        .map(display_width)
+        .max()
+        .unwrap_or(0)
+}
+
+/// What [`App::draw_project_chooser`] draws: one project chooser, whichever
+/// modal it sits in.
+struct ProjectChooserView<'a> {
+    title: &'static str,
+    /// The header line while no query is up.
+    count_line: String,
+    /// A second header line under the first, for a chooser that has
+    /// something to say about what a pick does.
+    caption: Option<&'a str>,
+    entries: &'a [ProjectChooserEntry],
+    list: &'a super::SearchableList,
+    /// The rows the query leaves, as indices into `entries`.
+    visible: &'a [usize],
+    /// The key hints, drawn on the header's bottom border.
+    bottom_line: Line<'static>,
+    /// Whether the chooser has the keys. Always true for a chooser that is
+    /// the whole modal.
+    focused: bool,
 }
 
 /// Whether a picker list is filtering by a typed search.
@@ -6966,18 +7003,33 @@ impl App {
             searching,
             editing_path,
             path_input,
+            project_chooser,
             ..
         } = &self.prompt
         else {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 70, frame.area());
-        self.clear_overlay_area(frame, area);
+        let full_area = centered_rect(72, 70, frame.area());
+        self.clear_overlay_area(frame, full_area);
+        // The standalone picker leads with the user's projects as folder
+        // shortcuts, drawn by the project chooser's own renderer; the explorer
+        // sits below. The path editor takes the whole modal.
+        let chooser = (project_chooser.is_shown() && !*editing_path).then_some(project_chooser);
+        let chooser_focused = chooser.is_some_and(|chooser| chooser.focused);
+        let (chooser_layout, area) = self.render_standalone_chooser(frame, chooser, full_area);
+        // Whichever half does not have the keys rests: a quiet border and no
+        // highlighted row. With the keys, the explorer's blocks keep the
+        // border the shared modal chrome gives them, refusal blink included.
+        let resting_border = chooser_focused.then(|| self.resting_border_style());
+        let rest = |block: Block<'static>| match resting_border {
+            Some(style) => block.border_style(style),
+            None => block,
+        };
         let Some((items, empty, selected_index)) = self.browse_projects_list_content() else {
             return;
         };
-        let picker = PickerList::new(items, Some(selected_index), empty);
+        let picker = PickerList::new(items, (!chooser_focused).then_some(selected_index), empty);
         let has_filter = !filter.is_empty();
         let show_top_input = *searching || has_filter || *editing_path;
         let (top_areas, list_render_area) = if show_top_input {
@@ -6989,14 +7041,14 @@ impl App {
         } else {
             (None, area)
         };
-        if let Some(filter_area) = top_areas {
-            let title = Self::browse_projects_title(*purpose, current_dir);
+        let title = Self::browse_projects_title(*purpose, current_dir);
+        let (input, list_block) = if let Some(filter_area) = top_areas {
             let (prefix, text, cursor) = if *editing_path {
                 ("go: ", path_input.text.as_str(), path_input.cursor)
             } else {
                 ("/ ", filter.text.as_str(), filter.cursor)
             };
-            let input_block = self.themed_overlay_block_prose(&title);
+            let input_block = rest(self.themed_overlay_block_prose(&title));
             let input_inner = input_block.inner(filter_area);
             Paragraph::new(render_single_line_field(
                 prefix,
@@ -7004,7 +7056,11 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                FocusState::Focused,
+                if chooser_focused {
+                    FocusState::Unfocused
+                } else {
+                    FocusState::Focused
+                },
                 input_inner.width,
             ))
             .block(input_block)
@@ -7020,34 +7076,93 @@ impl App {
                 self.browse_projects_field_footer(mode, area.width.saturating_sub(2));
             let list_block = Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .border_style(Style::default().fg(self.theme.overlay_border))
+                .border_style(
+                    resting_border
+                        .unwrap_or_else(|| Style::default().fg(self.theme.overlay_border)),
+                )
                 .style(Style::default().bg(self.theme.overlay_bg))
                 .title_bottom(bottom_spans);
-            let list = picker
-                .block(list_block)
-                .render(frame, list_render_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
-                input: Some(input_inner),
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-            };
+            (Some(input_inner), list_block)
         } else {
             let bottom_spans = self.browse_projects_browsing_footer(area.width.saturating_sub(2));
-            let title = Self::browse_projects_title(*purpose, current_dir);
-            let list_block = self
-                .themed_overlay_block_prose(&title)
-                .title_bottom(bottom_spans);
-            let list = picker
-                .block(list_block)
-                .render(frame, list_render_area, &self.theme);
-            self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
-                input: None,
-                list: list.list,
-                items: list.items,
-                offset: list.offset,
-            };
-        }
+            let list_block =
+                rest(self.themed_overlay_block_prose(&title)).title_bottom(bottom_spans);
+            (None, list_block)
+        };
+        let list = picker
+            .block(list_block)
+            .render(frame, list_render_area, &self.theme);
+        self.overlay_layout.active = OverlayMouseLayout::BrowseProjects {
+            input,
+            list: list.list,
+            items: list.items,
+            offset: list.offset,
+            chooser: chooser_layout,
+        };
+    }
+
+    /// The standalone picker's project chooser, drawn at the top of `area` by
+    /// the project chooser's own renderer. Returns where it landed, for the
+    /// mouse, and the room left below it for the explorer. With no chooser to
+    /// draw, the explorer keeps all of `area`.
+    fn render_standalone_chooser(
+        &self,
+        frame: &mut Frame<'_>,
+        chooser: Option<&super::StandaloneProjectChooser>,
+        area: Rect,
+    ) -> (Option<super::ChooserMouseLayout>, Rect) {
+        let Some(chooser) = chooser else {
+            return (None, area);
+        };
+        // Sized to every project, not the filtered few, so a query never
+        // moves the explorer; capped so the explorer keeps half the modal.
+        let rows = u16::try_from(chooser.entries.len()).unwrap_or(u16::MAX);
+        let height = rows
+            .saturating_add(STANDALONE_CHOOSER_CHROME_ROWS)
+            .min(area.height / 2);
+        let [top, rest] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(height), Constraint::Min(5)])
+            .areas(area);
+        let pickable = chooser
+            .entries
+            .iter()
+            .filter(|entry| entry.blocked().is_none())
+            .count();
+        let visible = chooser.visible();
+        let hint = self.standalone_chooser_hint_line(
+            if chooser.list.searching {
+                ListSearch::Searching
+            } else {
+                ListSearch::Browsing
+            },
+            top.width.saturating_sub(2),
+        );
+        let (input, rendered) = self.draw_project_chooser(
+            frame,
+            top,
+            &ProjectChooserView {
+                title: "Start In A Project's Folder",
+                count_line: format!(
+                    " Pick a project to browse to its folder ({pickable} available)."
+                ),
+                caption: Some(chooser.caption),
+                entries: &chooser.entries,
+                list: &chooser.list,
+                visible: &visible,
+                bottom_line: hint,
+                focused: chooser.focused,
+            },
+        );
+        (
+            Some(super::ChooserMouseLayout {
+                input,
+                list: rendered.list,
+                items: rendered.items,
+                offset: rendered.offset,
+            }),
+            rest,
+        )
     }
 
     /// What the project browser's list holds: its rows, the sentence it shows
@@ -7157,17 +7272,61 @@ impl App {
         let add_key = self.bindings.label_for(Action::AddCurrentDir);
         let goto_key = self.bindings.label_for(Action::GoToPath);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        modal_hint_line(
-            &self.theme,
-            &[
-                Hint::key(search_key, "search"),
-                Hint::key(open_key, "open"),
-                Hint::key(add_key, "add current"),
-                Hint::key(goto_key, "go to"),
-                Hint::key(close_key, "cancel").pinned(),
-            ],
-            width,
+        let mut hints = vec![
+            Hint::key(search_key, "search"),
+            Hint::key(open_key, "open"),
+            Hint::key(add_key, "add current"),
+            Hint::key(goto_key, "go to"),
+        ];
+        // With the project chooser drawn above, the explorer names the way
+        // back up to it.
+        if self.standalone_chooser_is_drawn() {
+            hints.push(Hint::key(
+                self.bindings.label_for(Action::FocusNext),
+                "projects",
+            ));
+        }
+        hints.push(Hint::key(close_key, "cancel").pinned());
+        modal_hint_line(&self.theme, &hints, width)
+    }
+
+    /// The border of the half of the standalone picker that does not have the
+    /// keys.
+    fn resting_border_style(&self) -> Style {
+        Style::default().fg(self.theme.border_normal)
+    }
+
+    /// Whether the standalone picker's project chooser is on screen.
+    fn standalone_chooser_is_drawn(&self) -> bool {
+        matches!(
+            &self.prompt,
+            PromptState::BrowseProjects {
+                project_chooser,
+                editing_path: false,
+                ..
+            } if project_chooser.is_shown()
         )
+    }
+
+    /// The footer of the standalone picker's project chooser: the project
+    /// chooser's own keys, plus the way down to the folders. Every key is
+    /// resolved through the bindings.
+    fn standalone_chooser_hint_line(&self, search: ListSearch, width: u16) -> Line<'static> {
+        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "browse there");
+        let close_key = self.bindings.label_for(Action::CloseOverlay);
+        let hints = if search == ListSearch::Searching {
+            vec![confirm, Hint::key(close_key, "clear").pinned()]
+        } else {
+            vec![
+                Hint::key(self.bindings.label_for(Action::MoveDown), "down"),
+                Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
+                Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
+                confirm,
+                Hint::key(self.bindings.label_for(Action::FocusNext), "folders"),
+                Hint::key(close_key, "cancel").pinned(),
+            ]
+        };
+        modal_hint_line(&self.theme, &hints, width)
     }
 
     fn browse_projects_title(purpose: BrowsePurpose, current_dir: &Path) -> Prose {
@@ -8430,21 +8589,70 @@ impl App {
             area.width.saturating_sub(2),
         );
 
+        let (filter_input_rect, rendered) = self.draw_project_chooser(
+            frame,
+            area,
+            &ProjectChooserView {
+                title: intent.title(),
+                count_line: format!(" Pick a project to continue ({} available).", entries.len()),
+                caption: None,
+                entries,
+                list,
+                visible: &visible,
+                bottom_line,
+                focused: true,
+            },
+        );
+        self.overlay_layout.active = OverlayMouseLayout::PickProject {
+            input: filter_input_rect,
+            list: rendered.list,
+            items: rendered.items,
+            offset: rendered.offset,
+        };
+    }
+
+    /// The project chooser, drawn into `area`: its header (the count line, or
+    /// the `/`-search field while a query is up, over an optional caption, with
+    /// the hint line on its border) and its rows. Shared by the project chooser
+    /// modal and the project half of the standalone picker, so the two cannot
+    /// drift. Returns the search field's rect, when it is the thing drawn, and
+    /// where the rows landed, for the caller to publish to the mouse.
+    ///
+    /// An unfocused chooser rests: a quiet border, no caret and no highlighted
+    /// row.
+    fn draw_project_chooser(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        view: &ProjectChooserView<'_>,
+    ) -> (Option<Rect>, PickerListLayout) {
+        let list = view.list;
+        let header_rows = if view.caption.is_some() { 2 } else { 1 };
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(4)])
+            .constraints([Constraint::Length(header_rows + 2), Constraint::Min(2)])
             .areas(area);
 
         // Header row: the `/`-search input while searching (or once a
         // query has been typed), else a plain count line.
-        let details_block = self
-            .themed_overlay_block(intent.title())
-            .title_bottom(bottom_line);
+        let details_block = self.themed_overlay_block(view.title);
+        // With the keys, the header keeps the border the shared modal chrome
+        // gives it, refusal blink included.
+        let details_block = if view.focused {
+            details_block
+        } else {
+            details_block.border_style(self.resting_border_style())
+        }
+        .title_bottom(view.bottom_line.clone());
+        let details_inner = details_block.inner(details_area);
+        details_block.render(details_area, frame.buffer_mut());
+        let first_row = Rect {
+            height: details_inner.height.min(1),
+            ..details_inner
+        };
         // A field the user cannot click into is a gap: the filter rect
         // is published whenever the filter is the thing being drawn.
-        let filter_input_rect = list
-            .is_filtering()
-            .then(|| details_block.inner(details_area));
+        let filter_input_rect = list.is_filtering().then_some(first_row);
         if list.is_filtering() {
             Paragraph::new(render_single_line_field(
                 "/ ",
@@ -8452,42 +8660,56 @@ impl App {
                 list.filter.cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                FocusState::Focused,
-                filter_input_rect.map_or(0, |rect| rect.width),
+                if view.focused && list.searching {
+                    FocusState::Focused
+                } else {
+                    FocusState::Unfocused
+                },
+                first_row.width,
             ))
-            .block(details_block)
-            .render(details_area, frame.buffer_mut());
+            .render(first_row, frame.buffer_mut());
         } else {
-            Paragraph::new(vec![Line::from(vec![Span::styled(
-                format!(" Pick a project to continue ({} available).", entries.len()),
+            Paragraph::new(Line::from(Span::styled(
+                view.count_line.clone(),
                 Style::default().fg(self.theme.hint_desc_fg),
-            )])])
-            .block(details_block)
-            .render(details_area, frame.buffer_mut());
+            )))
+            .render(first_row, frame.buffer_mut());
+        }
+        if let Some(caption) = view.caption {
+            let caption_row = Rect {
+                y: details_inner.y.saturating_add(1),
+                height: details_inner.height.saturating_sub(1).min(1),
+                ..details_inner
+            };
+            let room = usize::from(caption_row.width).saturating_sub(1);
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}", ellipsize_end(caption, room)),
+                Style::default().fg(self.theme.hint_dim_desc_fg),
+            )))
+            .render(caption_row, frame.buffer_mut());
         }
 
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-            .border_style(Style::default().fg(self.theme.overlay_border))
+            .border_style(if view.focused {
+                Style::default().fg(self.theme.overlay_border)
+            } else {
+                self.resting_border_style()
+            })
             .style(Style::default().bg(self.theme.overlay_bg));
         let list_inner = list_block.inner(list_area);
 
-        let items = self.project_chooser_items(entries, &visible, list_inner.width);
+        let items = self.project_chooser_items(view.entries, view.visible, list_inner.width);
 
-        let empty = if entries.is_empty() {
+        let empty = if view.entries.is_empty() {
             "No projects yet."
         } else {
             "No matching projects."
         };
-        let rendered = PickerList::new(items, Some(list.selected), empty)
+        let rendered = PickerList::new(items, view.focused.then_some(list.selected), empty)
             .block(list_block)
             .render(frame, list_area, &self.theme);
-        self.overlay_layout.active = OverlayMouseLayout::PickProject {
-            input: filter_input_rect,
-            list: rendered.list,
-            items: rendered.items,
-            offset: rendered.offset,
-        };
+        (filter_input_rect, rendered)
     }
 
     /// The project chooser's rows for the `visible` entries, laid out in columns
@@ -8545,7 +8767,18 @@ impl App {
         if name_col + base_col > room {
             base_col = room.saturating_sub(name_col).max(8);
         }
+        // A folder shortcut that cannot be picked says why across the agents
+        // and base columns, so the base column widens to the longest reason
+        // and every path still starts in one column.
+        base_col =
+            base_col.max(widest_blocked_reason(entries, visible).saturating_sub(count_col + 2));
         let path_col = usize::from(width).saturating_sub(gutters + name_col + base_col);
+        // A folder shortcut shows core's home-collapsed label, the same text
+        // the browser shows; every other row shows its path as it always has.
+        let display_path = |entry: &ProjectChooserEntry| match &entry.shortcut {
+            Some(shortcut) => shortcut.folder_label.clone(),
+            None => display_path(entry),
+        };
 
         visible
             .iter()
@@ -8566,6 +8799,16 @@ impl App {
                     ellipsize_start(&display_path(entry), path_col)
                 };
                 let base = ellipsize_middle(&base_label(entry), base_col);
+                // A row that cannot be picked is dimmed whole, and its reason
+                // stands where the agents and base columns would.
+                if let Some(reason) = entry.blocked() {
+                    return self.blocked_chooser_row(
+                        warn,
+                        &pad_to_width(&name, name_col),
+                        &pad_to_width(reason, count_col + 2 + base_col),
+                        path,
+                    );
+                }
                 ListItem::new(Line::from(vec![
                     Span::raw(" "),
                     warn,
@@ -8591,6 +8834,29 @@ impl App {
                 ]))
             })
             .collect::<Vec<_>>()
+    }
+
+    /// A project chooser row that cannot be picked: dimmed whole, its reason
+    /// in italics where the agents and base columns would be. `name` and
+    /// `reason` arrive padded to their columns.
+    fn blocked_chooser_row(
+        &self,
+        warn: Span<'static>,
+        name: &str,
+        reason: &str,
+        path: String,
+    ) -> ListItem<'static> {
+        let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
+        ListItem::new(Line::from(vec![
+            Span::raw(" "),
+            warn,
+            Span::raw(" "),
+            Span::styled(name.to_string(), dim),
+            Span::raw("  "),
+            Span::styled(reason.to_string(), dim.add_modifier(Modifier::ITALIC)),
+            Span::raw("  "),
+            Span::styled(path, dim),
+        ]))
     }
 
     /// `manage-projects`' second step: the project (or orphaned group) named in
@@ -26440,6 +26706,7 @@ mod tests {
             path_input: crate::app::text_input::TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).expect("terminal");
         terminal

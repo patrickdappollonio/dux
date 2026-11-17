@@ -2395,6 +2395,103 @@ pub(crate) struct ProjectChooserEntry {
     /// a project: `name` is the short id both surfaces show for one, and the
     /// only thing it offers is Remove project….
     pub(crate) orphaned: bool,
+    /// Set for a row of the standalone picker's project chooser, where the row
+    /// is a folder shortcut; `None` in every other chooser.
+    pub(crate) shortcut: Option<ChooserShortcut>,
+}
+
+/// What a project chooser row carries when it is one of the standalone
+/// picker's folder shortcuts. Both values are core's
+/// (`dux_core::standalone_shortcuts`), the same ones the browser is sent.
+#[derive(Clone, Debug)]
+pub(crate) struct ChooserShortcut {
+    /// The folder as shown, home directory collapsed.
+    pub(crate) folder_label: String,
+    /// Why the row cannot be picked, `None` when it can.
+    pub(crate) blocked: Option<&'static str>,
+}
+
+impl ProjectChooserEntry {
+    /// Why this row cannot be picked, for a folder shortcut that cannot.
+    pub(crate) fn blocked(&self) -> Option<&'static str> {
+        self.shortcut.as_ref().and_then(|shortcut| shortcut.blocked)
+    }
+}
+
+/// The project chooser at the top of the standalone picker: the user's
+/// projects as folder shortcuts, with the project chooser's own search and
+/// movement, over the folder explorer.
+///
+/// Empty (and so not drawn) in the add-project browser, when there are no
+/// projects, and until core's rows arrive from the worker that builds them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StandaloneProjectChooser {
+    /// One row per project, in core's order.
+    pub(crate) entries: Vec<ProjectChooserEntry>,
+    /// Core's sentence about what a shortcut does and does not bring along.
+    pub(crate) caption: &'static str,
+    pub(crate) list: SearchableList,
+    /// True while the chooser, not the folder explorer below it, has focus.
+    pub(crate) focused: bool,
+}
+
+impl StandaloneProjectChooser {
+    /// Whether there is a chooser to draw and to give focus to.
+    pub(crate) fn is_shown(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    /// The rows the query leaves, as indices into `entries`.
+    pub(crate) fn visible(&self) -> Vec<usize> {
+        self.list
+            .visible_indices(&self.entries, pick_project_matches)
+    }
+
+    /// The row under the cursor.
+    pub(crate) fn highlighted(&self) -> Option<&ProjectChooserEntry> {
+        self.visible()
+            .get(self.list.selected)
+            .and_then(|&index| self.entries.get(index))
+    }
+
+    /// Move the cursor to the next visible row that can be picked, down or up,
+    /// skipping the greyed-out ones. False when there is none that way, which
+    /// going down is the caller's cue to hand focus to the explorer.
+    pub(crate) fn step(&mut self, direction: ScrollDirection) -> bool {
+        let visible = self.visible();
+        let pickable = |row: usize| {
+            visible
+                .get(row)
+                .and_then(|&index| self.entries.get(index))
+                .is_some_and(|entry| entry.blocked().is_none())
+        };
+        let current = self.list.selected;
+        let next = match direction {
+            ScrollDirection::Down => (current + 1..visible.len()).find(|&row| pickable(row)),
+            ScrollDirection::Up => (0..current).rev().find(|&row| pickable(row)),
+        };
+        match next {
+            Some(row) => {
+                self.list.selected = row;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put the cursor on the first visible row that can be picked, or on the
+    /// first row when none can.
+    pub(crate) fn reset_cursor(&mut self) {
+        let visible = self.visible();
+        self.list.selected = visible
+            .iter()
+            .position(|&index| {
+                self.entries
+                    .get(index)
+                    .is_some_and(|entry| entry.blocked().is_none())
+            })
+            .unwrap_or(0);
+    }
 }
 
 /// One action a project's action list offers, and what a pick from the project
@@ -2760,8 +2857,11 @@ impl SearchableList {
 
 /// The project chooser's match predicate: case-insensitive substring over the
 /// project name or its path. `needle` is expected pre-lowercased.
+///
+/// The rule itself is core's, shared with the standalone picker's project
+/// shortcuts on both surfaces.
 pub(crate) fn pick_project_matches(entry: &ProjectChooserEntry, needle: &str) -> bool {
-    entry.name.to_lowercase().contains(needle) || entry.path.to_lowercase().contains(needle)
+    dux_core::standalone_shortcuts::project_matches_query(&entry.name, &entry.path, needle)
 }
 
 /// The kill-running dialog's match predicate: case-insensitive substring over a
@@ -3445,6 +3545,9 @@ pub(crate) enum PromptState {
         path_input: TextInput,
         tab_completions: Vec<String>,
         tab_index: usize,
+        /// The user's projects as folder shortcuts, above the explorer. Only
+        /// the standalone picker fills it; see [`StandaloneProjectChooser`].
+        project_chooser: StandaloneProjectChooser,
     },
     AddProjectFailed {
         message: String,
@@ -4539,6 +4642,16 @@ impl MouseLayoutState {
     }
 }
 
+/// Where the standalone picker's project chooser was drawn: its search field
+/// when that is up, and its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ChooserMouseLayout {
+    pub(crate) input: Option<Rect>,
+    pub(crate) list: Rect,
+    pub(crate) items: usize,
+    pub(crate) offset: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OverlayMouseLayoutState {
     pub(crate) active: OverlayMouseLayout,
@@ -4617,6 +4730,8 @@ pub(crate) enum OverlayMouseLayout {
         list: Rect,
         items: usize,
         offset: usize,
+        /// The standalone picker's project chooser, when it is drawn.
+        chooser: Option<ChooserMouseLayout>,
     },
     AddProjectFailed {
         ok_button: Rect,
@@ -5250,6 +5365,8 @@ mod picker_lists;
 mod render;
 mod reorder;
 mod sessions;
+#[cfg(test)]
+mod standalone_chooser;
 mod tab_reorder;
 #[cfg(test)]
 mod test_support;
@@ -10702,6 +10819,7 @@ mod tests {
             path_missing: false,
             base_branch: None,
             orphaned: false,
+            shortcut: None,
         };
         let entries = vec![
             entry("a", "alpha", "/home/me/alpha"),

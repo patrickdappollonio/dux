@@ -460,6 +460,7 @@ mod tests {
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         let drawn = frames_per_simulated_second(&mut app, &mut terminal);

@@ -598,6 +598,7 @@ mod tests {
                     path_input: TextInput::with_text("half-typed-path".to_string()),
                     tab_completions: Vec::new(),
                     tab_index: 0,
+                    project_chooser: crate::app::StandaloneProjectChooser::default(),
                 },
             ),
             (

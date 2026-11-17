@@ -1368,6 +1368,7 @@ fn the_browse_dialog_chips_the_folder_in_its_title() {
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         },
     );
     assert_chipped_on_row(&app, &buf, "Add Project", "/srv/browse-dir");

@@ -283,6 +283,7 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
                             path_input: path_input.clone(),
                             tab_completions: tab_completions.clone(),
                             tab_index,
+                            project_chooser: crate::app::StandaloneProjectChooser::default(),
                         },
                     ));
                 }

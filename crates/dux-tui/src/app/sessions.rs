@@ -192,8 +192,12 @@ impl App {
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         self.engine.spawn_browser_entries(&start_dir);
+        if purpose == BrowsePurpose::StandaloneAgent {
+            self.load_standalone_project_shortcuts();
+        }
         {
             let open = self.bindings.label_for(Action::OpenEntry);
             let add = self.bindings.label_for(Action::AddCurrentDir);
@@ -207,6 +211,94 @@ impl App {
                 "Folder browser: {open} opens folders, {add} {what}, {search} to search, {goto} to go to a path.",
             ));
         }
+    }
+
+    /// Ask core for the standalone picker's project shortcuts. The rows read
+    /// the filesystem (is each folder there, does an agent already work in
+    /// it), so they are built on a worker from an instant snapshot; the
+    /// chooser appears above the explorer when they land. With no projects
+    /// there is nothing to ask for and no chooser.
+    fn load_standalone_project_shortcuts(&mut self) {
+        let inputs = self.engine.standalone_shortcut_inputs();
+        if inputs.projects.is_empty() {
+            return;
+        }
+        let instance = self.browser_add.instance;
+        self.spawn_quiet_ui_job(
+            move || dux_core::standalone_shortcuts::project_shortcuts(&inputs),
+            move |app, list| {
+                // An answer for a browser the user has since closed or
+                // replaced is not this one's.
+                if app.browser_add.instance != instance {
+                    return;
+                }
+                if let Some(list) = list {
+                    app.show_standalone_project_shortcuts(&list);
+                }
+            },
+        );
+    }
+
+    /// Put core's shortcut rows into the open standalone picker as its project
+    /// chooser. The chooser takes focus, on its first row that can be picked,
+    /// unless the user has already started working in the explorer.
+    pub(crate) fn show_standalone_project_shortcuts(
+        &mut self,
+        list: &dux_core::standalone_shortcuts::ProjectShortcutList,
+    ) {
+        let entries = self.standalone_chooser_entries(list);
+        let PromptState::BrowseProjects {
+            purpose: BrowsePurpose::StandaloneAgent,
+            project_chooser,
+            selected,
+            searching,
+            editing_path,
+            filter,
+            ..
+        } = &mut self.prompt
+        else {
+            return;
+        };
+        let untouched = *selected == 0 && !*searching && !*editing_path && filter.is_empty();
+        *project_chooser = super::StandaloneProjectChooser {
+            focused: untouched && !entries.is_empty(),
+            entries,
+            caption: list.caption,
+            list: super::SearchableList::new(),
+        };
+        project_chooser.reset_cursor();
+    }
+
+    /// Core's shortcut rows as project chooser rows. Which projects, their
+    /// order, the folder label and what blocks a row are core's; the agent
+    /// count and base branch are the chooser's own columns, read from the
+    /// engine as every other chooser reads them.
+    fn standalone_chooser_entries(
+        &self,
+        list: &dux_core::standalone_shortcuts::ProjectShortcutList,
+    ) -> Vec<ProjectChooserEntry> {
+        list.rows
+            .iter()
+            .map(|row| ProjectChooserEntry {
+                id: row.project_id.clone(),
+                name: row.name.clone(),
+                path: row.path.clone(),
+                agent_count: self.project_agent_count(&row.project_id),
+                path_missing: row.state
+                    == dux_core::standalone_shortcuts::ShortcutState::FolderMissing,
+                base_branch: self
+                    .engine
+                    .projects
+                    .iter()
+                    .find(|project| project.id == row.project_id)
+                    .and_then(|project| project.leading_branch.clone()),
+                orphaned: false,
+                shortcut: Some(super::ChooserShortcut {
+                    folder_label: row.folder_label.clone(),
+                    blocked: row.reason,
+                }),
+            })
+            .collect()
     }
 
     /// Add the repository at `raw_path` as a project. What git says about it
@@ -442,6 +534,7 @@ impl App {
                 path_missing: project.path_missing,
                 base_branch: project.leading_branch.clone(),
                 orphaned: false,
+                shortcut: None,
             })
             .collect()
     }
@@ -467,6 +560,7 @@ impl App {
             path_missing: false,
             base_branch: None,
             orphaned: true,
+            shortcut: None,
         })
         .collect()
     }
@@ -8039,6 +8133,7 @@ mod tests {
                 path_missing: false,
                 base_branch: None,
                 orphaned: false,
+                shortcut: None,
             }],
             list: SearchableList::new(),
         };

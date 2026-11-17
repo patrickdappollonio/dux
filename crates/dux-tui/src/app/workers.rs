@@ -3346,6 +3346,7 @@ mod tests {
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.apply_reaction(EventReaction::BrowserEntriesArrived {
@@ -3384,6 +3385,7 @@ mod tests {
             path_input: TextInput::new(),
             tab_completions: Vec::new(),
             tab_index: 0,
+            project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
 
         app.apply_reaction(EventReaction::BrowserEntriesArrived {
