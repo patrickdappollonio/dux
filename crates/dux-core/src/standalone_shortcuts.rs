@@ -10,10 +10,15 @@
 //! a search query matches a row. The browser receives the rows ready-made and
 //! computes none of it.
 //!
-//! [`project_shortcuts`] reads the filesystem (it canonicalizes paths and asks
-//! whether each folder is there), so it runs on a worker, never on the engine
-//! thread or a UI thread. [`ShortcutInputs`] is the instant snapshot handed to
-//! that worker.
+//! The rows come in two steps, because only one of them is slow.
+//! [`unchecked_shortcuts`] is instant: which projects, in what order, under
+//! what name and folder label. It touches no file, so a surface that draws its
+//! own first frame (the terminal UI) can show the list at once. What each row's
+//! folder turns out to be takes the filesystem (is the folder there, does an
+//! agent already work in it, by canonical path), so [`project_shortcuts`]
+//! answers that on a worker, never on the engine thread or a UI thread, and
+//! returns the same rows with their states. [`ShortcutInputs`] is the instant
+//! snapshot both steps read. The browser is only ever sent the checked rows.
 
 use std::path::Path;
 
@@ -66,6 +71,73 @@ impl ShortcutState {
             OccupantKind::Managed => Self::AlreadyHasAgent,
         }
     }
+}
+
+/// What is known of a shortcut row's folder at a given moment, on a surface
+/// that shows the rows before the worker has answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutCheck {
+    /// The worker has not answered yet. The row is drawn as an ordinary row,
+    /// not greyed out, since nothing is known against it; it cannot be picked
+    /// until the answer is in.
+    Pending,
+    /// The worker stopped before answering, so the folder was never checked.
+    Failed,
+    /// The worker's answer.
+    Checked(ShortcutState),
+}
+
+impl ShortcutCheck {
+    /// Whether the row can be picked now: only once it is checked and found
+    /// available.
+    pub fn is_pickable(self) -> bool {
+        match self {
+            Self::Pending | Self::Failed => false,
+            Self::Checked(state) => state.is_pickable(),
+        }
+    }
+
+    /// The words a greyed-out row shows; `None` for a row that is not greyed
+    /// out, which a row still being checked is not.
+    pub fn greyed_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Pending => None,
+            Self::Failed => Some("could not be checked"),
+            Self::Checked(state) => state.reason(),
+        }
+    }
+
+    /// Why a pick of this row does nothing right now; `None` when it can be
+    /// picked.
+    pub fn refusal(self) -> Option<&'static str> {
+        match self {
+            Self::Pending => Some("its folder is still being checked, try again in a moment"),
+            Self::Failed | Self::Checked(_) => self.greyed_reason(),
+        }
+    }
+}
+
+/// One project as a shortcut row before its folder has been checked: who it
+/// is, what it is called and how its folder is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UncheckedShortcut {
+    /// The project's id.
+    pub project_id: String,
+    /// The project's name.
+    pub name: String,
+    /// The folder as shown: the path with the home directory collapsed.
+    pub folder_label: String,
+    /// The folder's absolute path on the machine dux runs on.
+    pub path: String,
+}
+
+/// The rows before their folders are checked, and the caption.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UncheckedShortcutList {
+    /// The sentence under the list.
+    pub caption: &'static str,
+    /// One row per project, in the engine's project order.
+    pub rows: Vec<UncheckedShortcut>,
 }
 
 /// One project offered as a folder shortcut.
@@ -189,8 +261,35 @@ pub fn directory_occupant<'a>(
     })
 }
 
-/// The shortcut rows for `inputs`, with the home directory collapsed in each
-/// folder label. Reads the filesystem: call it on a worker.
+/// The rows for `inputs` before any folder is checked: order, names and
+/// folder labels. Instant; reads no file.
+pub fn unchecked_shortcuts(inputs: &ShortcutInputs) -> UncheckedShortcutList {
+    unchecked_shortcuts_with_home(inputs, home::home_dir().as_deref())
+}
+
+/// [`unchecked_shortcuts`] against a given home directory.
+pub(crate) fn unchecked_shortcuts_with_home(
+    inputs: &ShortcutInputs,
+    home: Option<&Path>,
+) -> UncheckedShortcutList {
+    UncheckedShortcutList {
+        caption: CAPTION,
+        rows: inputs
+            .projects
+            .iter()
+            .map(|project| UncheckedShortcut {
+                project_id: project.id.clone(),
+                name: project.name.clone(),
+                folder_label: crate::home_path::shorten_home_from(Path::new(&project.path), home),
+                path: project.path.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The shortcut rows for `inputs` with every folder checked: the rows of
+/// [`unchecked_shortcuts`], each with its state. Reads the filesystem: call it
+/// on a worker.
 pub fn project_shortcuts(inputs: &ShortcutInputs) -> ProjectShortcutList {
     project_shortcuts_with_home(inputs, home::home_dir().as_deref())
 }
@@ -200,11 +299,12 @@ pub(crate) fn project_shortcuts_with_home(
     inputs: &ShortcutInputs,
     home: Option<&Path>,
 ) -> ProjectShortcutList {
-    let rows = inputs
-        .projects
-        .iter()
-        .map(|project| {
-            let folder = Path::new(&project.path);
+    let unchecked = unchecked_shortcuts_with_home(inputs, home);
+    let rows = unchecked
+        .rows
+        .into_iter()
+        .map(|row| {
+            let folder = Path::new(&row.path);
             // Missing is asked first: a folder that is gone cannot be picked
             // whatever is recorded against its path.
             let state = if folder.is_dir() {
@@ -223,29 +323,34 @@ pub(crate) fn project_shortcuts_with_home(
                 ShortcutState::FolderMissing
             };
             ProjectShortcut {
-                project_id: project.id.clone(),
-                name: project.name.clone(),
-                folder_label: crate::home_path::shorten_home_from(folder, home),
-                path: project.path.clone(),
+                project_id: row.project_id,
+                name: row.name,
+                folder_label: row.folder_label,
+                path: row.path,
                 state,
                 reason: state.reason(),
             }
         })
         .collect();
     ProjectShortcutList {
-        caption: CAPTION,
+        caption: unchecked.caption,
         rows,
     }
 }
 
 /// How a search query matches a project row: a case-insensitive substring of
-/// the project's name or of its path. `needle` is expected trimmed and
-/// lowercased; an empty one matches everything.
+/// the project's name or of its folder AS THE ROW SHOWS IT. `needle` is
+/// expected trimmed and lowercased; an empty one matches everything.
+///
+/// The folder is the text on the row, never a path behind it: a query for
+/// what the user can read finds the row, and a part of the path the row has
+/// collapsed away (the home directory behind a `~`) does not match every row
+/// at once. Each caller passes what its own rows print.
 ///
 /// The terminal UI's project chooser and its standalone picker's shortcut list
 /// both match through this; the browser's list has no search.
-pub fn project_matches_query(name: &str, path: &str, needle: &str) -> bool {
-    name.to_lowercase().contains(needle) || path.to_lowercase().contains(needle)
+pub fn project_matches_query(name: &str, folder_as_shown: &str, needle: &str) -> bool {
+    name.to_lowercase().contains(needle) || folder_as_shown.to_lowercase().contains(needle)
 }
 
 #[cfg(test)]
@@ -405,12 +510,102 @@ mod tests {
     }
 
     /// The rule the terminal UI's choosers filter by. The needle arrives
-    /// trimmed and lowercased, as `SearchableList` hands it over.
+    /// trimmed and lowercased, as `SearchableList` hands it over, and the
+    /// folder is the one the row shows.
     #[test]
-    fn a_query_matches_the_name_or_the_path_whatever_their_case() {
-        assert!(project_matches_query("Website", "/srv/site", "web"));
-        assert!(project_matches_query("api", "/home/ada/Work/api", "work"));
-        assert!(project_matches_query("notes", "/home/ada/notes", ""));
-        assert!(!project_matches_query("notes", "/home/ada/notes", "zzz"));
+    fn a_query_matches_the_name_or_the_folder_as_shown_whatever_their_case() {
+        assert!(project_matches_query("Website", "~/site", "web"));
+        assert!(project_matches_query("api", "~/Work/api", "work"));
+        assert!(project_matches_query("notes", "~/notes", "~/notes"));
+        assert!(project_matches_query("notes", "~/notes", ""));
+        assert!(!project_matches_query("notes", "~/notes", "zzz"));
+    }
+
+    /// The label a row shows is what a query is matched against, so the part
+    /// of the path collapsed behind the tilde finds nothing.
+    #[test]
+    fn a_query_for_the_collapsed_home_folder_matches_no_row() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let inputs = ShortcutInputs {
+            projects: vec![project("n", "notes", &home.path().join("notes"))],
+            agent_directories: Vec::new(),
+        };
+        let list = unchecked_shortcuts_with_home(&inputs, Some(home.path()));
+        let row = &list.rows[0];
+        assert_eq!(row.folder_label, "~/notes");
+        let home_name = home
+            .path()
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .to_lowercase();
+        assert!(row.path.to_lowercase().contains(&home_name));
+        assert!(!project_matches_query(
+            &row.name,
+            &row.folder_label,
+            &home_name
+        ));
+        assert!(project_matches_query(&row.name, &row.folder_label, "~/no"));
+    }
+
+    /// The instant rows are the checked rows minus their states: same
+    /// projects, order, names, labels and caption, and no file is read (the
+    /// folders here do not exist).
+    #[test]
+    fn the_unchecked_rows_are_the_checked_rows_without_their_states() {
+        let inputs = ShortcutInputs {
+            projects: vec![
+                project("z", "zebra", Path::new("/nowhere/zebra")),
+                project("a", "apple", Path::new("/nowhere/apple")),
+            ],
+            agent_directories: Vec::new(),
+        };
+        let unchecked = unchecked_shortcuts_with_home(&inputs, Some(Path::new("/nowhere")));
+        let checked = project_shortcuts_with_home(&inputs, Some(Path::new("/nowhere")));
+        assert_eq!(unchecked.caption, checked.caption);
+        let shown = |id: &str, name: &str, label: &str, path: &str| {
+            (
+                id.to_string(),
+                name.to_string(),
+                label.to_string(),
+                path.to_string(),
+            )
+        };
+        assert_eq!(
+            unchecked
+                .rows
+                .iter()
+                .map(|row| shown(&row.project_id, &row.name, &row.folder_label, &row.path))
+                .collect::<Vec<_>>(),
+            checked
+                .rows
+                .iter()
+                .map(|row| shown(&row.project_id, &row.name, &row.folder_label, &row.path))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(unchecked.rows[0].folder_label, "~/zebra");
+    }
+
+    /// A row still being checked is neither greyed out nor pickable; one that
+    /// could not be checked is greyed out and says so.
+    #[test]
+    fn a_row_is_pickable_only_once_checked_and_available() {
+        assert!(!ShortcutCheck::Pending.is_pickable());
+        assert_eq!(ShortcutCheck::Pending.greyed_reason(), None);
+        assert!(ShortcutCheck::Pending.refusal().is_some());
+        assert!(!ShortcutCheck::Failed.is_pickable());
+        assert_eq!(
+            ShortcutCheck::Failed.greyed_reason(),
+            Some("could not be checked")
+        );
+        assert!(ShortcutCheck::Checked(ShortcutState::Available).is_pickable());
+        assert_eq!(
+            ShortcutCheck::Checked(ShortcutState::Available).refusal(),
+            None
+        );
+        assert_eq!(
+            ShortcutCheck::Checked(ShortcutState::FolderMissing).refusal(),
+            Some("folder missing")
+        );
     }
 }
