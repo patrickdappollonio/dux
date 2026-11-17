@@ -71,7 +71,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
       .mkdir(browsePath, trimmed)
       .then((created) => {
         reset()
-        browseDir(created.path)
+        void browseDir(created.path)
       })
       .catch((e) => {
         setCreating(false)
@@ -479,7 +479,7 @@ function AddProjectBrowser() {
     // surfaces the same "add the repository instead" block as the TUI). This
     // also clears any pending selection from the directory we are leaving.
     setSelected(null)
-    browseDir(entry.path)
+    void browseDir(entry.path)
   }
 
   function handleAdd() {

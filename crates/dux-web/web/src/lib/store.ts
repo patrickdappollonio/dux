@@ -7153,25 +7153,45 @@ function browsingOpen(): boolean {
   return state.addProjectOpen || state.standaloneAgentPickerOpen
 }
 
-function runBrowse(path: string | null): void {
-  browseApi
+// Which browse is the latest one asked for. Both pickers share the one browse
+// slice, so they share the counter: an answer lands only while it is still the
+// latest, which is what keeps a slow earlier browse (the opening one, or one
+// from a picker since closed and reopened) from moving the explorer back after
+// a newer browse has answered, or from raising its failure over the new one.
+let browseSeq = 0
+
+/** Browse `path` into the shared slice. Resolves with the folder the explorer
+ * landed in when THIS browse is the one that landed, and with null when it
+ * failed, was replaced by a newer browse, or answered a picker since closed,
+ * so a caller can act on the folder only once the explorer is really there. */
+function runBrowse(path: string | null): Promise<string | null> {
+  const seq = ++browseSeq
+  const current = () => seq === browseSeq && browsingOpen()
+  return browseApi
     .browse(path)
     .then((res) => {
-      if (!browsingOpen()) return
+      if (!current()) return null
       setState({
         browsePath: res.path,
         browseEntries: res.entries,
         browseLoading: false,
       })
+      return res.path
     })
     .catch((e) => {
-      if (!browsingOpen()) return
+      if (!current()) return null
       setState({ browseEntries: [], browseLoading: false })
       notifyError(
         e instanceof Error ? e.message : "Could not browse the directory.",
       )
+      return null
     })
 }
+
+// Which request for the standalone picker's project shortcuts is the latest,
+// for the same reason: close and reopen must not let the first open's answer,
+// or its failure toast, land on the second.
+let shortcutsSeq = 0
 
 /** Open the standalone-agent folder picker at the server's configured default
  * start directory. Deliberately no inspection, unlike the add-project picker:
@@ -7184,18 +7204,21 @@ export function openStandaloneAgentPicker(): void {
     browseLoading: true,
     browseEntries: [],
   })
-  runBrowse(null)
+  void runBrowse(null)
   // The project shortcuts above the explorer, built whole by the server. Asked
   // on every open, so a project added or an agent created since is reflected.
-  // A late reply for a picker since closed is dropped.
+  // Only the latest request's answer lands, and only while the picker is open.
+  const seq = ++shortcutsSeq
+  const current = () =>
+    seq === shortcutsSeq && state.standaloneAgentPickerOpen
   browseApi
     .standaloneProjectShortcuts()
     .then((list) => {
-      if (!state.standaloneAgentPickerOpen) return
+      if (!current()) return
       setState({ standaloneProjectShortcuts: list })
     })
     .catch((e) => {
-      if (!state.standaloneAgentPickerOpen) return
+      if (!current()) return
       // The explorer still works without them, so the picker stays open and
       // says what is missing.
       notifyError(
@@ -7241,7 +7264,7 @@ export function openAddProject(): void {
   })
   // A null path tells the server to open at the configured default
   // (`defaults.start_directory`, resolved from the live config), not $HOME.
-  runBrowse(null)
+  void runBrowse(null)
 }
 
 // Open the same picker with the "init" intent (the "Initialize a
@@ -7254,7 +7277,7 @@ export function openAddProjectForInit(): void {
     browseLoading: true,
     browseEntries: [],
   })
-  runBrowse(null)
+  void runBrowse(null)
 }
 
 export function closeAddProject(): void {
@@ -7744,11 +7767,14 @@ function rememberPrClone(snapshot: PrCloneSnapshot): number {
   return id
 }
 
-export function browseDir(path: string | null): void {
+/** Send the open picker's explorer to `path`. The promise answers what
+ * `runBrowse` answers: the folder landed in, or null when this browse was not
+ * the one that landed. */
+export function browseDir(path: string | null): Promise<string | null> {
   // Navigating away abandons any pending/resolved branch inspection so a late
   // reply for the old selection can't resurface in the new directory.
   setState({ browseLoading: true, projectPathInspection: null })
-  runBrowse(path)
+  return runBrowse(path)
 }
 
 // Fire the branch pre-flight for a selected git repo, mirroring the TUI's

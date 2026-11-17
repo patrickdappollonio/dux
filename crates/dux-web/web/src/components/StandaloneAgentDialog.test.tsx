@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { ProjectShortcutListView } from "@/lib/types"
@@ -8,12 +14,17 @@ import type { ProjectShortcutListView } from "@/lib/types"
 // The store is mocked: `useDux` reads seeded state and the actions are spies,
 // so the test asserts what the dialog does with the rows the server sent.
 let mockState: DuxState
-const browseDir = vi.fn()
+// What the store's browse answers: the folder landed in, or null when the
+// browse failed or was replaced.
+let browseLands = true
+const browseDir = vi.fn((path: string) =>
+  Promise.resolve(browseLands ? path : null),
+)
 const createStandaloneAgent = vi.fn()
 const closeStandaloneAgentPicker = vi.fn()
 vi.mock("@/lib/store", () => ({
   useDux: () => mockState,
-  browseDir: (...a: unknown[]) => browseDir(...a),
+  browseDir: (path: string) => browseDir(path),
   createStandaloneAgent: (...a: unknown[]) => createStandaloneAgent(...a),
   closeStandaloneAgentPicker: () => closeStandaloneAgentPicker(),
 }))
@@ -58,7 +69,20 @@ const shortcutRows = () =>
   )
 
 afterEach(() => cleanup())
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  browseLands = true
+})
+
+const createButton = () =>
+  screen.getByRole<HTMLButtonElement>("button", { name: "Create agent" })
+
+// Click a shortcut and let the browse it started answer.
+async function pick(row: HTMLButtonElement) {
+  await act(async () => {
+    fireEvent.click(row)
+  })
+}
 
 describe("StandaloneAgentDialog project shortcuts", () => {
   it("renders the server's rows in the server's order and words", () => {
@@ -75,14 +99,34 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     expect(screen.getByText("Caption from the server.")).toBeTruthy()
   })
 
-  it("moves the explorer to a picked project's folder and targets it", () => {
+  it("moves the explorer to a picked project's folder and targets it", async () => {
     seed(SHORTCUTS)
     render(<StandaloneAgentDialog />)
-    fireEvent.click(shortcutRows()[0])
+    await pick(shortcutRows()[0])
     expect(browseDir).toHaveBeenCalledWith("/home/u/code/site")
+    expect(shortcutRows()[0].dataset.picked).toBe("")
     // The folder is now the target, exactly as the pinned row would make it.
-    fireEvent.click(screen.getByRole("button", { name: "Create agent" }))
+    fireEvent.click(createButton())
     expect(createStandaloneAgent).toHaveBeenCalledWith("/home/u/code/site", "")
+  })
+
+  it("targets nothing when the explorer never reached the project's folder", async () => {
+    seed(SHORTCUTS)
+    browseLands = false
+    render(<StandaloneAgentDialog />)
+    await pick(shortcutRows()[0])
+    expect(browseDir).toHaveBeenCalledWith("/home/u/code/site")
+    expect(createButton().disabled).toBe(true)
+    expect(shortcutRows()[0].dataset.picked).toBeUndefined()
+  })
+
+  it("keeps the footer outside the part that scrolls", () => {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    const body = document.querySelector("[data-standalone-picker-body]")!
+    expect(body.className).toContain("overflow-y-auto")
+    expect(body.contains(createButton())).toBe(false)
+    expect(body.contains(shortcutRows()[0])).toBe(true)
   })
 
   it("does not let a greyed-out row be picked", () => {
@@ -92,10 +136,7 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     expect(blocked.disabled).toBe(true)
     fireEvent.click(blocked)
     expect(browseDir).not.toHaveBeenCalled()
-    expect(
-      screen.getByRole<HTMLButtonElement>("button", { name: "Create agent" })
-        .disabled,
-    ).toBe(true)
+    expect(createButton().disabled).toBe(true)
   })
 
   it("draws no list when there are no projects", () => {
