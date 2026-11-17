@@ -984,6 +984,18 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// The cursor on a picker row that cannot be picked: a bar in the dimmed
+    /// description tone with the modal surface as its text, so the row reads
+    /// as the one under the cursor and as unavailable at once, and never as
+    /// [`Self::selection_style`]'s pickable selection. Built from the two
+    /// colors a greyed-out row is already drawn in, swapped, so it is as
+    /// legible in every theme as that row is.
+    pub(crate) fn unavailable_selection_style(&self) -> Style {
+        Style::default()
+            .fg(self.overlay_bg)
+            .bg(self.hint_dim_desc_fg)
+    }
+
     /// A faint, theme-derived background for the accent-bar selection: the
     /// theme's selection color blended a little over the app background, so it
     /// always tracks whatever accent the active theme uses (no hardcoded tint).
@@ -1235,6 +1247,40 @@ mod tests {
             assert_ne!(
                 theme.overlay_border_refused, theme.overlay_border,
                 "theme {} would render the refusal flash invisibly",
+                listing.id
+            );
+        }
+    }
+
+    /// The cursor on a picker row that cannot be picked has to read as a
+    /// cursor (it stands off the modal surface) and as not a pick (it is not
+    /// the selection bar), in every theme dux can load.
+    #[test]
+    fn the_unavailable_selection_is_its_own_look_in_every_loadable_theme() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let paths = DuxPaths {
+            config_path: root.join("config.toml"),
+            sessions_db_path: root.join("sessions.sqlite3"),
+            worktrees_root: root.join("worktrees"),
+            lock_path: root.join("dux.lock"),
+            socket_path: root.join("dux.sock"),
+            root,
+        };
+        for listing in discover_available(&paths) {
+            let theme = load(&listing.id, &paths)
+                .unwrap_or_else(|err| panic!("theme {} failed to load: {err}", listing.id));
+            let bar = theme.unavailable_selection_style().bg;
+            assert_ne!(
+                bar,
+                Some(theme.overlay_bg),
+                "theme {} would draw the unavailable cursor invisibly",
+                listing.id
+            );
+            assert_ne!(
+                bar,
+                theme.selection_style().bg,
+                "theme {} would draw an unavailable row as a pickable selection",
                 listing.id
             );
         }

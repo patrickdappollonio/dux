@@ -2140,6 +2140,7 @@ impl App {
                 project_chooser,
                 ..
             } => {
+                project_chooser.touched = true;
                 if *editing_path {
                     path_input.insert_str(text);
                     refresh_path_completions = true;
@@ -4831,6 +4832,7 @@ impl App {
         };
         let is_editing_path = *editing_path;
         let is_searching = *searching;
+        self.touch_folder_picker();
 
         if is_editing_path {
             self.handle_project_browser_path_editor_key(key);
@@ -8484,6 +8486,7 @@ impl App {
             return;
         };
         // A click into the explorer's field is where the keys go next.
+        self.touch_folder_picker();
         self.focus_standalone_picker(PickerHalf::Explorer);
         if let PromptState::BrowseProjects {
             filter,
@@ -8832,16 +8835,15 @@ impl App {
                     }
                 }
                 Some(Action::SearchToggle) if !searching => project_chooser.list.begin_search(),
-                // Past the last row that can be picked, the way down leads
-                // into the explorer. Not mid-search, where the keys stay with
-                // the query.
+                // Past the last row, the way down leads into the explorer.
+                // Not mid-search, where the keys stay with the query.
                 Some(Action::MoveDown) => {
-                    if !project_chooser.step(ScrollDirection::Down) && !searching {
+                    if !project_chooser.move_cursor(ScrollDirection::Down) && !searching {
                         project_chooser.focused = false;
                     }
                 }
                 Some(Action::MoveUp) => {
-                    project_chooser.step(ScrollDirection::Up);
+                    project_chooser.move_cursor(ScrollDirection::Up);
                 }
                 _ if searching => {
                     let before = project_chooser.list.filter.text.clone();
@@ -8873,7 +8875,8 @@ impl App {
         let Some(entry) = project_chooser.highlighted().cloned() else {
             return;
         };
-        if let Some(reason) = entry.blocked() {
+        if !entry.is_pickable() {
+            let reason = entry.blocked().unwrap_or("it is not available");
             self.set_warning(format!(
                 "Project \"{}\" cannot be picked here: {reason}. Pick another project, or \
                  browse to a folder below.",
@@ -8916,11 +8919,14 @@ impl App {
     /// A click on the project chooser's `index`th visible row gives the
     /// chooser the keys and selects the row; a double click picks it.
     fn click_standalone_chooser_item(&mut self, index: usize) {
-        let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
+        // Its own click target: the explorer below counts its clicks apart.
+        let double_click =
+            self.register_mouse_click(MouseClickTarget::StandaloneChooser, Some(index));
         if let PromptState::BrowseProjects {
             project_chooser, ..
         } = &mut self.prompt
         {
+            project_chooser.touched = true;
             project_chooser.focused = true;
             if index < project_chooser.visible().len() {
                 project_chooser.list.selected = index;
@@ -8954,7 +8960,74 @@ impl App {
                 cursor_from_single_line_click(&filter.text, filter.cursor, input_area, 2, column);
             project_chooser.list.searching = true;
             project_chooser.focused = true;
+            project_chooser.touched = true;
         }
+    }
+
+    /// Record that the user has started using the open folder picker, so a
+    /// project chooser whose rows land later does not take the keys.
+    fn touch_folder_picker(&mut self) {
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            project_chooser.touched = true;
+        }
+    }
+
+    /// The wheel over a project chooser's rows or the folder explorer's moves
+    /// that list's cursor, which is what scrolls a picker list. `None` when
+    /// the event is not a wheel notch over one of those lists.
+    fn handle_project_lists_wheel(&mut self, mouse: MouseEvent) -> Option<bool> {
+        let direction = match mouse.kind {
+            MouseEventKind::ScrollDown => ScrollDirection::Down,
+            MouseEventKind::ScrollUp => ScrollDirection::Up,
+            _ => return None,
+        };
+        let over = |list: Rect| contains_point(list, mouse.column, mouse.row);
+        let notch = wheel_lines::<usize>();
+        match (self.overlay_layout.active, &mut self.prompt) {
+            (
+                OverlayMouseLayout::PickProject {
+                    list: rows, items, ..
+                },
+                PromptState::PickProject { list, .. },
+            ) if over(rows) => {
+                for _ in 0..notch {
+                    match direction {
+                        ScrollDirection::Down => list.move_down(items),
+                        ScrollDirection::Up => list.move_up(),
+                    }
+                }
+            }
+            (
+                OverlayMouseLayout::BrowseProjects {
+                    list: explorer_rows,
+                    items,
+                    chooser,
+                    ..
+                },
+                PromptState::BrowseProjects {
+                    project_chooser,
+                    selected,
+                    ..
+                },
+            ) => {
+                if chooser.is_some_and(|chooser| over(chooser.list)) {
+                    project_chooser.scroll_cursor(direction, notch);
+                } else if over(explorer_rows) {
+                    *selected = match direction {
+                        ScrollDirection::Down => (*selected + notch).min(items.saturating_sub(1)),
+                        ScrollDirection::Up => selected.saturating_sub(notch),
+                    };
+                } else {
+                    return None;
+                }
+                project_chooser.touched = true;
+            }
+            _ => return None,
+        }
+        Some(false)
     }
 
     fn path_editor_completion_candidates(input: &str) -> Vec<String> {
@@ -10947,6 +11020,9 @@ impl App {
         if let Some(result) = self.handle_startup_command_logs_mouse(mouse) {
             return result;
         }
+        if let Some(result) = self.handle_project_lists_wheel(mouse) {
+            return result;
+        }
 
         if matches!(self.prompt, PromptState::None) {
             self.pressed_button = None;
@@ -10975,6 +11051,7 @@ impl App {
     fn click_browse_project_item(&mut self, index: usize) {
         let double_click = self.register_mouse_click(MouseClickTarget::CommandPalette, Some(index));
         // A click into the explorer is where the keys go next.
+        self.touch_folder_picker();
         self.focus_standalone_picker(PickerHalf::Explorer);
         self.set_browser_selection(index);
         if double_click {

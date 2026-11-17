@@ -195,9 +195,8 @@ impl App {
             project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         self.engine.spawn_browser_entries(&start_dir);
-        if purpose == BrowsePurpose::StandaloneAgent {
-            self.load_standalone_project_shortcuts();
-        }
+        let chooser_coming =
+            purpose == BrowsePurpose::StandaloneAgent && self.load_standalone_project_shortcuts();
         {
             let open = self.bindings.label_for(Action::OpenEntry);
             let add = self.bindings.label_for(Action::AddCurrentDir);
@@ -207,9 +206,22 @@ impl App {
                 BrowsePurpose::AddProject => "adds current dir",
                 BrowsePurpose::StandaloneAgent => "runs an agent in current dir",
             };
-            self.set_info(format!(
-                "Folder browser: {open} opens folders, {add} {what}, {search} to search, {goto} to go to a path.",
-            ));
+            if chooser_coming {
+                // The project chooser takes the keys as soon as its rows
+                // land, so the folder browser's keys are named as the folder
+                // browser's, behind the key that reaches it: whichever half
+                // has the keys, nothing here is promised that does not work.
+                let switch = self.bindings.label_for(Action::FocusNext);
+                self.set_info(format!(
+                    "Standalone agent: pick a project to browse to its folder, or press \
+                     {switch} for the folder browser, where {open} opens folders and {add} \
+                     {what}.",
+                ));
+            } else {
+                self.set_info(format!(
+                    "Folder browser: {open} opens folders, {add} {what}, {search} to search, {goto} to go to a path.",
+                ));
+            }
         }
     }
 
@@ -217,11 +229,16 @@ impl App {
     /// the filesystem (is each folder there, does an agent already work in
     /// it), so they are built on a worker from an instant snapshot; the
     /// chooser appears above the explorer when they land. With no projects
-    /// there is nothing to ask for and no chooser.
-    fn load_standalone_project_shortcuts(&mut self) {
+    /// there is nothing to ask for and no chooser. Returns whether a chooser
+    /// was asked for.
+    ///
+    /// A worker that stops before answering leaves the picker with its
+    /// explorer alone, and the status line says so: the projects the user
+    /// expects above it are missing, and browsing there by hand still works.
+    fn load_standalone_project_shortcuts(&mut self) -> bool {
         let inputs = self.engine.standalone_shortcut_inputs();
         if inputs.projects.is_empty() {
-            return;
+            return false;
         }
         let instance = self.browser_add.instance;
         self.spawn_quiet_ui_job(
@@ -232,16 +249,24 @@ impl App {
                 if app.browser_add.instance != instance {
                     return;
                 }
-                if let Some(list) = list {
-                    app.show_standalone_project_shortcuts(&list);
+                match list {
+                    Some(list) => app.show_standalone_project_shortcuts(&list),
+                    None => app.set_warning(
+                        "dux could not list your projects as folder shortcuts in this picker, \
+                         so only the folder browser is shown. Browse to the project's folder \
+                         by hand, or close the picker and open it again; dux.log has the \
+                         details.",
+                    ),
                 }
             },
         );
+        true
     }
 
     /// Put core's shortcut rows into the open standalone picker as its project
-    /// chooser. The chooser takes focus, on its first row that can be picked,
-    /// unless the user has already started working in the explorer.
+    /// chooser. The chooser takes the keys, on its first row that can be
+    /// picked, only from a user who has done nothing in the picker since it
+    /// opened; otherwise it appears without them, one focus key away.
     pub(crate) fn show_standalone_project_shortcuts(
         &mut self,
         list: &dux_core::standalone_shortcuts::ProjectShortcutList,
@@ -250,21 +275,18 @@ impl App {
         let PromptState::BrowseProjects {
             purpose: BrowsePurpose::StandaloneAgent,
             project_chooser,
-            selected,
-            searching,
-            editing_path,
-            filter,
             ..
         } = &mut self.prompt
         else {
             return;
         };
-        let untouched = *selected == 0 && !*searching && !*editing_path && filter.is_empty();
+        let touched = project_chooser.touched;
         *project_chooser = super::StandaloneProjectChooser {
-            focused: untouched && !entries.is_empty(),
+            focused: !touched && !entries.is_empty(),
             entries,
             caption: list.caption,
             list: super::SearchableList::new(),
+            touched,
         };
         project_chooser.reset_cursor();
     }
@@ -295,7 +317,7 @@ impl App {
                 orphaned: false,
                 shortcut: Some(super::ChooserShortcut {
                     folder_label: row.folder_label.clone(),
-                    blocked: row.reason,
+                    state: row.state,
                 }),
             })
             .collect()

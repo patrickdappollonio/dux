@@ -2407,14 +2407,25 @@ pub(crate) struct ProjectChooserEntry {
 pub(crate) struct ChooserShortcut {
     /// The folder as shown, home directory collapsed.
     pub(crate) folder_label: String,
-    /// Why the row cannot be picked, `None` when it can.
-    pub(crate) blocked: Option<&'static str>,
+    /// Whether the row can be picked, and core's words for why not.
+    pub(crate) state: dux_core::standalone_shortcuts::ShortcutState,
 }
 
 impl ProjectChooserEntry {
-    /// Why this row cannot be picked, for a folder shortcut that cannot.
+    /// Whether picking this row does anything. Every row can be picked except
+    /// a folder shortcut core says cannot.
+    pub(crate) fn is_pickable(&self) -> bool {
+        self.shortcut
+            .as_ref()
+            .is_none_or(|shortcut| shortcut.state.is_pickable())
+    }
+
+    /// Core's words for why this row cannot be picked, for a folder shortcut
+    /// that cannot.
     pub(crate) fn blocked(&self) -> Option<&'static str> {
-        self.shortcut.as_ref().and_then(|shortcut| shortcut.blocked)
+        self.shortcut
+            .as_ref()
+            .and_then(|shortcut| shortcut.state.reason())
     }
 }
 
@@ -2433,6 +2444,11 @@ pub(crate) struct StandaloneProjectChooser {
     pub(crate) list: SearchableList,
     /// True while the chooser, not the folder explorer below it, has focus.
     pub(crate) focused: bool,
+    /// Whether the user has pressed a key, clicked, pasted or turned the
+    /// wheel in this picker since it opened. Core's rows arrive from a worker
+    /// a moment later, and the chooser they fill takes the keys only from a
+    /// user who has not started using the picker.
+    pub(crate) touched: bool,
 }
 
 impl StandaloneProjectChooser {
@@ -2454,28 +2470,26 @@ impl StandaloneProjectChooser {
             .and_then(|&index| self.entries.get(index))
     }
 
-    /// Move the cursor to the next visible row that can be picked, down or up,
-    /// skipping the greyed-out ones. False when there is none that way, which
-    /// going down is the caller's cue to hand focus to the explorer.
-    pub(crate) fn step(&mut self, direction: ScrollDirection) -> bool {
-        let visible = self.visible();
-        let pickable = |row: usize| {
-            visible
-                .get(row)
-                .and_then(|&index| self.entries.get(index))
-                .is_some_and(|entry| entry.blocked().is_none())
-        };
-        let current = self.list.selected;
-        let next = match direction {
-            ScrollDirection::Down => (current + 1..visible.len()).find(|&row| pickable(row)),
-            ScrollDirection::Up => (0..current).rev().find(|&row| pickable(row)),
-        };
-        match next {
-            Some(row) => {
-                self.list.selected = row;
-                true
+    /// Move the cursor one visible row down or up. It visits every row, the
+    /// greyed-out ones included, so each can be scrolled into view and read.
+    /// False when there is no row that way, which going down is the caller's
+    /// cue to hand the keys to the explorer.
+    pub(crate) fn move_cursor(&mut self, direction: ScrollDirection) -> bool {
+        let before = self.list.selected;
+        match direction {
+            ScrollDirection::Down => self.list.move_down(self.visible().len()),
+            ScrollDirection::Up => self.list.move_up(),
+        }
+        self.list.selected != before
+    }
+
+    /// Move the cursor `rows` visible rows, stopping at either end: what a
+    /// wheel notch does.
+    pub(crate) fn scroll_cursor(&mut self, direction: ScrollDirection, rows: usize) {
+        for _ in 0..rows {
+            if !self.move_cursor(direction) {
+                break;
             }
-            None => false,
         }
     }
 
@@ -2488,7 +2502,7 @@ impl StandaloneProjectChooser {
             .position(|&index| {
                 self.entries
                     .get(index)
-                    .is_some_and(|entry| entry.blocked().is_none())
+                    .is_some_and(ProjectChooserEntry::is_pickable)
             })
             .unwrap_or(0);
     }
@@ -5035,6 +5049,10 @@ pub(crate) enum MouseClickTarget {
     UnstagedPane,
     StagedPane,
     CommandPalette,
+    /// A row of the standalone picker's project chooser. A target of its own,
+    /// because the chooser shares a modal with the folder explorer: a click on
+    /// row N of one and then row N of the other is two single clicks.
+    StandaloneChooser,
     StartupCommandInput,
     MacroTextInput,
 }

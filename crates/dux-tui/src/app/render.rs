@@ -19,7 +19,7 @@ use super::components::{
 use super::components::{
     HintTone, fitted_hint_spans, hint_line, hint_line_after, pane_hint_line, pane_hint_line_after,
 };
-use super::components::{PickerList, PickerListLayout, render_scroll_indicator};
+use super::components::{PickerList, PickerListLayout, SelectionLook, render_scroll_indicator};
 use super::confirm_dialog::{
     ConfirmButton, ConfirmDialog, clip_to, confirm_inner_width, stack_rows,
 };
@@ -2021,21 +2021,14 @@ enum HintRow {
     Hidden,
 }
 
-/// The rows the standalone picker's project chooser spends on chrome rather
-/// than projects: its header (count line and caption, inside two borders)
-/// and the list's bottom border.
-const STANDALONE_CHOOSER_CHROME_ROWS: u16 = 5;
-
-/// The display width of the longest reason a visible project chooser row
-/// gives for not being pickable, zero when every one can be picked.
-fn widest_blocked_reason(entries: &[ProjectChooserEntry], visible: &[usize]) -> usize {
-    visible
-        .iter()
-        .filter_map(|index| entries.get(*index))
-        .filter_map(ProjectChooserEntry::blocked)
-        .map(display_width)
-        .max()
-        .unwrap_or(0)
+/// Which rows a project chooser draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChooserRows {
+    /// The project chooser modal's: name, agent count, base branch, path.
+    Projects,
+    /// The standalone picker's: name and folder, or why the folder cannot be
+    /// picked.
+    FolderShortcuts,
 }
 
 /// What [`App::draw_project_chooser`] draws: one project chooser, whichever
@@ -2044,9 +2037,10 @@ struct ProjectChooserView<'a> {
     title: &'static str,
     /// The header line while no query is up.
     count_line: String,
-    /// A second header line under the first, for a chooser that has
-    /// something to say about what a pick does.
+    /// A sentence under the first header line, wrapped to the width, for a
+    /// chooser that has something to say about what a pick does.
     caption: Option<&'a str>,
+    rows: ChooserRows,
     entries: &'a [ProjectChooserEntry],
     list: &'a super::SearchableList,
     /// The rows the query leaves, as indices into `entries`.
@@ -7029,7 +7023,14 @@ impl App {
         let Some((items, empty, selected_index)) = self.browse_projects_list_content() else {
             return;
         };
-        let picker = PickerList::new(items, (!chooser_focused).then_some(selected_index), empty);
+        // Without the keys the explorer stays scrolled where it was and
+        // highlights nothing, and its field shows no caret.
+        let (look, field_focus) = if chooser_focused {
+            (SelectionLook::Resting, FocusState::Unfocused)
+        } else {
+            (SelectionLook::Pickable, FocusState::Focused)
+        };
+        let picker = PickerList::new(items, Some(selected_index), empty).selection_look(look);
         let has_filter = !filter.is_empty();
         let show_top_input = *searching || has_filter || *editing_path;
         let (top_areas, list_render_area) = if show_top_input {
@@ -7056,11 +7057,7 @@ impl App {
                 cursor,
                 self.theme.input_cursor_fg,
                 self.theme.input_cursor_bg,
-                if chooser_focused {
-                    FocusState::Unfocused
-                } else {
-                    FocusState::Focused
-                },
+                field_focus,
                 input_inner.width,
             ))
             .block(input_block)
@@ -7116,9 +7113,16 @@ impl App {
         };
         // Sized to every project, not the filtered few, so a query never
         // moves the explorer; capped so the explorer keeps half the modal.
+        // Around the rows: the header (two borders, the count line and the
+        // wrapped caption) and the list's bottom border.
         let rows = u16::try_from(chooser.entries.len()).unwrap_or(u16::MAX);
+        let caption_rows = usize_to_u16_wrapping(
+            self.chooser_caption_lines(chooser.caption, area.width.saturating_sub(2))
+                .len(),
+        );
         let height = rows
-            .saturating_add(STANDALONE_CHOOSER_CHROME_ROWS)
+            .saturating_add(4)
+            .saturating_add(caption_rows)
             .min(area.height / 2);
         let [top, rest] = Layout::default()
             .direction(Direction::Vertical)
@@ -7127,17 +7131,17 @@ impl App {
         let pickable = chooser
             .entries
             .iter()
-            .filter(|entry| entry.blocked().is_none())
+            .filter(|entry| entry.is_pickable())
             .count();
         let visible = chooser.visible();
-        let hint = self.standalone_chooser_hint_line(
-            if chooser.list.searching {
-                ListSearch::Searching
-            } else {
-                ListSearch::Browsing
-            },
-            top.width.saturating_sub(2),
-        );
+        let hint_width = top.width.saturating_sub(2);
+        let hint = if !chooser.focused {
+            self.reach_picker_half_hint_line("projects", hint_width)
+        } else if chooser.list.searching {
+            self.standalone_chooser_hint_line(ListSearch::Searching, hint_width)
+        } else {
+            self.standalone_chooser_hint_line(ListSearch::Browsing, hint_width)
+        };
         let (input, rendered) = self.draw_project_chooser(
             frame,
             top,
@@ -7147,6 +7151,7 @@ impl App {
                     " Pick a project to browse to its folder ({pickable} available)."
                 ),
                 caption: Some(chooser.caption),
+                rows: ChooserRows::FolderShortcuts,
                 entries: &chooser.entries,
                 list: &chooser.list,
                 visible: &visible,
@@ -7255,6 +7260,9 @@ impl App {
 
     /// The project browser's footer while its search or path field is up.
     fn browse_projects_field_footer(&self, mode: BrowseMode, width: u16) -> Line<'static> {
+        if self.standalone_chooser_has_the_keys() {
+            return self.reach_picker_half_hint_line("folders", width);
+        }
         let footer_keys = BrowseProjectsFooterKeys {
             close: self.bindings.label_for(Action::CloseOverlay),
             search: self.bindings.label_for(Action::SearchToggle),
@@ -7267,27 +7275,37 @@ impl App {
 
     /// The project browser's footer while it is plain browsing, no field up.
     fn browse_projects_browsing_footer(&self, width: u16) -> Line<'static> {
+        if self.standalone_chooser_has_the_keys() {
+            return self.reach_picker_half_hint_line("folders", width);
+        }
         let search_key = self.bindings.label_for(Action::SearchToggle);
         let open_key = self.bindings.label_for(Action::OpenEntry);
         let add_key = self.bindings.label_for(Action::AddCurrentDir);
         let goto_key = self.bindings.label_for(Action::GoToPath);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
-        let mut hints = vec![
-            Hint::key(search_key, "search"),
-            Hint::key(open_key, "open"),
-            Hint::key(add_key, "add current"),
-            Hint::key(goto_key, "go to"),
-        ];
-        // With the project chooser drawn above, the explorer names the way
-        // back up to it.
-        if self.standalone_chooser_is_drawn() {
-            hints.push(Hint::key(
-                self.bindings.label_for(Action::FocusNext),
-                "projects",
-            ));
-        }
-        hints.push(Hint::key(close_key, "cancel").pinned());
-        modal_hint_line(&self.theme, &hints, width)
+        modal_hint_line(
+            &self.theme,
+            &[
+                Hint::key(search_key, "search"),
+                Hint::key(open_key, "open"),
+                Hint::key(add_key, "add current"),
+                Hint::key(goto_key, "go to"),
+                Hint::key(close_key, "cancel").pinned(),
+            ],
+            width,
+        )
+    }
+
+    /// The footer of the half of the standalone picker that does NOT have the
+    /// keys: nothing but the key that reaches it, since none of its own keys
+    /// would do anything right now. One segment, pinned, so it survives any
+    /// width. `half` names what the key leads to.
+    fn reach_picker_half_hint_line(&self, half: &'static str, width: u16) -> Line<'static> {
+        modal_hint_line(
+            &self.theme,
+            &[Hint::key(self.bindings.label_for(Action::FocusNext), half).pinned()],
+            width,
+        )
     }
 
     /// The border of the half of the standalone picker that does not have the
@@ -7296,21 +7314,23 @@ impl App {
         Style::default().fg(self.theme.border_normal)
     }
 
-    /// Whether the standalone picker's project chooser is on screen.
-    fn standalone_chooser_is_drawn(&self) -> bool {
+    /// Whether the standalone picker's project chooser is on screen and has
+    /// the keys, which leaves the explorer below it without them.
+    fn standalone_chooser_has_the_keys(&self) -> bool {
         matches!(
             &self.prompt,
             PromptState::BrowseProjects {
                 project_chooser,
                 editing_path: false,
                 ..
-            } if project_chooser.is_shown()
+            } if project_chooser.is_shown() && project_chooser.focused
         )
     }
 
-    /// The footer of the standalone picker's project chooser: the project
-    /// chooser's own keys, plus the way down to the folders. Every key is
-    /// resolved through the bindings.
+    /// The footer of the standalone picker's project chooser while it has the
+    /// keys: the project chooser's own keys, every one resolved through the
+    /// bindings. The way down to the folders is named by the explorer's own
+    /// footer, which shows nothing else while it waits.
     fn standalone_chooser_hint_line(&self, search: ListSearch, width: u16) -> Line<'static> {
         let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "browse there");
         let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -7322,7 +7342,6 @@ impl App {
                 Hint::key(self.bindings.label_for(Action::MoveUp), "up"),
                 Hint::key(self.bindings.label_for(Action::SearchToggle), "search"),
                 confirm,
-                Hint::key(self.bindings.label_for(Action::FocusNext), "folders"),
                 Hint::key(close_key, "cancel").pinned(),
             ]
         };
@@ -8596,6 +8615,7 @@ impl App {
                 title: intent.title(),
                 count_line: format!(" Pick a project to continue ({} available).", entries.len()),
                 caption: None,
+                rows: ChooserRows::Projects,
                 entries,
                 list,
                 visible: &visible,
@@ -8627,7 +8647,12 @@ impl App {
         view: &ProjectChooserView<'_>,
     ) -> (Option<Rect>, PickerListLayout) {
         let list = view.list;
-        let header_rows = if view.caption.is_some() { 2 } else { 1 };
+        // The header is the count line (or the search field) over the
+        // caption, which wraps to the width rather than being cut.
+        let caption = view.caption.map_or_default(|caption| {
+            self.chooser_caption_lines(caption, area.width.saturating_sub(2))
+        });
+        let header_rows = 1 + usize_to_u16_wrapping(caption.len());
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(header_rows + 2), Constraint::Min(2)])
@@ -8675,19 +8700,14 @@ impl App {
             )))
             .render(first_row, frame.buffer_mut());
         }
-        if let Some(caption) = view.caption {
-            let caption_row = Rect {
+        Paragraph::new(caption).render(
+            Rect {
                 y: details_inner.y.saturating_add(1),
-                height: details_inner.height.saturating_sub(1).min(1),
+                height: details_inner.height.saturating_sub(1),
                 ..details_inner
-            };
-            let room = usize::from(caption_row.width).saturating_sub(1);
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {}", ellipsize_end(caption, room)),
-                Style::default().fg(self.theme.hint_dim_desc_fg),
-            )))
-            .render(caption_row, frame.buffer_mut());
-        }
+            },
+            frame.buffer_mut(),
+        );
 
         let list_block = Block::default()
             .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
@@ -8699,17 +8719,56 @@ impl App {
             .style(Style::default().bg(self.theme.overlay_bg));
         let list_inner = list_block.inner(list_area);
 
-        let items = self.project_chooser_items(view.entries, view.visible, list_inner.width);
+        let items = match view.rows {
+            ChooserRows::Projects => {
+                self.project_chooser_items(view.entries, view.visible, list_inner.width)
+            }
+            ChooserRows::FolderShortcuts => {
+                self.folder_shortcut_items(view.entries, view.visible, list_inner.width)
+            }
+        };
 
         let empty = if view.entries.is_empty() {
             "No projects yet."
         } else {
             "No matching projects."
         };
-        let rendered = PickerList::new(items, view.focused.then_some(list.selected), empty)
+        // The cursor always says where the list is scrolled to. What it looks
+        // like says whether the chooser has the keys, and whether the row
+        // under it can be picked at all.
+        let under_cursor = view
+            .visible
+            .get(list.selected)
+            .and_then(|index| view.entries.get(*index));
+        let look = if !view.focused {
+            SelectionLook::Resting
+        } else if under_cursor.is_some_and(|entry| !entry.is_pickable()) {
+            SelectionLook::Unavailable
+        } else {
+            SelectionLook::Pickable
+        };
+        let rendered = PickerList::new(items, Some(list.selected), empty)
+            .selection_look(look)
             .block(list_block)
             .render(frame, list_area, &self.theme);
         (filter_input_rect, rendered)
+    }
+
+    /// A chooser's caption as the rows it takes in a header `width` columns
+    /// wide: wrapped, one leading space in, in the dimmed description tone.
+    fn chooser_caption_lines(&self, caption: &str, width: u16) -> Vec<Line<'static>> {
+        let style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        wrap_styled_lines(
+            &[Line::from(Span::styled(caption.to_string(), style))],
+            usize::from(width).saturating_sub(2),
+        )
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
     }
 
     /// The project chooser's rows for the `visible` entries, laid out in columns
@@ -8767,18 +8826,7 @@ impl App {
         if name_col + base_col > room {
             base_col = room.saturating_sub(name_col).max(8);
         }
-        // A folder shortcut that cannot be picked says why across the agents
-        // and base columns, so the base column widens to the longest reason
-        // and every path still starts in one column.
-        base_col =
-            base_col.max(widest_blocked_reason(entries, visible).saturating_sub(count_col + 2));
         let path_col = usize::from(width).saturating_sub(gutters + name_col + base_col);
-        // A folder shortcut shows core's home-collapsed label, the same text
-        // the browser shows; every other row shows its path as it always has.
-        let display_path = |entry: &ProjectChooserEntry| match &entry.shortcut {
-            Some(shortcut) => shortcut.folder_label.clone(),
-            None => display_path(entry),
-        };
 
         visible
             .iter()
@@ -8799,16 +8847,6 @@ impl App {
                     ellipsize_start(&display_path(entry), path_col)
                 };
                 let base = ellipsize_middle(&base_label(entry), base_col);
-                // A row that cannot be picked is dimmed whole, and its reason
-                // stands where the agents and base columns would.
-                if let Some(reason) = entry.blocked() {
-                    return self.blocked_chooser_row(
-                        warn,
-                        &pad_to_width(&name, name_col),
-                        &pad_to_width(reason, count_col + 2 + base_col),
-                        path,
-                    );
-                }
                 ListItem::new(Line::from(vec![
                     Span::raw(" "),
                     warn,
@@ -8836,27 +8874,86 @@ impl App {
             .collect::<Vec<_>>()
     }
 
-    /// A project chooser row that cannot be picked: dimmed whole, its reason
-    /// in italics where the agents and base columns would be. `name` and
-    /// `reason` arrive padded to their columns.
-    fn blocked_chooser_row(
+    /// The standalone picker's rows: each project as a folder shortcut. A row
+    /// is the project's name and its folder (core's home-collapsed label, the
+    /// text the browser shows), with none of the project chooser's agent and
+    /// base-branch columns, which say nothing about a folder-only agent.
+    ///
+    /// A row that cannot be picked is dimmed whole and says why right after
+    /// its name, then its folder in whatever room is left. The reason takes
+    /// room on that row alone and is cut to the row, never the other way
+    /// round, so a row that can be picked always has the whole width after its
+    /// name for its folder, and no row is ever wider than `width`.
+    fn folder_shortcut_items(
         &self,
-        warn: Span<'static>,
-        name: &str,
-        reason: &str,
-        path: String,
-    ) -> ListItem<'static> {
+        entries: &[ProjectChooserEntry],
+        visible: &[usize],
+        width: u16,
+    ) -> Vec<ListItem<'static>> {
+        // The folder keeps room for its leaf on a narrow screen: the name
+        // gives up width first, down to its floor.
+        const FOLDER_FLOOR: usize = 14;
+        const NAME_FLOOR: usize = 8;
+        // margin(1) warn(1) sp(1) name sp(2) rest margin(1)
+        let room = usize::from(width).saturating_sub(6);
+        let name_col = visible
+            .iter()
+            .filter_map(|i| entries.get(*i))
+            .map(|entry| display_width(&entry.name))
+            .max()
+            .unwrap_or(NAME_FLOOR)
+            .clamp(NAME_FLOOR, 28)
+            .min(room.saturating_sub(FOLDER_FLOOR).max(NAME_FLOOR));
+        let rest = room.saturating_sub(name_col);
         let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
-        ListItem::new(Line::from(vec![
-            Span::raw(" "),
-            warn,
-            Span::raw(" "),
-            Span::styled(name.to_string(), dim),
-            Span::raw("  "),
-            Span::styled(reason.to_string(), dim.add_modifier(Modifier::ITALIC)),
-            Span::raw("  "),
-            Span::styled(path, dim),
-        ]))
+
+        visible
+            .iter()
+            .filter_map(|i| entries.get(*i))
+            .map(|entry| {
+                let warn = if entry.path_missing {
+                    Span::styled(
+                        self.glyphs().warning,
+                        Style::default().fg(self.theme.warning_fg),
+                    )
+                } else {
+                    Span::raw(" ")
+                };
+                let name = pad_to_width(&ellipsize_middle(&entry.name, name_col), name_col);
+                let folder = entry
+                    .shortcut
+                    .as_ref()
+                    .map_or(entry.path.as_str(), |shortcut| {
+                        shortcut.folder_label.as_str()
+                    });
+                let mut spans = vec![Span::raw(" "), warn, Span::raw(" ")];
+                if entry.is_pickable() {
+                    spans.push(Span::styled(
+                        name,
+                        Style::default()
+                            .fg(self.theme.text_fg)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(
+                        ellipsize_start(folder, rest),
+                        Style::default().fg(self.theme.hint_desc_fg),
+                    ));
+                } else {
+                    let reason = ellipsize_end(entry.blocked().unwrap_or("not available"), rest);
+                    // The folder follows only where its leaf still fits.
+                    let folder_room = rest.saturating_sub(display_width(&reason) + 2);
+                    spans.push(Span::styled(name, dim));
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(reason, dim.add_modifier(Modifier::ITALIC)));
+                    if folder_room >= FOLDER_FLOOR {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(ellipsize_start(folder, folder_room), dim));
+                    }
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
     }
 
     /// `manage-projects`' second step: the project (or orphaned group) named in

@@ -23,9 +23,25 @@ use crate::theme::Theme;
 pub(crate) struct PickerList<'a> {
     rows: Vec<ListItem<'a>>,
     selected: Option<usize>,
+    look: SelectionLook,
     empty: Text<'a>,
     block: Option<Block<'a>>,
     indicator_frame: Option<Rect>,
+}
+
+/// How the selected row is painted. Whatever the look, the list scrolls so
+/// that row is on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SelectionLook {
+    /// The row the confirm key would act on: the theme's selection style.
+    #[default]
+    Pickable,
+    /// The cursor is on a row that cannot be picked: the theme's
+    /// selected-but-unavailable style, so it never reads as a pick.
+    Unavailable,
+    /// The list does not have the keys: no highlight at all, and the list
+    /// stays scrolled where it was.
+    Resting,
 }
 
 /// What a rendered picker list publishes for the mouse: the rows' rect, how
@@ -49,10 +65,17 @@ impl<'a> PickerList<'a> {
         Self {
             rows,
             selected,
+            look: SelectionLook::default(),
             empty: empty.into(),
             block: None,
             indicator_frame: None,
         }
+    }
+
+    /// How the selected row is painted; the pickable look by default.
+    pub(crate) fn selection_look(mut self, look: SelectionLook) -> Self {
+        self.look = look;
+        self
     }
 
     /// The block the rows sit in. Its right border is where the scroll
@@ -95,7 +118,11 @@ impl<'a> PickerList<'a> {
         let heights: Vec<usize> = self.rows.iter().map(ListItem::height).collect();
         let mut state =
             ListState::default().with_selected(self.selected.map(|index| index.min(items - 1)));
-        let mut widget = List::new(self.rows).highlight_style(theme.selection_style());
+        let mut widget = List::new(self.rows).highlight_style(match self.look {
+            SelectionLook::Pickable => theme.selection_style(),
+            SelectionLook::Unavailable => theme.unavailable_selection_style(),
+            SelectionLook::Resting => ratatui::style::Style::default(),
+        });
         if let Some(block) = self.block {
             widget = widget.block(block);
         }
