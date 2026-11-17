@@ -284,6 +284,7 @@ fn the_project_picker_cuts_a_wide_name_and_keeps_the_tail_of_a_wide_path() {
         id: id.to_string(),
         name: name.to_string(),
         path: path.to_string(),
+        shown_folder: path.to_string(),
         agent_count: 0,
         path_missing: false,
         base_branch: None,

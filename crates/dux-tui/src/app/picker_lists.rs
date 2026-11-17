@@ -365,6 +365,7 @@ fn fixture(app: &mut App, name: &str) -> PickerFixture {
                         id: label.clone(),
                         name: label.clone(),
                         path: format!("/code/{label}"),
+                        shown_folder: format!("/code/{label}"),
                         agent_count: 0,
                         path_missing: false,
                         base_branch: None,

@@ -265,6 +265,54 @@ fn every_surface(bindings: fn() -> RuntimeBindings, width: u16, height: u16) -> 
                 tab_index,
                 ..
             } => {
+                // The standalone picker with its project chooser filled: the
+                // chooser's own footer and the resting explorer's, then the
+                // explorer's own and the resting chooser's, then the chooser
+                // mid-search.
+                for (label, focused, chooser_searching) in [
+                    ("BrowseProjects(standalone, chooser keys)", true, false),
+                    ("BrowseProjects(standalone, explorer keys)", false, false),
+                    ("BrowseProjects(standalone, chooser search)", true, true),
+                ] {
+                    let mut list = crate::app::SearchableList::new();
+                    list.searching = chooser_searching;
+                    prompts.push((
+                        label.to_string(),
+                        PromptState::BrowseProjects {
+                            purpose: crate::app::BrowsePurpose::StandaloneAgent,
+                            current_dir: current_dir.clone(),
+                            entries: entries.clone(),
+                            loading,
+                            selected,
+                            filter: filter.clone(),
+                            searching: false,
+                            editing_path: false,
+                            path_input: path_input.clone(),
+                            tab_completions: tab_completions.clone(),
+                            tab_index,
+                            project_chooser: crate::app::StandaloneProjectChooser {
+                                entries: vec![crate::app::ProjectChooserEntry {
+                                    id: "p".to_string(),
+                                    name: "demo".to_string(),
+                                    path: "/srv/demo".to_string(),
+                                    shown_folder: "/srv/demo".to_string(),
+                                    agent_count: 0,
+                                    path_missing: false,
+                                    base_branch: None,
+                                    orphaned: false,
+                                    shortcut: Some(
+                                        dux_core::standalone_shortcuts::ShortcutCheck::Checked(
+                                            dux_core::standalone_shortcuts::ShortcutState::Available,
+                                        ),
+                                    ),
+                                }],
+                                caption: dux_core::standalone_shortcuts::CAPTION,
+                                list,
+                                focused,
+                            },
+                        },
+                    ));
+                }
                 for (label, searching, editing_path) in [
                     ("BrowseProjects(search)", true, false),
                     ("BrowseProjects(path)", false, true),
@@ -826,6 +874,10 @@ const DIALOG_WORDS: &[(&str, &[Action])] = &[
     ("focus and type", &[Action::FocusAgent]),
     ("take over", &[Action::FocusAgent]),
     ("next pane", &[Action::FocusNext]),
+    ("folders", &[Action::FocusNext]),
+    ("projects", &[Action::FocusNext]),
+    ("browse there", &[Action::Confirm]),
+    ("run agent here", &[Action::AddCurrentDir]),
     ("previous pane", &[Action::FocusPrev]),
     ("actions", &[Action::FocusNext, Action::FocusPrev]),
     ("next tab", &[Action::NextTab]),

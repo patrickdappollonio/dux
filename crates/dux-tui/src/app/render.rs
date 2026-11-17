@@ -7131,7 +7131,7 @@ impl App {
         let pickable = chooser
             .entries
             .iter()
-            .filter(|entry| entry.is_pickable())
+            .filter(|entry| entry.greyed_reason().is_none())
             .count();
         let visible = chooser.visible();
         let hint_width = top.width.saturating_sub(2);
@@ -7283,12 +7283,20 @@ impl App {
         let add_key = self.bindings.label_for(Action::AddCurrentDir);
         let goto_key = self.bindings.label_for(Action::GoToPath);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
+        // The commit key says what it does in THIS browser. In the standalone
+        // picker it is the key the whole picker is for, so there it is pinned
+        // and outlives the conveniences on a narrow screen.
+        let commit = if self.browsing_for_a_standalone_agent() {
+            Hint::key(add_key, "run agent here").pinned()
+        } else {
+            Hint::key(add_key, "add current")
+        };
         modal_hint_line(
             &self.theme,
             &[
                 Hint::key(search_key, "search"),
                 Hint::key(open_key, "open"),
-                Hint::key(add_key, "add current"),
+                commit,
                 Hint::key(goto_key, "go to"),
                 Hint::key(close_key, "cancel").pinned(),
             ],
@@ -7332,7 +7340,9 @@ impl App {
     /// bindings. The way down to the folders is named by the explorer's own
     /// footer, which shows nothing else while it waits.
     fn standalone_chooser_hint_line(&self, search: ListSearch, width: u16) -> Line<'static> {
-        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "browse there");
+        // The key that acts is pinned: on a narrow screen the movement
+        // hints go before it does.
+        let confirm = Hint::key(self.bindings.label_for(Action::Confirm), "browse there").pinned();
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let hints = if search == ListSearch::Searching {
             vec![confirm, Hint::key(close_key, "clear").pinned()]
@@ -7346,6 +7356,17 @@ impl App {
             ]
         };
         modal_hint_line(&self.theme, &hints, width)
+    }
+
+    /// Whether the open folder browser is the standalone picker.
+    fn browsing_for_a_standalone_agent(&self) -> bool {
+        matches!(
+            self.prompt,
+            PromptState::BrowseProjects {
+                purpose: BrowsePurpose::StandaloneAgent,
+                ..
+            }
+        )
     }
 
     fn browse_projects_title(purpose: BrowsePurpose, current_dir: &Path) -> Prose {
@@ -8742,7 +8763,7 @@ impl App {
             .and_then(|index| view.entries.get(*index));
         let look = if !view.focused {
             SelectionLook::Resting
-        } else if under_cursor.is_some_and(|entry| !entry.is_pickable()) {
+        } else if under_cursor.is_some_and(|entry| entry.greyed_reason().is_some()) {
             SelectionLook::Unavailable
         } else {
             SelectionLook::Pickable
@@ -8784,9 +8805,6 @@ impl App {
         // The path keeps room for its leaf on a narrow screen: the name gives
         // up width first, then the base, each down to its floor.
         const PATH_FLOOR: usize = 14;
-        let start_dir = self.engine.config.defaults.start_directory.as_deref();
-        let display_path =
-            |entry: &ProjectChooserEntry| git::display_path_relative_to(&entry.path, start_dir);
         let mut name_col = visible
             .iter()
             .filter_map(|i| entries.get(*i))
@@ -8844,7 +8862,9 @@ impl App {
                 let path = if entry.orphaned {
                     ellipsize_end("its project record is gone", path_col)
                 } else {
-                    ellipsize_start(&display_path(entry), path_col)
+                    // The folder as shown, which is also what a search
+                    // is matched against.
+                    ellipsize_start(&entry.shown_folder, path_col)
                 };
                 let base = ellipsize_middle(&base_label(entry), base_col);
                 ListItem::new(Line::from(vec![
@@ -8896,6 +8916,16 @@ impl App {
         const NAME_FLOOR: usize = 8;
         // margin(1) warn(1) sp(1) name sp(2) rest margin(1)
         let room = usize::from(width).saturating_sub(6);
+        // With a greyed-out row among those shown, the name column also
+        // gives way to the longest reason, so the reason is read whole
+        // wherever the names can spare the room.
+        let widest_reason = visible
+            .iter()
+            .filter_map(|i| entries.get(*i))
+            .filter_map(ProjectChooserEntry::greyed_reason)
+            .map(display_width)
+            .max()
+            .unwrap_or(0);
         let name_col = visible
             .iter()
             .filter_map(|i| entries.get(*i))
@@ -8903,7 +8933,8 @@ impl App {
             .max()
             .unwrap_or(NAME_FLOOR)
             .clamp(NAME_FLOOR, 28)
-            .min(room.saturating_sub(FOLDER_FLOOR).max(NAME_FLOOR));
+            .min(room.saturating_sub(FOLDER_FLOOR.max(widest_reason)))
+            .max(NAME_FLOOR);
         let rest = room.saturating_sub(name_col);
         let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
 
@@ -8920,14 +8951,22 @@ impl App {
                     Span::raw(" ")
                 };
                 let name = pad_to_width(&ellipsize_middle(&entry.name, name_col), name_col);
-                let folder = entry
-                    .shortcut
-                    .as_ref()
-                    .map_or(entry.path.as_str(), |shortcut| {
-                        shortcut.folder_label.as_str()
-                    });
+                let folder = entry.shown_folder.as_str();
                 let mut spans = vec![Span::raw(" "), warn, Span::raw(" ")];
-                if entry.is_pickable() {
+                // Greyed out is what core has found against the folder. A row
+                // whose folder is still being checked is drawn as any other.
+                if let Some(reason) = entry.greyed_reason() {
+                    let reason = ellipsize_end(reason, rest);
+                    // The folder follows only where its leaf still fits.
+                    let folder_room = rest.saturating_sub(display_width(&reason) + 2);
+                    spans.push(Span::styled(name, dim));
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(reason, dim.add_modifier(Modifier::ITALIC)));
+                    if folder_room >= FOLDER_FLOOR {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(ellipsize_start(folder, folder_room), dim));
+                    }
+                } else {
                     spans.push(Span::styled(
                         name,
                         Style::default()
@@ -8939,17 +8978,6 @@ impl App {
                         ellipsize_start(folder, rest),
                         Style::default().fg(self.theme.hint_desc_fg),
                     ));
-                } else {
-                    let reason = ellipsize_end(entry.blocked().unwrap_or("not available"), rest);
-                    // The folder follows only where its leaf still fits.
-                    let folder_room = rest.saturating_sub(display_width(&reason) + 2);
-                    spans.push(Span::styled(name, dim));
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::styled(reason, dim.add_modifier(Modifier::ITALIC)));
-                    if folder_room >= FOLDER_FLOOR {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(ellipsize_start(folder, folder_room), dim));
-                    }
                 }
                 ListItem::new(Line::from(spans))
             })

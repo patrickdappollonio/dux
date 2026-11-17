@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use dux_core::standalone_shortcuts::{
-    CAPTION, ProjectShortcut, ProjectShortcutList, ShortcutState,
+    CAPTION, ProjectShortcut, ProjectShortcutList, ShortcutCheck, ShortcutState,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -141,10 +141,35 @@ fn open_with_child(app: &mut App) -> PathBuf {
 fn open_with_rows(app: &mut App, rows: Vec<ProjectShortcut>) {
     app.execute_command("new-standalone-agent").expect("opens");
     finish_ui_jobs(app);
-    app.show_standalone_project_shortcuts(&ProjectShortcutList {
+    app.set_checked_project_shortcuts(&ProjectShortcutList {
         caption: CAPTION,
         rows,
     });
+}
+
+/// Fill the explorer with `count` child folders, loaded.
+fn fill_explorer(app: &mut App, count: usize) {
+    if let PromptState::BrowseProjects {
+        entries, loading, ..
+    } = &mut app.prompt
+    {
+        *entries = (0..count)
+            .map(|n| BrowserEntry {
+                path: PathBuf::from(format!("/zz/child-{n:02}")),
+                label: format!("child-{n:02}/"),
+                is_git_repo: false,
+                is_parent: false,
+            })
+            .collect();
+        *loading = false;
+    }
+}
+
+fn explorer_selected(app: &App) -> usize {
+    match &app.prompt {
+        PromptState::BrowseProjects { selected, .. } => *selected,
+        other => panic!("expected the folder browser, got {other:?}"),
+    }
 }
 
 fn mixed_rows() -> Vec<ProjectShortcut> {
@@ -179,7 +204,7 @@ fn picking_a_project_moves_the_explorer_to_its_folder() {
     };
     assert_eq!(project_chooser.entries.len(), 1);
     assert_eq!(project_chooser.entries[0].id, "project-1");
-    assert_eq!(project_chooser.entries[0].blocked(), None);
+    assert!(project_chooser.entries[0].is_pickable());
     assert!(
         project_chooser.focused,
         "the chooser leads, so it has the keys"
@@ -210,15 +235,8 @@ fn a_greyed_out_project_is_reachable_but_cannot_be_picked() {
     let (start_dir, _) = explorer_and_focus(&app);
     assert_eq!(
         chooser(&app).list.selected,
-        1,
-        "the cursor starts on the row that can be picked"
-    );
-
-    press(&mut app, KeyCode::Up);
-    assert_eq!(
-        chooser(&app).list.selected,
         0,
-        "and moves onto a greyed-out one"
+        "the cursor rests on the first row, greyed out or not"
     );
 
     let (chooser_list, _, _) = rects(&mut app);
@@ -424,14 +442,14 @@ fn the_screen_describes_the_half_that_has_the_keys() {
     let painted = screen(&mut app);
     assert!(painted.contains("browse there"), "{painted}");
     assert!(
-        !painted.contains("add current"),
+        !painted.contains("run agent here"),
         "the explorer's keys are shown while it does not have them:\n{painted}"
     );
     assert!(painted.contains("<Tab> folders"), "{painted}");
 
     press(&mut app, KeyCode::Tab);
     let painted = screen(&mut app);
-    assert!(painted.contains("add current"), "{painted}");
+    assert!(painted.contains("run agent here"), "{painted}");
     assert!(
         !painted.contains("browse there"),
         "the chooser's keys are shown while it does not have them:\n{painted}"
@@ -439,23 +457,181 @@ fn the_screen_describes_the_half_that_has_the_keys() {
     assert!(painted.contains("<Tab> projects"), "{painted}");
 }
 
-/// Rows that land after the user has already pressed a key in the picker do
-/// not take the keys from under them, even with the explorer's cursor back
-/// on its first row; the chooser appears, unfocused.
+/// The chooser is there, with the keys, in the very first frame: its rows
+/// are the projects the engine already knows, before any folder has been
+/// checked. A row not checked yet is drawn as an ordinary row and cannot be
+/// picked into a wrong outcome; the worker's answer then fills the states in
+/// without moving the cursor or the keys.
 #[test]
-fn rows_landing_after_a_keypress_do_not_take_the_keys() {
+fn the_chooser_has_the_keys_before_any_folder_is_checked() {
     let mut app = test_app(default_bindings());
     app.execute_command("new-standalone-agent").expect("opens");
-    press(&mut app, KeyCode::Down);
-    finish_ui_jobs(&mut app);
-
-    assert!(chooser(&app).is_shown());
+    let (start_dir, focused) = explorer_and_focus(&app);
     assert!(
-        !explorer_and_focus(&app).1,
-        "the chooser took the keys mid-browse"
+        focused,
+        "the chooser has the keys before the worker answers"
     );
-    press(&mut app, KeyCode::Tab);
-    assert!(explorer_and_focus(&app).1, "the focus key still reaches it");
+    assert_eq!(chooser(&app).entries.len(), 1);
+    assert_eq!(
+        chooser(&app).entries[0].shortcut,
+        Some(ShortcutCheck::Pending)
+    );
+    let opening = app.status.text();
+    assert!(
+        opening.contains("project") && opening.contains("Tab"),
+        "the opening status describes the half that has the keys: {opening}"
+    );
+
+    let painted = screen(&mut app);
+    assert!(painted.contains("Start In A Project's Folder"), "{painted}");
+    assert!(!painted.contains("could not be checked"), "{painted}");
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(explorer_and_focus(&app).0, start_dir, "nothing was picked");
+    assert!(
+        app.status.text().contains("still being checked"),
+        "{}",
+        app.status.text()
+    );
+
+    finish_ui_jobs(&mut app);
+    assert_eq!(
+        chooser(&app).entries[0].shortcut,
+        Some(ShortcutCheck::Checked(ShortcutState::Available))
+    );
+    assert!(
+        explorer_and_focus(&app).1,
+        "the answer did not move the keys"
+    );
+    press(&mut app, KeyCode::Enter);
+    assert_ne!(
+        explorer_and_focus(&app).0,
+        start_dir,
+        "now it can be picked"
+    );
+}
+
+/// A key the folder browser binds, pressed while the project list has the
+/// keys, is not swallowed in silence: the status line says who has the keys
+/// and which key reaches the folder browser. A key bound to nothing stays
+/// silent.
+#[test]
+fn a_folder_browser_key_pressed_in_the_chooser_says_where_the_keys_are() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    finish_ui_jobs(&mut app);
+    let before = app.status.text();
+
+    press(&mut app, KeyCode::Char('z'));
+    assert_eq!(app.status.text(), before, "an unbound key says nothing");
+
+    press(&mut app, KeyCode::Char('o'));
+    assert!(matches!(app.prompt, PromptState::BrowseProjects { .. }));
+    let said = app.status.text();
+    assert!(
+        said.contains("project list has the keys") && said.contains("Tab"),
+        "{said}"
+    );
+}
+
+/// The wheel over the half without the keys hands it the keys, as a click
+/// there does, and then moves, so a notch always shows.
+#[test]
+fn the_wheel_over_a_resting_half_takes_the_keys_and_moves() {
+    let mut app = test_app(default_bindings());
+    open_with_rows(&mut app, many_rows());
+    fill_explorer(&mut app, 60);
+    let (chooser_list, explorer_list, _) = rects(&mut app);
+
+    mouse(
+        &mut app,
+        MouseEventKind::ScrollDown,
+        explorer_list.x + 1,
+        explorer_list.y + 1,
+    );
+    assert!(!explorer_and_focus(&app).1, "the explorer took the keys");
+    assert_eq!(explorer_selected(&app), 3);
+
+    mouse(
+        &mut app,
+        MouseEventKind::ScrollDown,
+        chooser_list.x + 1,
+        chooser_list.y,
+    );
+    assert!(explorer_and_focus(&app).1, "the chooser took the keys back");
+    assert_eq!(chooser(&app).list.selected, 3);
+}
+
+/// The wheel never moves the explorer's cursor past its last entry, and does
+/// nothing to it while the path editor is up, in the Add Project browser as
+/// in this one.
+#[test]
+fn the_wheel_keeps_the_explorer_cursor_on_a_real_row() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("add-project").expect("opens");
+    finish_ui_jobs(&mut app);
+    fill_explorer(&mut app, 2);
+    let _ = screen(&mut app);
+    let OverlayMouseLayout::BrowseProjects { list, .. } = app.overlay_layout.active else {
+        panic!("the browser is drawn");
+    };
+    for _ in 0..4 {
+        mouse(&mut app, MouseEventKind::ScrollDown, list.x + 1, list.y);
+    }
+    assert_eq!(explorer_selected(&app), 1, "the cursor left the entries");
+
+    if let PromptState::BrowseProjects {
+        selected,
+        editing_path,
+        tab_completions,
+        ..
+    } = &mut app.prompt
+    {
+        *selected = 0;
+        *editing_path = true;
+        *tab_completions = (0..40).map(|n| format!("/zz/c{n:02}/")).collect();
+    }
+    let _ = screen(&mut app);
+    let OverlayMouseLayout::BrowseProjects { list, .. } = app.overlay_layout.active else {
+        panic!("the browser is drawn");
+    };
+    for _ in 0..4 {
+        mouse(&mut app, MouseEventKind::ScrollDown, list.x + 1, list.y + 1);
+    }
+    assert_eq!(
+        explorer_selected(&app),
+        0,
+        "the wheel moved the hidden selection under the path editor"
+    );
+}
+
+/// A search matches what the rows show: the folder as written on the row,
+/// not the absolute path behind it.
+#[test]
+fn a_search_matches_the_folder_the_row_shows() {
+    let mut app = test_app(default_bindings());
+    open_with_rows(&mut app, mixed_rows());
+    press(&mut app, KeyCode::Char('/'));
+    for ch in "~/free".chars() {
+        press(&mut app, KeyCode::Char(ch));
+    }
+    assert_eq!(
+        chooser(&app).visible().len(),
+        1,
+        "the text on the row finds it"
+    );
+
+    let mut app = test_app(default_bindings());
+    open_with_rows(&mut app, mixed_rows());
+    press(&mut app, KeyCode::Char('/'));
+    for ch in "srv".chars() {
+        press(&mut app, KeyCode::Char(ch));
+    }
+    assert_eq!(
+        chooser(&app).visible().len(),
+        0,
+        "a part of the path no row shows matched"
+    );
 }
 
 fn many_rows() -> Vec<ProjectShortcut> {
@@ -526,22 +702,42 @@ fn the_wheel_scrolls_both_project_choosers() {
     assert_eq!(list.selected, 1, "the wheel did nothing");
 }
 
-/// A worker that never answers leaves no chooser, and says so rather than
-/// leaving the user wondering where their projects went.
+/// A worker that stops before answering leaves the rows listed, greyed out as
+/// unchecked and impossible to pick, and says so. An answer or a failure that
+/// belongs to a picker since closed says nothing.
 #[test]
-fn a_shortcut_worker_that_fails_says_so() {
+fn a_shortcut_worker_that_fails_says_so_and_only_to_its_own_picker() {
     let mut app = test_app(default_bindings());
     super::ui_jobs::fail_next_quiet_spawn();
     app.execute_command("new-standalone-agent").expect("opens");
     finish_ui_jobs(&mut app);
 
-    assert!(!chooser(&app).is_shown());
-    assert!(
-        app.status.text().contains("projects"),
-        "{}",
-        app.status.text()
+    assert!(chooser(&app).is_shown(), "the projects stay listed");
+    assert_eq!(
+        chooser(&app).entries[0].shortcut,
+        Some(ShortcutCheck::Failed)
     );
+    assert!(!chooser(&app).entries[0].is_pickable());
     assert_eq!(app.status.tone(), crate::statusline::StatusTone::Warning);
+    assert!(screen(&mut app).contains("could not be checked"));
+    let (start_dir, _) = explorer_and_focus(&app);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(explorer_and_focus(&app).0, start_dir);
+
+    // The same failure arriving for a picker the user has closed.
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    finish_ui_jobs(&mut app);
+    let instance = app.browser_add.instance;
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.prompt, PromptState::None));
+    let before = app.status.text();
+    app.finish_standalone_shortcut_check(instance, None);
+    assert_eq!(
+        app.status.text(),
+        before,
+        "a closed picker was warned about"
+    );
 }
 
 /// At 80x24: the caption wraps rather than being cut, a folder is shown
@@ -567,24 +763,53 @@ fn the_picker_holds_up_on_a_narrow_screen() {
         assert_eq!(line.chars().count(), 80, "a row overflowed: {line}");
     }
 
+    assert!(
+        painted.contains("already has a standalone agent"),
+        "the reason is cut:\n{painted}"
+    );
+    assert!(
+        painted.contains("browse there"),
+        "the key that acts is gone from the chooser's footer:\n{painted}"
+    );
+
     // Every row, the greyed-out ones included, can be brought on screen.
     let mut seen = String::new();
-    press(&mut app, KeyCode::Up);
     for _ in 0..3 {
         seen.push_str(&narrow_screen(&mut app));
         press(&mut app, KeyCode::Down);
     }
-    assert!(seen.contains("already has a standalone"), "{seen}");
     assert!(seen.contains("folder missing"), "{seen}");
 
     // The last press went down past the last row, into the explorer, whose
-    // half now names the way back up.
+    // half now names the way back up and still names the key that acts.
     assert!(!explorer_and_focus(&app).1);
     let painted = narrow_screen(&mut app);
     assert!(
         painted.contains("<Tab> projects"),
         "no way back up:\n{painted}"
     );
+    assert!(
+        painted.contains("run agent here"),
+        "the key that acts is gone from the explorer's footer:\n{painted}"
+    );
+}
+
+/// The explorer's footer says what its commit key does in this picker: it
+/// runs an agent here. The Add Project browser keeps its own words.
+#[test]
+fn the_explorer_footer_names_what_the_key_does_in_each_browser() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    finish_ui_jobs(&mut app);
+    press(&mut app, KeyCode::Tab);
+    let painted = screen(&mut app);
+    assert!(painted.contains("<o> run agent here"), "{painted}");
+    assert!(!painted.contains("add current"), "{painted}");
+
+    let mut app = test_app(default_bindings());
+    app.execute_command("add-project").expect("opens");
+    finish_ui_jobs(&mut app);
+    assert!(screen(&mut app).contains("<o> add current"));
 }
 
 /// With no greyed-out row among those shown, no room is set aside for a
@@ -607,11 +832,7 @@ fn a_reason_takes_room_only_when_a_greyed_out_row_is_shown() {
         project_chooser, ..
     } = &mut app.prompt
     {
-        project_chooser.entries[0]
-            .shortcut
-            .as_mut()
-            .expect("a shortcut row")
-            .folder_label = "~/work/clients/acme/services/free".to_string();
+        project_chooser.entries[0].shown_folder = "~/work/clients/acme/services/free".to_string();
     }
     press(&mut app, KeyCode::Char('/'));
     for ch in "free".chars() {

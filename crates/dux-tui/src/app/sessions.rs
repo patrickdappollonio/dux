@@ -195,8 +195,8 @@ impl App {
             project_chooser: crate::app::StandaloneProjectChooser::default(),
         };
         self.engine.spawn_browser_entries(&start_dir);
-        let chooser_coming =
-            purpose == BrowsePurpose::StandaloneAgent && self.load_standalone_project_shortcuts();
+        let chooser_has_keys =
+            purpose == BrowsePurpose::StandaloneAgent && self.open_standalone_project_chooser();
         {
             let open = self.bindings.label_for(Action::OpenEntry);
             let add = self.bindings.label_for(Action::AddCurrentDir);
@@ -206,16 +206,15 @@ impl App {
                 BrowsePurpose::AddProject => "adds current dir",
                 BrowsePurpose::StandaloneAgent => "runs an agent in current dir",
             };
-            if chooser_coming {
-                // The project chooser takes the keys as soon as its rows
-                // land, so the folder browser's keys are named as the folder
-                // browser's, behind the key that reaches it: whichever half
-                // has the keys, nothing here is promised that does not work.
+            if chooser_has_keys {
+                // The project list has the keys from this first frame, so the
+                // status says what works there and which key reaches the
+                // folder browser, and promises none of the browser's keys.
+                let confirm = self.bindings.label_for(Action::Confirm);
                 let switch = self.bindings.label_for(Action::FocusNext);
                 self.set_info(format!(
-                    "Standalone agent: pick a project to browse to its folder, or press \
-                     {switch} for the folder browser, where {open} opens folders and {add} \
-                     {what}.",
+                    "Standalone agent: {confirm} on a project browses to its folder. {switch} \
+                     moves to the folder browser, where {add} {what}.",
                 ));
             } else {
                 self.set_info(format!(
@@ -225,53 +224,103 @@ impl App {
         }
     }
 
-    /// Ask core for the standalone picker's project shortcuts. The rows read
-    /// the filesystem (is each folder there, does an agent already work in
-    /// it), so they are built on a worker from an instant snapshot; the
-    /// chooser appears above the explorer when they land. With no projects
-    /// there is nothing to ask for and no chooser. Returns whether a chooser
-    /// was asked for.
+    /// Fill the just-opened standalone picker's project chooser and give it
+    /// the keys. Returns whether there is a chooser: with no projects there is
+    /// none, and the explorer has the keys as it always did.
     ///
-    /// A worker that stops before answering leaves the picker with its
-    /// explorer alone, and the status line says so: the projects the user
-    /// expects above it are missing, and browsing there by hand still works.
-    fn load_standalone_project_shortcuts(&mut self) -> bool {
+    /// The rows are there in the first frame, built from what the engine
+    /// already knows (which projects, their names and folders) without
+    /// touching a file. What each folder turns out to be (is it there, does an
+    /// agent already work in it) takes the filesystem, so core answers that on
+    /// a worker and the answer fills in the rows' states when it lands.
+    fn open_standalone_project_chooser(&mut self) -> bool {
         let inputs = self.engine.standalone_shortcut_inputs();
-        if inputs.projects.is_empty() {
+        let unchecked = dux_core::standalone_shortcuts::unchecked_shortcuts(&inputs);
+        if unchecked.rows.is_empty() {
             return false;
+        }
+        if let PromptState::BrowseProjects {
+            project_chooser, ..
+        } = &mut self.prompt
+        {
+            *project_chooser = super::StandaloneProjectChooser {
+                entries: unchecked
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        shortcut_entry(
+                            row.project_id,
+                            row.name,
+                            row.path,
+                            row.folder_label,
+                            dux_core::standalone_shortcuts::ShortcutCheck::Pending,
+                        )
+                    })
+                    .collect(),
+                caption: unchecked.caption,
+                list: super::SearchableList::new(),
+                focused: true,
+            };
         }
         let instance = self.browser_add.instance;
         self.spawn_quiet_ui_job(
             move || dux_core::standalone_shortcuts::project_shortcuts(&inputs),
-            move |app, list| {
-                // An answer for a browser the user has since closed or
-                // replaced is not this one's.
-                if app.browser_add.instance != instance {
-                    return;
-                }
-                match list {
-                    Some(list) => app.show_standalone_project_shortcuts(&list),
-                    None => app.set_warning(
-                        "dux could not list your projects as folder shortcuts in this picker, \
-                         so only the folder browser is shown. Browse to the project's folder \
-                         by hand, or close the picker and open it again; dux.log has the \
-                         details.",
-                    ),
-                }
-            },
+            move |app, list| app.finish_standalone_shortcut_check(instance, list.as_ref()),
         );
         true
     }
 
-    /// Put core's shortcut rows into the open standalone picker as its project
-    /// chooser. The chooser takes the keys, on its first row that can be
-    /// picked, only from a user who has done nothing in the picker since it
-    /// opened; otherwise it appears without them, one focus key away.
-    pub(crate) fn show_standalone_project_shortcuts(
+    /// The worker's answer about the project shortcuts' folders, for the
+    /// picker that was `instance` when it asked. `None` is a worker that
+    /// stopped before answering.
+    ///
+    /// An answer for a picker the user has since closed or replaced is not
+    /// this one's, whichever answer it is: it changes nothing and says
+    /// nothing.
+    pub(crate) fn finish_standalone_shortcut_check(
+        &mut self,
+        instance: u64,
+        list: Option<&dux_core::standalone_shortcuts::ProjectShortcutList>,
+    ) {
+        if self.browser_add.instance != instance
+            || !matches!(
+                self.prompt,
+                PromptState::BrowseProjects {
+                    purpose: BrowsePurpose::StandaloneAgent,
+                    ..
+                }
+            )
+        {
+            return;
+        }
+        let Some(list) = list else {
+            if let PromptState::BrowseProjects {
+                project_chooser, ..
+            } = &mut self.prompt
+            {
+                for entry in &mut project_chooser.entries {
+                    entry.shortcut = Some(dux_core::standalone_shortcuts::ShortcutCheck::Failed);
+                }
+            }
+            let switch = self.bindings.label_for(Action::FocusNext);
+            self.set_warning(format!(
+                "dux could not check your projects' folders, so none of them can be picked as \
+                 a shortcut here. Press {switch} for the folder browser and browse to the \
+                 folder by hand, or close the picker and open it again; dux.log has the \
+                 details.",
+            ));
+            return;
+        };
+        self.set_checked_project_shortcuts(list);
+    }
+
+    /// Put core's checked rows into the open standalone picker's project
+    /// chooser. They are the rows already shown, now with their states, so
+    /// the cursor, the query and the keys stay exactly where they are.
+    pub(crate) fn set_checked_project_shortcuts(
         &mut self,
         list: &dux_core::standalone_shortcuts::ProjectShortcutList,
     ) {
-        let entries = self.standalone_chooser_entries(list);
         let PromptState::BrowseProjects {
             purpose: BrowsePurpose::StandaloneAgent,
             project_chooser,
@@ -280,47 +329,22 @@ impl App {
         else {
             return;
         };
-        let touched = project_chooser.touched;
-        *project_chooser = super::StandaloneProjectChooser {
-            focused: !touched && !entries.is_empty(),
-            entries,
-            caption: list.caption,
-            list: super::SearchableList::new(),
-            touched,
-        };
-        project_chooser.reset_cursor();
-    }
-
-    /// Core's shortcut rows as project chooser rows. Which projects, their
-    /// order, the folder label and what blocks a row are core's; the agent
-    /// count and base branch are the chooser's own columns, read from the
-    /// engine as every other chooser reads them.
-    fn standalone_chooser_entries(
-        &self,
-        list: &dux_core::standalone_shortcuts::ProjectShortcutList,
-    ) -> Vec<ProjectChooserEntry> {
-        list.rows
+        project_chooser.entries = list
+            .rows
             .iter()
-            .map(|row| ProjectChooserEntry {
-                id: row.project_id.clone(),
-                name: row.name.clone(),
-                path: row.path.clone(),
-                agent_count: self.project_agent_count(&row.project_id),
-                path_missing: row.state
-                    == dux_core::standalone_shortcuts::ShortcutState::FolderMissing,
-                base_branch: self
-                    .engine
-                    .projects
-                    .iter()
-                    .find(|project| project.id == row.project_id)
-                    .and_then(|project| project.leading_branch.clone()),
-                orphaned: false,
-                shortcut: Some(super::ChooserShortcut {
-                    folder_label: row.folder_label.clone(),
-                    state: row.state,
-                }),
+            .map(|row| {
+                shortcut_entry(
+                    row.project_id.clone(),
+                    row.name.clone(),
+                    row.path.clone(),
+                    row.folder_label.clone(),
+                    dux_core::standalone_shortcuts::ShortcutCheck::Checked(row.state),
+                )
             })
-            .collect()
+            .collect();
+        project_chooser.caption = list.caption;
+        let visible = project_chooser.visible().len();
+        project_chooser.list.clamp_selected(visible);
     }
 
     /// Add the repository at `raw_path` as a project. What git says about it
@@ -545,6 +569,8 @@ impl App {
             &self.engine.projects,
             &self.engine.sessions,
         );
+        // The folder as the rows print it, and so as a search matches it.
+        let start_dir = self.engine.config.defaults.start_directory.as_deref();
         order
             .into_iter()
             .filter_map(|index| self.engine.projects.get(index))
@@ -552,6 +578,7 @@ impl App {
                 id: project.id.clone(),
                 name: project.name.clone(),
                 path: project.path.clone(),
+                shown_folder: git::display_path_relative_to(&project.path, start_dir),
                 agent_count: self.project_agent_count(&project.id),
                 path_missing: project.path_missing,
                 base_branch: project.leading_branch.clone(),
@@ -579,6 +606,7 @@ impl App {
             id: group.project_id,
             name: group.name,
             path: String::new(),
+            shown_folder: String::new(),
             path_missing: false,
             base_branch: None,
             orphaned: true,
@@ -5705,6 +5733,31 @@ fn editor_search_job() -> crate::app::ui_jobs::UiJob {
     }
 }
 
+/// One of core's shortcut rows as a project chooser row. Who the project is,
+/// its name, its folder label and what is known of the folder are core's; the
+/// project chooser's agent-count and base-branch columns are not drawn for a
+/// folder shortcut, so they are left empty.
+fn shortcut_entry(
+    id: String,
+    name: String,
+    path: String,
+    folder_label: String,
+    check: dux_core::standalone_shortcuts::ShortcutCheck,
+) -> ProjectChooserEntry {
+    use dux_core::standalone_shortcuts::{ShortcutCheck, ShortcutState};
+    ProjectChooserEntry {
+        id,
+        name,
+        path,
+        shown_folder: folder_label,
+        agent_count: 0,
+        path_missing: check == ShortcutCheck::Checked(ShortcutState::FolderMissing),
+        base_branch: None,
+        orphaned: false,
+        shortcut: Some(check),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8151,6 +8204,7 @@ mod tests {
                 id: "ghost".to_string(),
                 name: "ghost".to_string(),
                 path: "/tmp/ghost".to_string(),
+                shown_folder: "/tmp/ghost".to_string(),
                 agent_count: 0,
                 path_missing: false,
                 base_branch: None,

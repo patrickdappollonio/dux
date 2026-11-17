@@ -2386,6 +2386,11 @@ pub(crate) struct ProjectChooserEntry {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) path: String,
+    /// The folder as the row prints it, which is also what a search is
+    /// matched against: the path shortened the way this chooser shortens it,
+    /// or core's home-collapsed label for a folder shortcut. Empty for an
+    /// orphaned group, whose row prints no folder.
+    pub(crate) shown_folder: String,
     pub(crate) agent_count: usize,
     pub(crate) path_missing: bool,
     /// The branch new agents start from, `None` when the project has no base
@@ -2396,36 +2401,30 @@ pub(crate) struct ProjectChooserEntry {
     /// only thing it offers is Remove project….
     pub(crate) orphaned: bool,
     /// Set for a row of the standalone picker's project chooser, where the row
-    /// is a folder shortcut; `None` in every other chooser.
-    pub(crate) shortcut: Option<ChooserShortcut>,
-}
-
-/// What a project chooser row carries when it is one of the standalone
-/// picker's folder shortcuts. Both values are core's
-/// (`dux_core::standalone_shortcuts`), the same ones the browser is sent.
-#[derive(Clone, Debug)]
-pub(crate) struct ChooserShortcut {
-    /// The folder as shown, home directory collapsed.
-    pub(crate) folder_label: String,
-    /// Whether the row can be picked, and core's words for why not.
-    pub(crate) state: dux_core::standalone_shortcuts::ShortcutState,
+    /// is a folder shortcut: what is known of its folder, in core's terms
+    /// (`dux_core::standalone_shortcuts`). `None` in every other chooser.
+    pub(crate) shortcut: Option<dux_core::standalone_shortcuts::ShortcutCheck>,
 }
 
 impl ProjectChooserEntry {
     /// Whether picking this row does anything. Every row can be picked except
-    /// a folder shortcut core says cannot.
+    /// a folder shortcut core says cannot be, or has not checked yet.
     pub(crate) fn is_pickable(&self) -> bool {
         self.shortcut
-            .as_ref()
-            .is_none_or(|shortcut| shortcut.state.is_pickable())
+            .is_none_or(dux_core::standalone_shortcuts::ShortcutCheck::is_pickable)
     }
 
-    /// Core's words for why this row cannot be picked, for a folder shortcut
-    /// that cannot.
-    pub(crate) fn blocked(&self) -> Option<&'static str> {
+    /// Core's words for why this row is greyed out, for a folder shortcut
+    /// that is. A shortcut still being checked is not greyed out.
+    pub(crate) fn greyed_reason(&self) -> Option<&'static str> {
         self.shortcut
-            .as_ref()
-            .and_then(|shortcut| shortcut.state.reason())
+            .and_then(dux_core::standalone_shortcuts::ShortcutCheck::greyed_reason)
+    }
+
+    /// Core's words for why a pick of this row does nothing right now.
+    pub(crate) fn pick_refusal(&self) -> Option<&'static str> {
+        self.shortcut
+            .and_then(dux_core::standalone_shortcuts::ShortcutCheck::refusal)
     }
 }
 
@@ -2433,8 +2432,11 @@ impl ProjectChooserEntry {
 /// projects as folder shortcuts, with the project chooser's own search and
 /// movement, over the folder explorer.
 ///
-/// Empty (and so not drawn) in the add-project browser, when there are no
-/// projects, and until core's rows arrive from the worker that builds them.
+/// Empty (and so not drawn) in the add-project browser and when there are no
+/// projects. Otherwise it is filled the moment the picker opens, from what the
+/// engine already knows, and has the keys from the first frame; what each
+/// folder turns out to be arrives from a worker a moment later and only fills
+/// in the rows' states.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StandaloneProjectChooser {
     /// One row per project, in core's order.
@@ -2444,11 +2446,6 @@ pub(crate) struct StandaloneProjectChooser {
     pub(crate) list: SearchableList,
     /// True while the chooser, not the folder explorer below it, has focus.
     pub(crate) focused: bool,
-    /// Whether the user has pressed a key, clicked, pasted or turned the
-    /// wheel in this picker since it opened. Core's rows arrive from a worker
-    /// a moment later, and the chooser they fill takes the keys only from a
-    /// user who has not started using the picker.
-    pub(crate) touched: bool,
 }
 
 impl StandaloneProjectChooser {
@@ -2491,20 +2488,6 @@ impl StandaloneProjectChooser {
                 break;
             }
         }
-    }
-
-    /// Put the cursor on the first visible row that can be picked, or on the
-    /// first row when none can.
-    pub(crate) fn reset_cursor(&mut self) {
-        let visible = self.visible();
-        self.list.selected = visible
-            .iter()
-            .position(|&index| {
-                self.entries
-                    .get(index)
-                    .is_some_and(ProjectChooserEntry::is_pickable)
-            })
-            .unwrap_or(0);
     }
 }
 
@@ -2870,12 +2853,13 @@ impl SearchableList {
 }
 
 /// The project chooser's match predicate: case-insensitive substring over the
-/// project name or its path. `needle` is expected pre-lowercased.
+/// project name or its folder as the row prints it. `needle` is expected
+/// pre-lowercased.
 ///
 /// The rule itself is core's, shared with the standalone picker's project
 /// shortcuts on both surfaces.
 pub(crate) fn pick_project_matches(entry: &ProjectChooserEntry, needle: &str) -> bool {
-    dux_core::standalone_shortcuts::project_matches_query(&entry.name, &entry.path, needle)
+    dux_core::standalone_shortcuts::project_matches_query(&entry.name, &entry.shown_folder, needle)
 }
 
 /// The kill-running dialog's match predicate: case-insensitive substring over a
@@ -10833,6 +10817,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             path: path.to_string(),
+            shown_folder: path.to_string(),
             agent_count: 0,
             path_missing: false,
             base_branch: None,
