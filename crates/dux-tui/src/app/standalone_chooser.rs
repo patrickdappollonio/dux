@@ -794,6 +794,74 @@ fn the_picker_holds_up_on_a_narrow_screen() {
     );
 }
 
+/// The caption is the sentence that says a shortcut brings the folder and
+/// nothing else, so it is whole wherever the terminal can hold it over one
+/// list row, and where it cannot it ends in an ellipsis rather than stopping
+/// mid-sentence.
+#[test]
+fn the_caption_is_whole_or_visibly_cut_on_short_and_narrow_screens() {
+    for (width, height) in [(80, 16), (50, 20), (40, 24)] {
+        let mut app = test_app(default_bindings());
+        open_with_rows(&mut app, mixed_rows());
+        let painted = rows_of(&buffer(&mut app, width, height)).join("\n");
+        assert!(
+            painted.contains("Uses the") && painted.contains("command."),
+            "the caption is cut at {width}x{height}:\n{painted}"
+        );
+        assert!(
+            painted.contains("taken") || painted.contains("free") || painted.contains("gone"),
+            "no project row is left at {width}x{height}:\n{painted}"
+        );
+        assert!(
+            painted.contains("Standalone Agent In"),
+            "the explorer is gone at {width}x{height}:\n{painted}"
+        );
+    }
+
+    let mut app = test_app(default_bindings());
+    open_with_rows(&mut app, mixed_rows());
+    let painted = rows_of(&buffer(&mut app, 80, 14));
+    let caption: Vec<&String> = painted
+        .iter()
+        .filter(|row| row.contains("Uses the project"))
+        .collect();
+    assert_eq!(
+        caption.len(),
+        1,
+        "no caption at 80x14:\n{}",
+        painted.join("\n")
+    );
+    assert!(
+        caption[0].contains('…'),
+        "the caption stops mid-sentence at 80x14: {}",
+        caption[0]
+    );
+}
+
+/// The header states how many projects are available only once their folders
+/// have been checked: a number given before that could drop a moment later.
+#[test]
+fn the_count_waits_for_the_folders_to_be_checked() {
+    let mut app = test_app(default_bindings());
+    app.execute_command("new-standalone-agent").expect("opens");
+    let pending = screen(&mut app);
+    assert!(
+        pending.contains("Pick a project to browse to its folder."),
+        "{pending}"
+    );
+    assert!(!pending.contains("available"), "{pending}");
+
+    finish_ui_jobs(&mut app);
+    let checked = screen(&mut app);
+    assert!(checked.contains("(1 available)"), "{checked}");
+
+    let mut app = test_app(default_bindings());
+    super::ui_jobs::fail_next_quiet_spawn();
+    app.execute_command("new-standalone-agent").expect("opens");
+    finish_ui_jobs(&mut app);
+    assert!(!screen(&mut app).contains("available"));
+}
+
 /// The explorer's footer says what its commit key does in this picker: it
 /// runs an agent here. The Add Project browser keeps its own words.
 #[test]

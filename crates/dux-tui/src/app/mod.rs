@@ -2857,7 +2857,8 @@ impl SearchableList {
 /// pre-lowercased.
 ///
 /// The rule itself is core's, shared with the standalone picker's project
-/// shortcuts on both surfaces.
+/// chooser. Only the terminal UI searches these lists; the browser's has no
+/// search.
 pub(crate) fn pick_project_matches(entry: &ProjectChooserEntry, needle: &str) -> bool {
     dux_core::standalone_shortcuts::project_matches_query(&entry.name, &entry.shown_folder, needle)
 }
