@@ -132,6 +132,49 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     }
   })
 
+  it("reveals the name field again when its block changes size, and when the project list arrives late", async () => {
+    const scrolled: Element[] = []
+    const originalScroll = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this)
+    }
+    // jsdom has no ResizeObserver; this one hands the test its callback.
+    const observers: (() => void)[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          observers.push(callback)
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    try {
+      // A folder is chosen in the explorer before the project list answers.
+      seed(null)
+      const view = render(<StandaloneAgentDialog />)
+      fireEvent.click(screen.getByRole("button", { name: /Run an agent here/ }))
+      expect(scrolled).toHaveLength(1)
+
+      // The observer's opening report is not a change; a later one is.
+      const report = observers[observers.length - 1]
+      report()
+      expect(scrolled).toHaveLength(1)
+      report()
+      expect(scrolled).toHaveLength(2)
+
+      // The project list lands above the explorer and pushes the field down.
+      seed(SHORTCUTS)
+      view.rerender(<StandaloneAgentDialog />)
+      expect(shortcutRows()).toHaveLength(2)
+      expect(scrolled).toHaveLength(3)
+    } finally {
+      Element.prototype.scrollIntoView = originalScroll
+      vi.unstubAllGlobals()
+    }
+  })
+
   it("targets nothing when the explorer never reached the project's folder", async () => {
     seed(SHORTCUTS)
     browseLands = false

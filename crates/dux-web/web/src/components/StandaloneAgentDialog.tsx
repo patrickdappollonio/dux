@@ -66,11 +66,12 @@ function StandaloneAgentBrowser() {
   // raise the keyboard). No glide under reduced motion.
   const reducedMotion = usePrefersReducedMotion()
   const nameBlock = useRef<HTMLDivElement | null>(null)
-  // Asked again when the explorer finishes listing the chosen folder (its
-  // rows land a moment after the choice and can push the field back down),
-  // and whenever the block itself changes size: the body gaining a scrollbar
+  // Asked again when the project list arrives above the explorer after a
+  // folder was already chosen (it pushes everything below it down), and
+  // whenever the block itself changes size: the body gaining a scrollbar
   // narrows it, a long path then wraps onto another line, and the block grows
   // after the first reveal was aimed.
+  const shortcutsShown = (standaloneProjectShortcuts?.rows.length ?? 0) > 0
   useEffect(() => {
     const block = nameBlock.current
     if (selected === null || block === null) return
@@ -87,7 +88,7 @@ function StandaloneAgentBrowser() {
     })
     resized.observe(block)
     return () => resized.disconnect()
-  }, [selected, browseLoading, browseEntries, reducedMotion])
+  }, [selected, shortcutsShown, reducedMotion])
   const invalidName = name !== "" && !isValidAgentName(name)
 
   function handleCreate() {
@@ -135,8 +136,7 @@ function StandaloneAgentBrowser() {
           </span>
         </DialogHeader>
 
-        {standaloneProjectShortcuts &&
-        standaloneProjectShortcuts.rows.length > 0 ? (
+        {standaloneProjectShortcuts && shortcutsShown ? (
           <ProjectShortcutList
             list={standaloneProjectShortcuts}
             pickedProjectId={selected === null ? null : pickedProject}
