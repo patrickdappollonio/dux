@@ -329,6 +329,13 @@ async function createStandaloneAgent(absolutePath, label) {
   await focusSidebar()
   sendKeys("s")
   await waitFor("Standalone Agent In")
+  // With projects in the workspace (the driver always adds some) the picker
+  // opens with its project list holding the keys, so the folder browser is
+  // one focus key away: its footer names its own keys once it has them.
+  if (captureText().includes("Start In A Project's Folder")) {
+    sendKeys("Tab")
+    await waitFor("run agent here")
+  }
   await browseTo(absolutePath)
   await waitFor("Name standalone agent", 20000)
   sendKeys("Enter")
