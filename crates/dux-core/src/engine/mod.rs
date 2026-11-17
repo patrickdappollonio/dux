@@ -6334,11 +6334,15 @@ impl Engine {
         //
         // The refusal is a signpost, not a wall: adding the folder as a project
         // is the multi-agent shape dux is built for.
-        let wanted = crate::project_browser::canonical_or_original(&folder);
-        if let Some(existing) = self.sessions.iter().find(|session| {
-            crate::project_browser::canonical_or_original(std::path::Path::new(session.directory()))
-                == wanted
-        }) {
+        //
+        // The standalone picker's project shortcuts ask this same function, so
+        // a shortcut is greyed out exactly when this would refuse it.
+        if let Some(existing) = crate::standalone_shortcuts::directory_occupant(
+            &folder,
+            self.sessions.iter().map(AgentSession::directory),
+        )
+        .and_then(|index| self.sessions.get(index))
+        {
             anyhow::bail!(
                 "Agent \"{}\" is already working in \"{}\". Coding CLIs resume their \
                  conversation history per directory, so a second agent there would silently \
@@ -6388,6 +6392,13 @@ impl Engine {
             },
             busy_message,
         ))
+    }
+
+    /// The instant snapshot the standalone picker's project shortcuts are
+    /// built from. The rows themselves read the filesystem, so they are built
+    /// from this on a worker (`standalone_shortcuts::project_shortcuts`).
+    pub fn standalone_shortcut_inputs(&self) -> crate::standalone_shortcuts::ShortcutInputs {
+        crate::standalone_shortcuts::ShortcutInputs::snapshot(&self.projects, &self.sessions)
     }
 
     /// Resolve what git dux may do for one agent. `None` for an unknown id, so

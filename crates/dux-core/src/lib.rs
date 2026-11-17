@@ -92,6 +92,7 @@ pub(crate) mod scroll_margins;
 pub mod serve_log;
 pub mod shell_quote;
 pub mod sidebar;
+pub mod standalone_shortcuts;
 #[cfg(any(test, feature = "test-support"))]
 pub mod start_check_fixtures;
 pub mod startup;
