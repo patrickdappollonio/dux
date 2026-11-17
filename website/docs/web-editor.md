@@ -407,6 +407,13 @@ itself, centered on the right, with the path and pixel dimensions in the status 
 nothing to save, no preview toggle and no diff view: clicking a changed image in the Changes
 pane shows the picture as it is on disk right now.
 
+A picture opens fitted to the pane. The zoom buttons in its corner switch to **Fit width**
+(full width, scroll down to read a tall screenshot), **100%** (actual pixels), or step the zoom
+in and out. Ctrl+scroll (Cmd+scroll on a Mac) and a pinch zoom around the spot you point
+at, dragging pans a picture bigger than the pane, and a double-click or double-tap flips
+between Fit and 100% at that spot. SVG previews zoom the same way, and every file opens
+fitted again.
+
 ## Diffs against HEAD
 
 This one is for agent worktrees; a terminal-rooted editor has no Diff button.

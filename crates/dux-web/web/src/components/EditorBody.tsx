@@ -150,6 +150,8 @@ import {
   type StatusBarEditor,
 } from "@/components/EditorStatusBar"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ImageZoomViewer } from "@/components/ImageZoomViewer"
+import { svgIntrinsicSize } from "@/lib/imageZoom"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -2810,8 +2812,8 @@ function ErrorPane({
 
 // Read-only preview for a raster image tab, rendered straight from /raw with no
 // /read and no buffer. A refused request or undecodable bytes error the <img>
-// and swap in the error text; Retry bumps `attempt`, which keys the <img>, so a
-// fresh element re-fires at the same URL (/raw already sends
+// and swap in the error text; Retry bumps `attempt`, which keys the viewer, so a
+// fresh <img> re-fires at the same URL (/raw already sends
 // Cache-Control: no-cache). The caller keys the pane by path, so this state
 // resets on a preview-replace.
 //
@@ -2852,27 +2854,19 @@ function ImagePreviewPane({
     )
   }
   return (
-    <PreviewImageFrame>
-      <img
-        key={attempt}
-        src={src}
-        alt={path}
-        className="max-h-full max-w-full object-contain"
-        onLoad={(e) =>
-          onDims({
-            path,
-            width: e.currentTarget.naturalWidth,
-            height: e.currentTarget.naturalHeight,
-          })
-        }
-        onError={() => {
-          // A picture that failed to load has no size to report, whatever the
-          // last successful load of this path measured.
-          onDims(null)
-          setFailed(true)
-        }}
-      />
-    </PreviewImageFrame>
+    <ImageZoomViewer
+      key={attempt}
+      src={src}
+      alt={path}
+      raster
+      onNaturalSize={(size) => onDims({ path, ...size })}
+      onError={() => {
+        // A picture that failed to load has no size to report, whatever the
+        // last successful load of this path measured.
+        onDims(null)
+        setFailed(true)
+      }}
+    />
   )
 }
 
@@ -2883,23 +2877,16 @@ function ImagePreviewPane({
 // live preview of text mid-edit.
 function SvgPreviewPane({ draft, path }: { draft: string; path: string }) {
   const url = useObjectUrl(draft, "image/svg+xml")
+  const declaredSize = useMemo(() => svgIntrinsicSize(draft), [draft])
+  // Keyed by path so zoom resets per file but survives edits to this one.
   return (
-    <PreviewImageFrame>
-      {url !== null && (
-        <img src={url} alt={path} className="max-h-full max-w-full object-contain" />
-      )}
-    </PreviewImageFrame>
-  )
-}
-
-// Shared frame for the two image panes: the image is contained in the pane, so
-// a portrait image can never force a surprise scrollbar. The path they used to
-// caption themselves with is the status bar's now.
-function PreviewImageFrame({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex h-full min-h-0 items-center justify-center bg-muted/30 p-4">
-      {children}
-    </div>
+    <ImageZoomViewer
+      key={path}
+      src={url ?? ""}
+      alt={path}
+      raster={false}
+      declaredSize={declaredSize}
+    />
   )
 }
 
