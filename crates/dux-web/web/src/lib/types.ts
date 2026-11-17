@@ -301,6 +301,29 @@ export interface DirEntryView {
   is_parent: boolean
 }
 
+// One project offered as a folder shortcut in the New standalone agent picker.
+// Built whole by the server (`dux_core::standalone_shortcuts`), the same rows
+// the terminal UI draws: the browser renders them and decides nothing. A row
+// can be picked exactly when `reason` is null; `state` says which case it is.
+export interface ProjectShortcutView {
+  project_id: string
+  name: string
+  // The folder as shown, home directory collapsed by the server (the browser
+  // may not be on the server's machine and never derives it).
+  folder_label: string
+  // The folder's absolute path on the server, where the explorer goes.
+  path: string
+  state: "available" | "already_has_standalone_agent" | "folder_missing"
+  // Why the row cannot be picked, in the server's words; null when it can.
+  reason: string | null
+}
+
+// The shortcut list as served: its rows, in order, and the caption under them.
+export interface ProjectShortcutListView {
+  caption: string
+  rows: ProjectShortcutView[]
+}
+
 // A managed-worktree candidate for the "Attach worktree" flow. `adoptable` is
 // false (with a `reason`) when the worktree already has an agent.
 export interface ProjectWorktreeEntryView {

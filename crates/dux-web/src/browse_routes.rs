@@ -1,10 +1,14 @@
-//! Two stateless reads the add-project and new-agent dialogs need:
+//! The stateless reads the add-project and new-agent dialogs need:
 //!
 //! - `GET /api/v1/browse?path=` lists a directory. An absent or empty `path`
 //!   resolves `defaults.start_directory` from the live engine config, falling back
 //!   to `$HOME` when the engine is gone. The reply echoes the resolved path.
 //! - `GET /api/v1/agent-name` generates a two-word pet name for the new-agent
 //!   dialog's randomized-name preview.
+//! - `GET /api/v1/standalone-agent/project-shortcuts` lists the projects the
+//!   New standalone agent picker offers as folder shortcuts, ready to render:
+//!   the rows, which are greyed out and why, and the caption are all built by
+//!   `dux_core::standalone_shortcuts`, the same rows the terminal UI draws.
 //!
 //! Filesystem reads run off the async reactor, through `spawn_blocking`.
 //!
@@ -37,6 +41,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/browse", get(browse))
         .route("/api/v1/browse/mkdir", post(mkdir))
         .route("/api/v1/agent-name", get(agent_name))
+        .route(
+            "/api/v1/standalone-agent/project-shortcuts",
+            get(standalone_project_shortcuts),
+        )
 }
 
 #[derive(Deserialize)]
@@ -235,6 +243,35 @@ async fn agent_name(State(_state): State<AppState>) -> Response {
     Json(AgentNameReply { name }).into_response()
 }
 
+/// `GET /api/v1/standalone-agent/project-shortcuts`: the projects offered as
+/// folder shortcuts in the New standalone agent picker.
+///
+/// The engine hands over an instant snapshot; the rows canonicalize paths and
+/// ask whether each folder is there, so they are built off the reactor and off
+/// the engine thread. The reply is core's own list, serialized as it stands, so
+/// the browser renders it and decides nothing.
+async fn standalone_project_shortcuts(State(state): State<AppState>) -> Response {
+    let Some(inputs) = state.engine.standalone_shortcut_inputs().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "dux is shutting down, so the projects could not be listed.",
+        )
+            .into_response();
+    };
+    let built = tokio::task::spawn_blocking(move || {
+        dux_core::standalone_shortcuts::project_shortcuts(&inputs)
+    })
+    .await;
+    match built {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("listing the projects failed: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +421,62 @@ mod tests {
         let value = browse_with_start_directory(".").await;
         let here = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert_eq!(value["path"], here.to_string_lossy().as_ref());
+    }
+
+    /// The shortcut rows reach the browser ready-made: the route serializes
+    /// core's own list, state, reason and caption included, so the browser has
+    /// nothing left to decide.
+    #[tokio::test]
+    async fn the_project_shortcuts_arrive_ready_to_render() {
+        let project = |id: &str, path: &std::path::Path| dux_core::model::Project {
+            id: id.to_string(),
+            name: format!("{id}-name"),
+            path: path.to_string_lossy().into_owned(),
+            explicit_default_provider: None,
+            default_provider: dux_core::model::ProviderKind::new("claude"),
+            leading_branch: None,
+            auto_reopen_agents: None,
+            startup_command: None,
+            env: std::collections::BTreeMap::new(),
+            current_branch: String::new(),
+            branch_status: dux_core::model::ProjectBranchStatus::Unknown,
+            path_missing: false,
+            created_at: None,
+        };
+        let tmp = dux_core::test_scratch::ScratchDir::new();
+        let folders = tempfile::tempdir().unwrap();
+        let here = folders.path().join("here");
+        std::fs::create_dir(&here).unwrap();
+        let gone = folders.path().join("gone");
+        let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
+        engine.projects.push(project("here", &here));
+        engine.projects.push(project("gone", &gone));
+        let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
+
+        let resp = crate::server::router(handle)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/standalone-agent/project-shortcuts")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(value["caption"], dux_core::standalone_shortcuts::CAPTION);
+        let rows = value["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["project_id"], "here");
+        assert_eq!(rows[0]["name"], "here-name");
+        assert_eq!(rows[0]["path"], here.to_string_lossy().as_ref());
+        assert!(rows[0]["folder_label"].is_string());
+        assert_eq!(rows[0]["state"], "available");
+        assert!(rows[0]["reason"].is_null());
+        assert_eq!(rows[1]["state"], "folder_missing");
+        assert_eq!(rows[1]["reason"], "folder missing");
     }
 
     #[tokio::test]

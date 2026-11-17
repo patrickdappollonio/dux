@@ -441,6 +441,10 @@ pub(crate) enum EngineRequest {
     /// and a raw save that has not been reloaded does not. An instant clone; the
     /// filesystem listing runs off-thread in the browse handler.
     BrowseStartDir(oneshot::Sender<String>),
+    /// Snapshot what the New standalone agent picker's project shortcuts are
+    /// built from: the projects and every agent's directory. An instant clone;
+    /// the rows read the filesystem and are built off-thread in the handler.
+    StandaloneShortcutInputs(oneshot::Sender<dux_core::standalone_shortcuts::ShortcutInputs>),
     /// Ask the engine to recompute a worktree's changed-files lists after an HTTP
     /// git mutation. Fire-and-forget: the engine spawns its refresh worker and the
     /// result flows back through the normal `ChangedFilesReady` path.
@@ -2216,6 +2220,23 @@ impl EngineHandle {
         rx.await.ok()
     }
 
+    /// The snapshot the standalone picker's project shortcuts are built from.
+    /// `None` if the engine is gone.
+    pub async fn standalone_shortcut_inputs(
+        &self,
+    ) -> Option<dux_core::standalone_shortcuts::ShortcutInputs> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .req_tx
+            .send(EngineRequest::StandaloneShortcutInputs(tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
     /// Fire-and-forget: ask the engine to recompute changed-files for `worktree`
     /// (after an HTTP git mutation). The refreshed lists are served by the REST
     /// changed-files read; nothing to await here.
@@ -2702,6 +2723,7 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
         | EngineRequest::BrowseStartDir(..)
+        | EngineRequest::StandaloneShortcutInputs(..)
 
         // Attach to an ALREADY-RUNNING PTY, or push bytes at one. Deliberately
         // distinct from `SubscribePty`: `SubscribeTerminal` never launches
@@ -5050,6 +5072,9 @@ fn handle_request(
         }
         EngineRequest::EditorDefault(reply) => answer(reply, engine.config.editor.default.clone()),
         EngineRequest::BrowseStartDir(reply) => answer(reply, browse_start_dir(engine)),
+        EngineRequest::StandaloneShortcutInputs(reply) => {
+            answer(reply, engine.standalone_shortcut_inputs());
+        }
         // Spawn the off-thread refresh unconditionally. If this worktree is
         // not the currently-watched one, the resulting `ChangedFilesReady`
         // (worktree-tagged) is dropped by `events.rs`. In practice the git
@@ -10185,6 +10210,11 @@ mod tests {
                 false,
             ),
             (
+                "StandaloneShortcutInputs",
+                EngineRequest::StandaloneShortcutInputs(dead_reply()),
+                false,
+            ),
+            (
                 "RefreshChangedFiles",
                 EngineRequest::RefreshChangedFiles("/tmp/wt".into()),
                 false,
@@ -10369,7 +10399,7 @@ mod tests {
         // through with a copied-from-its-neighbour `false` that nothing reads.
         assert_eq!(
             request_kind_answers().len(),
-            50,
+            51,
             "every EngineRequest kind needs a row in request_kind_answers; \
              update the count deliberately when adding one"
         );

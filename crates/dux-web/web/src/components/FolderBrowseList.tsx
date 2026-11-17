@@ -34,6 +34,7 @@ export function FolderBrowseList({
   committed,
   onCommit,
   onOpen,
+  shrinkable = false,
 }: {
   path: string
   entries: DirEntryView[]
@@ -44,11 +45,27 @@ export function FolderBrowseList({
   committed: boolean
   onCommit: (path: string) => void
   onOpen: (entry: DirEntryView) => void
+  /** For a dialog laid out as a column with more above and below the list:
+   * the list keeps its usual height while there is room and gives it up, down
+   * to a floor of a few rows, before anything else in the dialog leaves the
+   * screen. The default is the fixed height. */
+  shrinkable?: boolean
 }) {
   return (
-    <ScrollArea className="h-[50vh] rounded-md border md:h-80">
+    <ScrollArea
+      className={`h-[50vh] rounded-md border md:h-80 ${
+        shrinkable ? "min-h-32 shrink" : ""
+      }`}
+    >
       {loading ? (
-        <div className="flex h-[50vh] items-center justify-center md:h-80">
+        <div
+          className={`flex items-center justify-center ${
+            // The spinner fills the fixed list; in a shrinkable one it fills
+            // whatever height the list was left with, never less than its
+            // floor.
+            shrinkable ? "h-full min-h-32" : "h-[50vh] md:h-80"
+          }`}
+        >
           <GlyphSpinner className="text-lg text-muted-foreground" />
         </div>
       ) : (

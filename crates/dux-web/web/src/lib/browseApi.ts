@@ -2,7 +2,7 @@
 // non-2xx throws, so the caller can surface a toast and clear its loading state.
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
-import type { DirEntryView } from "./types"
+import type { DirEntryView, ProjectShortcutListView } from "./types"
 
 async function get<T>(path: string): Promise<T> {
   let resp: Response
@@ -54,6 +54,10 @@ export const browseApi = {
   // visible path component; a non-2xx (409 exists, 400 invalid) throws the server message.
   mkdir: (parent: string, name: string) =>
     post<{ path: string }>("/api/v1/browse/mkdir", { parent, name }),
+  // The projects the New standalone agent picker offers as folder shortcuts, ready to render:
+  // order, greyed-out rows, their reasons and the caption are all the server's.
+  standaloneProjectShortcuts: () =>
+    get<ProjectShortcutListView>("/api/v1/standalone-agent/project-shortcuts"),
   // A freshly generated pet name for the new-agent dialog's "Use randomized pet name" preview.
   agentName: () => get<{ name: string }>("/api/v1/agent-name"),
 }

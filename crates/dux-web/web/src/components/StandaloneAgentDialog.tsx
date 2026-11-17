@@ -2,6 +2,7 @@ import { useState } from "react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
+import { ProjectShortcutList } from "@/components/ProjectShortcutList"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,11 +29,21 @@ import {
  * deliberately absent: a standalone agent accepts whatever is there, initializes
  * nothing and never modifies the folder, so there is nothing to check.
  *
+ * Above the explorer sit the user's projects as shortcuts. Picking one is
+ * browsing to that project's folder and choosing it, nothing more: the agent
+ * is an ordinary standalone agent with no tie to the project. The list is the
+ * server's, rendered as it arrives, and is absent when there are no projects.
+ *
+ * The popup is a column whose explorer is the one part that gives up height,
+ * so the shortcuts and the name field never push Cancel and Create agent off
+ * the screen; only when the explorer is at its floor does the popup scroll.
+ *
  * Every refusal is the server's and arrives as a toast, shared with the terminal
  * UI so the two surfaces cannot answer the same question differently.
  */
 function StandaloneAgentBrowser() {
-  const { browsePath, browseEntries, browseLoading } = useDux()
+  const { browsePath, browseEntries, browseLoading, standaloneProjectShortcuts } =
+    useDux()
   const [selected, setSelected] = useState<string | null>(null)
   const [name, setName] = useState("")
   const invalidName = name !== "" && !isValidAgentName(name)
@@ -46,8 +57,11 @@ function StandaloneAgentBrowser() {
   }
 
   return (
-    <DialogContent className="sm:max-w-xl" showCloseButton={false}>
-      <DialogHeader>
+    <DialogContent
+      className="flex flex-col sm:max-w-xl"
+      showCloseButton={false}
+    >
+      <DialogHeader className="shrink-0">
         <DialogTitle>New standalone agent</DialogTitle>
         {/* The words "standalone agent" appear here on purpose: every other
           * surface uses that name, so the dialog that creates one teaches it. */}
@@ -57,7 +71,21 @@ function StandaloneAgentBrowser() {
         </span>
       </DialogHeader>
 
+      {standaloneProjectShortcuts &&
+      standaloneProjectShortcuts.rows.length > 0 ? (
+        <ProjectShortcutList
+          list={standaloneProjectShortcuts}
+          selected={selected}
+          onPick={(path) => {
+            // Exactly what browsing there and pressing the pinned row does.
+            browseDir(path)
+            setSelected(path)
+          }}
+        />
+      ) : null}
+
       <FolderBrowseList
+        shrinkable
         path={browsePath}
         entries={browseEntries}
         loading={browseLoading}
@@ -73,7 +101,7 @@ function StandaloneAgentBrowser() {
       />
 
       {selected ? (
-        <div className="flex flex-col gap-2">
+        <div className="flex shrink-0 flex-col gap-2">
           {/* Empty is the ordinary case: the server names the agent after the
             * folder. No branch is created, but the name follows the same rules
             * as every other agent's, so the field is the New agent dialog's.
@@ -97,7 +125,7 @@ function StandaloneAgentBrowser() {
         </div>
       ) : null}
 
-      <DialogFooter>
+      <DialogFooter className="shrink-0">
         <Button variant="outline" onClick={closeStandaloneAgentPicker}>
           Cancel
         </Button>

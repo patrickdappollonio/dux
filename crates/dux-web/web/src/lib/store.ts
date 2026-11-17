@@ -213,6 +213,7 @@ import type {
   EventsServerMessage,
   MacroView,
   OperationView,
+  ProjectShortcutListView,
   ProjectWorktreeEntryView,
   LeftoverFolderView,
   PrKeyView,
@@ -596,6 +597,10 @@ export interface DuxState {
    * time, and the browsing itself is the same act. What differs is what
    * happens to the folder you choose. */
   standaloneAgentPickerOpen: boolean
+  /** The projects offered as folder shortcuts in the standalone-agent picker,
+   * as the server built them; null until they arrive (and when they could not
+   * be listed), which draws no list. */
+  standaloneProjectShortcuts: ProjectShortcutListView | null
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
   // header hint in the dialog; the primary-action ladder does the real work
@@ -1198,6 +1203,7 @@ let state: DuxState = {
   addProjectOpen: false,
   cloneProject: null,
   standaloneAgentPickerOpen: false,
+  standaloneProjectShortcuts: null,
   addProjectIntent: "add",
   browsePath: "",
   browseEntries: [],
@@ -7174,10 +7180,30 @@ function runBrowse(path: string | null): void {
 export function openStandaloneAgentPicker(): void {
   setState({
     standaloneAgentPickerOpen: true,
+    standaloneProjectShortcuts: null,
     browseLoading: true,
     browseEntries: [],
   })
   runBrowse(null)
+  // The project shortcuts above the explorer, built whole by the server. Asked
+  // on every open, so a project added or an agent created since is reflected.
+  // A late reply for a picker since closed is dropped.
+  browseApi
+    .standaloneProjectShortcuts()
+    .then((list) => {
+      if (!state.standaloneAgentPickerOpen) return
+      setState({ standaloneProjectShortcuts: list })
+    })
+    .catch((e) => {
+      if (!state.standaloneAgentPickerOpen) return
+      // The explorer still works without them, so the picker stays open and
+      // says what is missing.
+      notifyError(
+        e instanceof Error
+          ? `Could not list your projects as shortcuts: ${e.message}`
+          : "Could not list your projects as shortcuts.",
+      )
+    })
 }
 
 export function closeStandaloneAgentPicker(): void {
