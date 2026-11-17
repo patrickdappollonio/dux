@@ -313,7 +313,11 @@ export interface ProjectShortcutView {
   folder_label: string
   // The folder's absolute path on the server, where the explorer goes.
   path: string
-  state: "available" | "already_has_standalone_agent" | "folder_missing"
+  state:
+    | "available"
+    | "already_has_standalone_agent"
+    | "already_has_agent"
+    | "folder_missing"
   // Why the row cannot be picked, in the server's words; null when it can.
   reason: string | null
 }

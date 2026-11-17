@@ -448,9 +448,28 @@ mod tests {
         let here = folders.path().join("here");
         std::fs::create_dir(&here).unwrap();
         let gone = folders.path().join("gone");
+        let taken = folders.path().join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        let worktree = folders.path().join("worktree");
+        std::fs::create_dir(&worktree).unwrap();
         let mut engine = crate::test_support::unstarted_test_engine(tmp.path());
         engine.projects.push(project("here", &here));
         engine.projects.push(project("gone", &gone));
+        engine.projects.push(project("taken", &taken));
+        engine.projects.push(project("worktree", &worktree));
+        // A standalone agent in one project's folder, and a managed agent
+        // whose working copy is another's (a project added from a worktree).
+        let mut standalone = crate::test_support::sample_agent("standalone");
+        standalone.workspace =
+            dux_core::model::AgentWorkspace::Folder(dux_core::model::FolderWorkspace {
+                folder_path: taken.to_string_lossy().into_owned(),
+            });
+        engine.sessions.push(standalone);
+        let mut managed = crate::test_support::sample_agent("managed");
+        if let dux_core::model::AgentWorkspace::Managed(workspace) = &mut managed.workspace {
+            workspace.worktree_path = worktree.to_string_lossy().into_owned();
+        }
+        engine.sessions.push(managed);
         let (handle, _join) = crate::engine_actor::spawn_engine_thread(engine);
 
         let resp = crate::server::router(handle)
@@ -468,7 +487,7 @@ mod tests {
 
         assert_eq!(value["caption"], dux_core::standalone_shortcuts::CAPTION);
         let rows = value["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0]["project_id"], "here");
         assert_eq!(rows[0]["name"], "here-name");
         assert_eq!(rows[0]["path"], here.to_string_lossy().as_ref());
@@ -477,6 +496,10 @@ mod tests {
         assert!(rows[0]["reason"].is_null());
         assert_eq!(rows[1]["state"], "folder_missing");
         assert_eq!(rows[1]["reason"], "folder missing");
+        assert_eq!(rows[2]["state"], "already_has_standalone_agent");
+        assert_eq!(rows[2]["reason"], "already has a standalone agent");
+        assert_eq!(rows[3]["state"], "already_has_agent");
+        assert_eq!(rows[3]["reason"], "already has an agent");
     }
 
     #[tokio::test]

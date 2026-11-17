@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::model::{AgentSession, Project};
+use crate::model::{AgentSession, AgentWorkspace, Project};
 
 /// The sentence under the list on both surfaces.
 pub const CAPTION: &str =
@@ -31,22 +31,21 @@ pub const CAPTION: &str =
 pub enum ShortcutState {
     /// The folder is there and no agent works in it.
     Available,
-    /// An agent already works in the folder, so creating a standalone agent
-    /// there would be refused (one agent per folder). A managed agent never
-    /// occupies a project's own checkout, so the agent found there is a
-    /// standalone one.
+    /// A standalone agent already works in the folder, so creating another
+    /// there would be refused (one agent per folder).
     AlreadyHasStandaloneAgent,
+    /// A managed agent's working copy is the folder, which is refused the same
+    /// way. It happens when a project was added from a linked worktree that an
+    /// agent works in, a dux agent's own worktree included.
+    AlreadyHasAgent,
     /// The project's folder is not on disk.
     FolderMissing,
 }
 
 impl ShortcutState {
-    /// Whether the row can be picked.
+    /// Whether the row can be picked: exactly when it has no reason not to be.
     pub fn is_pickable(self) -> bool {
-        match self {
-            Self::Available => true,
-            Self::AlreadyHasStandaloneAgent | Self::FolderMissing => false,
-        }
+        self.reason().is_none()
     }
 
     /// The words a greyed-out row shows for why it cannot be picked; `None`
@@ -55,7 +54,16 @@ impl ShortcutState {
         match self {
             Self::Available => None,
             Self::AlreadyHasStandaloneAgent => Some("already has a standalone agent"),
+            Self::AlreadyHasAgent => Some("already has an agent"),
             Self::FolderMissing => Some("folder missing"),
+        }
+    }
+
+    /// The state of a folder that is on disk and that `occupant` works in.
+    fn occupied_by(occupant: OccupantKind) -> Self {
+        match occupant {
+            OccupantKind::Standalone => Self::AlreadyHasStandaloneAgent,
+            OccupantKind::Managed => Self::AlreadyHasAgent,
         }
     }
 }
@@ -100,6 +108,34 @@ pub struct ShortcutProject {
     pub path: String,
 }
 
+/// Which kind of agent works in a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OccupantKind {
+    /// A standalone agent: the directory is the user's folder.
+    Standalone,
+    /// A managed agent: the directory is its working copy.
+    Managed,
+}
+
+impl OccupantKind {
+    /// The kind of agent a workspace belongs to.
+    pub fn of(workspace: &AgentWorkspace) -> Self {
+        match workspace {
+            AgentWorkspace::Managed(_) => Self::Managed,
+            AgentWorkspace::Folder(_) => Self::Standalone,
+        }
+    }
+}
+
+/// The directory one agent works in, and which kind of agent it is.
+#[derive(Clone, Debug)]
+pub struct AgentDirectory {
+    /// The directory, as the agent records it.
+    pub path: String,
+    /// The kind of agent working there.
+    pub kind: OccupantKind,
+}
+
 /// The engine state the rows are built from, cloned off the engine in an
 /// instant so the filesystem work can run elsewhere.
 #[derive(Clone, Debug, Default)]
@@ -108,7 +144,7 @@ pub struct ShortcutInputs {
     pub projects: Vec<ShortcutProject>,
     /// The directory every agent works in, managed and standalone alike:
     /// exactly what the create-time refusal compares a folder against.
-    pub agent_directories: Vec<String>,
+    pub agent_directories: Vec<AgentDirectory>,
 }
 
 impl ShortcutInputs {
@@ -125,7 +161,10 @@ impl ShortcutInputs {
                 .collect(),
             agent_directories: sessions
                 .iter()
-                .map(|session| session.directory().to_string())
+                .map(|session| AgentDirectory {
+                    path: session.directory().to_string(),
+                    kind: OccupantKind::of(&session.workspace),
+                })
                 .collect(),
         }
     }
@@ -168,17 +207,20 @@ pub(crate) fn project_shortcuts_with_home(
             let folder = Path::new(&project.path);
             // Missing is asked first: a folder that is gone cannot be picked
             // whatever is recorded against its path.
-            let state = if !folder.is_dir() {
-                ShortcutState::FolderMissing
-            } else if directory_occupant(
-                folder,
-                inputs.agent_directories.iter().map(String::as_str),
-            )
-            .is_some()
-            {
-                ShortcutState::AlreadyHasStandaloneAgent
+            let state = if folder.is_dir() {
+                directory_occupant(
+                    folder,
+                    inputs
+                        .agent_directories
+                        .iter()
+                        .map(|agent| agent.path.as_str()),
+                )
+                .and_then(|index| inputs.agent_directories.get(index))
+                .map_or(ShortcutState::Available, |agent| {
+                    ShortcutState::occupied_by(agent.kind)
+                })
             } else {
-                ShortcutState::Available
+                ShortcutState::FolderMissing
             };
             ProjectShortcut {
                 project_id: project.id.clone(),
@@ -200,21 +242,10 @@ pub(crate) fn project_shortcuts_with_home(
 /// the project's name or of its path. `needle` is expected trimmed and
 /// lowercased; an empty one matches everything.
 ///
-/// The terminal UI's project chooser and the standalone picker's shortcut list
-/// both match through this.
+/// The terminal UI's project chooser and its standalone picker's shortcut list
+/// both match through this; the browser's list has no search.
 pub fn project_matches_query(name: &str, path: &str, needle: &str) -> bool {
     name.to_lowercase().contains(needle) || path.to_lowercase().contains(needle)
-}
-
-/// The rows of `rows` that match `query`, as indices into it, in order. The
-/// query is trimmed and lowercased here.
-pub fn matching_shortcuts(rows: &[ProjectShortcut], query: &str) -> Vec<usize> {
-    let needle = query.trim().to_lowercase();
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| project_matches_query(&row.name, &row.path, &needle))
-        .map(|(index, _)| index)
-        .collect()
 }
 
 #[cfg(test)]
@@ -270,9 +301,16 @@ mod tests {
     fn no_projects_means_no_rows() {
         let inputs = ShortcutInputs {
             projects: Vec::new(),
-            agent_directories: vec!["/somewhere".to_string()],
+            agent_directories: vec![agent("/somewhere", OccupantKind::Standalone)],
         };
         assert_eq!(project_shortcuts_with_home(&inputs, None).rows, Vec::new());
+    }
+
+    fn agent(path: impl Into<String>, kind: OccupantKind) -> AgentDirectory {
+        AgentDirectory {
+            path: path.into(),
+            kind,
+        }
     }
 
     #[test]
@@ -282,7 +320,7 @@ mod tests {
         let inputs = ShortcutInputs {
             projects: vec![project("g", "gone", &gone)],
             // Even with an agent recorded there, missing is what the row says.
-            agent_directories: vec![gone.to_string_lossy().into_owned()],
+            agent_directories: vec![agent(gone.to_string_lossy(), OccupantKind::Standalone)],
         };
 
         let list = project_shortcuts_with_home(&inputs, None);
@@ -310,7 +348,7 @@ mod tests {
         ] {
             let inputs = ShortcutInputs {
                 projects: vec![project("t", "taken", &taken), project("f", "free", &free)],
-                agent_directories: vec![agent_directory.clone()],
+                agent_directories: vec![agent(agent_directory.clone(), OccupantKind::Standalone)],
             };
             let list = project_shortcuts_with_home(&inputs, None);
             assert_eq!(
@@ -322,29 +360,57 @@ mod tests {
                 "agent recorded at {agent_directory}"
             );
             assert_eq!(list.rows[0].reason, Some("already has a standalone agent"));
+            assert!(!list.rows[0].state.is_pickable());
+            assert!(list.rows[1].state.is_pickable());
         }
     }
 
+    /// A project added from a linked worktree a managed agent works in: the
+    /// row is greyed out all the same, and does not call that agent standalone.
     #[test]
-    fn a_query_matches_the_name_or_the_path_whatever_its_case() {
-        let row = |name: &str, path: &str| ProjectShortcut {
-            project_id: name.to_string(),
-            name: name.to_string(),
-            folder_label: path.to_string(),
-            path: path.to_string(),
-            state: ShortcutState::Available,
-            reason: None,
+    fn a_folder_a_managed_agent_works_in_says_so() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let worktree = root.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("mkdir");
+        let inputs = ShortcutInputs {
+            projects: vec![project("w", "worktree", &worktree)],
+            agent_directories: vec![agent(worktree.to_string_lossy(), OccupantKind::Managed)],
         };
-        let rows = vec![
-            row("Website", "/srv/site"),
-            row("api", "/home/ada/Work/api"),
-            row("notes", "/home/ada/notes"),
-        ];
 
-        assert_eq!(matching_shortcuts(&rows, "  WEB "), vec![0]);
-        assert_eq!(matching_shortcuts(&rows, "work"), vec![1]);
-        assert_eq!(matching_shortcuts(&rows, "ada"), vec![1, 2]);
-        assert_eq!(matching_shortcuts(&rows, ""), vec![0, 1, 2]);
-        assert_eq!(matching_shortcuts(&rows, "zzz"), Vec::<usize>::new());
+        let list = project_shortcuts_with_home(&inputs, None);
+
+        assert_eq!(list.rows[0].state, ShortcutState::AlreadyHasAgent);
+        assert_eq!(list.rows[0].reason, Some("already has an agent"));
+        assert!(!list.rows[0].state.is_pickable());
+    }
+
+    /// The snapshot reads each agent's kind off its workspace.
+    #[test]
+    fn the_snapshot_tells_a_managed_agent_from_a_standalone_one() {
+        use crate::engine::test_support::{sample_session, sample_standalone_session};
+        let inputs = ShortcutInputs::snapshot(
+            &[],
+            &[
+                sample_session("m", "p", "feat"),
+                sample_standalone_session("s", "/srv/notes"),
+            ],
+        );
+        let kinds: Vec<OccupantKind> = inputs
+            .agent_directories
+            .iter()
+            .map(|agent| agent.kind)
+            .collect();
+        assert_eq!(kinds, vec![OccupantKind::Managed, OccupantKind::Standalone]);
+        assert_eq!(inputs.agent_directories[1].path, "/srv/notes");
+    }
+
+    /// The rule the terminal UI's choosers filter by. The needle arrives
+    /// trimmed and lowercased, as `SearchableList` hands it over.
+    #[test]
+    fn a_query_matches_the_name_or_the_path_whatever_their_case() {
+        assert!(project_matches_query("Website", "/srv/site", "web"));
+        assert!(project_matches_query("api", "/home/ada/Work/api", "work"));
+        assert!(project_matches_query("notes", "/home/ada/notes", ""));
+        assert!(!project_matches_query("notes", "/home/ada/notes", "zzz"));
     }
 }
