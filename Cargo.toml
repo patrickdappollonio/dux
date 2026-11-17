@@ -12,6 +12,11 @@ resolver = "3"
 # (dux-core's display_version) can never show different versions.
 [workspace.package]
 version = "0.1.0"
+# The oldest Rust that builds dux. The workspace tracks current stable (see
+# CONTRIBUTING.md), so this moves up whenever the code starts using something
+# newer; it is here so an older toolchain says which version it needs rather
+# than failing on whichever newer API it meets first.
+rust-version = "1.100"
 
 [workspace.dependencies]
 anyhow = "1.0.98"

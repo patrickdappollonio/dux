@@ -1,6 +1,7 @@
 [package]
 name = "dux-journeys"
 version.workspace = true
+rust-version.workspace = true
 edition = "2024"
 publish = false
 description = "Container-based user journeys for dux's web server: the dux binary in Docker, driven over HTTP, WebSockets and a real browser."

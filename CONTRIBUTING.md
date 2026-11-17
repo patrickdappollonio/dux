@@ -8,7 +8,9 @@ the tenet wins.
 ## What you need
 
 - **Rust** (stable). The workspace tracks whatever `dtolnay/rust-toolchain@stable`
-  installs in CI, so a current stable toolchain is the right target.
+  installs in CI, so a current stable toolchain is the right target. The oldest
+  version that builds it is the `rust-version` in the root `Cargo.toml`; with an
+  older one, `rustup update stable` first.
 - **Node 22 or newer** plus npm. The web UI is a React app that is **compiled into
   the `dux` binary**, so a normal `cargo build` builds it. If you have no Node
   toolchain, see [Building without the web UI](#building-without-the-web-ui).
