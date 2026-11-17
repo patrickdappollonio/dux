@@ -110,6 +110,28 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     expect(createStandaloneAgent).toHaveBeenCalledWith("/home/u/code/site", "")
   })
 
+  it("brings the name field into view once a folder is chosen, without taking focus", async () => {
+    const scrolled: Element[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this)
+    }
+    try {
+      seed(SHORTCUTS)
+      render(<StandaloneAgentDialog />)
+      expect(scrolled).toEqual([])
+      await pick(shortcutRows()[0])
+      const nameBlock = document.querySelector("[data-standalone-name]")
+      expect(nameBlock).not.toBeNull()
+      expect(scrolled).toEqual([nameBlock])
+      // The name field is revealed, not focused: on a phone, focus would
+      // raise the keyboard.
+      expect(nameBlock!.contains(document.activeElement)).toBe(false)
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
+
   it("targets nothing when the explorer never reached the project's folder", async () => {
     seed(SHORTCUTS)
     browseLands = false

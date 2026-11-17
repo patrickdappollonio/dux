@@ -43,15 +43,17 @@ export function ProjectShortcutList({
           Your projects
         </div>
         {/* Capped and scrolling by itself, so a long project list takes the
-            explorer's room only up to a point. Wherever the cap happens to
-            cut, mid-row or on a row's edge, the fade is what says more rows
-            follow. */}
+            explorer's room only up to a point. The cap is about three and a
+            half coarse rows on a phone or any coarse pointer (44px each), and a
+            little under four compact rows with a fine pointer, so the next
+            row peeks; a taller two-line row can move the cut, and the fade is
+            what says more rows follow wherever it lands. */}
         <div
           ref={ref}
           data-project-shortcut-rows
           data-more-above={moreAbove ? "" : undefined}
           data-more-below={moreBelow ? "" : undefined}
-          className="dux-list-fade flex max-h-[8.75rem] flex-col overflow-y-auto"
+          className="dux-list-fade flex max-h-[8.75rem] flex-col overflow-y-auto max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]"
         >
           {list.rows.map((row) => (
             <button

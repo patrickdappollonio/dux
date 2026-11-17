@@ -1,8 +1,9 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { ProjectShortcutList } from "@/components/ProjectShortcutList"
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -58,6 +59,20 @@ function StandaloneAgentBrowser() {
   // path is whatever spelling the server echoed.
   const [pickedProject, setPickedProject] = useState<string | null>(null)
   const [name, setName] = useState("")
+  // Choosing a folder reveals the name field at the end of the scrolling
+  // body, which on a short screen is below the fold: bring it into view, so
+  // the choice visibly did something. Scrolling only; focus stays where it
+  // was (the field has never taken it by itself, and on a phone that would
+  // raise the keyboard). No glide under reduced motion.
+  const reducedMotion = usePrefersReducedMotion()
+  const nameBlock = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (selected === null) return
+    nameBlock.current?.scrollIntoView?.({
+      block: "nearest",
+      behavior: reducedMotion ? "auto" : "smooth",
+    })
+  }, [selected, reducedMotion])
   const invalidName = name !== "" && !isValidAgentName(name)
 
   function handleCreate() {
@@ -136,7 +151,11 @@ function StandaloneAgentBrowser() {
         />
 
         {selected ? (
-          <div className="flex shrink-0 flex-col gap-2">
+          <div
+            ref={nameBlock}
+            data-standalone-name
+            className="flex shrink-0 flex-col gap-2 pb-px"
+          >
             {/* Empty is the ordinary case: the server names the agent after the
               * folder. No branch is created, but the name follows the same rules
               * as every other agent's, so the field is the New agent dialog's.
