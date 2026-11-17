@@ -120,7 +120,7 @@ function terminalNumber(label: string): number | null {
 
 // The terminal's display title: a running foreground app's command name alone
 // ("vim"), falling back to the stable label the moment it exits, and
-// disambiguated by the terminal's counter number ("vim (#1)") when a sibling
+// disambiguated by the terminal's number ("vim (#1)") when a sibling
 // runs the same app. `siblings` is the set shown together and includes `t`,
 // which is skipped by id. Twin of core's
 // `dux_core::terminal_title::terminal_title`, which owns the decision and is

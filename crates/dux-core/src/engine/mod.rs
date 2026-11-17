@@ -423,7 +423,9 @@ pub struct Engine {
     /// from them (the terminal UI's row layout) can tell a new read from the
     /// one it built from without comparing the lists.
     pub changed_files_revision: u64,
-    /// How many terminals have been opened, which numbers the next one.
+    /// How many terminals have been opened, which numbers the next one's id
+    /// (`term-N`) and its default drag order. The default NAME is numbered per
+    /// owner instead, by `Engine::default_terminal_label`.
     pub terminal_counter: usize,
     /// Whether the GitHub integration is on.
     pub github_integration_enabled: bool,

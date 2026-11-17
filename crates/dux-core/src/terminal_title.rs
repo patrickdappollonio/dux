@@ -49,7 +49,7 @@ fn terminal_number(label: &str) -> Option<u64> {
 /// one exception is COLLISION: when another terminal in `sibling_foreground_cmds`
 /// (the RAW foregrounds of the other terminals shown together, owner-scoped)
 /// normalizes to the same app, both would read identically, so disambiguate with
-/// the terminal's own counter number ("vim (#1)", "vim (#2)"). Deterministic and
+/// the terminal's own number, unique within its owner ("vim (#1)", "vim (#2)"). Deterministic and
 /// identical on every surface.
 pub fn terminal_title(
     label: &str,

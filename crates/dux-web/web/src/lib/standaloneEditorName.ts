@@ -4,9 +4,9 @@
 // second line's owner text.
 
 import { chip, prose, type Prose } from "./prose"
-import { matchWireOwner } from "./terminalOwner"
+import { matchWireOwner, ownerRefFromWire } from "./terminalOwner"
 import { sessionLabel } from "./agentWorkspace"
-import { terminalTitle } from "./terminals"
+import { terminalsForOwner, terminalTitle } from "./terminals"
 import type { EditorRoot } from "./editorRoot"
 import type { Spine } from "./workspaceApi"
 
@@ -39,7 +39,9 @@ export function standaloneEditorName(
   if (!terminal) {
     return { glyph: "terminal", name: root.terminalId, detail: null }
   }
-  const siblings = spine?.terminals ?? []
+  // Disambiguated among its own owner's terminals, as every other surface does: terminal
+  // numbers are per owner, so another owner's "Terminal 1" is a different terminal.
+  const siblings = terminalsForOwner(spine?.terminals ?? [], ownerRefFromWire(terminal.owner))
   const detail = matchWireOwner<string | null>(terminal.owner, {
     session: (owner) => {
       const session = spine?.sessions.find((s) => s.id === owner.session_id)

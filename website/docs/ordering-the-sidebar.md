@@ -34,6 +34,12 @@ A project terminal's second line names its project. A standalone terminal has no
 it names the directory it opened in instead, shortened with `~`. Whichever it
 shows is what the sidebar search matches on.
 
+A new terminal is named `Terminal 1`, `Terminal 2` and so on, counted among the terminals of
+whatever it belongs to: an agent's first terminal is `Terminal 1` however many terminals are
+open elsewhere, and the same goes for each project and for standalone terminals. It takes the
+lowest number free there, so closing `Terminal 1` and opening another gives you `Terminal 1`
+again.
+
 Typing in the filter narrows the list to the rows that match, with the matching text
 picked out.
 

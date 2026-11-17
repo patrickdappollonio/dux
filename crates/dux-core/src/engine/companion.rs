@@ -167,6 +167,9 @@ impl Engine {
         // Announced before the check and kept until the session is registered
         // below, so a removal claiming the folder meanwhile either refuses
         // this spawn or waits to see its session.
+        // Chosen before the spawn so the process registry's description of
+        // the shell names it exactly as the row will.
+        let label = self.default_terminal_label(&owner);
         let _spawning = self
             .spawn_gate()
             .enter(cwd)
@@ -214,7 +217,7 @@ impl Engine {
             client.set_leader_exit_hook(self.process_registry.leader_exit_hook(process));
             let registry = self.process_registry.clone();
             client.set_recorded_members(Box::new(move || registry.survivors_of(&[process])));
-            let name = format!("Terminal {}", self.terminal_counter + 1);
+            let name = &label;
             let what = match owner.as_ref() {
                 crate::model::TerminalOwnerRef::Session(session_id) => format!(
                     "terminal \"{name}\" of agent \"{}\"",
@@ -238,7 +241,6 @@ impl Engine {
         }
         self.terminal_counter += 1;
         let terminal_id = format!("term-{}", self.terminal_counter);
-        let label = format!("Terminal {}", self.terminal_counter);
         // A new list row lands at the end of the list, after the last agent in
         // the stored order. An agent's own terminal is not a list row.
         let list_after = match owner.as_ref() {
@@ -266,6 +268,26 @@ impl Engine {
         );
 
         Ok((terminal_id, label))
+    }
+
+    /// The name a new terminal of `owner` gets: "Terminal N", where N is the
+    /// smallest positive number no live terminal of the same owner holds under
+    /// that default form. An agent's first terminal is therefore "Terminal 1"
+    /// whatever exists elsewhere, and a closed terminal's number is reused. A
+    /// terminal whose label is anything but exactly the default form holds no
+    /// number. Every surface opens terminals through the engine, so this is
+    /// the one place a default name is minted.
+    fn default_terminal_label(&self, owner: &TerminalOwner) -> String {
+        let taken: std::collections::HashSet<u64> = self
+            .companion_terminals
+            .values()
+            .filter(|terminal| &terminal.owner == owner)
+            .filter_map(|terminal| default_label_number(&terminal.label))
+            .collect();
+        // Among the first `taken.len() + 1` numbers at least one is free.
+        let bound = u64::try_from(taken.len()).map_or(u64::MAX, |len| len.saturating_add(1));
+        let number = (1..=bound).find(|n| !taken.contains(n)).unwrap_or(bound);
+        format!("Terminal {number}")
     }
 
     /// Put a project or standalone terminal's row right after `after_agent` in
@@ -453,6 +475,14 @@ impl Engine {
         let session_id = self.owning_session_for_tab(&tab_id)?;
         self.session_by_id(&session_id)
     }
+}
+
+/// The number in a label of exactly the default form "Terminal N", N a
+/// positive integer written without leading zeros; `None` for any other label.
+fn default_label_number(label: &str) -> Option<u64> {
+    let digits = label.strip_prefix("Terminal ")?;
+    let number: u64 = digits.parse().ok()?;
+    (number > 0 && number.to_string() == digits).then_some(number)
 }
 
 #[cfg(test)]
@@ -1369,6 +1399,100 @@ mod tests {
         assert!(
             engine.companion_terminals.is_empty(),
             "no terminal should have been registered"
+        );
+    }
+
+    /// An engine with two agents and one project, all on real directories, and
+    /// `cat` as the terminal so spawning is cheap.
+    fn engine_with_two_agents_and_a_project() -> (
+        crate::engine::Engine,
+        crate::test_scratch::ScratchDir,
+        tempfile::TempDir,
+    ) {
+        let (mut engine, tmp) = test_engine();
+        let dir = tempfile::tempdir().expect("worktree dir");
+        let path = dir.path().to_string_lossy().to_string();
+        engine.projects.push(sample_project("p1", &path));
+        for id in ["s1", "s2"] {
+            let mut session = sample_session(id, "p1", id);
+            session
+                .workspace
+                .as_managed_mut()
+                .expect("managed test session")
+                .worktree_path = path.clone();
+            engine.sessions.push(session);
+        }
+        engine.config.terminal.command = "cat".to_string();
+        engine.config.terminal.args = vec![];
+        (engine, tmp, dir)
+    }
+
+    fn label_of(created: anyhow::Result<(String, String)>) -> String {
+        created.expect("terminal spawns").1
+    }
+
+    #[test]
+    fn a_new_terminal_is_numbered_within_its_own_owner() {
+        let (mut engine, _tmp, _dir) = engine_with_two_agents_and_a_project();
+
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s1", 24, 80)),
+            "Terminal 1"
+        );
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s1", 24, 80)),
+            "Terminal 2"
+        );
+        // Terminals elsewhere do not count: every owner's first is number one.
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s2", 24, 80)),
+            "Terminal 1"
+        );
+        assert_eq!(
+            label_of(engine.create_project_terminal("p1", 24, 80)),
+            "Terminal 1"
+        );
+        assert_eq!(
+            label_of(engine.create_standalone_terminal(24, 80)),
+            "Terminal 1"
+        );
+        assert_eq!(
+            label_of(engine.create_standalone_terminal(24, 80)),
+            "Terminal 2"
+        );
+    }
+
+    #[test]
+    fn a_new_terminal_takes_the_lowest_free_default_number_and_ignores_custom_names() {
+        let (mut engine, _tmp, _dir) = engine_with_two_agents_and_a_project();
+        let (first, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("first terminal");
+        let (second, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("second terminal");
+
+        // Closing Terminal 1 frees its number for the next one.
+        engine.companion_terminals.remove(&first);
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s1", 24, 80)),
+            "Terminal 1"
+        );
+
+        // A renamed terminal no longer holds its number, and a custom name that
+        // merely contains a number never claims one.
+        engine
+            .companion_terminals
+            .get_mut(&second)
+            .expect("second terminal")
+            .label = "Terminal 3 dev server".to_string();
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s1", 24, 80)),
+            "Terminal 2"
+        );
+        assert_eq!(
+            label_of(engine.create_companion_terminal("s1", 24, 80)),
+            "Terminal 3"
         );
     }
 }
