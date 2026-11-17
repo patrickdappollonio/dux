@@ -910,6 +910,49 @@ be a git repository, and dux initializes nothing in it.
 > swallow that chord before dux ever sees it; the palette command still works there, and
 > so does rebinding the key to something your terminal passes through.
 
+### Starting in a project's folder
+
+Often the folder you are after is one dux already knows: a project's. So the picker lists
+your projects above the folder browser, each with its name and its folder. Pick one and
+the browser goes to that project's folder, exactly as if you had browsed there yourself.
+It is a shortcut and nothing more: you can still browse on to somewhere else.
+
+With no projects there is no list, and the picker is the folder browser alone.
+
+In the browser the list is headed **Your projects**. Picking a row selects that folder,
+ready for **Create agent**.
+
+![The New standalone agent dialog: three projects listed over the folder explorer, one picked so the explorer shows its folder as the place the agent will run, and one greyed out with "already has a standalone agent" beside it.](/screens/standalone-project-shortcuts.png)
+
+In the terminal UI the project list sits on top and has the keys when the picker opens.
+It has its own search, and one key moves between the list and the folder browser; each
+half's footer names the keys it takes, or just the one that reaches it. Picking a project
+moves the folder browser there and hands it the keys, so you finish the way you would
+after browsing by hand.
+
+![The terminal UI standalone agent picker: a project list on top with one project greyed out and marked "already has a standalone agent", a line saying only the folder is used, and the folder browser underneath.](/screens/tui-standalone-project-shortcuts.png)
+
+> [!IMPORTANT]
+> A shortcut uses the project's **folder only**. What you get is an ordinary standalone
+> agent, not one of the project's agents:
+>
+> - The project's environment variables are **not** used. The agent gets your global
+>   environment and nothing else.
+> - The project's startup command does **not** run.
+> - There is no branch and no worktree: the agent works directly in the project's own
+>   folder, on whatever is checked out there.
+>
+> For an agent that has all of those, [create one in the project](#creating-a-new-agent-from-scratch)
+> instead.
+
+A project that cannot be picked stays in the list, greyed out, and says why:
+
+- **already has a standalone agent:** a standalone agent is running in that folder, and
+  there is [one per folder](#one-standalone-agent-per-folder).
+- **already has an agent:** the folder is the working copy of an agent dux manages, which
+  happens when the project was added from a worktree an agent works in.
+- **folder missing:** the project's folder is not on disk.
+
 ### Naming a standalone agent
 
 Both surfaces then ask what to call the agent. The name is optional, and backing out of
