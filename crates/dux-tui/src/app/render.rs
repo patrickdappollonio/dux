@@ -7115,28 +7115,6 @@ impl App {
         let Some(chooser) = chooser else {
             return (None, area);
         };
-        // Sized to every project, not the filtered few, so a query never
-        // moves the explorer. Around the rows: the header (two borders, the
-        // count line and the wrapped caption) and the list's bottom border.
-        //
-        // The explorer keeps half the modal, except that the chooser takes
-        // what it needs to show its caption whole over one project row, down
-        // to the explorer's own floor (a border, two rows, a border): the
-        // caption is the sentence that says what a shortcut does not bring.
-        let rows = u16::try_from(chooser.entries.len()).unwrap_or(u16::MAX);
-        let chrome = 4 + usize_to_u16_wrapping(
-            Self::chooser_caption_rows(chooser.caption, area.width.saturating_sub(2)).len(),
-        );
-        let limit = (area.height / 2).max(
-            chrome
-                .saturating_add(1)
-                .min(area.height.saturating_sub(EXPLORER_FLOOR)),
-        );
-        let height = rows.saturating_add(chrome).min(limit);
-        let [top, rest] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(height), Constraint::Min(EXPLORER_FLOOR)])
-            .areas(area);
         // A count is stated only once every folder has been checked: a
         // number given before that could drop a moment later, and after a
         // failed check there is none to give.
@@ -7152,10 +7130,36 @@ impl App {
                 .iter()
                 .filter(|entry| entry.is_pickable())
                 .count();
-            format!(" Pick a project to browse to its folder ({pickable} available).")
+            format!("Pick a project to browse to its folder ({pickable} available).")
         } else {
-            " Pick a project to browse to its folder.".to_string()
+            "Pick a project to browse to its folder.".to_string()
         };
+        // Sized to every project, not the filtered few, so a query never
+        // moves the explorer. Around the rows: the header (two borders, the
+        // wrapped count line and the wrapped caption) and the list's bottom
+        // border.
+        //
+        // The explorer keeps half the modal, except that the chooser takes
+        // what it needs to show its count line and its caption whole over one
+        // project row, down to the explorer's own floor (a border, two rows,
+        // a border): the caption is the sentence that says what a shortcut
+        // does not bring.
+        let rows = u16::try_from(chooser.entries.len()).unwrap_or(u16::MAX);
+        let header_width = area.width.saturating_sub(2);
+        let chrome = 3 + usize_to_u16_wrapping(
+            Self::chooser_header_rows(&count_line, header_width).len()
+                + Self::chooser_header_rows(chooser.caption, header_width).len(),
+        );
+        let limit = (area.height / 2).max(
+            chrome
+                .saturating_add(1)
+                .min(area.height.saturating_sub(EXPLORER_FLOOR)),
+        );
+        let height = rows.saturating_add(chrome).min(limit);
+        let [top, rest] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(height), Constraint::Min(EXPLORER_FLOOR)])
+            .areas(area);
         let visible = chooser.visible();
         let hint_width = top.width.saturating_sub(2);
         let hint = if !chooser.focused {
@@ -8655,7 +8659,7 @@ impl App {
             area,
             &ProjectChooserView {
                 title: intent.title(),
-                count_line: format!(" Pick a project to continue ({} available).", entries.len()),
+                count_line: format!("Pick a project to continue ({} available).", entries.len()),
                 caption: None,
                 rows: ChooserRows::Projects,
                 entries,
@@ -8690,16 +8694,17 @@ impl App {
     ) -> (Option<Rect>, PickerListLayout) {
         let list = view.list;
         // The header is the count line (or the search field) over the
-        // caption, which wraps to the width rather than being cut.
-        let (caption, caption_offset) = self.chooser_header_caption(view, area);
-        let header_rows = usize_to_u16_wrapping(caption.len()) + caption_offset;
+        // caption, both wrapped to the width rather than cut.
+        let (count, caption) = self.chooser_header_lines(view, area);
+        let count_rows = usize_to_u16_wrapping(count.len());
+        let header_rows = count_rows + usize_to_u16_wrapping(caption.len());
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(header_rows + 2), Constraint::Min(2)])
             .areas(area);
 
         // Header row: the `/`-search input while searching (or once a
-        // query has been typed), else a plain count line.
+        // query has been typed), else the count line.
         let details_block = self.themed_overlay_block(view.title);
         // With the keys, the header keeps the border the shared modal chrome
         // gives it, refusal blink included.
@@ -8719,6 +8724,8 @@ impl App {
         // is published whenever the filter is the thing being drawn.
         let filter_input_rect = list.is_filtering().then_some(first_row);
         if list.is_filtering() {
+            // The field takes the count line's first row and leaves the rest
+            // of its rows empty, so a search never moves the rows below.
             Paragraph::new(render_single_line_field(
                 "/ ",
                 &list.filter.text,
@@ -8733,17 +8740,13 @@ impl App {
                 first_row.width,
             ))
             .render(first_row, frame.buffer_mut());
-        } else if caption_offset == 1 {
-            Paragraph::new(Line::from(Span::styled(
-                view.count_line.clone(),
-                Style::default().fg(self.theme.hint_desc_fg),
-            )))
-            .render(first_row, frame.buffer_mut());
+        } else {
+            Paragraph::new(count).render(details_inner, frame.buffer_mut());
         }
         Paragraph::new(caption).render(
             Rect {
-                y: details_inner.y.saturating_add(caption_offset),
-                height: details_inner.height.saturating_sub(caption_offset),
+                y: details_inner.y.saturating_add(count_rows),
+                height: details_inner.height.saturating_sub(count_rows),
                 ..details_inner
             },
             frame.buffer_mut(),
@@ -8794,38 +8797,56 @@ impl App {
         (filter_input_rect, rendered)
     }
 
-    /// The caption rows a chooser's header draws in `area`, and the row they
-    /// start on under the header's top border: 1, below the count line, or 0
-    /// when they take its place.
+    /// The count line's rows and the caption's rows as a chooser's header
+    /// draws them in `area`, the caption straight below the count line.
     ///
-    /// The list keeps one row and its border; the header's two borders and
-    /// its count line come out of the rest, and what is left is the
-    /// caption's. With no row left for it at all, the caption takes the count
-    /// line's place (never the search field's): of the two, it is the one
-    /// that must be read.
-    fn chooser_header_caption(
+    /// The list keeps one row and its border and the header its two borders;
+    /// what is left is shared by the two sentences, each wrapped. Where both
+    /// cannot be whole the count line gives up rows first, down to one, and
+    /// then the caption does; each ends in an ellipsis where it is cut. With
+    /// a single row left for both, the caption takes it and the count line is
+    /// not drawn (the search field always keeps its row): of the two, the
+    /// caption is the one that must be read.
+    fn chooser_header_lines(
         &self,
         view: &ProjectChooserView<'_>,
         area: Rect,
-    ) -> (Vec<Line<'static>>, u16) {
-        let Some(caption) = view.caption else {
-            return (Vec::new(), 1);
-        };
-        let room = usize::from(area.height.saturating_sub(5));
+    ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let room = usize::from(area.height.saturating_sub(4));
         let width = area.width.saturating_sub(2);
-        if room == 0 && !view.list.is_filtering() {
-            (self.chooser_caption_lines(caption, width, 1), 0)
-        } else {
-            (self.chooser_caption_lines(caption, width, room), 1)
+        let count_style = Style::default().fg(self.theme.hint_desc_fg);
+        let Some(caption) = view.caption else {
+            let count =
+                Self::chooser_header_text(&view.count_line, width, room.max(1), count_style);
+            return (count, Vec::new());
+        };
+        let caption_style = Style::default().fg(self.theme.hint_dim_desc_fg);
+        if room <= 1 && !view.list.is_filtering() {
+            let caption = Self::chooser_header_text(caption, width, 1, caption_style);
+            return (Vec::new(), caption);
         }
+        let caption_wants = Self::chooser_header_rows(caption, width).len();
+        let count = Self::chooser_header_text(
+            &view.count_line,
+            width,
+            room.saturating_sub(caption_wants).max(1),
+            count_style,
+        );
+        let caption = Self::chooser_header_text(
+            caption,
+            width,
+            room.saturating_sub(count.len()),
+            caption_style,
+        );
+        (count, caption)
     }
 
-    /// A chooser's caption wrapped for a header `width` columns wide, one row
-    /// of plain text each, before the leading space the header draws them
-    /// with.
-    fn chooser_caption_rows(caption: &str, width: u16) -> Vec<String> {
+    /// A sentence of a chooser's header wrapped for a header `width` columns
+    /// wide, one row of plain text each, before the leading space the header
+    /// draws them with.
+    fn chooser_header_rows(text: &str, width: u16) -> Vec<String> {
         wrap_styled_lines(
-            &[Line::from(caption.to_string())],
+            &[Line::from(text.to_string())],
             usize::from(width).saturating_sub(2),
         )
         .into_iter()
@@ -8838,16 +8859,17 @@ impl App {
         .collect()
     }
 
-    /// The caption as the header draws it in at most `max_rows` rows: whole
-    /// when it fits, and otherwise cut to the rows there are with the last one
-    /// ending in an ellipsis, so it never just stops mid-sentence.
-    fn chooser_caption_lines(
-        &self,
-        caption: &str,
+    /// A sentence of a chooser's header as it is drawn in at most `max_rows`
+    /// rows: whole when it fits, and otherwise cut to the rows there are with
+    /// the last one ending in an ellipsis, so it never just stops
+    /// mid-sentence.
+    fn chooser_header_text(
+        text: &str,
         width: u16,
         max_rows: usize,
+        style: Style,
     ) -> Vec<Line<'static>> {
-        let mut rows = Self::chooser_caption_rows(caption, width);
+        let mut rows = Self::chooser_header_rows(text, width);
         if rows.len() > max_rows {
             let cut = rows.split_off(max_rows.saturating_sub(1));
             if max_rows > 0 {
@@ -8857,7 +8879,6 @@ impl App {
                 ));
             }
         }
-        let style = Style::default().fg(self.theme.hint_dim_desc_fg);
         rows.into_iter()
             .map(|row| Line::from(Span::styled(format!(" {row}"), style)))
             .collect()

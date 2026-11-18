@@ -838,6 +838,46 @@ fn the_caption_is_whole_or_visibly_cut_on_short_and_narrow_screens() {
     );
 }
 
+/// The header's first line follows the caption's rules: on a narrow screen it
+/// wraps, keeping the count of available projects, and where there is no row
+/// to wrap into it ends in an ellipsis rather than stopping at the border.
+#[test]
+fn the_count_line_wraps_or_is_visibly_cut_on_narrow_screens() {
+    for (width, height) in [(60, 20), (50, 20)] {
+        let mut app = test_app(default_bindings());
+        open_with_rows(&mut app, mixed_rows());
+        let painted = rows_of(&buffer(&mut app, width, height)).join("\n");
+        assert!(
+            painted.contains("available)."),
+            "the count line is cut at {width}x{height}:\n{painted}"
+        );
+        assert!(
+            painted.contains("Uses the") && painted.contains("command."),
+            "the caption is cut at {width}x{height}:\n{painted}"
+        );
+        assert!(
+            painted.contains("taken") || painted.contains("free") || painted.contains("gone"),
+            "no project row is left at {width}x{height}:\n{painted}"
+        );
+        assert!(
+            painted.contains("Standalone Agent In"),
+            "the explorer is gone at {width}x{height}:\n{painted}"
+        );
+    }
+
+    let mut app = test_app(default_bindings());
+    open_with_rows(&mut app, mixed_rows());
+    let painted = rows_of(&buffer(&mut app, 50, 14));
+    let count = painted
+        .iter()
+        .find(|row| row.contains("Pick a project"))
+        .unwrap_or_else(|| panic!("no count line at 50x14:\n{}", painted.join("\n")));
+    assert!(
+        count.contains('…'),
+        "the count line stops at the border at 50x14: {count}"
+    );
+}
+
 /// The header states how many projects are available only once their folders
 /// have been checked: a number given before that could drop a moment later.
 #[test]
