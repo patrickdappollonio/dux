@@ -16,7 +16,6 @@ use ratatui::widgets::{Block, Borders, ListItem, Paragraph};
 
 use super::components::ellipsis::{ellipsize_spans, fit_to_width, pad_to_width};
 use super::components::{Hint, PickerList, labelled_name, modal_hint_line};
-use super::render::centered_rect;
 use super::{App, OverlayMouseLayout, PromptState, PullRequestsPrompt, PullRequestsView};
 use crate::keybindings::{Action, BindingScope};
 use crate::model::{AgentPr, PrKey, PrState};
@@ -499,7 +498,7 @@ impl App {
             return;
         }
         self.render_dim_overlay(frame);
-        let area = centered_rect(84, 70, frame.area());
+        let area = self.centered_modal(84, 70, frame.area());
         self.clear_overlay_area(frame, area);
 
         let rows = self.pull_request_modal_rows(&prompt);

@@ -6568,7 +6568,7 @@ impl App {
 
     fn render_help(&mut self, frame: &mut Frame<'_>) {
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 70, frame.area());
+        let area = self.centered_modal(72, 70, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer_block = self.themed_overlay_block("Help");
@@ -6666,7 +6666,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let popup = centered_rect(72, 40, frame.area());
+        let popup = self.centered_modal(72, 40, frame.area());
         self.clear_overlay_area(frame, popup);
         let commands = self.filtered_palette_commands(&input.text);
         let items = {
@@ -6764,7 +6764,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(66, 55, frame.area());
+        let area = self.centered_modal(66, 55, frame.area());
         self.clear_overlay_area(frame, area);
 
         let move_down = self.bindings.label_for(Action::MoveDown);
@@ -6905,7 +6905,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(60, 60, frame.area());
+        let area = self.centered_modal(60, 60, frame.area());
         self.clear_overlay_area(frame, area);
 
         let move_down = self.bindings.label_for(Action::MoveDown);
@@ -7008,7 +7008,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let full_area = centered_rect(72, 70, frame.area());
+        let full_area = self.centered_modal(72, 70, frame.area());
         self.clear_overlay_area(frame, full_area);
         // The standalone picker leads with the user's projects as folder
         // shortcuts, drawn by the project chooser's own renderer; the explorer
@@ -7442,7 +7442,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 42, frame.area());
+        let area = self.centered_modal(72, 42, frame.area());
         self.clear_overlay_area(frame, area);
 
         let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
@@ -7549,7 +7549,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 42, frame.area());
+        let area = self.centered_modal(72, 42, frame.area());
         self.clear_overlay_area(frame, area);
 
         let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
@@ -7638,7 +7638,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(64, 60, frame.area());
+        let area = self.centered_modal(64, 60, frame.area());
         self.clear_overlay_area(frame, area);
 
         let bottom_spans = self.provider_picker_footer(area.width.saturating_sub(2));
@@ -7786,7 +7786,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(64, 34, frame.area());
+        let area = self.centered_modal(64, 34, frame.area());
         self.clear_overlay_area(frame, area);
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
@@ -7872,7 +7872,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(78, 58, frame.area());
+        let area = self.centered_modal(78, 58, frame.area());
         self.clear_overlay_area(frame, area);
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
@@ -8134,7 +8134,7 @@ impl App {
         let selected = (!actions.is_empty()).then(|| prompt.selected.min(actions.len() - 1));
         let folder = prompt.folder.clone();
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 50, frame.area());
+        let area = self.centered_modal(72, 50, frame.area());
         self.clear_overlay_area(frame, area);
 
         let label_style = Style::default().fg(self.theme.hint_desc_fg);
@@ -8471,7 +8471,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(78, 58, frame.area());
+        let area = self.centered_modal(78, 58, frame.area());
         self.clear_overlay_area(frame, area);
 
         let confirm_key = self.bindings.label_for(Action::Confirm);
@@ -8638,7 +8638,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 58, frame.area());
+        let area = self.centered_modal(72, 58, frame.area());
         self.clear_overlay_area(frame, area);
 
         // Which entries survive the `/` filter (indices into `entries`).
@@ -9086,7 +9086,7 @@ impl App {
         let prompt = prompt.clone();
         let rows = self.project_action_rows(&prompt.target);
         self.render_dim_overlay(frame);
-        let area = centered_rect(72, 70, frame.area());
+        let area = self.centered_modal(72, 70, frame.area());
         self.clear_overlay_area(frame, area);
 
         let text_style = Style::default().fg(self.theme.text_fg);
@@ -9229,7 +9229,7 @@ impl App {
         };
         let prompt = (**prompt).clone();
         self.render_dim_overlay(frame);
-        let area = centered_rect(76, 70, frame.area());
+        let area = self.centered_modal(76, 70, frame.area());
         self.clear_overlay_area(frame, area);
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
@@ -9524,7 +9524,7 @@ impl App {
         }
         let body_lines = wrap_styled_lines(&body_lines, usize::from(inner_width));
         let body_height = usize_to_u16_wrapping(body_lines.len());
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+        let area = self.centered_modal_exact(dialog_width, 2 + body_height + 3, frame.area());
         self.clear_overlay_area(frame, area);
 
         let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -9806,7 +9806,7 @@ impl App {
         self.render_dim_overlay(frame);
         // Height combines the body minimum, border, rule, and button row;
         // `centered_rect_exact` clamps it on short terminals.
-        let area = first_load::modal_area(frame.area());
+        let area = self.lifted_above_footer(first_load::modal_area(frame.area()), frame.area());
         self.clear_overlay_area(frame, area);
         let close_key = self.bindings.label_for(Action::CloseOverlay);
         let rendered = first_load::render_modal(frame, area, prompt, &self.theme, &close_key);
@@ -9849,7 +9849,7 @@ impl App {
             }
         }
         let body_height = wrapped_rows(&body_lines, inner_width);
-        let area = centered_rect_exact(dialog_width, 2 + body_height + 3, frame.area());
+        let area = self.centered_modal_exact(dialog_width, 2 + body_height + 3, frame.area());
         self.clear_overlay_area(frame, area);
 
         let close_key = self.bindings.label_for(Action::CloseOverlay);
@@ -11044,7 +11044,7 @@ impl App {
             0
         };
         let checkbox_spacing = u16::from(*branch_named);
-        let area = centered_rect_exact(
+        let area = self.centered_modal_exact(
             dialog_width,
             9 + checkbox_spacing + checkbox_height,
             frame.area(),
@@ -11266,7 +11266,7 @@ impl App {
             .checked(CheckMark::from(*randomize_name))
             .state(checkbox_state);
         let checkbox_height = checkbox.height_at(inner_width).saturating_add(1);
-        let area = centered_rect_exact(dialog_width, 17 + checkbox_height, frame.area());
+        let area = self.centered_modal_exact(dialog_width, 17 + checkbox_height, frame.area());
         let inner = self
             .open_modal_frame(frame, "Clone a Repository", area)
             .inner;
@@ -11439,7 +11439,7 @@ impl App {
         } = self.pr_clone_layout(form, &agent_name.text, inner_width);
         let review_label = PR_REVIEW_COPY_LABEL;
         let height = rows.iter().sum::<u16>().saturating_add(2);
-        let area = centered_rect_exact(dialog_width, height, frame.area());
+        let area = self.centered_modal_exact(dialog_width, height, frame.area());
         let inner = self
             .open_modal_frame(frame, "New Agent from PR", area)
             .inner;
@@ -11722,7 +11722,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let popup = centered_rect(80, 70, frame.area());
+        let popup = self.centered_modal(80, 70, frame.area());
         self.clear_overlay_area(frame, popup);
 
         // Split: content area + 1-line footer hint.
@@ -11822,7 +11822,7 @@ impl App {
         // field, so it needs four more rows than the project-first one.
         let has_project = project.is_some();
         let height = if has_project { 8 } else { 12 };
-        let area = centered_rect_exact(64, height, frame.area());
+        let area = self.centered_modal_exact(64, height, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Create Agent From PR");
@@ -11947,7 +11947,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect_exact(64, 9, frame.area());
+        let area = self.centered_modal_exact(64, 9, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Attach Pull Request");
@@ -12028,7 +12028,7 @@ impl App {
         let default_name = dux_core::git::standalone_agent_title("", &folder_path);
         let folder_label = dux_core::home_path::shorten_home(&folder_path);
         self.render_dim_overlay(frame);
-        let area = centered_rect_exact(64, 9, frame.area());
+        let area = self.centered_modal_exact(64, 9, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Name standalone agent");
@@ -12124,7 +12124,7 @@ impl App {
         self.render_dim_overlay(frame);
         // Reserve a blank row plus three button rows for misclick safety and the
         // full-text field's controls. Width must fit the complete key footer.
-        let area = centered_rect_exact(84, if is_env { 22 } else { 20 }, frame.area());
+        let area = self.centered_modal_exact(84, if is_env { 22 } else { 20 }, frame.area());
         self.clear_overlay_area(frame, area);
         let outer = self.themed_overlay_block(if is_global_env {
             "Configure Global Environment"
@@ -12405,7 +12405,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let area = centered_rect(92, 82, frame.area());
+        let area = self.centered_modal(92, 82, frame.area());
         self.clear_overlay_area(frame, area);
         let bottom_spans = self.startup_logs_footer(area.width.saturating_sub(2));
 
@@ -12710,7 +12710,7 @@ impl App {
             return;
         };
         self.render_dim_overlay(frame);
-        let popup = centered_rect(78, 72, frame.area());
+        let popup = self.centered_modal(78, 72, frame.area());
         self.clear_overlay_area(frame, popup);
 
         let visible_indices = Self::visible_kill_running_indices(prompt);
@@ -13528,7 +13528,8 @@ impl App {
             footer_spacing,
         ];
         // The rows, the frame's two border rows, and two rows for the hints.
-        let area = centered_rect_exact(dialog_width, rows.iter().sum::<u16>() + 4, frame.area());
+        let area =
+            self.centered_modal_exact(dialog_width, rows.iter().sum::<u16>() + 4, frame.area());
         self.clear_overlay_area(frame, area);
 
         let outer = self.themed_overlay_block("Name New Agent");
@@ -13954,7 +13955,7 @@ impl App {
     fn render_edit_macros(&mut self, frame: &mut Frame<'_>) {
         // Pre-compute the popup layout so we can set the display width for
         // soft-wrapping before taking the immutable borrow on self.prompt.
-        let popup = centered_rect_exact(MACRO_EDIT_POPUP.0, MACRO_EDIT_POPUP.1, frame.area());
+        let popup = self.centered_modal_exact(MACRO_EDIT_POPUP.0, MACRO_EDIT_POPUP.1, frame.area());
         {
             // Temporarily borrow prompt mutably to set the text input's
             // viewport to match the available inner area after all borders,
@@ -15091,7 +15092,7 @@ impl App {
             .saturating_sub(2 + extra_inner_rows)
             .max(1);
         let body_height = total_rows.min(max_body);
-        let area = centered_rect_exact(
+        let area = self.centered_modal_exact(
             dialog_width,
             2 + body_height + extra_inner_rows,
             frame.area(),
@@ -15185,7 +15186,7 @@ impl App {
         use ratatui::widgets::{Cell, Row, Table, TableState};
 
         self.render_dim_overlay(frame);
-        let popup = centered_rect(85, 78, frame.area());
+        let popup = self.centered_modal(85, 78, frame.area());
         self.clear_overlay_area(frame, popup);
 
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup);
@@ -15322,6 +15323,47 @@ impl App {
         let footer_h = 1 + status_lines; // hints bar + status line(s)
         let dim_h = full.height.saturating_sub(footer_h);
         Rect::new(full.x, full.y, full.width, dim_h)
+    }
+
+    /// Where a modal that asked for `wanted` is drawn: moved up, when it
+    /// would otherwise reach into the key-hint bar and the status line, until
+    /// it ends on the row above them or reaches the top of the screen. Its
+    /// size is kept.
+    ///
+    /// Modals are centered on the whole screen, and the footer below them
+    /// grows to three rows when the status wraps, so on a short terminal a
+    /// centered modal's last rows are the footer's.
+    pub(super) fn lifted_above_footer(&self, wanted: Rect, frame_area: Rect) -> Rect {
+        let floor = self.dim_overlay_area(frame_area).bottom();
+        let overflow = wanted.bottom().saturating_sub(floor);
+        Rect {
+            y: wanted.y.saturating_sub(overflow).max(frame_area.y),
+            ..wanted
+        }
+    }
+
+    /// A modal taking a share of the screen, centered on it and kept off the
+    /// key-hint bar and the status line: lifted above them, and where the
+    /// terminal is too short for that, cut to the rows above them.
+    pub(super) fn centered_modal(&self, percent_x: u16, percent_y: u16, frame_area: Rect) -> Rect {
+        let lifted =
+            self.lifted_above_footer(centered_rect(percent_x, percent_y, frame_area), frame_area);
+        let floor = self.dim_overlay_area(frame_area).bottom();
+        if floor <= lifted.y {
+            return lifted;
+        }
+        Rect {
+            height: lifted.height.min(floor - lifted.y),
+            ..lifted
+        }
+    }
+
+    /// A modal of a set size, centered on the screen and lifted above the
+    /// key-hint bar and the status line. It keeps the rows it asked for, so
+    /// on a terminal too short to hold it above the footer it still covers
+    /// the footer rather than losing its buttons.
+    pub(super) fn centered_modal_exact(&self, width: u16, height: u16, frame_area: Rect) -> Rect {
+        self.lifted_above_footer(centered_rect_exact(width, height, frame_area), frame_area)
     }
 
     pub(super) fn render_dim_overlay(&self, frame: &mut Frame<'_>) {
@@ -23798,6 +23840,41 @@ mod tests {
         let buf = terminal.backend().buffer();
         let tail: String = (26..30).map(|x| buf[(x, 1)].symbol()).collect();
         assert_eq!(tail, " 6s ");
+    }
+
+    /// A modal is centered on the whole screen, so on a short terminal with a
+    /// status that wraps it is lifted to end above the footer. Where it
+    /// already ends above the footer it stays where centering put it, and a
+    /// modal of a set size keeps its rows even when they cannot all fit.
+    #[test]
+    fn a_modal_is_lifted_above_the_footer_only_where_it_would_reach_it() {
+        let mut app = test_app(default_bindings());
+        app.status.set(
+            Instant::now(),
+            None,
+            StatusTone::Info,
+            "a status long enough to need a second row. ".repeat(4),
+        );
+        let short = Rect::new(0, 0, 80, 15);
+        let centered = centered_rect(72, 70, short);
+        let footer_top = app.dim_overlay_area(short).bottom();
+        assert!(centered.bottom() > footer_top, "{centered:?}");
+        assert_eq!(
+            app.centered_modal(72, 70, short),
+            Rect {
+                y: footer_top - centered.height,
+                ..centered
+            }
+        );
+
+        let tall = Rect::new(0, 0, 80, 24);
+        assert_eq!(
+            app.centered_modal(72, 70, tall),
+            centered_rect(72, 70, tall)
+        );
+
+        assert_eq!(app.centered_modal(72, 100, short).bottom(), footer_top);
+        assert_eq!(app.centered_modal_exact(40, 14, short).height, 14);
     }
 
     /// The footer's height is decided once per message: a counter going from

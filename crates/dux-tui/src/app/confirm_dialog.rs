@@ -44,7 +44,6 @@ use super::components::{
     button_state_for, render_scroll_view, shared_button_width, wrap_styled_lines,
 };
 use super::modal::{ModalFamily, modal_spec};
-use super::render::centered_rect_exact;
 use super::{App, PromptState};
 use crate::keybindings::{Action, BindingScope};
 use crate::theme::FocusState;
@@ -287,7 +286,7 @@ impl App {
                 .saturating_sub(below_body.saturating_add(2))
                 .max(1),
         );
-        let area = centered_rect_exact(
+        let area = self.centered_modal_exact(
             confirm_width(screen),
             body_rows.saturating_add(below_body).saturating_add(2),
             screen,

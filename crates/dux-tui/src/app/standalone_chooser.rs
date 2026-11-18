@@ -878,6 +878,34 @@ fn the_count_line_wraps_or_is_visibly_cut_on_narrow_screens() {
     );
 }
 
+/// On a short terminal the picker's own status wraps to a second row and the
+/// footer grows to three; the picker ends above it rather than drawing its last border over
+/// the key hints.
+#[test]
+fn the_picker_stays_off_the_footer_on_a_short_screen() {
+    for (width, height) in [(100, 15), (80, 15), (60, 15)] {
+        let mut app = test_app(default_bindings());
+        open_with_rows(&mut app, mixed_rows());
+        let painted = rows_of(&buffer(&mut app, width, height));
+        let (above, footer) = painted.split_at(painted.len() - 3);
+        assert!(
+            !footer[2].trim().is_empty(),
+            "the picker's own status no longer wraps at {width}x{height}:\n{}",
+            painted.join("\n")
+        );
+        assert!(
+            above.iter().any(|row| row.contains("<Tab> folders")),
+            "the picker's last row is not above the footer at {width}x{height}:\n{}",
+            painted.join("\n")
+        );
+        assert!(
+            !footer.iter().any(|row| row.contains(['╰', '╯', '│'])),
+            "the picker is drawn over the footer at {width}x{height}:\n{}",
+            painted.join("\n")
+        );
+    }
+}
+
 /// The header states how many projects are available only once their folders
 /// have been checked: a number given before that could drop a moment later.
 #[test]
