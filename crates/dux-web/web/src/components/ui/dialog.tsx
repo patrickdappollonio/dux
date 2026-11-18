@@ -131,9 +131,12 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       // max-md:[&_button]:min-h-11 gives every footer action a ≥44px touch
-      // target on phones (desktop keeps the compact h-8 default via md:).
+      // target at phone width, and pointer-coarse:[&_button]:min-h-11 does the
+      // same at desktop width under a coarse pointer (a touch tablet, which is
+      // wide enough for the desktop layout but still tapped with a finger). A
+      // fine pointer at desktop width keeps the compact h-8 default.
       className={cn(
-        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 max-md:[&_button]:min-h-11 sm:flex-row sm:justify-end",
+        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 max-md:[&_button]:min-h-11 pointer-coarse:[&_button]:min-h-11 sm:flex-row sm:justify-end",
         className
       )}
       {...props}

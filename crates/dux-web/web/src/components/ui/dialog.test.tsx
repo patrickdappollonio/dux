@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
@@ -150,5 +151,21 @@ describe("DialogContent destructive backdrop", () => {
     const popup = document.querySelector('[data-slot="dialog-content"]')
     expect(popup).not.toBeNull()
     expect(popup?.getAttribute("destructive")).toBeNull()
+  })
+})
+
+describe("DialogFooter touch height", () => {
+  // jsdom cannot evaluate media queries, so the class is what can be pinned.
+  it("lifts footer buttons to the touch floor on a coarse pointer at any width", () => {
+    render(
+      <DialogFooter>
+        <button type="button">Cancel</button>
+      </DialogFooter>,
+    )
+    const footer = document.querySelector('[data-slot="dialog-footer"]')
+    expect(
+      footer?.className,
+      "a touch tablet at desktop width gets the desktop layout, so its footer buttons need the coarse-pointer minimum to stay above the 40px touch floor",
+    ).toContain("pointer-coarse:[&_button]:min-h-11")
   })
 })
