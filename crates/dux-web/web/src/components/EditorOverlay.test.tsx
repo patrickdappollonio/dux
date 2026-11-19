@@ -1411,6 +1411,26 @@ describe("editor panel units and scroll surfaces", () => {
     ).toBeTruthy()
   })
 
+  // A browser check on a phone at 390px: open the standalone editor, press Tab
+  // from the header and watch focus skip the folded explorer's controls; open
+  // the explorer and Tab reaches them again.
+  it("takes a folded explorer out of the tab order and the accessibility tree, and puts it back when open", async () => {
+    localStorage.setItem(
+      EXPLORER_LAYOUT_KEY,
+      JSON.stringify({ px: 420, collapsed: true }),
+    )
+    await mountWithTab(PATH)
+    await screen.findByRole("button", { name: /show the file explorer/i })
+    const folded = document.querySelector('[aria-label="Explorer actions"]')!
+    expect(folded.closest("[inert]")).not.toBeNull()
+    cleanup()
+    localStorage.clear()
+    await mountWithTab(PATH)
+    await screen.findByRole("button", { name: /hide the file explorer/i })
+    const open = document.querySelector('[aria-label="Explorer actions"]')!
+    expect(open.closest("[inert]")).toBeNull()
+  })
+
   it("clips both panel wrappers so panes own their scrolling", async () => {
     await mountWithTab(PATH)
     // The overlay Dialog portals to document.body, so query the document.

@@ -2054,7 +2054,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 panes bleeding to the shell edge with the handle as the only
                 divider. A border here doubles the editor content's left edge
                 while its bottom and right have none. */}
-            <div className="flex h-full min-w-0 flex-col">
+            {/* inert while folded: the panel collapses to 0px wide but keeps its
+                children mounted, so without it their controls stay Tab stops. */}
+            <div className="flex h-full min-w-0 flex-col" inert={explorerCollapsed}>
               {/* gap-2 (8px) is the repo's measured misclick spacing between
                   adjacent icon squares, and this bar has two of them: New file
                   and the explorer `⋯`, 28px with a mouse and 40px under a
