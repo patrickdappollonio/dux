@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  act,
   cleanup,
   configure,
   fireEvent,
@@ -4434,5 +4435,59 @@ describe("the editor's view and the store, end to end", () => {
     )
     expect(store.getSnapshot().editorRoute?.view?.language).toBe("toml")
     expect(location.hash).toBe("#/agent/s1/editor/file/src%2Frenamed.txt?lang=toml")
+  })
+})
+
+// The browser's own Tab, for jsdom, which has none: focus moves to the next
+// element in document order that takes keyboard focus, the dialog's focus
+// guards included, and the guard then routes it.
+function pressTab(shift = false) {
+  const order = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "a[href], button:not([disabled]), input:not([disabled]), textarea, [tabindex]",
+    ),
+  ).filter((el) => el.tabIndex >= 0)
+  const at = order.indexOf(document.activeElement as HTMLElement)
+  act(() => order[at + (shift ? -1 : 1)]?.focus())
+}
+
+// A browser check: open the editor, Tab past the status bar's last button and
+// focus comes back to the editor header, and Shift-Tab from the header's first
+// button lands on the status bar, never on the page underneath. Inside the code
+// itself Tab indents, and Monaco's own Ctrl-M switches Tab to moving focus.
+describe("the editor's keyboard walk", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    installBootStubs()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  it("keeps Tab inside the open editor and reaches its status bar", async () => {
+    const behind = document.createElement("button")
+    behind.textContent = "Behind the editor"
+    document.body.prepend(behind)
+    try {
+      await mountWithTab("src/a.ts")
+      await screen.findByTestId("code-editor")
+      const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+      const inside = Array.from(
+        popup.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input, [tabindex]"),
+      ).filter((el) => el.tabIndex >= 0)
+      const first = inside[0]
+      const last = inside[inside.length - 1]
+      const statusBar = screen.getByLabelText("Copy path src/a.ts").closest(".border-t")!
+      expect(statusBar.contains(last)).toBe(true)
+      act(() => last.focus())
+      pressTab()
+      await waitFor(() => expect(document.activeElement).toBe(first))
+      pressTab(true)
+      await waitFor(() => expect(document.activeElement).toBe(last))
+    } finally {
+      behind.remove()
+    }
   })
 })
