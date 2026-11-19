@@ -891,6 +891,58 @@ describe("TerminalArea dock", () => {
     expect(setStackLayoutMock).not.toHaveBeenCalled()
   })
 
+  // jsdom lays nothing out, and the panel library does nothing with a group of
+  // no height, so the stack is given one: panels of 250px each and a strip of
+  // `stripPx`. A 20px strip is under the half of the 15% minimum where the
+  // library snaps a part shut (a fine pointer's strips), a 50px one is over it
+  // (a coarse pointer's taller strips).
+  it.each([
+    ["fine", "terminal", 20],
+    ["coarse", "terminal", 50],
+    ["fine", "agent", 20],
+    ["coarse", "agent", 50],
+  ] as const)(
+    "brings the split back at its share from the %s pointer's %s layout",
+    async (_pointer, folded, stripPx) => {
+      const proto = HTMLElement.prototype
+      const offset = Object.getOwnPropertyDescriptor(proto, "offsetHeight")
+      Object.defineProperty(proto, "offsetHeight", {
+        configurable: true,
+        get(this: HTMLElement) {
+          return this.hasAttribute("data-panel") ? 250 : 0
+        },
+      })
+      const rect = vi
+        .spyOn(proto, "getBoundingClientRect")
+        .mockImplementation(function (this: HTMLElement) {
+          const height =
+            this.className === "shrink-0"
+              ? stripPx
+              : this.className.includes("[container-type:size]")
+                ? 500
+                : 0
+          return { height, width: 0, top: 0, left: 0, right: 0, bottom: height, x: 0, y: 0, toJSON() {} }
+        })
+      try {
+        mockState = dockState({ layout: folded, alwaysShow: true })
+        const { rerender } = render(<TerminalArea />)
+        await screen.findByTestId("stack-agent-box")
+        mockState = dockState({ layout: "split", alwaysShow: true })
+        rerender(<TerminalArea />)
+        // Nothing folds the split the person just asked for, and nothing
+        // remembers a share they never dragged to.
+        expect(setStackLayoutMock).not.toHaveBeenCalled()
+        expect(localStorage.getItem("dux:stack-agent-percent")).toBeNull()
+        const grow = (id: string) => document.getElementById(id)?.style.flexGrow
+        expect([grow("stack-agent"), grow("stack-dock")]).toEqual(["50", "50"])
+        expect([onScreen("agent"), onScreen("dock")]).toEqual([true, true])
+      } finally {
+        rect.mockRestore()
+        if (offset) Object.defineProperty(proto, "offsetHeight", offset)
+      }
+    },
+  )
+
   it("rests the pill on the divider in the split and tucks it inside a maximized layout", async () => {
     const pill = () => screen.getByTestId("stack-layout-pill")
     mockState = dockState({ layout: "split" })

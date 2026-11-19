@@ -286,17 +286,25 @@ function StackSplit({
     agentHeader: agentHeaderPx,
     dockHeader: dockHeaderPx,
   })
+  const split = layout === "split" && hasDock
+  // Whether the sizes pushed below are the split's. Entering the split changes
+  // the panels' minimums, and the library re-checks the folded sizes it still
+  // holds against them before the push lands, snapping a part shut or up to
+  // its minimum and reporting that as a changed layout. Until the push, a
+  // reported layout is that leftover and never a release of the divider.
+  const pushedSplit = useRef(false)
   // The library owns the sizes during a drag; every other change of layout or
   // of a strip's height is pushed to it here.
   const agentSize = sizes.agent
   useLayoutEffect(() => {
-    if (!hasDock) return
-    groupRef.current?.setLayout({ [AGENT_PANEL]: agentSize, [DOCK_PANEL]: 100 - agentSize })
-  }, [hasDock, agentSize])
+    if (hasDock) {
+      groupRef.current?.setLayout({ [AGENT_PANEL]: agentSize, [DOCK_PANEL]: 100 - agentSize })
+    }
+    pushedSplit.current = split
+  }, [hasDock, agentSize, split])
 
-  const split = layout === "split" && hasDock
   const onLayoutChanged = (next: Layout) => {
-    if (!split) return
+    if (!split || !pushedSplit.current) return
     const release = dividerRelease(
       next[AGENT_PANEL] ?? splitPercent,
       next[DOCK_PANEL] ?? 100 - splitPercent,
