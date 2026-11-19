@@ -329,10 +329,14 @@ describe("AgentTabsStrip phone height", () => {
     }
   })
 
-  it("halves the strip's own padding so the strip gets shorter, not just the pill", () => {
+  // A browser check at 390px: Tab onto a pill, "New tab" and "Choose provider
+  // for new tab"; each ring is whole at the top and bottom, and the strip is
+  // 2px taller than the 41px it was.
+  it("pads the strip 3px a side, the ring's reach, so the scroller never cuts it", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     const strip = screen.getAllByRole("tab")[0].parentElement
-    expect(strip?.className).toContain("max-md:py-0.5")
+    expect(strip?.className).toContain("max-md:py-0.75")
+    expect(strip?.className).not.toContain("max-md:py-0.5")
   })
 
   it("keeps every control's 44px WIDTH while relaxing its height", () => {
@@ -538,5 +542,27 @@ describe("keyboard focus on the strip", () => {
     expect(scroll).toHaveBeenCalledTimes(1)
     expect(pill.parentElement!.className).toContain("py-1.25")
     expect(pill.parentElement!.className).toContain("scroll-px-2")
+  })
+})
+
+// A browser check on a computer: focus a tab pill and press ArrowRight and
+// ArrowLeft; focus moves to the neighbouring pill and the strip does not scroll
+// sideways under it, and nothing happens past either end.
+describe("arrow keys between tab pills", () => {
+  it("moves focus to the neighbouring pill and stops at the ends", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const pills = screen.getAllByRole("tab")
+    expect(pills.length).toBeGreaterThan(1)
+    const last = pills.length - 1
+    act(() => pills[0].focus())
+    fireEvent.keyDown(pills[0], { key: "ArrowLeft" })
+    expect(document.activeElement).toBe(pills[0])
+    fireEvent.keyDown(pills[0], { key: "ArrowRight" })
+    expect(document.activeElement).toBe(pills[1])
+    fireEvent.keyDown(pills[1], { key: "ArrowLeft" })
+    expect(document.activeElement).toBe(pills[0])
+    act(() => pills[last].focus())
+    fireEvent.keyDown(pills[last], { key: "ArrowRight" })
+    expect(document.activeElement).toBe(pills[last])
   })
 })

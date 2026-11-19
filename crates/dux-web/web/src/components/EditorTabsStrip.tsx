@@ -13,7 +13,7 @@ import {
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { rootKey, type EditorRoot } from "@/lib/editorRoot"
-import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
+import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 
 // The code-editor tab strip (pills), rhymes with `AgentTabsStrip` but is its
 // own component: editor tabs are pure client state (see lib/editorTabs.ts),
@@ -84,6 +84,7 @@ function TabPill({
             e.preventDefault()
             onActivate()
           }
+          focusAdjacentTab(e)
         }}
         // max-md:min-h-8.5 makes the phone pill 34px, deliberately under the
         // 40px touch-target floor on the vertical axis only: the strip sits

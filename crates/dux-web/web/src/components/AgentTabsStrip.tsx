@@ -45,7 +45,7 @@ import {
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
-import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
+import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -88,9 +88,10 @@ export function AgentTabsStrip({
   const disabled = atCap || creating
 
   return (
-    // `max-md:py-0.5` halves the strip's own vertical padding to go with the
+    // `max-md:py-0.75` trims the strip's own vertical padding to go with the
     // shorter phone pill below: shrinking the pill alone would leave the strip
-    // the same height. Desktop padding is unchanged.
+    // the same height. It stays at 3px, the reach of a focus ring, because the
+    // scroller clips anything past it.
     //
     // A finger at desktop width (a tablet) gets 8px between pills, so one
     // pill's ⋯ tap margin stays clear of the next pill, and an 18px end: the
@@ -99,7 +100,7 @@ export function AgentTabsStrip({
     <div
       ref={attachStrip}
       onFocus={(e) => scrollFocusedTabIntoView(e.target)}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 max-md:py-0.5 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 max-md:py-0.75 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
       <SortableStrip
         ids={tabs.map((t) => t.id)}
@@ -233,6 +234,7 @@ function TabPill({
           e.preventDefault()
           select()
         }
+        focusAdjacentTab(e)
       }}
       // `max-md:min-h-9` (36px) relaxes the 40px touch-target floor on the
       // vertical axis only. The neighbours there are the mobile header, whose

@@ -21,7 +21,7 @@ import {
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
-import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
+import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
@@ -149,6 +149,7 @@ function DockPill({
           e.preventDefault()
           select()
         }
+        focusAdjacentTab(e)
       }}
       className={cn(
         // 36px on a tablet, the tab strip's pill height.

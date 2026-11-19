@@ -243,3 +243,26 @@ describe("keyboard focus on the strip", () => {
     expect(pill.parentElement!.className).toContain("scroll-px-2")
   })
 })
+
+// A browser check on a computer: focus a tab pill and press ArrowRight and
+// ArrowLeft; focus moves to the neighbouring pill and the strip does not scroll
+// sideways under it, and nothing happens past either end.
+describe("arrow keys between tab pills", () => {
+  it("moves focus to the neighbouring pill and stops at the ends", () => {
+    seed("s1", [tab({ id: "t1", path: "a.ts" }), tab({ id: "t2", path: "b.ts" })], "t1")
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
+    const pills = screen.getAllByRole("tab")
+    expect(pills.length).toBeGreaterThan(1)
+    const last = pills.length - 1
+    act(() => pills[0].focus())
+    fireEvent.keyDown(pills[0], { key: "ArrowLeft" })
+    expect(document.activeElement).toBe(pills[0])
+    fireEvent.keyDown(pills[0], { key: "ArrowRight" })
+    expect(document.activeElement).toBe(pills[1])
+    fireEvent.keyDown(pills[1], { key: "ArrowLeft" })
+    expect(document.activeElement).toBe(pills[0])
+    act(() => pills[last].focus())
+    fireEvent.keyDown(pills[last], { key: "ArrowRight" })
+    expect(document.activeElement).toBe(pills[last])
+  })
+})
