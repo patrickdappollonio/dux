@@ -169,3 +169,29 @@ describe("DialogFooter touch height", () => {
     ).toContain("pointer-coarse:[&_button]:min-h-11")
   })
 })
+
+describe("DialogContent close button touch size", () => {
+  // jsdom cannot evaluate media queries, so the classes are what can be pinned.
+  it("grows the corner close button to the touch floor on a coarse pointer without moving its glyph", () => {
+    render(
+      <Dialog open>
+        <DialogContent>
+          <DialogTitle>Title</DialogTitle>
+        </DialogContent>
+      </Dialog>,
+    )
+    const classes = Array.from(
+      document.querySelector('[data-slot="dialog-close"]')?.classList ?? [],
+    )
+    expect(
+      classes,
+      "the 28px close button is under the 40px touch floor, so a coarse pointer needs the 40px box, and the offsets must shrink by the 6px it grows each way or the X moves",
+    ).toEqual(
+      expect.arrayContaining([
+        "pointer-coarse:size-10",
+        "pointer-coarse:top-0.5",
+        "pointer-coarse:right-0.5",
+      ]),
+    )
+  })
+})

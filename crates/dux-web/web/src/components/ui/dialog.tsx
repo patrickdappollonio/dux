@@ -92,9 +92,13 @@ function DialogContent({
           <DialogPrimitive.Close
             data-slot="dialog-close"
             render={
+              // At phone width and under a coarse pointer the box grows from
+              // 28px to the 40px touch floor, and both offsets shrink by the
+              // same 6px it grows on each side, so the glyph stays where it
+              // is. A fine pointer at desktop width keeps the compact 28px.
               <Button
                 variant="ghost"
-                className="absolute top-2 right-2"
+                className="absolute top-2 right-2 max-md:top-0.5 max-md:right-0.5 max-md:size-10 pointer-coarse:top-0.5 pointer-coarse:right-0.5 pointer-coarse:size-10"
                 size="icon-sm"
               />
             }
