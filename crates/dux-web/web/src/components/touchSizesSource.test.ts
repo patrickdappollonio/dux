@@ -91,7 +91,7 @@ describe("controls that had no touch size at all", () => {
     ["ChunkBoundary.tsx", "onClick={() => location.reload()}", "<Button", BUTTON_FLOOR],
     ["terminal/partPieces.tsx", "plainBounce(props.ptyRef.current", "<Button", BUTTON_FLOOR],
     ["terminal/partPieces.tsx", "onClick={takeOver}", "<Button", ["max-md:min-h-11", "pointer-coarse:min-h-11"]],
-    ["MacroPopover.tsx", "openMacrosDialog()", "<button", BUTTON_FLOOR],
+    ["MacroPopover.tsx", "openMacrosDialog()", "<PopoverPrimitive.Close", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "const HEADER_CONTROL_SIZING", "const", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "aria-expanded={open}", "<button", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "<Search className", "<div", BUTTON_FLOOR],

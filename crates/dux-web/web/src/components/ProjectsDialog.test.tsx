@@ -361,7 +361,7 @@ describe("ProjectsDialog", () => {
     })
     expect(trigger.className).toContain("pointer-coarse:size-10")
     const wrapper = trigger.parentElement!
-    const caps = [...wrapper.className.matchAll(/max-w-(\d+)\b/g)]
+    const caps = [...wrapper.className.matchAll(/\[--reveal-cap:--spacing\((\d+)\)\]/g)]
       .map((m) => Number(m[1]))
       .filter((n) => n > 0)
     expect(caps.length).toBeGreaterThan(0)
