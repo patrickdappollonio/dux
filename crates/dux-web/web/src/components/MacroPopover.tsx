@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type * as React from "react"
 import { SquarePen, SquareSlash } from "lucide-react"
 
@@ -85,6 +85,11 @@ export function MacroPopover({
   const [ownOpen, setOwnOpen] = useState(false)
   const open = anchored ? anchored.open : ownOpen
   const setOpen = anchored ? anchored.onOpenChange : setOwnOpen
+  // A pane that becomes blocked closes the picker, so it does not come back by
+  // itself once the pane is free again.
+  useEffect(() => {
+    if (blocked && open) setOpen(false)
+  }, [blocked, open, setOpen])
   const isMobile = useIsMobile()
   const coarsePointer = useIsCoarsePointer()
   // Set when the LAST pick landed in the mobile compose draft rather than the

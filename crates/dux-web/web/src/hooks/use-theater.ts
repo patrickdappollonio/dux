@@ -181,23 +181,11 @@ function consumeToggleFocus(): boolean {
 }
 
 /**
- * The header toggle taking focus back after an exit that was not its own press.
- * Only on an armed exit: a toggle that grabbed focus on every mount would pull
- * it out of the terminal on an ordinary page load.
- */
-export function useTheaterToggleFocus(
-  ref: React.RefObject<HTMLElement | null>,
-  theater: boolean,
-): void {
-  useTheaterToggleFocusWhen(ref, !theater)
-}
-
-/**
- * The same hand-off for a control whose readiness is not simply "theater is
- * off". The phone's docked flap stays mounted but hidden through the return
- * flight so the choreography can measure the dock it is flying to, and focusing
- * it in that state would put the keyboard on something invisible, so the caller
- * states its own readiness.
+ * A control taking focus back after an exit that was not its own press, once
+ * the caller says it is `ready`. Only on an armed exit: a control that grabbed
+ * focus on every mount would pull it out of the terminal on an ordinary page
+ * load. The phone's docked flap stays mounted but hidden through the return
+ * flight, which is why readiness is the caller's to state.
  */
 export function useTheaterToggleFocusWhen(
   ref: React.RefObject<HTMLElement | null>,

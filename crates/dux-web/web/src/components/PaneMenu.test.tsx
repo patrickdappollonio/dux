@@ -612,6 +612,26 @@ describe("the pane menu at the computer's anchors", () => {
     expect(screen.getByText("Input")).toBeTruthy()
   })
 
+  it("says why the folded Macros… row is disabled, as its description", async () => {
+    render(<PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        appearance="header"
+        settingsDrill={false}
+        folded={{
+          theater: () => {},
+          macros: () => {},
+          macrosBlocked: "Take over to send macros",
+        }}
+      />)
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    const macros = screen.getByRole("menuitem", { name: "Macros…" })
+    expect(macros.getAttribute("aria-disabled")).toBe("true")
+    expect(macros.getAttribute("aria-describedby")).toBeTruthy()
+    expect(
+      document.getElementById(macros.getAttribute("aria-describedby")!)?.textContent,
+    ).toBe("Take over to send macros")
+  })
+
   it("names itself what every other anchor names itself", () => {
     // One name across the surfaces, so a screen reader and a voice command do
     // not have to learn which anchor is on screen.

@@ -1,5 +1,5 @@
 import { Ellipsis, Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
-import type { ReactNode, Ref } from "react"
+import { useId, type ReactNode, type Ref } from "react"
 
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
@@ -198,7 +198,7 @@ export function PaneMenuBody({
           through that pane's own gated connection and lands in its own sink,
           and the surface items are that pane's own state. */}
       <PaneInputGroup ptyIds={paneInputPtyIds(subject, pane)} />
-      {folded ? <FoldedHeaderGroup controls={folded} /> : null}
+      {folded ? <FoldedHeaderGroup controls={folded} theater={theater} /> : null}
       {actions}
       {paneActions}
       {theater ? (
@@ -244,8 +244,17 @@ export function PaneMenuBody({
 // names their room. Right after the Input group, which keeps the menu's head:
 // they were the first controls on the header, so the top of the menu is where a
 // person who saw them leave looks first. Theater keeps its word, because the
-// mode has no other way in.
-function FoldedHeaderGroup({ controls }: { controls: FoldedHeaderControls }) {
+// mode has no other way in; while it is on, the theater group's exit is the one
+// row for it.
+function FoldedHeaderGroup({
+  controls,
+  theater,
+}: {
+  controls: FoldedHeaderControls
+  theater: boolean
+}) {
+  const macrosReasonId = useId()
+  const macrosBlocked = controls.macrosBlocked
   return (
     <>
       <DropdownMenuGroup>
@@ -256,17 +265,30 @@ function FoldedHeaderGroup({ controls }: { controls: FoldedHeaderControls }) {
             New tab…
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem onClick={controls.theater}>
-          <Maximize2 />
-          Theater
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={controls.macrosBlocked !== null}
-          onClick={controls.macros}
-        >
-          <SquareSlash />
-          Macros…
-        </DropdownMenuItem>
+        {theater ? null : (
+          <DropdownMenuItem onClick={controls.theater}>
+            <Maximize2 />
+            Theater
+          </DropdownMenuItem>
+        )}
+        {/* A group of its own, because the primitive's label part names its
+          * group: the reason is shown once and the row names it as its
+          * description, the way the Macros… button's tooltip says it. */}
+        <DropdownMenuGroup>
+          {macrosBlocked !== null ? (
+            <DropdownMenuLabel id={macrosReasonId} className="max-w-64">
+              {macrosBlocked}
+            </DropdownMenuLabel>
+          ) : null}
+          <DropdownMenuItem
+            disabled={macrosBlocked !== null}
+            aria-describedby={macrosBlocked !== null ? macrosReasonId : undefined}
+            onClick={controls.macros}
+          >
+            <SquareSlash />
+            Macros…
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
     </>

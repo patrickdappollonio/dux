@@ -472,7 +472,7 @@ export function useChangedFilesController(
 
   return {
     ...model,
-    // What the bulk bar counts: files, so a checked folder counts what is
+    // What the selection row counts: files, so a checked folder counts what is
     // inside it, the same count its dialog and its toast use.
     // A checked row inside a checked folder the verb acts on is counted once,
     // in the folder; inside one it does not act on, it counts on its own.

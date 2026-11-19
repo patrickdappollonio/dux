@@ -1936,6 +1936,30 @@ describe("the Changes pane header in a narrow pane", () => {
     expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "s1" })
   })
 
+  it("hands focus to the ⋯ when the button holding it folds away", () => {
+    const observers: (() => void)[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          observers.push(cb)
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    restore = headerWidth(400)
+    render(<ChangedFiles />)
+    screen.getByLabelText("New terminal").focus()
+
+    restore()
+    restore = headerWidth(120)
+    act(() => observers.forEach((cb) => cb()))
+    expect(screen.queryByLabelText("New terminal")).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText("Changes actions"))
+  })
+
   it("keeps them in the header, and out of the ⋯, when they fit", async () => {
     restore = headerWidth(400)
     render(<ChangedFiles />)

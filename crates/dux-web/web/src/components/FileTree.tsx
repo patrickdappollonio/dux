@@ -36,7 +36,9 @@ import type { EditorRoot } from "@/lib/editorRoot"
 const noop = () => {}
 
 // Each row's height in px, set inline on the row and used to position and
-// window the virtual list. A finger, or a phone's width, gets 32px.
+// window the virtual list. A finger, or a phone's width, gets 32px, under the
+// 40px floor on purpose: a taller tree shows too few files, and a tap that lands
+// on the neighbouring row opens that file, one tap to undo with nothing lost.
 const ROW_HEIGHT = 28
 const TOUCH_ROW_HEIGHT = 32
 const OVERSCAN = 10 // rows to render above/below the viewport

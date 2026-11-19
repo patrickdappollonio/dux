@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { useRef, useState } from "react"
 
 import {
   registerPaneMacroTarget,
@@ -452,6 +453,46 @@ describe("MacroPopover under the take-over card", () => {
     expect(screen.queryByTestId("macros-disabled")).toBeNull()
     await openAndPick()
     expect(runMacro).toHaveBeenCalledWith("Greet", target)
+  })
+
+  it("closes an anchored picker for good when the card covers the pane", async () => {
+    const onOpenChange = vi.fn()
+    function Anchored() {
+      const ref = useRef<HTMLDivElement | null>(null)
+      const [open, setOpen] = useState(true)
+      return (
+        <>
+          <div ref={ref} />
+          <MacroPopover
+            target={target}
+            anchored={{
+              ref,
+              open,
+              onOpenChange: (next) => {
+                onOpenChange(next)
+                setOpen(next)
+              },
+            }}
+          />
+        </>
+      )
+    }
+    render(<Anchored />)
+    await settle()
+    expect(document.querySelector('[data-slot="popover-content"]')).not.toBeNull()
+
+    let retire = () => {}
+    act(() => {
+      retire = covered()
+    })
+    await settle()
+    act(() => {
+      retire()
+      registerPaneMacroTarget("s1", ownerPane())
+    })
+    await settle()
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull()
+    expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 
   it("reads the card of its own pane, not another mounted one", () => {

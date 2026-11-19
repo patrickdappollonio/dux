@@ -57,10 +57,17 @@ export function useChangesHeaderFold() {
     trigger: null,
   })
   const observer = useRef<ResizeObserver | null>(null)
+  const focusInFolding = useRef(false)
 
   const measure = useCallback(() => {
     const next = tooNarrow(nodes.current)
-    if (next !== null) setFolded(next)
+    if (next === null) return
+    // The buttons that fold are the `⋯`'s siblings.
+    const trigger = nodes.current.trigger
+    const active = document.activeElement
+    focusInFolding.current =
+      next && active !== trigger && (trigger?.parentElement?.contains(active) ?? false)
+    setFolded(next)
   }, [])
 
   const track = useCallback(
@@ -78,6 +85,12 @@ export function useChangesHeaderFold() {
   const titleRef = useCallback((node: HTMLElement | null) => track("title", node), [track])
   const recapRef = useCallback((node: HTMLElement | null) => track("recap", node), [track])
   const triggerRef = useCallback((node: HTMLElement | null) => track("trigger", node), [track])
+
+  // A button that folds away while it holds focus hands it to the `⋯`.
+  useLayoutEffect(() => {
+    if (folded && focusInFolding.current) nodes.current.trigger?.focus()
+    focusInFolding.current = false
+  }, [folded])
 
   useLayoutEffect(() => {
     measure()

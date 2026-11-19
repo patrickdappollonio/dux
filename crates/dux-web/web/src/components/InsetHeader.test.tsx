@@ -1006,6 +1006,19 @@ describe("InsetHeader folding the cluster into the pane menu", () => {
     expect(screen.getByText("Pane")).toBeTruthy()
   })
 
+  // In theater a full-pane cover brings the header back; the menu then offers
+  // the way out once, under the theater group's own words.
+  it("offers leaving theater once, and no Theater row, while theater is on", async () => {
+    cutOffNames()
+    mockState = { ...stateFor("main", "main"), theater: true } as unknown as DuxState
+    render(<InsetHeader />)
+    const items = await menuLabels(/session actions/i)
+    expect(items.filter((label) => /theater/i.test(label))).toEqual([
+      "Leave theater mode",
+    ])
+    expect(items).toContain("Macros…")
+  })
+
   it("moves Theater and Macros… on a project terminal's pane, which has no New tab…", async () => {
     cutOffNames()
     mockState = {
@@ -1074,6 +1087,30 @@ describe("InsetHeader folding the cluster into the pane menu", () => {
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(500)
     act(() => observers.forEach((cb) => cb()))
     for (const button of clusterButtons()) expect(button).not.toBeNull()
+  })
+
+  it("hands focus to the ⋯ when the control holding it folds away", () => {
+    const observers: (() => void)[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          observers.push(cb)
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    screen.getByRole("button", { name: /theater mode/i }).focus()
+
+    cutOffNames()
+    act(() => observers.forEach((cb) => cb()))
+    for (const button of clusterButtons()) expect(button).toBeNull()
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: /session actions/i }),
+    )
   })
 
   it("gives every control left in the header the 40px touch height under a finger, and 32px with a mouse", () => {

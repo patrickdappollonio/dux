@@ -2131,7 +2131,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                             type="button"
                             onClick={() => requestOpen(p)}
                             className={cn(
-                              // A tree row's height: 32px under a finger or at phone width.
+                              // A tree row's height: 32px under a finger or at phone width,
+                              // under the floor like the file tree's rows: a missed tap
+                              // opens the neighbouring result, one tap to undo.
                               "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted max-md:min-h-8 pointer-coarse:min-h-8",
                               p === openPath && "bg-muted",
                               p === searchPick.activeKey && ACTIVE_ROW_RING,

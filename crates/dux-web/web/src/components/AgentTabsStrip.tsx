@@ -52,8 +52,8 @@ import type { AgentTabView, SessionView } from "@/lib/types"
 const FIRST_TAB_HINT =
   "The agent's first tab: the one that starts when you open a stopped agent."
 
-// The provider-tab strip at the top of the center pane, rendered by App only
-// when a session has two or more tabs. All tabs render uniformly: clicking a
+// The provider-tab strip at the top of the center pane; whether it shows is the
+// caller's decision. All tabs render uniformly: clicking a
 // pill focuses it, the hover-revealed ⋯ retargets the provider and closes the
 // tab, and the trailing + adds one, disabled at the cap or mid-create. A pill
 // drags along the strip to reorder it, like a browser tab; the order is the

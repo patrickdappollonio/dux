@@ -46,11 +46,14 @@ export function useFoldToFit({
   enabled,
   layout,
   watch,
+  focusOnFold,
 }: {
   /// Off where there is nowhere to fold into; `folded` is then false.
   enabled: boolean
   layout: string
   watch: string
+  /// Where focus goes when the controls fold while one of them holds it.
+  focusOnFold?: React.RefObject<HTMLElement | null>
 }): {
   folded: boolean | null
   rowRef: React.RefObject<HTMLDivElement | null>
@@ -63,11 +66,13 @@ export function useFoldToFit({
   const rowRef = useRef<HTMLDivElement | null>(null)
   const clusterRef = useRef<HTMLDivElement | null>(null)
   const clusterWidth = useRef<number | null>(null)
+  const focusInCluster = useRef(false)
 
   const measure = useCallback(() => {
     const row = rowRef.current
     if (!row || !enabled) return
     const cluster = clusterRef.current
+    focusInCluster.current = cluster?.contains(document.activeElement) ?? false
     if (cluster) {
       const gap = parseFloat(getComputedStyle(cluster.parentElement ?? cluster).columnGap)
       clusterWidth.current =
@@ -89,6 +94,12 @@ export function useFoldToFit({
       return s.folded === folded ? s : { ...s, folded }
     })
   }, [enabled])
+
+  // Ahead of the re-measure below, which forgets where focus was once the
+  // controls are gone.
+  useLayoutEffect(() => {
+    if (state.folded === true && focusInCluster.current) focusOnFold?.current?.focus()
+  }, [state.folded, focusOnFold])
 
   useLayoutEffect(() => measure(), [measure, watch, state.folded, state.layout])
 

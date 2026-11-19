@@ -1,5 +1,5 @@
 import { PanelRightOpen } from "lucide-react"
-import { useRef, useState } from "react"
+import { useRef, useState, type RefObject } from "react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
@@ -88,10 +88,12 @@ export function InsetHeader() {
   // ride in the pane's `⋯` instead, and they come back once the names fit
   // beside them again. Only where that `⋯` exists, since a folded control must
   // have somewhere to go.
+  const paneMenuRef = useRef<HTMLButtonElement | null>(null)
   const { folded, rowRef, clusterRef } = useFoldToFit({
     enabled: Boolean(paneSubject && selectedTarget),
     layout: newTabSession ? "with-new-tab" : "without-new-tab",
     watch: chips.map((c) => c.value).join("\u0000"),
+    focusOnFold: paneMenuRef,
   })
 
   // The width the header must hold back on its right so that whatever sits just
@@ -172,6 +174,7 @@ export function InsetHeader() {
           target={selectedTarget}
           newTabSession={newTabSession}
           folded={folded === true}
+          triggerRef={paneMenuRef}
         />
       ) : null}
 
@@ -249,20 +252,22 @@ export function InsetHeader() {
 // While the header has folded its controls in, it carries them as rows, and
 // what they open has no button left to stand on: the New tab… dialog and the
 // macro picker open here once the menu has finished closing, the picker placed
-// against this `⋯`, and focus comes back to it.
+// against this `⋯`. Focus comes back to the `⋯` from the dialog, and from the
+// picker goes to the pane's typing surface when it has one.
 function HeaderPaneMenu({
   subject,
   target,
   newTabSession,
   folded,
+  triggerRef,
 }: {
   subject: NonNullable<ReturnType<typeof insetHeaderPaneSubject>>
   target: SelectedTarget
   newTabSession: SessionView | null
   folded: boolean
+  triggerRef: RefObject<HTMLButtonElement | null>
 }) {
   const { theater } = useDux()
-  const triggerRef = useRef<HTMLButtonElement | null>(null)
   const pendingRef = useRef<"new-tab" | "macros" | null>(null)
   const [adding, setAdding] = useState(false)
   const [macrosOpen, setMacrosOpen] = useState(false)
