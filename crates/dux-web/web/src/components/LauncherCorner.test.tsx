@@ -80,6 +80,18 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe("LauncherCorner", () => {
+  // The two halves meet flush, so a focused half's ring overlaps its neighbour;
+  // the shared button group lifts whichever child holds keyboard focus. A
+  // browser check: Tab onto each half and its ring is drawn over the other.
+  it("lifts the focused half over its neighbour", () => {
+    render(<LauncherCorner />)
+    const main = screen.getByRole("button", { name: /New agent/ })
+    const more = screen.getByRole("button", { name: "More ways to start" })
+    expect(main.parentElement).toBe(more.parentElement)
+    expect(main.parentElement!.className).toContain("[&>*]:focus-visible:z-10")
+    expect(main.parentElement!.className).toContain("[&>*]:focus-visible:relative")
+  })
+
   it("opens the New agent project picker from its main half", () => {
     render(<LauncherCorner />)
     fireEvent.click(screen.getByRole("button", { name: "New agent…" }))

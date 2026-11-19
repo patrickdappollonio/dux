@@ -4471,7 +4471,7 @@ describe("the editor's keyboard walk", () => {
     behind.textContent = "Behind the editor"
     document.body.prepend(behind)
     try {
-      await mountWithTab("src/a.ts")
+      await mountWithTab("src/a.ts", "file", ["src/a.ts"])
       await screen.findByTestId("code-editor")
       const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
       const inside = Array.from(
@@ -4481,6 +4481,10 @@ describe("the editor's keyboard walk", () => {
       const last = inside[inside.length - 1]
       const statusBar = screen.getByLabelText("Copy path src/a.ts").closest(".border-t")!
       expect(statusBar.contains(last)).toBe(true)
+      // The File/Diff pair meets flush; the group lifts the focused segment's
+      // ring over its neighbour.
+      const file = await screen.findByRole("button", { name: "File" })
+      expect(file.parentElement!.className).toContain("[&>*]:focus-visible:z-10")
       act(() => last.focus())
       pressTab()
       await waitFor(() => expect(document.activeElement).toBe(first))
