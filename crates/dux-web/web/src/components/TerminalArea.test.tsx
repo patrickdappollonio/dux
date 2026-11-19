@@ -904,6 +904,27 @@ describe("TerminalArea dock", () => {
     expect(pill().style.top).toBe("12px")
   })
 
+  // The stopped agent's band holds the top of a maximized terminal, with Start
+  // at its right end, where the pill tucked 12px into the stack used to sit
+  // over Start and its focus ring. A browser must show Start whole, with the
+  // pill below the band.
+  it("tucks the pill under a stopped agent's band rather than over its Start", async () => {
+    const rect = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        const height = this.querySelector("[data-testid='stopped-agent-band']") ? 37 : 0
+        return { height, width: 0, top: 0, left: 0, right: 0, bottom: height, x: 0, y: 0, toJSON() {} }
+      })
+    try {
+      mockState = dockState({ stopped: true, layout: "terminal" })
+      render(<TerminalArea />)
+      await screen.findByTestId("stopped-agent-band")
+      expect(screen.getByTestId("stack-layout-pill").style.top).toBe("49px")
+    } finally {
+      rect.mockRestore()
+    }
+  })
+
   it("puts the attention look on the pill's dot over the working one", async () => {
     const state = dockState({ layout: "terminal", working: true })
     state.spine!.sessions[0].needs_attention = true

@@ -13,8 +13,8 @@ export type LayoutPillPlacement =
   | { kind: "divider"; agentPercent: number }
   /** Tucked inside the bottom of the stack, over a divider folded to it. */
   | { kind: "bottom" }
-  /** Tucked inside the top of the stack, under a divider folded to it. */
-  | { kind: "top" }
+  /** Tucked under a divider folded to the top, below the agent's strip or band. */
+  | { kind: "top"; belowPx: number }
 
 // The pill's buttons are the cluster's: one height token, lifted to the touch
 // floor under a finger. Their neighbours are each other, 2px apart.
@@ -69,7 +69,7 @@ function placementStyle(placement: LayoutPillPlacement): React.CSSProperties {
     case "bottom":
       return { bottom: "12px" }
     case "top":
-      return { top: "12px" }
+      return { top: `${placement.belowPx + 12}px` }
   }
 }
 

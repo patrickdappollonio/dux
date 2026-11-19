@@ -109,6 +109,7 @@ export function AgentStack({
     setStackLayout(sessionId, applyLayoutAction(layout, action))
 
   const [splitPercent, setSplitPercent] = useState(readSplitPercent)
+  const [agentHeaderPx, setAgentHeaderPx] = useState(0)
 
   const agentHeader = model.agentStopped ? (
     <StoppedAgentBand
@@ -137,7 +138,7 @@ export function AgentStack({
     <StackLayoutPill
       session={session}
       layout={layout}
-      placement={pillPlacement(layout, splitPercent)}
+      placement={pillPlacement(layout, splitPercent, agentHeaderPx)}
       onLayoutAction={onLayoutAction}
     />
   )
@@ -198,6 +199,8 @@ export function AgentStack({
               onSplitPercent={setSplitPercent}
               onFold={(fold) => setStackLayout(sessionId, fold)}
               agentHeader={agentHeader}
+              agentHeaderPx={agentHeaderPx}
+              onAgentHeaderPx={setAgentHeaderPx}
               dockHeader={dockHeader}
               agent={rendered.agent ?? agentCard}
               dock={rendered.dock ?? null}
@@ -221,14 +224,18 @@ export function AgentStack({
   )
 }
 
-function pillPlacement(layout: ComputerLayout, splitPercent: number): LayoutPillPlacement {
+function pillPlacement(
+  layout: ComputerLayout,
+  splitPercent: number,
+  agentHeaderPx: number,
+): LayoutPillPlacement {
   switch (layout) {
     case "split":
       return { kind: "divider", agentPercent: splitPercent }
     case "agent":
       return { kind: "bottom" }
     case "terminal":
-      return { kind: "top" }
+      return { kind: "top", belowPx: agentHeaderPx }
   }
 }
 
@@ -240,6 +247,8 @@ function StackSplit({
   onSplitPercent,
   onFold,
   agentHeader,
+  agentHeaderPx,
+  onAgentHeaderPx,
   dockHeader,
   agent,
   dock,
@@ -255,6 +264,8 @@ function StackSplit({
   onSplitPercent: (percent: number) => void
   onFold: (layout: ComputerLayout) => void
   agentHeader: ReactNode
+  agentHeaderPx: number
+  onAgentHeaderPx: (px: number) => void
   dockHeader: ReactNode
   agent: ReactNode
   dock: ReactNode
@@ -265,10 +276,9 @@ function StackSplit({
 }) {
   const groupRef = useRef<GroupImperativeHandle | null>(null)
   const [groupPx, setGroupPx] = useState(0)
-  const [agentHeaderPx, setAgentHeaderPx] = useState(0)
   const [dockHeaderPx, setDockHeaderPx] = useState(0)
   const groupEl = useObservedHeight(setGroupPx)
-  const agentHeaderEl = useObservedHeight(setAgentHeaderPx)
+  const agentHeaderEl = useObservedHeight(onAgentHeaderPx)
   const dockHeaderEl = useObservedHeight(setDockHeaderPx)
 
   const sizes = panelSizes(layout, hasDock, splitPercent, {
