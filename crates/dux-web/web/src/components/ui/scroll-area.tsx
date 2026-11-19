@@ -25,10 +25,12 @@ function ScrollArea({
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
         // Inset: the viewport is the scrolling box, and the ring a Tab stop draws
-        // around it would be cut by any card that clips its overflow.
+        // around it would be cut by any card that clips its overflow. The scroll
+        // padding is the same for a control inside: a browser scrolls a focused one
+        // just into view, flush with the edge, which would cut its 3px ring.
         ref={viewportRef}
         onScroll={onViewportScroll}
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/50 focus-visible:outline-1"
+        className="size-full scroll-py-1 rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/50 focus-visible:outline-1"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

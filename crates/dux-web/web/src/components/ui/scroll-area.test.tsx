@@ -16,4 +16,13 @@ describe("scroll area focus ring", () => {
       expect.arrayContaining(["focus-visible:ring-[3px]", "focus-visible:ring-inset"]),
     )
   })
+
+  // A browser check: in Preferences, Tab to a control below the visible part
+  // (the Teal swatch, "Reset section to defaults…") and Shift-Tab back up past
+  // the top; the control's 3px ring is whole at the bottom and at the top.
+  it("keeps a keyboard-focused control's ring in view by scroll padding on the scrolling element", () => {
+    render(<ScrollArea>content</ScrollArea>)
+    const viewport = document.querySelector('[data-slot="scroll-area-viewport"]')!
+    expect(viewport.classList).toContain("scroll-py-1")
+  })
 })
