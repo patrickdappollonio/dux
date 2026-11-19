@@ -98,7 +98,7 @@ function PathCopyButton({ path }: { path: string }) {
         type="button"
         onClick={copy}
         aria-label={`Copy path ${path}`}
-        className="flex h-full min-w-0 items-center rounded-sm text-left outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-w-10"
+        className="flex h-full min-w-0 items-center rounded-sm text-left outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-10 pointer-coarse:min-w-10"
       >
         <StartTruncatedText
           text={path}

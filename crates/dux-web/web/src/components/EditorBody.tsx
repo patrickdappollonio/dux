@@ -2057,9 +2057,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             <div className="flex h-full min-w-0 flex-col">
               {/* gap-2 (8px) is the repo's measured misclick spacing between
                   adjacent icon squares, and this bar has two of them: New file
-                  and the explorer `⋯`, both 28px on both axes, with the search
-                  field as the third interactive neighbour on the row. */}
-              <div className="flex items-center gap-2 border-b p-2">
+                  and the explorer `⋯`, 28px with a mouse and 40px under a
+                  finger, with the search field as the third interactive
+                  neighbour on the row. Under a finger the bar ends 10px short
+                  of its right edge, where the divider's touch band reaches
+                  into this panel, so the `⋯` sits clear of it. */}
+              <div className="flex items-center gap-2 border-b p-2 pointer-coarse:pr-2.5">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                   <Input
@@ -2075,6 +2078,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     size="icon-sm"
                     variant="ghost"
                     aria-label="New file"
+                    className="max-md:size-10 pointer-coarse:size-10"
                     onClick={() => setNewEntryTarget({ kind: "file", dir: "" })}
                   >
                     <FilePlus />
@@ -2082,9 +2086,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 </SimpleTooltip>
                 {/* The explorer's own menu, on every surface: the tree keeps
                     itself fresh on events, and this is the way to ask it
-                    anyway. Under the 40px floor on both axes to match New file
-                    beside it, which sets this bar's density; the exemption is
-                    paid for by the gap above rather than by the size. */}
+                    anyway. Sized with New file beside it. */}
                 <DropdownMenu>
                   <DropdownMenuTrigger
                     render={
@@ -2092,6 +2094,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         size="icon-sm"
                         variant="ghost"
                         aria-label="Explorer actions"
+                        className="max-md:size-10 pointer-coarse:size-10"
                       />
                     }
                   >
@@ -2128,7 +2131,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                             type="button"
                             onClick={() => requestOpen(p)}
                             className={cn(
-                              "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted",
+                              // A tree row's height: 32px under a finger or at phone width.
+                              "flex w-full items-center gap-1.5 rounded px-1 py-1 hover:bg-muted max-md:min-h-8 pointer-coarse:min-h-8",
                               p === openPath && "bg-muted",
                               p === searchPick.activeKey && ACTIVE_ROW_RING,
                             )}

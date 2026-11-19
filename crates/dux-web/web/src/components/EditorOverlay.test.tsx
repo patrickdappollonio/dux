@@ -3029,8 +3029,8 @@ describe("when the file changes on disk underneath the editor", () => {
   })
 })
 
-// The explorer bar puts two 28px icon squares side by side, which is under the
-// touch floor: the spacing between them is what pays for that.
+// The explorer bar puts two icon squares side by side: 28px with a mouse, with
+// the spacing between them as the misclick margin, and 40px under a finger.
 describe("the explorer bar's controls", () => {
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -3058,6 +3058,35 @@ describe("the explorer bar's controls", () => {
     const menu = screen.getByRole("button", { name: "Explorer actions" })
     expect(newFile.parentElement).toBe(menu.parentElement)
     expect(newFile.parentElement!.className).toContain("gap-2")
+  })
+
+  // jsdom cannot evaluate media queries, so the classes are what can be pinned.
+  it("grows both buttons to 40px under a coarse pointer and at phone width", async () => {
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    render(<EditorOverlay />)
+
+    for (const name of ["New file", "Explorer actions"]) {
+      const button = await screen.findByRole("button", { name })
+      expect(button.className).toContain("pointer-coarse:size-10")
+      expect(button.className).toContain("max-md:size-10")
+    }
+    // Clear of the explorer divider's 10px touch band on its right.
+    const bar = screen.getByRole("button", { name: "New file" }).parentElement!
+    expect(bar.className).toContain("pointer-coarse:pr-2.5")
+  })
+
+  it("makes a search result row 32px tall under a coarse pointer and at phone width, like a tree row", async () => {
+    listMock.mockResolvedValueOnce({ files: ["src/notes.md"], truncated: false })
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    render(<EditorOverlay />)
+
+    fireEvent.change(await screen.findByPlaceholderText("Search files…"), {
+      target: { value: "notes" },
+    })
+    const mark = await screen.findByText("notes", { selector: "mark" })
+    const row = mark.closest("button")!
+    expect(row.className).toContain("pointer-coarse:min-h-8")
+    expect(row.className).toContain("max-md:min-h-8")
   })
 })
 

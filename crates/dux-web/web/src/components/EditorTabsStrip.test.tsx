@@ -167,12 +167,10 @@ describe("EditorTabsStrip", () => {
     expect(strip.className).toContain("overflow-x-auto")
   })
 
-  it("phone pills match the mode toggle's height, a deliberate touch-floor deviation", () => {
-    // The pill's visible phone height is pinned to the File/Diff mode
-    // toggle's rendered height (h-7 button + p-0.5 + border = 34px =
-    // min-h-8.5), NOT the 40px touch floor, a settled product decision for
-    // this surface. The close button keeps a larger-than-visual hit area
-    // (max-md:size-8 fits inside the 34px pill without adding height).
+  it("phone pills are 34px tall, a deliberate touch-floor deviation", () => {
+    // NOT the 40px touch floor, a settled product decision for this surface.
+    // The close button keeps a larger-than-visual hit area (max-md:size-8 fits
+    // inside the 34px pill without adding height).
     seed("s1", [tab({ id: "t1" })], "t1")
     render(<EditorTabsStrip root={agentRoot("s1")} />)
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
@@ -184,6 +182,28 @@ describe("EditorTabsStrip", () => {
     const closeBtn = screen.getByLabelText("Close a.ts")
     expect(closeBtn.className).toContain("max-md:size-8")
     expect(closeBtn.className).not.toContain("max-md:size-10")
+  })
+
+  it("gives the close ✕ a 40px tap area on a touch tablet without growing it", () => {
+    // A tablet is a finger at desktop width, where the ✕ is 20px. jsdom cannot
+    // evaluate media queries, so the classes are what can be pinned.
+    seed("s1", [tab({ id: "t1" })], "t1")
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
+    const classes = Array.from(screen.getByLabelText("Close a.ts").classList)
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        "size-5",
+        "relative",
+        "after:absolute",
+        "after:-inset-2.5",
+        "after:hidden",
+        "md:pointer-coarse:after:block",
+      ]),
+    )
+    // The phone's 32px ✕ needs no margin, and the pill keeps its height.
+    expect(classes).not.toContain("pointer-coarse:after:block")
+    const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
+    expect(pill.className).not.toMatch(/pointer-coarse:min-h/)
   })
 
   it("renders nothing when the session has no tabs", () => {

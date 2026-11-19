@@ -81,11 +81,12 @@ function TabPill({
             onActivate()
           }
         }}
-        // max-md:min-h-8.5 pins the phone pill to the header File/Diff toggle's
-        // rendered height, deliberately under the 40px touch-target floor: the
-        // strip sits between the header and Monaco, where vertical space is the
-        // scarce resource on a phone. max-md:py-0 goes with it, or the close
-        // button's own hit area adds the padding back and overshoots.
+        // max-md:min-h-8.5 makes the phone pill 34px, deliberately under the
+        // 40px touch-target floor on the vertical axis only: the strip sits
+        // between the header and Monaco, neither a tap target beside a pill,
+        // and vertical space is the scarce resource on a phone. max-md:py-0
+        // goes with it, or the close button's own hit area adds the padding
+        // back and overshoots.
         className={cn(
           "group/etab flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-8.5 max-md:py-0",
           active
@@ -125,7 +126,14 @@ function TabPill({
           // max-md:size-8 keeps a larger-than-visual tap area (32px against
           // the icon's 14px glyph) without adding to the pill's 34px height:
           // the cheap tap forgiveness the reduced pill still affords.
-          className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:size-8"
+          //
+          // A tablet keeps the 20px box and the pill's height; an invisible
+          // 10px margin takes the tap area to 40px wide. Its left 10px lie
+          // over the pill's own name or dirty dot, so a tap there closes
+          // rather than selects. Vertically the strip's scroll box clips it
+          // to 38px; the neighbours there are the editor header and Monaco,
+          // neither a tap target beside the ✕.
+          className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:size-8 md:pointer-coarse:after:block"
         >
           <X className="size-3.5" />
         </button>

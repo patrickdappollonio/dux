@@ -282,6 +282,7 @@ describe("the editor status bar", () => {
     expect(button.querySelector("bdi")?.textContent).toBe("src/main.rs")
     // A control on a touch screen, so it carries the 40px floor.
     expect(button.className).toContain("pointer-coarse:min-w-10")
+    expect(button.className).toContain("pointer-coarse:h-10")
     expect(button.className).toContain("h-full")
     fireEvent.click(button)
     await waitFor(() => expect(successMock).toHaveBeenCalled())

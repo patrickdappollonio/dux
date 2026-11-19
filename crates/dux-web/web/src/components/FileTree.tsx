@@ -20,6 +20,8 @@ import { dragCarriesFiles } from "@/lib/fileDrop"
 import { classifyDroppedItems } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { useFilePicker } from "@/hooks/use-file-picker"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { targetDirForCreate } from "@/lib/fileTreeOps"
 import {
   ancestorDirs,
@@ -33,7 +35,10 @@ import type { EditorRoot } from "@/lib/editorRoot"
 
 const noop = () => {}
 
-const ROW_HEIGHT = 28 // px, must match the py-1 + text-sm row height
+// Each row's height in px, set inline on the row and used to position and
+// window the virtual list. A finger, or a phone's width, gets 32px.
+const ROW_HEIGHT = 28
+const TOUCH_ROW_HEIGHT = 32
 const OVERSCAN = 10 // rows to render above/below the viewport
 
 interface FileTreeProps {
@@ -449,12 +454,15 @@ export function FileTree({
 
   const rootState = dirs.get("")
 
-  const totalHeight = rows.length * ROW_HEIGHT
+  const coarse = useIsCoarsePointer()
+  const mobile = useIsMobile()
+  const rowHeight = coarse || mobile ? TOUCH_ROW_HEIGHT : ROW_HEIGHT
+  const totalHeight = rows.length * rowHeight
 
-  const firstVisible = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN)
+  const firstVisible = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN)
   const lastVisible = Math.min(
     rows.length - 1,
-    Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN,
+    Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN,
   )
   const visibleRows = rows.slice(firstVisible, lastVisible + 1)
 
@@ -577,7 +585,7 @@ export function FileTree({
         <ul
           style={{
             position: "absolute",
-            top: firstVisible * ROW_HEIGHT,
+            top: firstVisible * rowHeight,
             left: 0,
             right: 0,
           }}
@@ -610,7 +618,7 @@ export function FileTree({
                         )}
                         style={{
                           paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                          height: ROW_HEIGHT,
+                          height: rowHeight,
                         }}
                       />
                     }
@@ -667,7 +675,7 @@ export function FileTree({
                   className="flex items-center gap-1 py-1 pr-1 text-muted-foreground"
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                    height: ROW_HEIGHT,
+                    height: rowHeight,
                   }}
                 >
                   <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />
@@ -684,7 +692,7 @@ export function FileTree({
                   className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left text-muted-foreground hover:bg-muted"
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                    height: ROW_HEIGHT,
+                    height: rowHeight,
                   }}
                 >
                   <RotateCw className="size-3.5 shrink-0" />
@@ -711,7 +719,7 @@ export function FileTree({
                         )}
                         style={{
                           paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
-                          height: ROW_HEIGHT,
+                          height: rowHeight,
                         }}
                         className={cn(
                           "flex w-full items-center gap-1.5 rounded py-1 pr-1 text-left hover:bg-muted",

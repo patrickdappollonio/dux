@@ -5,6 +5,14 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { DirEntry } from "@/lib/fileTree"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { agentRoot } from "@/lib/editorRoot"
+import {
+  COARSE_POINTER_QUERY,
+  stubMatchMedia,
+  type MatchMediaStub,
+} from "@/test/matchMedia"
+
+// The width query `useIsMobile` subscribes to.
+const MOBILE_QUERY = "(max-width: 767px)"
 
 // FileTree talks to the server exclusively through `fileApi.tree`, so mocking
 // that one function is enough to drive every scenario below without a real
@@ -494,6 +502,118 @@ describe("FileTree", () => {
     expect(screen.queryByText("file-000.txt")).toBeNull()
     const rendered = container.querySelectorAll("li").length
     expect(rendered).toBeLessThan(60)
+  })
+
+  // A finger gets 32px rows, a mouse 28px. The height is what the virtual
+  // list positions rows by and sizes its scroll height from, so all three must
+  // move together, and move when the pointer or the width changes.
+  describe("row height follows the pointer and the width", () => {
+    const COUNT = 50
+    let stub: MatchMediaStub | null = null
+    const originalWidth = window.innerWidth
+
+    function setWidth(width: number) {
+      Object.defineProperty(window, "innerWidth", {
+        value: width,
+        configurable: true,
+      })
+    }
+
+    afterEach(() => {
+      stub?.restore()
+      stub = null
+      setWidth(originalWidth)
+    })
+
+    async function renderMany() {
+      const many = Array.from({ length: COUNT }, (_, i) =>
+        file(`file-${String(i).padStart(3, "0")}.txt`),
+      )
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? many : [] }),
+      )
+      const view = render(
+        <FileTree
+          root={agentRoot("s1")}
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+        />,
+      )
+      await screen.findByText("file-000.txt")
+      return view
+    }
+
+    function layout(container: HTMLElement) {
+      const list = container.querySelector("ul")!
+      const spacer = list.parentElement!
+      const viewport = container.querySelector<HTMLDivElement>(
+        '[data-slot="scroll-area-viewport"]',
+      )!
+      return {
+        total: parseFloat(spacer.style.height),
+        top: () => parseFloat(list.style.top),
+        row: parseFloat(
+          screen.getByText("file-000.txt").closest("button")!.style.height,
+        ),
+        scrollTo(px: number) {
+          Object.defineProperty(viewport, "scrollTop", {
+            configurable: true,
+            writable: true,
+            value: px,
+          })
+          fireEvent.scroll(viewport)
+        },
+      }
+    }
+
+    function expectRowHeight(container: HTMLElement, height: number) {
+      const l = layout(container)
+      expect(l.row).toBe(height)
+      expect(l.total).toBe(COUNT * height)
+      // Scrolled past the overscan, the window starts on a whole row.
+      l.scrollTo(30 * height)
+      expect(l.top()).toBe(20 * height)
+      l.scrollTo(0)
+    }
+
+    it("is 28px with a mouse at desktop width", async () => {
+      stub = stubMatchMedia({ [COARSE_POINTER_QUERY]: false })
+      setWidth(1024)
+      const { container } = await renderMany()
+      expectRowHeight(container, 28)
+    })
+
+    it("is 32px under a coarse pointer at desktop width", async () => {
+      stub = stubMatchMedia({ [COARSE_POINTER_QUERY]: true })
+      setWidth(1024)
+      const { container } = await renderMany()
+      expectRowHeight(container, 32)
+    })
+
+    it("is 32px at phone width", async () => {
+      stub = stubMatchMedia({ [COARSE_POINTER_QUERY]: false })
+      setWidth(390)
+      const { container } = await renderMany()
+      expectRowHeight(container, 32)
+    })
+
+    it("changes while the tree is open when the pointer or the width does", async () => {
+      stub = stubMatchMedia({ [COARSE_POINTER_QUERY]: true })
+      setWidth(1024)
+      const { container } = await renderMany()
+      expectRowHeight(container, 32)
+
+      act(() => stub!.set(COARSE_POINTER_QUERY, false))
+      expectRowHeight(container, 28)
+
+      act(() => {
+        setWidth(390)
+        stub!.set(MOBILE_QUERY, true)
+      })
+      expectRowHeight(container, 32)
+    })
   })
 
   describe("context menu", () => {

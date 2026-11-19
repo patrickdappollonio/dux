@@ -370,6 +370,67 @@ describe("AgentTabsStrip phone height", () => {
   })
 })
 
+// A tablet is a finger at desktop width, so none of the phone's `max-md:`
+// sizes reach it. jsdom cannot evaluate media queries; the classes are what can
+// be pinned.
+describe("AgentTabsStrip on a touch tablet", () => {
+  it("makes the pills 36px tall with 8px between them", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    for (const pill of screen.getAllByRole("tab")) {
+      expect(pill.className).toContain("md:pointer-coarse:min-h-9")
+    }
+    const strip = screen.getAllByRole("tab")[0].parentElement
+    expect(strip?.className).toContain("md:pointer-coarse:gap-2")
+  })
+
+  it("gives the ⋯, + and chooser a 40px tap area without growing them", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const margins: Array<[HTMLElement, string]> = [
+      // 20px box, 10px a side.
+      ...screen
+        .getAllByLabelText("Tab actions")
+        .map((b): [HTMLElement, string] => [b, "after:-inset-2.5"]),
+      // 24px boxes, 8px a side.
+      [screen.getByLabelText("New tab"), "after:-inset-2"],
+      [screen.getByLabelText("Choose provider for new tab"), "after:-inset-2"],
+    ]
+    for (const [control, inset] of margins) {
+      const classes = Array.from(control.classList)
+      expect(classes).toEqual(
+        expect.arrayContaining([
+          "relative",
+          "after:absolute",
+          inset,
+          "after:hidden",
+          "md:pointer-coarse:after:block",
+        ]),
+      )
+      // The phone's own sizes already clear the floor's width; a margin there
+      // would overlap the neighbours.
+      expect(classes).not.toContain("pointer-coarse:after:block")
+      expect(classes).not.toContain("max-md:after:block")
+    }
+  })
+
+  it("lets the ⋯'s tap area out of its reveal wrapper only where it is always revealed", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const wrapper = screen.getAllByLabelText("Tab actions")[0].closest("div")!
+    expect(wrapper.className).toContain("pointer-coarse:overflow-visible")
+    // A mouse keeps the clip that hides the collapsed trigger.
+    expect(wrapper.className).toContain("overflow-hidden")
+  })
+
+  it("keeps the + and chooser tap areas apart and the chooser's clear of the pane divider", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const group = screen.getByLabelText("New tab").parentElement!
+    expect(group.className).toContain("md:pointer-coarse:gap-4")
+    // And the + clear of the last pill's ⋯.
+    expect(group.className).toContain("md:pointer-coarse:ml-0.5")
+    const strip = screen.getAllByRole("tab")[0].parentElement!
+    expect(strip.className).toContain("md:pointer-coarse:pr-4.5")
+  })
+})
+
 // The pill's cue follows its own ladder: needs-you and typing outrank
 // working, so a pill flagged for either shows that state and no working cue.
 describe("AgentTabsStrip working cue ladder", () => {

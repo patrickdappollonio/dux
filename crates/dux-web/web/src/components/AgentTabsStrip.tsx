@@ -90,9 +90,14 @@ export function AgentTabsStrip({
     // `max-md:py-0.5` halves the strip's own vertical padding to go with the
     // shorter phone pill below: shrinking the pill alone would leave the strip
     // the same height. Desktop padding is unchanged.
+    //
+    // A finger at desktop width (a tablet) gets 8px between pills, so one
+    // pill's ⋯ tap margin stays clear of the next pill, and an 18px end: the
+    // pane divider's touch band reaches 10px into this strip, and the
+    // chooser's tap margin takes the other 8.
     <div
       ref={attachStrip}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5"
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
       <SortableStrip
         ids={tabs.map((t) => t.id)}
@@ -112,8 +117,12 @@ export function AgentTabsStrip({
       </SortableStrip>
       {/* Split "+" control: the main button quick-adds the project default
           provider, the adjacent caret opens a menu to pick another configured
-          one. The gap between the halves is the misclick-safe spacing. */}
-      <div className="flex shrink-0 items-center gap-0.5">
+          one. The gap between the halves is the misclick-safe spacing. On a
+          tablet both keep their 24px boxes and take a 40px tap area (8px a
+          side), so 16px between them keeps the two areas from overlapping,
+          and 2px more before the "+" keeps its area off the last pill's ⋯,
+          whose own reaches 1px past its pill. */}
+      <div className="flex shrink-0 items-center gap-0.5 md:pointer-coarse:ml-0.5 md:pointer-coarse:gap-4">
         <SimpleTooltip
           content={
             atCap
@@ -132,7 +141,9 @@ export function AgentTabsStrip({
             // height relaxation is VERTICAL only (see the pill below), so this
             // keeps its full 44px WIDTH, where its neighbour is the provider
             // caret and a stray sideways tap would add the wrong provider.
-            className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11"
+            // On a tablet the box stays 24px and an invisible margin takes the
+            // tap area to 40px.
+            className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
           >
             <Plus className="size-4" />
           </button>
@@ -144,9 +155,9 @@ export function AgentTabsStrip({
                 type="button"
                 aria-label="Choose provider for new tab"
                 disabled={disabled}
-                // Height relaxed, width kept: same reasoning as the "+" beside
-                // it.
-                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11"
+                // Height relaxed, width kept, and the same tablet tap margin:
+                // same reasoning as the "+" beside it.
+                className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
               />
             }
           >
@@ -226,11 +237,13 @@ function TabPill({
       // controls end at its bottom edge, and the PTY, where a mis-tap costs a
       // keyboard you dismiss or a click the app ignores. Horizontally the pill
       // keeps its size, because its neighbours are other tabs and landing on
-      // the wrong one is a real mis-tap.
+      // the wrong one is a real mis-tap. A tablet gets the same 36px for the
+      // same reasons, with the strip's own padding kept, so the ⋯ tap area
+      // inside, which overshoots the pill by 2px, stays inside the strip.
       className={cn(
         // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
         // top of the 32px ⋯ hit area inside and overshoot the 36px again.
-        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0",
+        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0 md:pointer-coarse:min-h-9",
         isDragging && "relative z-10 shadow-lg",
         active
           ? "border-border bg-background text-foreground"
@@ -264,10 +277,12 @@ function TabPill({
           max-width collapses to zero rather than opacity alone, which would
           still reserve the box's width, and animates open on hover,
           focus-within, or `data-popup-open` (Base UI does not mirror that onto
-          `aria-expanded`). Always revealed on touch. */}
+          `aria-expanded`). Always revealed on touch, so a coarse pointer has
+          nothing for the clip to hide and drops it: the trigger's tap margin
+          reaches past this wrapper. */}
       <div
         className={cn(
-          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100",
+          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100 pointer-coarse:overflow-visible",
           ALWAYS_REVEALED_ON_TOUCH,
         )}
       >
@@ -281,8 +296,12 @@ function TabPill({
                 // `max-md:h-8 max-md:w-11` keeps the full 44px width (its
                 // horizontal neighbour is the next tab) while fitting inside the
                 // pill's 36px height; `max-md:size-11` here would have forced
-                // the pill back to 44px and undone the shorter strip.
-                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground max-md:h-8 max-md:w-11"
+                // the pill back to 44px and undone the shorter strip. A tablet
+                // keeps the 20px box and an invisible 10px margin takes the tap
+                // area to 40px. Its left 10px lie over the pill's own label or
+                // pin, so a tap there opens the menu rather than selecting the
+                // tab.
+                className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:h-8 max-md:w-11 md:pointer-coarse:after:block"
               />
             }
           >
