@@ -129,10 +129,12 @@ describe("DockStrip", () => {
     expect(screen.getAllByLabelText("Terminal actions")).toHaveLength(1)
   })
 
-  it("lifts every control on the strip to the touch floor under a finger", () => {
+  it("lifts every control on the strip to the touch floor under a finger at phone width", () => {
     render(strip([terminal("t1", 1)]))
     for (const label of ["New terminal", "Hide terminals", "Maximize terminal", "Terminal actions"]) {
-      expect(screen.getByLabelText(label).className, label).toContain("pointer-coarse:size-10")
+      const classes = Array.from(screen.getByLabelText(label).classList)
+      expect(classes, label).toContain("max-md:pointer-coarse:size-10")
+      expect(classes, `${label} keeps its box on a tablet`).not.toContain("pointer-coarse:size-10")
     }
   })
 
@@ -214,5 +216,59 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+  })
+})
+
+// The agent tab strip's tablet shape, so the two strips stacked in one pane
+// match: jsdom cannot evaluate media queries, so the classes are what can be
+// pinned, and a browser must measure the 36px pills and 40px tap areas.
+describe("DockStrip on a touch tablet", () => {
+  it("makes the pills 36px tall with 8px between them", () => {
+    render(strip([terminal("t1", 1), terminal("t2", 2)]))
+    for (const pill of screen.getAllByRole("tab")) {
+      expect(pill.className).toContain("md:pointer-coarse:min-h-9")
+    }
+    expect(screen.getByTestId("dock-strip").className).toContain("md:pointer-coarse:gap-2")
+  })
+
+  it("gives the ⋯, + and layout controls a 40px tap area without growing them", () => {
+    render(strip([terminal("t1", 1)]))
+    const margins: Array<[string, string]> = [
+      // 20px box, 10px a side.
+      ["Terminal actions", "after:-inset-2.5"],
+      // 24px boxes, 8px a side.
+      ["New terminal", "after:-inset-2"],
+      ["Hide terminals", "after:-inset-2"],
+      ["Maximize terminal", "after:-inset-2"],
+    ]
+    for (const [label, inset] of margins) {
+      const classes = Array.from(screen.getByLabelText(label).classList)
+      expect(classes, label).toEqual(
+        expect.arrayContaining([
+          "relative",
+          "after:absolute",
+          inset,
+          "after:hidden",
+          "md:pointer-coarse:after:block",
+        ]),
+      )
+      expect(classes, label).not.toContain("pointer-coarse:after:block")
+    }
+  })
+
+  it("lets the ⋯'s tap area out of its reveal wrapper, keeping the mouse's clip", () => {
+    render(strip([terminal("t1", 1)]))
+    const wrapper = screen.getByLabelText("Terminal actions").closest("div")!
+    expect(wrapper.className).toContain("md:pointer-coarse:overflow-visible")
+    expect(wrapper.className).toContain("overflow-hidden")
+  })
+
+  it("keeps the tap areas apart and the last one clear of the pane divider", () => {
+    render(strip([terminal("t1", 1)]))
+    // The + clear of the last pill's ⋯.
+    expect(screen.getByLabelText("New terminal").className).toContain("md:pointer-coarse:ml-0.5")
+    const group = screen.getByLabelText("Hide terminals").parentElement!
+    expect(group.className).toContain("md:pointer-coarse:gap-4")
+    expect(screen.getByTestId("dock-strip").className).toContain("md:pointer-coarse:pr-4.5")
   })
 })

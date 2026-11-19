@@ -24,10 +24,11 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
-// The strip's icon buttons: the tab strip's own, at one height token, lifted to
-// the 40px floor under a finger, where Hide and Maximize sit side by side.
+// The strip's icon buttons: the tab strip's own, at one height token. A phone
+// lifts the box to the 40px floor; a tablet keeps the 24px box and an invisible
+// 8px margin a side takes the tap area to 40px, as the tab strip's + does.
 const STRIP_ICON_BUTTON =
-  "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-10"
+  "relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:pointer-coarse:size-10 md:pointer-coarse:after:block"
 
 // An agent's terminal dock strip: one pill per terminal of the agent, in the
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
@@ -57,10 +58,14 @@ export function DockStrip({
   const ids = terminals.map((t) => t.id)
   const attachStrip = useKeepCueClocks(ids.join("\n"))
   return (
+    // A tablet gets the tab strip's spacing: 8px between pills, so one pill's ⋯
+    // tap margin stays clear of the next pill, and an 18px end, since the pane
+    // divider's touch band reaches 10px into the strip and the last layout
+    // control's tap margin takes the other 8.
     <div
       ref={attachStrip}
       data-testid="dock-strip"
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1"
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
       <SortableStrip ids={ids} onReorder={(next) => reorderDock(sessionId, next)}>
         {terminals.map((terminal) => (
@@ -79,16 +84,18 @@ export function DockStrip({
           type="button"
           aria-label="New terminal"
           onClick={() => createTerminal(sessionId)}
-          className={STRIP_ICON_BUTTON}
+          // 2px more on a tablet keeps its tap area off the last pill's ⋯,
+          // whose own reaches 1px past its pill.
+          className={cn(STRIP_ICON_BUTTON, "md:pointer-coarse:ml-0.5")}
         >
           <Plus className="size-4" />
         </button>
       </SimpleTooltip>
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
-          other. */}
+          other. On a tablet 16px between them keeps their tap areas apart. */}
       {layout !== undefined && onLayoutAction !== undefined ? (
-        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">
+        <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2 md:pointer-coarse:gap-4">
           {layoutControls(layout).map((control) => (
             <SimpleTooltip key={control.action} content={control.label}>
               <button
@@ -142,7 +149,8 @@ function DockPill({
         }
       }}
       className={cn(
-        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors",
+        // 36px on a tablet, the tab strip's pill height.
+        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors md:pointer-coarse:min-h-9",
         isDragging && "relative z-10 shadow-lg",
         active
           ? "border-border bg-background text-foreground"
@@ -157,11 +165,13 @@ function DockPill({
         className="size-3.5"
       />
       <span className="max-w-40 truncate">{label}</span>
-      {/* Consumes no layout space at rest, like the tab pill's. */}
+      {/* Consumes no layout space at rest, like the tab pill's. Always revealed
+          on a tablet, so the clip drops there and the trigger's tap margin
+          reaches past this wrapper. */}
       {withMenu ? (
         <div
           className={cn(
-            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100",
+            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100 md:pointer-coarse:overflow-visible",
             ALWAYS_REVEALED_ON_TOUCH,
           )}
         >
@@ -173,8 +183,9 @@ function DockPill({
                   aria-label="Terminal actions"
                   onClick={(e) => e.stopPropagation()}
                   // The touch floor under a finger: its neighbours are the next
-                  // pill and its own pill's select.
-                  className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground pointer-coarse:size-10"
+                  // pill and its own pill's select. A tablet keeps the 20px box
+                  // and an invisible 10px margin takes the tap area to 40px.
+                  className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:pointer-coarse:size-10 md:pointer-coarse:after:block"
                 />
               }
             >
