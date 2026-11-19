@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type * as React from "react"
 import { SquarePen, SquareSlash } from "lucide-react"
+import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 
 import {
   Command,
@@ -148,7 +149,9 @@ export function MacroPopover({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    // Tab stays in the picker, which base-ui does only with a Close part inside
+    // it; the page keeps its scroll and a click outside still dismisses it.
+    <Popover open={open} onOpenChange={setOpen} modal="trap-focus">
       {/* The ellipsis on the label says the button opens a menu of choices
           rather than acting.
 
@@ -194,8 +197,9 @@ export function MacroPopover({
         ) : (
           <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
         )}
-        <button
-          type="button"
+        {/* The picker's Close part: it closes the picker on its way to the
+            dialog, so it is the one control that can carry the role. */}
+        <PopoverPrimitive.Close
           // shrink-0: the footer never gives up height to the list; when the
           // popup is at its viewport cap it is the list that scrolls.
           className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground max-md:min-h-10 pointer-coarse:min-h-10"
@@ -206,7 +210,7 @@ export function MacroPopover({
         >
           <SquarePen className="size-3.5 shrink-0" />
           Edit macros…
-        </button>
+        </PopoverPrimitive.Close>
       </PopoverContent>
     </Popover>
   )

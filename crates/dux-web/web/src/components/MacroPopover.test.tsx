@@ -568,3 +568,44 @@ describe("MacroPopover search highlight", () => {
     expect(marks.map((m) => m.textContent)).toEqual(["G", "t"])
   })
 })
+
+// The browser's own Tab, for jsdom, which has none: focus moves to the next
+// element in document order that takes keyboard focus, the primitive's focus
+// guards included, and the guard then routes it.
+function pressTab(shift = false) {
+  const order = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), input:not([disabled]), textarea, [tabindex]",
+    ),
+  ).filter((el) => el.tabIndex >= 0)
+  const at = order.indexOf(document.activeElement as HTMLElement)
+  const next = order[at + (shift ? -1 : 1)]
+  act(() => next?.focus())
+}
+
+// The picker sits over a live page; a keyboard user walking its controls must
+// stay in it until they pick, press Escape or click away. A browser check: open
+// Macros…, Tab past Edit macros… and focus comes back to the search field, and
+// Shift-Tab from the search field goes to Edit macros….
+describe("MacroPopover keyboard walk", () => {
+  it("keeps Tab inside the open picker in both directions", async () => {
+    render(
+      <>
+        <MacroPopover target={target} />
+        <button type="button">Behind the picker</button>
+      </>,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    const popup = document.querySelector('[data-slot="popover-content"]')!
+    const edit = screen.getByRole("button", { name: "Edit macros…" })
+    act(() => edit.focus())
+    pressTab()
+    await settle()
+    expect(popup.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).toBe(document.querySelector('[data-slot="command-input"]'))
+    pressTab(true)
+    await settle()
+    expect(document.activeElement).toBe(edit)
+  })
+})
