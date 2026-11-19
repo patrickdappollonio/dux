@@ -21,6 +21,7 @@ import {
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
+import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
@@ -65,7 +66,8 @@ export function DockStrip({
     <div
       ref={attachStrip}
       data-testid="dock-strip"
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
       <SortableStrip ids={ids} onReorder={(next) => reorderDock(sessionId, next)}>
         {terminals.map((terminal) => (

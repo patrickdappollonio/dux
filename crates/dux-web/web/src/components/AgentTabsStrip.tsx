@@ -45,6 +45,7 @@ import {
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
+import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -97,7 +98,8 @@ export function AgentTabsStrip({
     // chooser's tap margin takes the other 8.
     <div
       ref={attachStrip}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1 max-md:py-0.5 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 max-md:py-0.5 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
       <SortableStrip
         ids={tabs.map((t) => t.id)}

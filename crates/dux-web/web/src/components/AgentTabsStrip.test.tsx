@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import type { SessionView } from "@/lib/types"
 import { ONLY_TAB_CLOSE_REFUSAL } from "@/lib/agentTabs"
 import {
@@ -513,5 +513,30 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest 
     expect(frameOf(icon()).getAttribute("class"), LOCKED).toContain(BOUNCE)
     fireAnimationIteration(frameOf(icon()), "working-bounce")
     expect(frameOf(icon()).getAttribute("class"), LOCKED).not.toContain(BOUNCE)
+  })
+})
+
+// A browser check: Tab onto a tab past the strip's right edge and the strip
+// scrolls the whole tab into view, with its focus ring whole above and below.
+describe("keyboard focus on the strip", () => {
+  it("scrolls a tab taking keyboard focus into view, with room for its ring", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const pill = screen.getAllByRole("tab")[1]
+    const scroll = vi.fn()
+    pill.scrollIntoView = scroll
+    const matches = Element.prototype.matches
+    const keyboard = vi
+      .spyOn(Element.prototype, "matches")
+      .mockImplementation(function (this: Element, selector: string) {
+        return selector === ":focus-visible" || matches.call(this, selector)
+      })
+    try {
+      act(() => pill.focus())
+    } finally {
+      keyboard.mockRestore()
+    }
+    expect(scroll).toHaveBeenCalledTimes(1)
+    expect(pill.parentElement!.className).toContain("py-1.25")
+    expect(pill.parentElement!.className).toContain("scroll-px-2")
   })
 })

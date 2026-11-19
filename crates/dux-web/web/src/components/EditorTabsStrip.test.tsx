@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { EditorTab } from "@/lib/editorTabs"
@@ -215,5 +215,31 @@ describe("EditorTabsStrip", () => {
     seed("s1", [], null)
     const { container } = render(<EditorTabsStrip root={agentRoot("s1")} />)
     expect(container.firstChild).toBeNull()
+  })
+})
+
+// A browser check: Tab onto a tab past the strip's right edge and the strip
+// scrolls the whole tab into view, with its focus ring whole above and below.
+describe("keyboard focus on the strip", () => {
+  it("scrolls a tab taking keyboard focus into view, with room for its ring", () => {
+    seed("s1", [tab({ id: "t1", path: "a.ts" }), tab({ id: "t2", path: "b.ts" })], "t1")
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
+    const pill = screen.getAllByRole("tab")[1]
+    const scroll = vi.fn()
+    pill.scrollIntoView = scroll
+    const matches = Element.prototype.matches
+    const keyboard = vi
+      .spyOn(Element.prototype, "matches")
+      .mockImplementation(function (this: Element, selector: string) {
+        return selector === ":focus-visible" || matches.call(this, selector)
+      })
+    try {
+      act(() => pill.focus())
+    } finally {
+      keyboard.mockRestore()
+    }
+    expect(scroll).toHaveBeenCalledTimes(1)
+    expect(pill.parentElement!.className).toContain("py-1.25")
+    expect(pill.parentElement!.className).toContain("scroll-px-2")
   })
 })

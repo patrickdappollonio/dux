@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
@@ -11,6 +10,7 @@ import {
   stubGlyphEase,
 } from "@/test/animationEvents"
 import type { DuxState } from "@/lib/store"
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import type { SessionView, TerminalView } from "@/lib/types"
 
 // Drag-from-any-mode contract. dnd-kit cannot run a real drag under jsdom (it

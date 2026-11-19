@@ -13,6 +13,7 @@ import {
 } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { rootKey, type EditorRoot } from "@/lib/editorRoot"
+import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 
 // The code-editor tab strip (pills), rhymes with `AgentTabsStrip` but is its
 // own component: editor tabs are pure client state (see lib/editorTabs.ts),
@@ -34,7 +35,10 @@ export function EditorTabsStrip({ root }: { root: EditorRoot }) {
   }
 
   return (
-    <div className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1">
+    <div
+      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
+      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2"
+    >
       {tabs.map((tab) => (
         <TabPill
           key={tab.id}

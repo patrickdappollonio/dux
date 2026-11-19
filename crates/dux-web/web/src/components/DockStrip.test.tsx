@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import type { TerminalView } from "@/lib/types"
 import {
@@ -270,5 +270,30 @@ describe("DockStrip on a touch tablet", () => {
     const group = screen.getByLabelText("Hide terminals").parentElement!
     expect(group.className).toContain("md:pointer-coarse:gap-4")
     expect(screen.getByTestId("dock-strip").className).toContain("md:pointer-coarse:pr-4.5")
+  })
+})
+
+// A browser check: Tab onto a tab past the strip's right edge and the strip
+// scrolls the whole tab into view, with its focus ring whole above and below.
+describe("keyboard focus on the strip", () => {
+  it("scrolls a tab taking keyboard focus into view, with room for its ring", () => {
+    render(strip([terminal("t1", 1), terminal("t2", 2)]))
+    const pill = screen.getAllByRole("tab")[1]
+    const scroll = vi.fn()
+    pill.scrollIntoView = scroll
+    const matches = Element.prototype.matches
+    const keyboard = vi
+      .spyOn(Element.prototype, "matches")
+      .mockImplementation(function (this: Element, selector: string) {
+        return selector === ":focus-visible" || matches.call(this, selector)
+      })
+    try {
+      act(() => pill.focus())
+    } finally {
+      keyboard.mockRestore()
+    }
+    expect(scroll).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId("dock-strip").className).toContain("py-1.25")
+    expect(screen.getByTestId("dock-strip").className).toContain("scroll-px-2")
   })
 })
