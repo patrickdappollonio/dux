@@ -631,6 +631,35 @@ describe("the Changes pane header in a quiet state", () => {
     expect(screen.getByLabelText("Changes actions")).toBeTruthy()
   })
 
+  it("gives the failed listing's Refresh the touch floor", () => {
+    mockState = {
+      selectedSessionId: "s1",
+      changes: { ...loadedChanges(), phase: "error", error: "git exploded" },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    const classes = screen.getByRole("button", { name: "Refresh" }).className.split(/\s+/)
+    expect(classes).toContain("pointer-coarse:min-h-10")
+    expect(classes).toContain("max-md:pointer-coarse:min-h-11")
+  })
+
+  it("carries the editor's reason onto its folded menu items", async () => {
+    const restore = headerWidth(120)
+    try {
+      mockState = folderAt("missing", folderStates[4]!.sentence)
+      render(<ChangedFiles />)
+      const menu = await openMenu()
+      for (const text of ["Open editor", "New terminal"]) {
+        const item = itemOf(menu, text)
+        expect(item.getAttribute("aria-disabled"), text).toBe("true")
+        expect(reasonOf(item), text).toBe("This folder no longer exists on disk.")
+      }
+      // The git items share the sentence, which the menu says once.
+      expect(menu.getAllByText("This folder no longer exists on disk.")).toHaveLength(1)
+    } finally {
+      restore()
+    }
+  })
+
   it("keeps the header over the ordinary no-changes state, with every item live", async () => {
     render(<ChangedFiles />)
     expect(screen.getByText("No changes")).toBeTruthy()
@@ -669,6 +698,17 @@ function bar() {
   return within(screen.getByRole("toolbar", { name: "Actions for the selected files" }))
 }
 
+function selectionButton() {
+  return bar().getByRole("button", { name: /selected$/ })
+}
+
+// The verbs live in the selection button's menu, which closes on every pick,
+// so this opens it whenever it is not already open.
+function selectionMenu() {
+  if (!screen.queryByRole("menu")) fireEvent.click(selectionButton())
+  return within(screen.getByRole("menu"))
+}
+
 describe("the changes pane's multi-select", () => {
   beforeEach(() => {
     mockState = withFiles(
@@ -686,8 +726,8 @@ describe("the changes pane's multi-select", () => {
     check("a.ts")
     check("b.ts")
 
-    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
-    expect(bar().getByRole("button", { name: "Discard 2…" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 2" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Discard 2…" })).toBeTruthy()
   })
 
   // One request per verb: the batch route stages the lot in one git call and
@@ -699,7 +739,7 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("b.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 2" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(stageMany).toHaveBeenCalledTimes(1)
@@ -713,7 +753,7 @@ describe("the changes pane's multi-select", () => {
   it("sends nothing on a second click after a success", async () => {
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 1" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(
@@ -735,16 +775,16 @@ describe("the changes pane's multi-select", () => {
     )
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 1" }))
 
     check("b.ts")
-    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 2" })).toBeTruthy()
 
     await act(async () => {
       land({ done: ["a.ts"], refused: [] })
     })
 
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
     expect(
       screen.getByLabelText("Select b.ts").getAttribute("aria-checked"),
     ).toBe("true")
@@ -753,7 +793,7 @@ describe("the changes pane's multi-select", () => {
   it("unstages from the staged section with its own verb", async () => {
     render(<ChangedFiles />)
     check("staged.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Unstage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Unstage 1" }))
     await act(() => unstageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(unstageMany).toHaveBeenCalledWith("s1", ["staged.ts"])
@@ -764,7 +804,7 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("b.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 2" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(notifyWarning).toHaveBeenCalledTimes(1)
@@ -785,15 +825,18 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("staged.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 1" }))
 
-    const staging = bar().getByRole("button", { name: "Stage 1" })
+    // The menu closed on the pick, so the button that stays on screen says it.
+    expect(selectionButton().getAttribute("aria-busy")).toBe("true")
+    expect(selectionButton().querySelector('svg[class*="animate-spin"]')).toBeTruthy()
+    const staging = selectionMenu().getByRole("menuitem", { name: "Stage 1" })
     expect(staging.getAttribute("aria-busy")).toBe("true")
-    expect(staging.hasAttribute("disabled")).toBe(true)
+    expect(staging.getAttribute("aria-disabled")).toBe("true")
     expect(staging.querySelector('svg[class*="animate-spin"]')).toBeTruthy()
     // The other verb is disabled too, so nothing else can start behind it.
-    const unstaging = bar().getByRole("button", { name: "Unstage 1" })
-    expect(unstaging.hasAttribute("disabled")).toBe(true)
+    const unstaging = selectionMenu().getByRole("menuitem", { name: "Unstage 1" })
+    expect(unstaging.getAttribute("aria-disabled")).toBe("true")
     expect(unstaging.getAttribute("aria-busy")).toBe("false")
 
     await act(async () => {
@@ -801,7 +844,7 @@ describe("the changes pane's multi-select", () => {
     })
 
     expect(
-      bar().getByRole("button", { name: "Unstage 1" }).hasAttribute("disabled"),
+      selectionMenu().getByRole("menuitem", { name: "Unstage 1" }).hasAttribute("aria-disabled"),
     ).toBe(false)
   })
 
@@ -812,7 +855,7 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("b.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 2" }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -827,14 +870,55 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("staged.ts")
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
-    expect(bar().getByRole("button", { name: "Unstage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Unstage 1" })).toBeTruthy()
 
-    fireEvent.click(bar().getByRole("button", { name: "Clear" }))
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }))
 
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
     ).toBeNull()
+  })
+
+  // One row that never wraps: the count on one button whose menu holds the
+  // verbs, and a clear button beside it.
+  it("acts on the selection from one counted button and its menu", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("b.ts")
+    check("staged.ts")
+
+    expect(bar().getAllByRole("button")).toHaveLength(2)
+    expect(selectionButton().textContent).toBe("3 selected")
+    const clear = bar().getByRole("button", { name: "Clear selection" })
+    expect(within(clear.parentElement!).getByTestId("tooltip-content").textContent).toBe(
+      "Clear selection",
+    )
+
+    const menu = selectionMenu()
+    expect(menu.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Stage 2",
+      "Unstage 1",
+      "Discard 2…",
+      "Select none",
+    ])
+    expect(menu.getAllByRole("separator")).toHaveLength(2)
+    for (const item of menu.getAllByRole("menuitem")) {
+      expect(item.querySelector("svg")).toBeTruthy()
+    }
+  })
+
+  it("gives both selection controls the 40px floor on touch and at phone width", () => {
+    render(<ChangedFiles />)
+    check("a.ts")
+    const selection = selectionButton().className.split(/\s+/)
+    expect(selection).toEqual(
+      expect.arrayContaining(["h-9", "max-md:h-10", "pointer-coarse:h-10"]),
+    )
+    const clear = bar().getByRole("button", { name: "Clear selection" }).className.split(/\s+/)
+    expect(clear).toEqual(
+      expect.arrayContaining(["size-9", "max-md:size-10", "pointer-coarse:size-10"]),
+    )
   })
 
   // The checkbox and the row mean different things, and base-ui re-dispatches a
@@ -992,7 +1076,7 @@ describe("the changes pane's multi-select", () => {
   it("drops a checked path once a refresh moves it to the other section", () => {
     render(<ChangedFiles />)
     check("a.ts")
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
 
     mockState = withFiles([["staged.ts", "M"], ["a.ts", "M"]], [["b.ts", "??"]])
     publishMockState()
@@ -1030,7 +1114,7 @@ describe("the changes pane's multi-select", () => {
     expect(screen.getByLabelText("Select a.ts").getAttribute("aria-checked")).toBe(
       "true",
     )
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
   })
 
   it("drops every attempted path after a partial bulk result", async () => {
@@ -1039,7 +1123,7 @@ describe("the changes pane's multi-select", () => {
     check("a.ts")
     check("b.ts")
 
-    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 2" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(
@@ -1068,7 +1152,7 @@ describe("the changes pane's multi-select", () => {
     check("a.ts")
     check("b.ts")
 
-    fireEvent.click(bar().getByRole("button", { name: "Stage 2" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 2" }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(proseText(notifyWarning.mock.calls[0]![0] as Prose)).toBe(
@@ -1081,7 +1165,7 @@ describe("the changes pane's multi-select", () => {
     render(<ChangedFiles />)
     check("a.ts")
 
-    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 1" }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -1090,7 +1174,7 @@ describe("the changes pane's multi-select", () => {
     expect(screen.getByLabelText("Select a.ts").getAttribute("aria-checked")).toBe(
       "true",
     )
-    const button = bar().getByRole("button", { name: "Stage 1" })
+    const button = selectionMenu().getByRole("menuitem", { name: "Stage 1" })
     expect(button.getAttribute("aria-busy")).toBe("false")
     expect(button.hasAttribute("disabled")).toBe(false)
   })
@@ -1112,7 +1196,7 @@ describe("the changes pane's selection on a touch screen", () => {
 
     fireEvent.click(box)
 
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
   })
 
   // A tap anywhere in the slot lands on the checkbox halo and bubbles to the
@@ -1155,6 +1239,22 @@ describe("the changes pane's selection on a touch screen", () => {
   // landscape tablet had no way to any row's actions at all. The marker/
   // checkbox swap is a separate mechanism with its own coarse rule (above) and
   // is deliberately untouched by this.
+  // A tablet at desktop width with a finger gets the 40px floor, and a phone
+  // keeps the 44px it had, finger or not.
+  it("gives the row's ⋯, the headings and the filter the touch floor", () => {
+    render(<ChangedFiles />)
+    const classes = (el: Element) => el.className.split(/\s+/)
+    const ellipsis = classes(screen.getByLabelText("Actions for a.ts"))
+    expect(ellipsis).toContain("pointer-coarse:size-10")
+    expect(ellipsis).toContain("max-md:pointer-coarse:size-11")
+    const heading = classes(screen.getByText("Unstaged").closest("button")!)
+    expect(heading).toContain("pointer-coarse:min-h-10")
+    expect(heading).toContain("max-md:pointer-coarse:min-h-11")
+    const filter = classes(screen.getByLabelText("Filter changed files"))
+    expect(filter).toContain("pointer-coarse:h-10")
+    expect(filter).toContain("max-md:pointer-coarse:h-11")
+  })
+
   it("always reveals the row's ⋯ where the pointer is coarse", () => {
     render(<ChangedFiles />)
     const wrapper = screen
@@ -1186,18 +1286,18 @@ describe("the bulk bar's Select all toggle", () => {
     render(<ChangedFiles />)
     check("a.ts")
 
-    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select all" }))
 
-    expect(bar().getByRole("button", { name: "Stage 2" })).toBeTruthy()
-    expect(bar().getByRole("button", { name: "Unstage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 2" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Unstage 1" })).toBeTruthy()
   })
 
   it("flips to Select none once every visible row is checked, and unchecks them", () => {
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select all" }))
 
-    fireEvent.click(bar().getByRole("button", { name: "Select none" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select none" }))
 
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
@@ -1213,9 +1313,9 @@ describe("the bulk bar's Select all toggle", () => {
     // The part of the path the filter matched is lit.
     expect(screen.getByText("a.ts").tagName).toBe("MARK")
 
-    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select all" }))
 
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
   })
 
   it("changes visible rows across sections without touching hidden rows", () => {
@@ -1229,7 +1329,7 @@ describe("the bulk bar's Select all toggle", () => {
       target: { value: "visible" },
     })
 
-    fireEvent.click(bar().getByRole("button", { name: "Select all" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select all" }))
     fireEvent.change(screen.getByLabelText("Filter changed files"), {
       target: { value: "" },
     })
@@ -1258,10 +1358,10 @@ describe("the bulk bar's Select all toggle", () => {
       target: { value: "a.ts" },
     })
 
-    fireEvent.click(bar().getByRole("button", { name: "Select none" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Select none" }))
 
-    expect(bar().getByRole("button", { name: "Stage 1" })).toBeTruthy()
-    expect(bar().getByRole("button", { name: "Select all" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Stage 1" })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: "Select all" })).toBeTruthy()
   })
 
   // Clear is not the same control: it empties the WHOLE selection, including
@@ -1274,7 +1374,7 @@ describe("the bulk bar's Select all toggle", () => {
       target: { value: "a.ts" },
     })
 
-    fireEvent.click(bar().getByRole("button", { name: "Clear" }))
+    fireEvent.click(screen.getByRole("button", { name: "Clear selection" }))
 
     expect(
       screen.queryByRole("toolbar", { name: "Actions for the selected files" }),
@@ -1290,8 +1390,8 @@ describe("the bulk bar's Select all toggle", () => {
       target: { value: "no-such-file" },
     })
 
-    expect(bar().queryByRole("button", { name: /^Select (all|none)$/ })).toBeNull()
-    expect(bar().getByRole("button", { name: "Clear" })).toBeTruthy()
+    expect(selectionMenu().queryByRole("menuitem", { name: /^Select (all|none)$/ })).toBeNull()
+    expect(screen.getByRole("button", { name: "Clear selection" })).toBeTruthy()
   })
 
   // It matches the checkboxes, not the verbs: ticking stays possible while a
@@ -1302,10 +1402,10 @@ describe("the bulk bar's Select all toggle", () => {
     )
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Stage 1" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Stage 1" }))
 
     expect(
-      bar().getByRole("button", { name: "Select all" }).hasAttribute("disabled"),
+      selectionMenu().getByRole("menuitem", { name: "Select all" }).hasAttribute("aria-disabled"),
     ).toBe(false)
   })
 
@@ -1327,7 +1427,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
 
     const dialog = within(screen.getByRole("dialog"))
     expect(dialog.getByText(/2 files/)).toBeTruthy()
@@ -1342,7 +1442,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
         name: "Discard",
@@ -1360,7 +1460,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
 
     mockState = withFiles([], [["a.ts", "M"]])
     publishMockState()
@@ -1377,7 +1477,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
     expect(screen.getByRole("dialog")).toBeTruthy()
 
     mockState = withFiles([["a.ts", "M"], ["gone.ts", "??"]], [])
@@ -1393,7 +1493,7 @@ describe("the multi-file discard confirm", () => {
   it("closes itself when the working copy goes away while it is open", async () => {
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 1…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 1…" }))
     expect(screen.getByRole("dialog")).toBeTruthy()
 
     const listed = withFiles([], [["a.ts", "M"], ["gone.ts", "??"]])
@@ -1442,7 +1542,7 @@ describe("the multi-file discard confirm", () => {
   it("closes itself when the listing goes back to loading", async () => {
     render(<ChangedFiles />)
     check("a.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 1…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 1…" }))
     expect(screen.getByRole("dialog")).toBeTruthy()
 
     mockState = {
@@ -1465,7 +1565,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
         name: "Discard",
@@ -1490,7 +1590,7 @@ describe("the multi-file discard confirm", () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
-    fireEvent.click(bar().getByRole("button", { name: "Discard 2…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 2…" }))
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
         name: "Discard",
@@ -1752,9 +1852,14 @@ describe("the Changes pane header's Open editor button", () => {
     const ellipsis = actionsTrigger()
 
     for (const control of [button, ellipsis]) {
-      expect(control.className).toContain("size-8")
-      expect(control.className).toContain("max-md:size-11")
-      expect(control.className).toContain("border-border")
+      const classes = control.className.split(/\s+/)
+      expect(classes).toContain("size-8")
+      expect(classes).toContain("max-md:size-11")
+      // A finger on a tablet at desktop width gets the 40px floor, and a
+      // phone keeps its 44px under the finger too.
+      expect(classes).toContain("pointer-coarse:size-10")
+      expect(classes).toContain("max-md:pointer-coarse:size-11")
+      expect(classes).toContain("border-border")
     }
   })
 
@@ -1782,6 +1887,66 @@ describe("the Changes pane header's Open editor button", () => {
   })
 })
 
+// jsdom lays nothing out, so the header's widths are given: its own content
+// box, the title's text and the ⋯'s square. Returns the undo.
+function headerWidth(width: number): () => void {
+  const spies = [
+    vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (this: Element) {
+      return this.getAttribute("data-slot") === "card-header" ? width : 0
+    }),
+    vi.spyOn(Element.prototype, "scrollWidth", "get").mockImplementation(function (this: Element) {
+      return this.getAttribute("data-slot") === "card-title" ? 67 : 0
+    }),
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("aria-label") === "Changes actions" ? 32 : 0
+    }),
+  ]
+  return () => spies.forEach((spy) => spy.mockRestore())
+}
+
+// A narrow pane keeps its title clear of the buttons by moving the editor and
+// New terminal into the ⋯, and only there.
+describe("the Changes pane header in a narrow pane", () => {
+  let restore: () => void = () => {}
+  afterEach(() => restore())
+
+  async function openMenu() {
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    return within(await screen.findByRole("menu"))
+  }
+
+  it("moves Open editor and New terminal into the ⋯ when they do not fit", async () => {
+    restore = headerWidth(120)
+    render(<ChangedFiles />)
+    expect(screen.queryByLabelText("Open editor")).toBeNull()
+    expect(screen.queryByLabelText("New terminal")).toBeNull()
+
+    const items = (await openMenu()).getAllByRole("menuitem")
+    expect(items.slice(0, 2).map((item) => item.textContent)).toEqual([
+      "Open editor",
+      "New terminal",
+    ])
+    expect(items[0]!.querySelector("svg")).toBeTruthy()
+    expect(items[1]!.querySelector("svg")).toBeTruthy()
+    fireEvent.click(items[1]!)
+    expect(createTerminal).toHaveBeenCalledWith("s1")
+
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    fireEvent.click((await screen.findByRole("menu")).querySelector('[role="menuitem"]')!)
+    expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "s1" })
+  })
+
+  it("keeps them in the header, and out of the ⋯, when they fit", async () => {
+    restore = headerWidth(400)
+    render(<ChangedFiles />)
+    expect(screen.getByLabelText("Open editor")).toBeTruthy()
+    expect(screen.getByLabelText("New terminal")).toBeTruthy()
+    const menu = await openMenu()
+    expect(menu.queryByText("Open editor")).toBeNull()
+    expect(menu.queryByText("New terminal")).toBeNull()
+  })
+})
+
 // The header's second door to the agent's New terminal: the same shared action
 // the agent menu and the dock strip's + run, for the agent on screen.
 describe("the Changes pane header's New terminal button", () => {
@@ -1795,8 +1960,8 @@ describe("the Changes pane header's New terminal button", () => {
     expect(button.parentElement).toBe(ellipsis.parentElement)
     expect(editor.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(button.compareDocumentPosition(ellipsis) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    for (const token of ["size-8", "max-md:size-11", "border-border"]) {
-      expect(button.className).toContain(token)
+    for (const token of ["size-8", "max-md:size-11", "pointer-coarse:size-10", "border-border"]) {
+      expect(button.className.split(/\s+/)).toContain(token)
     }
 
     fireEvent.click(button)
@@ -2075,11 +2240,8 @@ describe("a folded folder row", () => {
     mockState = withFolder()
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select node_modules"))
-    const toolbar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    expect(toolbar.getByText("Stage 28,747")).toBeTruthy()
-    expect(toolbar.getByText("Discard 28,747…")).toBeTruthy()
+    expect(selectionMenu().getByText("Stage 28,747")).toBeTruthy()
+    expect(selectionMenu().getByText("Discard 28,747…")).toBeTruthy()
   })
 
   // The bulk discard names what the user confirmed for each folder, so the
@@ -2088,7 +2250,7 @@ describe("a folded folder row", () => {
     mockState = withFolder()
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select node_modules"))
-    fireEvent.click(bar().getByRole("button", { name: "Discard 28,747…" }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: "Discard 28,747…" }))
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }),
     )
@@ -2128,21 +2290,20 @@ describe("a folded folder row", () => {
   }
 
   // A verb with nothing to act on is not offered as a click that silently
-  // does nothing: it is disabled, and its tooltip says why.
+  // does nothing: it is disabled, and the menu says why on the item itself.
   it("disables a bulk verb whose count is zero and says why", () => {
     mockState = withWorktree()
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
 
-    const stage = bar().getByRole("button", { name: /Stage 0/ })
-    const discard = bar().getByRole("button", { name: /Discard 0/ })
-    expect((stage as HTMLButtonElement).disabled).toBe(true)
-    expect((discard as HTMLButtonElement).disabled).toBe(true)
-    const hints = bar()
-      .getAllByTestId("tooltip-content")
-      .map((el) => el.textContent ?? "")
-    expect(hints.some((text) => text.startsWith("Nothing selected can be staged"))).toBe(true)
-    expect(hints.some((text) => text.startsWith("Nothing selected can be discarded"))).toBe(true)
+    const stage = selectionMenu().getByRole("menuitem", { name: /Stage 0/ })
+    const discard = selectionMenu().getByRole("menuitem", { name: /Discard 0/ })
+    expect(stage.getAttribute("aria-disabled")).toBe("true")
+    expect(discard.getAttribute("aria-disabled")).toBe("true")
+    const reason = (item: HTMLElement) =>
+      document.getElementById(item.getAttribute("aria-describedby") ?? "")?.textContent ?? ""
+    expect(reason(stage)).toMatch(/^Nothing selected can be staged/)
+    expect(reason(discard)).toMatch(/^Nothing selected can be discarded/)
   })
 
   // In a mixed selection the rows a bulk stage leaves out are named with why,
@@ -2153,7 +2314,7 @@ describe("a folded folder row", () => {
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
 
-    fireEvent.click(bar().getByRole("button", { name: /Stage 28,747/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 28,747/ }))
     await act(() => stageMany.mock.results[0]!.value as Promise<unknown>)
 
     expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules"])
@@ -2169,7 +2330,7 @@ describe("a folded folder row", () => {
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
 
-    fireEvent.click(bar().getByRole("button", { name: /Discard 28,747/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Discard 28,747/ }))
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }))
     await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
 
@@ -2202,11 +2363,8 @@ describe("a folded folder row", () => {
     render(<ChangedFiles />)
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select inner-wt"))
-    const toolbar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    expect(toolbar.getByText("Stage 28,747")).toBeTruthy()
-    expect(toolbar.getByText("Discard 28,747…")).toBeTruthy()
+    expect(selectionMenu().getByText("Stage 28,747")).toBeTruthy()
+    expect(selectionMenu().getByText("Discard 28,747…")).toBeTruthy()
   })
 
   it("offers no menu for a row nothing acts on, and the row says what it is", async () => {

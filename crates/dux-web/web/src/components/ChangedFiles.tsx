@@ -13,6 +13,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Check,
+  ChevronDown,
   ChevronRight,
   Ellipsis,
   EllipsisVertical,
@@ -33,6 +34,7 @@ import {
   SquareTerminal,
   TriangleAlert,
   Undo2,
+  X,
 } from "lucide-react"
 import { notifyError, notifyInfo } from "@/lib/notify"
 import { leftOutNotice } from "@/lib/discardOutcome"
@@ -138,6 +140,7 @@ import {
   type ChangesBulkVerb,
   type ChangesBusyAction,
 } from "@/components/useChangedFilesController"
+import { useChangesHeaderFold } from "@/components/useChangesHeaderFold"
 
 // The header's recap while no list is on screen: nothing to sum.
 const NO_RECAP: ChangedFilesRecap = {
@@ -148,8 +151,16 @@ const NO_RECAP: ChangedFilesRecap = {
   diffExcludedCount: 0,
 }
 
-// One height for every control in the bulk bar; they differ in width only.
-const BULK_CONTROL = "h-9 max-md:h-11"
+// One height for both controls in the selection row; they differ in width only.
+const SELECTION_CONTROL = "h-9 max-md:h-10 pointer-coarse:h-10"
+
+// The pane's icon squares under a finger: 40px at any width, and a phone's
+// 44px kept whatever its pointer. The last class is not redundant: Tailwind
+// emits `pointer-coarse:` after `max-md:`, so without it a phone with a finger
+// would drop to 40.
+const TOUCH_ICON = "max-md:size-11 pointer-coarse:size-10 max-md:pointer-coarse:size-11"
+// The same rule for a control whose height alone is set.
+const TOUCH_MIN_HEIGHT = "max-md:min-h-11 pointer-coarse:min-h-10 max-md:pointer-coarse:min-h-11"
 
 // The row's one leading slot: the status marker and the selection checkbox
 // stacked in the same box, fixed on both axes so which one shows can never shift
@@ -603,9 +614,10 @@ const FileRow = memo(function FileRow({
       /* The wrapper consumes no width until the row is hovered, the menu is
         * open, or an action is in flight (aria-busy, so the spinner outlives the
         * menu), so the path and counts otherwise use the full row. Always
-        * visible on touch at a 44px target. The stopPropagation keeps clicks on
-        * the trigger and on the portaled menu items off the row's open-diff
-        * handler, which React routes through this ancestor. */
+        * visible at phone width (44px) and under a finger (40px). The
+        * stopPropagation keeps clicks on the trigger and on the portaled menu
+        * items off the row's open-diff handler, which React routes through
+        * this ancestor. */
       <div
         role="gridcell"
         className={cn(
@@ -628,7 +640,7 @@ const FileRow = memo(function FileRow({
                 aria-busy={busy}
                 tabIndex={inTabOrder ? undefined : -1}
                 aria-label={`Actions for ${file.path}`}
-                className="shrink-0 max-md:size-11"
+                className={cn("shrink-0", TOUCH_ICON)}
               />
             }
           >
@@ -723,10 +735,12 @@ function ChangesRecap({
   scope,
   recap,
   className,
+  ref,
 }: {
   scope: string
   recap: ChangedFilesRecap
   className?: string
+  ref?: React.Ref<HTMLSpanElement>
 }) {
   const { additions, deletions, binaryCount, diffExcludedCount } = recap
   const hasLines = additions > 0 || deletions > 0
@@ -737,6 +751,7 @@ function ChangesRecap({
 
   return (
     <span
+      ref={ref}
       className={cn("shrink-0 font-mono text-xs", className)}
       aria-label={recapLabel(scope, recap)}
     >
@@ -778,15 +793,18 @@ function GroupHeader({
   inTabOrder,
 }: GroupHeaderProps) {
   return (
-    // No checkbox here: the whole-list selection is the bulk bar's Select all /
-    // Select none, which spans both sections at once.
+    // No checkbox here: the whole-list selection is the selection menu's
+    // Select all / Select none, which spans both sections at once.
     <button
       type="button"
       aria-expanded={open}
       aria-controls={controls}
       tabIndex={inTabOrder ? undefined : -1}
       onClick={onToggleOpen}
-      className="flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11 pointer-coarse:pl-3"
+      className={cn(
+        "flex w-full items-center gap-2 rounded px-1 py-1 text-sm font-medium outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 pointer-coarse:pl-3",
+        TOUCH_MIN_HEIGHT,
+      )}
     >
       <span className="flex-1 text-left">{heading}</span>
       <ChangesRecap scope={heading} recap={recap} />
@@ -829,7 +847,7 @@ function OpenEditorButton({
     size: "icon",
     variant: "outline",
     "aria-label": label,
-    className: "max-md:size-11",
+    className: TOUCH_ICON,
   } as const
   if (unavailable !== null) {
     // A plain disabled button on both form factors: a disabled anchor is not
@@ -886,7 +904,7 @@ function NewTerminalButton({
     size: "icon",
     variant: "outline",
     "aria-label": label,
-    className: "max-md:size-11",
+    className: TOUCH_ICON,
   } as const
   if (unavailable !== null) {
     return (
@@ -925,7 +943,7 @@ interface ChangesHeaderProps {
 // The pane's one header, in every state an agent can put the pane in: loaded,
 // loading, failed, and every quiet one. A quiet pane is still a pane the user
 // may want to hide, open the editor from or open a terminal from, so the title,
-// the editor and terminal buttons and the ⋯ never leave with the list.
+// the editor and terminal actions and the ⋯ never leave with the list.
 function ChangesHeader({
   sessionId,
   stagedCount,
@@ -936,11 +954,22 @@ function ChangesHeader({
   editorBlocked,
 }: ChangesHeaderProps) {
   const reasonId = useId()
+  const editorReasonId = useId()
+  const { folded, headerRef, titleRef, recapRef, triggerRef } = useChangesHeaderFold()
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.
   const blocked = gitBlocked !== null
-  const describedBy = blocked ? reasonId : undefined
+  // Folded, the editor and terminal items carry their own reason the same way.
+  // A gone directory greys both kinds of item with one sentence, which the
+  // menu then says once, above the editor items, for all of them.
+  const editorReason = folded ? editorBlocked : null
+  const gitReasonShared = editorReason !== null && gitBlocked === editorReason
+  const describedBy = blocked
+    ? gitReasonShared
+      ? editorReasonId
+      : reasonId
+    : undefined
   const runGit = (operation: "push" | "pull") => {
     git[operation](sessionId).catch((error) =>
       notifyError(
@@ -948,17 +977,25 @@ function ChangesHeader({
       ),
     )
   }
+  const root = agentRoot(sessionId)
 
   return (
-    <CardHeader className="flex items-center justify-between gap-2 border-b">
+    <CardHeader
+      ref={headerRef}
+      className="flex items-center justify-between gap-2 border-b"
+    >
       <div className="flex min-w-0 items-baseline gap-2">
-        <CardTitle className="shrink-0">Changes</CardTitle>
-        {/* The pane's recap is the one figure with a control beside it: the
-          * header is a two-cell grid whose second cell is the ⋯ trigger, so the
-          * recap gives way, ellipsizing to nothing while the title stays whole
-          * and the aria-label keeps saying it. The group headings need none of
+        {/* The title never shrinks while anything else can give way, and is
+          * capped at its cell, so in a pane too narrow even for the ⋯ alone it
+          * is the last thing to shorten, with an ellipsis. */}
+        <CardTitle ref={titleRef} className="max-w-full shrink-0 truncate">
+          Changes
+        </CardTitle>
+        {/* The recap gives way before the title, ellipsizing to nothing while
+          * the aria-label keeps saying it. The group headings need none of
           * this, their badge being inside the same shrinking row. */}
         <ChangesRecap
+          ref={recapRef}
           scope="Changes"
           recap={recap}
           className="min-w-0 shrink truncate"
@@ -966,33 +1003,82 @@ function ChangesHeader({
       </div>
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
         * the editor button, the terminal button and the `⋯`, adjacent icon
-        * squares of one size. */}
+        * squares of one size. When the title, the recap and all three do not
+        * fit, the editor and terminal buttons fold into the ⋯ as its first
+        * items, and come back once the pane is wide enough again. */}
       <CardAction className="flex shrink-0 items-center gap-2 self-center">
-        <OpenEditorButton
-          sessionId={sessionId}
-          isMobile={isMobile}
-          unavailable={editorBlocked}
-        />
-        <NewTerminalButton sessionId={sessionId} unavailable={editorBlocked} />
+        {folded ? null : (
+          <>
+            <OpenEditorButton
+              sessionId={sessionId}
+              isMobile={isMobile}
+              unavailable={editorBlocked}
+            />
+            <NewTerminalButton sessionId={sessionId} unavailable={editorBlocked} />
+          </>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger
+            ref={triggerRef}
             render={
               <Button
                 size="icon"
                 variant="outline"
                 aria-label="Changes actions"
-                className="max-md:size-11"
+                className={TOUCH_ICON}
               />
             }
           >
             <EllipsisVertical />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            {folded ? (
+              <>
+                {/* The header's two buttons, doing what they do there: the
+                  * in-page editor on a computer, the standalone editor's
+                  * address on a phone, and neither for a directory that is
+                  * gone. */}
+                <DropdownMenuGroup>
+                  {editorReason !== null ? (
+                    <DropdownMenuLabel id={editorReasonId} className="max-w-64">
+                      {editorReason}
+                    </DropdownMenuLabel>
+                  ) : null}
+                  <DropdownMenuItem
+                    disabled={editorReason !== null}
+                    aria-describedby={editorReason !== null ? editorReasonId : undefined}
+                    {...(isMobile && editorReason === null
+                      ? {
+                          render: (
+                            <a
+                              href={standaloneEditorHash(root)}
+                              target="_blank"
+                              rel="noopener"
+                            />
+                          ),
+                        }
+                      : { onClick: () => openEditor(root) })}
+                  >
+                    <FileCode2 />
+                    Open editor
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={editorReason !== null}
+                    aria-describedby={editorReason !== null ? editorReasonId : undefined}
+                    onClick={() => createTerminal(sessionId)}
+                  >
+                    <SquareTerminal />
+                    New terminal
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             {/* A real group, because the primitive's label part reads its
               * group from context. The label is the reason, shown once, and
               * every git item names it as its description. */}
             <DropdownMenuGroup>
-              {blocked ? (
+              {blocked && !gitReasonShared ? (
                 <DropdownMenuLabel id={reasonId} className="max-w-64">
                   {gitBlocked}
                 </DropdownMenuLabel>
@@ -1089,10 +1175,6 @@ interface BulkToolbarProps {
   onClear: () => void
 }
 
-function BusyGlyph({ busy }: { busy: boolean }) {
-  return busy ? <Loader2 className="motion-safe:animate-spin" /> : null
-}
-
 // Why a bulk verb is disabled when every selected row is one it would leave
 // out, rather than a click that silently does nothing.
 const NOTHING_TO_STAGE =
@@ -1122,6 +1204,10 @@ function ExplainedWhenIdle({
   )
 }
 
+// A ticked selection is acted on from one row that never wraps: a button
+// naming how many rows are ticked, whose menu holds the verbs with the files
+// each would act on, and a clear button at the far end. It is not a second
+// surface-scoped `⋯`: the header's stays the pane's only one.
 function BulkToolbar({
   selected,
   counts,
@@ -1133,72 +1219,113 @@ function BulkToolbar({
   onToggleVisible,
   onClear,
 }: BulkToolbarProps) {
+  const stageReasonId = useId()
+  const discardReasonId = useId()
+  const showStage = selected.unstaged.size > 0
+  const showUnstage = selected.staged.size > 0
+  const ticked = selected.staged.size + selected.unstaged.size
   return (
     <div
       role="toolbar"
       aria-label="Actions for the selected files"
-      className="flex flex-wrap items-center gap-2 border-b p-2"
+      className="flex items-center justify-between gap-2 border-b p-2"
     >
-      {selected.unstaged.size > 0 ? (
-        <ExplainedWhenIdle
-          why={counts.unstaged === 0 ? NOTHING_TO_STAGE : null}
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="outline"
+              aria-busy={busy !== null}
+              className={cn(SELECTION_CONTROL, "min-w-0")}
+            />
+          }
         >
-          <Button
-            variant="outline"
-            className={BULK_CONTROL}
-            disabled={busy !== null || counts.unstaged === 0}
-            aria-busy={busy === "stage"}
-            onClick={() => onRunBulk("stage")}
-          >
-            <BusyGlyph busy={busy === "stage"} />
-            {busy !== "stage" ? <Plus /> : null}
-            Stage {groupDigits(counts.unstaged)}
-          </Button>
-        </ExplainedWhenIdle>
-      ) : null}
-      {selected.staged.size > 0 ? (
+          <span className="truncate">{groupDigits(ticked)} selected</span>
+          {busy !== null ? (
+            <Loader2 className="motion-safe:animate-spin" />
+          ) : (
+            <ChevronDown />
+          )}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          {/* A verb whose rows are all ones it would leave out is disabled
+            * rather than a click that silently does nothing, and the label
+            * above it, which it names as its description, says why. */}
+          <DropdownMenuGroup>
+            {showStage && counts.unstaged === 0 ? (
+              <DropdownMenuLabel id={stageReasonId} className="max-w-64">
+                {NOTHING_TO_STAGE}
+              </DropdownMenuLabel>
+            ) : null}
+            {showStage ? (
+              <DropdownMenuItem
+                disabled={busy !== null || counts.unstaged === 0}
+                aria-busy={busy === "stage"}
+                aria-describedby={counts.unstaged === 0 ? stageReasonId : undefined}
+                onClick={() => onRunBulk("stage")}
+              >
+                {busy === "stage" ? <Loader2 className="motion-safe:animate-spin" /> : <Plus />}
+                Stage {groupDigits(counts.unstaged)}
+              </DropdownMenuItem>
+            ) : null}
+            {showUnstage ? (
+              <DropdownMenuItem
+                disabled={busy !== null}
+                aria-busy={busy === "unstage"}
+                onClick={() => onRunBulk("unstage")}
+              >
+                {busy === "unstage" ? <Loader2 className="motion-safe:animate-spin" /> : <Minus />}
+                Unstage {groupDigits(counts.staged)}
+              </DropdownMenuItem>
+            ) : null}
+          </DropdownMenuGroup>
+          {/* Destructive, so the trailing "…" and the confirm dialog carry the
+            * danger and the item itself stays neutral. */}
+          {showStage ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                {counts.discard === 0 ? (
+                  <DropdownMenuLabel id={discardReasonId} className="max-w-64">
+                    {NOTHING_TO_DISCARD}
+                  </DropdownMenuLabel>
+                ) : null}
+                <DropdownMenuItem
+                  disabled={busy !== null || counts.discard === 0}
+                  aria-busy={busy === "discard"}
+                  aria-describedby={counts.discard === 0 ? discardReasonId : undefined}
+                  onClick={onDiscard}
+                >
+                  {busy === "discard" ? <Loader2 className="motion-safe:animate-spin" /> : <Undo2 />}
+                  Discard {groupDigits(counts.discard)}…
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </>
+          ) : null}
+          {/* Over the rows the filter shows, and live while a verb is in
+            * flight, like the row checkboxes. */}
+          {visibleCount > 0 ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={onToggleVisible}>
+                {allVisibleChecked ? <Square /> : <SquareCheck />}
+                {allVisibleChecked ? "Select none" : "Select all"}
+              </DropdownMenuItem>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <SimpleTooltip content="Clear selection">
         <Button
           variant="outline"
-          className={BULK_CONTROL}
-          disabled={busy !== null}
-          aria-busy={busy === "unstage"}
-          onClick={() => onRunBulk("unstage")}
+          size="icon"
+          aria-label="Clear selection"
+          className="size-9 shrink-0 max-md:size-10 pointer-coarse:size-10"
+          onClick={onClear}
         >
-          <BusyGlyph busy={busy === "unstage"} />
-          {busy !== "unstage" ? <Minus /> : null}
-          Unstage {groupDigits(counts.staged)}
+          <X />
         </Button>
-      ) : null}
-      {selected.unstaged.size > 0 ? (
-        <ExplainedWhenIdle
-          why={counts.discard === 0 ? NOTHING_TO_DISCARD : null}
-        >
-          <Button
-            variant="outline"
-            className={BULK_CONTROL}
-            disabled={busy !== null || counts.discard === 0}
-            aria-busy={busy === "discard"}
-            onClick={onDiscard}
-          >
-            <BusyGlyph busy={busy === "discard"} />
-            {busy !== "discard" ? <Undo2 /> : null}
-            Discard {groupDigits(counts.discard)}…
-          </Button>
-        </ExplainedWhenIdle>
-      ) : null}
-      {visibleCount > 0 ? (
-        <Button
-          variant="outline"
-          className={BULK_CONTROL}
-          onClick={onToggleVisible}
-        >
-          {allVisibleChecked ? <Square /> : <SquareCheck />}
-          {allVisibleChecked ? "Select none" : "Select all"}
-        </Button>
-      ) : null}
-      <Button variant="outline" className={BULK_CONTROL} onClick={onClear}>
-        Clear
-      </Button>
+      </SimpleTooltip>
     </div>
   )
 }
@@ -1987,7 +2114,7 @@ function changesBodyInstead(
         <Button
           variant="outline"
           onClick={() => refreshChanges()}
-          className="max-md:min-h-11"
+          className={TOUCH_MIN_HEIGHT}
         >
           <RefreshCw />
           Refresh
@@ -2120,7 +2247,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Filter changed files…"
                   aria-label="Filter changed files"
-                  className="h-9 pl-8 max-md:h-11"
+                  className="h-9 pl-8 max-md:h-11 pointer-coarse:h-10 max-md:pointer-coarse:h-11"
                 />
               </div>
             </div>
