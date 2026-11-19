@@ -5647,6 +5647,50 @@ describe("TerminalStack with two parts", () => {
     expect(document.activeElement).toBe(composeBox())
   })
 
+  // The agent's process exiting takes its part away, so the dock becomes the
+  // typing target with its one automatic focus still owed. Under a modal dialog
+  // (the editor, say) that move would pull the keyboard out of the dialog.
+  it("takes no focus by itself while a modal dialog is open, nor when it closes", async () => {
+    const { Dialog, DialogContent, DialogTitle } = await import("@/components/ui/dialog")
+    const page = (agentRuns: boolean, dialogOpen: boolean) => (
+      <>
+        <TerminalStack
+          parts={
+            agentRuns
+              ? [{ ...agent, slot: "agent" }, { ...dock, slot: "dock" }]
+              : [{ ...dock, slot: "dock" }]
+          }
+        />
+        <Dialog open={dialogOpen} historyEntry={false}>
+          <DialogContent>
+            <DialogTitle>Code editor</DialogTitle>
+            <button type="button">In the dialog</button>
+          </DialogContent>
+        </Dialog>
+      </>
+    )
+    const { rerender } = render(page(true, false))
+    ownBoth()
+    for (const pty of FakePtySocket.instances) {
+      act(() => pty.bytesCb?.(new Uint8Array([0x61])))
+    }
+    const dockFocus = vi.spyOn(TermStub.instances[1], "focus")
+    rerender(page(true, true))
+    const inDialog = screen.getByRole("button", { name: "In the dialog" })
+    act(() => inDialog.focus())
+
+    rerender(page(false, true))
+    expect(dockFocus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(inDialog)
+
+    // An ended composition retries a move it blocked; this one was spent.
+    rerender(page(false, false))
+    act(() => {
+      document.dispatchEvent(new Event("compositionend"))
+    })
+    expect(dockFocus).not.toHaveBeenCalled()
+  })
+
   it("moves the one input area, the tab-stop suspension and the drafts with the target", () => {
     pointerStub = stubCoarsePointer(true)
     render(<TerminalStack parts={[agent, dock]} />)

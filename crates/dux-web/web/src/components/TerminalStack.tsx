@@ -36,6 +36,7 @@ import { registerPaneMacroTarget } from "@/lib/paneMacroTarget"
 import { registerPaneInputGroup } from "@/lib/paneInputGroup"
 import {
   focusTypingSurfaceIn,
+  hiddenUnderModal,
   nextTypingFocus,
   typingFocusAllowed,
   useInputSurface,
@@ -591,6 +592,9 @@ function TerminalPart(props: TerminalPartProps) {
     })
     focusedForRef.current = decision.focusedFor
     if (!decision.focus) return
+    // Under a modal the move is spent rather than made: the keyboard belongs to
+    // the dialog, and closing it later is no new attach to focus for.
+    if (hiddenUnderModal(containerRef.current)) return
     focusTypingSurface()
     // `focusTypingSurface` reads only refs, so listing it would re-focus on every
     // commit; `compositionEnded` is listed so a deferred move is retried.
@@ -606,6 +610,7 @@ function TerminalPart(props: TerminalPartProps) {
     id,
     composeInputRef,
     termRef,
+    containerRef,
   ])
   // The compose bar renders outside the terminal container, so the container's
   // capture listener cannot see a paste that lands in the box.

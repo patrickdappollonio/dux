@@ -115,6 +115,14 @@ export function typingFocusAllowed(ctx: {
   return !ctx.composing
 }
 
+/// Whether a layer over the page hides this element from the person right now.
+/// An open modal dialog or menu marks everything outside it `aria-hidden`,
+/// without `inert`, so the browser would still let a script focus in there; the
+/// sign-in gate makes the app `inert`.
+export function hiddenUnderModal(el: Element | null): boolean {
+  return el?.closest('[aria-hidden="true"], [inert]') != null
+}
+
 /// Once per attach, not once per epoch: `typingFocusAllowed` is a permission,
 /// not an occasion, and its `replayApplied` input flips on every socket reopen.
 /// `attach` names what a move is owed for (the target, plus which typing surface
