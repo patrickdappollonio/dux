@@ -55,7 +55,7 @@ export function DormantTabSurface({
           {/* Same touch floor as the card's own button; see the note there. */}
           <Button
             onClick={() => startDormantTab(sessionId, tabId)}
-            className="max-md:min-h-11"
+            className="max-md:min-h-11 pointer-coarse:min-h-11"
           >
             Start session
           </Button>

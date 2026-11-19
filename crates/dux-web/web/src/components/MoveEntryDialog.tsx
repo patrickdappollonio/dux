@@ -200,7 +200,7 @@ function MoveEntryDialogBody({
             <button
               type="button"
               onClick={() => navigateTo(parentDir(dir))}
-              className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-muted max-md:min-h-10"
+              className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-muted max-md:min-h-10 pointer-coarse:min-h-10"
             >
               <CornerLeftUp className="size-3.5 shrink-0 text-muted-foreground" />
               Up one level
@@ -216,7 +216,7 @@ function MoveEntryDialogBody({
               <button
                 type="button"
                 onClick={() => setReloadNonce((n) => n + 1)}
-                className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted max-md:min-h-10"
+                className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted max-md:min-h-10 pointer-coarse:min-h-10"
               >
                 <RotateCw className="size-3.5" />
                 Retry
@@ -232,7 +232,7 @@ function MoveEntryDialogBody({
                 key={entry.path}
                 type="button"
                 onClick={() => navigateTo(entry.path)}
-                className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-muted max-md:min-h-10"
+                className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-sm hover:bg-muted max-md:min-h-10 pointer-coarse:min-h-10"
               >
                 <FileTreeIcon
                   kind={dirIconKind({ open: false, empty: false })}

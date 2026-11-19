@@ -440,7 +440,7 @@ function NotificationPermissionRow({
           type="button"
           variant="outline"
           size="sm"
-          className="max-md:min-h-10"
+          className="max-md:min-h-10 pointer-coarse:min-h-10"
           onClick={() => void request()}
         >
           {lit(NOTIFICATION_PERMISSION_TEXT.action)}
@@ -1128,7 +1128,7 @@ function CustomizeWebappForm({
         </DialogDescription>
       </DialogHeader>
 
-      <div className="flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10">
+      <div className="flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
         <Search className="size-4 shrink-0 text-muted-foreground" />
         <input
           value={query}
@@ -1174,7 +1174,7 @@ function CustomizeWebappForm({
                       variant="ghost"
                       size="sm"
                       disabled={saving}
-                      className="max-md:min-h-10 shrink-0 text-xs"
+                      className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0 text-xs"
                       onClick={() => resetSection(group.settings)}
                     >
                       Reset section to defaults…

@@ -182,7 +182,7 @@ export function OfflineOverlay() {
             <p>{face.stable}</p>
           </div>
         </div>
-        <Button onClick={reconnect}>
+        <Button onClick={reconnect} className="max-md:min-h-10 pointer-coarse:min-h-10">
           <RefreshCw aria-hidden />
           {face.button}
         </Button>

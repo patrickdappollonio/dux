@@ -62,7 +62,7 @@ export class ChunkBoundary extends Component<
             The dux server likely restarted with a new build, so this tab is out
             of date. Reload to pick up the latest version.
           </p>
-          <Button className="mt-4" onClick={() => location.reload()}>
+          <Button className="mt-4 max-md:min-h-10 pointer-coarse:min-h-10" onClick={() => location.reload()}>
             Reload
           </Button>
         </div>

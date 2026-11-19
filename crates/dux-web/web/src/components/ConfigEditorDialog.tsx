@@ -77,10 +77,10 @@ function ConfigEditorForm({
             <span>{conflict}</span>
           </div>
           <div className="flex justify-end gap-3">
-            <Button variant="outline" autoFocus onClick={dismissConfigEditorConflict}>
+            <Button variant="outline" autoFocus onClick={dismissConfigEditorConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Keep editing
             </Button>
-            <Button variant="destructive" onClick={() => openConfigEditor()}>
+            <Button variant="destructive" onClick={() => openConfigEditor()} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Reload the file
             </Button>
           </div>

@@ -635,7 +635,7 @@ export function AppSidebar() {
             size="sm"
             aria-label="New…"
             onClick={openNewLauncher}
-            className="hidden size-8 flex-none p-0 group-data-[collapsible=icon]:flex"
+            className="hidden size-8 flex-none p-0 pointer-coarse:size-10 group-data-[collapsible=icon]:flex"
           >
             <Plus />
           </Button>

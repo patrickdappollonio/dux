@@ -175,7 +175,7 @@ function PrReferenceFields({
         <div className="flex justify-start">
           <Button
             variant="link"
-            className="h-auto px-0 max-md:min-h-10 text-muted-foreground"
+            className="h-auto px-0 max-md:min-h-10 pointer-coarse:min-h-10 text-muted-foreground"
             onClick={() => chooseExistingProject(value)}
           >
             or choose an existing project

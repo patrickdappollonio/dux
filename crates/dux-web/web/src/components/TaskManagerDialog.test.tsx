@@ -660,7 +660,18 @@ describe("TaskManagerDialog", () => {
     render(<TaskManagerDialog />)
 
     const toggle = await screen.findByLabelText("Show fix-auth child processes")
-    expect(toggle.className).toMatch(/max-md:size-10|max-md:min-h-10/)
+    // Both halves: phone width, and a finger at any width (a touch tablet).
+    expect(Array.from(toggle.classList)).toEqual(
+      expect.arrayContaining(["max-md:size-10", "pointer-coarse:size-10"]),
+    )
+    for (const stop of screen.getAllByLabelText("Force stop fix-auth")) {
+      expect(
+        Array.from(stop.classList),
+        "Force stop is 28px under a finger without both halves",
+      ).toEqual(
+        expect.arrayContaining(["max-md:min-h-10", "pointer-coarse:min-h-10"]),
+      )
+    }
   })
 
   it("shows_a_stale_indicator_after_repeated_poll_failures_and_stops_after_a_recovery", async () => {

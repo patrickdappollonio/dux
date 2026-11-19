@@ -78,17 +78,17 @@ export function FileDiskBanner({
           click on "Reload" discards text, so it must not sit flush against
           the dismiss. */}
       {deleted ? (
-        <Button size="sm" variant="outline" onClick={onCloseTab}>
+        <Button size="sm" variant="outline" onClick={onCloseTab} className="max-md:min-h-10 pointer-coarse:min-h-10">
           <X />
           Close tab
         </Button>
       ) : (
-        <Button size="sm" variant="outline" disabled={busy} onClick={onReload}>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onReload} className="max-md:min-h-10 pointer-coarse:min-h-10">
           <RotateCw />
           Reload from disk
         </Button>
       )}
-      <Button size="sm" variant="ghost" onClick={onDismiss}>
+      <Button size="sm" variant="ghost" onClick={onDismiss} className="max-md:min-h-10 pointer-coarse:min-h-10">
         {deleted ? "Keep it open" : "Keep mine"}
       </Button>
     </div>

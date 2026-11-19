@@ -333,7 +333,7 @@ function LeftoverRow({
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 shrink-0 max-md:size-10"
+              className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
               aria-label="Left-over folder actions"
             />
           }
@@ -613,7 +613,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
               return (
                 <div
                   key={entry.worktree_path}
-                  className={`flex min-h-11 w-full items-center gap-1 pr-1 md:min-h-0 ${
+                  className={`flex min-h-11 w-full items-center gap-1 pr-1 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${
                     isSelected ? "bg-accent" : "hover:bg-accent/60"
                   }`}
                 >
@@ -623,7 +623,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                     <button
                       type="button"
                       onClick={() => handleSelect(entry)}
-                      className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left md:min-h-0"
+                      className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
                     >
                       <WorktreeRowBody entry={entry} />
                     </button>
@@ -634,7 +634,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-8 shrink-0 max-md:size-10"
+                          className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
                           aria-label="Worktree actions"
                         />
                       }

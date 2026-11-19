@@ -190,7 +190,7 @@ function MacrosEditor({ initial }: { initial: MacroView[] }) {
       <Button
         variant="outline"
         size="sm"
-        className="w-full"
+        className="w-full max-md:min-h-10 pointer-coarse:min-h-10"
         onClick={() => {
           setDeleteIndex(null)
           setMode({ kind: "form", index: "new" })
@@ -236,10 +236,10 @@ function StaleSaveNotice({ message }: { message: string }) {
         <span>{message}</span>
       </div>
       <div className="flex justify-end gap-3">
-        <Button variant="outline" autoFocus onClick={dismissMacrosConflict}>
+        <Button variant="outline" autoFocus onClick={dismissMacrosConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
           Keep editing
         </Button>
-        <Button variant="destructive" onClick={() => void reloadMacrosDraft()}>
+        <Button variant="destructive" onClick={() => void reloadMacrosDraft()} className="max-md:min-h-10 pointer-coarse:min-h-10">
           Reload macros
         </Button>
       </div>
@@ -304,11 +304,14 @@ function SortableMacroRow({
           <Badge variant="secondary" className="shrink-0">
             {SURFACE_LABEL[macro.surface] ?? macro.surface}
           </Badge>
-          <div className="ml-auto flex gap-1">
+          {/* gap-2 under a finger: Delete is the one a stray tap on Edit's
+              neighbour would hit, and it only asks for confirmation. */}
+          <div className="ml-auto flex gap-1 max-md:gap-2 pointer-coarse:gap-2">
             <SimpleTooltip content="Edit">
               <Button
                 variant="ghost"
                 size="icon-sm"
+                className="max-md:size-10 pointer-coarse:size-10"
                 aria-label={`Edit ${macro.name}`}
                 onClick={onEdit}
               >
@@ -319,6 +322,7 @@ function SortableMacroRow({
               <Button
                 variant="ghost"
                 size="icon-sm"
+                className="max-md:size-10 pointer-coarse:size-10"
                 aria-label={`Delete ${macro.name}`}
                 onClick={onAskDelete}
               >
@@ -335,10 +339,10 @@ function SortableMacroRow({
         <div className="flex items-center gap-2 border-t pt-2">
           <span className="text-xs text-destructive">Delete this macro?</span>
           <div className="ml-auto flex gap-2">
-            <Button variant="outline" size="sm" autoFocus onClick={onCancelDelete}>
+            <Button variant="outline" size="sm" autoFocus onClick={onCancelDelete} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Cancel
             </Button>
-            <Button variant="destructive" size="sm" onClick={onConfirmDelete}>
+            <Button variant="destructive" size="sm" onClick={onConfirmDelete} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Delete
             </Button>
           </div>

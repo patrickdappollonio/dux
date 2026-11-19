@@ -177,7 +177,7 @@ function PickerBody({
             ? "No base branch is recorded yet."
             : null}
         </DialogDescription>
-        <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10">
+        <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10 pointer-coarse:min-h-10">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             value={query}
@@ -281,7 +281,7 @@ function BranchRow({
       disabled={heldBy !== null}
       onClick={() => onPick(branch.name)}
       className={cn(
-        "flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent max-md:min-h-10",
+        "flex w-full min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent max-md:min-h-10 pointer-coarse:min-h-10",
         active && ACTIVE_ROW_RING,
       )}
     >

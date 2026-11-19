@@ -87,7 +87,7 @@ export function DormantTabCard({
         * matching it keeps the two the same size under a finger. */}
       <Button
         onClick={() => startDormantTab(sessionId, tabId)}
-        className="max-md:min-h-11"
+        className="max-md:min-h-11 pointer-coarse:min-h-11"
       >
         Start session
       </Button>

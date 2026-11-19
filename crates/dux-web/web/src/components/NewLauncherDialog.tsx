@@ -353,7 +353,7 @@ function AgentStep({
         </div>
       </div>
       <div className={cn("flex flex-col gap-2", phone ? "px-3 pt-2" : "")}>
-        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10">
+        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10 pointer-coarse:min-h-10">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             type="search"

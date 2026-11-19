@@ -65,14 +65,14 @@ export function TerminalNotFound({
           * terminal is a position of its own, so this one stays one Back
           * behind it, where the user found it. */}
         {newTerminal !== null ? (
-          <Button className="max-md:min-h-10" onClick={newTerminal}>
+          <Button className="max-md:min-h-10 pointer-coarse:min-h-10" onClick={newTerminal}>
             <SquareTerminal />
             New terminal
           </Button>
         ) : null}
         <Button
           variant="outline"
-          className="max-md:min-h-10"
+          className="max-md:min-h-10 pointer-coarse:min-h-10"
           onClick={() => navigateUp()}
         >
           Back to agents

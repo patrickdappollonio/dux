@@ -195,11 +195,16 @@ describe("EditorTabsStrip", () => {
         "size-5",
         "relative",
         "after:absolute",
-        "after:-inset-2.5",
+        "after:-inset-y-2.5",
+        "after:-right-2.5",
+        "after:left-0",
         "after:hidden",
         "md:pointer-coarse:after:block",
       ]),
     )
+    // The margin never reaches left over the tab's own label.
+    expect(classes).not.toContain("after:-inset-2.5")
+    expect(classes).not.toContain("after:-left-2.5")
     // The phone's 32px ✕ needs no margin, and the pill keeps its height.
     expect(classes).not.toContain("pointer-coarse:after:block")
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement

@@ -401,9 +401,10 @@ function ExpandToggle({
           ? `Hide ${row.name} child processes`
           : `Show ${row.name} child processes`
       }
-      // 40px touch target on phones: this chevron sits beside Stop, the one control
-      // a misclick would be worst on. Desktop keeps the compact density.
-      className="inline-flex size-4 max-md:size-10 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+      // 40px touch target on phones and under a finger at any width: this chevron
+      // sits beside Stop, the one control a misclick would be worst on. A mouse
+      // keeps the compact density.
+      className="inline-flex size-4 max-md:size-10 pointer-coarse:size-10 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
     >
       <Icon className="size-3.5" />
     </button>
@@ -481,6 +482,7 @@ function DesktopRow({
               variant="outline"
               onClick={onStop}
               aria-label={row.stopLabel}
+              className="max-md:min-h-10 pointer-coarse:min-h-10"
             >
               <CircleStop aria-hidden />
               Force stop
@@ -581,7 +583,7 @@ function MobileRow({
             variant="outline"
             onClick={onStop}
             aria-label={row.stopLabel}
-            className="max-md:min-h-10 shrink-0"
+            className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0"
           >
             <CircleStop aria-hidden />
             Force stop

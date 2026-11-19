@@ -128,12 +128,15 @@ function TabPill({
           // the cheap tap forgiveness the reduced pill still affords.
           //
           // A tablet keeps the 20px box and the pill's height; an invisible
-          // 10px margin takes the tap area to 40px wide. Its left 10px lie
-          // over the pill's own name or dirty dot, so a tap there closes
-          // rather than selects. Vertically the strip's scroll box clips it
-          // to 38px; the neighbours there are the editor header and Monaco,
-          // neither a tap target beside the ✕.
-          className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:size-8 md:pointer-coarse:after:block"
+          // 10px margin takes the tap area to 40px tall and 30px wide. It
+          // reaches up, down and right only: the left edge stays on the box,
+          // because a margin over the pill's own name or dirty dot would make
+          // a tap meant to select the tab close it, with no confirm on a clean
+          // one. The right 10px lies over the pill's own 9px of padding and
+          // 1px of the 4px gap to the next pill. Vertically the strip's
+          // scroll box clips it to 38px; the neighbours there are the editor
+          // header and Monaco, neither a tap target beside the ✕.
+          className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-y-2.5 after:-right-2.5 after:left-0 after:hidden hover:text-foreground max-md:size-8 md:pointer-coarse:after:block"
         >
           <X className="size-3.5" />
         </button>

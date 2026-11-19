@@ -86,7 +86,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
       <Button
         variant="ghost"
         size="sm"
-        className="max-md:min-h-10 shrink-0"
+        className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0"
         onClick={() => setEditing(true)}
       >
         <FolderPlus />
@@ -121,7 +121,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
       <Button
         variant="outline"
         size="sm"
-        className="max-md:min-h-10"
+        className="max-md:min-h-10 pointer-coarse:min-h-10"
         disabled={!name.trim() || creating}
         onClick={create}
       >
@@ -130,7 +130,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
       <Button
         variant="ghost"
         size="sm"
-        className="max-md:min-h-10"
+        className="max-md:min-h-10 pointer-coarse:min-h-10"
         onClick={reset}
       >
         Cancel

@@ -78,7 +78,7 @@ export function FolderBrowseList({
           <button
             type="button"
             onClick={() => onCommit(path)}
-            className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0 ${
+            className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${
               committed ? "bg-accent" : "bg-muted/40"
             }`}
           >
@@ -102,9 +102,10 @@ export function FolderBrowseList({
                   key={entry.path}
                   type="button"
                   onClick={() => onOpen(entry)}
-                  // min-h-11 on phones gives each row a ≥44px touch target;
-                  // desktop keeps the compact py-2 density via md:.
-                  className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
+                  // min-h-11 on phones gives each row a ≥44px touch target, 40px
+                  // on a touch tablet; only a mouse at desktop width keeps the
+                  // compact py-2 density.
+                  className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
                 >
                   <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
                   <span className="shrink-0">Up to</span>
@@ -122,7 +123,7 @@ export function FolderBrowseList({
                 key={entry.path}
                 type="button"
                 onClick={() => onOpen(entry)}
-                className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:min-h-0"
+                className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
               >
                 <Icon className="size-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate">{entry.label}</span>

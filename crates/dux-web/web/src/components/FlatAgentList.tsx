@@ -645,7 +645,7 @@ function QuietTail({
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10"
+        className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground max-md:min-h-10 pointer-coarse:min-h-10"
       >
         <ChevronRight
           className={cn(
@@ -734,7 +734,7 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 
 // One height token for every control in the list's header, set explicitly rather
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
-const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10"
+const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10 pointer-coarse:min-h-10"
 
 // The Inactive divider's counter pill. It sits right after the section word,
 // and right edges carry controls only.
@@ -1003,7 +1003,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             </div>
           ) : null}
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-2.5 max-md:min-h-10">
+        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-2.5 max-md:min-h-10 pointer-coarse:min-h-10">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             value={agentSearch}

@@ -177,7 +177,7 @@ export function MacroPopover({
           type="button"
           // shrink-0: the footer never gives up height to the list; when the
           // popup is at its viewport cap it is the list that scrolls.
-          className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground"
+          className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground max-md:min-h-10 pointer-coarse:min-h-10"
           onClick={() => {
             setOpen(false)
             openMacrosDialog()

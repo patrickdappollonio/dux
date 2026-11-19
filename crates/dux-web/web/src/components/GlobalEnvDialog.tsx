@@ -64,10 +64,10 @@ function GlobalEnvForm({
             <span>{conflict}</span>
           </div>
           <div className="flex justify-end gap-3">
-            <Button variant="outline" autoFocus onClick={dismissGlobalEnvConflict}>
+            <Button variant="outline" autoFocus onClick={dismissGlobalEnvConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Keep editing
             </Button>
-            <Button variant="destructive" onClick={() => void reloadGlobalEnvDraft()}>
+            <Button variant="destructive" onClick={() => void reloadGlobalEnvDraft()} className="max-md:min-h-10 pointer-coarse:min-h-10">
               Reload the environment
             </Button>
           </div>

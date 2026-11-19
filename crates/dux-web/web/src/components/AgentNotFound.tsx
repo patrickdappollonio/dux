@@ -38,7 +38,7 @@ export function AgentNotFound({ sessionId }: { sessionId: string }) {
           * where it moves between two real positions. */}
         <Button
           variant="outline"
-          className="max-md:min-h-10"
+          className="max-md:min-h-10 pointer-coarse:min-h-10"
           onClick={() => navigateUp()}
         >
           Back to agents

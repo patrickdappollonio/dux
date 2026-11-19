@@ -201,6 +201,7 @@ export function TerminalCover(props: TerminalCoverProps) {
             <Button
               size="sm"
               variant="secondary"
+              className="max-md:min-h-10 pointer-coarse:min-h-10"
               onClick={() =>
                 plainBounce(props.ptyRef.current, props.takeoverIntent)
               }
@@ -285,7 +286,7 @@ function TakeoverCard({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button onClick={takeOver} className="w-full max-md:min-h-11">
+          <Button onClick={takeOver} className="w-full max-md:min-h-11 pointer-coarse:min-h-11">
             <MonitorSmartphone />
             Take over
           </Button>
