@@ -4,6 +4,7 @@ import { matchWorkspace, type AgentWorkspaceWire } from "@/lib/agentWorkspace"
 // headed differently by two anchors. Every group in the menu carries one.
 export const MENU_GROUP_LABELS = {
   input: "Input",
+  pane: "Pane",
   running: "Running",
   agent: "Agent",
   startup: "Startup",

@@ -1,4 +1,5 @@
 import { PanelRightOpen } from "lucide-react"
+import { useRef, useState } from "react"
 
 import { AppMenu } from "@/components/AppMenu"
 import { MacroPopover } from "@/components/MacroPopover"
@@ -10,17 +11,23 @@ import {
   insetHeaderPaneSubject,
 } from "@/components/insetHeaderView"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { NewTabButton } from "@/components/StackNewDialog"
+import { NewTabButton, StackNewDialog } from "@/components/StackNewDialog"
 import { TheaterToggle } from "@/components/TheaterToggle"
 import { Button } from "@/components/ui/button"
+import { useFoldToFit } from "@/hooks/use-fold-to-fit"
+import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
+import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import { useIsTruncated } from "@/hooks/use-truncated"
 import { headerChipTooltip, type HeaderChip } from "@/lib/headerSubject"
+import type { SessionView } from "@/lib/types"
 import { changesSummary } from "@/lib/changesSummary"
 import {
   changesPaneEffectivelyHidden,
   changesSpacerPercent,
   showChangesPane,
+  toggleTheater,
   useDux,
+  type SelectedTarget,
 } from "@/lib/store"
 
 // The desktop center-pane top bar: one row of chips naming what you are looking
@@ -48,7 +55,11 @@ function Chip({ chip }: { chip: HeaderChip }) {
         }
       >
         <Glyph aria-hidden className="size-3.5 shrink-0" />
-        <span ref={ref} className="min-w-0 truncate font-medium text-foreground">
+        <span
+          ref={ref}
+          data-fold-name
+          className="min-w-0 truncate font-medium text-foreground"
+        >
           {chip.value}
         </span>
       </span>
@@ -69,6 +80,19 @@ export function InsetHeader() {
   )
 
   const paneSubject = insetHeaderPaneSubject(spine, session, selectedTarget)
+  // The agent New tab… adds to, on an agent's pane only.
+  const newTabSession =
+    paneSubject?.kind === "agent" ? paneSubject.session : null
+  // THE NAMES OUTRANK THE BUTTONS. Whenever a chip's own text would be cut off
+  // beside them, New tab…, Theater and Macros… leave the header together and
+  // ride in the pane's `⋯` instead, and they come back once the names fit
+  // beside them again. Only where that `⋯` exists, since a folded control must
+  // have somewhere to go.
+  const { folded, rowRef, clusterRef } = useFoldToFit({
+    enabled: Boolean(paneSubject && selectedTarget),
+    layout: newTabSession ? "with-new-tab" : "without-new-tab",
+    watch: chips.map((c) => c.value).join("\u0000"),
+  })
 
   // The width the header must hold back on its right so that whatever sits just
   // before it lands on the terminal pane's RIGHT EDGE rather than the window's.
@@ -106,61 +130,49 @@ export function InsetHeader() {
         />
       )}
       {/* The chips share one shrink budget so the header clips instead of
-          pushing the right-hand controls off the edge: the chips yield all the
-          way to nothing and the controls never move.
+          pushing the right-hand controls off the edge. Once a chip's text is
+          cut off the pane's controls fold away to give them room, and past
+          that the chips yield all the way to nothing.
 
           The gap is wider than the header's own `gap-2` because it replaces the
           hairline dividers a field list would otherwise need; the glyphs
           already say where one field stops. One font at one size throughout,
           because the fields are peers. */}
-      <div className="flex min-w-0 flex-1 items-center gap-3.5 overflow-hidden">
+      <div
+        ref={rowRef}
+        className="flex min-w-0 flex-1 items-center gap-3.5 overflow-hidden"
+      >
         {chips.map((chip) => (
           <Chip key={chip.kind} chip={chip} />
         ))}
       </div>
 
-      {/* The macro quick-picker. It lives on the pane's own right edge, in the
-          header's control family, never floating over the PTY text.
-          Labelled on desktop because
-          there is room and macros are a feature people forget exists; the phone
-          keeps the icon variant (MobileShell), where there is not. */}
-      {/* New tab… leads the pane's own controls on an agent's pane, ahead of
-          Theater, in the same outline family at the same `h-8` token. It is
-          the stack's way to add a tab or a terminal, so a project or
-          standalone terminal's pane has none. Leading the cluster, its arrival
-          with the agent's spine row shifts nothing to its right. */}
-      {paneSubject?.kind === "agent" ? (
-        <NewTabButton session={paneSubject.session} />
+      {/* The pane's own controls, one outline family at the `h-8` token, 40px
+          under a finger. Measured as one box, because they fold as one.
+
+          New tab… leads on an agent's pane: it is the stack's way to add a tab
+          or a terminal, so a project or standalone terminal's pane has none,
+          and leading, its arrival with the agent's spine row shifts nothing to
+          its right. Theater next: the mode change is the one the eye should
+          land on. Then the macro quick-picker, labelled because macros are a
+          feature people forget exists. Theater and Macros render together or
+          not at all: gating them separately lets Macros paint alone for the
+          frame between a target being selected and its agent arriving in the
+          spine, which resizes the cluster and shifts every control in it. */}
+      {selectedTarget && folded !== true ? (
+        <div ref={clusterRef} className="flex shrink-0 items-center gap-2">
+          {newTabSession ? <NewTabButton session={newTabSession} /> : null}
+          <TheaterToggle settled={folded === false} />
+          {paneSubject ? <MacroPopover target={selectedTarget} /> : null}
+        </div>
       ) : null}
-      {/* Theater next, beside the macros trigger: the mode change is the
-          one the eye should land on among the pane's controls. Same `h-8`
-          token as its neighbours. */}
-      <TheaterToggle />
-      {/* The pane's own pair, rendered together or not at all: gating them
-          separately lets Macros paint alone for the frame between a target
-          being selected and its agent arriving in the spine, which resizes the
-          cluster and shifts every control in it. */}
       {paneSubject && selectedTarget ? (
-        <>
-          <MacroPopover target={selectedTarget} />
-          {/* The pane's top menu on a computer, the twin of the phone flap's
-              `⋯`. It opens the whole menu, the same body the sidebar row's `⋯`
-              opens, rather than a header-sized subset, and it sits with the
-              pane's own controls rather than in the cog beside it, whose menu
-              is the app's. Which body it opens is the question the header's own
-              chips answer. */}
-          <PaneMenu
-            subject={paneSubject}
-            // The pane it is painted over, which is what the INPUT group is
-            // read under: a companion terminal's pane publishes under the
-            // TERMINAL's id while the menu around it is the agent's.
-            pane={selectedTarget}
-            appearance="header"
-            // No drill: the cog is mounted in this same header for as long as
-            // this `⋯` exists, so drilling would offer one body twice.
-            settingsDrill={false}
-          />
-        </>
+        <HeaderPaneMenu
+          subject={paneSubject}
+          target={selectedTarget}
+          newTabSession={newTabSession}
+          folded={folded === true}
+        />
       ) : null}
 
       {/* The spacer IS the control cluster, not an empty box in front of it: an
@@ -224,5 +236,82 @@ export function InsetHeader() {
         <AppMenu />
       </div>
     </header>
+  )
+}
+
+// The pane's top menu on a computer, the twin of the phone flap's `⋯`. It opens
+// the whole menu, the same body the sidebar row's `⋯` opens, rather than a
+// header-sized subset, and it sits with the pane's own controls rather than in
+// the cog beside it, whose menu is the app's. Which body it opens is the
+// question the header's own chips answer.
+//
+// While the header has folded its controls in, it carries them as rows, and
+// what they open has no button left to stand on: the New tab… dialog and the
+// macro picker open here once the menu has finished closing, the picker placed
+// against this `⋯`, and focus comes back to it.
+function HeaderPaneMenu({
+  subject,
+  target,
+  newTabSession,
+  folded,
+}: {
+  subject: NonNullable<ReturnType<typeof insetHeaderPaneSubject>>
+  target: SelectedTarget
+  newTabSession: SessionView | null
+  folded: boolean
+}) {
+  const { theater } = useDux()
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const pendingRef = useRef<"new-tab" | "macros" | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [macrosOpen, setMacrosOpen] = useState(false)
+  const macrosBlocked = useMacrosBlockedHint(target)
+  // An exit from theater that its own button did not press gives the focus to
+  // this `⋯` when the button that would take it is folded in here.
+  useTheaterToggleFocusWhen(triggerRef, !theater && folded)
+  return (
+    <>
+      <PaneMenu
+        subject={subject}
+        // The pane it is painted over, which is what the INPUT group is read
+        // under: a companion terminal's pane publishes under the TERMINAL's id
+        // while the menu around it is the agent's.
+        pane={target}
+        appearance="header"
+        // No drill: the cog is mounted in this same header for as long as this
+        // `⋯` exists, so drilling would offer one body twice.
+        settingsDrill={false}
+        triggerRef={triggerRef}
+        folded={
+          folded
+            ? {
+                newTab: newTabSession
+                  ? () => (pendingRef.current = "new-tab")
+                  : undefined,
+                theater: () => toggleTheater(),
+                macros: () => (pendingRef.current = "macros"),
+                macrosBlocked,
+              }
+            : undefined
+        }
+        onCloseComplete={() => {
+          const pending = pendingRef.current
+          pendingRef.current = null
+          if (pending === "new-tab") setAdding(true)
+          if (pending === "macros") setMacrosOpen(true)
+        }}
+      />
+      {newTabSession ? (
+        <StackNewDialog
+          session={newTabSession}
+          open={adding}
+          onClose={() => setAdding(false)}
+        />
+      ) : null}
+      <MacroPopover
+        target={target}
+        anchored={{ ref: triggerRef, open: macrosOpen, onOpenChange: setMacrosOpen }}
+      />
+    </>
   )
 }

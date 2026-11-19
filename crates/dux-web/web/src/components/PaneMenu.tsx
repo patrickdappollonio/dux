@@ -1,5 +1,5 @@
-import { Ellipsis, Settings } from "lucide-react"
-import type { ReactNode } from "react"
+import { Ellipsis, Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
+import type { ReactNode, Ref } from "react"
 
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
@@ -12,6 +12,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
@@ -66,6 +67,16 @@ export type PaneMenuSettingsDrill = {
   settingsDrill: boolean
 }
 
+/// The computer header's own controls while they are folded into its `⋯`: each
+/// row runs what its button runs. `newTab` is absent where the pane has no New
+/// tab…, and `macrosBlocked` is the reason the Macros… button would be disabled.
+export type FoldedHeaderControls = {
+  newTab?: () => void
+  theater: () => void
+  macros: () => void
+  macrosBlocked: string | null
+}
+
 function paneMenuLabel(subject: PaneMenuSubject): string {
   return subject.kind === "agent"
     ? PANE_MENU_AGENT_LABEL
@@ -77,7 +88,8 @@ function paneMenuLabel(subject: PaneMenuSubject): string {
 // permanent home the virtual input's controls have; then the subject's actions,
 // the pane's own verbs when the pane is not the subject, the theater exit, and
 // the Settings drill where the anchor stands somewhere the cog does not. What
-// varies between anchors is placement, the trigger, and that drill, never a row.
+// varies between anchors is placement, the trigger, that drill, and the computer
+// header's own controls while it has folded them in, never a row of the pane's.
 // There is deliberately no count row: an agent's flap and pill carry a real one.
 export function PaneMenu({
   subject,
@@ -85,6 +97,9 @@ export function PaneMenu({
   side = "bottom",
   appearance = "cluster",
   settingsDrill,
+  folded,
+  triggerRef,
+  onCloseComplete,
 }: {
   subject: PaneMenuSubject
   /// The pane this anchor is painted over, for the anchors that are on one.
@@ -93,18 +108,35 @@ export function PaneMenu({
   /// ignores it and renders a sheet.
   side?: "top" | "bottom"
   appearance?: PaneMenuAppearance
+  /// The header's controls, while the header has folded them in here.
+  folded?: FoldedHeaderControls
+  triggerRef?: Ref<HTMLButtonElement>
+  /// Called once the menu has finished closing, for a row whose dialog or
+  /// picker should open only after the menu has handed focus back.
+  onCloseComplete?: () => void
 } & PaneMenuSettingsDrill) {
   const cluster = appearance === "cluster"
   const label = paneMenuLabel(subject)
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChangeComplete={(open) => {
+        if (!open) onCloseComplete?.()
+      }}
+    >
       <SimpleTooltip content={label}>
         <DropdownMenuTrigger
+          ref={triggerRef}
           render={
             <Button
               variant={cluster ? "ghost" : "outline"}
               size="icon"
-              className={cluster ? "size-10 shrink-0 rounded-full" : "shrink-0"}
+              // The header's is 40px square under a finger, like the rest of
+              // its cluster; the flap's circle is 40px already.
+              className={
+                cluster
+                  ? "size-10 shrink-0 rounded-full"
+                  : "shrink-0 pointer-coarse:size-10"
+              }
               aria-label={label}
             />
           }
@@ -117,6 +149,7 @@ export function PaneMenu({
           subject={subject}
           pane={pane}
           settingsDrill={settingsDrill}
+          folded={folded}
         />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -128,9 +161,11 @@ export function PaneMenuBody({
   subject,
   pane,
   settingsDrill,
+  folded,
 }: {
   subject: PaneMenuSubject
   pane?: PaneMenuPane
+  folded?: FoldedHeaderControls
 } & PaneMenuSettingsDrill) {
   const theater = useDux().theater
   // The subject's own rows.
@@ -163,6 +198,7 @@ export function PaneMenuBody({
           through that pane's own gated connection and lands in its own sink,
           and the surface items are that pane's own state. */}
       <PaneInputGroup ptyIds={paneInputPtyIds(subject, pane)} />
+      {folded ? <FoldedHeaderGroup controls={folded} /> : null}
       {actions}
       {paneActions}
       {theater ? (
@@ -200,6 +236,39 @@ export function PaneMenuBody({
           </DropdownMenuGroup>
         </>
       ) : null}
+    </>
+  )
+}
+
+// The computer header's controls, while it has folded them in here to give the
+// names their room. Right after the Input group, which keeps the menu's head:
+// they were the first controls on the header, so the top of the menu is where a
+// person who saw them leave looks first. Theater keeps its word, because the
+// mode has no other way in.
+function FoldedHeaderGroup({ controls }: { controls: FoldedHeaderControls }) {
+  return (
+    <>
+      <DropdownMenuGroup>
+        <DropdownMenuLabel>{MENU_GROUP_LABELS.pane}</DropdownMenuLabel>
+        {controls.newTab ? (
+          <DropdownMenuItem onClick={controls.newTab}>
+            <Plus />
+            New tab…
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem onClick={controls.theater}>
+          <Maximize2 />
+          Theater
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={controls.macrosBlocked !== null}
+          onClick={controls.macros}
+        >
+          <SquareSlash />
+          Macros…
+        </DropdownMenuItem>
+      </DropdownMenuGroup>
+      <DropdownMenuSeparator />
     </>
   )
 }

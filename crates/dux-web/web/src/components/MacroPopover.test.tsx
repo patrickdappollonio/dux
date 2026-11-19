@@ -200,7 +200,7 @@ describe("MacroPopover pick focus routing", () => {
     )
     runMacro.mockReturnValue("compose")
 
-    render(<MacroPopover variant="icon" target={target} />)
+    render(<MacroPopover variant="pill" target={target} />)
     await openAndPick()
 
     expect(runMacro).toHaveBeenCalledWith("Greet", target)
@@ -230,7 +230,7 @@ describe("MacroPopover pick focus routing", () => {
     // yet): Base UI's default return-to-trigger behavior.
     runMacro.mockReturnValue("pty")
 
-    render(<MacroPopover variant="icon" target={target} />)
+    render(<MacroPopover variant="pill" target={target} />)
     await openAndPick()
 
     expect(document.activeElement).toBe(
@@ -244,7 +244,7 @@ describe("MacroPopover pick focus routing", () => {
     // than focus nothing.
     runMacro.mockReturnValue("compose")
 
-    render(<MacroPopover variant="icon" target={target} />)
+    render(<MacroPopover variant="pill" target={target} />)
     await openAndPick()
 
     expect(document.activeElement).toBe(

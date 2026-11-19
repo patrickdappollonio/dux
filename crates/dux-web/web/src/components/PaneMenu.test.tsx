@@ -633,6 +633,8 @@ describe("the pane menu at the computer's anchors", () => {
       />)
     const trigger = screen.getByLabelText(PANE_MENU_AGENT_LABEL)
     expect(trigger.className).toContain("size-8")
+    // 40px square under a finger, like the rest of the header's cluster.
+    expect(trigger.className).toContain("pointer-coarse:size-10")
     expect(trigger.className).not.toContain("rounded-full")
 
     cleanup()

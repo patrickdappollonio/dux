@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -16,6 +23,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     showChangesPane: vi.fn(),
     addTab: vi.fn(),
     createTerminal: vi.fn(),
+    toggleTheater: vi.fn(),
   }
 })
 
@@ -137,10 +145,12 @@ describe("InsetHeader app menu", () => {
       expect(el.className).toContain("h-8")
     }
     expect(paneMenu.className).toContain("size-8")
-    // …and no control in the row forces its own height on top of the token.
+    // …and no control in the row forces its own height on top of the token
+    // for a mouse. A finger's taller size is a `pointer-coarse:` variant, which
+    // this pattern deliberately does not match.
     for (const el of [settings, reopen, macros, theater, paneMenu]) {
-      expect(el.className).not.toMatch(/\bh-(9|10|11)\b/)
-      expect(el.className).not.toMatch(/\bsize-(9|10|11)\b/)
+      expect(el.className).not.toMatch(/(?:^|\s)h-(9|10|11)\b/)
+      expect(el.className).not.toMatch(/(?:^|\s)size-(9|10|11)\b/)
     }
   })
 })
@@ -869,7 +879,7 @@ describe("InsetHeader geometry", () => {
     const header = container.querySelector("header")!
     expect(header.className).toContain("h-12")
     expect(header.className).toContain("shrink-0")
-    // Buttons win: the chip row owns the whole shrink budget.
+    // The chip row owns the whole shrink budget.
     const row = chip("agent")!.parentElement!
     expect(row.className).toContain("min-w-0")
     expect(row.className).toContain("flex-1")
@@ -947,5 +957,138 @@ describe("InsetHeader new tab button", () => {
     render(<InsetHeader />)
     expect(screen.getByRole("button", { name: /theater/i })).toBeTruthy()
     expect(newTab()).toBeNull()
+  })
+})
+
+// THE NAMES OUTRANK THE BUTTONS. While a chip's own text is cut off, New tab…,
+// Theater and Macros… leave the header together for rows in the `⋯`, and they
+// come back once the names fit beside them. jsdom computes no layout, so each
+// test states the widths it needs: an element reporting more scroll width than
+// client width is a cut-off name.
+describe("InsetHeader folding the cluster into the pane menu", () => {
+  const CLUSTER = ["New tab…", "Theater", "Macros…"]
+
+  function cutOffNames() {
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(40)
+  }
+
+  function clusterButtons(): (HTMLElement | null)[] {
+    return [
+      screen.queryByRole("button", { name: "New tab…" }),
+      screen.queryByRole("button", { name: /theater mode/i }),
+      screen.queryByRole("button", { name: /run a macro/i }),
+    ]
+  }
+
+  async function menuLabels(name: RegExp): Promise<string[]> {
+    fireEvent.click(screen.getByRole("button", { name }))
+    await screen.findByRole("menu")
+    return screen.getAllByRole("menuitem").map((el) => el.textContent ?? "")
+  }
+
+  it("keeps the cluster in the header, and out of the menu, while the names fit", async () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    for (const button of clusterButtons()) expect(button).not.toBeNull()
+    const items = await menuLabels(/session actions/i)
+    for (const label of CLUSTER) expect(items).not.toContain(label)
+  })
+
+  it("moves all three into the menu, under a heading, when a name is cut off", async () => {
+    cutOffNames()
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    for (const button of clusterButtons()) expect(button).toBeNull()
+    const items = await menuLabels(/session actions/i)
+    for (const label of CLUSTER) expect(items).toContain(label)
+    expect(screen.getByText("Pane")).toBeTruthy()
+  })
+
+  it("moves Theater and Macros… on a project terminal's pane, which has no New tab…", async () => {
+    cutOffNames()
+    mockState = {
+      selectedSessionId: null,
+      changesPanePercent: 26,
+      selectedTarget: { kind: "terminal", terminalId: "pt-1", owner: { kind: "project", projectId: "p1" } },
+      spine: {
+        projects: [{ id: "p1", name: "Repo" }],
+        sessions: [],
+        terminals: [{ id: "pt-1", owner: { kind: "project", project_id: "p1" }, label: "Terminal 2" }],
+      },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    const items = await menuLabels(/terminal actions/i)
+    expect(items).toContain("Theater")
+    expect(items).toContain("Macros…")
+    expect(items).not.toContain("New tab…")
+  })
+
+  it("runs from each row exactly what its button runs", async () => {
+    cutOffNames()
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+
+    await menuLabels(/session actions/i)
+    fireEvent.click(screen.getByRole("menuitem", { name: "Theater" }))
+    expect(store.toggleTheater).toHaveBeenCalled()
+
+    await menuLabels(/session actions/i)
+    fireEvent.click(screen.getByRole("menuitem", { name: "New tab…" }))
+    fireEvent.click(await screen.findByText("New agent tab"))
+    expect(store.addTab).toHaveBeenCalledWith("s1")
+    // With no button left to return to, focus comes back to the `⋯`.
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: /session actions/i }),
+      ),
+    )
+
+    await menuLabels(/session actions/i)
+    fireEvent.click(screen.getByRole("menuitem", { name: "Macros…" }))
+    expect(await screen.findByText(/no macros found/i)).toBeTruthy()
+  })
+
+  it("brings the cluster back when the names fit beside it again", () => {
+    // The header follows its row's size, which is what a dragged divider or a
+    // side panel opening and closing changes.
+    const observers: (() => void)[] = []
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(cb: () => void) {
+          observers.push(cb)
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    cutOffNames()
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    for (const button of clusterButtons()) expect(button).toBeNull()
+
+    // Room enough: nothing is cut off and the row is wide.
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(500)
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(500)
+    act(() => observers.forEach((cb) => cb()))
+    for (const button of clusterButtons()) expect(button).not.toBeNull()
+  })
+
+  it("gives every control left in the header the 40px touch height under a finger, and 32px with a mouse", () => {
+    for (const state of ["fits", "folded"] as const) {
+      if (state === "folded") cutOffNames()
+      mockState = stateFor("main", "main")
+      render(<InsetHeader />)
+      const paneMenu = screen.getByRole("button", { name: /session actions/i })
+      expect(paneMenu.className).toContain("size-8")
+      expect(paneMenu.className).toContain("pointer-coarse:size-10")
+      for (const button of clusterButtons()) {
+        if (state === "folded") continue
+        expect(button!.className).toContain("h-8")
+        expect(button!.className).toContain("pointer-coarse:h-10")
+      }
+      cleanup()
+    }
   })
 })

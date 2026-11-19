@@ -23,7 +23,8 @@ import type { SessionView } from "@/lib/types"
 // outline family and at the height token Theater and Macros share, on an agent's
 // pane only, since a project or standalone terminal has no agent to add to. It
 // asks what to add rather than adding a tab outright, because a terminal in the
-// dock is the other half of the same question.
+// dock is the other half of the same question. When the header folds it into
+// the pane's menu, that row opens the same dialog.
 export function NewTabButton({ session }: { session: SessionView }) {
   const [adding, setAdding] = useState(false)
   return (
@@ -32,9 +33,9 @@ export function NewTabButton({ session }: { session: SessionView }) {
         <Button
           variant="outline"
           // `default` like Theater and Macros beside it: one height, and the
-          // label changes only the width.
+          // label changes only the width. 40px tall under a finger, like them.
           size="default"
-          className="shrink-0"
+          className="shrink-0 pointer-coarse:h-10"
           onClick={() => setAdding(true)}
         >
           <Plus />
