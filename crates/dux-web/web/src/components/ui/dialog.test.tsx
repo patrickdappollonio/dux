@@ -172,7 +172,7 @@ describe("DialogFooter touch height", () => {
 
 describe("DialogContent close button touch size", () => {
   // jsdom cannot evaluate media queries, so the classes are what can be pinned.
-  it("grows the corner close button to the touch floor on a coarse pointer without moving its glyph", () => {
+  it("extends the corner close button's tap area to the touch floor at phone width and on a coarse pointer without growing its visible box", () => {
     render(
       <Dialog open>
         <DialogContent>
@@ -185,13 +185,19 @@ describe("DialogContent close button touch size", () => {
     )
     expect(
       classes,
-      "the 28px close button is under the 40px touch floor, so a coarse pointer needs the 40px box, and the offsets must shrink by the 6px it grows each way or the X moves",
+      "the 28px close button is under the 40px touch floor: a 6px-per-side pseudo-element must cover phone width and a coarse pointer, and be off otherwise",
     ).toEqual(
       expect.arrayContaining([
-        "pointer-coarse:size-10",
-        "pointer-coarse:top-0.5",
-        "pointer-coarse:right-0.5",
+        "after:hidden",
+        "max-md:after:block",
+        "pointer-coarse:after:block",
+        "after:-inset-1.5",
       ]),
     )
+    expect(
+      classes.filter((c) => /size-10|top-0\.5|right-0\.5/.test(c)),
+      "growing the visible box pushes its focus ring into the popup's clipped edge, so the box stays 28px at 8px from the corner",
+    ).toEqual([])
+    expect(classes).toEqual(expect.arrayContaining(["top-2", "right-2", "size-7"]))
   })
 })
