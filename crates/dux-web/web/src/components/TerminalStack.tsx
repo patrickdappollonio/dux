@@ -626,15 +626,6 @@ function TerminalPart(props: TerminalPartProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [composeSurfaceLive, inputArea])
 
-  // The focus guard would bounce a Shift-Tab out of the box straight back, so
-  // xterm's tab stop is suspended: the tab order is what a pointer does not consult.
-  useEffect(() => {
-    if (!composeSurfaceLive) return
-    return suspendTerminalTabStop(termRef.current?.textarea)
-    // `termRef` is filled by the lifecycle effect above; it is listed for the
-    // linter rather than because its identity changes.
-  }, [composeSurfaceLive, termRef])
-
   // The pane's INPUT group for whichever top menu is over it, published only
   // while this pane owns the input. Deps stay primitive: gates is rebuilt each render.
   const {
@@ -702,6 +693,26 @@ function TerminalPart(props: TerminalPartProps) {
   // instead of being written to the PTY. A layout effect, like the cover above,
   // so the control is never painted enabled over a card for a frame.
   const takeoverCard = cover.kind === "card"
+
+  // xterm's tab stop is suspended in two cases. With the message box up, the
+  // focus guard would bounce a Shift-Tab out of the box straight back: the tab
+  // order is what a pointer does not consult. Under a cover over the whole pane,
+  // the textarea is hidden and xterm keeps every Tab pressed in it, so Tab could
+  // never reach the cover's button or leave the pane.
+  const tabStopSuspended = composeSurfaceLive || coverOwnsPane
+  useEffect(() => {
+    if (!tabStopSuspended) return
+    return suspendTerminalTabStop(termRef.current?.textarea)
+    // `termRef` is filled by the lifecycle effect above; it is listed for the
+    // linter rather than because its identity changes.
+  }, [tabStopSuspended, termRef])
+  // The take-over card also takes the focus off a textarea that held it when
+  // another device took the pty, for the same trap.
+  useEffect(() => {
+    if (!takeoverCard) return
+    const textarea = termRef.current?.textarea
+    if (textarea && document.activeElement === textarea) textarea.blur()
+  }, [takeoverCard, termRef])
   const composeSinkLive = composeBarEnabled && isOwner
   useLayoutEffect(
     () =>

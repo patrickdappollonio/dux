@@ -1079,6 +1079,30 @@ describe("TerminalPane take-over card", () => {
     expect(card()).toBeTruthy()
   })
 
+  // xterm keeps every Tab pressed in its textarea, so a hidden one that is a
+  // tab stop, or that holds the focus, is a trap the card's button sits behind.
+  it("takes the hidden terminal input out of the tab order and out of focus while it is up", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onConnected("conn-self", null))
+    const textarea = document.createElement("textarea")
+    document.body.append(textarea)
+    try {
+      ;(TermStub.instances.at(-1) as unknown as { textarea: HTMLTextAreaElement }).textarea =
+        textarea
+      textarea.focus()
+      act(() => notifyPtyOwner("s1", "conn-other"))
+      expect(screen.getByText("Take over")).toBeTruthy()
+      expect(textarea.tabIndex).toBe(-1)
+      expect(document.activeElement).not.toBe(textarea)
+
+      act(() => notifyPtyOwner("s1", "conn-self"))
+      expect(screen.queryByText("Take over")).toBeNull()
+      expect(textarea.tabIndex).toBe(0)
+    } finally {
+      textarea.remove()
+    }
+  })
+
   it("is not rendered for the owner at all", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => last().onConnected("conn-self", null))
@@ -5363,7 +5387,9 @@ describe("TerminalPane compose surface belongs to the owner", () => {
     const term = TermStub.instances.at(-1)!
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(term.options.cursorInactiveStyle).toBe("outline")
-    expect(term.textarea.tabIndex).toBe(0)
+    // Out of the tab order all the same, for the take-over card over it.
+    expect(screen.getByText("Take over")).toBeTruthy()
+    expect(term.textarea.tabIndex).toBe(-1)
   })
 })
 
