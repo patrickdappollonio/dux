@@ -249,7 +249,7 @@ function TaskManagerBody() {
             data-testid="task-manager-scroll"
             className="max-h-96 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
           >
-            <div className="overflow-x-auto">
+            <div className="-mr-[3px] overflow-x-auto pr-[3px]">
               {/* Desktop: the 4-column table. */}
               {isMobile ? null : (
               <table className="w-full border-collapse text-sm">

@@ -2339,3 +2339,15 @@ describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest"
     expectLookEasesIn(look, LOCKED)
   })
 })
+
+describe("FlatAgentList focus rings", () => {
+  // A browser check must Tab to the first row and see its whole ring, and
+  // Tab into the search field and see its frame ringed.
+  it("leaves 3px above the first row and rings the search frame, not the input", () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const scroller = screen.getByText("Alpha").closest(".overflow-y-auto") as HTMLElement
+    expect(scroller.className).toContain("pt-[3px]")
+    const frame = screen.getByLabelText("Search agents and terminals").parentElement!
+    expect(frame.className).toContain("has-[input:focus-visible]:ring-3")
+  })
+})

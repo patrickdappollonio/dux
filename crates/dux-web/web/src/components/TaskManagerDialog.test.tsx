@@ -880,3 +880,16 @@ describe("TaskManagerDialog", () => {
     expect(table!.contains(stop)).toBe(true)
   })
 })
+
+describe("TaskManagerDialog focus rings", () => {
+  // A browser check must Tab to a Force stop button and see its whole ring,
+  // the process table lining up where it did.
+  it("gives the table's horizontal scroller room on the right that it takes back outward", () => {
+    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const scroller = screen.getByTestId("task-manager-scroll").firstElementChild!
+    expect(scroller.className).toContain("overflow-x-auto")
+    expect(scroller.className).toContain("pr-[3px]")
+    expect(scroller.className).toContain("-mr-[3px]")
+  })
+})

@@ -95,7 +95,7 @@ export function ProjectList({
       <DialogHeader className="shrink-0 p-4 pb-3">
         <DialogTitle>{title}</DialogTitle>
         <DialogDescription className="text-pretty">{description}</DialogDescription>
-        <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10 pointer-coarse:min-h-10">
+        <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             value={query}

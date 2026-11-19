@@ -1158,8 +1158,13 @@ function CustomizeWebappForm({
           </p>
         </div>
       ) : (
-        <ScrollArea className="h-[60vh] min-h-0 shrink pr-3">
-          <div className="flex flex-col gap-6">
+        // The 3px of padding on the content is the room a control's focus ring
+        // needs inside the clipping viewport; -ml and the 9px right padding
+        // (12px less the 3px) give it back, so the rows stay in line with the
+        // search field above and the footer below, and the scrollbar keeps its
+        // place.
+        <ScrollArea className="-ml-[3px] h-[60vh] min-h-0 shrink pr-[9px]">
+          <div className="flex flex-col gap-6 px-[3px] pb-[3px]">
             {shownGroups.map(({ group, settings }) => (
               <div key={group.surface} className="flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-3">

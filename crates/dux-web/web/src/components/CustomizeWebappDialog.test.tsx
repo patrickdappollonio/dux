@@ -1039,3 +1039,18 @@ describe("CustomizeWebappDialog search", () => {
     expect(patch.ui).toEqual({ copy_on_select: false })
   })
 })
+
+describe("CustomizeWebappDialog focus rings", () => {
+  // A browser check must Tab down the settings and see every ring whole at
+  // 1024px and at phone width, the rows still lined up with the search field.
+  it("pads the scrolled content by the ring's width and takes the room back outward", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    const root = document.querySelector('[data-slot="scroll-area"]')!
+    expect(root.className).toContain("-ml-[3px]")
+    const content = document.querySelector('[data-slot="scroll-area-viewport"]')!
+      .firstElementChild!
+    expect(content.className).toContain("px-[3px]")
+    expect(content.className).toContain("pb-[3px]")
+  })
+})

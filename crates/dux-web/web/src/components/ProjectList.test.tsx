@@ -88,3 +88,11 @@ describe("a project row's menu on a computer", () => {
     expect(document.activeElement).toBe(search)
   })
 })
+
+describe("ProjectList search focus ring", () => {
+  it("rings the search frame on keyboard focus", () => {
+    renderList()
+    const frame = screen.getByLabelText("Search projects").parentElement!
+    expect(frame.className).toContain("has-[input:focus-visible]:ring-3")
+  })
+})

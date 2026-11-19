@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render } from "@testing-library/react"
 
-import { Command, CommandItem, CommandList } from "./command"
+import { Command, CommandInput, CommandItem, CommandList } from "./command"
 
 // cmdk measures its list, which jsdom has no observer for.
 vi.stubGlobal(
@@ -37,5 +37,18 @@ describe("command row touch height", () => {
         "md:not-pointer-coarse:min-h-0",
       ]),
     )
+  })
+})
+
+describe("command search field focus ring", () => {
+  // A browser check must Tab into "Search macros…" and see the frame's ring.
+  it("lets the frame around the search input draw the focus ring", () => {
+    render(
+      <Command>
+        <CommandInput placeholder="Search" />
+      </Command>,
+    )
+    const frame = document.querySelector('[data-slot="input-group"]')!
+    expect(frame.className).toContain("has-[input:focus-visible,[data-slot=input-group-control]:focus-visible]:ring-3")
   })
 })
