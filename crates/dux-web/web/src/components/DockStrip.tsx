@@ -20,7 +20,7 @@ import {
   selectTerminal,
 } from "@/lib/store"
 import { terminalTitle } from "@/lib/terminals"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
@@ -150,7 +150,8 @@ function DockPill({
       }}
       className={cn(
         // 36px on a tablet, the tab strip's pill height.
-        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors md:pointer-coarse:min-h-9",
+        "flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors md:pointer-coarse:min-h-9",
+        REVEAL_ROW,
         isDragging && "relative z-10 shadow-lg",
         active
           ? "border-border bg-background text-foreground"
@@ -165,14 +166,13 @@ function DockPill({
         className="size-3.5"
       />
       <span className="max-w-40 truncate">{label}</span>
-      {/* Consumes no layout space at rest, like the tab pill's. Always revealed
-          on a tablet, so the clip drops there and the trigger's tap margin
-          reaches past this wrapper. */}
+      {/* The tab pill's reveal. */}
       {withMenu ? (
         <div
           className={cn(
-            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100 md:pointer-coarse:overflow-visible",
-            ALWAYS_REVEALED_ON_TOUCH,
+            HOVER_REVEAL,
+            "[--reveal-cap:--spacing(8)]",
+            REVEALED_ON_ANY_FOCUS,
           )}
         >
           <DropdownMenu>

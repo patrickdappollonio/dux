@@ -44,7 +44,7 @@ import {
   useDux,
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -243,7 +243,8 @@ function TabPill({
       className={cn(
         // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
         // top of the 32px ⋯ hit area inside and overshoot the 36px again.
-        "group/tab flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0 md:pointer-coarse:min-h-9",
+        "flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0 md:pointer-coarse:min-h-9",
+        REVEAL_ROW,
         isDragging && "relative z-10 shadow-lg",
         active
           ? "border-border bg-background text-foreground"
@@ -273,17 +274,13 @@ function TabPill({
           </span>
         </SimpleTooltip>
       ) : null}
-      {/* The ⋯ trigger consumes no layout space at rest: the wrapper's
-          max-width collapses to zero rather than opacity alone, which would
-          still reserve the box's width, and animates open on hover,
-          focus-within, or `data-popup-open` (Base UI does not mirror that onto
-          `aria-expanded`). Always revealed on touch, so a coarse pointer has
-          nothing for the clip to hide and drops it: the trigger's tap margin
-          reaches past this wrapper. */}
+      {/* The shared reveal, also on mouse focus in the pill. The phone keeps
+          the slot's width open for its 44px trigger. */}
       <div
         className={cn(
-          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none max-w-0 opacity-0 group-hover/tab:max-w-8 group-hover/tab:opacity-100 group-focus-within/tab:max-w-8 group-focus-within/tab:opacity-100 has-[[data-popup-open]]:max-w-8 has-[[data-popup-open]]:opacity-100 pointer-coarse:overflow-visible",
-          ALWAYS_REVEALED_ON_TOUCH,
+          HOVER_REVEAL,
+          "[--reveal-cap:--spacing(8)] max-md:max-w-none",
+          REVEALED_ON_ANY_FOCUS,
         )}
       >
         <DropdownMenu>

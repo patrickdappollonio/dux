@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
@@ -362,11 +363,10 @@ describe("AgentTabsStrip phone height", () => {
     expect(wrapper!.className).toContain("pointer-coarse:opacity-100")
     // The mouse's rules are untouched: collapsed at rest, opening on hover,
     // focus-within, or while the menu is open.
-    expect(wrapper!.className).toContain("max-w-0")
-    expect(wrapper!.className).toContain("opacity-0")
-    expect(wrapper!.className).toContain("group-hover/tab:max-w-8")
-    expect(wrapper!.className).toContain("group-focus-within/tab:max-w-8")
-    expect(wrapper!.className).toContain("has-[[data-popup-open]]:max-w-8")
+    expect(wrapper!.className).toContain(HOVER_REVEAL)
+    expect(wrapper!.className).toContain(REVEALED_ON_ANY_FOCUS)
+    expect(wrapper!.className).toContain("[--reveal-cap:--spacing(8)]")
+    expect(screen.getAllByRole("tab")[0].classList).toContain(REVEAL_ROW)
   })
 })
 

@@ -130,7 +130,7 @@ import {
 } from "@/lib/changesExpansion"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import { ALWAYS_REVEALED_ON_PHONE, HOVER_REVEAL, REVEAL_ROW } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
@@ -501,6 +501,7 @@ const FileRow = memo(function FileRow({
         // checkbox's halo stops short of the pane divider's grab zone.
         "group flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
         ROW_FOCUS,
+        REVEAL_ROW,
         folderCount === null && "cursor-pointer",
       )}
       style={depthIndent(depth)}
@@ -611,18 +612,17 @@ const FileRow = memo(function FileRow({
         * nothing (a worktree of this repository, a folder holding only
         * repositories). Such a row's label already says what it is. */}
       {hasMenuItems && (
-      /* The wrapper consumes no width until the row is hovered, the menu is
-        * open, or an action is in flight (aria-busy, so the spinner outlives the
-        * menu), so the path and counts otherwise use the full row. Always
-        * visible at phone width (44px) and under a finger (40px). The
-        * stopPropagation keeps clicks on the trigger and on the portaled menu
-        * items off the row's open-diff handler, which React routes through
-        * this ancestor. */
+      /* The shared reveal, held open too while an action is in flight
+        * (aria-busy, so the spinner outlives the menu), and always visible at
+        * phone width (44px). The stopPropagation keeps clicks on the trigger
+        * and on the portaled menu items off the row's open-diff handler, which
+        * React routes through this ancestor. */
       <div
         role="gridcell"
         className={cn(
-          "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out max-md:max-w-none motion-reduce:transition-none md:max-w-0 md:opacity-0 md:group-hover:max-w-10 md:group-hover:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 md:has-[[aria-busy=true]]:max-w-10 md:has-[[aria-busy=true]]:opacity-100",
-          ALWAYS_REVEALED_ON_TOUCH,
+          HOVER_REVEAL,
+          "[--reveal-cap:--spacing(10)] has-[[aria-busy=true]]:max-w-(--reveal-cap) has-[[aria-busy=true]]:opacity-100",
+          ALWAYS_REVEALED_ON_PHONE,
         )}
         onClick={(e) => e.stopPropagation()}
       >

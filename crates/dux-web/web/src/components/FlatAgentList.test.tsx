@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
@@ -1657,19 +1658,14 @@ describe("FlatAgentList row actions on a coarse pointer", () => {
 
   it("leaves the mouse's resting and reveal rules exactly as they were", () => {
     render(<FlatAgentList handlers={handlers} />)
-    for (const [label, group] of [
-      ["Session actions", "flat-row"],
-      ["Terminal actions", "flat-term"],
-    ] as const) {
-      const cls = wrapperOf(label).className
+    for (const label of ["Session actions", "Terminal actions"]) {
+      const wrapper = wrapperOf(label)
       // Idle: no slot and no paint, so the identity gets the whole row.
-      expect(cls).toContain("md:max-w-0")
-      expect(cls).toContain("md:opacity-0")
-      // Revealed by hover, by keyboard focus anywhere in the row, and held
-      // open while the menu itself is open.
-      expect(cls).toContain(`md:group-hover/${group}:max-w-10`)
-      expect(cls).toContain(`md:group-focus-within/${group}:max-w-10`)
-      expect(cls).toContain("md:has-[[data-popup-open]]:max-w-10")
+      // Revealed by hover, by any focus anywhere in the row, and held open
+      // while the menu itself is open.
+      expect(wrapper.className).toContain(HOVER_REVEAL)
+      expect(wrapper.className).toContain(REVEALED_ON_ANY_FOCUS)
+      expect(wrapper.parentElement!.classList).toContain(REVEAL_ROW)
     }
   })
 
@@ -1741,12 +1737,10 @@ describe("FlatAgentList row ⋯ focus ring", () => {
     for (const label of labels) {
       const caps = parts(label)
         .wrapper.className.split(/\s+/)
-        .map((c) => /(?:^|:)max-w-(\d+)$/.exec(c))
+        .map((c) => /^\[--reveal-cap:--spacing\((\d+)\)\]$/.exec(c))
         .filter((m): m is RegExpExecArray => m !== null)
         .map((m) => Number(m[1]))
-        // max-w-0 is the idle state, which reveals nothing.
-        .filter((n) => n !== 0)
-      expect(caps.length).toBeGreaterThan(0)
+      expect(caps.length).toBe(1)
       for (const cap of caps) expect(cap).toBeGreaterThanOrEqual(10)
     }
   })

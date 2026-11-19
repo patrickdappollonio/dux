@@ -25,7 +25,12 @@ import { useSearchPick } from "@/hooks/use-search-pick"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { openAddProject } from "@/lib/store"
 import { ACTIVE_ROW_RING, FOCUS_RING } from "@/lib/focusRing"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import {
+  ALWAYS_REVEALED_ON_PHONE,
+  HOVER_REVEAL,
+  REVEAL_ROW,
+  REVEALED_ON_ANY_FOCUS,
+} from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 
 /** One row of a project list: a project, or an orphaned group of agents whose
@@ -256,7 +261,8 @@ function ProjectRow({
       data-testid="project-row"
       data-name={row.name}
       className={cn(
-        "group/project-row flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10 pointer-coarse:min-h-10",
+        "flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10 pointer-coarse:min-h-10",
+        REVEAL_ROW,
         "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
         active && ACTIVE_ROW_RING,
       )}
@@ -319,18 +325,14 @@ function ProjectRow({
           setMenuOpen(open)
         }}
       >
-        {/* The row rule: revealed on hover or focus anywhere in the row, kept
-            while its menu is open, always shown on a coarse pointer, and taking
-            no width while idle. Every revealed cap is max-w-10, the trigger's
-            40px coarse-pointer size: these md: caps outrank the unprefixed
-            pointer-coarse:max-w-none, so a narrower cap would clip a focused or
-            open trigger to 32px on a tablet at desktop width. The clip the
-            width animation needs would also shear the trigger's focus ring,
-            so the wrapper lets it out while the trigger has keyboard focus. */}
+        {/* The shared reveal, also on mouse focus anywhere in the row, and
+            always shown at phone width. The cap is the 40px trigger's. */}
         <div
           className={cn(
-            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/project-row:max-w-10 md:group-hover/project-row:opacity-100 md:group-focus-within/project-row:max-w-10 md:group-focus-within/project-row:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 has-[:focus-visible]:overflow-visible",
-            ALWAYS_REVEALED_ON_TOUCH,
+            HOVER_REVEAL,
+            "[--reveal-cap:--spacing(10)]",
+            REVEALED_ON_ANY_FOCUS,
+            ALWAYS_REVEALED_ON_PHONE,
           )}
         >
           <DropdownMenuTrigger

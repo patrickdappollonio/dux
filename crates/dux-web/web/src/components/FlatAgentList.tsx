@@ -105,7 +105,12 @@ import {
   prBadgeTooltip,
   sessionPrs,
 } from "@/lib/pr"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import {
+  ALWAYS_REVEALED_ON_PHONE,
+  HOVER_REVEAL,
+  REVEAL_ROW,
+  REVEALED_ON_ANY_FOCUS,
+} from "@/lib/hoverReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
 import {
@@ -304,7 +309,8 @@ function AgentFlatRow({
         className={cn(
           // The wrapper owns the highlight so it spans both lines and the trailing
           // ⋯; the button below is transparent and fills the row.
-          "group/flat-row relative flex items-stretch rounded-md pr-1 transition-colors",
+          "relative flex items-stretch rounded-md pr-1 transition-colors",
+          REVEAL_ROW,
           "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
           agentSelected && "bg-sidebar-accent text-sidebar-accent-foreground",
           picked && ACTIVE_ROW_RING,
@@ -401,21 +407,14 @@ function AgentFlatRow({
         </SimpleTooltip>
 
         <DropdownMenu>
-          {/* The row rule: revealed on hover or focus anywhere in the row, kept
-              while its menu is open, always shown on a coarse pointer, and
-              taking no width while idle. Every revealed cap is max-w-10, the
-              trigger's 40px coarse-pointer size: these md: caps outrank the
-              unprefixed pointer-coarse:max-w-none, so a narrower cap would clip
-              a focused or open trigger on a tablet at desktop width. The
-              overflow clip the width animation needs also shears the trigger's
-              focus ring (a box-shadow) off its sides while the row's full
-              height leaves the bands above and below, which is what drew a
-              wide bar instead of a ring; the wrapper lets the ring out while
-              the trigger has keyboard focus. */}
+          {/* The shared reveal, also on mouse focus anywhere in the row, and
+              always shown at phone width. The cap is the 40px trigger's. */}
           <div
             className={cn(
-              "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-row:max-w-10 md:group-hover/flat-row:opacity-100 md:group-focus-within/flat-row:max-w-10 md:group-focus-within/flat-row:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 has-[:focus-visible]:overflow-visible",
-              ALWAYS_REVEALED_ON_TOUCH,
+              HOVER_REVEAL,
+              "[--reveal-cap:--spacing(10)]",
+              REVEALED_ON_ANY_FOCUS,
+              ALWAYS_REVEALED_ON_PHONE,
             )}
           >
             <DropdownMenuTrigger
@@ -519,7 +518,8 @@ function TerminalFlatRow({
       style={style}
       data-sidebar-row={terminalRowKey(terminal.id)}
       className={cn(
-        "group/flat-term relative flex items-stretch rounded-md pr-1 transition-colors",
+        "relative flex items-stretch rounded-md pr-1 transition-colors",
+        REVEAL_ROW,
         "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         active && "bg-sidebar-accent text-sidebar-accent-foreground",
         picked && ACTIVE_ROW_RING,
@@ -574,11 +574,13 @@ function TerminalFlatRow({
         </span>
       </button>
       <DropdownMenu>
-        {/* The agent row's reveal rule and ring clearance, for the same reasons. */}
+        {/* The agent row's reveal, for the same reasons. */}
         <div
           className={cn(
-            "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none max-md:max-w-none md:max-w-0 md:opacity-0 md:group-hover/flat-term:max-w-10 md:group-hover/flat-term:opacity-100 md:group-focus-within/flat-term:max-w-10 md:group-focus-within/flat-term:opacity-100 md:has-[[data-popup-open]]:max-w-10 md:has-[[data-popup-open]]:opacity-100 has-[:focus-visible]:overflow-visible",
-            ALWAYS_REVEALED_ON_TOUCH,
+            HOVER_REVEAL,
+            "[--reveal-cap:--spacing(10)]",
+            REVEALED_ON_ANY_FOCUS,
+            ALWAYS_REVEALED_ON_PHONE,
           )}
         >
           <DropdownMenuTrigger

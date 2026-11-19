@@ -14,6 +14,7 @@ import {
 import type * as React from "react"
 
 import type { ChangesSlice, DuxState } from "@/lib/store"
+import { HOVER_REVEAL, REVEAL_ROW } from "@/lib/hoverReveal"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 import { toastText } from "@/test/toastText"
 
@@ -1264,11 +1265,21 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(wrapper.className).toContain("pointer-coarse:opacity-100")
     // A mouse still gets the collapsed slot and the hover reveal, plus the
     // two states that hold it open: the menu, and an action in flight.
-    expect(wrapper.className).toContain("md:max-w-0")
-    expect(wrapper.className).toContain("md:opacity-0")
-    expect(wrapper.className).toContain("md:group-hover:max-w-10")
-    expect(wrapper.className).toContain("md:has-[[data-popup-open]]:max-w-10")
-    expect(wrapper.className).toContain("md:has-[[aria-busy=true]]:max-w-10")
+    expect(wrapper.className).toContain(HOVER_REVEAL)
+    expect(wrapper.className).toContain("has-[[aria-busy=true]]:max-w-(--reveal-cap)")
+  })
+
+  // Tab onto "Actions for <file>" (or onto its row) with the mouse elsewhere
+  // and a browser must paint the ⋯ with its whole ring; it used to hold focus
+  // with nothing drawn. The row is the reveal group, so its own roving focus
+  // counts, and a mouse click (no :focus-visible) reveals nothing new.
+  it("reveals the row's ⋯ while the row or the ⋯ holds keyboard focus", () => {
+    render(<ChangedFiles />)
+    const trigger = screen.getByLabelText("Actions for a.ts")
+    const wrapper = trigger.closest("div") as HTMLElement
+    expect(wrapper.className).toContain(HOVER_REVEAL)
+    expect(wrapper.className).not.toMatch(/focus-within/)
+    expect(trigger.closest('[role="row"]')!.classList).toContain(REVEAL_ROW)
   })
 })
 

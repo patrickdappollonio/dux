@@ -259,7 +259,7 @@ describe("DockStrip on a touch tablet", () => {
   it("lets the ⋯'s tap area out of its reveal wrapper, keeping the mouse's clip", () => {
     render(strip([terminal("t1", 1)]))
     const wrapper = screen.getByLabelText("Terminal actions").closest("div")!
-    expect(wrapper.className).toContain("md:pointer-coarse:overflow-visible")
+    expect(wrapper.className).toContain("pointer-coarse:overflow-visible")
     expect(wrapper.className).toContain("overflow-hidden")
   })
 
