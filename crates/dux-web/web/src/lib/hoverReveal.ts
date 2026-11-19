@@ -4,12 +4,9 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "./touchReveal"
 export const REVEAL_ROW = "group/reveal"
 
 /**
- * The wrapper around a hover-revealed `⋯`: no width and no paint at rest,
- * revealed while its row is hovered, while the row or the `⋯` holds keyboard
- * focus, while its menu is open, and always under a coarse pointer. The site
- * sets its revealed width as `--reveal-cap`. The clip the width animation needs
- * lifts while the `⋯` holds keyboard focus and under a coarse pointer, so the
- * ring and the tap area are drawn whole.
+ * The wrapper around a hover-revealed `⋯`, opened to the site's `--reveal-cap`
+ * on hover, an open menu, keyboard focus in its row, and always under a coarse
+ * pointer; its clip lifts while the `⋯` holds keyboard focus.
  */
 export const HOVER_REVEAL = [
   "flex shrink-0 items-center overflow-hidden transition-[max-width,opacity] duration-200 ease-out motion-reduce:transition-none",
