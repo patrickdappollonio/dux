@@ -1269,6 +1269,24 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(wrapper.className).toContain("has-[[aria-busy=true]]:max-w-(--reveal-cap)")
   })
 
+  // A browser check must confirm at a 191px pane under a coarse pointer: a
+  // folder row's "40 files +40" ends before the ⋯ starts, and the section
+  // heading's count badge is whole. jsdom has no layout, so this pins the
+  // classes that let the counts give way instead of overflowing under the ⋯.
+  it("lets a row's counts and a heading's recap truncate instead of overflowing", () => {
+    render(<ChangedFiles />)
+    const row = screen.getByLabelText("Actions for a.ts").closest('[role="row"]')!
+    const counts = row.querySelector(".text-dux-added")!.parentElement!
+    expect(counts.className).toContain("truncate")
+    expect(counts.className).toContain("min-w-0")
+    expect(counts.className).not.toContain("shrink-0")
+    const heading = screen.getByText("Unstaged").closest("button")!
+    const recap = heading.querySelector("[aria-label]")!
+    expect(recap.className).toContain("truncate")
+    expect(recap.className).toContain("min-w-0")
+    expect(recap.className).not.toContain("shrink-0")
+  })
+
   // Tab onto "Actions for <file>" (or onto its row) with the mouse elsewhere
   // and a browser must paint the ⋯ with its whole ring; it used to hold focus
   // with nothing drawn. The row is the reveal group, so its own roving focus
@@ -1695,8 +1713,10 @@ describe("the changes pane's group recaps", () => {
     const paneRecap = recap("Changes")
     expect(paneRecap.className).toContain("truncate")
     expect(paneRecap.className).not.toContain("shrink-0")
-    // A group heading keeps its figure whole: its badge shrinks with it.
-    expect(recap("Unstaged").className).toContain("shrink-0")
+    // A group heading's recap gives way too, so the count badge after it stays
+    // whole in a pane too narrow for both.
+    expect(recap("Unstaged").className).toContain("truncate")
+    expect(recap("Unstaged").className).not.toContain("shrink-0")
   })
 
   // Only LINE counts abbreviate: the badge beside the sum counts files, and it

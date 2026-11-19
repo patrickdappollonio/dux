@@ -548,7 +548,7 @@ const FileRow = memo(function FileRow({
         />
 
         {folderCount !== null && (
-          <span className="shrink-0 font-mono text-xs text-muted-foreground">
+          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
             {folderCount}
           </span>
         )}
@@ -568,7 +568,7 @@ const FileRow = memo(function FileRow({
         {/* Additions and deletions, coloured to match the diff viewer's gutter.
           * Binary files report none. */}
         {!file.binary && !file.diff_excluded && (file.additions > 0 || file.deletions > 0) && (
-          <span className="shrink-0 font-mono text-xs">
+          <span className="min-w-0 truncate font-mono text-xs">
             {file.additions > 0 && (
               <span className="text-dux-added">+{file.additions}</span>
             )}
@@ -807,7 +807,7 @@ function GroupHeader({
       )}
     >
       <span className="flex-1 text-left">{heading}</span>
-      <ChangesRecap scope={heading} recap={recap} />
+      <ChangesRecap scope={heading} recap={recap} className="min-w-0 shrink truncate" />
       <Badge variant="secondary">
         {filtering ? `${groupDigits(shown)} of ${groupDigits(total)}` : groupDigits(shown)}
       </Badge>
