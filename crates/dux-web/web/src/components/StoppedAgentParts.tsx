@@ -15,13 +15,13 @@ import type { AgentTabView } from "@/lib/types"
 // agent part is on screen beside the dock it gets the short card instead of
 // the full one, whose tip and large logo would crowd the dock.
 
-// The band's buttons keep their 28px box: a 40px filled Start looked oversized
-// in a 36px band, and the band must not grow. A finger gets the 40px from an
-// invisible tap area instead, taller only (inset-y, never inset-x), so the two
-// buttons' tap areas stay the band's 12px gap apart and cannot overlap. It is
-// 7px above and below, measured from inside the 1px border, and reaches a pixel
-// or two past the band onto the strip above and the dock divider below, neither
-// of which is a tap target a finger lands on beside these buttons.
+// The band's buttons keep their 28px box: a 40px filled Start looked oversized.
+// A finger gets the 40px from an invisible tap area instead, taller only
+// (inset-y, never inset-x), so the two buttons' tap areas stay the band's 12px
+// gap apart and cannot overlap. It is 7px above and below, measured from inside
+// the 1px border. Under a coarse pointer the band is 44px tall (see
+// StoppedAgentBand), so the whole 40px sits inside it, clear of the dock
+// divider below.
 const BAND_BUTTON =
   "h-7 shrink-0 relative after:absolute after:-inset-y-[7px] after:inset-x-0 after:hidden max-md:after:block pointer-coarse:after:block"
 
@@ -47,7 +47,7 @@ export function StoppedAgentBand({
   return (
     <div
       data-testid="stopped-agent-band"
-      className="flex min-h-9 shrink-0 items-center gap-3 border-b bg-muted/30 px-3 py-1 text-sm"
+      className="flex min-h-9 pointer-coarse:min-h-11 shrink-0 items-center gap-3 border-b bg-muted/30 px-3 py-1 text-sm"
     >
       <p className="min-w-0 flex-1 truncate">
         <span className="font-mono">{provider}</span> isn&rsquo;t running.

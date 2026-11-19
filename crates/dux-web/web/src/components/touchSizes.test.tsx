@@ -94,6 +94,14 @@ describe("stopped agent band", () => {
       )
     }
   })
+
+  it("is 44px tall under a coarse pointer so both 40px tap areas sit inside it (a browser must measure each inside the band, clear of the divider)", () => {
+    render(<StoppedAgentBand sessionId="s1" slotTab={tab} withStart />)
+    const band = screen.getByTestId("stopped-agent-band")
+    expect(classesOf(band)).toEqual(
+      expect.arrayContaining(["min-h-9", "pointer-coarse:min-h-11"]),
+    )
+  })
 })
 
 describe("file disk banner", () => {
