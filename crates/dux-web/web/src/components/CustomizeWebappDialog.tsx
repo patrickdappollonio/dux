@@ -259,7 +259,7 @@ function NumberControl({
       max={max}
       value={text}
       disabled={disabled}
-      className="max-md:min-h-10 w-24"
+      className="w-24"
       onChange={(e) => {
         const raw = e.target.value
         setText(raw)
@@ -321,7 +321,7 @@ function SettingControl({
           onValueChange={(v) => onChange(v as string)}
           disabled={disabled}
         >
-          <SelectTrigger id={id} aria-label={d.label} className="max-md:min-h-10">
+          <SelectTrigger id={id} aria-label={d.label}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -343,7 +343,7 @@ function SettingControl({
           onValueChange={(v) => onChange(v as string)}
           disabled={disabled}
         >
-          <SelectTrigger id={id} aria-label={d.label} className="max-md:min-h-10">
+          <SelectTrigger id={id} aria-label={d.label}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -365,7 +365,7 @@ function SettingControl({
           maxLength={d.control.maxLen}
           placeholder={String(d.default)}
           disabled={disabled}
-          className="max-md:min-h-10 w-full md:w-56"
+          className="w-full md:w-56"
           onChange={(e) => onChange(e.target.value)}
         />
       )
@@ -584,9 +584,8 @@ function StrengthMeter({ strength, minScore }: { strength: Strength; minScore: n
   )
 }
 
-// On a coarse pointer the fields meet the touch floor at any width; with a mouse
-// they keep the shared input height, stacked a gap-3 apart.
-const PASSWORD_FIELD_CLASS = "pointer-coarse:min-h-11 w-full md:w-64"
+// Stacked a gap-3 apart, at the shared input's heights.
+const PASSWORD_FIELD_CLASS = "w-full md:w-64"
 
 function PasswordField({
   id,

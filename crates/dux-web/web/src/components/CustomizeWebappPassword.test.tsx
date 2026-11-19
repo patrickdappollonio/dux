@@ -341,7 +341,7 @@ describe("the password row", () => {
   it("keeps the password fields at the touch floor", () => {
     render(<CustomizeWebappDialog />)
     for (const label of ["Current password", "New password", "New password again"]) {
-      expect(screen.getByLabelText(label).className).toContain("pointer-coarse:min-h-11")
+      expect(screen.getByLabelText(label).className).toContain("pointer-coarse:min-h-10")
     }
   })
 })

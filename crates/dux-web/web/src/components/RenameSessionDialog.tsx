@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import {
   Dialog,
   DialogContent,
@@ -145,16 +145,13 @@ export function RenameSessionDialog() {
         </p>
         {branch !== null && (
           <div className="grid gap-1">
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="rename-branch"
-                checked={renameBranch}
-                onCheckedChange={(checked) => setRenameBranch(checked)}
-              />
-              <label htmlFor="rename-branch" className="text-sm">
-                Also rename the git branch
-              </label>
-            </div>
+            <CheckboxRow
+              id="rename-branch"
+              checked={renameBranch}
+              onCheckedChange={(checked) => setRenameBranch(checked)}
+            >
+              Also rename the git branch
+            </CheckboxRow>
             <p
               className={
                 warns

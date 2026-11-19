@@ -5,7 +5,7 @@ import {
   GuardedConfirmButton,
 } from "@/components/AttachedSection"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import {
   Dialog,
   DialogContent,
@@ -108,18 +108,15 @@ export function ConfirmRecreateWorkingCopyDialog() {
           </DialogDescription>
         </DialogHeader>
         {offer.length > 0 && (
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="recreate-restart-tabs"
-              checked={restart.ticked}
-              onCheckedChange={(ticked) =>
-                setRestart({ target: recreateWorkingCopyTarget, ticked })
-              }
-            />
-            <label htmlFor="recreate-restart-tabs" className="min-w-0 text-sm">
-              {renderProse(recreateRestartCheckboxProse(offer))}
-            </label>
-          </div>
+          <CheckboxRow
+            id="recreate-restart-tabs"
+            checked={restart.ticked}
+            onCheckedChange={(ticked) =>
+              setRestart({ target: recreateWorkingCopyTarget, ticked })
+            }
+          >
+            {renderProse(recreateRestartCheckboxProse(offer))}
+          </CheckboxRow>
         )}
         <AttachedSection blockers={shownBlockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}

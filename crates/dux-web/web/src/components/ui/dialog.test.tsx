@@ -3,6 +3,7 @@ import { useRef, useState } from "react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
@@ -155,18 +156,33 @@ describe("DialogContent destructive backdrop", () => {
 })
 
 describe("DialogFooter touch height", () => {
-  // jsdom cannot evaluate media queries, so the class is what can be pinned.
-  it("lifts footer buttons to the touch floor on a coarse pointer at any width", () => {
+  // jsdom cannot evaluate media queries, so the footer's own classes are read
+  // back and each one's descendant selector is tried against the rendered
+  // buttons, a plain one and a link-styled one.
+  it("lifts every footer button, a link rendered as one included, to 44px at phone width and on a coarse pointer at any width", () => {
     render(
       <DialogFooter>
         <button type="button">Cancel</button>
+        <Button render={<a href="https://example.com">Docs</a>} />
       </DialogFooter>,
     )
-    const footer = document.querySelector('[data-slot="dialog-footer"]')
-    expect(
-      footer?.className,
-      "a touch tablet at desktop width gets the desktop layout, so its footer buttons need the coarse-pointer minimum to stay above the 40px touch floor",
-    ).toContain("pointer-coarse:[&_button]:min-h-11")
+    const footer = document.querySelector('[data-slot="dialog-footer"]') as HTMLElement
+    const anchor = screen.getByText("Docs").closest("a") as HTMLElement
+    const plain = screen.getByText("Cancel")
+    for (const media of ["max-md", "pointer-coarse"]) {
+      const rule = Array.from(footer.classList).find(
+        (c) => c.startsWith(`${media}:[&_`) && c.endsWith("]:min-h-11"),
+      )
+      expect(
+        rule,
+        `${media}: a touch tablet at desktop width gets the desktop layout, so its footer buttons need the coarse-pointer minimum as well as the phone-width one`,
+      ).toBeDefined()
+      const selector = (rule as string)
+        .slice(`${media}:[&_`.length, -"]:min-h-11".length)
+        .replaceAll("_", " ")
+      expect(plain.matches(selector), `${media}: a plain footer button`).toBe(true)
+      expect(anchor.matches(selector), `${media}: a Button rendered as a link`).toBe(true)
+    }
   })
 })
 

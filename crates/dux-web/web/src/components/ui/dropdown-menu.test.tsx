@@ -16,8 +16,11 @@ await import("@/lib/store")
 
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -241,5 +244,48 @@ describe("DropdownMenuContent on mobile (innerWidth 500)", () => {
     fireEvent.click(screen.getByText("Deep item"))
     await settle()
     expect(screen.queryByRole("menu")).toBeNull()
+  })
+})
+
+describe("menu row touch height", () => {
+  beforeEach(() => setViewportWidth(1280))
+
+  // jsdom cannot evaluate media queries, so the classes are what can be pinned.
+  it("gives every kind of row 44px at phone width and 40px under a coarse pointer at desktop width", async () => {
+    render(
+      <DropdownMenu>
+        <DropdownMenuTrigger>open</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem>Item</DropdownMenuItem>
+          <DropdownMenuCheckboxItem checked>Checkbox</DropdownMenuCheckboxItem>
+          <DropdownMenuRadioGroup value="a">
+            <DropdownMenuRadioItem value="a">Radio</DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>More</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuItem>Deep item</DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </DropdownMenuContent>
+      </DropdownMenu>,
+    )
+    await openRoot()
+    for (const slot of ["item", "checkbox-item", "radio-item", "sub-trigger"]) {
+      const classes = Array.from(
+        document.querySelector(`[data-slot="dropdown-menu-${slot}"]`)?.classList ?? [],
+      )
+      expect(
+        classes,
+        `${slot}: 44px below md, 40px for a finger at md and up, compact only for a fine pointer at md and up`,
+      ).toEqual(
+        expect.arrayContaining([
+          "min-h-11",
+          "md:pointer-coarse:min-h-10",
+          "md:not-pointer-coarse:min-h-0",
+        ]),
+      )
+      expect(classes, `${slot}: an ungated md:min-h-0 would take the floor from a finger too`).not.toContain("md:min-h-0")
+    }
   })
 })

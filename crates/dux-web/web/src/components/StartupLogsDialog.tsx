@@ -81,7 +81,7 @@ function StartupLogsBody({
             value={startupLogsSelected?.name ?? startupLogsEntries[0]?.name ?? ""}
             onValueChange={(name) => name && selectStartupLog(name)}
           >
-            <SelectTrigger className="w-full font-mono max-md:min-h-11">
+            <SelectTrigger className="w-full font-mono">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

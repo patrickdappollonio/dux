@@ -9,7 +9,7 @@ import { notifyError } from "@/lib/notify"
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import {
   Dialog,
   DialogContent,
@@ -116,7 +116,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
           }
         }}
         placeholder="Folder name"
-        className="h-8 max-md:min-h-10 w-40"
+        className="h-8 w-40"
       />
       <Button
         variant="outline"
@@ -246,18 +246,14 @@ function InspectionMessages({
             </div>
           </div>
           {branch.canCheckoutDefault && branch.defaultBranch ? (
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={checkoutDefault}
-                onCheckedChange={(checked) =>
-                  setCheckoutDefault(checked === true)
-                }
-              />
-              <span>
-                Check out <InlineCode>{branch.defaultBranch}</InlineCode> before
-                adding
-              </span>
-            </label>
+            <CheckboxRow
+              id="add-project-checkout-default"
+              checked={checkoutDefault}
+              onCheckedChange={setCheckoutDefault}
+            >
+              Check out <InlineCode>{branch.defaultBranch}</InlineCode> before
+              adding
+            </CheckboxRow>
           ) : null}
         </div>
       ) : null}

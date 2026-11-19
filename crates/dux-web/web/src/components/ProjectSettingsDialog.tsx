@@ -101,7 +101,7 @@ function ProjectSettingsForm({
             value={provider}
             onValueChange={(value) => setProvider(value ?? "")}
           >
-            <SelectTrigger className="w-full max-md:min-h-11">
+            <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -121,7 +121,7 @@ function ProjectSettingsForm({
             value={autoReopen}
             onValueChange={(value) => setAutoReopen(value ?? "inherit")}
           >
-            <SelectTrigger className="w-full max-md:min-h-11">
+            <SelectTrigger className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

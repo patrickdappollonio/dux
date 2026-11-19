@@ -1252,9 +1252,10 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
   })
 
   it("gives the submenu trigger rows the same phone touch-target height as sibling items", () => {
-    // DropdownMenuItem carries min-h-11 (44px) on phones, undone on desktop
-    // via md:min-h-0. The two DropdownMenuSubTrigger rows (New agent tab,
-    // Project) must carry the exact same pair, or they render visibly shorter
+    // DropdownMenuItem carries min-h-11 (44px) on phones, 40px for a finger at
+    // desktop width, and is compact only for a fine pointer there. The two
+    // DropdownMenuSubTrigger rows (New agent tab, Project) must carry the exact
+    // same classes, or they render visibly shorter
     // than every sibling item in the same open menu. Measured against a bar
     // toggle, which is a plain shared item and therefore the reference height.
     mockState = terminalState()
@@ -1268,7 +1269,11 @@ describe("MobileShell quick toggles in the terminal-screen ⋯ menu", () => {
       screen.getByText("New agent tab…").closest('[role="menuitem"]')!,
       screen.getByText(/^Project /).closest('[role="menuitem"]')!,
     ]
-    for (const cls of ["min-h-11", "md:min-h-0"]) {
+    for (const cls of [
+      "min-h-11",
+      "md:pointer-coarse:min-h-10",
+      "md:not-pointer-coarse:min-h-0",
+    ]) {
       expect(item.className).toContain(cls)
       for (const trigger of subTriggers) {
         expect(trigger.className).toContain(cls)

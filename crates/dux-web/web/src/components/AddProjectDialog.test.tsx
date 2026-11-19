@@ -338,7 +338,7 @@ describe("AddProjectDialog non-default branch", () => {
     ).toEqual(["feature", "main"])
 
     // The checkbox label names the default branch as a chip, with no quotes.
-    const label = screen.getByRole("checkbox").closest("label")!
+    const label = screen.getByRole("checkbox").parentElement!.querySelector("label")!
     expect(label.textContent).toBe("Check out main before adding")
     expect(within(label).getByText("main", { selector: "code" })).toBeTruthy()
 

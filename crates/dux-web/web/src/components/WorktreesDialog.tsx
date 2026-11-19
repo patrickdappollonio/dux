@@ -4,7 +4,7 @@ import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { CheckboxRow } from "@/components/CheckboxRow"
 import {
   Dialog,
   DialogContent,
@@ -215,17 +215,14 @@ function ConfirmDeleteWorktree() {
           )}
         </div>
         {branch !== null ? (
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="delete-worktree-branch"
-              checked={deleteBranch}
-              onCheckedChange={setDeleteBranch}
-            />
-            <label htmlFor="delete-worktree-branch" className="text-sm">
-              Also delete the branch{" "}
-              <InlineCode>{branch}</InlineCode>
-            </label>
-          </div>
+          <CheckboxRow
+            id="delete-worktree-branch"
+            checked={deleteBranch}
+            onCheckedChange={setDeleteBranch}
+          >
+            Also delete the branch{" "}
+            <InlineCode>{branch}</InlineCode>
+          </CheckboxRow>
         ) : null}
         {/* Misclick-safe spacing between the warning (and the checkbox, which
            must not sit flush against the buttons) and the footer. */}
@@ -478,19 +475,13 @@ function ConfirmDeleteLeftoverFolder() {
         {branches.length > 0 ? (
           <div className="grid gap-2">
             {folderPresent ? (
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="delete-leftover-branches"
-                  checked={deleteBranches}
-                  onCheckedChange={setChoice}
-                />
-                <label
-                  htmlFor="delete-leftover-branches"
-                  className="min-w-0 text-sm"
-                >
-                  {renderProse(branchCheckboxLabel(branches))}
-                </label>
-              </div>
+              <CheckboxRow
+                id="delete-leftover-branches"
+                checked={deleteBranches}
+                onCheckedChange={setChoice}
+              >
+                {renderProse(branchCheckboxLabel(branches))}
+              </CheckboxRow>
             ) : null}
             {/* The danger sits in the sentence, never in a red checkbox, as in
                the agent-delete dialog. */}

@@ -93,8 +93,9 @@ function DialogContent({
             data-slot="dialog-close"
             render={
               // The 28px box and its focus ring stay put; at phone width and
-              // under a coarse pointer an invisible 6px margin per side takes
-              // the tap area to the 40px touch floor.
+              // under a coarse pointer an invisible 6px margin per side widens
+              // the tap area to 38px, not 40, because the margin is counted
+              // from inside the button's 1px border.
               <Button
                 variant="ghost"
                 className="absolute top-2 right-2 after:absolute after:-inset-1.5 after:hidden max-md:after:block pointer-coarse:after:block"
@@ -133,13 +134,13 @@ function DialogFooter({
   return (
     <div
       data-slot="dialog-footer"
-      // max-md:[&_button]:min-h-11 gives every footer action a ≥44px touch
-      // target at phone width, and pointer-coarse:[&_button]:min-h-11 does the
-      // same at desktop width under a coarse pointer (a touch tablet, which is
-      // wide enough for the desktop layout but still tapped with a finger). A
-      // fine pointer at desktop width keeps the compact h-8 default.
+      // Every footer action is at least 44px tall at phone width, and at
+      // desktop width under a coarse pointer (a touch tablet, which is wide
+      // enough for the desktop layout but still tapped with a finger). A fine
+      // pointer at desktop width keeps the compact h-8 default. The selector
+      // also takes a `Button` rendered as a link, which is no <button>.
       className={cn(
-        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 max-md:[&_button]:min-h-11 pointer-coarse:[&_button]:min-h-11 sm:flex-row sm:justify-end",
+        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 max-md:[&_:is(button,[data-slot=button])]:min-h-11 pointer-coarse:[&_:is(button,[data-slot=button])]:min-h-11 sm:flex-row sm:justify-end",
         className
       )}
       {...props}

@@ -69,8 +69,11 @@ function SheetContent({
             render={
               <Button
                 variant="ghost"
-                // ≥44px touch target on phones; compact icon-sm on desktop.
-                className="absolute top-3 right-3 max-md:size-11"
+                // The dialog's corner X: a 28px box 8px from the corner, whose
+                // invisible 6px margin per side at phone width and under a
+                // coarse pointer widens the tap area to 38px without moving
+                // the glyph.
+                className="absolute top-2 right-2 after:absolute after:-inset-1.5 after:hidden max-md:after:block pointer-coarse:after:block"
                 size="icon-sm"
               />
             }

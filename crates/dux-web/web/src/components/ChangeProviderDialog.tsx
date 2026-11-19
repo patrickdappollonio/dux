@@ -71,7 +71,7 @@ function ChangeProviderForm({
           value={provider}
           onValueChange={(value) => setProvider(value ?? provider)}
         >
-          <SelectTrigger className="w-full max-md:min-h-11">
+          <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

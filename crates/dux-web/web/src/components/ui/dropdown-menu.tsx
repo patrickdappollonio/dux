@@ -152,11 +152,13 @@ function DropdownMenuItem({
       data-slot="dropdown-menu-item"
       data-inset={inset}
       data-variant={variant}
-      // Divergence from the generated template: max-md:min-h-11 gives each menu
-      // item a ≥44px touch target on phones: these menus carry the mobile hub's
-      // primary session/project actions. Desktop density is unchanged via md:.
+      // Divergence from the generated template: every menu row is 44px tall
+      // below md, where these menus carry the mobile hub's primary actions, and
+      // 40px for a finger at md and up (a touch tablet). Only a fine pointer at
+      // md and up gets the compact row. The checkbox, radio and submenu-trigger
+      // rows below, and the context menu's rows, carry the same three classes.
       className={cn(
-        "group/dropdown-menu-item relative flex min-h-11 cursor-default items-center gap-1.5 rounded-md px-1.5 py-1 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground not-data-[variant=destructive]:focus:**:text-accent-foreground data-inset:pl-7 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-[variant=destructive]:focus:text-destructive dark:data-[variant=destructive]:focus:bg-destructive/20 data-disabled:pointer-events-none data-disabled:opacity-50 md:min-h-0 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 data-[variant=destructive]:*:[svg]:text-destructive",
+        "group/dropdown-menu-item relative flex min-h-11 cursor-default items-center gap-1.5 rounded-md px-1.5 py-1 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground not-data-[variant=destructive]:focus:**:text-accent-foreground data-inset:pl-7 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-[variant=destructive]:focus:text-destructive dark:data-[variant=destructive]:focus:bg-destructive/20 data-disabled:pointer-events-none data-disabled:opacity-50 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 data-[variant=destructive]:*:[svg]:text-destructive",
         className
       )}
       {...props}
@@ -206,11 +208,11 @@ function DropdownMenuSubTrigger({
     <MenuPrimitive.SubmenuTrigger
       data-slot="dropdown-menu-sub-trigger"
       data-inset={inset}
-      // These must stay identical to `DropdownMenuItem`'s pair: a submenu
-      // trigger is a row in the same open menu, and without the shared phone
-      // floor it renders visibly shorter than every sibling item.
+      // These must stay identical to `DropdownMenuItem`'s height classes: a
+      // submenu trigger is a row in the same open menu, and without the shared
+      // touch floor it renders visibly shorter than every sibling item.
       className={cn(
-        "flex min-h-11 cursor-default items-center gap-1.5 rounded-md px-1.5 py-1 text-sm outline-hidden select-none md:min-h-0 focus:bg-accent focus:text-accent-foreground not-data-[variant=destructive]:focus:**:text-accent-foreground data-inset:pl-7 data-popup-open:bg-accent data-popup-open:text-accent-foreground data-open:bg-accent data-open:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "flex min-h-11 cursor-default items-center gap-1.5 rounded-md px-1.5 py-1 text-sm outline-hidden select-none md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 focus:bg-accent focus:text-accent-foreground not-data-[variant=destructive]:focus:**:text-accent-foreground data-inset:pl-7 data-popup-open:bg-accent data-popup-open:text-accent-foreground data-open:bg-accent data-open:text-accent-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
@@ -292,7 +294,7 @@ function DropdownMenuCheckboxItem({
       data-slot="dropdown-menu-checkbox-item"
       data-inset={inset}
       className={cn(
-        "relative flex cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground focus:**:text-accent-foreground data-inset:pl-7 data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "relative flex min-h-11 cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground focus:**:text-accent-foreground data-inset:pl-7 data-disabled:pointer-events-none data-disabled:opacity-50 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       checked={checked}
@@ -334,7 +336,7 @@ function DropdownMenuRadioItem({
       data-slot="dropdown-menu-radio-item"
       data-inset={inset}
       className={cn(
-        "relative flex cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground focus:**:text-accent-foreground data-inset:pl-7 data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "relative flex min-h-11 cursor-default items-center gap-1.5 rounded-md py-1 pr-8 pl-1.5 text-sm outline-hidden select-none focus:bg-accent focus:text-accent-foreground focus:**:text-accent-foreground data-inset:pl-7 data-disabled:pointer-events-none data-disabled:opacity-50 md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
