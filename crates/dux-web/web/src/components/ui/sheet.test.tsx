@@ -19,7 +19,7 @@ afterEach(cleanup)
 
 describe("SheetContent close button touch size", () => {
   // jsdom cannot evaluate media queries, so the classes are what can be pinned.
-  it("extends the corner close button's tap area at phone width and on a coarse pointer without growing or moving its visible box", () => {
+  it("gives the 28px corner close button a 7px margin per side at phone width and on a coarse pointer, a 40px tap area across its 1px border (a browser must measure 40px), without growing or moving its visible box", () => {
     render(
       <Sheet open>
         <SheetContent side="bottom">
@@ -38,7 +38,7 @@ describe("SheetContent close button touch size", () => {
         "after:hidden",
         "max-md:after:block",
         "pointer-coarse:after:block",
-        "after:-inset-1.5",
+        "after:-inset-[7px]",
       ]),
     )
     expect(

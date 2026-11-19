@@ -829,10 +829,10 @@ describe("InsetHeader show-Changes summary", () => {
     const settings = screen.getByRole("button", { name: /^settings$/i })
     expect(button.className).toContain("h-8")
     expect(settings.className).toContain("h-8")
-    // The number widens the control; it must never make it taller, and it must
-    // not go back to being a fixed square.
+    // The number widens the control; it must never make it taller than its
+    // row, and it must not go back to being a fixed square.
     expect(button.className).not.toMatch(/(?:^|\s)size-\d/)
-    expect(button.className).not.toMatch(/\bh-(9|10|11)\b/)
+    expect(button.className).not.toMatch(/(?:^|\s)h-(9|10|11)\b/)
   })
 
   it("stays a bare icon when no agent is in view", () => {
@@ -849,6 +849,7 @@ describe("InsetHeader show-Changes summary", () => {
     const button = screen.getByRole("button", { name: /show changes pane/i })
     expect(button.textContent).toBe("")
     expect(button.className).toContain("size-8")
+    expect(button.className).toContain("pointer-coarse:size-10")
   })
 
   it("carries no summary while the pane itself is on screen", () => {
@@ -1078,11 +1079,21 @@ describe("InsetHeader folding the cluster into the pane menu", () => {
   it("gives every control left in the header the 40px touch height under a finger, and 32px with a mouse", () => {
     for (const state of ["fits", "folded"] as const) {
       if (state === "folded") cutOffNames()
-      mockState = stateFor("main", "main")
+      mockState = {
+        ...stateFor("main", "main"),
+        bootstrap: { show_changes_pane: true },
+        changesPanePercent: 0,
+      } as unknown as DuxState
       render(<InsetHeader />)
       const paneMenu = screen.getByRole("button", { name: /session actions/i })
       expect(paneMenu.className).toContain("size-8")
       expect(paneMenu.className).toContain("pointer-coarse:size-10")
+      const reopen = screen.getByRole("button", { name: /show changes pane/i })
+      expect(reopen.className).toContain("h-8")
+      expect(reopen.className).toContain("pointer-coarse:h-10")
+      const cog = screen.getByRole("button", { name: "Settings" })
+      expect(cog.className).toContain("h-8")
+      expect(cog.className).toContain("pointer-coarse:h-10")
       for (const button of clusterButtons()) {
         if (state === "folded") continue
         expect(button!.className).toContain("h-8")

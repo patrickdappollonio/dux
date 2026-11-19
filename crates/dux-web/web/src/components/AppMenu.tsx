@@ -83,11 +83,12 @@ export function AppMenu() {
           behind. The label changes the WIDTH and nothing else, the button's
           default size token is `h-8`, exactly the `size="icon"` (`size-8`)
           height of the icon-only buttons beside it, so the control row stays one
-          height. Visible text supplies the accessible name so voice commands
-          can match "Settings". */}
+          height, and 40px under a coarse pointer like the rest of that row.
+          Visible text supplies the accessible name so voice commands can match
+          "Settings". */}
       <DropdownMenuTrigger
         render={
-          <Button variant="outline">
+          <Button variant="outline" className="pointer-coarse:h-10">
             <Settings />
             Settings
           </Button>

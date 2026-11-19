@@ -188,7 +188,7 @@ describe("DialogFooter touch height", () => {
 
 describe("DialogContent close button touch size", () => {
   // jsdom cannot evaluate media queries, so the classes are what can be pinned.
-  it("extends the corner close button's tap area to the touch floor at phone width and on a coarse pointer without growing its visible box", () => {
+  it("gives the 28px corner close button a 7px margin per side at phone width and on a coarse pointer, a 40px tap area across its 1px border (a browser must measure 40px), without growing its visible box", () => {
     render(
       <Dialog open>
         <DialogContent>
@@ -201,13 +201,13 @@ describe("DialogContent close button touch size", () => {
     )
     expect(
       classes,
-      "the 28px close button is under the 40px touch floor: a 6px-per-side pseudo-element must cover phone width and a coarse pointer, and be off otherwise",
+      "the 28px close button is under the 40px touch floor: a 7px-per-side pseudo-element must cover phone width and a coarse pointer, and be off otherwise",
     ).toEqual(
       expect.arrayContaining([
         "after:hidden",
         "max-md:after:block",
         "pointer-coarse:after:block",
-        "after:-inset-1.5",
+        "after:-inset-[7px]",
       ]),
     )
     expect(

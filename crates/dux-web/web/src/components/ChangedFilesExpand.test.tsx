@@ -134,6 +134,18 @@ function toggle(name: string): HTMLButtonElement {
   return screen.getByRole("button", { name: new RegExp(`^${name}`) }) as HTMLButtonElement
 }
 
+// The bulk verbs live in the "N selected" button's menu, which closes on every
+// pick, so this opens it whenever it is not already open.
+function selectionMenu() {
+  if (!screen.queryByRole("menu")) {
+    const bar = within(
+      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
+    )
+    fireEvent.click(bar.getByRole("button", { name: /selected$/ }))
+  }
+  return within(screen.getByRole("menu"))
+}
+
 async function answer(index: number, rows: ChangedFileView[]) {
   await act(async () => {
     answers[index]!.resolve(rows)
@@ -365,10 +377,7 @@ describe("expanding a folded folder", () => {
     render(<ChangedFiles />)
     expect(screen.getByText("30,001")).toBeTruthy()
     fireEvent.click(screen.getByLabelText("Select node_modules"))
-    const bar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    expect(bar.getByRole("button", { name: /Stage 30,000/ })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: /Stage 30,000/ })).toBeTruthy()
   })
 
   it("makes every row inside a full row: diff, menu actions and selection", async () => {
@@ -388,12 +397,10 @@ describe("expanding a folded folder", () => {
     await vi.waitFor(() =>
       expect(stageOne).toHaveBeenCalledWith("s1", "node_modules/top.js"),
     )
+    await vi.waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
 
     fireEvent.click(screen.getByLabelText("Select node_modules/top.js"))
-    const bar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    fireEvent.click(bar.getByRole("button", { name: /Stage 1/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 1/ }))
     await vi.waitFor(() =>
       expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules/top.js"]),
     )
@@ -406,10 +413,7 @@ describe("expanding a folded folder", () => {
     fireEvent.click(screen.getByLabelText("Select node_modules"))
     fireEvent.click(screen.getByLabelText("Select node_modules/top.js"))
 
-    const bar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    fireEvent.click(bar.getByRole("button", { name: /Stage 3/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 3/ }))
     await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules"]))
   })
 
@@ -461,10 +465,6 @@ describe("expanding a folded folder", () => {
 })
 
 describe("what is checked under an expanded folder", () => {
-  function bar() {
-    return within(screen.getByRole("toolbar", { name: "Actions for the selected files" }))
-  }
-
   // "Select all" is every row shown, the rows inside expanded folders too.
   it("Select all checks the rows inside expanded folders, and Select none clears them", async () => {
     render(<ChangedFiles />)
@@ -472,11 +472,11 @@ describe("what is checked under an expanded folder", () => {
     await answer(0, [file("node_modules/top.js")])
     fireEvent.click(screen.getByLabelText("Select notes.md"))
 
-    fireEvent.click(bar().getByRole("button", { name: /Select all/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Select all/ }))
     const child = screen.getByLabelText("Select node_modules/top.js")
     expect(child.getAttribute("aria-checked")).toBe("true")
 
-    fireEvent.click(bar().getByRole("button", { name: /Select none/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Select none/ }))
     expect(child.getAttribute("aria-checked")).toBe("false")
   })
 
@@ -487,10 +487,10 @@ describe("what is checked under an expanded folder", () => {
     await answer(0, [file("node_modules/top.js")])
     fireEvent.click(screen.getByLabelText("Select node_modules/top.js"))
     fireEvent.click(screen.getByLabelText("Select notes.md"))
-    expect(bar().getByRole("button", { name: /Stage 2/ })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: /Stage 2/ })).toBeTruthy()
 
     fireEvent.click(toggle("node_modules/"))
-    expect(bar().getByRole("button", { name: /Stage 1/ })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: /Stage 1/ })).toBeTruthy()
 
     fireEvent.click(toggle("node_modules/"))
     await answer(1, [file("node_modules/top.js")])
@@ -519,7 +519,7 @@ describe("what is checked under an expanded folder", () => {
     await answer(2, [file("node_modules/top.js")])
 
     expect(screen.queryByText("a.js")).toBeNull()
-    fireEvent.click(bar().getByRole("button", { name: /Stage 1/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 1/ }))
     await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["notes.md"]))
   })
 
@@ -542,11 +542,11 @@ describe("what is checked under an expanded folder", () => {
     fireEvent.click(toggle("vendor/"))
     await answer(0, [file("vendor/lib", { kind: "nested_repository", additions: 0 })])
     fireEvent.click(screen.getByLabelText("Select vendor"))
-    fireEvent.click(bar().getByRole("button", { name: /Select all/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Select all/ }))
 
-    expect(bar().getByRole("button", { name: /Stage 1/ })).toBeTruthy()
-    expect(bar().getByRole("button", { name: /Discard 1/ })).toBeTruthy()
-    fireEvent.click(bar().getByRole("button", { name: /Stage 1/ }))
+    expect(selectionMenu().getByRole("menuitem", { name: /Stage 1/ })).toBeTruthy()
+    expect(selectionMenu().getByRole("menuitem", { name: /Discard 1/ })).toBeTruthy()
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 1/ }))
     await vi.waitFor(() => expect(stageMany).toHaveBeenCalledWith("s1", ["vendor/lib"]))
   })
 
@@ -621,10 +621,7 @@ describe("a user expanding and staging inside a folder", () => {
     await answer(1, [file("node_modules/pkg0/a.js"), file("node_modules/pkg0/b.js")])
 
     fireEvent.click(screen.getByLabelText("Select node_modules/pkg0/a.js"))
-    const bar = within(
-      screen.getByRole("toolbar", { name: "Actions for the selected files" }),
-    )
-    fireEvent.click(bar.getByRole("button", { name: /Stage 1/ }))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 1/ }))
     await vi.waitFor(() =>
       expect(stageMany).toHaveBeenCalledWith("s1", ["node_modules/pkg0/a.js"]),
     )

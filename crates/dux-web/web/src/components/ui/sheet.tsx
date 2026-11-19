@@ -70,10 +70,10 @@ function SheetContent({
               <Button
                 variant="ghost"
                 // The dialog's corner X: a 28px box 8px from the corner, whose
-                // invisible 6px margin per side at phone width and under a
-                // coarse pointer widens the tap area to 38px without moving
-                // the glyph.
-                className="absolute top-2 right-2 after:absolute after:-inset-1.5 after:hidden max-md:after:block pointer-coarse:after:block"
+                // invisible margin at phone width and under a coarse pointer
+                // widens the tap area to 40px without moving the glyph (7px,
+                // because it is measured from inside the 1px border).
+                className="absolute top-2 right-2 after:absolute after:-inset-[7px] after:hidden max-md:after:block pointer-coarse:after:block"
                 size="icon-sm"
               />
             }

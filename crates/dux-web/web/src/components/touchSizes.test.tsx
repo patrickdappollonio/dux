@@ -73,7 +73,7 @@ describe("stopped agent band", () => {
     last_run_verdict: { ending: "exited", excerpt: ["boom"], ended_at: 0 },
   } as unknown as AgentTabView
 
-  it("keeps the 28px buttons and gives each a 40px tap area that cannot overlap its neighbour", () => {
+  it("keeps the 28px buttons and gives each a 7px margin above and below, a 40px tap area across the 1px border (a browser must measure 40px), that cannot overlap its neighbour", () => {
     render(<StoppedAgentBand sessionId="s1" slotTab={tab} withStart />)
     for (const name of ["Last output", "Start"]) {
       const classes = classesOf(screen.getByRole("button", { name }))
@@ -82,7 +82,7 @@ describe("stopped agent band", () => {
         expect.arrayContaining([
           "relative",
           "after:absolute",
-          "after:-inset-y-1.5",
+          "after:-inset-y-[7px]",
           "after:inset-x-0",
           "after:hidden",
           "max-md:after:block",
@@ -90,7 +90,7 @@ describe("stopped agent band", () => {
         ]),
       )
       expect(classes, `${name} must not grow its tap area sideways`).not.toContain(
-        "after:-inset-1.5",
+        "after:-inset-[7px]",
       )
     }
   })

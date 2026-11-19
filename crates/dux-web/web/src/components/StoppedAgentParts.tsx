@@ -18,12 +18,12 @@ import type { AgentTabView } from "@/lib/types"
 // The band's buttons keep their 28px box: a 40px filled Start looked oversized
 // in a 36px band, and the band must not grow. A finger gets the 40px from an
 // invisible tap area instead, taller only (inset-y, never inset-x), so the two
-// buttons' tap areas stay the band's 12px gap apart and cannot overlap. The
-// extra 6px above and below reaches past the band by 1.5px onto the strip above
-// and the dock divider below, neither of which is a tap target a finger lands
-// on beside these buttons.
+// buttons' tap areas stay the band's 12px gap apart and cannot overlap. It is
+// 7px above and below, measured from inside the 1px border, and reaches a pixel
+// or two past the band onto the strip above and the dock divider below, neither
+// of which is a tap target a finger lands on beside these buttons.
 const BAND_BUTTON =
-  "h-7 shrink-0 relative after:absolute after:-inset-y-1.5 after:inset-x-0 after:hidden max-md:after:block pointer-coarse:after:block"
+  "h-7 shrink-0 relative after:absolute after:-inset-y-[7px] after:inset-x-0 after:hidden max-md:after:block pointer-coarse:after:block"
 
 /**
  * The band in place of a stopped agent's tab strip. It carries Start only when

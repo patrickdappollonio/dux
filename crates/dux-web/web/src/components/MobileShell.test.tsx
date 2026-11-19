@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react"
 import { Profiler } from "react"
 
@@ -1883,11 +1884,11 @@ describe("MobileShell hub bottom bar", () => {
 })
 
 // The changes screen is the same component the desktop pane renders, so the
-// multi-select behaviour is tested there. What matters here is that the bulk
-// bar's verbs stay TEXT on a phone: each carries a count, and a count is data
-// no icon can say.
+// multi-select behaviour is tested there. What matters here is that the
+// selection button and the verbs in its menu stay TEXT on a phone: each carries
+// a count, and a count is data no icon can say.
 describe("MobileShell changes screen", () => {
-  it("keeps the bulk bar's verbs as text with their counts", () => {
+  it("keeps the selection button and its verbs as text with their counts", () => {
     mockState = makeState({
       spine: makeSessionSpine(1),
       selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
@@ -1906,7 +1907,10 @@ describe("MobileShell changes screen", () => {
 
     fireEvent.click(screen.getByLabelText("Select a.ts"))
 
-    const stage = screen.getByRole("button", { name: "Stage 1" })
+    const selection = screen.getByRole("button", { name: "1 selected" })
+    expect(selection.textContent).toBe("1 selected")
+    fireEvent.click(selection)
+    const stage = within(screen.getByRole("menu")).getByRole("menuitem", { name: "Stage 1" })
     expect(stage.textContent).toContain("Stage 1")
   })
 })

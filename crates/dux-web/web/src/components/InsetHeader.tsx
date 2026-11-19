@@ -219,6 +219,7 @@ export function InsetHeader() {
             <Button
               variant="outline"
               size={summary ? "default" : "icon"}
+              className={summary ? "pointer-coarse:h-10" : "pointer-coarse:size-10"}
               aria-label={
                 summary
                   ? `Show Changes pane, ${summary.countLabel}`

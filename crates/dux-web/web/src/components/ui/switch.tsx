@@ -6,8 +6,9 @@ import { cn } from "@/lib/utils"
 // one, so per the "shadcn/base-ui first" tenet we wrap it rather than reusing
 // Checkbox. The visible switch is the same on every device; at phone width
 // and under a coarse pointer an invisible 10px margin per side widens its tap
-// area, to about 39px tall because the margin is counted from inside its 1px
-// border.
+// area to 38px tall (measured from inside its 1px border), under the floor on
+// that axis: in Preferences the rows above and below it are text, and the
+// nearest other control is 44px or more away.
 function Switch({ className, ...props }: SwitchPrimitive.Root.Props) {
   return (
     <SwitchPrimitive.Root
