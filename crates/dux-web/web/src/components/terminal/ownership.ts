@@ -325,7 +325,6 @@ export function useTerminalOwnership(
     }
     const stamp = ownerId === undefined ? undefined : heldConnIdStamp(ownerId)
     if (stamp === undefined) return false
-    takeoverIntent.clear()
     setOwnerPresent(true)
     setTakeoverDeviceFor(null, null)
     if (verdictRef.current === "this" && runIdentityConfirmedAs(stamp)) return true
@@ -451,12 +450,16 @@ export function useTerminalOwnership(
     ) {
       takeoverIntent.arm(newestOwner)
     }
-    // An event this mount heard freed the row after the snapshot: a foregrounded
-    // page claims it as it would an unowned handshake, with a plain resize.
-    const rowLetGo =
+    // This page's own ghost let go of the row after the snapshot: a foregrounded
+    // page claims it with a plain resize. A row another device let go of stays
+    // that device's until a press, since losing ownership is sticky.
+    const ghostLetGo =
       superseded &&
       eventHeardRef.current &&
       newestEventFreedRef.current &&
+      typeof owner === "string" &&
+      owner !== myConnId &&
+      ownGhostOfThisRun(owner) &&
       isForeground()
     // The page's other pane claimed the row on the driver id this socket was
     // just seated on, before this handshake landed.
@@ -467,7 +470,7 @@ export function useTerminalOwnership(
     // pending one is not a verdict that this page drives.
     const mine =
       eventNamedThisSeat ||
-      rowLetGo ||
+      ghostLetGo ||
       seedVerdictFromConnected({
         owner,
         myConnId,

@@ -1016,11 +1016,24 @@ describe("a word heard while this socket has no id", () => {
     expect(view.result.current.isOwner).toBe(true)
   })
 
-  it("claims a row another device let go of after its handshake was snapshotted", () => {
+  // Losing ownership is sticky: the server can reap a blipped driver's dead
+  // connection just before this watcher's handshake lands, and a row another
+  // device let go of is not this page's to take without a press.
+  it("stays a watcher of a row another device let go of after its handshake was snapshotted", () => {
     const { view } = setup()
     act(() => notifyPtyOwner("p1", "theirs", 2, undefined))
     act(() => notifyPtyOwner("p1", undefined, 3, undefined))
     act(() => view.result.current.seedFromConnected("seat-1", "theirs", 1))
-    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(true)
+    expect(view.result.current.ownerPresent).toBe(false)
+  })
+
+  it("stays a watcher when only the freeing event preceded that handshake", () => {
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", undefined, 3, undefined))
+    act(() => view.result.current.seedFromConnected("seat-1", "theirs", 1))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(true)
   })
 })
