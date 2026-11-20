@@ -22,6 +22,11 @@ export interface KeyedRegistry<T> {
   register: (key: string, value: T) => () => void
   /// The value published under `key`, or undefined when nobody has.
   read: (key: string) => T | undefined
+  /// Every published value, for a reader whose question spans several keys it
+  /// cannot name in advance.
+  values: () => IterableIterator<T>
+  /// Hear every change, for a reader that is not a component.
+  subscribe: (listener: () => void) => () => void
   /// Subscribe a component to every change, without reading anything itself:
   /// the caller does its own lookup afterwards, since a scan over several keys
   /// is as common here as a single read.
@@ -63,6 +68,8 @@ export function createKeyedRegistry<T>(): KeyedRegistry<T> {
       }
     },
     read: (key) => entries.get(key),
+    values: () => entries.values(),
+    subscribe,
     useVersion() {
       useSyncExternalStore(subscribe, snapshot, snapshot)
     },

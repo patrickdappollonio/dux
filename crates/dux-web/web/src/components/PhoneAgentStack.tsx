@@ -4,6 +4,7 @@ import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { DormantTabSurface } from "@/components/DormantTabSurface"
 import { LazyTerminalStack } from "@/components/LazyTerminalPane"
 import type { StackPartSpec } from "@/components/TerminalStack"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import { cn } from "@/lib/utils"
 
 import type { AgentStackModel } from "./agentStackModel"
@@ -22,6 +23,11 @@ export function PhoneAgentStack({
   overlay: ReactNode
 }) {
   const { sessionId, parts: on } = model
+  const hasDock = model.activeTerminal !== null
+  // With a terminal mounted, the row's card covers the whole stack and what is
+  // under it, the agent's card and its Start included, leaves the tab order and
+  // the accessibility tree. With none, the agent's own part paints the card.
+  const underCard = useAgentRowWatch(sessionId).watched && hasDock
   const stackParts: StackPartSpec[] = []
   if (on.agentLiveSocket) {
     stackParts.push({
@@ -67,12 +73,13 @@ export function PhoneAgentStack({
           // A phone has one part on screen and it is already where typing goes;
           // moving between the parts is the switch's job.
           onChooseTypingTarget={() => {}}
+          cardOverStack={hasDock}
           arrange={(rendered) => (
             <div className="relative flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-              <PhonePartBox onScreen={on.agent} testId="stack-agent-box">
+              <PhonePartBox onScreen={on.agent} inert={underCard} testId="stack-agent-box">
                 {rendered.agent ?? card}
               </PhonePartBox>
-              <PhonePartBox onScreen={on.dock} testId="stack-dock-box">
+              <PhonePartBox onScreen={on.dock} inert={underCard} testId="stack-dock-box">
                 {rendered.dock ?? null}
               </PhonePartBox>
             </div>
@@ -87,10 +94,12 @@ export function PhoneAgentStack({
 // box just below the stack's edge, where the stack clips it.
 function PhonePartBox({
   onScreen,
+  inert,
   testId,
   children,
 }: {
   onScreen: boolean
+  inert: boolean
   testId: string
   children: ReactNode
 }) {
@@ -98,6 +107,7 @@ function PhonePartBox({
     <div
       data-testid={testId}
       data-on-screen={onScreen}
+      inert={inert}
       className={cn(
         "flex w-full flex-col",
         onScreen ? "relative min-h-0 flex-1" : "absolute inset-x-0 top-full h-full",

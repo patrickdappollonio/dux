@@ -4,7 +4,7 @@ import { useEffect } from "react"
 import { fireAnimationStart } from "@/test/animationEvents"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
-import { registerPaneCover, resetPaneCovers } from "@/lib/paneCover"
+import { agentRowKey, registerPaneCover, resetPaneCovers } from "@/lib/paneCover"
 import type { DuxState } from "@/lib/store"
 
 // Override only `useDux` (keeping every other real store export intact), plus
@@ -1056,7 +1056,7 @@ describe("TerminalArea dock", () => {
       await screen.findByTestId("stack-agent-box")
       let retire = () => {}
       act(() => {
-        retire = registerPaneCover("s1", "card")
+        retire = registerPaneCover("s1", "card", { row: agentRowKey("s1") })
       })
       expect(screen.queryByRole("separator")).toBeNull()
       expect(screen.queryByTestId("dock-strip")).toBeNull()
@@ -1072,6 +1072,44 @@ describe("TerminalArea dock", () => {
       expect(partMounts.sort()).toEqual(["s1", "t1"])
     },
   )
+
+  // The card covers the stack whichever part of the row paints it, and what is
+  // under it can be neither reached nor read.
+  describe("under the row's take-over card", () => {
+    const watch = (ptyId: string) =>
+      act(() => void registerPaneCover(ptyId, "card", { row: agentRowKey("s1") }))
+    const outOfReach = (el: Element) => el.closest("[inert]") !== null
+
+    it.each(["agent", "split", "terminal"] as const)(
+      "takes a stopped agent's Start out of reach in the %s layout",
+      async (layout) => {
+        mockState = dockState({ stopped: true, layout })
+        render(<TerminalArea />)
+        await screen.findByTestId("stopped-agent-band")
+        watch("t1")
+        const starts = screen.getAllByRole("button", { name: "Start", hidden: true })
+        expect(starts.length).toBeGreaterThan(0)
+        expect(starts.every(outOfReach)).toBe(true)
+        expect(stackProps.at(-1)).toMatchObject({ cardTopPx: 0 })
+      },
+    )
+
+    it("draws the agent's strip only where an agent with no terminals has one, above the card", async () => {
+      mockState = dockState({ terminals: 2, layout: "split" })
+      const { unmount } = render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      watch("s1")
+      expect(screen.queryByLabelText("New tab")).toBeNull()
+      unmount()
+
+      mockState = dockState({ terminals: 2, tabs: 2, layout: "split" })
+      render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      expect(outOfReach(screen.getByLabelText("New tab"))).toBe(false)
+      expect(outOfReach(screen.getByTestId("stack-agent-box"))).toBe(true)
+      expect(outOfReach(screen.getByTestId("stack-dock-box"))).toBe(true)
+    })
+  })
 
   it("keeps the stack as it is under a Reconnect box on a row this device drives", async () => {
     mockState = dockState({ layout: "split" })

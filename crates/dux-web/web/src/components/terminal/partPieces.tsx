@@ -25,6 +25,8 @@ type TerminalPaneSurfaceProps = {
   /// The stack paints this part's take-over card over every part, so the part
   /// paints none of its own.
   cardInStack: boolean
+  /// What the take-over card says the device would drive.
+  cardKind: TerminalPartProps["kind"]
   /// Off screen, the part keeps a real box the size of the stack's and is
   /// hidden, never shrunk.
   onScreen: boolean
@@ -53,6 +55,7 @@ type TerminalPaneSurfaceProps = {
 export function TerminalPaneSurface({
   partId,
   cardInStack,
+  cardKind,
   onScreen,
   onPress,
   kind,
@@ -143,7 +146,7 @@ export function TerminalPaneSurface({
         {pickerInput}
         <TerminalCover
           cover={cardInStack && cover.kind === "card" ? { kind: "none" } : cover}
-          kind={kind}
+          kind={cover.kind === "card" ? cardKind : kind}
           providerName={providerName}
           ptyRef={ptyRef}
           takeoverIntent={takeoverIntent}

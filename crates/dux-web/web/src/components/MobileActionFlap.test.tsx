@@ -64,7 +64,7 @@ const { MobileActionFlap } = await import("./MobileActionFlap")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
 )
-const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function session(): SessionView {
   return {
@@ -616,7 +616,7 @@ describe("the agent/terminals switch in the docked flap", () => {
   ])("is absent over %s while this device does not drive the row", (_part, on) => {
     phone()
     mockState = withTerminals([term("t1")])
-    registerPaneCover(on === undefined ? "s1" : "t1", "card")
+    registerPaneCover(on === undefined ? "s1" : "t1", "card", { row: agentRowKey("s1") })
     flap(on)
     expect(screen.queryByTestId("pane-part-switch")).toBeNull()
   })

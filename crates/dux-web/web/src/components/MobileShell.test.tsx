@@ -145,7 +145,7 @@ const { MobileShell } = await import("./MobileShell")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
 )
-const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
@@ -2007,8 +2007,16 @@ describe("MobileShell one part of an agent at a time", () => {
     expect(screen.queryByLabelText("Maximize terminal")).toBeNull()
   })
 
+  it("draws the agent's strip over a watcher's card on its terminals, as an agent with no terminals would", () => {
+    registerPaneCover("t1", "card", { row: agentRowKey("s1") })
+    mockState = partsState(dock, { tabs: 2 })
+    render(<MobileShell />)
+    expect(screen.queryByTestId("dock-strip")).toBeNull()
+    expect(screen.getByLabelText("New tab")).toBeTruthy()
+  })
+
   it("draws no dock strip over the take-over card a watcher gets", () => {
-    registerPaneCover("t1", "card")
+    registerPaneCover("t1", "card", { row: agentRowKey("s1") })
     mockState = partsState(dock, { terminals: ["t1", "t2"] })
     render(<MobileShell />)
     expect(screen.queryByTestId("dock-strip")).toBeNull()

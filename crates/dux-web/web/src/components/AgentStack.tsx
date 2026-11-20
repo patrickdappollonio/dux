@@ -39,7 +39,7 @@ import {
   setStackLayout,
   settleStackOpening,
 } from "@/lib/store"
-import { useTakeoverCardUp } from "@/lib/paneCover"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import { cn } from "@/lib/utils"
 import type { SessionView } from "@/lib/types"
 
@@ -87,11 +87,16 @@ export function AgentStack({
 }) {
   const { sessionId, layout, dock, parts: on } = model
   const hasDock = dock.length > 0
-  // A device that does not drive the row sees the take-over card alone, so
-  // nothing of the dock is drawn: its strip, its layout controls and the
-  // divider, which is painted above the card. The parts stay mounted where they
-  // are, so taking over brings the stack back exactly as it was.
-  const watching = useTakeoverCardUp(model.typingPtyId)
+  // A device that does not drive the row sees the take-over card and nothing
+  // that says the agent has terminals: no dock strip, layout controls or
+  // divider, which is painted above the card, and the agent's strip only where
+  // an agent with no terminals would have one. The parts stay mounted where
+  // they are, so taking over brings the stack back exactly as it was.
+  const { watched: watching } = useAgentRowWatch(sessionId)
+  // The card covers the whole stack, below the agent's strip, whenever the
+  // agent has terminals, and what is under it leaves the tab order and the
+  // accessibility tree. With none, the agent's own part paints it in its box.
+  const underCard = watching && hasDock
 
   // Record how this opening laid the stack out, so it holds while the agent is
   // worked in. A layout effect, so the frame painted is already the one held.
@@ -123,7 +128,7 @@ export function AgentStack({
       slotTab={session.tabs.find((t) => t.id === model.slotTabId)}
       withStart={layout === "terminal"}
     />
-  ) : model.stripsShown ? (
+  ) : (watching ? model.agentStripShown : model.stripsShown) ? (
     <AgentTabsStrip session={session} activeTabId={model.tabId} maxTabs={maxTabs} />
   ) : null
   const dockHeader =
@@ -197,14 +202,19 @@ export function AgentStack({
           typingTarget={model.typingPtyId}
           onChooseTypingTarget={(ptyId) => chooseStackPart(sessionId, ptyId)}
           // A stopped agent's stack is its dock terminal alone, under the
-          // agent's band or short card, and the card is the row's.
+          // agent's band or short card, and the card is the row's. It starts
+          // below the agent's strip, and covers a stopped agent's band, whose
+          // Start is the agent's.
           cardOverStack={hasDock}
+          cardTopPx={underCard && !model.agentStopped ? agentHeaderPx : 0}
           arrange={(rendered, typingTarget) => (
             <StackSplit
               layout={layout}
               hasDock={hasDock}
               theater={theater}
               divider={!theater && !watching}
+              underCard={underCard}
+              headerUnderCard={underCard && model.agentStopped}
               splitPercent={splitPercent}
               onSplitPercent={setSplitPercent}
               onFold={(fold) => setStackLayout(sessionId, fold)}
@@ -254,6 +264,8 @@ function StackSplit({
   hasDock,
   theater,
   divider,
+  underCard,
+  headerUnderCard,
   splitPercent,
   onSplitPercent,
   onFold,
@@ -272,6 +284,10 @@ function StackSplit({
   hasDock: boolean
   theater: boolean
   divider: boolean
+  /** The row's card covers the parts. */
+  underCard: boolean
+  /** ...and the agent's header, which is a stopped agent's band. */
+  headerUnderCard: boolean
   splitPercent: number
   onSplitPercent: (percent: number) => void
   onFold: (layout: ComputerLayout) => void
@@ -351,13 +367,14 @@ function StackSplit({
           collapsedSize="0%"
         >
           <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
-            <div ref={agentHeaderEl} className="shrink-0">
+            <div ref={agentHeaderEl} className="shrink-0" inert={headerUnderCard}>
               <TheaterChrome hidden={theater}>{agentHeader}</TheaterChrome>
             </div>
             <PartBox
               onScreen={agentOnScreen}
               folded={foldedBox(splitPercent)}
               grey={greyAgent}
+              inert={underCard}
               testId="stack-agent-box"
             >
               {agent}
@@ -385,6 +402,7 @@ function StackSplit({
                   onScreen={dockOnScreen}
                   folded={foldedBox(100 - splitPercent)}
                   grey={greyDock}
+                  inert={underCard}
                   testId="stack-dock-box"
                 >
                   {dock}
@@ -405,12 +423,14 @@ function PartBox({
   onScreen,
   folded,
   grey,
+  inert,
   testId,
   children,
 }: {
   onScreen: boolean
   folded: React.CSSProperties
   grey: boolean
+  inert: boolean
   testId: string
   children: ReactNode
 }) {
@@ -418,6 +438,7 @@ function PartBox({
     <div
       data-testid={testId}
       data-on-screen={onScreen}
+      inert={inert}
       className={cn(
         onScreen
           ? "relative flex min-h-0 w-full flex-1 flex-col"

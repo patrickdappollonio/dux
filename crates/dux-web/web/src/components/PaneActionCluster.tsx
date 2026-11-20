@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
 import { phoneSwitch, type PartCue, type PhoneView } from "@/lib/layoutModel"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { useTakeoverCardUp } from "@/lib/paneCover"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import { keysToggleLabel, usePaneInputGroup } from "@/lib/paneInputGroup"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { armTheaterToggleFocus } from "@/hooks/use-theater"
@@ -249,9 +249,7 @@ function PartSwitchButton({
 }) {
   const isMobile = useIsMobile()
   const { spine } = useDux()
-  const watching = useTakeoverCardUp(
-    target.kind === "agent" ? target.tabId : target.terminalId,
-  )
+  const watching = useAgentRowWatch(sessionId).watched
   const session = spine?.sessions.find((s) => s.id === sessionId)
   if (!isMobile || watching || session === undefined) return null
   const terminals = (spine?.terminals ?? []).filter(

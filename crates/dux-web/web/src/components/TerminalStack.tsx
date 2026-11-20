@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -28,9 +29,14 @@ import { useViewerGrid } from "@/components/terminal/viewerGrid"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
 import {
+  paneCoverKindFor,
   registerPaneCover,
+  registerRowClaim,
+  rowClaimSpent,
+  rowKeyOfPart,
   useAnyPaneCoverOwned,
   usePaneCoverOwned,
+  useRowWatch,
 } from "@/lib/paneCover"
 import { registerPaneMacroTarget } from "@/lib/paneMacroTarget"
 import { registerPaneInputGroup } from "@/lib/paneInputGroup"
@@ -78,6 +84,13 @@ type StackContextValue = {
   /// Where a take-over card covering the whole stack goes, when the stack has
   /// more than one part.
   coverArea: HTMLElement | null
+  /// The take-over card is up for the row: some part of it shows the card, so
+  /// no part offers input, whatever it believes about itself.
+  rowWatched: boolean
+  /// The part that paints the row's card into the cover area, or null.
+  cardPainter: string | null
+  /// Note that the card painted by `ptyId` was pressed.
+  noteClaim: (ptyId: string) => void
 }
 
 const StackContext = createContext<StackContextValue | null>(null)
@@ -113,6 +126,7 @@ export function TerminalStack({
   typingTarget: chosenByCaller,
   onChooseTypingTarget,
   cardOverStack = false,
+  cardTopPx = 0,
 }: {
   parts: StackPartSpec[]
   overlay?: ReactNode
@@ -122,6 +136,9 @@ export function TerminalStack({
   /** The take-over card covers the whole stack even with one part, because the
    * caller lays out more around that part than the part's own box. */
   cardOverStack?: boolean
+  /** How far below the stack's top edge the card starts, leaving what the
+   * caller draws above it uncovered. */
+  cardTopPx?: number
 }) {
   const [chosenHere, setChosenHere] = useState<string | null>(null)
   const controlled = onChooseTypingTarget !== undefined
@@ -132,13 +149,55 @@ export function TerminalStack({
   // input rows into it.
   const [inputArea, setInputArea] = useState<HTMLElement | null>(null)
   const [coverArea, setCoverArea] = useState<HTMLElement | null>(null)
-  const context = useMemo<StackContextValue>(
-    () => ({ typingTarget, chooseTypingTarget, inputArea, coverArea }),
-    [typingTarget, chooseTypingTarget, inputArea, coverArea],
+  // Every part of a stack is a part of one row.
+  const row = parts.length === 0 ? null : rowKeyOfPart(parts[0])
+  const { watched: rowWatched } = useRowWatch(row)
+  // The typing target paints the card when it has one; otherwise the first
+  // part that does, so a target with no card of its own (its socket just
+  // failed, or it remounted and has not heard the server) never uncovers the
+  // row.
+  const cardPainter = !rowWatched
+    ? null
+    : typingTarget !== null && paneCoverKindFor(typingTarget) === "card"
+      ? typingTarget
+      : (parts.find((part) => paneCoverKindFor(part.id) === "card")?.id ?? null)
+  // A press on the card hands the row to this device. The other parts keep
+  // their cards until the server's answer reaches them, and the claim stands
+  // in for that answer meanwhile; it is let go once it is answered, refused or
+  // lost.
+  const claimRef = useRef<{ row: string; retire: () => void } | null>(null)
+  const noteClaim = useCallback(
+    (ptyId: string) => {
+      if (row === null) return
+      claimRef.current?.retire()
+      claimRef.current = { row, retire: registerRowClaim(row, ptyId) }
+    },
+    [row],
   )
-  // A cover that owns the typing target's part withholds the layer whole; the
-  // take-over cards are row-wide, so the parts of a row always agree on them.
-  const layerWithheld = usePaneCoverOwned(typingTarget)
+  // Every render, since any pane's verdict re-renders the stack.
+  useEffect(() => {
+    const claim = claimRef.current
+    if (claim !== null && rowClaimSpent(claim.row)) {
+      claim.retire()
+      claimRef.current = null
+    }
+  })
+  useEffect(() => () => claimRef.current?.retire(), [])
+  const context = useMemo<StackContextValue>(
+    () => ({
+      typingTarget,
+      chooseTypingTarget,
+      inputArea,
+      coverArea,
+      rowWatched,
+      cardPainter,
+      noteClaim,
+    }),
+    [typingTarget, chooseTypingTarget, inputArea, coverArea, rowWatched, cardPainter, noteClaim],
+  )
+  // A cover that owns the typing target's part withholds the layer whole, and
+  // so does the row's card, wherever it is painted from.
+  const layerWithheld = usePaneCoverOwned(typingTarget) || rowWatched
   // A cover over the OTHER part (its own socket reconnecting) leaves the
   // target's part usable, so the layer stays and shrinks to that part: a pill
   // resting over a covered terminal could neither be read nor reach it.
@@ -162,14 +221,14 @@ export function TerminalStack({
         <div ref={boxRef} className="relative flex min-h-0 w-full flex-1 flex-col">
           {arrange ? arrange(rendered, typingTarget) : Object.values(rendered)}
           {/* A row is driven or watched whole, so a take-over card is one card
-            * over every part with one button, painted here by the typing
-            * target's part. Above the parts, below the overlay layer, which a
-            * card withholds anyway. */}
+            * over every part with one button, painted here by one part. Above
+            * the parts, below the overlay layer, which a card withholds anyway. */}
           {parts.length > 1 || cardOverStack ? (
             <div
               ref={setCoverArea}
               data-testid="stack-cover-area"
               className="pointer-events-none absolute inset-0 z-20 empty:hidden *:pointer-events-auto"
+              style={cardTopPx > 0 ? { top: cardTopPx } : undefined}
             />
           ) : null}
           {/* Withheld whole under a full-pane cover, layer included, so nothing of
@@ -258,6 +317,14 @@ function TerminalPart(props: TerminalPartProps) {
   // Outside a stack (never in the app) a part is its own typing target.
   const isTypingTarget = stack === null || stack.typingTarget === id
   const onScreen = props.onScreen !== false
+  // The row's card is up, painted by this part or another: nothing in this part
+  // may offer input meanwhile, even while it believes it owns the pty.
+  const rowWatched = stack?.rowWatched ?? false
+  const row = rowKeyOfPart(props)
+  // The card speaks of what the device would drive: an agent's own terminal is
+  // part of the agent's row, so its card is about the agent.
+  const cardKind: TerminalPartProps["kind"] =
+    props.kind === "terminal" && props.owner.kind !== "session" ? "terminal" : "agent"
   const {
     hostRef,
     containerRef,
@@ -584,6 +651,7 @@ function TerminalPart(props: TerminalPartProps) {
       // finishing its replay later never pulls focus off the part chosen.
       allowed:
         isTypingTarget &&
+        !rowWatched &&
         typingFocusAllowed({
           isOwner,
           ownershipConfirmed: handshakeSeen,
@@ -606,6 +674,7 @@ function TerminalPart(props: TerminalPartProps) {
   }, [
     isOwner,
     isTypingTarget,
+    rowWatched,
     composeBarEnabled,
     handshakeSeen,
     replayApplied,
@@ -636,20 +705,22 @@ function TerminalPart(props: TerminalPartProps) {
   }, [composeSurfaceLive, inputArea])
 
   // The pane's INPUT group for whichever top menu is over it, published only
-  // while this pane owns the input. Deps stay primitive: gates is rebuilt each render.
+  // while this pane owns the input and the row's card is down. Deps stay
+  // primitive: gates is rebuilt each render.
   const {
     surfaceSwitch: topSurfaceSwitch,
     keysToggle: topKeysToggle,
     composeSurface: topComposeSurface,
   } = topInputGates
+  const inputGroupOffered = isOwner && !rowWatched
   useEffect(() => {
-    if (!isOwner) return
+    if (!inputGroupOffered) return
     return registerPaneInputGroup(id, {
       surfaceSwitch: topSurfaceSwitch,
       keysToggle: topKeysToggle,
       composeSurface: topComposeSurface,
     })
-  }, [id, isOwner, topSurfaceSwitch, topKeysToggle, topComposeSurface])
+  }, [id, inputGroupOffered, topSurfaceSwitch, topKeysToggle, topComposeSurface])
 
   // Report the slot tab stopping cleanly with the whole agent leaving `active`:
   // the user stays on the agent and the tab rests on its idle screen. A badly
@@ -685,32 +756,36 @@ function TerminalPart(props: TerminalPartProps) {
     handoffGrace,
   })
 
-  // Publish which cover is over the pane, under this pane's pty id, for the
-  // chrome outside it. The phone's header comes back under a cover that owns the
-  // pane while theater stays on, since the pill it would otherwise offer is
-  // withheld here, and the agent's stack drops its terminal chrome under the
-  // take-over card.
+  // Publish which cover is over the pane, under this pane's pty id and with its
+  // row, for the chrome outside it and the row's other parts. The phone's
+  // header comes back under a cover that owns the pane while theater stays on,
+  // since the pill it would otherwise offer is withheld here, and the chrome
+  // that would say the agent has terminals goes under the row's card.
   // A layout effect, so a mounted pane's true verdict is in the registry before
   // the first paint and the shell never paints one frame of the wrong chrome.
   // The window while the lazy chunk resolves remains, and costs nothing: no
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
-  useLayoutEffect(() => registerPaneCover(id, cover.kind), [id, cover.kind])
+  useLayoutEffect(
+    () => registerPaneCover(id, cover.kind, { row, ownerPresent }),
+    [id, cover.kind, row, ownerPresent],
+  )
 
   // Where a picked macro goes, published under this pane's pty id for the Macros
   // controls outside it. Only the owner gets a way to write: under the take-over
   // card the control is disabled, and nothing else may type for it either. While
   // the bar renders, a macro is spliced into the compose DRAFT at the caret
   // instead of being written to the PTY. A layout effect, like the cover above,
-  // so the control is never painted enabled over a card for a frame.
-  const takeoverCard = cover.kind === "card"
+  // so the control is never painted enabled over a card for a frame. The row's
+  // card counts as this pane's.
+  const takeoverCard = cover.kind === "card" || rowWatched
 
   // xterm's tab stop is suspended in two cases. With the message box up, the
   // focus guard would bounce a Shift-Tab out of the box straight back: the tab
   // order is what a pointer does not consult. Under a cover over the whole pane,
   // the textarea is hidden and xterm keeps every Tab pressed in it, so Tab could
   // never reach the cover's button or leave the pane.
-  const tabStopSuspended = composeSurfaceLive || coverOwnsPane
+  const tabStopSuspended = composeSurfaceLive || coverOwnsPane || rowWatched
   useEffect(() => {
     if (!tabStopSuspended) return
     return suspendTerminalTabStop(termRef.current?.textarea)
@@ -753,6 +828,7 @@ function TerminalPart(props: TerminalPartProps) {
     <TerminalPaneSurface
       partId={id}
       cardInStack={coverArea !== null}
+      cardKind={cardKind}
       onScreen={onScreen}
       onPress={() => stack?.chooseTypingTarget(id)}
       kind={kind}
@@ -777,9 +853,10 @@ function TerminalPart(props: TerminalPartProps) {
   )
 
   // The typing target's rows go in the stack's one input area, for the input
-  // owner alone; every other part publishes nothing there.
+  // owner alone and never under the row's card; every other part publishes
+  // nothing there.
   const rows =
-    isTypingTarget && isOwner ? (
+    isTypingTarget && isOwner && !rowWatched ? (
       <TerminalInputRows
         accessoryBarShown={accessoryBarShown}
         composeBarShown={composeBarShownHere}
@@ -790,17 +867,20 @@ function TerminalPart(props: TerminalPartProps) {
     ) : null
   const area = stack?.inputArea ?? null
   const stackCard =
-    coverArea !== null && isTypingTarget && cover.kind === "card"
+    coverArea !== null && stack?.cardPainter === id && cover.kind === "card"
       ? createPortal(
           <TerminalCover
             cover={cover}
-            kind={kind}
+            kind={cardKind}
             providerName={providerName}
             ptyRef={ptyRef}
             takeoverIntent={takeoverIntent}
             takeoverLabel={takeoverLabel}
             ownerPresent={ownerPresent}
-            takeOver={takeOver}
+            takeOver={() => {
+              stack.noteClaim(id)
+              takeOver()
+            }}
           />,
           coverArea,
         )

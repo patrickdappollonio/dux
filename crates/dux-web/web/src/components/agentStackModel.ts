@@ -51,6 +51,10 @@ export interface AgentStackModel {
   agentCard: "short" | "full" | null
   /** Both strips show, or neither. */
   stripsShown: boolean
+  /** Whether the agent's strip would show if it had no terminals: what a
+   * device that does not drive the agent sees, since it is not shown that the
+   * agent has any. */
+  agentStripShown: boolean
   /** The agent is stopped while its terminals run, so its strip gives way to a
    * band saying so. */
   agentStopped: boolean
@@ -183,6 +187,7 @@ export function agentStackModel(ctx: {
         ? "short"
         : "full",
     stripsShown: shouldShowStackStrips(session.tabs, dock.length, ctx.alwaysShowTabStrip),
+    agentStripShown: shouldShowStackStrips(session.tabs, 0, ctx.alwaysShowTabStrip),
     agentStopped,
   }
 }

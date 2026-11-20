@@ -5884,6 +5884,66 @@ describe("TerminalStack with two parts", () => {
     )
   })
 
+  // The row's card, whichever of its parts can paint it. The agent's own
+  // terminal is a part of the agent's row, so its card speaks of the agent.
+  describe("the row's take-over card", () => {
+    const agentPart = { kind: "agent" as const, id: "s1", sessionId: "s1", slot: "agent" }
+    const dockPart = {
+      kind: "terminal" as const,
+      id: "t1",
+      owner: { kind: "session" as const, sessionId: "s1" },
+      slot: "dock",
+    }
+    const watchAll = () => {
+      for (const pty of FakePtySocket.instances) {
+        act(() => {
+          pty.onOpen()
+          pty.onConnected("seat-1", "seat-other")
+        })
+      }
+    }
+    const cardOverStack = () =>
+      screen.getByTestId("stack-cover-area").contains(screen.getByText("Take over"))
+
+    it("is painted over the stack by its only part while that part is off screen", () => {
+      render(<TerminalStack parts={[{ ...dockPart, onScreen: false }]} cardOverStack />)
+      watchAll()
+      expect(cardOverStack()).toBe(true)
+    })
+
+    it("speaks of the agent, not the terminal, over the agent's own terminal", () => {
+      render(<TerminalStack parts={[dockPart]} />)
+      watchAll()
+      expect(screen.getByText(/drive this agent from here/)).toBeTruthy()
+      expect(screen.queryByText(/terminal/)).toBeNull()
+    })
+
+    it("stays up while the typing target's socket has just failed", async () => {
+      render(<TerminalStack parts={[agentPart, dockPart]} />)
+      watchAll()
+      act(() => FakePtySocket.instances[0].emit("failed"))
+      expect(cardOverStack()).toBe(true)
+      await passHandoffGrace()
+      expect(cardOverStack()).toBe(true)
+    })
+
+    it("stays up, with no input rows, while a remounted target has not heard the server", () => {
+      pointerStub = stubCoarsePointer(true)
+      const { rerender } = render(<TerminalStack parts={[agentPart, dockPart]} />)
+      watchAll()
+      rerender(<TerminalStack parts={[{ ...agentPart, instance: "2" }, dockPart]} />)
+      expect(cardOverStack()).toBe(true)
+      expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+    })
+
+    it("goes at the press, before the server's answer reaches the other part", () => {
+      render(<TerminalStack parts={[agentPart, dockPart]} />)
+      watchAll()
+      fireEvent.click(screen.getByText("Take over"))
+      expect(screen.queryByText("Take over")).toBeNull()
+    })
+  })
+
   it("takes a part whose own socket was lost out of the overlay's bounds", async () => {
     // The dock part's box sits below the agent's in the stack's box.
     const rects: Record<string, Partial<DOMRect>> = {
@@ -6015,6 +6075,18 @@ describe("the phone stack's overlay layer", () => {
     }
     expect(screen.getAllByText("Take over")).toHaveLength(1)
     expect(screen.queryByTestId("pane-overlay-layer")).toBeNull()
+  })
+
+  it("covers a stopped agent's card, Start and all, with the card of its terminal off screen", async () => {
+    render(stack(phoneModel({ live: false })))
+    await act(async () => {})
+    for (const pty of FakePtySocket.instances) {
+      act(() => pty.onConnected("conn-self", "conn-other"))
+    }
+    expect(
+      screen.getByTestId("stack-cover-area").contains(screen.getByText("Take over")),
+    ).toBe(true)
+    expect(screen.getByText("Start session").closest("[inert]")).not.toBeNull()
   })
 
   it("floats over a dormant tab's card with no pane under it", async () => {
