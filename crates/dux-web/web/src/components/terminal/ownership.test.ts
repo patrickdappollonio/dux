@@ -130,12 +130,28 @@ describe("a handover", () => {
     expect(view.result.current.takeoverLabel).toBeNull()
   })
 
-  it("reads a NULL id as 'not us', so a pre-connected handover is safe", () => {
+  // Before its handshake a pane does not know its own driver id, so an event
+  // naming the row's driver cannot say whether that is this page. Another pane
+  // of the page claiming the row is the usual sender, and judging that as
+  // another device put the card up over the page's own row on every reload.
+  it("waits for the handshake to judge a handover that lands before it", () => {
     const { view } = setup()
-    act(() => {
-      notifyPtyOwner("p1", "theirs", 1, undefined)
-    })
+    act(() => notifyPtyOwner("p1", "driver-d", 5, undefined))
+    expect(view.result.current.isOwner).toBe(true)
+    act(() => view.result.current.seedFromConnected("driver-d", null, 4))
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  it("demotes on the handshake when the earlier handover named another device", () => {
+    const { view } = setup()
+    act(() =>
+      notifyPtyOwner("p1", "theirs", 5, "Mozilla/5.0 (Macintosh) Chrome/1"),
+    )
+    expect(view.result.current.isOwner).toBe(true)
+    act(() => view.result.current.seedFromConnected("mine", null, 4))
     expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownerPresent).toBe(true)
+    expect(view.result.current.takeoverLabel).toBe("Chrome on macOS")
   })
 
   it("ignores a handover for another pty entirely", () => {
@@ -620,6 +636,7 @@ describe("the other device's NAME across an events-socket outage", () => {
         }),
       { initialProps: { conn: "open" as const } },
     )
+    act(() => view.result.current.connId.write("mine"))
     act(() => {
       notifyPtyOwner("p1", "theirs", 1, "Mozilla/5.0 (Macintosh) Chrome/1")
     })
@@ -917,6 +934,15 @@ describe("the spine corrects a phantom owner", () => {
     setSpineInputOwner(undefined)
     expect(view.result.current.isOwner).toBe(true)
     setSpineInputOwner(null)
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  // A reload: the spine the new page loaded can still name the page it
+  // replaced, while the handshake already says nobody drives the row.
+  it("leaves the verdict to the handshake when the spine predates it", () => {
+    const { view } = setup({ spineInputOwner: "previous-page" })
+    expect(view.result.current.isOwner).toBe(true)
+    act(() => view.result.current.seedFromConnected("mine", null))
     expect(view.result.current.isOwner).toBe(true)
   })
 
