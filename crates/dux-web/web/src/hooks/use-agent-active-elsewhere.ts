@@ -42,6 +42,8 @@ export function agentChangeBlockReason(block: RowBlock): string {
       return "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here."
     case "nobody":
       return "Nobody is driving this agent, this device included, so actions that modify it are disabled. Take over the agent to use them here."
+    case "reconnecting":
+      return "This device is reconnecting to this agent, so actions that modify it are disabled until it hears again who is driving."
     case "pending":
       return "This device is still connecting to this agent, so actions that modify it are disabled until it knows who is driving."
   }
@@ -49,7 +51,13 @@ export function agentChangeBlockReason(block: RowBlock): string {
 
 /// Why this device cannot add a tab or a terminal to the agent right now.
 export function addToAgentBlockHint(block: RowBlock): string {
-  return block === "pending"
-    ? "Still connecting to this agent"
-    : "Take over to add a tab or a terminal"
+  switch (block) {
+    case "reconnecting":
+      return "Reconnecting to this agent"
+    case "pending":
+      return "Still connecting to this agent"
+    case "other":
+    case "nobody":
+      return "Take over to add a tab or a terminal"
+  }
 }

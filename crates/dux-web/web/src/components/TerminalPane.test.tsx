@@ -6343,6 +6343,43 @@ describe("TerminalPane knows whether it drives before it acts on it", () => {
     expect(rowBlockFor(row)).toBe("other")
   })
 
+  // Cut off, the page cannot know that nobody took the row meanwhile, so it
+  // keeps its typing surface and draft but changes nothing in the row.
+  it("keeps the row's changes out of reach while its socket cannot hear the server", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(rowBlockFor(row)).toBeNull()
+    act(() => last().onReconnecting())
+    expect(rowBlockFor(row)).toBe("reconnecting")
+    expect(message()).not.toBeNull()
+    expect(takeOver()).toBeNull()
+    act(() => last().onOpen())
+    expect(rowBlockFor(row)).toBe("reconnecting")
+    act(() => last().onConnected("conn-self-2", "conn-self-2"))
+    expect(rowBlockFor(row)).toBeNull()
+  })
+
+  it("keeps the row's changes out of reach while its socket is parked", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    last().emit("closed")
+    expect(rowBlockFor(row)).toBe("reconnecting")
+  })
+
+  it("lets the row's changes through while another of its parts still hears the server", () => {
+    const agentPart = { kind: "agent" as const, id: "s1", sessionId: "s1", slot: "agent" }
+    const dockPart = {
+      kind: "terminal" as const,
+      id: "t1",
+      owner: { kind: "session" as const, sessionId: "s1" },
+      slot: "dock",
+    }
+    render(<TerminalStack parts={[agentPart, dockPart]} />)
+    const [agentPty, dockPty] = FakePtySocket.instances
+    act(() => agentPty.onReconnecting())
+    expect(rowBlockFor(row)).toBeNull()
+    act(() => dockPty.onReconnecting())
+    expect(rowBlockFor(row)).toBe("reconnecting")
+  })
+
   it("never drives a row the spine says another device drives before its handshake", async () => {
     FakePtySocket.autoHandshake = false
     spineNames("conn-other")

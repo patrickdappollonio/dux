@@ -416,6 +416,7 @@ function TerminalPart(props: TerminalPartProps) {
     ownershipKnown,
     rowConfirmed,
     readRowConfirmed,
+    hearingServer,
     takeOver,
   } = useTerminalOwnership({
     id,
@@ -774,12 +775,16 @@ function TerminalPart(props: TerminalPartProps) {
   // The window while the lazy chunk resolves remains, and costs nothing: no
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
+  // A verdict that this page drives stands only while the socket can hear the
+  // server: cut off, another device may have taken the row unheard.
   const driver: PaneDriver = connectionLost
     ? null
     : !ownershipKnown
       ? "pending"
       : isOwner
-        ? "this"
+        ? hearingServer
+          ? "this"
+          : "reconnecting"
         : ownerPresent
           ? "other"
           : "nobody"

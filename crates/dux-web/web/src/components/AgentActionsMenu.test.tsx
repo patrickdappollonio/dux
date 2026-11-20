@@ -326,6 +326,16 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       }
       expect(screen.getByText(/still connecting to this agent/)).toBeTruthy()
     })
+
+    it("gates every entry while the pane that drove the row here is reconnecting", async () => {
+      const session = seedStoppedWithTerminal()
+      registerPaneCover("t1", "spinner", { row, driver: "reconnecting" })
+      await openMenu(session)
+      for (const label of mutating) {
+        expect(itemFor(label).getAttribute("aria-disabled"), label).toBe("true")
+      }
+      expect(screen.getByText(/reconnecting to this agent/)).toBeTruthy()
+    })
   })
 })
 

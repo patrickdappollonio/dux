@@ -13,15 +13,13 @@ import { createKeyedRegistry } from "./keyedRegistry"
 // just failed, or it remounted and has not heard the server yet) leaves the row
 // covered. A pane still waiting for the server to say covers nothing.
 
-/// Who drives a pane's pty, on the server's word: this page, another device,
-/// or nobody. "pending" while the pane is waiting for the server to say, and
-/// null once its socket is lost, which leaves the question to the spine.
-export type PaneDriver = "this" | "other" | "nobody" | "pending" | null
+/// Who drives a pane's pty, on the server's word. "pending" before it has said,
+/// "reconnecting" for a driving pane that cannot hear it, null once lost.
+export type PaneDriver = "this" | "other" | "nobody" | "pending" | "reconnecting" | null
 
-/// Why this device may not change a row: another device drives it, nobody
-/// does and this device has not taken it, or a pane of it is still waiting to
-/// hear which.
-export type RowBlock = "other" | "nobody" | "pending"
+/// Why this device may not change a row, one value per reason the change
+/// controls give.
+export type RowBlock = "other" | "nobody" | "reconnecting" | "pending"
 
 /// Boxed so each registration has an identity of its own: the registry tells
 /// registrations apart by identity, and two panes publishing the same verdict
@@ -110,7 +108,10 @@ export function paneCoverFor(
 }
 
 function cardHeard(entry: CoverEntry): boolean {
-  return entry.kind === "card" && entry.driver !== null && entry.driver !== "pending"
+  return (
+    entry.kind === "card" &&
+    (entry.driver === "other" || entry.driver === "nobody" || entry.driver === "this")
+  )
 }
 
 function claimHolds(row: string): boolean {
@@ -162,6 +163,7 @@ export function rowBlockFor(row: string | null): RowBlock | null | undefined {
   if (drivers.includes("other")) return "other"
   if (drivers.includes("nobody")) return "nobody"
   if (drivers.includes("this")) return null
+  if (drivers.includes("reconnecting")) return "reconnecting"
   if (drivers.includes("pending")) return "pending"
   return undefined
 }

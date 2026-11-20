@@ -108,6 +108,9 @@ export type TerminalOwnership = {
   /// to claim it, which a pane off screen must not act on.
   rowConfirmed: boolean
   readRowConfirmed: () => boolean
+  /// Whether this socket's current connection has handshaken; while false a
+  /// verdict that this page drives may be stale.
+  hearingServer: boolean
   /// Whether this socket has given up for good.
   connectionLost: boolean
   setConnectionLost: (value: boolean) => void
@@ -178,10 +181,14 @@ export function useTerminalOwnership(
     const stamp = heldConnIdStamp(id)
     return stamp !== undefined && runIdentityConfirmedAs(stamp)
   }
+  const [hearingServer, setHearingServer] = useState(false)
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
+        // An id arrives only with a handshake, and is retired on every open and
+        // every drop.
+        setHearingServer(next !== null)
         if (next !== null) rememberHeldConnId(next, currentRunStamp())
         // A new connection has not been named the row's driver yet.
         if (next !== myConnIdRef.current) {
@@ -509,6 +516,9 @@ export function useTerminalOwnership(
   /// reach here, because `connect()` detaches the orphan handlers first, which
   /// is how the intent survives the one bounce it is meant to ride.
   function notePtyConn(state: ConnState) {
+    // A socket parked while hidden closes without retiring its id, so the
+    // state itself says the server can no longer be heard.
+    if (state !== "open") setHearingServer(false)
     if (state === "failed") {
       setConnectionLost(true)
       takeoverIntent.clear()
@@ -568,6 +578,7 @@ export function useTerminalOwnership(
     handshakeSeen,
     rowConfirmed,
     readRowConfirmed: () => rowConfirmedRef.current,
+    hearingServer,
     connectionLost,
     setConnectionLost,
     takeOver,

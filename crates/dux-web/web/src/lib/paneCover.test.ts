@@ -82,6 +82,16 @@ describe("a row's answer", () => {
     expect(rowBlockFor(row)).toBe("other")
   })
 
+  it("keeps the row's changes out of reach while the panes that drove it reconnect", () => {
+    registerPaneCover("s1", "spinner", { row, driver: "reconnecting" })
+    const waiting = registerPaneCover("t1", "spinner", { row, driver: "pending" })
+    expect(rowWatchedFor(row)).toBe(false)
+    expect(rowBlockFor(row)).toBe("reconnecting")
+    waiting()
+    registerPaneCover("t1", "none", { row, driver: "this" })
+    expect(rowBlockFor(row)).toBeNull()
+  })
+
   it("leaves the question to the spine while no pane of it can say", () => {
     registerPaneCover("s1", "box", { row, driver: null })
     expect(rowBlockFor(row)).toBeUndefined()
