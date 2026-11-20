@@ -170,11 +170,6 @@ describe("DockStrip", () => {
   })
 })
 
-// USER-LOCKED. A running terminal's pill icon bounces with the pulse and
-// finishes its bounce at rest on every stop, easing back to full opacity like
-// the sidebar list and the agent tab strip. This guard is named by CLAUDE.md's
-// "Locked by the user" section. Do not edit, weaken or delete it, or change
-// what it pins, without the user's explicit request.
 // The dock's order and terminals are the agent's own, so they change only on a
 // device that drives the agent's row.
 describe("DockStrip on a row this device does not drive", () => {
@@ -205,6 +200,11 @@ describe("DockStrip on a row this device does not drive", () => {
   })
 })
 
+// USER-LOCKED. A running terminal's pill icon bounces with the pulse and
+// finishes its bounce at rest on every stop, easing back to full opacity like
+// the sidebar list and the agent tab strip. This guard is named by CLAUDE.md's
+// "Locked by the user" section. Do not edit, weaken or delete it, or change
+// what it pins, without the user's explicit request.
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (terminal dock strip)", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +
