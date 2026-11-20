@@ -32,6 +32,11 @@ import {
   sessionAsShown,
   tabLabels,
 } from "@/lib/agentTabs"
+import {
+  ADD_TO_AGENT_ELSEWHERE_HINT,
+  AGENT_ELSEWHERE_REASON,
+  useAgentActiveElsewhere,
+} from "@/hooks/use-agent-active-elsewhere"
 import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
 import { usePillSort } from "@/hooks/use-pill-sort"
 import {
@@ -56,7 +61,10 @@ const FIRST_TAB_HINT =
 // The provider-tab strip at the top of the center pane; whether it shows is the
 // caller's decision. All tabs render uniformly: clicking a
 // pill focuses it, the hover-revealed ⋯ retargets the provider and closes the
-// tab, and the trailing + adds one, disabled at the cap or mid-create. A pill
+// tab, and the trailing + adds one, disabled at the cap or mid-create. While
+// another device drives the agent, the strip stays above the take-over card and
+// everything in it that changes the agent is disabled, as in the agent's menu;
+// selecting a tab is not a change and stays. A pill
 // drags along the strip to reorder it, like a browser tab; the order is the
 // agent's own and survives a restart. The agent's first tab, the one that starts
 // and resumes the agent, wears a pin while there are two or more tabs.
@@ -85,7 +93,8 @@ export function AgentTabsStrip({
   const atCap = tabs.length >= cap
   const creating = createTabInFlight.includes(session.id)
   const defaultProvider = defaultProviderForSession(spine, session)
-  const disabled = atCap || creating
+  const elsewhere = useAgentActiveElsewhere(session)
+  const disabled = atCap || creating || elsewhere
 
   return (
     // `max-md:py-0.75` trims the strip's own vertical padding to go with the
@@ -115,6 +124,7 @@ export function AgentTabsStrip({
             active={tab.id === activeTabId}
             providers={providers}
             pinned={tabs.length >= 2 && isFirstTab(shown, tab.id)}
+            elsewhere={elsewhere}
           />
         ))}
       </SortableStrip>
@@ -128,11 +138,13 @@ export function AgentTabsStrip({
       <div className="flex shrink-0 items-center gap-0.5 md:pointer-coarse:ml-0.5 md:pointer-coarse:gap-4">
         <SimpleTooltip
           content={
-            atCap
-              ? `Tab limit reached (${cap})`
-              : creating
-                ? "Adding…"
-                : `New ${defaultProvider} tab`
+            elsewhere
+              ? ADD_TO_AGENT_ELSEWHERE_HINT
+              : atCap
+                ? `Tab limit reached (${cap})`
+                : creating
+                  ? "Adding…"
+                  : `New ${defaultProvider} tab`
           }
         >
           <button
@@ -195,6 +207,7 @@ function TabPill({
   active,
   providers,
   pinned,
+  elsewhere,
 }: {
   session: SessionView
   tab: AgentTabView
@@ -203,6 +216,8 @@ function TabPill({
   providers: string[]
   /** This is the agent's first tab and the agent has two or more. */
   pinned: boolean
+  /** Another device drives the agent, so nothing here may change it. */
+  elsewhere: boolean
 }) {
   const { setNodeRef, style, listeners, isDragging } = usePillSort(tab.id)
   // No successor means no slot to hand on, which is the one close the server
@@ -309,8 +324,16 @@ function TabPill({
             <Ellipsis className="size-3.5" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+            {elsewhere ? (
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="max-w-60 whitespace-normal">
+                  {AGENT_ELSEWHERE_REASON}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+              </DropdownMenuGroup>
+            ) : null}
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger disabled={elsewhere}>
                 <Replace />
                 Change provider…
               </DropdownMenuSubTrigger>
@@ -334,7 +357,10 @@ function TabPill({
             {/* Unlike Close, the only tab can stop too, since the tab stays.
                 Absent rather than disabled with no process, like Detach. */}
             {tab.has_live_process ? (
-              <DropdownMenuItem onClick={() => openStopTab(session.id, tab.id)}>
+              <DropdownMenuItem
+                disabled={elsewhere}
+                onClick={() => openStopTab(session.id, tab.id)}
+              >
                 <CircleStop />
                 Stop tab…
               </DropdownMenuItem>
@@ -372,7 +398,10 @@ function TabPill({
                 </DropdownMenuItem>
               </DropdownMenuGroup>
             ) : (
-              <DropdownMenuItem onClick={() => openCloseTab(session.id, tab.id)}>
+              <DropdownMenuItem
+                disabled={elsewhere}
+                onClick={() => openCloseTab(session.id, tab.id)}
+              >
                 <X />
                 Close tab…
               </DropdownMenuItem>

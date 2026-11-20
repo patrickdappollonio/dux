@@ -60,6 +60,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { AgentTabsStrip } = await import("./AgentTabsStrip")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function session(): SessionView {
   return {
@@ -102,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetPaneCovers()
   vi.unstubAllGlobals()
 })
 
@@ -233,6 +235,41 @@ describe("AgentTabsStrip", () => {
   it("renders no attention dot when no tab needs attention", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
     expect(screen.queryByLabelText("Needs attention")).toBeNull()
+  })
+})
+
+// The strip stays above the take-over card, so it gates what changes the row
+// the way the agent's menu does, and only while another device drives it.
+describe("AgentTabsStrip on a row another device drives", () => {
+  const watch = (driver: "other" | "nobody") =>
+    registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver })
+
+  it("disables adding, and every change in a pill's ⋯, and still selects a tab", async () => {
+    watch("other")
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("Choose provider for new tab")).toHaveProperty("disabled", true)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
+    const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText(/active on another device/i)).toBeTruthy()
+    for (const label of ["Change provider…", "Stop tab…", "Close tab…"]) {
+      const item = menu.getByText(label).closest("[role='menuitem']")
+      expect(item?.getAttribute("aria-disabled"), label).toBe("true")
+    }
+    fireEvent.click(menu.getByText("Close tab…"))
+    expect(openCloseTabMock).not.toHaveBeenCalled()
+    fireEvent.keyDown(screen.getAllByRole("tab")[1], { key: "Enter" })
+    expect(clickTabMock).toHaveBeenCalledWith("s1", "b2")
+  })
+
+  it("keeps all of it while nobody drives the row", async () => {
+    watch("nobody")
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", false)
+    fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
+    const menu = within(await screen.findByRole("menu"))
+    const item = menu.getByText("Close tab…").closest("[role='menuitem']")
+    expect(item?.getAttribute("aria-disabled")).not.toBe("true")
   })
 })
 
