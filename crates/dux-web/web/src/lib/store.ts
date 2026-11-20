@@ -9766,7 +9766,8 @@ export function noteOwnPtyConnection(
 }
 
 // True while any of the agent's PTYs is input-owned by another connection.
-// The agent menu disables its mutating entries on this; read-only ones stay.
+// The spine's half of `useAgentActiveElsewhere`, read when no pane of the
+// agent's row has heard the server.
 //
 // Per tab, freshest first: a mounted pane's `ptyOwnership` verdict, then the
 // spine's `AgentTabView.input_owner` compared against this client's own ids,

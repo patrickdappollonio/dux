@@ -25,6 +25,9 @@ type TerminalPaneSurfaceProps = {
   /// The stack paints this part's take-over card over every part, so the part
   /// paints none of its own.
   cardInStack: boolean
+  /// The take-over card is over this part, painted here or by the stack: the
+  /// terminal under it leaves the tab order and the accessibility tree.
+  underCard: boolean
   /// What the take-over card says the device would drive.
   cardKind: TerminalPartProps["kind"]
   /// Off screen, the part keeps a real box the size of the stack's and is
@@ -55,6 +58,7 @@ type TerminalPaneSurfaceProps = {
 export function TerminalPaneSurface({
   partId,
   cardInStack,
+  underCard,
   cardKind,
   onScreen,
   onPress,
@@ -122,6 +126,7 @@ export function TerminalPaneSurface({
         {dragActive ? <FileDropOverlay kind={kind} /> : null}
         <div
           ref={hostRef}
+          inert={underCard}
           className={
             viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"
           }

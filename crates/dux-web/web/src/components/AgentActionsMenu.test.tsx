@@ -58,6 +58,9 @@ const { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } = await import(
   "@/components/ui/dropdown-menu"
 )
 const store = await import("@/lib/store")
+const { agentRowKey, registerPaneCover, registerRowClaim, resetPaneCovers } = await import(
+  "@/lib/paneCover"
+)
 const openPullRequests = vi.mocked(store.openPullRequests)
 const openStopAgent = vi.mocked(store.openStopAgent)
 const openRecreateWorkingCopy = vi.mocked(store.openRecreateWorkingCopy)
@@ -266,6 +269,48 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       { "tab-2": "elsewhere" }
     await openMenu(session)
     expect(itemFor("Delete agent…").getAttribute("aria-disabled")).toBe("true")
+  })
+
+  // A stopped agent whose terminal runs: its row's driver is named on the
+  // terminal alone, and the spine names it until the server's list refreshes.
+  describe("with a pane of the row mounted", () => {
+    const row = agentRowKey("s1")
+    const mutating = ["New agent tab…", "Rename agent…", "Delete agent…", "New terminal in the worktree"]
+    function seedStoppedWithTerminal() {
+      const session = makeSession({ id: "s1", status: "detached" })
+      seed(session, true)
+      ;(mockState as unknown as { spine: { terminals: unknown[] } }).spine.terminals = [
+        { id: "t1", owner: { kind: "session", session_id: "s1" }, input_owner: "42" },
+      ]
+      return session
+    }
+    afterEach(() => resetPaneCovers())
+
+    it("answers from the pane over the spine, and turns at once on a take-over pressed here", async () => {
+      const session = seedStoppedWithTerminal()
+      registerPaneCover("t1", "card", { row, driver: "other" })
+      await openMenu(session)
+      for (const label of mutating) {
+        expect(itemFor(label).getAttribute("aria-disabled"), label).toBe("true")
+      }
+      cleanup()
+      registerRowClaim(row, "t1")
+      registerPaneCover("t1", "spinner", { row, driver: "this" })
+      await openMenu(session)
+      for (const label of mutating) {
+        expect(itemFor(label).getAttribute("aria-disabled"), label).not.toBe("true")
+      }
+      expect(screen.queryByText(/active on another device/i)).toBeNull()
+    })
+
+    it("gates every entry alike on a row nobody drives", async () => {
+      const session = seedStoppedWithTerminal()
+      registerPaneCover("t1", "card", { row, driver: "nobody" })
+      await openMenu(session)
+      for (const label of mutating) {
+        expect(itemFor(label).getAttribute("aria-disabled"), label).not.toBe("true")
+      }
+    })
   })
 })
 

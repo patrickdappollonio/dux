@@ -77,7 +77,7 @@ import {
   TERMINAL_PANE_MIN_PERCENT,
   useDux,
 } from "@/lib/store"
-import { usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
+import { rowKeyOfTarget, usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
 import { keyboardLikelyOpen } from "@/lib/viewport"
 
@@ -154,9 +154,13 @@ export function DesktopShell() {
   // Theater's cover exception, on this layout too. A tablet with no keyboard
   // reaches the computer layout by width alone and has no Escape, so a
   // full-pane cover brings the top bar back with the Theater button in it. The
-  // side panels stay where the mode put them: the cover is about the pane.
+  // side panels stay where the mode put them: the cover is about the pane. The
+  // row's card counts too, over a tab with no pane of its own.
   const selectedPtyId = selectedTarget ? targetPtyId(selectedTarget) : null
-  const coverOwnsPane = usePaneCoverOwned(selectedPtyId)
+  const coverOwnsPane = usePaneCoverOwned(
+    selectedPtyId,
+    selectedTarget ? rowKeyOfTarget(selectedTarget) : null,
+  )
   const topChrome = topChromeHidden({ theater, coverOwnsPane })
   // The header moving changes the terminal's height, and the mode never moved,
   // so this is the only gesture that pays for that refit.

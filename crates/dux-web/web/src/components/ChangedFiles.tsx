@@ -110,7 +110,7 @@ import {
 } from "@/lib/store"
 import {
   ADD_TO_AGENT_ELSEWHERE_HINT,
-  addToAgentBlocked,
+  agentDrivenElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import type { ChangesSlice, DuxState } from "@/lib/store"
@@ -966,14 +966,16 @@ function ChangesHeader({
   // While another device drives the agent, a terminal opened here would join a
   // row this device does not drive, so New terminal is disabled with that
   // reason, unless the gone directory already gave it one.
-  const row = useAgentRowWatch(sessionId)
-  const storeElsewhere = useDuxSelector((state) => {
+  const rowElsewhere = useAgentRowWatch(sessionId).elsewhere
+  const spineElsewhere = useDuxSelector((state) => {
     const session = state.spine?.sessions.find((s) => s.id === sessionId)
     return session !== undefined && sessionActiveElsewhere(state, session)
   })
   const terminalBlocked =
     editorBlocked ??
-    (addToAgentBlocked(row, storeElsewhere) ? ADD_TO_AGENT_ELSEWHERE_HINT : null)
+    (agentDrivenElsewhere(rowElsewhere, () => spineElsewhere)
+      ? ADD_TO_AGENT_ELSEWHERE_HINT
+      : null)
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.

@@ -29,6 +29,7 @@ import {
 import { useTheaterFlight } from "@/hooks/use-theater-flight"
 import { useChromeGesture } from "@/hooks/use-theater"
 import {
+  agentRowKey,
   useAgentRowWatch,
   usePaneCoverKnown,
   usePaneCoverOwned,
@@ -486,7 +487,8 @@ function AgentTerminalScreen({
   // Theater's one exception, phone only (desktop has Escape): a full-pane cover
   // withholds the pill, so the header is the only way back and comes back with
   // it. Nothing writes the mode; the chrome leaves again once the cover goes.
-  const coverOwnsPane = usePaneCoverOwned(shownId)
+  // The row's card counts too, over a tab with no pane of its own.
+  const coverOwnsPane = usePaneCoverOwned(shownId, agentRowKey(session.id))
   const chromeHidden = topChromeHidden({
     theater: duxState.theater,
     coverOwnsPane,

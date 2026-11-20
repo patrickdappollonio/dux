@@ -14,7 +14,7 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   ADD_TO_AGENT_ELSEWHERE_HINT,
-  useAddToAgentBlocked,
+  useAgentActiveElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
@@ -32,7 +32,7 @@ import type { SessionView } from "@/lib/types"
 // the agent it is disabled with the reason, as Macros… beside it is.
 export function NewTabButton({ session }: { session: SessionView }) {
   const [adding, setAdding] = useState(false)
-  const elsewhere = useAddToAgentBlocked(session)
+  const elsewhere = useAgentActiveElsewhere(session)
   if (elsewhere) {
     // A disabled button takes no pointer events, so the hint hangs off a
     // focusable wrapper, which wears the focus ring the button cannot.
@@ -91,7 +91,7 @@ export function StackNewDialog({
   const { spine, bootstrap, createTabInFlight } = useDux()
   // Another device took the agent while the dialog was open: neither row adds
   // to a row this device does not drive.
-  const elsewhere = useAddToAgentBlocked(session)
+  const elsewhere = useAgentActiveElsewhere(session)
   const provider = defaultProviderForSession(spine, session)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const tabDisabled =

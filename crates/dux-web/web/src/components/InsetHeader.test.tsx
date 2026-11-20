@@ -701,7 +701,10 @@ describe("InsetHeader under the agent's take-over card", () => {
         ],
       },
     } as unknown as DuxState
-    registerPaneCover("t1", "card", { row: agentRowKey("s1"), ownerPresent })
+    registerPaneCover("t1", "card", {
+      row: agentRowKey("s1"),
+      driver: ownerPresent ? "other" : "nobody",
+    })
     render(<InsetHeader />)
   }
   async function menuItems(): Promise<HTMLElement[]> {
@@ -730,6 +733,7 @@ describe("InsetHeader under the agent's take-over card", () => {
     expect(item(items, "Close…")).toBeUndefined()
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).not.toBe("true")
   })
+
 })
 
 describe("InsetHeader show-Changes button", () => {

@@ -19,7 +19,7 @@ import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import {
   ADD_TO_AGENT_ELSEWHERE_HINT,
-  useAddToAgentBlocked,
+  useAgentActiveElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import { useIsTruncated } from "@/hooks/use-truncated"
@@ -275,7 +275,7 @@ function HeaderPaneMenu({
   triggerRef: RefObject<HTMLButtonElement | null>
 }) {
   const { theater } = useDux()
-  const newTabBlocked = useAddToAgentBlocked(newTabSession)
+  const newTabBlocked = useAgentActiveElsewhere(newTabSession)
     ? ADD_TO_AGENT_ELSEWHERE_HINT
     : null
   const pendingRef = useRef<"new-tab" | "macros" | null>(null)

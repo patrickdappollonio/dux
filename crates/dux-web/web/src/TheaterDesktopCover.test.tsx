@@ -75,7 +75,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { DesktopShell } = await import("./App")
-const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 const { registerLayoutGestureHolder } = await import("@/lib/layoutGesture")
 const { THEATER_TRANSITION_MS } = await import("@/lib/theater")
 
@@ -217,6 +217,12 @@ describe("the computer layout under a full-pane cover", () => {
     agentCover()
     cleanup()
     registerPaneCover("t1", "box")
+    render(<DesktopShell />)
+    expect(theaterButton()).toBeTruthy()
+  })
+  it("brings it back over a tab with no pane while a terminal of the agent shows the row's card", () => {
+    // A dormant or stopped tab publishes nothing; the row's card is over it.
+    registerPaneCover("t1", "card", { row: agentRowKey("s1") })
     render(<DesktopShell />)
     expect(theaterButton()).toBeTruthy()
   })

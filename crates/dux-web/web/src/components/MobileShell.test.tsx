@@ -713,6 +713,15 @@ describe("MobileShell in theater", () => {
     expect(screen.getByTestId("theater-pill")).toBeTruthy()
   })
 
+  it("brings the header back over a tab with no pane while the agent's row shows the card", () => {
+    // A dormant or stopped tab publishes nothing; a terminal of the agent's
+    // shows the row's card, which withholds the pill over the whole stack.
+    registerPaneCover("t1", "card", { row: agentRowKey("s1") })
+    mockState = coveredAgentState()
+    render(<MobileShell />)
+    expect(screen.getByLabelText("Back")).toBeTruthy()
+  })
+
   // The same rule on the screen with no agent behind it. It is the same
   // component running the same flight, and its terminal is just as takeable, so
   // the exception has to be keyed on the TERMINAL's id there.

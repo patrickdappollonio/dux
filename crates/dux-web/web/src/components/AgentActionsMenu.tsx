@@ -73,7 +73,7 @@ import {
 } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import {
-  useAddToAgentBlocked,
+  AGENT_ELSEWHERE_REASON,
   useAgentActiveElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 
@@ -102,15 +102,14 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   const branchGit = supportsBranchGit(session.workspace)
   // While another connection input-owns one of this agent's PTYs, the mutating
   // entries disable: deleting, renaming or relaunching an agent someone else is
-  // driving surprises them. The answer comes from a mounted pane's live verdict
-  // and from the spine's `input_owner`, which is what lets a row gate an agent
-  // no pane here is attached to. Read-only entries and this device's own view
-  // preferences stay usable. The reason is an inline label, because a disabled
-  // item is pointer-events-none and touch has no hover.
+  // driving surprises them, and a tab or a terminal added here would join a row
+  // this device does not drive. The answer comes from a mounted pane of the
+  // row when there is one, and from the spine's `input_owner` otherwise, which
+  // is what lets a row gate an agent no pane here is attached to. Read-only
+  // entries and this device's own view preferences stay usable. The reason is
+  // an inline label, because a disabled item is pointer-events-none and touch
+  // has no hover.
   const activeElsewhere = useAgentActiveElsewhere(session)
-  // A terminal opened in the dock would join a row another device drives; a
-  // row nobody drives keeps it.
-  const addBlocked = useAddToAgentBlocked(session)
   // Whether there is a process to ask to shut down at all. The SERVER's answer,
   // from the same oracle the engine's teardown and the terminal UI's palette
   // gate ask, rather than a scan of the tab rows here.
@@ -122,8 +121,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       {activeElsewhere ? (
         <DropdownMenuGroup>
           <DropdownMenuLabel className="max-w-60 whitespace-normal">
-            This agent is active on another device, so actions that modify it
-            are disabled. Take over in its terminal to use them here.
+            {AGENT_ELSEWHERE_REASON}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
         </DropdownMenuGroup>
@@ -243,7 +241,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           * than fixed: this menu also serves a standalone agent, which has a
           * folder and no worktree. */}
         <DropdownMenuItem
-          disabled={addBlocked}
+          disabled={activeElsewhere}
           onClick={() => createTerminal(session.id)}
         >
           <SquareTerminal />

@@ -5942,6 +5942,71 @@ describe("TerminalStack with two parts", () => {
       fireEvent.click(screen.getByText("Take over"))
       expect(screen.queryByText("Take over")).toBeNull()
     })
+ 
+    const message = () => screen.queryByRole("textbox", { name: "Message" })
+
+    // Every kind of row, a lone part with no stack around it included: under
+    // the card only the card can be reached or read.
+    it.each([
+      ["an agent with no terminals", { kind: "agent" as const, id: "s1", sessionId: "s1" }],
+      [
+        "a project terminal",
+        { kind: "terminal" as const, id: "pt1", owner: { kind: "project" as const, projectId: "p1" } },
+      ],
+    ])("takes the terminal of %s out of reach under its card, and gives it back", (_row, part) => {
+      render(<TerminalStack parts={[part]} />)
+      act(() => {
+        last().onOpen()
+        last().onConnected("seat-1", "seat-other")
+      })
+      const terminal = screen.getByTestId("terminal-container")
+      expect(terminal.closest("[inert]")).not.toBeNull()
+      expect(screen.getByText("Take over").closest("[inert]")).toBeNull()
+      act(() => notifyPtyOwner(part.id, "seat-1", undefined, undefined))
+      expect(terminal.closest("[inert]")).toBeNull()
+    })
+
+    it("is not raised by a part that has only guessed, so the part that drives keeps its input", () => {
+      pointerStub = stubCoarsePointer(true)
+      // Mounted while the page was hidden, both parts guess another device
+      // drives the row; only the agent's has heard the server since.
+      const visibility = (value: string) =>
+        Object.defineProperty(document, "visibilityState", { value, configurable: true })
+      visibility("hidden")
+      try {
+        render(<TerminalStack parts={[agentPart, dockPart]} />)
+      } finally {
+        visibility("visible")
+      }
+      const [agentPty] = FakePtySocket.instances
+      act(() => {
+        agentPty.onOpen()
+        agentPty.onConnected("seat-1", "seat-1")
+      })
+      act(() => agentPty.bytesCb?.(new Uint8Array([0x61])))
+      expect(message()).not.toBeNull()
+      expect(document.activeElement).toBe(message())
+      expect(screen.getByTestId("stack-cover-area").textContent).toBe("")
+    })
+
+    it("gives typing back to the part that drives when the row's card comes down", () => {
+      pointerStub = stubCoarsePointer(true)
+      render(<TerminalStack parts={[agentPart, dockPart]} />)
+      const [agentPty, dockPty] = FakePtySocket.instances
+      act(() => {
+        agentPty.onOpen()
+        agentPty.onConnected("seat-1", "seat-1")
+      })
+      act(() => agentPty.bytesCb?.(new Uint8Array([0x61])))
+      expect(document.activeElement).toBe(message())
+      act(() => {
+        dockPty.onOpen()
+        dockPty.onConnected("seat-1", "seat-other")
+      })
+      expect(message()).toBeNull()
+      act(() => notifyPtyOwner("t1", "seat-1", undefined, undefined))
+      expect(document.activeElement).toBe(message())
+    })
   })
 
   it("takes a part whose own socket was lost out of the overlay's bounds", async () => {

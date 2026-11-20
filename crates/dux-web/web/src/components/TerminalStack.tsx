@@ -29,7 +29,8 @@ import { useViewerGrid } from "@/components/terminal/viewerGrid"
 import { REPLAY_WAIT_POLL_MS } from "@/components/terminal/constants"
 import { suspendTerminalTabStop } from "@/components/terminal/inputWiring"
 import {
-  paneCoverKindFor,
+  type PaneDriver,
+  paneCoverFor,
   registerPaneCover,
   registerRowClaim,
   rowClaimSpent,
@@ -84,8 +85,9 @@ type StackContextValue = {
   /// Where a take-over card covering the whole stack goes, when the stack has
   /// more than one part.
   coverArea: HTMLElement | null
-  /// The take-over card is up for the row: some part of it shows the card, so
-  /// no part offers input, whatever it believes about itself.
+  /// The take-over card is up for the row: some part of it shows the card on
+  /// the server's word, so no part offers input, whatever it believes about
+  /// itself.
   rowWatched: boolean
   /// The part that paints the row's card into the cover area, or null.
   cardPainter: string | null
@@ -152,15 +154,15 @@ export function TerminalStack({
   // Every part of a stack is a part of one row.
   const row = parts.length === 0 ? null : rowKeyOfPart(parts[0])
   const { watched: rowWatched } = useRowWatch(row)
-  // The typing target paints the card when it has one; otherwise the first
-  // part that does, so a target with no card of its own (its socket just
-  // failed, or it remounted and has not heard the server) never uncovers the
-  // row.
+  // The typing target paints the card when the server put one over it;
+  // otherwise the first part the server did, so a target with no card of its
+  // own (its socket just failed, or it remounted and has not heard the server)
+  // never uncovers the row.
   const cardPainter = !rowWatched
     ? null
-    : typingTarget !== null && paneCoverKindFor(typingTarget) === "card"
+    : typingTarget !== null && paneCoverFor(typingTarget)?.cardHeard === true
       ? typingTarget
-      : (parts.find((part) => paneCoverKindFor(part.id) === "card")?.id ?? null)
+      : (parts.find((part) => paneCoverFor(part.id)?.cardHeard === true)?.id ?? null)
   // A press on the card hands the row to this device. The other parts keep
   // their cards until the server's answer reaches them, and the claim stands
   // in for that answer meanwhile; it is let go once it is answered, refused or
@@ -411,6 +413,7 @@ function TerminalPart(props: TerminalPartProps) {
     connectionLost,
     notePtyConn,
     handshakeSeen,
+    ownerHeard,
     rowConfirmed,
     readRowConfirmed,
     takeOver,
@@ -658,7 +661,9 @@ function TerminalPart(props: TerminalPartProps) {
           replayApplied,
           composing: composingRef.current,
         }),
-      isOwner,
+      // The row's card coming down is a way back to typing like any other, so
+      // the attach it covered is owed its move again.
+      isOwner: isOwner && !rowWatched,
       attach: `${kind}:${id}:${composeBarEnabled}`,
       focusedFor: focusedForRef.current,
     })
@@ -757,7 +762,8 @@ function TerminalPart(props: TerminalPartProps) {
   })
 
   // Publish which cover is over the pane, under this pane's pty id and with its
-  // row, for the chrome outside it and the row's other parts. The phone's
+  // row and who drives it as far as the server has said, for the chrome
+  // outside it and the row's other parts. The phone's
   // header comes back under a cover that owns the pane while theater stays on,
   // since the pill it would otherwise offer is withheld here, and the chrome
   // that would say the agent has terminals goes under the row's card.
@@ -766,9 +772,17 @@ function TerminalPart(props: TerminalPartProps) {
   // The window while the lazy chunk resolves remains, and costs nothing: no
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
+  const driver: PaneDriver =
+    !ownerHeard || connectionLost
+      ? null
+      : isOwner
+        ? "this"
+        : ownerPresent
+          ? "other"
+          : "nobody"
   useLayoutEffect(
-    () => registerPaneCover(id, cover.kind, { row, ownerPresent }),
-    [id, cover.kind, row, ownerPresent],
+    () => registerPaneCover(id, cover.kind, { row, driver }),
+    [id, cover.kind, row, driver],
   )
 
   // Where a picked macro goes, published under this pane's pty id for the Macros
@@ -827,7 +841,10 @@ function TerminalPart(props: TerminalPartProps) {
   const surface = (
     <TerminalPaneSurface
       partId={id}
-      cardInStack={coverArea !== null}
+      // The stack paints the row's card; a card the server has not confirmed
+      // is not the row's, and stays this part's own.
+      cardInStack={coverArea !== null && (rowWatched || driver !== null)}
+      underCard={takeoverCard}
       cardKind={cardKind}
       onScreen={onScreen}
       onPress={() => stack?.chooseTypingTarget(id)}

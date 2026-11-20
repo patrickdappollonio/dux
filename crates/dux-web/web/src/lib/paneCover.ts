@@ -7,11 +7,17 @@ import { createKeyedRegistry } from "./keyedRegistry"
 // shell reads.
 //
 // A device drives or watches a whole row of the agents list, so every pane also
-// names its row, and the row's answer is the one the chrome reads: the row is
-// watched while ANY of its panes shows the take-over card. Its parts can
-// disagree for a moment (a pane whose socket just failed, or one that remounted
-// and has not heard the server yet, has no card of its own), and the row then
-// stays covered rather than showing what the other part is watching.
+// names its row and who drives it, and the row's answer is the one the chrome
+// reads. Only what a pane has heard from the server counts toward the row: the
+// row is watched while any of its panes shows the take-over card on the
+// server's word, so a pane with no card of its own for a moment (its socket
+// just failed, or it remounted and has not heard the server yet) leaves the row
+// covered, and a pane that has only guessed (one mounted while the page was
+// hidden) covers nothing but itself.
+
+/// Who drives a pane's pty, on the server's word: this page, another device,
+/// or nobody. Null until the server has said, or once the socket is lost.
+export type PaneDriver = "this" | "other" | "nobody" | null
 
 /// Boxed so each registration has an identity of its own: the registry tells
 /// registrations apart by identity, and two panes publishing the same verdict
@@ -19,9 +25,7 @@ import { createKeyedRegistry } from "./keyedRegistry"
 interface CoverEntry {
   kind: AttachCover["kind"]
   row: string
-  /// Somebody drives the pty, as far as this pane knows. Read only under the
-  /// card, where false is the card's "Running in the background".
-  ownerPresent: boolean
+  driver: PaneDriver
 }
 
 const covers = createKeyedRegistry<CoverEntry>()
@@ -52,21 +56,32 @@ export function rowKeyOfPart(
     : `terminal:${part.id}`
 }
 
+/** The row key of what a shell has selected: an agent's tab, or a terminal. */
+export function rowKeyOfTarget(
+  target:
+    | { kind: "agent"; sessionId: string }
+    | { kind: "terminal"; terminalId: string; owner: { kind: string; sessionId?: string } },
+): string {
+  return target.kind === "agent"
+    ? agentRowKey(target.sessionId)
+    : rowKeyOfPart({ kind: "terminal", id: target.terminalId, owner: target.owner })
+}
+
 /**
  * Publish this pane's cover verdict and return its retirement. The retirement
  * clears the entry only while it is still this pane's, so a replacement pane
- * survives the outgoing pane's late cleanup. A pane that names no row is a row
- * of its own.
+ * survives the outgoing pane's late cleanup. With no `driver`, a card reads as
+ * the server's word that another device drives the pty, any other cover as none.
  */
 export function registerPaneCover(
   ptyId: string,
   kind: AttachCover["kind"],
-  opts: { row?: string; ownerPresent?: boolean } = {},
+  opts: { row?: string; driver?: PaneDriver } = {},
 ): () => void {
   return covers.register(ptyId, {
     kind,
     row: opts.row ?? `pty:${ptyId}`,
-    ownerPresent: opts.ownerPresent ?? true,
+    driver: opts.driver !== undefined ? opts.driver : kind === "card" ? "other" : null,
   })
 }
 
@@ -79,9 +94,19 @@ export function registerRowClaim(row: string, ptyId: string): () => void {
   return claims.register(row, { ptyId })
 }
 
-/** The cover verdict one pane published, or undefined. */
-export function paneCoverKindFor(ptyId: string): AttachCover["kind"] | undefined {
-  return covers.read(ptyId)?.kind
+/** The cover one pane published, and whether its card is the server's word,
+ * or undefined. */
+export function paneCoverFor(
+  ptyId: string,
+): { kind: AttachCover["kind"]; cardHeard: boolean } | undefined {
+  const entry = covers.read(ptyId)
+  return entry === undefined
+    ? undefined
+    : { kind: entry.kind, cardHeard: cardHeard(entry) }
+}
+
+function cardHeard(entry: CoverEntry): boolean {
+  return entry.kind === "card" && entry.driver !== null
 }
 
 function claimHolds(row: string): boolean {
@@ -95,10 +120,8 @@ function claimHolds(row: string): boolean {
   )
 }
 
-function rowCards(row: string): CoverEntry[] {
-  return Array.from(covers.values()).filter(
-    (entry) => entry.row === row && entry.kind === "card",
-  )
+function rowEntries(row: string): CoverEntry[] {
+  return Array.from(covers.values()).filter((entry) => entry.row === row)
 }
 
 /**
@@ -114,28 +137,34 @@ export function rowClaimSpent(row: string): boolean {
     presser === undefined ||
     presser.kind === "card" ||
     presser.kind === "box" ||
-    rowCards(row).length === 0
+    !rowEntries(row).some(cardHeard)
   )
 }
 
 /** Does this device watch the row rather than drive it? */
 export function rowWatchedFor(row: string | null): boolean {
   if (row === null || claimHolds(row)) return false
-  return rowCards(row).length > 0
+  return rowEntries(row).some(cardHeard)
 }
 
-/** Is the row watched because another device drives it, rather than because
- * nobody does and this device has not claimed it? */
-export function rowDrivenElsewhereFor(row: string | null): boolean {
-  if (row === null || claimHolds(row)) return false
-  return rowCards(row).some((entry) => entry.ownerPresent)
+/**
+ * Does another device drive the row, as far as this page's panes of it have
+ * heard? Undefined when none of them has heard the server, which leaves the
+ * question to the spine. A take-over pressed here answers no at once.
+ */
+export function rowDrivenElsewhereFor(row: string | null): boolean | undefined {
+  if (row === null) return undefined
+  if (claimHolds(row)) return false
+  const heard = rowEntries(row).filter((entry) => entry.driver !== null)
+  if (heard.length === 0) return undefined
+  return heard.some((entry) => entry.driver === "other")
 }
 
 export type RowWatch = {
   /** The take-over card is up for the row. */
   watched: boolean
-  /** ...and another device drives it. */
-  elsewhere: boolean
+  /** Another device drives it, or undefined when no pane of it can say. */
+  elsewhere: boolean | undefined
 }
 
 /** The row's answer, re-read on every change to any pane of any row. */
@@ -162,14 +191,12 @@ export function subscribePaneCovers(listener: () => void): () => void {
 
 /**
  * Does a full-pane cover own this pty's pane? An id nobody has published for
- * reads as uncovered, which is what an unmounted or dormant pane is. A pane of
- * a watched row is covered whatever it shows itself, because the row's card is
- * over it.
+ * reads as uncovered unless `row` is watched, whose card is over a dormant tab.
  */
-export function usePaneCoverOwned(ptyId: string | null): boolean {
+export function usePaneCoverOwned(ptyId: string | null, row: string | null = null): boolean {
   covers.useVersion()
   claims.useVersion()
-  return paneCoverOwnedFor(ptyId)
+  return paneCoverOwnedFor(ptyId) || rowWatchedFor(row)
 }
 
 /** Does a full-pane cover own any of these ptys' panes? */

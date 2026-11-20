@@ -92,6 +92,9 @@ export type TerminalOwnership = {
   /// least once on this mount. Until it has, `isOwner` is only the foreground
   /// GUESS, which is not a good enough reason to raise a soft keyboard.
   handshakeSeen: boolean
+  /// Whether the handshake or a `pty.owner` event has said who drives this pty
+  /// on this mount; until then the verdict is a guess.
+  ownerHeard: boolean
   /// Whether the server has named this pane's own driver id as the row's
   /// owner on the current connection: the handshake or a `pty.owner` event. Until then an owner verdict over an unclaimed row is only the
   /// foreground guess, which a pane off screen must not act on.
@@ -253,6 +256,7 @@ export function useTerminalOwnership(
   // initial verdict is a foreground guess and nothing more, so the input surface
   // waits for this before it summons a keyboard.
   const [handshakeSeen, setHandshakeSeen] = useState(false)
+  const [ownerEventHeard, setOwnerEventHeard] = useState(false)
 
   // Device names survive events reconnects and are replaced only by a handover,
   // handshake, or a refetched spine owner. The same spine read corrects the
@@ -294,6 +298,7 @@ export function useTerminalOwnership(
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
+      setOwnerEventHeard(true)
       // Any handover for this pty is the server ANSWERING, so a pressed claim of
       // ours is no longer in flight and stops shielding the verdict from the
       // spine. This event is the definitive word either way.
@@ -514,6 +519,7 @@ export function useTerminalOwnership(
     takeoverLabel: deviceLabel(takeoverDevice),
     ownerPresent,
     handshakeSeen,
+    ownerHeard: handshakeSeen || ownerEventHeard,
     rowConfirmed,
     readRowConfirmed: () => rowConfirmedRef.current,
     connectionLost,

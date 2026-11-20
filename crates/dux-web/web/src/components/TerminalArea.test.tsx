@@ -1061,8 +1061,11 @@ describe("TerminalArea dock", () => {
       expect(screen.queryByRole("separator")).toBeNull()
       expect(screen.queryByTestId("dock-strip")).toBeNull()
       expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+      const boxes = () => [screen.getByTestId("stack-agent-box"), screen.getByTestId("stack-dock-box")]
+      expect(boxes().map((box) => box.closest("[inert]") !== null)).toEqual([true, true])
 
       act(() => retire())
+      expect(boxes().map((box) => box.closest("[inert]") !== null)).toEqual([false, false])
       expect(screen.getByRole("separator")).toBeTruthy()
       expect(
         screen.queryByTestId(alwaysShow ? "dock-strip" : "stack-layout-pill"),
@@ -1101,10 +1104,12 @@ describe("TerminalArea dock", () => {
       watch("s1")
       expect(screen.queryByLabelText("New tab")).toBeNull()
       unmount()
+      resetPaneCovers()
 
       mockState = dockState({ terminals: 2, tabs: 2, layout: "split" })
       render(<TerminalArea />)
       await screen.findByTestId("stack-agent-box")
+      watch("s1")
       expect(outOfReach(screen.getByLabelText("New tab"))).toBe(false)
       expect(outOfReach(screen.getByTestId("stack-agent-box"))).toBe(true)
       expect(outOfReach(screen.getByTestId("stack-dock-box"))).toBe(true)
