@@ -118,16 +118,20 @@ class FitStub {
 class FakePtySocket {
   static instances: FakePtySocket[] = []
   url: string
-  // The first connect answers with the handshake an older server sends, which
-  // names no owner, so a foregrounded pane drives as soon as it mounts. A pane
-  // drives only once the server has answered, and most tests here are about a
-  // pane that drives; one about the time before the handshake turns this off.
+  // The first connect opens and answers with a handshake naming nobody as the
+  // driver, in the real socket's order, so a foregrounded pane drives as soon as
+  // it mounts. A pane drives only once the server has answered, and most tests
+  // here are about a pane that drives; one about the time before the handshake
+  // turns this off.
   static autoHandshake = true
   private handshook = false
   connect = vi.fn(() => {
     if (FakePtySocket.autoHandshake && !this.handshook) {
       this.handshook = true
-      this.onConnected("42")
+      this.onConn("connecting")
+      this.onConn("open")
+      this.onOpen()
+      this.onConnected("42", null)
     }
   })
   close = vi.fn()

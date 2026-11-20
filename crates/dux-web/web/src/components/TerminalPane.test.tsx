@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { useLayoutEffect } from "react"
+import { useLayoutEffect, useState } from "react"
 
 import { COMPOSE_SUBMIT_DELAY_MS } from "@/lib/composebar"
 import {
@@ -383,16 +383,20 @@ class FitStub {
 class FakePtySocket {
   static instances: FakePtySocket[] = []
   url: string
-  // The first connect answers with the handshake an older server sends, which
-  // names no owner, so a foregrounded pane drives as soon as it mounts. A pane
-  // drives only once the server has answered, and most tests here are about a
-  // pane that drives; one about the time before the handshake turns this off.
+  // The first connect opens and answers with a handshake naming nobody as the
+  // driver, in the real socket's order, so a foregrounded pane drives as soon as
+  // it mounts. A pane drives only once the server has answered, and most tests
+  // here are about a pane that drives; one about the time before the handshake
+  // turns this off.
   static autoHandshake = true
   private handshook = false
   connect = vi.fn(() => {
     if (FakePtySocket.autoHandshake && !this.handshook) {
       this.handshook = true
-      this.onConnected("conn-self")
+      this.onConn("connecting")
+      this.onConn("open")
+      this.onOpen()
+      this.onConnected("conn-self", null)
     }
   })
   close = vi.fn()
@@ -3215,9 +3219,14 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
   })
 
   it("still jiggles on the very first open (the deliberate first-frame bypass)", () => {
+    // The first open is this test's to drive.
+    FakePtySocket.autoHandshake = false
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => pty.onOpen())
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-self", null)
+    })
     act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
     act(() => {
@@ -3232,9 +3241,14 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     // land between mount and the first PTY frame. Everything after it must read
     // the POST-fit grid, or the jiggle asserts a size the browser is no longer
     // rendering.
+    // The first open is this test's to drive.
+    FakePtySocket.autoHandshake = false
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => pty.onOpen())
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-self", null)
+    })
     FitStub.nextDims = { rows: 30, cols: 100 }
     act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(term().rows).toBe(30)
@@ -3259,9 +3273,14 @@ describe("TerminalPane reports every local re-grid to the PTY", () => {
     // and its `cols` tail 60ms later. The tail must send the size the terminal
     // has NOW, not the one it had when the jiggle was armed, and the debounced
     // check behind it must not then contradict the tail.
+    // The first open is this test's to drive.
+    FakePtySocket.autoHandshake = false
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     const pty = last()
-    act(() => pty.onOpen())
+    act(() => {
+      pty.onOpen()
+      pty.onConnected("conn-self", null)
+    })
     act(() => pty.bytesCb?.(new Uint8Array([1])))
     expect(pty.sendResize).toHaveBeenNthCalledWith(1, 24, 79)
     act(() => {
@@ -5233,22 +5252,37 @@ describe("TerminalPane publishes its cover verdict", () => {
   it("has published the card cover by the time the card is painted", () => {
     // A backgrounded pane's handshake makes it a watcher, and the commit that
     // first shows the card is the one the shell must see it on. Before the
-    // handshake the pane shows no card, and the shell sees none.
+    // handshake the pane shows no card, and the shell sees none. The probe is
+    // re-rendered in the handshake's own commit, so its layout phase is that
+    // commit's, after the pane's.
     FakePtySocket.autoHandshake = false
-    const commits: boolean[] = []
-    hidden(() =>
-      render(
+    const commits: { card: boolean; cover: boolean }[] = []
+    const card = () => /Active on|Running in the background/.test(document.body.textContent ?? "")
+    let bump = () => {}
+    function Harness() {
+      const [n, setN] = useState(0)
+      bump = () => setN(n + 1)
+      return (
         <>
           <TerminalPane kind="agent" id="s1" sessionId="s1" />
-          <CoverProbe id="s1" seen={(v) => commits.push(v)} />
-        </>,
-      ),
+          <CoverProbe id="s1" seen={(cover) => commits.push({ card: card(), cover })} />
+        </>
+      )
+    }
+    hidden(() => render(<Harness />))
+    expect(card()).toBe(false)
+    expect(commits.some((c) => c.cover)).toBe(false)
+    hidden(() =>
+      act(() => {
+        last().onOpen()
+        last().onConnected("conn-self", null)
+        bump()
+      }),
     )
-    expect(screen.queryByText(/Active on|Running in the background/)).toBeNull()
-    expect(commits).not.toContain(true)
-    hidden(() => act(() => last().onConnected("conn-self")))
-    expect(screen.getByText(/Active on|Running in the background/)).toBeTruthy()
-    expect(paneCoverOwnedFor("s1")).toBe(true)
+    expect(card()).toBe(true)
+    const first = commits.findIndex((c) => c.card)
+    expect(first).toBeGreaterThan(-1)
+    expect(commits[first].cover).toBe(true)
   })
 
   it("says the take-over card owns the pane, under the pane's own id", () => {
@@ -5986,10 +6020,10 @@ describe("TerminalStack with two parts", () => {
       expect(terminal.closest("[inert]")).toBeNull()
     })
 
-    it("is not raised by a part that has only guessed, so the part that drives keeps its input", () => {
+    it("is not raised by a part still waiting for the server, so the part that drives keeps its input", () => {
       pointerStub = stubCoarsePointer(true)
-      // Mounted while the page was hidden, both parts guess another device
-      // drives the row; only the agent's has heard the server since.
+      // Mounted while the page was hidden, both parts wait for the server to
+      // say who drives the row; only the agent's has heard it since.
       FakePtySocket.autoHandshake = false
       const visibility = (value: string) =>
         Object.defineProperty(document, "visibilityState", { value, configurable: true })
