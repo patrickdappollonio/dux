@@ -7,9 +7,10 @@
 //   CLAIMING  a take-over reconnect is waiting to send its flagged first resize.
 //   LOST      a terminal socket failure suppresses the stale local verdict.
 //
-// A foreign owner named by the handshake, a `pty.owner` event or the spine
-// demotes at once, whatever the socket is doing. Losing ownership remains
-// sticky until an explicit take-over or confirmed self-succession.
+// A foreign owner named by the handshake or a `pty.owner` event demotes at
+// once, whatever the socket is doing; the spine's word is weighed in the
+// correction below. Losing ownership remains sticky until an explicit take-over
+// or confirmed self-succession.
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { deviceLabel } from "@/lib/deviceLabel"

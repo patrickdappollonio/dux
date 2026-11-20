@@ -844,9 +844,9 @@ function TerminalPart(props: TerminalPartProps) {
   const surface = (
     <TerminalPaneSurface
       partId={id}
-      // The stack paints the row's card; a card the server has not confirmed
-      // is not the row's, and stays this part's own.
-      cardInStack={coverArea !== null && (rowWatched || driver !== null)}
+      // The stack paints the row's card; the card of a part whose socket is
+      // lost is not the server's word, so it stays this part's own.
+      cardInStack={coverArea !== null && (rowWatched || !connectionLost)}
       underCard={takeoverCard}
       cardKind={cardKind}
       onScreen={onScreen}
