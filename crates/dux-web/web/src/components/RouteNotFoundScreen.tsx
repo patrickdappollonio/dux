@@ -1,4 +1,5 @@
 import { SearchX, SquareTerminal } from "lucide-react"
+import { useId } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { Button } from "@/components/ui/button"
@@ -11,6 +12,10 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import {
+  ADD_TO_AGENT_ELSEWHERE_HINT,
+  useAgentActiveElsewhere,
+} from "@/hooks/use-agent-active-elsewhere"
 import { assertNever } from "@/lib/assertNever"
 import {
   createProjectTerminal,
@@ -45,6 +50,14 @@ export function TerminalNotFound({
 }) {
   const { spine } = useDux()
   const newTerminal = ownerExists(owner, spine) ? newTerminalFor(owner) : null
+  // A terminal of an agent's joins the agent's row, so it waits while another
+  // device drives that row, as every New terminal on the agent's pane does.
+  const agent =
+    owner.kind === "session"
+      ? spine?.sessions.find((s) => s.id === owner.sessionId)
+      : undefined
+  const blocked = useAgentActiveElsewhere(agent)
+  const reasonId = useId()
   return (
     <Empty className="h-full border-0">
       <EmptyHeader>
@@ -65,7 +78,12 @@ export function TerminalNotFound({
           * terminal is a position of its own, so this one stays one Back
           * behind it, where the user found it. */}
         {newTerminal !== null ? (
-          <Button className="max-md:min-h-10 pointer-coarse:min-h-10" onClick={newTerminal}>
+          <Button
+            className="max-md:min-h-10 pointer-coarse:min-h-10"
+            disabled={blocked}
+            aria-describedby={blocked ? reasonId : undefined}
+            onClick={newTerminal}
+          >
             <SquareTerminal />
             New terminal
           </Button>
@@ -77,6 +95,13 @@ export function TerminalNotFound({
         >
           Back to agents
         </Button>
+        {/* Said in words, since a disabled button answers no hover and a
+          * finger has none. */}
+        {newTerminal !== null && blocked ? (
+          <p id={reasonId} className="w-full text-center text-sm text-muted-foreground">
+            {ADD_TO_AGENT_ELSEWHERE_HINT}
+          </p>
+        ) : null}
       </EmptyContent>
     </Empty>
   )

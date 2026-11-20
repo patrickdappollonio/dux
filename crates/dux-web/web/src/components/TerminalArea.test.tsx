@@ -341,6 +341,23 @@ describe("TerminalArea terminal not-found route", () => {
     expect(createTerminalMock).toHaveBeenCalledWith("s1")
   })
 
+  it("adds no terminal to an agent another device drives, and says why", () => {
+    mockState = makeState({
+      spine: dormantSpine(),
+      routeNotFound: {
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+    })
+    registerPaneCover("s1-other-tab", "card", { row: agentRowKey("s1"), driver: "other" })
+    render(<TerminalArea />)
+    const button = screen.getByRole("button", { name: "New terminal" })
+    expect(button).toHaveProperty("disabled", true)
+    expect(button.getAttribute("aria-describedby")).toBeTruthy()
+    expect(screen.getByText(/Take over to add a tab or a terminal/)).toBeTruthy()
+  })
+
   it("opens a new terminal at the project's root, or a new standalone one", () => {
     const spine = dormantSpine()!
     spine.projects = [{ id: "p1", name: "Repo" }] as never
