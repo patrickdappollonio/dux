@@ -1,6 +1,6 @@
 import { Bot, Plus, SquareTerminal } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -33,27 +33,35 @@ import type { SessionView } from "@/lib/types"
 export function NewTabButton({ session }: { session: SessionView }) {
   const [adding, setAdding] = useState(false)
   const elsewhere = useAgentActiveElsewhere(session)
+  // Mounted whatever the button shows, so the dialog hears the block arrive
+  // while it is open and closes for good.
+  const dialog = (
+    <StackNewDialog session={session} open={adding} onClose={() => setAdding(false)} />
+  )
   if (elsewhere) {
     // A disabled button takes no pointer events, so the hint hangs off a
     // focusable wrapper, which wears the focus ring the button cannot.
     return (
-      <SimpleTooltip content={ADD_TO_AGENT_ELSEWHERE_HINT}>
-        <span
-          tabIndex={0}
-          data-testid="new-tab-disabled"
-          className={cn("inline-flex shrink-0 rounded-lg", FOCUS_RING)}
-        >
-          <Button
-            variant="outline"
-            size="default"
-            className="shrink-0 pointer-coarse:h-10"
-            disabled
+      <>
+        <SimpleTooltip content={ADD_TO_AGENT_ELSEWHERE_HINT}>
+          <span
+            tabIndex={0}
+            data-testid="new-tab-disabled"
+            className={cn("inline-flex shrink-0 rounded-lg", FOCUS_RING)}
           >
-            <Plus />
-            New tab…
-          </Button>
-        </span>
-      </SimpleTooltip>
+            <Button
+              variant="outline"
+              size="default"
+              className="shrink-0 pointer-coarse:h-10"
+              disabled
+            >
+              <Plus />
+              New tab…
+            </Button>
+          </span>
+        </SimpleTooltip>
+        {dialog}
+      </>
     )
   }
   return (
@@ -71,7 +79,7 @@ export function NewTabButton({ session }: { session: SessionView }) {
           New tab…
         </Button>
       </SimpleTooltip>
-      <StackNewDialog session={session} open={adding} onClose={() => setAdding(false)} />
+      {dialog}
     </>
   )
 }
@@ -89,9 +97,13 @@ export function StackNewDialog({
   onClose: () => void
 }) {
   const { spine, bootstrap, createTabInFlight } = useDux()
-  // Another device took the agent while the dialog was open: neither row adds
-  // to a row this device does not drive.
+  // Another device took the agent while the dialog was open: it closes rather
+  // than offer to add to a row this device does not drive, and until it has,
+  // it says why its rows are disabled.
   const elsewhere = useAgentActiveElsewhere(session)
+  useEffect(() => {
+    if (open && elsewhere) onClose()
+  }, [open, elsewhere, onClose])
   const provider = defaultProviderForSession(spine, session)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const tabDisabled =
@@ -106,7 +118,9 @@ export function StackNewDialog({
         <DialogHeader>
           <DialogTitle>Add to this agent</DialogTitle>
           <DialogDescription>
-            Another tab works in the same worktree; a terminal opens in its dock.
+            {elsewhere
+              ? ADD_TO_AGENT_ELSEWHERE_HINT
+              : "Another tab works in the same worktree; a terminal opens in its dock."}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-0.5">

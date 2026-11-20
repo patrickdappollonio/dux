@@ -734,6 +734,21 @@ describe("InsetHeader under the agent's take-over card", () => {
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).not.toBe("true")
   })
 
+  it("closes New tab…'s dialog for good when another device takes the agent while it is open", async () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    fireEvent.click(screen.getByRole("button", { name: /new tab/i }))
+    expect(await screen.findByRole("dialog")).toBeTruthy()
+    let retire = () => {}
+    act(() => {
+      retire = registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
+    })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    act(() => retire())
+    expect(screen.getByRole("button", { name: /new tab/i })).toBeTruthy()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(screen.queryByRole("dialog")).toBeNull()
+  })
 })
 
 describe("InsetHeader show-Changes button", () => {
