@@ -103,10 +103,16 @@ import {
   openEditor,
   openStandaloneEditorInThisTab,
   refreshChanges,
+  sessionActiveElsewhere,
   standaloneEditorHash,
   toggleChangesPane,
   useDuxSelector,
 } from "@/lib/store"
+import {
+  ADD_TO_AGENT_ELSEWHERE_HINT,
+  addToAgentBlocked,
+} from "@/hooks/use-agent-active-elsewhere"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import type { ChangesSlice, DuxState } from "@/lib/store"
 import {
   buildChangesItems,
@@ -955,7 +961,19 @@ function ChangesHeader({
 }: ChangesHeaderProps) {
   const reasonId = useId()
   const editorReasonId = useId()
+  const terminalReasonId = useId()
   const { folded, headerRef, titleRef, recapRef, triggerRef } = useChangesHeaderFold()
+  // While another device drives the agent, a terminal opened here would join a
+  // row this device does not drive, so New terminal is disabled with that
+  // reason, unless the gone directory already gave it one.
+  const row = useAgentRowWatch(sessionId)
+  const storeElsewhere = useDuxSelector((state) => {
+    const session = state.spine?.sessions.find((s) => s.id === sessionId)
+    return session !== undefined && sessionActiveElsewhere(state, session)
+  })
+  const terminalBlocked =
+    editorBlocked ??
+    (addToAgentBlocked(row, storeElsewhere) ? ADD_TO_AGENT_ELSEWHERE_HINT : null)
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.
@@ -964,6 +982,9 @@ function ChangesHeader({
   // A gone directory greys both kinds of item with one sentence, which the
   // menu then says once, above the editor items, for all of them.
   const editorReason = folded ? editorBlocked : null
+  const terminalReason = folded ? terminalBlocked : null
+  // Said once, above the editor items, when it is the editor's reason too.
+  const terminalReasonOwn = terminalReason !== null && terminalReason !== editorReason
   const gitReasonShared = editorReason !== null && gitBlocked === editorReason
   const describedBy = blocked
     ? gitReasonShared
@@ -1014,7 +1035,7 @@ function ChangesHeader({
               isMobile={isMobile}
               unavailable={editorBlocked}
             />
-            <NewTerminalButton sessionId={sessionId} unavailable={editorBlocked} />
+            <NewTerminalButton sessionId={sessionId} unavailable={terminalBlocked} />
           </>
         )}
         <DropdownMenu>
@@ -1062,14 +1083,29 @@ function ChangesHeader({
                     <FileCode2 />
                     Open editor
                   </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={editorReason !== null}
-                    aria-describedby={editorReason !== null ? editorReasonId : undefined}
-                    onClick={() => createTerminal(sessionId)}
-                  >
-                    <SquareTerminal />
-                    New terminal
-                  </DropdownMenuItem>
+                  {/* A group of its own, because the primitive's label part
+                    * names its group, for a reason only this item has. */}
+                  <DropdownMenuGroup>
+                    {terminalReasonOwn ? (
+                      <DropdownMenuLabel id={terminalReasonId} className="max-w-64">
+                        {terminalReason}
+                      </DropdownMenuLabel>
+                    ) : null}
+                    <DropdownMenuItem
+                      disabled={terminalReason !== null}
+                      aria-describedby={
+                        terminalReason === null
+                          ? undefined
+                          : terminalReasonOwn
+                            ? terminalReasonId
+                            : editorReasonId
+                      }
+                      onClick={() => createTerminal(sessionId)}
+                    >
+                      <SquareTerminal />
+                      New terminal
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
               </>

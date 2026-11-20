@@ -12,6 +12,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import {
+  ADD_TO_AGENT_ELSEWHERE_HINT,
+  useAddToAgentBlocked,
+} from "@/hooks/use-agent-active-elsewhere"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { FOCUS_RING } from "@/lib/focusRing"
@@ -24,9 +28,34 @@ import type { SessionView } from "@/lib/types"
 // pane only, since a project or standalone terminal has no agent to add to. It
 // asks what to add rather than adding a tab outright, because a terminal in the
 // dock is the other half of the same question. When the header folds it into
-// the pane's menu, that row opens the same dialog.
+// the pane's menu, that row opens the same dialog. While another device drives
+// the agent it is disabled with the reason, as Macros… beside it is.
 export function NewTabButton({ session }: { session: SessionView }) {
   const [adding, setAdding] = useState(false)
+  const elsewhere = useAddToAgentBlocked(session)
+  if (elsewhere) {
+    // A disabled button takes no pointer events, so the hint hangs off a
+    // focusable wrapper, which wears the focus ring the button cannot.
+    return (
+      <SimpleTooltip content={ADD_TO_AGENT_ELSEWHERE_HINT}>
+        <span
+          tabIndex={0}
+          data-testid="new-tab-disabled"
+          className={cn("inline-flex shrink-0 rounded-lg", FOCUS_RING)}
+        >
+          <Button
+            variant="outline"
+            size="default"
+            className="shrink-0 pointer-coarse:h-10"
+            disabled
+          >
+            <Plus />
+            New tab…
+          </Button>
+        </span>
+      </SimpleTooltip>
+    )
+  }
   return (
     <>
       <SimpleTooltip content="New agent tab or terminal">
@@ -60,10 +89,13 @@ export function StackNewDialog({
   onClose: () => void
 }) {
   const { spine, bootstrap, createTabInFlight } = useDux()
+  // Another device took the agent while the dialog was open: neither row adds
+  // to a row this device does not drive.
+  const elsewhere = useAddToAgentBlocked(session)
   const provider = defaultProviderForSession(spine, session)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   const tabDisabled =
-    session.tabs.length >= cap || createTabInFlight.includes(session.id)
+    elsewhere || session.tabs.length >= cap || createTabInFlight.includes(session.id)
   const run = (act: () => void) => {
     onClose()
     act()
@@ -95,6 +127,7 @@ export function StackNewDialog({
             icon={SquareTerminal}
             title="New terminal"
             excerpt="Opens a shell in this agent's worktree, in its dock."
+            disabled={elsewhere}
             onActivate={() => run(() => createTerminal(session.id))}
           />
         </div>

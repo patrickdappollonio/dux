@@ -119,12 +119,14 @@ function terminalChips(spine: Spine, focused: TerminalTarget): HeaderChip[] {
 // that has focus: an agent with its terminal count whether typing goes to one
 // of its tabs or a terminal of its dock, and a project or standalone terminal,
 // which is a row of its own, by itself. `shownTabId` is the tab on top of the
-// agent's stack while its dock has focus.
+// agent's stack while its dock has focus. `terminalsHidden` drops the count,
+// for a device that does not drive the agent and is not shown it has any.
 export function insetHeaderChips(
   spine: Spine,
   session: SessionView | undefined,
   selectedTarget: SelectedTarget | null,
   shownTabId?: string,
+  terminalsHidden = false,
 ): HeaderChip[] {
   if (selectedTarget?.kind === "terminal" && selectedTarget.owner.kind !== "session") {
     return terminalChips(spine, selectedTarget)
@@ -148,7 +150,7 @@ export function insetHeaderChips(
       spine,
       session,
       focusedTabProvider,
-      sessionTerminals.length,
+      terminalsHidden ? 0 : sessionTerminals.length,
     ),
   )
 }

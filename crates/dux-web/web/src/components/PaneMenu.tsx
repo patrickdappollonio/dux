@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import { useDux } from "@/lib/store"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
@@ -69,9 +70,11 @@ export type PaneMenuSettingsDrill = {
 
 /// The computer header's own controls while they are folded into its `⋯`: each
 /// row runs what its button runs. `newTab` is absent where the pane has no New
-/// tab…, and `macrosBlocked` is the reason the Macros… button would be disabled.
+/// tab…, and `newTabBlocked` and `macrosBlocked` are the reasons the New tab…
+/// and Macros… buttons would be disabled.
 export type FoldedHeaderControls = {
   newTab?: () => void
+  newTabBlocked?: string | null
   theater: () => void
   macros: () => void
   macrosBlocked: string | null
@@ -168,6 +171,10 @@ export function PaneMenuBody({
   folded?: FoldedHeaderControls
 } & PaneMenuSettingsDrill) {
   const theater = useDux().theater
+  // Under the agent's take-over card nothing names one of its terminals.
+  const watched = useAgentRowWatch(
+    subject.kind === "agent" ? subject.session.id : null,
+  ).watched
   // The subject's own rows.
   const actions: ReactNode =
     subject.kind === "agent" ? (
@@ -182,7 +189,7 @@ export function PaneMenuBody({
   // Labelled and last, so the agent body keeps its order and Close… reads as the
   // terminal's rather than the agent's.
   const paneActions: ReactNode =
-    subject.kind === "agent" && pane?.kind === "terminal" ? (
+    subject.kind === "agent" && pane?.kind === "terminal" && !watched ? (
       <>
         <DropdownMenuSeparator />
         <TerminalActionsMenu
@@ -254,16 +261,29 @@ function FoldedHeaderGroup({
   theater: boolean
 }) {
   const macrosReasonId = useId()
+  const newTabReasonId = useId()
   const macrosBlocked = controls.macrosBlocked
+  const newTabBlocked = controls.newTabBlocked ?? null
   return (
     <>
       <DropdownMenuGroup>
         <DropdownMenuLabel>{MENU_GROUP_LABELS.pane}</DropdownMenuLabel>
         {controls.newTab ? (
-          <DropdownMenuItem onClick={controls.newTab}>
-            <Plus />
-            New tab…
-          </DropdownMenuItem>
+          <DropdownMenuGroup>
+            {newTabBlocked !== null ? (
+              <DropdownMenuLabel id={newTabReasonId} className="max-w-64">
+                {newTabBlocked}
+              </DropdownMenuLabel>
+            ) : null}
+            <DropdownMenuItem
+              disabled={newTabBlocked !== null}
+              aria-describedby={newTabBlocked !== null ? newTabReasonId : undefined}
+              onClick={controls.newTab}
+            >
+              <Plus />
+              New tab…
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
         ) : null}
         {theater ? null : (
           <DropdownMenuItem onClick={controls.theater}>

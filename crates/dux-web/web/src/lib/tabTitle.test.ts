@@ -121,6 +121,17 @@ describe("tabPosition", () => {
     ).toEqual({ kind: "terminal", terminal: "Terminal 2" })
   })
 
+  it("names only the agent to a device that does not drive it, typing target or not", () => {
+    expect(
+      tabPosition(
+        input({
+          selectedTarget: { kind: "terminal", terminalId: "d1", owner: { kind: "session" } },
+          agentRowWatched: (sessionId) => sessionId === "s1",
+        }),
+      ),
+    ).toEqual({ kind: "agent", agent: "fix-login", tab: null, terminal: null })
+  })
+
   it("reads the editor's active buffer and its dirty flag over the selection", () => {
     const position = tabPosition(
       input({

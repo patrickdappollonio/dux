@@ -17,6 +17,11 @@ import { Button } from "@/components/ui/button"
 import { useFoldToFit } from "@/hooks/use-fold-to-fit"
 import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
+import {
+  ADD_TO_AGENT_ELSEWHERE_HINT,
+  useAddToAgentBlocked,
+} from "@/hooks/use-agent-active-elsewhere"
+import { useAgentRowWatch } from "@/lib/paneCover"
 import { useIsTruncated } from "@/hooks/use-truncated"
 import { headerChipTooltip, type HeaderChip } from "@/lib/headerSubject"
 import type { SessionView } from "@/lib/types"
@@ -77,6 +82,8 @@ export function InsetHeader() {
     selectedTarget,
     // The tab on top of the stack, read the way the stack reads it.
     session ? (dux.stackTabs[session.id] ?? readStackMemory(session.id).tab ?? undefined) : undefined,
+    // Under the take-over card nothing says the agent has terminals.
+    useAgentRowWatch(session?.id).watched,
   )
 
   const paneSubject = insetHeaderPaneSubject(spine, session, selectedTarget)
@@ -268,6 +275,9 @@ function HeaderPaneMenu({
   triggerRef: RefObject<HTMLButtonElement | null>
 }) {
   const { theater } = useDux()
+  const newTabBlocked = useAddToAgentBlocked(newTabSession)
+    ? ADD_TO_AGENT_ELSEWHERE_HINT
+    : null
   const pendingRef = useRef<"new-tab" | "macros" | null>(null)
   const [adding, setAdding] = useState(false)
   const [macrosOpen, setMacrosOpen] = useState(false)
@@ -294,6 +304,7 @@ function HeaderPaneMenu({
                 newTab: newTabSession
                   ? () => (pendingRef.current = "new-tab")
                   : undefined,
+                newTabBlocked,
                 theater: () => toggleTheater(),
                 macros: () => (pendingRef.current = "macros"),
                 macrosBlocked,

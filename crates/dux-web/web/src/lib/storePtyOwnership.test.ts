@@ -164,6 +164,26 @@ describe("sessionActiveElsewhere", () => {
     ).toBe(false)
   })
 
+  it("an agent's own terminal driven by another device disables, with no tab owned", async () => {
+    // A stopped agent whose terminal runs: its tabs have no pty, so the row's
+    // owner is named on the terminal alone.
+    const mod = await import("./store")
+    const terminal = (owner: string | undefined, sessionId = "s1") => ({
+      id: "t1",
+      owner: { kind: "session", session_id: sessionId },
+      input_owner: owner,
+    })
+    const withTerminals = (terminals: object[], extra: object = {}) =>
+      stateWith({ spine: { terminals }, ...extra })
+    const s = session([{ id: "s1" }])
+    expect(mod.sessionActiveElsewhere(withTerminals([terminal("42")]), s)).toBe(true)
+    expect(mod.sessionActiveElsewhere(withTerminals([terminal(undefined)]), s)).toBe(false)
+    expect(mod.sessionActiveElsewhere(withTerminals([terminal("42", "s2")]), s)).toBe(false)
+    expect(
+      mod.sessionActiveElsewhere(withTerminals([terminal("42")], { ownPtyConnIds: { "42": true } }), s),
+    ).toBe(false)
+  })
+
   it("ownership by one of this client's own connections does not disable", async () => {
     const mod = await import("./store")
     const s = session([{ id: "s1", input_owner: "42" }])

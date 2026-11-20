@@ -116,6 +116,7 @@ import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { tabPosition, tabTitle } from "./tabTitle"
+import { agentRowKey, rowWatchedFor, subscribePaneCovers } from "./paneCover"
 import {
   type RawWorkspace,
   type Spine,
@@ -2190,7 +2191,16 @@ let writtenTabTitle: string | null = null
 function refreshTabTitle(): void {
   if (typeof document === "undefined") return
   const title = tabTitle(
-    tabPosition(state),
+    tabPosition({
+      spine: state.spine,
+      selectedTarget: state.selectedTarget,
+      routeNotFound: state.routeNotFound,
+      editorRoute: state.editorRoute,
+      editorTabs: state.editorTabs,
+      pendingSlotTab: state.pendingSlotTab,
+      // A device that does not drive an agent is not told it has terminals.
+      agentRowWatched: (sessionId) => rowWatchedFor(agentRowKey(sessionId)),
+    }),
     resolveInstanceTitle(state.bootstrap?.title),
     attentionCount(),
   )
@@ -2198,6 +2208,9 @@ function refreshTabTitle(): void {
   writtenTabTitle = title
   document.title = title
 }
+
+// The take-over card coming or going changes the title with no state change.
+subscribePaneCovers(refreshTabTitle)
 
 // Monotonic sequence for spine loads: rapid change events fire concurrent
 // `fetchWorkspace()`s, and without this an older reply resolving last would
@@ -9752,12 +9765,15 @@ export function noteOwnPtyConnection(
   setState({ ownPtyConnIds: next })
 }
 
-// True while any of the agent's tab PTYs is input-owned by another connection.
+// True while any of the agent's PTYs is input-owned by another connection.
 // The agent menu disables its mutating entries on this; read-only ones stay.
 //
 // Per tab, freshest first: a mounted pane's `ptyOwnership` verdict, then the
 // spine's `AgentTabView.input_owner` compared against this client's own ids,
-// which is what gates an agent no pane on this device is attached to.
+// which is what gates an agent no pane on this device is attached to. The
+// agent's own terminals answer from the spine too, since a device drives the
+// whole row: a stopped agent's tabs have no pty, and its row's owner is named
+// on its terminals alone.
 // The optional chains are deliberate: unit-test states are partial mocks.
 export function sessionActiveElsewhere(
   s: DuxState,
@@ -9768,12 +9784,25 @@ export function sessionActiveElsewhere(
   // are present the loop below covers this entry too, with the full local
   // -then-server precedence. Do not "optimize" the loop to skip the slot tab.
   if (s.ptyOwnership?.[session.id] === "elsewhere") return true
-  return (session.tabs ?? []).some((t) => {
+  const ownedElsewhere = (owner: string | undefined) =>
+    Boolean(owner) && !s.ownPtyConnIds?.[owner as string]
+  const tabs = session.tabs ?? []
+  const byTab = tabs.some((t) => {
     const local = s.ptyOwnership?.[t.id]
     if (local === "elsewhere") return true
     if (local === "mine") return false
-    return Boolean(t.input_owner) && !s.ownPtyConnIds?.[t.input_owner as string]
+    return ownedElsewhere(t.input_owner)
   })
+  if (byTab) return true
+  // A tab this page drives says the row is this page's, whatever a spine that
+  // has not caught up yet says of its terminals.
+  if (tabs.some((t) => s.ptyOwnership?.[t.id] === "mine")) return false
+  return (s.spine?.terminals ?? []).some(
+    (t) =>
+      t.owner.kind === "session" &&
+      t.owner.session_id === session.id &&
+      ownedElsewhere(t.input_owner),
+  )
 }
 
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the

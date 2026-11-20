@@ -48,6 +48,7 @@ const store = await import("@/lib/store")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
 )
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 // The chip a kind renders as, or null when that field is absent. Queried by the
 // `data-chip` marker the header stamps on each chip, because a glyph has no
@@ -110,6 +111,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   resetPaneInputGroups()
+  resetPaneCovers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -670,6 +672,63 @@ describe("InsetHeader pane menu", () => {
     render(<InsetHeader />)
     expect(screen.queryByRole("button", { name: /session actions/i })).toBeNull()
     expect(screen.queryByRole("button", { name: /terminal actions/i })).toBeNull()
+  })
+})
+
+// A device that does not drive the agent's row is not told it has terminals,
+// and while another device drives it, cannot add to it either. Typing goes to
+// the agent's terminal here, which is what the header reads the pane under.
+describe("InsetHeader under the agent's take-over card", () => {
+  function watching(ownerPresent: boolean): void {
+    const base = stateFor("main", "main")
+    mockState = {
+      ...base,
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "t1",
+        owner: { kind: "session", sessionId: "s1" },
+      },
+      spine: {
+        ...base.spine,
+        terminals: [
+          {
+            id: "t1",
+            owner: { kind: "session", session_id: "s1" },
+            label: "Terminal 1",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+      },
+    } as unknown as DuxState
+    registerPaneCover("t1", "card", { row: agentRowKey("s1"), ownerPresent })
+    render(<InsetHeader />)
+  }
+  async function menuItems(): Promise<HTMLElement[]> {
+    fireEvent.click(screen.getByRole("button", { name: /session actions/i }))
+    await screen.findByRole("menu")
+    return screen.getAllByRole("menuitem")
+  }
+  const item = (items: HTMLElement[], text: string) =>
+    items.find((el) => el.textContent?.includes(text))
+
+  it("names no terminal and adds nothing while another device drives it", async () => {
+    watching(true)
+    expect(chip("terminal")).toBeNull()
+    expect(screen.getByTestId("new-tab-disabled")).toBeTruthy()
+    const items = await menuItems()
+    expect(item(items, "Close…")).toBeUndefined()
+    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
+  })
+
+  it("names no terminal, and still adds, while nobody drives it", async () => {
+    watching(false)
+    expect(chip("terminal")).toBeNull()
+    expect(screen.queryByTestId("new-tab-disabled")).toBeNull()
+    expect(screen.getByRole("button", { name: /new tab/i })).toBeTruthy()
+    const items = await menuItems()
+    expect(item(items, "Close…")).toBeUndefined()
+    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).not.toBe("true")
   })
 })
 

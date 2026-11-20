@@ -89,6 +89,9 @@ export interface TabPositionInput {
   editorRoute: { root: EditorRoot; path: string | null } | null
   editorTabs: Record<string, EditorTabsState>
   pendingSlotTab: Record<string, PendingSlotTab>
+  /** Whether the take-over card is up for an agent's row on this device, which
+   * is then not shown that the agent has terminals. Absent reads as driven. */
+  agentRowWatched?: (sessionId: string) => boolean
 }
 
 function agentName(spine: Spine | null, sessionId: string): string | null {
@@ -149,7 +152,7 @@ export function tabPosition(input: TabPositionInput): TabPosition {
   const owner = terminalOwnerSession(spine, target.terminalId)
   if (owner === null) return { kind: "terminal", terminal }
   const agent = agentName(spine, owner)
-  return agent === null
-    ? { kind: "terminal", terminal }
-    : { kind: "agent", agent, tab: null, terminal }
+  if (agent === null) return { kind: "terminal", terminal }
+  const watched = input.agentRowWatched?.(owner) ?? false
+  return { kind: "agent", agent, tab: null, terminal: watched ? null : terminal }
 }
