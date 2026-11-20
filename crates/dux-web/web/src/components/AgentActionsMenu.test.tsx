@@ -198,10 +198,12 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       ).not.toBe("true")
     }
     // The reason is stated inline (disabled items are pointer-events-none, so
-    // a hover tooltip could never fire, and touch has no hover at all).
+    // a hover tooltip could never fire, and touch has no hover at all). A
+    // device that does not drive the row is not shown that the agent has
+    // terminals, so the note does not send it to one.
     expect(
-      screen.getByText(/active on another device/i),
-    ).toBeTruthy()
+      screen.getByText(/active on another device/i).textContent,
+    ).not.toMatch(/terminal/i)
   })
 
   it("keeps every entry enabled and shows no hint when nothing is owned elsewhere", async () => {
