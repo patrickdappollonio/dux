@@ -1054,7 +1054,6 @@ describe("TerminalPane take-over card", () => {
 
   it("paints solid over the whole pane, with the terminal still mounted underneath", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other"))
     // A full-pane, solid backdrop: it reads as "instead of" the terminal
     // rather than a banner over it.
@@ -1070,7 +1069,6 @@ describe("TerminalPane take-over card", () => {
 
   it("keeps the three titles, the second sentence, and the one action", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other"))
     expect(screen.getByText("Active on another device")).toBeTruthy()
     // The placeholder explains what the covered pane is for.
@@ -1135,7 +1133,6 @@ describe("TerminalPane take-over device naming", () => {
   it("names the other device in the modal when a handover carries a device UA", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     // A foreign device claims the PTY (owner id is not ours) with its UA attached.
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
     expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
   })
@@ -1164,7 +1161,6 @@ describe("TerminalPane take-over device naming", () => {
     const { rerender } = render(
       <TerminalPane kind="agent" id="s1" sessionId="s1" />,
     )
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other", undefined, chromeMac))
     expect(screen.getByText("Active on Chrome on macOS")).toBeTruthy()
     mockState = makeState(false, "closed")
@@ -1491,7 +1487,6 @@ describe("TerminalPane ownership reporting into the store", () => {
     // the "mine" verdict is what overrides a stale spine `input_owner` right
     // after a take-over.
     expect(store.getSnapshot().ptyOwnership["s1"]).toBe("mine")
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other"))
     expect(store.getSnapshot().ptyOwnership["s1"]).toBe("elsewhere")
     // Take over from here: the placeholder's button reclaims and the verdict
@@ -1939,7 +1934,6 @@ describe("TerminalPane mobile compose bar", () => {
     expect(composeTextarea()).toBeTruthy()
     expect(screen.getByRole("button", { name: "Esc" })).toBeTruthy()
     // A foreign device takes over: this view is demoted to a read-only viewer.
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other", undefined, undefined))
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
@@ -3536,7 +3530,6 @@ describe("TerminalPane typing surfaces follow the pointer, not the layout", () =
   it("renders neither for a viewer, coarse pointer or not", () => {
     pointerStub = stubCoarsePointer(true)
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
-    act(() => last().onConnected("conn-self"))
     act(() => notifyPtyOwner("s1", "conn-other"))
     expect(composeUp()).toBe(false)
     expect(accessoryUp()).toBe(false)

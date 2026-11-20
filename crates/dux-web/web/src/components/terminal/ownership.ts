@@ -165,19 +165,10 @@ export function useTerminalOwnership(
     const stamp = heldConnIdStamp(id)
     return stamp !== undefined && runIdentityConfirmedAs(stamp)
   }
-  // Whether the current connection's id is still unknown: a mount or an open
-  // whose handshake has not landed. Until it lands, neither a `pty.owner`
-  // naming the row's driver nor the spine can say whether that driver is this
-  // page, so neither moves the verdict.
-  const handshakePendingRef = useRef(true)
-  // A `pty.owner` held back while the handshake was pending, which the
-  // handshake reads when that event supersedes it.
-  const eventAwaitsHandshakeRef = useRef(false)
   const connId = useMemo<ConnectionIdentity>(
     () => ({
       read: () => myConnIdRef.current,
       write: (next) => {
-        handshakePendingRef.current = next === null
         if (next !== null) rememberHeldConnId(next, currentRunStamp())
         // A new connection has not been named the row's driver yet.
         if (next !== myConnIdRef.current) {
@@ -297,9 +288,6 @@ export function useTerminalOwnership(
     if (spineInputOwner === myConnId) return
     if (heldConnIdStamp(spineInputOwner) !== undefined) return
     if (pressedClaimRef.current) return
-    // A spine read before this connection's handshake is older than the
-    // handshake's answer, which decides instead.
-    if (handshakePendingRef.current) return
     ownership.write(false)
     setOwnerPresent(true)
   }, [conn, spineInputOwner, connId, ownership])
@@ -310,6 +298,7 @@ export function useTerminalOwnership(
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
+      setOwnerEventHeard(true)
       // Any handover for this pty is the server ANSWERING, so a pressed claim of
       // ours is no longer in flight and stops shielding the verdict from the
       // spine. This event is the definitive word either way.
@@ -326,17 +315,6 @@ export function useTerminalOwnership(
         setOwnerPresent(false)
         return
       }
-      // Without this connection's id the event cannot be told apart from this
-      // page's own claim, which is what another pane of the row sends while
-      // this one is still attaching. The handshake judges it from the refs
-      // above; the device name is kept for the card it may then put up.
-      eventAwaitsHandshakeRef.current = handshakePendingRef.current
-      if (handshakePendingRef.current) {
-        setOwnerPresent(!freed)
-        setTakeoverDeviceFor(freed ? null : (device ?? null), ownerId ?? null)
-        return
-      }
-      setOwnerEventHeard(true)
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setRowConfirmed(mine)
       setOwnerPresent(!freed)
@@ -390,9 +368,6 @@ export function useTerminalOwnership(
     ownerDevice?: string,
   ) {
     setHandshakeSeen(true)
-    handshakePendingRef.current = false
-    const eventAwaited = eventAwaitsHandshakeRef.current
-    eventAwaitsHandshakeRef.current = false
     const appliedEpoch = appliedPtyOwnerEpoch(id)
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {
@@ -458,9 +433,7 @@ export function useTerminalOwnership(
         takeoverArmed: takeoverIntent.read(),
         handshakeEpoch: ownerEpoch,
         appliedEpoch,
-        // A held-back event that did not name this seat or free a ghost's row
-        // named another driver, or nobody.
-        priorVerdict: eventAwaited ? false : ownership.read(),
+        priorVerdict: ownership.read(),
       })
     ownership.write(mine)
     // Seed the other device's name from the same frame: a watcher that merely
