@@ -13,8 +13,8 @@ import {
 } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
-  ADD_TO_AGENT_ELSEWHERE_HINT,
-  useAgentActiveElsewhere,
+  addToAgentBlockHint,
+  useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 import { assertNever } from "@/lib/assertNever"
 import {
@@ -56,7 +56,8 @@ export function TerminalNotFound({
     owner.kind === "session"
       ? spine?.sessions.find((s) => s.id === owner.sessionId)
       : undefined
-  const blocked = useAgentActiveElsewhere(agent)
+  const block = useAgentChangeBlock(agent)
+  const blocked = block !== null
   const reasonId = useId()
   return (
     <Empty className="h-full border-0">
@@ -97,9 +98,9 @@ export function TerminalNotFound({
         </Button>
         {/* Said in words, since a disabled button answers no hover and a
           * finger has none. */}
-        {newTerminal !== null && blocked ? (
+        {newTerminal !== null && block !== null ? (
           <p id={reasonId} className="w-full text-center text-sm text-muted-foreground">
-            {ADD_TO_AGENT_ELSEWHERE_HINT}
+            {addToAgentBlockHint(block)}
           </p>
         ) : null}
       </EmptyContent>

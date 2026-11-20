@@ -1,14 +1,15 @@
 // A shared PTY has one driver. Plain attaches never steal; take-over arms an
 // intent and reconnects so the claim rides a fresh attach and replay.
 //
-//   OWNER     input and resize writes are enabled.
+//   OWNER     the server has said this page drives; writes are enabled.
 //   OBSERVER  another connection (or none while backgrounded) owns the PTY.
+//   PENDING   the server has not said yet; no writes and no card.
 //   CLAIMING  a take-over reconnect is waiting to send its flagged first resize.
 //   LOST      a terminal socket failure suppresses the stale local verdict.
 //
-// Handshakes and `pty.owner` events are authoritative. Losing ownership remains
-// sticky until an explicit take-over or confirmed self-succession. The verdict
-// channel updates synchronous write gates and React state together.
+// A foreign owner named by the handshake, a `pty.owner` event or the spine
+// demotes at once, whatever the socket is doing. Losing ownership remains
+// sticky until an explicit take-over or confirmed self-succession.
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { deviceLabel } from "@/lib/deviceLabel"
@@ -40,6 +41,10 @@ import type {
   TakeoverIntent,
 } from "./channels"
 
+/// Whether this page drives the pty: on the server's word ("this", "not"), or
+/// not known yet ("pending").
+type Verdict = "this" | "not" | "pending"
+
 export type TerminalOwnershipDeps = {
   /// The pty id: the session id for an agent, the terminal id for a companion.
   id: string
@@ -59,8 +64,13 @@ export type TerminalOwnershipDeps = {
 }
 
 export type TerminalOwnership = {
-  /// The rendered verdict.
+  /// Whether the server has said this page drives the pty. False while the
+  /// verdict is still pending, which `ownershipKnown` tells apart.
   isOwner: boolean
+  /// Whether the server has said who drives, on this mount or since a word
+  /// only the next handshake can settle. While false the pane shows neither
+  /// input nor the take-over card.
+  ownershipKnown: boolean
   /// The verdict channel, for the lifecycle's stable closures.
   ownership: OwnershipVerdict
   /// This socket's connection id, owned by the lifecycle's attach wiring and
@@ -89,15 +99,12 @@ export type TerminalOwnership = {
   /// meaningful while `isOwner` is false.
   ownerPresent: boolean
   /// Whether the `connected` handshake has answered the ownership question at
-  /// least once on this mount. Until it has, `isOwner` is only the foreground
-  /// GUESS, which is not a good enough reason to raise a soft keyboard.
+  /// least once on this mount.
   handshakeSeen: boolean
-  /// Whether the handshake or a `pty.owner` event has said who drives this pty
-  /// on this mount; until then the verdict is a guess.
-  ownerHeard: boolean
   /// Whether the server has named this pane's own driver id as the row's
-  /// owner on the current connection: the handshake or a `pty.owner` event. Until then an owner verdict over an unclaimed row is only the
-  /// foreground guess, which a pane off screen must not act on.
+  /// owner on the current connection: the handshake or a `pty.owner` event.
+  /// Until then an owner verdict over a row nobody had claimed is only leave
+  /// to claim it, which a pane off screen must not act on.
   rowConfirmed: boolean
   readRowConfirmed: () => boolean
   /// Whether this socket has given up for good.
@@ -121,20 +128,25 @@ export function useTerminalOwnership(
     setReconnecting,
   } = deps
 
-  // The foreground guess lasts only until the server's connected handshake.
-  // No-document contexts count as foreground so a claim is never suppressed.
-  const [isOwner, setIsOwner] = useState(isForeground)
-  const isOwnerRef = useRef(isOwner)
+  // The channel's boolean is "this page drives, on the server's word", so every
+  // write gate reads PENDING as no.
+  const [verdict, setVerdictState] = useState<Verdict>("pending")
+  const verdictRef = useRef<Verdict>("pending")
+  const setVerdict = (next: Verdict) => {
+    verdictRef.current = next
+    setVerdictState(next)
+  }
   const ownership = useMemo<OwnershipVerdict>(
     () => ({
-      read: () => isOwnerRef.current,
+      read: () => verdictRef.current === "this",
       write: (mine) => {
-        isOwnerRef.current = mine
-        setIsOwner(mine)
+        verdictRef.current = mine ? "this" : "not"
+        setVerdictState(verdictRef.current)
       },
     }),
     [],
   )
+  const isOwner = verdict === "this"
 
   const myConnIdRef = useRef<string | null>(null)
   const [rowConfirmed, setRowConfirmedState] = useState(false)
@@ -194,9 +206,9 @@ export function useTerminalOwnership(
   // flash the card back over a pane the user just took. A press names no
   // expected owner and so cannot be refused, which is why blocking is safe.
   const pressedClaimRef = useRef(false)
-  // Whether the newest `pty.owner` applied for this pty said nobody drives it.
-  // A handshake superseded by that word, naming one of this page's own ghosts,
-  // is a row the page let go of between the snapshot and the event.
+  // Whether the newest `pty.owner` this mount heard said nobody drives the pty.
+  // A handshake superseded by that word is about a row that was let go of
+  // between the snapshot and the event.
   const newestEventFreedRef = useRef(false)
   // The owner the newest applied `pty.owner` named, or null when it freed the
   // row. A pane whose handshake is still in flight has no id to compare an
@@ -252,11 +264,15 @@ export function useTerminalOwnership(
   // an explicit Reconnect affordance. Only meaningful when the app is NOT
   // globally offline, which the pane's own overlay precedence handles.
   const [connectionLost, setConnectionLost] = useState(false)
-  // Whether the server has answered "who drives this pty" on this mount. The
-  // initial verdict is a foreground guess and nothing more, so the input surface
-  // waits for this before it summons a keyboard.
+  // Whether the handshake has answered "who drives this pty" on this mount. The
+  // ref is for the spine correction, which must not let a document the page
+  // loaded before this mount's first handshake decide (see below).
   const [handshakeSeen, setHandshakeSeen] = useState(false)
-  const [ownerEventHeard, setOwnerEventHeard] = useState(false)
+  const handshakeSeenRef = useRef(false)
+  // Whether this mount has heard any `pty.owner` for its pty. When it has, the
+  // newest one it heard is the newest one applied, which a superseded handshake
+  // defers to.
+  const eventHeardRef = useRef(false)
 
   // Device names survive events reconnects and are replaced only by a handover,
   // handshake, or a refetched spine owner. The same spine read corrects the
@@ -272,6 +288,8 @@ export function useTerminalOwnership(
   //     refused and only a stale document could disagree. A self-succession
   //     deliberately does not block it, because refusal is an answer it can get
   //     and the ghost clause already covers the version that will be granted.
+  //   - Before this mount's first handshake it decides nothing: after a reload
+  //     the spine can still name the replaced page, which this one cannot recognise.
   useEffect(() => {
     if (conn !== "open") return
     // The server has not answered the question: no evidence, so no correction.
@@ -283,14 +301,37 @@ export function useTerminalOwnership(
     }
     const named = takeoverDeviceOwnerRef.current
     if (named !== null && spineInputOwner !== named) setTakeoverDeviceFor(null, null)
-    if (!ownership.read()) return
+    if (verdictRef.current === "not") return
     if (spineInputOwner === null) return
     if (spineInputOwner === myConnId) return
     if (heldConnIdStamp(spineInputOwner) !== undefined) return
     if (pressedClaimRef.current) return
+    if (!handshakeSeenRef.current) return
     ownership.write(false)
     setOwnerPresent(true)
   }, [conn, spineInputOwner, connId, ownership])
+
+  // Handles a `pty.owner` heard while this socket has no id that names one of
+  // this page's ids or frees the row, which only the next handshake can judge;
+  // returns false for a foreign owner, which demotes as usual.
+  const awaitsHandshake = (ownerId: string | undefined, freed: boolean): boolean => {
+    takeoverIntent.clear()
+    if (freed) {
+      if (verdictRef.current === "not") return false
+      setVerdict("pending")
+      setOwnerPresent(false)
+      setTakeoverDeviceFor(null, null)
+      return true
+    }
+    const stamp = ownerId === undefined ? undefined : heldConnIdStamp(ownerId)
+    if (stamp === undefined) return false
+    takeoverIntent.clear()
+    setOwnerPresent(true)
+    setTakeoverDeviceFor(null, null)
+    if (verdictRef.current === "this" && runIdentityConfirmedAs(stamp)) return true
+    setVerdict("pending")
+    return true
+  }
 
   // A `pty.owner` event confirms this connection, demotes it for another owner,
   // or marks the PTY unowned. Demotion is sticky until a fresh handshake or an
@@ -298,7 +339,7 @@ export function useTerminalOwnership(
   useEffect(() => {
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
-      setOwnerEventHeard(true)
+      eventHeardRef.current = true
       // Any handover for this pty is the server ANSWERING, so a pressed claim of
       // ours is no longer in flight and stops shielding the verdict from the
       // spine. This event is the definitive word either way.
@@ -315,6 +356,7 @@ export function useTerminalOwnership(
         setOwnerPresent(false)
         return
       }
+      if (myConnIdRef.current === null && awaitsHandshake(ownerId, freed)) return
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
       setRowConfirmed(mine)
       setOwnerPresent(!freed)
@@ -342,20 +384,20 @@ export function useTerminalOwnership(
   // path in both directions, gating the menu when a handover lands and
   // un-gating it after a take-over, while the spine's `input_owner` still names
   // the previous owner until the refetch. A pane whose socket has failed for
-  // good publishes no verdict, and the cleanup hands the answer back to the
-  // server-published spine field alone.
+  // good, or whose verdict is still pending, publishes no verdict, and the
+  // cleanup hands the answer back to the server-published spine field alone.
   useEffect(() => {
     if (kind !== "agent") return
-    if (connectionLost) {
+    if (connectionLost || verdict === "pending") {
       noteAgentPtyOwnership(id, "unknown")
       return
     }
-    noteAgentPtyOwnership(id, isOwner ? "mine" : "elsewhere")
+    noteAgentPtyOwnership(id, verdict === "this" ? "mine" : "elsewhere")
     return () => noteAgentPtyOwnership(id, "unknown")
-  }, [kind, id, isOwner, connectionLost])
+  }, [kind, id, verdict, connectionLost])
 
-  // The connected handshake replaces the foreground guess unless a take-over is
-  // armed. It can be stale, riding the PTY socket while `pty.owner` rides the
+  // The connected handshake settles the verdict unless a take-over is armed.
+  // It can be stale, riding the PTY socket while `pty.owner` rides the
   // events socket with nothing ordering the two, so a strictly newer applied
   // `pty.owner` wins: verdict and `ownerPresent` both defer on the same
   // `handshakeSuperseded` comparison. Without that, a slow
@@ -368,6 +410,7 @@ export function useTerminalOwnership(
     ownerDevice?: string,
   ) {
     setHandshakeSeen(true)
+    handshakeSeenRef.current = true
     const appliedEpoch = appliedPtyOwnerEpoch(id)
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {
@@ -393,39 +436,38 @@ export function useTerminalOwnership(
     // legitimately claimed in the gap; the client lands as a watcher instead.
     //
     // A backgrounded page never self-succeeds (a departed owner comes back as a
-    // watcher and presses the button), and neither does a superseded handshake.
+    // watcher and presses the button). A superseded handshake judges the newer
+    // event this mount heard instead of its own stale owner.
+    const newestOwner: HandshakeOwner = !superseded
+      ? owner
+      : eventHeardRef.current
+        ? newestEventOwnerRef.current
+        : undefined
     if (
-      !superseded &&
-      typeof owner === "string" &&
-      owner !== myConnId &&
-      ownGhostOfThisRun(owner) &&
+      typeof newestOwner === "string" &&
+      newestOwner !== myConnId &&
+      ownGhostOfThisRun(newestOwner) &&
       isForeground()
     ) {
-      takeoverIntent.arm(owner)
+      takeoverIntent.arm(newestOwner)
     }
-    // The same switch in the other order: the event freeing the row was applied
-    // before this handshake, which was snapshotted while this page's own ghost
-    // still held the row. The newer word is that nobody drives it, so a
-    // foregrounded page owns it as it would an unowned handshake, and its plain
-    // resize claims it. Anything newer naming an owner leaves this false.
-    const ghostLetGo =
+    // An event this mount heard freed the row after the snapshot: a foregrounded
+    // page claims it as it would an unowned handshake, with a plain resize.
+    const rowLetGo =
       superseded &&
+      eventHeardRef.current &&
       newestEventFreedRef.current &&
-      typeof owner === "string" &&
-      owner !== myConnId &&
-      ownGhostOfThisRun(owner) &&
       isForeground()
     // The page's other pane claimed the row on the driver id this socket was
-    // just seated on, and that claim reached this pane before its own
-    // handshake, which was snapshotted before it. Without this the pane stays a
-    // watcher of its own page's row, because a superseded handshake keeps the
-    // verdict the event left, and nothing later corrects it.
+    // just seated on, before this handshake landed.
     const eventNamedThisSeat =
       superseded && newestEventOwnerRef.current === myConnId
     if (eventNamedThisSeat) setRowConfirmed(true)
+    // A superseded handshake keeps the verdict the newer event left, and a
+    // pending one is not a verdict that this page drives.
     const mine =
       eventNamedThisSeat ||
-      ghostLetGo ||
+      rowLetGo ||
       seedVerdictFromConnected({
         owner,
         myConnId,
@@ -518,8 +560,8 @@ export function useTerminalOwnership(
     // Parsing lives in the pure, tested `deviceLabel` helper.
     takeoverLabel: deviceLabel(takeoverDevice),
     ownerPresent,
+    ownershipKnown: verdict !== "pending",
     handshakeSeen,
-    ownerHeard: handshakeSeen || ownerEventHeard,
     rowConfirmed,
     readRowConfirmed: () => rowConfirmedRef.current,
     connectionLost,

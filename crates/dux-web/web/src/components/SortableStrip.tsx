@@ -25,12 +25,15 @@ import { moveItem, ordersMatch } from "@/lib/reorder"
 export function SortableStrip({
   ids,
   onReorder,
+  disabled = false,
   children,
 }: {
   /** The pills' ids in their displayed order. */
   ids: string[]
   /** Called with the complete new order when a drop changes it. */
   onReorder: (next: string[]) => void
+  /** No pill drags, and nothing is reordered. */
+  disabled?: boolean
   children: ReactNode
 }) {
   const sensors = useSensors(
@@ -39,7 +42,7 @@ export function SortableStrip({
   )
 
   function handleDragEnd({ active, over }: DragEndEvent) {
-    if (!over || active.id === over.id) return
+    if (disabled || !over || active.id === over.id) return
     const next = moveItem(ids, String(active.id), String(over.id))
     if (!ordersMatch(ids, next)) onReorder(next)
   }
@@ -50,7 +53,11 @@ export function SortableStrip({
       collisionDetection={closestCenter}
       onDragEnd={handleDragEnd}
     >
-      <SortableContext items={ids} strategy={horizontalListSortingStrategy}>
+      <SortableContext
+        items={ids}
+        strategy={horizontalListSortingStrategy}
+        disabled={disabled}
+      >
         {children}
       </SortableContext>
     </DndContext>

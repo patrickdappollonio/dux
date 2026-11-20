@@ -21,7 +21,11 @@ const reorderTabsMock = vi.fn()
 // The real strip, with its props captured: a drag cannot run under jsdom (the
 // pure part of it is in SortableStrip.test.tsx), so the tests hand the strip
 // the drop its drag would have produced.
-let sortableProps: { ids: string[]; onReorder: (next: string[]) => void } | null = null
+let sortableProps: {
+  ids: string[]
+  onReorder: (next: string[]) => void
+  disabled?: boolean
+} | null = null
 vi.mock("@/components/SortableStrip", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/SortableStrip")>()
   return {
@@ -239,7 +243,7 @@ describe("AgentTabsStrip", () => {
 })
 
 // The strip stays above the take-over card, so it gates what changes the row
-// the way the agent's menu does, and only while another device drives it.
+// the way the agent's menu does, whoever the card says drives it.
 describe("AgentTabsStrip on a row another device drives", () => {
   const watch = (driver: "other" | "nobody") =>
     registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver })
@@ -262,14 +266,30 @@ describe("AgentTabsStrip on a row another device drives", () => {
     expect(clickTabMock).toHaveBeenCalledWith("s1", "b2")
   })
 
-  it("keeps all of it while nobody drives the row", async () => {
+  it("gates all of it while nobody drives the row, and says so truthfully", async () => {
     watch("nobody")
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", false)
+    expect(screen.getByLabelText("New tab")).toHaveProperty("disabled", true)
+    expect(sortableProps?.disabled).toBe(true)
     fireEvent.click(screen.getAllByLabelText("Tab actions")[1])
     const menu = within(await screen.findByRole("menu"))
+    expect(menu.getByText(/Nobody is driving this agent/)).toBeTruthy()
+    expect(menu.queryByText(/active on another device/i)).toBeNull()
     const item = menu.getByText("Close tab…").closest("[role='menuitem']")
-    expect(item?.getAttribute("aria-disabled")).not.toBe("true")
+    expect(item?.getAttribute("aria-disabled")).toBe("true")
+  })
+
+  // The order is the agent's own, kept on the server, so a drag is a change.
+  it("does not reorder while another device drives the row", () => {
+    watch("other")
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    expect(sortableProps?.disabled).toBe(true)
+  })
+
+  it("reorders while this device drives the row", () => {
+    registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    expect(sortableProps?.disabled).toBe(false)
   })
 })
 

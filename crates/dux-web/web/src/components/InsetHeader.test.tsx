@@ -724,14 +724,14 @@ describe("InsetHeader under the agent's take-over card", () => {
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
   })
 
-  it("names no terminal, and still adds, while nobody drives it", async () => {
+  it("names no terminal and adds nothing while nobody drives it", async () => {
     watching(false)
     expect(chip("terminal")).toBeNull()
-    expect(screen.queryByTestId("new-tab-disabled")).toBeNull()
-    expect(screen.getByRole("button", { name: /new tab/i })).toBeTruthy()
+    expect(screen.getByTestId("new-tab-disabled")).toBeTruthy()
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
-    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).not.toBe("true")
+    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getByText(/Nobody is driving this agent/)).toBeTruthy()
   })
 
   it("closes New tab…'s dialog for good when another device takes the agent while it is open", async () => {

@@ -8,16 +8,20 @@ import { createKeyedRegistry } from "./keyedRegistry"
 //
 // A device drives or watches a whole row of the agents list, so every pane also
 // names its row and who drives it, and the row's answer is the one the chrome
-// reads. Only what a pane has heard from the server counts toward the row: the
-// row is watched while any of its panes shows the take-over card on the
-// server's word, so a pane with no card of its own for a moment (its socket
+// reads. The row is watched while any of its panes shows the take-over card on
+// the server's word, so a pane with no card of its own for a moment (its socket
 // just failed, or it remounted and has not heard the server yet) leaves the row
-// covered, and a pane that has only guessed (one mounted while the page was
-// hidden) covers nothing but itself.
+// covered. A pane still waiting for the server to say covers nothing.
 
 /// Who drives a pane's pty, on the server's word: this page, another device,
-/// or nobody. Null until the server has said, or once the socket is lost.
-export type PaneDriver = "this" | "other" | "nobody" | null
+/// or nobody. "pending" while the pane is waiting for the server to say, and
+/// null once its socket is lost, which leaves the question to the spine.
+export type PaneDriver = "this" | "other" | "nobody" | "pending" | null
+
+/// Why this device may not change a row: another device drives it, nobody
+/// does and this device has not taken it, or a pane of it is still waiting to
+/// hear which.
+export type RowBlock = "other" | "nobody" | "pending"
 
 /// Boxed so each registration has an identity of its own: the registry tells
 /// registrations apart by identity, and two panes publishing the same verdict
@@ -106,7 +110,7 @@ export function paneCoverFor(
 }
 
 function cardHeard(entry: CoverEntry): boolean {
-  return entry.kind === "card" && entry.driver !== null
+  return entry.kind === "card" && entry.driver !== null && entry.driver !== "pending"
 }
 
 function claimHolds(row: string): boolean {
@@ -148,30 +152,33 @@ export function rowWatchedFor(row: string | null): boolean {
 }
 
 /**
- * Does another device drive the row, as far as this page's panes of it have
- * heard? Undefined when none of them has heard the server, which leaves the
- * question to the spine. A take-over pressed here answers no at once.
+ * Why the row's changes are out of reach here, null when they are not, or
+ * undefined when no pane of it can say and the spine decides.
  */
-export function rowDrivenElsewhereFor(row: string | null): boolean | undefined {
+export function rowBlockFor(row: string | null): RowBlock | null | undefined {
   if (row === null) return undefined
-  if (claimHolds(row)) return false
-  const heard = rowEntries(row).filter((entry) => entry.driver !== null)
-  if (heard.length === 0) return undefined
-  return heard.some((entry) => entry.driver === "other")
+  if (claimHolds(row)) return null
+  const drivers = rowEntries(row).map((entry) => entry.driver)
+  if (drivers.includes("other")) return "other"
+  if (drivers.includes("nobody")) return "nobody"
+  if (drivers.includes("this")) return null
+  if (drivers.includes("pending")) return "pending"
+  return undefined
 }
 
 export type RowWatch = {
   /** The take-over card is up for the row. */
   watched: boolean
-  /** Another device drives it, or undefined when no pane of it can say. */
-  elsewhere: boolean | undefined
+  /** Why the row's changes are out of reach, null when they are not, or
+   * undefined when no pane of it can say. */
+  block: RowBlock | null | undefined
 }
 
 /** The row's answer, re-read on every change to any pane of any row. */
 export function useRowWatch(row: string | null): RowWatch {
   covers.useVersion()
   claims.useVersion()
-  return { watched: rowWatchedFor(row), elsewhere: rowDrivenElsewhereFor(row) }
+  return { watched: rowWatchedFor(row), block: rowBlockFor(row) }
 }
 
 /** The answer for an agent's row, or a quiet one with no agent. */

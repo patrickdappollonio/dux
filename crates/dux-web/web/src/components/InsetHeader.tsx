@@ -18,8 +18,8 @@ import { useFoldToFit } from "@/hooks/use-fold-to-fit"
 import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import {
-  ADD_TO_AGENT_ELSEWHERE_HINT,
-  useAgentActiveElsewhere,
+  addToAgentBlockHint,
+  useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import { useIsTruncated } from "@/hooks/use-truncated"
@@ -275,9 +275,8 @@ function HeaderPaneMenu({
   triggerRef: RefObject<HTMLButtonElement | null>
 }) {
   const { theater } = useDux()
-  const newTabBlocked = useAgentActiveElsewhere(newTabSession)
-    ? ADD_TO_AGENT_ELSEWHERE_HINT
-    : null
+  const newTabBlock = useAgentChangeBlock(newTabSession)
+  const newTabBlocked = newTabBlock === null ? null : addToAgentBlockHint(newTabBlock)
   const pendingRef = useRef<"new-tab" | "macros" | null>(null)
   const [adding, setAdding] = useState(false)
   const [macrosOpen, setMacrosOpen] = useState(false)

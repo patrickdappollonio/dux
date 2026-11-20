@@ -73,8 +73,8 @@ import {
 } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 import {
-  AGENT_ELSEWHERE_REASON,
-  useAgentActiveElsewhere,
+  agentChangeBlockReason,
+  useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 
 // Every per-agent action, in one place so no surface can drift from another.
@@ -100,16 +100,11 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // pull requests, startup commands. They are about a branch dux manages, and
   // a standalone agent has none whatever its folder contains.
   const branchGit = supportsBranchGit(session.workspace)
-  // While another connection input-owns one of this agent's PTYs, the mutating
-  // entries disable: deleting, renaming or relaunching an agent someone else is
-  // driving surprises them, and a tab or a terminal added here would join a row
-  // this device does not drive. The answer comes from a mounted pane of the
-  // row when there is one, and from the spine's `input_owner` otherwise, which
-  // is what lets a row gate an agent no pane here is attached to. Read-only
-  // entries and this device's own view preferences stay usable. The reason is
-  // an inline label, because a disabled item is pointer-events-none and touch
-  // has no hover.
-  const activeElsewhere = useAgentActiveElsewhere(session)
+  // While this device does not drive the agent's row, the mutating entries
+  // disable, with the reason as an inline label: a disabled item takes no
+  // pointer events and touch has no hover.
+  const block = useAgentChangeBlock(session)
+  const changesBlocked = block !== null
   // Whether there is a process to ask to shut down at all. The SERVER's answer,
   // from the same oracle the engine's teardown and the terminal UI's palette
   // gate ask, rather than a scan of the tab rows here.
@@ -118,10 +113,10 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
 
   return (
     <>
-      {activeElsewhere ? (
+      {block !== null ? (
         <DropdownMenuGroup>
           <DropdownMenuLabel className="max-w-60 whitespace-normal">
-            {AGENT_ELSEWHERE_REASON}
+            {agentChangeBlockReason(block)}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
         </DropdownMenuGroup>
@@ -137,7 +132,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           defaultProvider={defaultProvider}
           atTabCap={atTabCap}
           addingTab={addingTab}
-          activeElsewhere={activeElsewhere}
+          changesBlocked={changesBlocked}
         />
         <AgentProjectSubmenu projectId={projectId} projectName={projectName} />
       </DropdownMenuGroup>
@@ -145,7 +140,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       <DropdownMenuGroup>
         <DropdownMenuLabel>{MENU_GROUP_LABELS.running}</DropdownMenuLabel>
         <DropdownMenuItem
-          disabled={activeElsewhere}
+          disabled={changesBlocked}
           onClick={() => openForceReconnect(session.id)}
         >
           <RotateCcw />
@@ -157,7 +152,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           * gets it: dux does not create, move or remove the user's own folder. */}
         {copyMissing ? (
           <DropdownMenuItem
-            disabled={activeElsewhere}
+            disabled={changesBlocked}
             onClick={() => openRecreateWorkingCopy(session.id)}
           >
             <FolderSync />
@@ -170,7 +165,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           * every other destructive item here; the dialog is the danger signal. */}
         {liveProcess ? (
           <DropdownMenuItem
-            disabled={activeElsewhere}
+            disabled={changesBlocked}
             onClick={() => openStopAgent(session.id)}
           >
             <Unplug />
@@ -178,7 +173,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem
-          disabled={activeElsewhere}
+          disabled={changesBlocked}
           onClick={() => toggleSessionAutoReopen(session.id, !session.auto_reopen_enabled)}
         >
           <RefreshCw />
@@ -191,7 +186,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       <DropdownMenuGroup>
         <DropdownMenuLabel>{MENU_GROUP_LABELS.agent}</DropdownMenuLabel>
         <DropdownMenuItem
-          disabled={activeElsewhere}
+          disabled={changesBlocked}
           onClick={() => openRename(session.id)}
         >
           <Pencil />
@@ -200,7 +195,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <AgentIdentityItems
           sessionId={session.id}
           branchGit={branchGit}
-          activeElsewhere={activeElsewhere}
+          changesBlocked={changesBlocked}
         />
       </DropdownMenuGroup>
       {branchGit ? (
@@ -241,7 +236,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
           * than fixed: this menu also serves a standalone agent, which has a
           * folder and no worktree. */}
         <DropdownMenuItem
-          disabled={activeElsewhere}
+          disabled={changesBlocked}
           onClick={() => createTerminal(session.id)}
         >
           <SquareTerminal />
@@ -262,7 +257,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
         <DropdownMenuItem
           variant="destructive"
           className="not-focus:text-destructive/70! not-focus:*:[svg]:text-destructive/70!"
-          disabled={activeElsewhere}
+          disabled={changesBlocked}
           onClick={() => openDelete(session.id)}
         >
           <Trash2 />
@@ -279,19 +274,19 @@ function AgentTabSubmenu({
   defaultProvider,
   atTabCap,
   addingTab,
-  activeElsewhere,
+  changesBlocked,
 }: {
   sessionId: string
   providers: string[]
   defaultProvider: string
   atTabCap: boolean
   addingTab: boolean
-  activeElsewhere: boolean
+  changesBlocked: boolean
 }) {
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger
-        disabled={atTabCap || addingTab || activeElsewhere}
+        disabled={atTabCap || addingTab || changesBlocked}
       >
         <Plus />
         <span className="min-w-0 truncate">New agent tab…</span>
@@ -345,11 +340,11 @@ function AgentProjectSubmenu({
 function AgentIdentityItems({
   sessionId,
   branchGit,
-  activeElsewhere,
+  changesBlocked,
 }: {
   sessionId: string
   branchGit: boolean
-  activeElsewhere: boolean
+  changesBlocked: boolean
 }) {
   return (
     <>
@@ -360,7 +355,7 @@ function AgentIdentityItems({
         </DropdownMenuItem>
       ) : null}
       <DropdownMenuItem
-        disabled={activeElsewhere}
+        disabled={changesBlocked}
         onClick={() => openChangeProvider(sessionId)}
       >
         <Cpu />

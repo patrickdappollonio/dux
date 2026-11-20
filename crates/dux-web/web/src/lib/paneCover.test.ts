@@ -8,7 +8,7 @@ import {
   registerRowClaim,
   resetPaneCovers,
   rowClaimSpent,
-  rowDrivenElsewhereFor,
+  rowBlockFor,
   rowWatchedFor,
   usePaneCoverOwned,
 } from "./paneCover"
@@ -56,23 +56,36 @@ describe("a row's answer", () => {
     const guess = registerPaneCover("s1", "card", { row, driver: null })
     registerPaneCover("t1", "none", { row, driver: "this" })
     expect(rowWatchedFor(row)).toBe(false)
-    expect(rowDrivenElsewhereFor(row)).toBe(false)
+    expect(rowBlockFor(row)).toBeNull()
     guess()
     registerPaneCover("s1", "card", { row, driver: "other" })
     expect(rowWatchedFor(row)).toBe(true)
-    expect(rowDrivenElsewhereFor(row)).toBe(true)
+    expect(rowBlockFor(row)).toBe("other")
   })
 
-  it("says nobody drives it under the card's Running in the background", () => {
+  // Under the card's Running in the background nobody drives the row, and the
+  // device looking at that card has not taken it either.
+  it("keeps the row's changes out of reach while nobody drives it", () => {
     registerPaneCover("s1", "card", { row, driver: "nobody" })
     expect(rowWatchedFor(row)).toBe(true)
-    expect(rowDrivenElsewhereFor(row)).toBe(false)
+    expect(rowBlockFor(row)).toBe("nobody")
   })
 
-  it("leaves the question to the spine while no pane of it has heard the server", () => {
-    registerPaneCover("s1", "spinner", { row, driver: null })
-    expect(rowDrivenElsewhereFor(row)).toBeUndefined()
-    expect(rowDrivenElsewhereFor(agentRowKey("s2"))).toBeUndefined()
+  it("keeps the row's changes out of reach while its panes are still waiting to hear", () => {
+    const waiting = registerPaneCover("s1", "spinner", { row, driver: "pending" })
+    expect(rowWatchedFor(row)).toBe(false)
+    expect(rowBlockFor(row)).toBe("pending")
+    registerPaneCover("t1", "none", { row, driver: "this" })
+    expect(rowBlockFor(row)).toBeNull()
+    waiting()
+    registerPaneCover("s1", "card", { row, driver: "other" })
+    expect(rowBlockFor(row)).toBe("other")
+  })
+
+  it("leaves the question to the spine while no pane of it can say", () => {
+    registerPaneCover("s1", "box", { row, driver: null })
+    expect(rowBlockFor(row)).toBeUndefined()
+    expect(rowBlockFor(agentRowKey("s2"))).toBeUndefined()
   })
 
   it("is driven from the press until the other part hears the server", () => {
@@ -82,7 +95,7 @@ describe("a row's answer", () => {
     // The pressed pane bounces its socket and believes it drives the pty.
     registerPaneCover("t1", "spinner", { row, driver: "this" })
     expect(rowWatchedFor(row)).toBe(false)
-    expect(rowDrivenElsewhereFor(row)).toBe(false)
+    expect(rowBlockFor(row)).toBeNull()
     expect(rowClaimSpent(row)).toBe(false)
     registerPaneCover("s1", "none", { row, driver: "this" })
     expect(rowClaimSpent(row)).toBe(true)

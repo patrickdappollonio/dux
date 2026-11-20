@@ -33,9 +33,9 @@ import {
   tabLabels,
 } from "@/lib/agentTabs"
 import {
-  ADD_TO_AGENT_ELSEWHERE_HINT,
-  AGENT_ELSEWHERE_REASON,
-  useAgentActiveElsewhere,
+  addToAgentBlockHint,
+  agentChangeBlockReason,
+  useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
 import { usePillSort } from "@/hooks/use-pill-sort"
@@ -51,6 +51,7 @@ import {
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
+import type { RowBlock } from "@/lib/paneCover"
 import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
@@ -62,9 +63,10 @@ const FIRST_TAB_HINT =
 // caller's decision. All tabs render uniformly: clicking a
 // pill focuses it, the hover-revealed ⋯ retargets the provider and closes the
 // tab, and the trailing + adds one, disabled at the cap or mid-create. While
-// another device drives the agent, the strip stays above the take-over card and
-// everything in it that changes the agent is disabled, as in the agent's menu;
-// selecting a tab is not a change and stays. A pill
+// this device does not drive the agent, the strip stays above the take-over
+// card and everything in it that changes the agent is disabled, as in the
+// agent's menu, dragging a pill to reorder included; selecting a tab is not a
+// change and stays. A pill
 // drags along the strip to reorder it, like a browser tab; the order is the
 // agent's own and survives a restart. The agent's first tab, the one that starts
 // and resumes the agent, wears a pin while there are two or more tabs.
@@ -93,8 +95,8 @@ export function AgentTabsStrip({
   const atCap = tabs.length >= cap
   const creating = createTabInFlight.includes(session.id)
   const defaultProvider = defaultProviderForSession(spine, session)
-  const elsewhere = useAgentActiveElsewhere(session)
-  const disabled = atCap || creating || elsewhere
+  const block = useAgentChangeBlock(session)
+  const disabled = atCap || creating || block !== null
 
   return (
     // `max-md:py-0.75` trims the strip's own vertical padding to go with the
@@ -114,6 +116,7 @@ export function AgentTabsStrip({
       <SortableStrip
         ids={tabs.map((t) => t.id)}
         onReorder={(next) => reorderTabs(session.id, next)}
+        disabled={block !== null}
       >
         {tabs.map((tab, i) => (
           <TabPill
@@ -124,7 +127,7 @@ export function AgentTabsStrip({
             active={tab.id === activeTabId}
             providers={providers}
             pinned={tabs.length >= 2 && isFirstTab(shown, tab.id)}
-            elsewhere={elsewhere}
+            block={block}
           />
         ))}
       </SortableStrip>
@@ -138,8 +141,8 @@ export function AgentTabsStrip({
       <div className="flex shrink-0 items-center gap-0.5 md:pointer-coarse:ml-0.5 md:pointer-coarse:gap-4">
         <SimpleTooltip
           content={
-            elsewhere
-              ? ADD_TO_AGENT_ELSEWHERE_HINT
+            block !== null
+              ? addToAgentBlockHint(block)
               : atCap
                 ? `Tab limit reached (${cap})`
                 : creating
@@ -207,7 +210,7 @@ function TabPill({
   active,
   providers,
   pinned,
-  elsewhere,
+  block,
 }: {
   session: SessionView
   tab: AgentTabView
@@ -216,9 +219,10 @@ function TabPill({
   providers: string[]
   /** This is the agent's first tab and the agent has two or more. */
   pinned: boolean
-  /** Another device drives the agent, so nothing here may change it. */
-  elsewhere: boolean
+  /** Why nothing here may change the agent, or null when it may. */
+  block: RowBlock | null
 }) {
+  const changesBlocked = block !== null
   const { setNodeRef, style, listeners, isDragging } = usePillSort(tab.id)
   // No successor means no slot to hand on, which is the one close the server
   // refuses. Answered from the tab list rather than from slot-ness, because
@@ -324,16 +328,16 @@ function TabPill({
             <Ellipsis className="size-3.5" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-            {elsewhere ? (
+            {block !== null ? (
               <DropdownMenuGroup>
                 <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                  {AGENT_ELSEWHERE_REASON}
+                  {agentChangeBlockReason(block)}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
               </DropdownMenuGroup>
             ) : null}
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={elsewhere}>
+              <DropdownMenuSubTrigger disabled={changesBlocked}>
                 <Replace />
                 Change provider…
               </DropdownMenuSubTrigger>
@@ -358,7 +362,7 @@ function TabPill({
                 Absent rather than disabled with no process, like Detach. */}
             {tab.has_live_process ? (
               <DropdownMenuItem
-                disabled={elsewhere}
+                disabled={changesBlocked}
                 onClick={() => openStopTab(session.id, tab.id)}
               >
                 <CircleStop />
@@ -399,7 +403,7 @@ function TabPill({
               </DropdownMenuGroup>
             ) : (
               <DropdownMenuItem
-                disabled={elsewhere}
+                disabled={changesBlocked}
                 onClick={() => openCloseTab(session.id, tab.id)}
               >
                 <X />

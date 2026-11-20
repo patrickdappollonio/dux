@@ -5,9 +5,10 @@ import { act, renderHook } from "@testing-library/react"
 import {
   forgetHeldConnIds,
   notifyPtyOwner,
+  rememberHeldConnId,
   resetPtyOwnerEpochs,
 } from "@/lib/ptyOwnership"
-import { noteServerRunProbe } from "@/lib/serverRun"
+import { currentRunStamp, noteServerRunProbe } from "@/lib/serverRun"
 import type { PtySocket } from "@/lib/ptySocket"
 
 import { useTerminalOwnership } from "./ownership"
@@ -88,11 +89,20 @@ afterEach(() => {
 })
 
 describe("the initial verdict", () => {
-  it("claims on attach when the document is foregrounded", () => {
+  it("waits for the server, writing nothing and publishing nothing, however foregrounded", () => {
     const { view } = setup()
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(false)
+    expect(view.result.current.ownership.read()).toBe(false)
+    expect(ledger.every(([, verdict]) => verdict === "unknown")).toBe(true)
+  })
+
+  it("claims on the handshake when the document is foregrounded", () => {
+    const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
     expect(view.result.current.isOwner).toBe(true)
     expect(view.result.current.ownership.read()).toBe(true)
-    expect(ledger).toEqual([["p1", "mine"]])
+    expect(ledger.at(-1)).toEqual(["p1", "mine"])
   })
 
   it("publishes nothing at all for a companion terminal", () => {
@@ -140,6 +150,7 @@ describe("a handover", () => {
 
   it("ignores a handover for another pty entirely", () => {
     const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
     act(() => {
       notifyPtyOwner("other", "theirs", 1, undefined)
     })
@@ -154,7 +165,7 @@ describe("a handover", () => {
 describe("seeding the verdict from the connected handshake", () => {
   it("demotes a foregrounded pane that joined a pty somebody else drives", () => {
     const { view } = setup()
-    expect(view.result.current.isOwner).toBe(true) // the pre-handshake guess
+    expect(view.result.current.ownershipKnown).toBe(false)
     act(() => view.result.current.seedFromConnected("mine", "theirs"))
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.ownership.read()).toBe(false)
@@ -581,6 +592,7 @@ describe("self-succession after a blipped socket", () => {
 describe("the LOST state", () => {
   it("publishes no verdict at all once the socket has given up", () => {
     const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
     expect(ledger.at(-1)).toEqual(["p1", "mine"])
     act(() => view.result.current.setConnectionLost(true))
     expect(ledger.at(-1)).toEqual(["p1", "unknown"])
@@ -588,6 +600,7 @@ describe("the LOST state", () => {
 
   it("resumes publishing when the socket comes back", () => {
     const { view } = setup()
+    act(() => view.result.current.seedFromConnected("mine", null))
     act(() => view.result.current.setConnectionLost(true))
     act(() => view.result.current.setConnectionLost(false))
     expect(ledger.at(-1)).toEqual(["p1", "mine"])
@@ -927,6 +940,87 @@ describe("the spine corrects a phantom owner", () => {
     act(() => view.result.current.connId.write("mine"))
     act(() => view.result.current.seedFromConnected("mine", null))
     setSpineInputOwner("mine")
+    expect(view.result.current.isOwner).toBe(true)
+  })
+})
+
+// While this socket has no id, an event that only its next handshake can tell
+// apart from this page's own word leaves the pane pending; anything naming
+// another device demotes it at once.
+describe("a word heard while this socket has no id", () => {
+  const driving = () => {
+    const env = setup()
+    act(() => env.view.result.current.connId.write("seat-1"))
+    act(() => env.view.result.current.seedFromConnected("seat-1", null, 1))
+    expect(env.view.result.current.isOwner).toBe(true)
+    // The socket drops: its id retires until the next handshake.
+    act(() => env.view.result.current.connId.write(null))
+    return env
+  }
+
+  it("keeps driving when another part of the page claims on the page's id", () => {
+    const { view } = driving()
+    act(() => notifyPtyOwner("p1", "seat-1", 2, undefined))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.ownershipKnown).toBe(true)
+  })
+
+  it("demotes at once when another device takes over", () => {
+    const { view } = driving()
+    act(() => notifyPtyOwner("p1", "theirs", 2, "Mozilla/5.0 (Macintosh) Chrome/1"))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(true)
+    expect(view.result.current.ownership.read()).toBe(false)
+    expect(ledger.at(-1)).toEqual(["p1", "elsewhere"])
+  })
+
+  it("demotes at once when only the spine says another device drives", () => {
+    const { view, setSpineInputOwner } = driving()
+    setSpineInputOwner("theirs")
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(true)
+    expect(ledger.at(-1)).toEqual(["p1", "elsewhere"])
+  })
+
+  // Its own dropped socket frees the row, so "nobody" is not news against it,
+  // and it does not drive a free row either.
+  it("waits for the next handshake when the row is freed, and drives again on it", () => {
+    const { view } = driving()
+    act(() => notifyPtyOwner("p1", undefined, 2, undefined))
+    expect(view.result.current.isOwner).toBe(false)
+    expect(view.result.current.ownershipKnown).toBe(false)
+    expect(ledger.at(-1)).toEqual(["p1", "unknown"])
+    act(() => view.result.current.connId.write("seat-2"))
+    act(() => view.result.current.seedFromConnected("seat-2", null, 2))
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  it("waits, rather than reading its own page as another device, before its first handshake", () => {
+    rememberHeldConnId("seat-1", currentRunStamp())
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", "seat-1", 2, undefined))
+    expect(view.result.current.ownershipKnown).toBe(false)
+    expect(view.result.current.isOwner).toBe(false)
+    // Snapshotted before that claim, the handshake defers to it and finds the
+    // page's own id.
+    act(() => view.result.current.connId.write("seat-1"))
+    act(() => view.result.current.seedFromConnected("seat-1", null, 1))
+    expect(view.result.current.isOwner).toBe(true)
+    expect(view.result.current.rowConfirmed).toBe(true)
+  })
+
+  it("leaves a spine read before its first handshake to that handshake", () => {
+    const { view } = setup({ spineInputOwner: "previous-page" })
+    expect(view.result.current.ownershipKnown).toBe(false)
+    act(() => view.result.current.seedFromConnected("seat-2", null))
+    expect(view.result.current.isOwner).toBe(true)
+  })
+
+  it("claims a row another device let go of after its handshake was snapshotted", () => {
+    const { view } = setup()
+    act(() => notifyPtyOwner("p1", "theirs", 2, undefined))
+    act(() => notifyPtyOwner("p1", undefined, 3, undefined))
+    act(() => view.result.current.seedFromConnected("seat-1", "theirs", 1))
     expect(view.result.current.isOwner).toBe(true)
   })
 })

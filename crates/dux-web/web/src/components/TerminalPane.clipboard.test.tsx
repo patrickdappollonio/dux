@@ -119,7 +119,18 @@ class FitStub {
 class FakePtySocket {
   static instances: FakePtySocket[] = []
   url: string
-  connect = vi.fn()
+  // The first connect answers with the handshake an older server sends, which
+  // names no owner, so a foregrounded pane drives as soon as it mounts. A pane
+  // drives only once the server has answered, and most tests here are about a
+  // pane that drives; one about the time before the handshake turns this off.
+  static autoHandshake = true
+  private handshook = false
+  connect = vi.fn(() => {
+    if (FakePtySocket.autoHandshake && !this.handshook) {
+      this.handshook = true
+      this.onConnected("42")
+    }
+  })
   close = vi.fn()
   // The pane's teardown DISPOSES rather than closes: a socket whose pane is
   // gone must lose its wake listeners too.
@@ -413,6 +424,7 @@ function sentToSocket(): string[] {
 beforeEach(() => {
   resetComposeDrafts()
   FakePtySocket.instances = []
+  FakePtySocket.autoHandshake = true
   TermStub.instances = []
   TermStub.pastes = []
   TermStub.xtermPastes = []

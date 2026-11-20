@@ -6,9 +6,17 @@ import { WorkingGlyph } from "@/components/WorkingGlyph"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  addToAgentBlockHint,
+  agentChangeBlockReason,
+  useAgentChangeBlockById,
+} from "@/hooks/use-agent-active-elsewhere"
 import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
 import { usePillSort } from "@/hooks/use-pill-sort"
 import type { ComputerLayout, LayoutAction } from "@/lib/layoutModel"
@@ -19,6 +27,7 @@ import {
   reorderDock,
   selectTerminal,
 } from "@/lib/store"
+import type { RowBlock } from "@/lib/paneCover"
 import { terminalTitle } from "@/lib/terminals"
 import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
 import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
@@ -37,7 +46,8 @@ const STRIP_ICON_BUTTON =
 // the front, a drag along the strip reorders the dock, and its ⋯ holds that
 // terminal's own actions. The + opens another terminal, and on a computer the
 // strip's right end carries the layout controls; a phone shows one part at a
-// time and has none.
+// time and has none. While this device does not drive the agent, the +, the
+// reorder and every pill's actions are disabled, as on the agent's tab strip.
 export function DockStrip({
   sessionId,
   terminals,
@@ -58,6 +68,7 @@ export function DockStrip({
 }) {
   const ids = terminals.map((t) => t.id)
   const attachStrip = useKeepCueClocks(ids.join("\n"))
+  const block = useAgentChangeBlockById(sessionId)
   return (
     // A tablet gets the tab strip's spacing: 8px between pills, so one pill's ⋯
     // tap margin stays clear of the next pill, and an 18px end, since the pane
@@ -69,7 +80,11 @@ export function DockStrip({
       onFocus={(e) => scrollFocusedTabIntoView(e.target)}
       className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >
-      <SortableStrip ids={ids} onReorder={(next) => reorderDock(sessionId, next)}>
+      <SortableStrip
+        ids={ids}
+        onReorder={(next) => reorderDock(sessionId, next)}
+        disabled={block !== null}
+      >
         {terminals.map((terminal) => (
           <DockPill
             key={terminal.id}
@@ -78,13 +93,15 @@ export function DockStrip({
             label={terminalTitle(terminal, terminals)}
             active={terminal.id === activeTerminal}
             withMenu={terminal.id !== unlisted}
+            block={block}
           />
         ))}
       </SortableStrip>
-      <SimpleTooltip content="New terminal">
+      <SimpleTooltip content={block === null ? "New terminal" : addToAgentBlockHint(block)}>
         <button
           type="button"
           aria-label="New terminal"
+          disabled={block !== null}
           onClick={() => createTerminal(sessionId)}
           // 2px more on a tablet keeps its tap area off the last pill's ⋯,
           // whose own reaches 1px past its pill.
@@ -122,12 +139,15 @@ function DockPill({
   label,
   active,
   withMenu,
+  block,
 }: {
   sessionId: string
   terminal: TerminalView
   label: string
   active: boolean
   withMenu: boolean
+  /** Why nothing here may change the agent, or null when it may. */
+  block: RowBlock | null
 }) {
   const { setNodeRef, style, listeners, isDragging } = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
@@ -198,7 +218,18 @@ function DockPill({
               {/* This terminal's own actions only: the input rows and the editor
                   live in the pane's top menu. Neutral, like every destructive
                   item; the confirm is the danger signal. */}
-              <DropdownMenuItem onClick={() => openDeleteTerminal(terminal.id)}>
+              {block !== null ? (
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="max-w-60 whitespace-normal">
+                    {agentChangeBlockReason(block)}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                </DropdownMenuGroup>
+              ) : null}
+              <DropdownMenuItem
+                disabled={block !== null}
+                onClick={() => openDeleteTerminal(terminal.id)}
+              >
                 <X />
                 Close terminal…
               </DropdownMenuItem>

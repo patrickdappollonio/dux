@@ -31,8 +31,10 @@ import {
 import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
 import { usePaneInputGroup } from "@/lib/paneInputGroup"
 import {
+  agentRowKey,
   paneCoverOwnedFor,
   resetPaneCovers,
+  rowBlockFor,
   usePaneCoverKnown,
 } from "@/lib/paneCover"
 
@@ -381,7 +383,18 @@ class FitStub {
 class FakePtySocket {
   static instances: FakePtySocket[] = []
   url: string
-  connect = vi.fn()
+  // The first connect answers with the handshake an older server sends, which
+  // names no owner, so a foregrounded pane drives as soon as it mounts. A pane
+  // drives only once the server has answered, and most tests here are about a
+  // pane that drives; one about the time before the handshake turns this off.
+  static autoHandshake = true
+  private handshook = false
+  connect = vi.fn(() => {
+    if (FakePtySocket.autoHandshake && !this.handshook) {
+      this.handshook = true
+      this.onConnected("conn-self")
+    }
+  })
   close = vi.fn()
   // The pane's teardown DISPOSES rather than closes: a socket whose pane is
   // gone must lose its wake listeners too.
@@ -652,6 +665,7 @@ function last(): FakePtySocket {
 beforeEach(() => {
   resetComposeDrafts()
   FakePtySocket.instances = []
+  FakePtySocket.autoHandshake = true
   TermStub.instances = []
   FitStub.fits = 0
   FitStub.nextDims = null
@@ -4975,6 +4989,7 @@ describe("TerminalPane and theater mode", () => {
     // real verdict is not a demotion. Treating it as one made a shared theater
     // link, opened while another device drives, enter theater and immediately
     // leave it with the pane's memory wiped.
+    FakePtySocket.autoHandshake = false
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => last().onConnected("conn-self", "conn-other"))
     expect(screen.getByText("Active on another device")).toBeTruthy()
@@ -5215,9 +5230,11 @@ describe("TerminalPane publishes its cover verdict", () => {
     }
   }
 
-  it("has published a card cover before anything is painted", () => {
-    // A backgrounded pane never guesses it owns the pty, so the card is there
-    // on the very first commit and the shell must see it on that one.
+  it("has published the card cover by the time the card is painted", () => {
+    // A backgrounded pane's handshake makes it a watcher, and the commit that
+    // first shows the card is the one the shell must see it on. Before the
+    // handshake the pane shows no card, and the shell sees none.
+    FakePtySocket.autoHandshake = false
     const commits: boolean[] = []
     hidden(() =>
       render(
@@ -5227,8 +5244,11 @@ describe("TerminalPane publishes its cover verdict", () => {
         </>,
       ),
     )
+    expect(screen.queryByText(/Active on|Running in the background/)).toBeNull()
+    expect(commits).not.toContain(true)
+    hidden(() => act(() => last().onConnected("conn-self")))
     expect(screen.getByText(/Active on|Running in the background/)).toBeTruthy()
-    expect(commits[0]).toBe(true)
+    expect(paneCoverOwnedFor("s1")).toBe(true)
   })
 
   it("says the take-over card owns the pane, under the pane's own id", () => {
@@ -5970,6 +5990,7 @@ describe("TerminalStack with two parts", () => {
       pointerStub = stubCoarsePointer(true)
       // Mounted while the page was hidden, both parts guess another device
       // drives the row; only the agent's has heard the server since.
+      FakePtySocket.autoHandshake = false
       const visibility = (value: string) =>
         Object.defineProperty(document, "visibilityState", { value, configurable: true })
       visibility("hidden")
@@ -6239,5 +6260,150 @@ describe("a phone stack under the soft keyboard", () => {
     expect(fitted.filter((t) => t === agentTerm)).toHaveLength(1)
     expect(agentPty.sendResize).toHaveBeenCalledTimes(1)
     expect(agentPty.sendResize).toHaveBeenCalledWith(18, 80)
+  })
+})
+
+// One driver per row, and a page that does not drive never believes it does:
+// while the server has not said, a pane offers no input and no card, and any
+// foreign owner it hears, on any socket, demotes it at once.
+describe("TerminalPane knows whether it drives before it acts on it", () => {
+  let pointerStub: MatchMediaStub | null = null
+  beforeEach(() => {
+    pointerStub = stubCoarsePointer(true)
+  })
+  afterEach(() => {
+    pointerStub?.restore()
+    pointerStub = null
+    resetPaneCovers()
+  })
+  const row = agentRowKey("s1")
+  const message = () => screen.queryByRole("textbox", { name: "Message" })
+  const takeOver = () => screen.queryByText("Take over")
+  const ledger = async () => (await import("@/lib/store")).getSnapshot().ptyOwnership["s1"]
+  const spineNames = (owner: string | undefined) => {
+    const tab = mockState.spine!.sessions[0].tabs[0] as AgentTabView & { input_owner?: string }
+    tab.input_owner = owner
+    mockState = { ...mockState }
+  }
+
+  it("steps down at once when another device takes over while its socket reconnects", async () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).not.toBeNull()
+    act(() => last().onReconnecting())
+    act(() => notifyPtyOwner("s1", "conn-other", 7, undefined))
+    expect(message()).toBeNull()
+    expect(takeOver()).not.toBeNull()
+    expect(await ledger()).toBe("elsewhere")
+    expect(rowBlockFor(row)).toBe("other")
+  })
+
+  it("steps down at once when only the spine says another device drives, while its socket reconnects", async () => {
+    const { rerender } = render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).not.toBeNull()
+    act(() => last().onReconnecting())
+    spineNames("conn-other")
+    rerender(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).toBeNull()
+    expect(takeOver()).not.toBeNull()
+    expect(await ledger()).toBe("elsewhere")
+    expect(rowBlockFor(row)).toBe("other")
+  })
+
+  it("never drives a row the spine says another device drives before its handshake", async () => {
+    FakePtySocket.autoHandshake = false
+    spineNames("conn-other")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).toBeNull()
+    expect(await ledger()).not.toBe("mine")
+    expect(rowBlockFor(row)).toBe("pending")
+    act(() => last().onConnected("conn-self", "conn-other"))
+    expect(message()).toBeNull()
+    expect(takeOver()).not.toBeNull()
+  })
+
+  it("withholds input when another device takes the pty before its handshake", async () => {
+    FakePtySocket.autoHandshake = false
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).toBeNull()
+    act(() => notifyPtyOwner("s1", "conn-other", 5, undefined))
+    expect(message()).toBeNull()
+    expect(takeOver()).not.toBeNull()
+    expect(await ledger()).toBe("elsewhere")
+    // The handshake was snapshotted before that event, so the event stands.
+    act(() => last().onConnected("conn-self", null, 4))
+    expect(message()).toBeNull()
+    expect(takeOver()).not.toBeNull()
+  })
+
+  it("shows no card and offers no input while it has not heard the server", async () => {
+    FakePtySocket.autoHandshake = false
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(message()).toBeNull()
+    expect(takeOver()).toBeNull()
+    expect(await ledger()).toBeUndefined()
+    act(() => last().onConnected("conn-self", null))
+    expect(message()).not.toBeNull()
+    expect(await ledger()).toBe("mine")
+  })
+
+  it("keeps the row's changes out of reach under the card of a row nobody drives", () => {
+    FakePtySocket.autoHandshake = false
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true })
+    try {
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      act(() => last().onConnected("conn-self", null))
+    } finally {
+      Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true })
+    }
+    expect(screen.getByText("Running in the background")).toBeTruthy()
+    expect(rowBlockFor(row)).toBe("nobody")
+  })
+
+  // A reload of the page that drives: the spine it loaded still names the page
+  // it replaced, which it cannot recognise as itself.
+  it("shows no card on a reload whose spine still names the page it replaced", () => {
+    FakePtySocket.autoHandshake = false
+    spineNames("previous-page")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    expect(takeOver()).toBeNull()
+    expect(message()).toBeNull()
+    act(() => last().onOpen())
+    expect(takeOver()).toBeNull()
+    act(() => last().onConnected("seat-2", null))
+    expect(takeOver()).toBeNull()
+    expect(message()).not.toBeNull()
+  })
+
+  // A reload of the page that drives: the agent's part claims the row first,
+  // and the broadcast naming this page's driver id reaches the dock's part
+  // before the dock's own handshake.
+  it("shows no card on a reload whose other part claims the row first", () => {
+    FakePtySocket.autoHandshake = false
+    const agentPart = { kind: "agent" as const, id: "s1", sessionId: "s1", slot: "agent" }
+    const dockPart = {
+      kind: "terminal" as const,
+      id: "t1",
+      owner: { kind: "session" as const, sessionId: "s1" },
+      slot: "dock",
+    }
+    render(<TerminalStack parts={[agentPart, dockPart]} />)
+    const [agentPty, dockPty] = FakePtySocket.instances
+    expect(takeOver()).toBeNull()
+    act(() => {
+      agentPty.onOpen()
+      agentPty.onConnected("seat-1", null, 1)
+    })
+    expect(takeOver()).toBeNull()
+    act(() => {
+      notifyPtyOwner("s1", "seat-1", 2, undefined)
+      notifyPtyOwner("t1", "seat-1", 2, undefined)
+    })
+    expect(takeOver()).toBeNull()
+    act(() => dockPty.onOpen())
+    expect(takeOver()).toBeNull()
+    act(() => dockPty.onConnected("seat-1", null, 1))
+    expect(takeOver()).toBeNull()
+    expect(rowBlockFor(row)).toBeNull()
+    expect(message()).not.toBeNull()
   })
 })

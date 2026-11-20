@@ -305,13 +305,26 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
       expect(screen.queryByText(/active on another device/i)).toBeNull()
     })
 
-    it("gates every entry alike on a row nobody drives", async () => {
+    it("gates every entry under the card of a row nobody drives, and says so", async () => {
       const session = seedStoppedWithTerminal()
       registerPaneCover("t1", "card", { row, driver: "nobody" })
       await openMenu(session)
       for (const label of mutating) {
-        expect(itemFor(label).getAttribute("aria-disabled"), label).not.toBe("true")
+        expect(itemFor(label).getAttribute("aria-disabled"), label).toBe("true")
       }
+      expect(screen.getByText(/Nobody is driving this agent/)).toBeTruthy()
+      expect(screen.queryByText(/active on another device/i)).toBeNull()
+    })
+
+    it("gates every entry while the row's only pane is still waiting to hear who drives", async () => {
+      const session = seedStoppedWithTerminal()
+      ;(mockState as unknown as { spine: { terminals: { input_owner?: string }[] } }).spine.terminals[0].input_owner = undefined
+      registerPaneCover("t1", "spinner", { row, driver: "pending" })
+      await openMenu(session)
+      for (const label of mutating) {
+        expect(itemFor(label).getAttribute("aria-disabled"), label).toBe("true")
+      }
+      expect(screen.getByText(/still connecting to this agent/)).toBeTruthy()
     })
   })
 })

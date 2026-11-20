@@ -413,7 +413,7 @@ function TerminalPart(props: TerminalPartProps) {
     connectionLost,
     notePtyConn,
     handshakeSeen,
-    ownerHeard,
+    ownershipKnown,
     rowConfirmed,
     readRowConfirmed,
     takeOver,
@@ -446,15 +446,16 @@ function TerminalPart(props: TerminalPartProps) {
 
   // Losing ownership leaves theater and forgets the mode, on the TRANSITION only
   // and never before the handshake's first honest verdict (`theaterOwnershipStep`).
+  // A verdict pending again is not a loss, so it is no verdict to the step.
   const ownerWatchRef = useRef(theaterOwnershipWatchStart)
   useEffect(() => {
     const step = theaterOwnershipStep(ownerWatchRef.current, {
-      handshakeSeen,
+      handshakeSeen: handshakeSeen && ownershipKnown,
       isOwner,
     })
     ownerWatchRef.current = step.state
     if (step.lost) noteTheaterOwnershipLost(kind, id)
-  }, [handshakeSeen, isOwner, kind, id])
+  }, [handshakeSeen, ownershipKnown, isOwner, kind, id])
 
   // One PTY has one authoritative grid, the owner's. A diverged viewer heals by
   // re-attaching, never by resizing the PTY, which would be a silent steal.
@@ -757,6 +758,7 @@ function TerminalPart(props: TerminalPartProps) {
     offline,
     waitExpired: replayWaitExpired,
     isOwner,
+    verdictPending: !ownershipKnown,
     firstAttach: appliedEpoch === null,
     handoffGrace,
   })
@@ -772,9 +774,10 @@ function TerminalPart(props: TerminalPartProps) {
   // The window while the lazy chunk resolves remains, and costs nothing: no
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
-  const driver: PaneDriver =
-    !ownerHeard || connectionLost
-      ? null
+  const driver: PaneDriver = connectionLost
+    ? null
+    : !ownershipKnown
+      ? "pending"
       : isOwner
         ? "this"
         : ownerPresent

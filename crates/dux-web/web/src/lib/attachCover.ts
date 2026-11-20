@@ -20,6 +20,9 @@ export type AttachCoverInputs = {
   /// replay. Always false when the wait is configured to zero.
   waitExpired: boolean
   isOwner: boolean
+  /// The server has not said yet whether this page drives the pty: the pane
+  /// looks like it is attaching, never like the take-over card.
+  verdictPending?: boolean
   /// This pane may be on its way out: its socket failed moments ago, and a
   /// provider that exited cleanly hands its slot to a sibling and takes this
   /// pane with it. A terminal's socket also fails when the terminal is closed or
@@ -61,7 +64,7 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
   // A watcher's whole pane is the card, before and after the replay lands. It is
   // a statement about control rather than about pixels, so it does not wait for
   // a picture to cover.
-  if (!input.isOwner) return { kind: "card" }
+  if (!input.isOwner && !input.verdictPending) return { kind: "card" }
   // A socket that is not open has no screen coming either, even when the last
   // open's replay is still on xterm: the picture is frozen, which is the whole
   // point of the reconnect cue. So the cover is up for both reasons, and the wait
@@ -97,6 +100,9 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
   // The screen is on, but this pty has never printed anything: the provider is
   // still starting up. The oldest cover in the pane, and unrelated to attaching.
   if (!input.everReady) return { kind: "spinner", wording: "starting" }
+  // A screen with nobody yet saying whether this page drives it is still being
+  // attached to.
+  if (input.verdictPending) return { kind: "spinner", wording: "attaching" }
   return { kind: "none" }
 }
 

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
+import { agentRowKey, registerPaneCover, resetPaneCovers } from "@/lib/paneCover"
 import type { TerminalView } from "@/lib/types"
 import {
   fireAnimationIteration,
@@ -16,7 +17,11 @@ const createTerminalMock = vi.fn()
 // The real strip, with its props captured: a drag cannot run under jsdom (the
 // pure part of it is in SortableStrip.test.tsx), so the tests hand the strip
 // the drop its drag would have produced.
-let sortableProps: { ids: string[]; onReorder: (next: string[]) => void } | null = null
+let sortableProps: {
+  ids: string[]
+  onReorder: (next: string[]) => void
+  disabled?: boolean
+} | null = null
 vi.mock("@/components/SortableStrip", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/SortableStrip")>()
   return {
@@ -170,6 +175,36 @@ describe("DockStrip", () => {
 // the sidebar list and the agent tab strip. This guard is named by CLAUDE.md's
 // "Locked by the user" section. Do not edit, weaken or delete it, or change
 // what it pins, without the user's explicit request.
+// The dock's order and terminals are the agent's own, so they change only on a
+// device that drives the agent's row.
+describe("DockStrip on a row this device does not drive", () => {
+  afterEach(() => resetPaneCovers())
+
+  it.each(["other", "nobody", "pending"] as const)(
+    "disables the +, the reorder and every pill's actions while the row's answer is %s",
+    async (driver) => {
+      registerPaneCover("s1", driver === "pending" ? "spinner" : "card", {
+        row: agentRowKey("s1"),
+        driver,
+      })
+      render(strip([terminal("t1", 1), terminal("t2", 2)]))
+      expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", true)
+      expect(sortableProps?.disabled).toBe(true)
+      fireEvent.click(screen.getAllByLabelText("Terminal actions")[1])
+      const menu = within(await screen.findByRole("menu"))
+      const close = menu.getByText("Close terminal…").closest("[role='menuitem']")
+      expect(close?.getAttribute("aria-disabled")).toBe("true")
+    },
+  )
+
+  it("keeps all of it on a row this device drives", () => {
+    registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
+    render(strip([terminal("t1", 1), terminal("t2", 2)]))
+    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", false)
+    expect(sortableProps?.disabled).toBe(false)
+  })
+})
+
 describe("USER-LOCKED: working glyph bounces with the pulse and settles at rest (terminal dock strip)", () => {
   const LOCKED =
     'This is a user-locked decision recorded in CLAUDE.md "Locked by the user" ' +

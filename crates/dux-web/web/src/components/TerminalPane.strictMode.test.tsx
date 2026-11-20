@@ -44,6 +44,9 @@ class TermStub {
   parser = {
     registerOscHandler: () => ({ dispose: () => {} }),
   }
+  // The pane's relayout reads and writes the font here when the handshake makes
+  // it the driver.
+  options: Record<string, unknown> = {}
   constructor() {
     TermStub.instances.push(this)
   }
@@ -115,7 +118,18 @@ class FitStub {
 class FakePtySocket {
   static instances: FakePtySocket[] = []
   url: string
-  connect = vi.fn()
+  // The first connect answers with the handshake an older server sends, which
+  // names no owner, so a foregrounded pane drives as soon as it mounts. A pane
+  // drives only once the server has answered, and most tests here are about a
+  // pane that drives; one about the time before the handshake turns this off.
+  static autoHandshake = true
+  private handshook = false
+  connect = vi.fn(() => {
+    if (FakePtySocket.autoHandshake && !this.handshook) {
+      this.handshook = true
+      this.onConnected("42")
+    }
+  })
   close = vi.fn()
   dispose = vi.fn()
   sendResize = vi.fn(() => true)
@@ -290,6 +304,7 @@ const paneProps = { kind: "agent", id: "s1", sessionId: "s1" } as const
 
 beforeEach(() => {
   FakePtySocket.instances = []
+  FakePtySocket.autoHandshake = true
   TermStub.instances = []
   resetPaneMacroTargets()
   mockState = makeState()
