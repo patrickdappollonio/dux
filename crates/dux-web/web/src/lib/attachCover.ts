@@ -103,7 +103,7 @@ export function attachCover(input: AttachCoverInputs): AttachCover {
 /// Whether the cover speaks for the whole pane. A card or a box is full-pane and
 /// opaque, so the theater pill is withheld and the phone's top chrome comes back;
 /// the transparent spinner keeps both, because it flashes on short reconnects.
-export function coverOwnsThePane(cover: AttachCover): boolean {
+export function coverOwnsThePane(cover: Pick<AttachCover, "kind">): boolean {
   switch (cover.kind) {
     case "card":
     case "box":
@@ -112,6 +112,6 @@ export function coverOwnsThePane(cover: AttachCover): boolean {
     case "none":
       return false
     default:
-      return assertNever(cover)
+      return assertNever(cover.kind)
   }
 }

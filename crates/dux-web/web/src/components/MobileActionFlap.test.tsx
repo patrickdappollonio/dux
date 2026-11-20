@@ -64,6 +64,7 @@ const { MobileActionFlap } = await import("./MobileActionFlap")
 const { registerPaneInputGroup, resetPaneInputGroups } = await import(
   "@/lib/paneInputGroup"
 )
+const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function session(): SessionView {
   return {
@@ -147,6 +148,7 @@ beforeEach(() => {
   setAccessoryBarVisibilityMock.mockReset()
   switchPhonePartMock.mockReset()
   resetPaneInputGroups()
+  resetPaneCovers()
   mockState = makeState()
 })
 
@@ -606,6 +608,17 @@ describe("the agent/terminals switch in the docked flap", () => {
         expect(anim).toMatch(/^motion-(safe|reduce):/)
       }
     }
+  })
+
+  it.each([
+    ["the agent", undefined],
+    ["its terminals", dockTarget],
+  ])("is absent over %s while this device does not drive the row", (_part, on) => {
+    phone()
+    mockState = withTerminals([term("t1")])
+    registerPaneCover(on === undefined ? "s1" : "t1", "card")
+    flap(on)
+    expect(screen.queryByTestId("pane-part-switch")).toBeNull()
   })
 
   it("asks the store to flip the view", () => {

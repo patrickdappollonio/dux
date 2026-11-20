@@ -28,7 +28,11 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useTheaterFlight } from "@/hooks/use-theater-flight"
 import { useChromeGesture } from "@/hooks/use-theater"
-import { usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
+import {
+  usePaneCoverKnown,
+  usePaneCoverOwned,
+  useTakeoverCardUp,
+} from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
 import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
 import { readStackMemory } from "@/lib/stackMemory"
@@ -494,14 +498,17 @@ function AgentTerminalScreen({
   const projectName = spine?.projects.find(
     (project) => project.id === workspaceProjectId(session.workspace),
   )?.name
-  // Both strips show or neither, and only the shown part's is on screen.
+  // Both strips show or neither, and only the shown part's is on screen. Under
+  // the take-over card the dock's is not drawn, so nothing says the agent has
+  // terminals to a device that does not drive it.
+  const watching = useTakeoverCardUp(shownId)
   const strip = !model.stripsShown ? null : model.view === "agent" ? (
     <AgentTabsStrip
       session={session}
       activeTabId={model.tabId}
       maxTabs={bootstrap?.agent_tabs_max}
     />
-  ) : (
+  ) : watching ? null : (
     <DockStrip
       sessionId={session.id}
       terminals={model.dock}

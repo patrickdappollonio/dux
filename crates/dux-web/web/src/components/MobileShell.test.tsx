@@ -660,7 +660,7 @@ describe("MobileShell in theater", () => {
   }
 
   it("brings the header back while a full-pane cover owns the pane", () => {
-    registerPaneCover("s1", true)
+    registerPaneCover("s1", "box")
     mockState = coveredAgentState()
     render(<MobileShell />)
     expect(screen.getByLabelText("Back")).toBeTruthy()
@@ -673,7 +673,7 @@ describe("MobileShell in theater", () => {
     // The pane publishes from a layout effect so the verdict is in the registry
     // before anything is painted. A shell that learned it a commit later
     // flashed the theater layout over a card nobody could walk away from.
-    registerPaneCover("s1", true)
+    registerPaneCover("s1", "box")
     mockState = coveredAgentState()
     const commits: boolean[] = []
     render(
@@ -690,7 +690,7 @@ describe("MobileShell in theater", () => {
   })
 
   it("resumes theater once the cover goes, with no navigation", () => {
-    const retire = registerPaneCover("s1", true)
+    const retire = registerPaneCover("s1", "box")
     mockState = coveredAgentState()
     render(<MobileShell />)
     act(() => retire())
@@ -706,7 +706,7 @@ describe("MobileShell in theater", () => {
   it("keeps the header away under the transparent spinner cover", () => {
     // A spinner flashes on every short reconnect, so it is deliberately not a
     // cover that owns the pane: theater stands.
-    registerPaneCover("s1", false)
+    registerPaneCover("s1", "spinner")
     mockState = coveredAgentState()
     render(<MobileShell />)
     expect(screen.queryByLabelText("Back")).toBeNull()
@@ -749,7 +749,7 @@ describe("MobileShell in theater", () => {
   }
 
   it("brings a project terminal's header back under its own cover", () => {
-    registerPaneCover("pt-1", true)
+    registerPaneCover("pt-1", "box")
     mockState = coveredTerminalState()
     render(<MobileShell />)
     expect(screen.getByLabelText("Back")).toBeTruthy()
@@ -757,7 +757,7 @@ describe("MobileShell in theater", () => {
   })
 
   it("resumes theater on a terminal screen once its cover goes", () => {
-    const retire = registerPaneCover("pt-1", true)
+    const retire = registerPaneCover("pt-1", "box")
     mockState = coveredTerminalState()
     render(<MobileShell />)
     act(() => retire())
@@ -769,7 +769,7 @@ describe("MobileShell in theater", () => {
   })
 
   it("keeps a terminal screen in theater under the spinner cover", () => {
-    registerPaneCover("pt-1", false)
+    registerPaneCover("pt-1", "spinner")
     mockState = coveredTerminalState()
     render(<MobileShell />)
     expect(screen.queryByLabelText("Back")).toBeNull()
@@ -2005,6 +2005,14 @@ describe("MobileShell one part of an agent at a time", () => {
     expect(screen.queryByLabelText("New tab")).toBeNull()
     // A phone has no layout to change.
     expect(screen.queryByLabelText("Maximize terminal")).toBeNull()
+  })
+
+  it("draws no dock strip over the take-over card a watcher gets", () => {
+    registerPaneCover("t1", "card")
+    mockState = partsState(dock, { terminals: ["t1", "t2"] })
+    render(<MobileShell />)
+    expect(screen.queryByTestId("dock-strip")).toBeNull()
+    expect(screen.queryByTestId("pane-part-switch")).toBeNull()
   })
 
   it("draws no strip for a lone tab beside a lone terminal, and no floating +", () => {

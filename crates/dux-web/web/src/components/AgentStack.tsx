@@ -39,6 +39,7 @@ import {
   setStackLayout,
   settleStackOpening,
 } from "@/lib/store"
+import { useTakeoverCardUp } from "@/lib/paneCover"
 import { cn } from "@/lib/utils"
 import type { SessionView } from "@/lib/types"
 
@@ -86,6 +87,11 @@ export function AgentStack({
 }) {
   const { sessionId, layout, dock, parts: on } = model
   const hasDock = dock.length > 0
+  // A device that does not drive the row sees the take-over card alone, so
+  // nothing of the dock is drawn: its strip, its layout controls and the
+  // divider, which is painted above the card. The parts stay mounted where they
+  // are, so taking over brings the stack back exactly as it was.
+  const watching = useTakeoverCardUp(model.typingPtyId)
 
   // Record how this opening laid the stack out, so it holds while the agent is
   // worked in. A layout effect, so the frame painted is already the one held.
@@ -121,7 +127,7 @@ export function AgentStack({
     <AgentTabsStrip session={session} activeTabId={model.tabId} maxTabs={maxTabs} />
   ) : null
   const dockHeader =
-    hasDock && model.stripsShown ? (
+    hasDock && model.stripsShown && !watching ? (
       <DockStrip
         sessionId={sessionId}
         terminals={dock}
@@ -134,7 +140,7 @@ export function AgentStack({
 
   const overlay = theater ? (
     <TheaterPill target={target} session={session} />
-  ) : model.stripsShown || !hasDock ? null : (
+  ) : model.stripsShown || !hasDock || watching ? null : (
     <StackLayoutPill
       session={session}
       layout={layout}
@@ -190,11 +196,15 @@ export function AgentStack({
           overlay={overlay}
           typingTarget={model.typingPtyId}
           onChooseTypingTarget={(ptyId) => chooseStackPart(sessionId, ptyId)}
+          // A stopped agent's stack is its dock terminal alone, under the
+          // agent's band or short card, and the card is the row's.
+          cardOverStack={hasDock}
           arrange={(rendered, typingTarget) => (
             <StackSplit
               layout={layout}
               hasDock={hasDock}
               theater={theater}
+              divider={!theater && !watching}
               splitPercent={splitPercent}
               onSplitPercent={setSplitPercent}
               onFold={(fold) => setStackLayout(sessionId, fold)}
@@ -243,6 +253,7 @@ function StackSplit({
   layout,
   hasDock,
   theater,
+  divider,
   splitPercent,
   onSplitPercent,
   onFold,
@@ -260,6 +271,7 @@ function StackSplit({
   layout: ComputerLayout
   hasDock: boolean
   theater: boolean
+  divider: boolean
   splitPercent: number
   onSplitPercent: (percent: number) => void
   onFold: (layout: ComputerLayout) => void
@@ -354,9 +366,10 @@ function StackSplit({
         </ResizablePanel>
         {hasDock ? (
           <>
-            {/* Theater draws no strip, and the divider is the dock's strip
-              * while the strips are hidden. */}
-            {theater ? null : <DockDivider disabled={!split} />}
+            {/* Theater draws no strip, the take-over card none of the dock,
+              * and the divider is the dock's strip while the strips are
+              * hidden. */}
+            {divider ? <DockDivider disabled={!split} /> : null}
             <ResizablePanel
               id={DOCK_PANEL}
               defaultSize={`${100 - sizes.agent}%`}

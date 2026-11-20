@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { changesSummary } from "@/lib/changesSummary"
 import { phoneSwitch, type PartCue, type PhoneView } from "@/lib/layoutModel"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useTakeoverCardUp } from "@/lib/paneCover"
 import { keysToggleLabel, usePaneInputGroup } from "@/lib/paneInputGroup"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { armTheaterToggleFocus } from "@/hooks/use-theater"
@@ -237,7 +238,8 @@ const PART_CUE_WORDS: Record<PartCue, string> = {
 // A phone shows an agent or its terminals, never both, and this is how it moves
 // between them: the other part's icon, with the terminal count over the agent.
 // A computer lays the two out together and has no switch. Present only on an
-// agent with a terminal to switch to.
+// agent with a terminal to switch to, and only on a row this device drives:
+// under the take-over card, nothing may say the agent has terminals.
 function PartSwitchButton({
   target,
   sessionId,
@@ -247,8 +249,11 @@ function PartSwitchButton({
 }) {
   const isMobile = useIsMobile()
   const { spine } = useDux()
+  const watching = useTakeoverCardUp(
+    target.kind === "agent" ? target.tabId : target.terminalId,
+  )
   const session = spine?.sessions.find((s) => s.id === sessionId)
-  if (!isMobile || session === undefined) return null
+  if (!isMobile || watching || session === undefined) return null
   const terminals = (spine?.terminals ?? []).filter(
     (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
   )

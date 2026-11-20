@@ -5873,6 +5873,17 @@ describe("TerminalStack with two parts", () => {
     expect(area.contains(screen.getByText("Take over"))).toBe(true)
   })
 
+  it("covers the whole stack with the card of a lone dock part when asked to", () => {
+    // A stopped agent's stack is its dock terminal alone, under the agent's
+    // band or short card; the card is the row's and covers those too.
+    render(<TerminalStack parts={[dock]} cardOverStack />)
+    act(() => last().onConnected("seat-1", "seat-other"))
+    expect(screen.getAllByText("Take over")).toHaveLength(1)
+    expect(screen.getByTestId("stack-cover-area").contains(screen.getByText("Take over"))).toBe(
+      true,
+    )
+  })
+
   it("takes a part whose own socket was lost out of the overlay's bounds", async () => {
     // The dock part's box sits below the agent's in the stack's box.
     const rects: Record<string, Partial<DOMRect>> = {

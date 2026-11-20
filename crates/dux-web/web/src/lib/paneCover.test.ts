@@ -8,8 +8,8 @@ afterEach(() => resetPaneCovers())
 
 describe("the pane cover registry", () => {
   it("answers per pty id, and reads uncovered for one nobody published", () => {
-    registerPaneCover("tab-a", true)
-    registerPaneCover("tab-b", false)
+    registerPaneCover("tab-a", "box")
+    registerPaneCover("tab-b", "spinner")
     expect(renderHook(() => usePaneCoverOwned("tab-a")).result.current).toBe(true)
     expect(renderHook(() => usePaneCoverOwned("tab-b")).result.current).toBe(false)
     expect(renderHook(() => usePaneCoverOwned("tab-c")).result.current).toBe(false)
@@ -17,11 +17,11 @@ describe("the pane cover registry", () => {
   })
 
   it("re-renders a reader when the pane's verdict changes", () => {
-    const retire = registerPaneCover("tab-a", false)
+    const retire = registerPaneCover("tab-a", "spinner")
     const { result, rerender } = renderHook(() => usePaneCoverOwned("tab-a"))
     expect(result.current).toBe(false)
     retire()
-    registerPaneCover("tab-a", true)
+    registerPaneCover("tab-a", "box")
     rerender()
     expect(result.current).toBe(true)
   })
@@ -31,8 +31,8 @@ describe("the pane cover registry", () => {
     // retirement must not clear the entry the successor has already written.
     // Same verdict on both sides deliberately: a registration is told apart by
     // its own identity, never by the value it happens to carry.
-    const stale = registerPaneCover("tab-a", true)
-    registerPaneCover("tab-a", true)
+    const stale = registerPaneCover("tab-a", "box")
+    registerPaneCover("tab-a", "box")
     stale()
     expect(renderHook(() => usePaneCoverOwned("tab-a")).result.current).toBe(true)
   })

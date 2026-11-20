@@ -112,12 +112,16 @@ export function TerminalStack({
   arrange,
   typingTarget: chosenByCaller,
   onChooseTypingTarget,
+  cardOverStack = false,
 }: {
   parts: StackPartSpec[]
   overlay?: ReactNode
   arrange?: StackArrange
   typingTarget?: string | null
   onChooseTypingTarget?: (ptyId: string) => void
+  /** The take-over card covers the whole stack even with one part, because the
+   * caller lays out more around that part than the part's own box. */
+  cardOverStack?: boolean
 }) {
   const [chosenHere, setChosenHere] = useState<string | null>(null)
   const controlled = onChooseTypingTarget !== undefined
@@ -161,7 +165,7 @@ export function TerminalStack({
             * over every part with one button, painted here by the typing
             * target's part. Above the parts, below the overlay layer, which a
             * card withholds anyway. */}
-          {parts.length > 1 ? (
+          {parts.length > 1 || cardOverStack ? (
             <div
               ref={setCoverArea}
               data-testid="stack-cover-area"
@@ -681,15 +685,17 @@ function TerminalPart(props: TerminalPartProps) {
     handoffGrace,
   })
 
-  // Publish whether the cover speaks for the whole pane, under this pane's pty
-  // id, for the chrome outside it. The phone's header comes back on this while
-  // theater stays on, since the pill it would otherwise offer is withheld here.
+  // Publish which cover is over the pane, under this pane's pty id, for the
+  // chrome outside it. The phone's header comes back under a cover that owns the
+  // pane while theater stays on, since the pill it would otherwise offer is
+  // withheld here, and the agent's stack drops its terminal chrome under the
+  // take-over card.
   // A layout effect, so a mounted pane's true verdict is in the registry before
   // the first paint and the shell never paints one frame of the wrong chrome.
   // The window while the lazy chunk resolves remains, and costs nothing: no
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
-  useLayoutEffect(() => registerPaneCover(id, coverOwnsPane), [id, coverOwnsPane])
+  useLayoutEffect(() => registerPaneCover(id, cover.kind), [id, cover.kind])
 
   // Where a picked macro goes, published under this pane's pty id for the Macros
   // controls outside it. Only the owner gets a way to write: under the take-over

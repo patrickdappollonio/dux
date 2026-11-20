@@ -166,7 +166,7 @@ describe("the computer layout under a full-pane cover", () => {
   })
 
   it("brings the top bar back, with the Theater button in it", () => {
-    registerPaneCover("s1", true)
+    registerPaneCover("s1", "box")
     render(<DesktopShell />)
     expect(theaterButton()).toBeTruthy()
   })
@@ -174,20 +174,20 @@ describe("the computer layout under a full-pane cover", () => {
   it("leaves the side panels where the mode put them", () => {
     // Only the way out comes back. The sidebar and the Changes pane are not a
     // way out of anything, and returning them would undo the mode.
-    registerPaneCover("s1", true)
+    registerPaneCover("s1", "box")
     render(<DesktopShell />)
     expect(screen.queryByTestId("app-sidebar")).toBeNull()
     expect(screen.queryByTestId("changed-files")).toBeNull()
   })
 
   it("keeps the bar away under the transparent spinner cover", () => {
-    registerPaneCover("s1", false)
+    registerPaneCover("s1", "spinner")
     render(<DesktopShell />)
     expect(theaterButton()).toBeNull()
   })
 
   it("reads the cover under the SELECTED pane and not some other one", () => {
-    registerPaneCover("t2", true)
+    registerPaneCover("t2", "box")
     render(<DesktopShell />)
     expect(theaterButton()).toBeNull()
   })
@@ -211,12 +211,12 @@ describe("the computer layout under a full-pane cover", () => {
     } as unknown as DuxState
     // A box lost on the agent's socket, folded away under the terminal, is
     // not the screen anybody is looking at.
-    const agentCover = registerPaneCover("s1", true)
+    const agentCover = registerPaneCover("s1", "box")
     render(<DesktopShell />)
     expect(theaterButton()).toBeNull()
     agentCover()
     cleanup()
-    registerPaneCover("t1", true)
+    registerPaneCover("t1", "box")
     render(<DesktopShell />)
     expect(theaterButton()).toBeTruthy()
   })
@@ -235,13 +235,13 @@ describe("the refit the returning bar costs", () => {
     // The pane's own first verdict is initial state, whatever it says.
     let retire = () => {}
     act(() => {
-      retire = registerPaneCover("s1", false)
+      retire = registerPaneCover("s1", "spinner")
     })
     expect(pane.hold).not.toHaveBeenCalled()
 
     act(() => {
       retire()
-      retire = registerPaneCover("s1", true)
+      retire = registerPaneCover("s1", "box")
     })
     expect(pane.hold).toHaveBeenCalledTimes(1)
     act(() => {
@@ -254,7 +254,7 @@ describe("the refit the returning bar costs", () => {
     // refit then.
     act(() => {
       retire()
-      retire = registerPaneCover("s1", false)
+      retire = registerPaneCover("s1", "spinner")
     })
     expect(pane.hold).toHaveBeenCalledTimes(2)
     act(() => {

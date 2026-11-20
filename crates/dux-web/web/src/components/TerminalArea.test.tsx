@@ -2,8 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useEffect } from "react"
 import { fireAnimationStart } from "@/test/animationEvents"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import { registerPaneCover, resetPaneCovers } from "@/lib/paneCover"
 import type { DuxState } from "@/lib/store"
 
 // Override only `useDux` (keeping every other real store export intact), plus
@@ -306,6 +307,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetPaneCovers()
   vi.unstubAllGlobals()
 })
 
@@ -1037,6 +1039,46 @@ describe("TerminalArea dock", () => {
     expect(screen.getAllByRole("tab")[0]).toBe(pill)
     expect(pill.querySelector("[data-slot='working-glyph']")).toBe(frame)
     expect(frame.getAttribute("class")).toContain("motion-safe:animate-working-bounce")
+  })
+
+  // A device that does not drive the row sees the take-over card and nothing
+  // that says the agent has terminals: the divider and its grip are painted
+  // above the card, and the strip and the pill would be in the tab order under
+  // it.
+  it.each([
+    ["the strips", true],
+    ["the layout pill", false],
+  ] as const)(
+    "shows a watcher only the take-over card, with %s, and gives the stack back as it was",
+    async (_chrome, alwaysShow) => {
+      mockState = dockState({ layout: "split", alwaysShow })
+      render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      let retire = () => {}
+      act(() => {
+        retire = registerPaneCover("s1", "card")
+      })
+      expect(screen.queryByRole("separator")).toBeNull()
+      expect(screen.queryByTestId("dock-strip")).toBeNull()
+      expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
+
+      act(() => retire())
+      expect(screen.getByRole("separator")).toBeTruthy()
+      expect(
+        screen.queryByTestId(alwaysShow ? "dock-strip" : "stack-layout-pill"),
+      ).toBeTruthy()
+      expect([onScreen("agent"), onScreen("dock")]).toEqual([true, true])
+      expect(setStackLayoutMock).not.toHaveBeenCalled()
+      expect(partMounts.sort()).toEqual(["s1", "t1"])
+    },
+  )
+
+  it("keeps the stack as it is under a Reconnect box on a row this device drives", async () => {
+    mockState = dockState({ layout: "split" })
+    render(<TerminalArea />)
+    await screen.findByTestId("stack-agent-box")
+    act(() => void registerPaneCover("s1", "box"))
+    expect(screen.getByRole("separator")).toBeTruthy()
   })
 
   describe("a stopped agent with a running terminal", () => {
