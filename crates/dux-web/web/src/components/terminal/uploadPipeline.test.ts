@@ -15,9 +15,10 @@ import { useUploadPipeline } from "./uploadPipeline"
 // that are about sequencing rather than about the DOM: which sink is chosen,
 // when its availability is re-asked, what the request carries, and that a batch
 // always ends in exactly one report.
-const { uploads, toasts } = vi.hoisted(() => ({
+const { uploads, toasts, attachers } = vi.hoisted(() => ({
   uploads: [] as { name: string; opts: { pty: string; conn: string | null } }[],
-  toasts: [] as { kind: string; id: string | undefined }[],
+  toasts: [] as { kind: string; id: string | undefined; text: string }[],
+  attachers: new Set<string>(),
 }))
 vi.mock("@/lib/fileDropApi", () => ({
   FileDropApiError: class extends Error {
@@ -37,15 +38,18 @@ vi.mock("@/lib/fileDropApi", () => ({
   },
 }))
 vi.mock("@/lib/notify", () => ({
-  notify: (_tone: string, _m: string, o?: { id?: string }) =>
-    toasts.push({ kind: "final", id: o?.id }),
-  notifyBusy: (_m: string, o?: { id?: string }) =>
-    toasts.push({ kind: "busy", id: o?.id }),
-  notifyError: (_m: string, o?: { id?: string }) =>
-    toasts.push({ kind: "error", id: o?.id }),
+  notify: (_tone: string, m: unknown, o?: { id?: string }) =>
+    toasts.push({ kind: "final", id: o?.id, text: JSON.stringify(m) }),
+  notifyBusy: (m: unknown, o?: { id?: string }) =>
+    toasts.push({ kind: "busy", id: o?.id, text: JSON.stringify(m) }),
+  notifyError: (m: unknown, o?: { id?: string }) =>
+    toasts.push({ kind: "error", id: o?.id, text: JSON.stringify(m) }),
 }))
 vi.mock("@/lib/attachRegistry", () => ({
-  registerAttachCapability: () => () => {},
+  registerAttachCapability: (id: string) => {
+    attachers.add(id)
+    return () => attachers.delete(id)
+  },
 }))
 
 class TermFake {
@@ -131,6 +135,7 @@ function setup(
 beforeEach(() => {
   uploads.length = 0
   toasts.length = 0
+  attachers.clear()
 })
 afterEach(() => {
   document.body.innerHTML = ""
@@ -307,5 +312,96 @@ describe("a drop made while this page's take-over of the row is in flight", () =
       await drop
     })
     expect(term.pasted).toHaveLength(1)
+  })
+
+  it("waits once for the whole drop, says another device took the row back, and leaves no timer", async () => {
+    vi.useFakeTimers()
+    try {
+      const flight = await import("@/lib/takeoverFlight")
+      const { registerPaneCover } = await import("@/lib/paneCover")
+      const landed = flight.beginTakeoverFlight("agent:s1")
+      const { view, term } = setup({ owner: false })
+      let done = false
+      const drop = view.result.current
+        .runUpload([file("a.txt"), file("b.txt")], view.result.current.activeUploadSink())
+        .then(() => {
+          done = true
+        })
+      landed(true)
+      const retire = registerPaneCover("p1", "card", { row: "agent:s1", driver: "other" })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(flight.TAKEOVER_WAIT_MS + 100)
+      })
+      expect(done).toBe(true)
+      await drop
+      retire()
+      expect(term.pasted).toEqual([])
+      const report = toasts.filter((t) => t.kind === "final").at(-1)?.text ?? ""
+      expect(report).toContain("another device took over input")
+      expect(report).not.toContain("had not reached this pane")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops waiting when the pane goes away", async () => {
+    vi.useFakeTimers()
+    try {
+      const flight = await import("@/lib/takeoverFlight")
+      const landed = flight.beginTakeoverFlight("agent:s1")
+      const { view } = setup({ owner: false })
+      const drop = view.result.current.runUpload(
+        [file("a.txt")],
+        view.result.current.activeUploadSink(),
+      )
+      landed(true)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100)
+      })
+      view.unmount()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+        await drop
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe("a paste or a pick made while this page's take-over of the row is in flight", () => {
+  it("takes an image paste on a pane still under its card", async () => {
+    const flight = await import("@/lib/takeoverFlight")
+    const landed = flight.beginTakeoverFlight("agent:s1")
+    const { view, setOwner } = setup({ owner: false })
+    const image = new File([new Uint8Array([1])], "clip.png", { type: "image/png" })
+    const event = {
+      clipboardData: {
+        items: [{ kind: "file", type: "image/png", getAsFile: () => image }],
+        types: ["image/png"],
+        getData: () => "",
+      },
+      preventDefault: () => {},
+      stopPropagation: () => {},
+    } as unknown as ClipboardEvent
+    act(() => view.result.current.onClipboardPaste(event))
+    expect(toasts.filter((t) => t.kind === "error")).toEqual([])
+    landed(true)
+    setOwner(true)
+    await vi.waitFor(() => expect(uploads.map((u) => u.name)).toEqual(["clip.png"]))
+  })
+
+  it("offers the picker on a pane still under its card", async () => {
+    const flight = await import("@/lib/takeoverFlight")
+    setup({ owner: false })
+    expect(attachers.has("p1")).toBe(false)
+    let landed: (ok: boolean) => void = () => {}
+    act(() => {
+      landed = flight.beginTakeoverFlight("agent:s1")
+    })
+    expect(attachers.has("p1")).toBe(true)
+    act(() => landed(false))
+    expect(attachers.has("p1")).toBe(false)
   })
 })

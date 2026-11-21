@@ -8,12 +8,24 @@
 // long. The pane that pressed opens the flight and settles it on the server's
 // word (`components/terminal/ownership.ts`).
 
+import { useSyncExternalStore } from "react"
+
 /// How long a change waits for a take-over before it is given up on.
 export const TAKEOVER_WAIT_MS = 4000
 
 type Outcome = "landed" | "failed"
 
 const flights = new Map<string, Promise<Outcome>>()
+const listeners = new Set<() => void>()
+
+function changed(): void {
+  for (const listener of [...listeners]) listener()
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => listeners.delete(listener)
+}
 
 /// Open a flight for `row` (a `paneCover` row key) and return what settles it:
 /// true once the server named this page the row's driver, false when the
@@ -25,8 +37,12 @@ export function beginTakeoverFlight(row: string): (landed: boolean) => void {
     settle = resolve
   })
   flights.set(row, flight)
+  changed()
   return (landed) => {
-    if (flights.get(row) === flight) flights.delete(row)
+    if (flights.get(row) === flight) {
+      flights.delete(row)
+      changed()
+    }
     settle(landed ? "landed" : "failed")
   }
 }
@@ -60,6 +76,11 @@ function rowsOfRequest(path: string): string[] {
 /// Is a take-over this page pressed on `row` still waiting for the server?
 export function takeoverInFlight(row: string): boolean {
   return flights.has(row)
+}
+
+/// The same answer, re-rendering when it changes.
+export function useTakeoverInFlight(row: string): boolean {
+  return useSyncExternalStore(subscribe, () => flights.has(row))
 }
 
 /// Wait out a take-over in flight on a row `path` would change. Null, at once,

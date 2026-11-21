@@ -28,7 +28,12 @@ import {
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { isRowDriven } from "@/lib/rowDriven"
-import { TAKEOVER_WAIT_MS, takeoverInFlight } from "@/lib/takeoverFlight"
+import { rowBlockFor } from "@/lib/paneCover"
+import {
+  TAKEOVER_WAIT_MS,
+  takeoverInFlight,
+  useTakeoverInFlight,
+} from "@/lib/takeoverFlight"
 import { notify, notifyBusy, notifyError } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { registerAttachCapability } from "@/lib/attachRegistry"
@@ -85,7 +90,8 @@ export type UploadPipelineDeps = {
 }
 
 export type UploadPipeline = {
-  /// Run a batch: the drop gesture's own entry point.
+  /// Run a batch: the drop gesture's own entry point. Called at the gesture,
+  /// which is when it reads whether the gesture was made during a take-over.
   runUpload: (
     files: File[],
     sink: UploadSink,
@@ -125,6 +131,19 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   // afterwards. A one-shot LATCH rather than a lasting preference: it describes
   // one keystroke.
   const forcedTextPasteRef = useRef(false)
+  // Aborted when the pane goes, so a batch waiting for the pane to hear its
+  // take-over stops waiting with it.
+  const goneRef = useRef(new AbortController())
+  useEffect(() => {
+    const gone = new AbortController()
+    goneRef.current = gone
+    return () => gone.abort()
+  }, [])
+  const flying = useTakeoverInFlight(row)
+  /// Whether a gesture made now is made during this page's take-over of the
+  /// row: in flight, or landed but not yet heard by this pane. A pane that does
+  /// not drive takes a file only then, so not driving here means that.
+  const takingOverNow = () => takeoverInFlight(row) || !ownership.read()
 
   function terminalUploadSink(): UploadSink {
     return {
@@ -195,14 +214,15 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     files: File[],
     toastId: string,
     sink: UploadSink,
+    takingOver: boolean,
     pastedTextChars?: number,
   ) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
-    // Made while this page's take-over of the row was in flight: every upload
-    // waits for it, and a pane other than the one pressed may hear that it
-    // drives a moment after the claim has landed.
-    const takingOver = takeoverInFlight(row)
+    // Made during this page's take-over of the row: every upload waits for the
+    // claim, and a pane other than the one pressed may hear that it drives a
+    // moment after the claim has landed, which the whole batch waits for once.
+    const heard = takingOver ? untilOwner(ownership, goneRef.current.signal) : null
 
     for (const [i, file] of files.entries()) {
       // The drop overlay is already gone and an upload can wait a real amount
@@ -264,9 +284,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
 
       // Asked IMMEDIATELY BEFORE this delivery, not once at the start of the
       // drop: ownership can move and the socket can close between two files.
-      if (takingOver) await untilOwner(ownership)
+      if (heard !== null) await heard
       const unavailable =
-        takingOver && !ownership.read()
+        heard !== null && !ownership.read() && rowBlockFor(row) !== "other"
           ? "this device's take-over had not reached this pane yet"
           : sink.unavailable()
       if (unavailable !== null) {
@@ -342,10 +362,11 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     files: File[],
     sink: UploadSink,
     pastedTextChars?: number,
+    takingOver = takingOverNow(),
   ) {
     const toastId = nextFileDropToastId()
     try {
-      await handleUploadedFiles(files, toastId, sink, pastedTextChars)
+      await handleUploadedFiles(files, toastId, sink, takingOver, pastedTextChars)
     } catch (e) {
       notifyError(
         `The upload failed unexpectedly: ${e instanceof Error ? e.message : String(e)}`,
@@ -363,24 +384,27 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   /// about the moment of delivery. No `pastedTextChars`, which words the
   /// long-text paste toast and would describe a gesture that did not happen.
   function attachFromPicker(): void {
+    // Read at the press: the dialog can sit open past the take-over's end.
+    const takingOver = takingOverNow()
     void openFilePicker().then((files) => {
       if (files.length === 0) return
-      void runUpload(files, activeUploadSink())
+      void runUpload(files, activeUploadSink(), undefined, takingOver)
     })
   }
 
   // Published to the agent and terminal row menus while this pane is mounted
-  // and owns the input. Ownership is part of the registration rather than
-  // something the menu checks: a viewer's pane mounts completely, and an attach
-  // from one would strand every file as saved-but-not-sent.
+  // and owns the input, or while this page's take-over of its row is in flight,
+  // as a drop and a paste are taken. Ownership is part of the registration
+  // rather than something the menu checks: a viewer's pane mounts completely,
+  // and an attach from one would strand every file as saved-but-not-sent.
   useEffect(() => {
-    if (!(isOwner && fileDropEnabled)) return
+    if (!((isOwner || flying) && fileDropEnabled)) return
     return registerAttachCapability(id, attachFromPicker)
     // `attachFromPicker` is a component-body function reading only refs and
     // props, so a fresh identity every render says nothing new; listing it
     // would re-register on every keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, isOwner, fileDropEnabled])
+  }, [id, isOwner, flying, fileDropEnabled])
 
   // An image on the clipboard, pasted: the same journey as a drop.
   //
@@ -421,7 +445,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       e.clipboardData?.getData("text/plain") ?? "",
       {
         uploadsEnabled: live.current.fileDropEnabled,
-        isOwner: ownership.read(),
+        // A pane still under its card while this page's take-over of the row
+        // is in flight takes the paste, which waits for the claim as a drop does.
+        isOwner: ownership.read() || takeoverInFlight(row),
         forceText,
         // An AGENT gets the long-text threshold; a TERMINAL has none, and the
         // union is what makes that structural rather than a condition.
@@ -498,11 +524,22 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
 }
 
 /// Wait, at most as long as a change waits for a take-over, for this pane to
-/// hear that it drives its pty. The verdict is a channel with no subscription,
-/// so it is read again every 50ms.
-async function untilOwner(ownership: OwnershipVerdict): Promise<void> {
+/// hear that it drives its pty, or until `gone` aborts. The verdict is a
+/// channel with no subscription, so it is read again every 50ms.
+function untilOwner(ownership: OwnershipVerdict, gone: AbortSignal): Promise<void> {
   const deadline = Date.now() + TAKEOVER_WAIT_MS
-  while (!ownership.read() && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stop = () => {
+      clearTimeout(timer)
+      gone.removeEventListener("abort", stop)
+      resolve()
+    }
+    const check = () => {
+      if (ownership.read() || Date.now() >= deadline || gone.aborted) stop()
+      else timer = setTimeout(check, 50)
+    }
+    gone.addEventListener("abort", stop)
+    check()
+  })
 }
