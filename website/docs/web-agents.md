@@ -376,8 +376,10 @@ itself and a total.
 - **Force stop** on an agent's first row ends the agent and every tab it is running; on an
   extra tab it closes the tab; on a terminal it destroys the terminal.
 - **Force stop everything…** does the same to every agent and terminal in one go, except
-  the ones whose own **Force stop** is disabled on this device (another device is driving
-  them, or nobody is until you take over), which it names and leaves running, saying why.
+  the ones whose own **Force stop** is disabled on this device: another device is driving
+  them, their take-over card is up on this device, or this device is still connecting to
+  them. It names those and leaves them running, saying why. An agent or terminal that
+  nobody is driving and that is not open on this device is stopped like the rest.
   Both confirmations say so before you commit. When every running agent and terminal is
   one of those, the button is disabled and says why.
 
