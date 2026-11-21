@@ -206,11 +206,32 @@ impl App {
     }
 
     /// Which card, if any, is over `part`. Both parts of the center belong to
-    /// one row, and a row has one driver, so the two always agree.
+    /// one row, and a row has one driver, so over an agent's row every part
+    /// carries the row's card, a part with no pty of its own included.
     pub(crate) fn part_takeover_card(&self, part: CenterPart) -> Option<PtyTakeoverCard> {
         self.pty_ownership()?;
-        let pty_id = self.part_pty_id(part)?;
-        match self.pty_driver(&pty_id) {
+        if self.selected_terminal_row().is_none() && self.selected_session().is_some() {
+            return self.agent_row_card().map(|(card, _)| card);
+        }
+        self.pty_takeover_card(&self.part_pty_id(part)?)
+    }
+
+    /// The card over the selected agent's row, and the pty it was read from:
+    /// the focused tab's, or any of the agent's terminals'.
+    pub(crate) fn agent_row_card(&self) -> Option<(PtyTakeoverCard, String)> {
+        self.pty_ownership()?;
+        if self.selected_terminal_row().is_some() {
+            return None;
+        }
+        let session_id = self.selected_session()?.id.clone();
+        self.part_pty_id(CenterPart::Main)
+            .into_iter()
+            .chain(self.dock_terminal_ids(&session_id))
+            .find_map(|pty_id| Some((self.pty_takeover_card(&pty_id)?, pty_id)))
+    }
+
+    fn pty_takeover_card(&self, pty_id: &str) -> Option<PtyTakeoverCard> {
+        match self.pty_driver(pty_id) {
             PtyDriver::Mine => None,
             PtyDriver::Free => Some(PtyTakeoverCard::Free),
             PtyDriver::Elsewhere { device } => Some(PtyTakeoverCard::Elsewhere { device }),
@@ -2661,7 +2682,7 @@ mod tests {
             row: agent_point.1,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.focused_part(), crate::app::CenterPart::Dock);
+        assert_eq!(app.session_surface, SessionSurface::Terminal);
         assert!(app.terminal_selection.is_none());
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -2746,6 +2767,197 @@ mod tests {
         assert!(app.resize_pty_if_permitted(&terminal, 20, 70));
         assert_eq!(app.pending_pty_takeover, None);
         assert!(seat.owners.is_owner("session-1-slot", seat.conn_id));
+    }
+
+    /// The text of `area` in a drawn frame, one string per row.
+    fn text_in(rows: &[String], area: ratatui::layout::Rect) -> String {
+        rows.iter()
+            .skip(usize::from(area.y))
+            .take(usize::from(area.height))
+            .map(|row| {
+                row.chars()
+                    .skip(usize::from(area.x))
+                    .take(usize::from(area.width))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The user's rule: only the device driving a row sees that the agent has
+    /// terminals. Under the card the center pane is the agent alone, whatever
+    /// layout is remembered: no dock, no dock strip, no layout control, no
+    /// divider, no terminal in the caption or the header, and the agent's own
+    /// strip only where an agent with no terminals would have one (one tab
+    /// here, so none, though two terminals alone would show it).
+    #[test]
+    fn under_the_card_an_agents_row_shows_nothing_of_its_terminals_in_any_layout() {
+        use crate::app::DockLayout;
+        let (mut app, _seat, terminal) = a_browser_driving_a_docked_row();
+        app.engine
+            .create_companion_terminal("session-1", 24, 80)
+            .expect("a second terminal");
+        let label = app.engine.companion_terminals[&terminal].label.clone();
+        let session_id = app.engine.sessions[0].id.clone();
+        let screen = ratatui::layout::Rect::new(0, 0, 160, 40);
+        for (layout, overlay) in [
+            (DockLayout::Agent, FullscreenOverlay::None),
+            (DockLayout::Split, FullscreenOverlay::None),
+            (DockLayout::Term, FullscreenOverlay::None),
+            (DockLayout::Split, FullscreenOverlay::Terminal),
+        ] {
+            app.dock_layouts.insert(session_id.clone(), layout);
+            app.fullscreen_overlay = overlay;
+            let rows = render_rows(&mut app, screen.width, screen.height);
+            let area = if overlay == FullscreenOverlay::None {
+                app.mouse_layout.center_stack.expect("the stack")
+            } else {
+                crate::app::render::centered_rect(96, 94, screen)
+            };
+            let center = text_in(&rows, area);
+            let case = format!("{layout:?} {overlay:?}:\n{}", rows.join("\n"));
+            assert!(center.contains("Take over"), "{case}");
+            for word in [label.as_str(), "erminal", "split"] {
+                assert!(!center.contains(word), "{word:?} under the card in {case}");
+            }
+            assert!(
+                !rows[0].contains("erminal"),
+                "the header counts one: {case}"
+            );
+            for action in [Action::ShowTerminal, Action::CycleTerminalLayout] {
+                let key = format!("<{}>", app.bindings.label_for(action));
+                assert!(
+                    !rows.iter().any(|row| row.contains(&key)),
+                    "{key} hinted in {case}"
+                );
+            }
+            assert!(app.mouse_layout.dock_pills.is_empty(), "{case}");
+            assert!(app.mouse_layout.layout_control.is_empty(), "{case}");
+            assert!(app.mouse_layout.dock_divider.is_none(), "{case}");
+            assert!(app.agent_tab_regions.is_empty(), "{case}");
+        }
+    }
+
+    /// A stopped agent whose terminal runs shows the card, not the band and
+    /// its Start, and neither the start key nor a click where Start would be
+    /// launches it.
+    #[test]
+    fn under_the_card_a_stopped_agent_has_no_start_band_and_does_not_start() {
+        let (mut app, _seat, _terminal) = a_browser_driving_a_docked_row();
+        app.engine.providers.remove(TabIdRef::new("session-1-slot"));
+        let rows = render_rows(&mut app, 160, 40);
+        let center = text_in(&rows, app.mouse_layout.center_stack.expect("the stack"));
+        assert!(center.contains("Take over"), "{}", rows.join("\n"));
+        assert!(
+            !center.contains("isn't running") && !center.contains("Start"),
+            "{}",
+            rows.join("\n")
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .unwrap();
+        if let Some(button) = app.mouse_layout.dormant_tab_button {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                app.handle_mouse(MouseEvent {
+                    kind,
+                    column: button.x + 1,
+                    row: button.y + 1,
+                    modifiers: KeyModifiers::NONE,
+                });
+            }
+        }
+        assert!(
+            !app.tui_launched_ptys.contains("session-1-slot"),
+            "the agent was started under the card"
+        );
+
+        // The agent's part has no pty to carry the claim, so the hidden
+        // terminal carries it, and the band comes back with the row.
+        app.take_over_focused_pty();
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(app.pending_pty_takeover, None);
+        assert!(!app.card_covers_center());
+        let rows = render_rows(&mut app, 160, 40);
+        assert!(
+            rows.iter().any(|row| row.contains("isn't running")),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    /// Under the card nothing moves around inside the row: Tab passes over the
+    /// dock, the dock's tab keys, the layout key and the show-terminal key do
+    /// nothing to it, and a take-over brings back exactly the layout, split
+    /// share, focused part and front terminal there were before.
+    #[test]
+    fn under_the_card_keys_leave_the_row_alone_and_take_over_restores_its_layout() {
+        use crate::app::{CenterPart, DockLayout};
+        let (mut app, _seat, first) = a_browser_driving_a_docked_row();
+        let (second, _) = app
+            .engine
+            .create_companion_terminal("session-1", 24, 80)
+            .expect("a second terminal");
+        let session_id = app.engine.sessions[0].id.clone();
+        app.dock_layouts
+            .insert(session_id.clone(), DockLayout::Split);
+        app.terminal_dock_pct = 30;
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.card_covers_center());
+        let remembered = |app: &App| {
+            (
+                app.dock_layouts.get(&session_id).copied(),
+                app.terminal_dock_pct,
+                app.session_surface,
+                app.active_terminal_id.clone(),
+                app.dock_active.get(&session_id).cloned(),
+            )
+        };
+        let before = remembered(&app);
+        assert_eq!(before.3.as_deref(), Some(first.as_str()));
+
+        let press = |app: &mut App, code, modifiers| {
+            app.handle_key(KeyEvent::new(code, modifiers)).unwrap();
+            let _ = render_rows(app, 160, 40);
+        };
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.focus, FocusPane::Files, "Tab passed over the dock");
+        press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(app.focus, FocusPane::Center);
+        press(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(
+            !matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
+            "{:?}",
+            app.prompt
+        );
+        app.prompt = PromptState::None;
+        app.focus = FocusPane::Left;
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        app.focus = FocusPane::Center;
+        assert_eq!(remembered(&app), before);
+        assert!(
+            !app.engine
+                .companion_terminals
+                .keys()
+                .any(|id| *id != first && *id != second)
+        );
+
+        app.take_over_focused_pty();
+        let rows = render_rows(&mut app, 160, 40);
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(!app.card_covers_center(), "{}", rows.join("\n"));
+        assert_eq!(remembered(&app), before);
+        assert_eq!(app.selected_dock_layout(), DockLayout::Split);
+        assert_eq!(app.focused_part(), CenterPart::Dock);
+        let rows = render_rows(&mut app, 160, 40);
+        assert!(
+            rows.iter().any(|row| row.contains("agent | split | term")),
+            "{}",
+            rows.join("\n")
+        );
     }
 
     /// Ctrl-g in interactive mode: the default `ToggleFullscreen` binding, which
@@ -3083,35 +3295,19 @@ mod tests {
         );
     }
 
-    /// A companion terminal's card says "terminal" where an agent's says
-    /// "agent", the same word swap the web makes.
+    /// A terminal's own row says "terminal" where an agent's says "agent", the
+    /// same word swap the web makes; an agent's terminal maximized under the
+    /// card is not shown at all, so that card speaks of the agent.
     #[test]
-    fn a_free_companion_terminals_card_names_a_terminal() {
+    fn a_free_terminal_rows_card_names_a_terminal_and_an_agents_names_the_agent() {
         let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
-        app.session_surface = SessionSurface::Terminal;
-        app.fullscreen_overlay = FullscreenOverlay::Terminal;
-        app.active_terminal_id = Some("term-1".to_string());
-        app.engine.companion_terminals.insert(
-            "term-1".to_string(),
-            dux_core::model::CompanionTerminal {
-                owner: dux_core::model::TerminalOwner::Session("session-1".to_string()),
-                label: "shell".to_string(),
-                foreground_cmd: None,
-                client: crate::pty::PtyClient::spawn(
-                    "sh",
-                    &["-c".to_string(), "sleep 5".to_string()],
-                    std::path::Path::new("."),
-                    10,
-                    10,
-                    100,
-                )
-                .expect("spawn pty"),
-                sort_order: 0,
-                created_at: chrono::Utc::now(),
-                list_after: None,
-            },
+        crate::app::test_support::add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
         );
-
+        app.reselect_left_terminal("term-1");
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
         let flat = flowed(&render_rows(&mut app, 160, 40));
         assert!(
             flat.contains(
@@ -3120,6 +3316,20 @@ mod tests {
                  drive it from here."
             ),
             "a terminal's card names a terminal: {flat}"
+        );
+
+        crate::app::test_support::add_terminal(
+            &mut app,
+            "term-2",
+            dux_core::model::TerminalOwner::Session("session-1".to_string()),
+        );
+        app.selected_left = 1;
+        app.active_terminal_id = Some("term-2".to_string());
+        app.session_surface = SessionSurface::Terminal;
+        let flat = flowed(&render_rows(&mut app, 160, 40));
+        assert!(
+            flat.contains("The device driving this agent disconnected"),
+            "an agent's card names the agent: {flat}"
         );
     }
 

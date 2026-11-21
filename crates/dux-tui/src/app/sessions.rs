@@ -2354,6 +2354,10 @@ impl App {
     /// reached through the explicit `new-terminal-for-project` command (via the
     /// project chooser), never by guessing from what is selected.
     pub(crate) fn show_or_open_first_terminal(&mut self) {
+        if self.terminals_hidden_by_card() {
+            self.refuse_under_takeover_card();
+            return;
+        }
         let Some(session) = self.selected_session() else {
             self.set_warning(
                 "Select an agent first, or use new-terminal-for-project for a project terminal.",

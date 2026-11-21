@@ -2564,7 +2564,14 @@ impl App {
 
     /// The live-terminal count chip's text, or `None` when none are running.
     fn running_terminals_chip(&self) -> Option<String> {
-        match self.running_companion_terminal_count() {
+        let hidden = self.selected_session().map_or(0, |session| {
+            self.dock_terminal_ids(&session.id).len()
+                - self.visible_dock_terminal_ids(&session.id).len()
+        });
+        match self
+            .running_companion_terminal_count()
+            .saturating_sub(hidden)
+        {
             0 => None,
             count => Some(format!(
                 "{} {}",
@@ -6236,6 +6243,13 @@ impl App {
             return hints;
         }
         let mut hints = self.bindings.hints_for(ctx);
+        if self.terminals_hidden_by_card() {
+            let hidden = [
+                self.bindings.label_for(Action::ShowTerminal),
+                self.bindings.label_for(Action::CycleTerminalLayout),
+            ];
+            hints.retain(|(key, _)| !hidden.contains(key));
+        }
         if matches!(ctx, HintContext::Files) {
             self.name_the_folder_key(&mut hints);
         }
@@ -14528,6 +14542,12 @@ impl App {
                 self.render_fullscreen_agent(frame);
                 return;
             }
+            // An agent's row under the take-over card shows the agent alone,
+            // maximized too.
+            FullscreenOverlay::Terminal if self.terminals_hidden_by_card() => {
+                self.render_fullscreen_agent(frame);
+                return;
+            }
             FullscreenOverlay::Terminal => {
                 self.render_fullscreen_terminal(frame);
                 return;
@@ -15165,7 +15185,7 @@ impl App {
                 remote_viewers_segment(self.pty_browser_count(&self.focused_tab_id(&session.id)))
                     .map_or_default(|segment| format!(" · {segment}"));
             let base = format!("{base}{remote}");
-            let count = self.session_terminal_count(&session.id);
+            let count = self.visible_dock_terminal_ids(&session.id).len();
             if count > 0 {
                 return format!("{base} (+ {})", count_of(count, "terminal"));
             }

@@ -6,7 +6,8 @@
 //! `[ui] terminal_dock_pct`), or the dock alone. The dock is a pane of its own
 //! for focus: Tab stops at it, and the fullscreen key, the close binding and the
 //! tab keys act on it while it has focus. Which terminal it shows is remembered
-//! per agent as well.
+//! per agent as well. Under the take-over card none of this is drawn: the agent
+//! shows alone, and what is remembered waits for the row to come back.
 
 use super::components::wrap_lines::display_width;
 use super::render::TabStripItem;
@@ -53,15 +54,48 @@ const MIN_PART_ROWS: u16 = 4;
 
 impl App {
     /// Whether the selected agent's two strips show. Both show, or neither.
+    /// Under the take-over card the agent's strip shows as it would for an
+    /// agent with no terminals.
     pub(crate) fn strips_shown(&self) -> bool {
         let Some(session) = self.selected_session() else {
             return false;
         };
         dux_core::agent_tabs::strips_shown(
             self.session_tab_ids(&session.id).len(),
-            self.dock_terminal_ids(&session.id).len(),
+            self.visible_dock_terminal_ids(&session.id).len(),
             dux_core::agent_tabs::StripSetting::from(self.engine.config.ui.always_show_tab_strip),
         )
+    }
+
+    /// Whether the take-over card is over the selected agent's row. Only the
+    /// device driving a row sees that the agent has terminals, so the center
+    /// pane then shows the agent alone and nothing on it reaches the dock.
+    pub(crate) fn terminals_hidden_by_card(&self) -> bool {
+        self.agent_row_card().is_some()
+    }
+
+    /// `session_id`'s dock terminals as the screen may show them: none while
+    /// the take-over card hides them.
+    pub(crate) fn visible_dock_terminal_ids(&self, session_id: &str) -> Vec<String> {
+        if self.terminals_hidden_by_card() {
+            return Vec::new();
+        }
+        self.dock_terminal_ids(session_id)
+    }
+
+    /// Say that a key that would change the selected agent's row did nothing
+    /// because this surface does not drive it, without saying what the row
+    /// holds.
+    pub(crate) fn refuse_under_takeover_card(&mut self) {
+        let name = self.selected_session().map_or_else(
+            || "This agent".to_string(),
+            dux_core::model::AgentSession::display_label,
+        );
+        let key = self.bindings.label_for(Action::FocusAgent);
+        self.set_info(format!(
+            "This window is not driving {name}, so nothing changed. Press {key} on the card \
+             to take it over first."
+        ));
     }
 
     /// Whether the dock of the selected agent has focus.
@@ -106,6 +140,10 @@ impl App {
     /// terminals has nothing to share the pane with, which is said rather than
     /// done silently.
     pub(crate) fn cycle_terminal_layout(&mut self) {
+        if self.terminals_hidden_by_card() {
+            self.refuse_under_takeover_card();
+            return;
+        }
         if let Some(terminal) = self.selected_terminal_row() {
             let label = self
                 .engine
@@ -295,7 +333,9 @@ impl App {
         self.mouse_layout.center_stack = Some(area);
         // Only a layout that draws the agent's strip publishes its pills again.
         self.agent_tab_regions.clear();
-        let dock = self.selected_dock_terminal_ids();
+        let dock = self
+            .selected_session()
+            .map_or_default(|session| self.visible_dock_terminal_ids(&session.id));
         let layout = self.selected_dock_layout();
         let part_focus = |app: &Self, part: CenterPart| {
             if focused == FocusState::Focused && app.focused_part() == part {
@@ -344,7 +384,33 @@ impl App {
                 self.render_dock_part(frame, rest, dock_focus, &dock);
             }
         }
+        if self.terminals_hidden_by_card() {
+            self.keep_hidden_dock_attached();
+        }
         self.render_stack_takeover_card(frame);
+    }
+
+    /// Under the card the dock is not drawn, yet the row it belongs to is still
+    /// open here: the dock stays attached wherever its layout would draw it, and
+    /// a take-over the agent's part could not spend (it has no pty) is spent by
+    /// the dock's terminal at the grid it already has.
+    fn keep_hidden_dock_attached(&mut self) {
+        if self.remembered_dock_layout() != DockLayout::Agent {
+            self.note_drawn_pty(CenterPart::Dock);
+        }
+        let Some(pty_id) = self.part_pty_id(CenterPart::Dock) else {
+            return;
+        };
+        let armed_here = self
+            .pending_pty_takeover
+            .as_ref()
+            .is_some_and(|armed| *armed == self.engine.pty_row(&pty_id));
+        let grid = self
+            .part_client(CenterPart::Dock)
+            .and_then(crate::pty::PtyClient::grid_size);
+        if armed_here && let Some((rows, cols)) = grid {
+            let _ = self.resize_pty_if_permitted(&pty_id, rows, cols);
+        }
     }
 
     /// Whether the frame is drawing an agent's stack in the center pane, where
@@ -362,30 +428,21 @@ impl App {
     }
 
     /// The take-over card over the center pane and a pty of the row it
-    /// covers. Over an agent's stack that is any drawn part with a pty, so a
-    /// dormant tab in the focused part does not leave the row unclaimable.
+    /// covers. Over an agent's row that is any pty of the row, so a dormant
+    /// tab in the agent's part does not leave the row unclaimable.
     pub(crate) fn covering_card(
         &self,
     ) -> Option<(crate::app::pty_ownership::PtyTakeoverCard, String)> {
-        let shows_stack = matches!(self.fullscreen_overlay, FullscreenOverlay::None)
-            && matches!(self.center_mode, super::CenterMode::Agent)
-            && self.selected_terminal_row().is_none()
-            && self.selected_session().is_some();
-        let parts = if shows_stack {
-            self.layout_parts()
-        } else {
-            vec![self.focused_part()]
-        };
-        parts.into_iter().find_map(|part| {
-            let card = self.part_takeover_card(part)?;
-            Some((card, self.part_pty_id(part)?))
-        })
+        if self.selected_terminal_row().is_none() && self.selected_session().is_some() {
+            return self.agent_row_card();
+        }
+        let part = self.focused_part();
+        Some((self.part_takeover_card(part)?, self.part_pty_id(part)?))
     }
 
-    /// The card over the stack, when the row is not this surface's: one card
-    /// across every grid the layout draws, the dock's strip between them
-    /// included, while the agent's strip above and the hint lanes stay visible
-    /// as they do over a single pane.
+    /// The card over the stack, when the row is not this surface's: over the
+    /// agent's grid, the only part drawn then, while the agent's strip above
+    /// and the hint lane stay visible as they do over a single pane.
     fn render_stack_takeover_card(&mut self, frame: &mut Frame<'_>) {
         self.mouse_layout.takeover_button = None;
         let grids = [self.mouse_layout.focused_term, self.mouse_layout.other_term];

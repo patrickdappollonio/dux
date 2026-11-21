@@ -1354,6 +1354,9 @@ impl App {
 
     /// Give focus to `part` of the center pane, when it is one the layout draws.
     fn focus_center_part(&mut self, part: Option<CenterPart>) {
+        if self.terminals_hidden_by_card() {
+            return;
+        }
         if let Some(part) = part {
             self.session_surface = Self::part_surface(part);
         }
@@ -1820,7 +1823,11 @@ impl App {
             // A stopped agent beside its terminals starts its first tab,
             // whichever part has focus.
             Action::ReconnectAgent if self.selected_agent_stopped_beside_dock() => {
-                self.start_stopped_agent();
+                if self.terminals_hidden_by_card() {
+                    self.refuse_under_takeover_card();
+                } else {
+                    self.start_stopped_agent();
+                }
             }
             Action::ReconnectAgent => {
                 self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
@@ -13199,6 +13206,9 @@ impl App {
     /// Launch whatever dormant tab the card is currently about. The same act the
     /// focus-agent binding performs, so the button and the key cannot diverge.
     fn start_focused_dormant_tab(&mut self) {
+        if self.terminals_hidden_by_card() {
+            return;
+        }
         if self.selected_agent_stopped_beside_dock() {
             self.start_stopped_agent();
             return;

@@ -8931,10 +8931,20 @@ impl App {
     }
 
     /// The selected agent's center layout. An agent with no terminals has no
-    /// dock, so it is always the agent alone; one that is stopped while its
+    /// dock, so it is always the agent alone, and so is one under the take-over
+    /// card, which shows none of its terminals; one that is stopped while its
     /// terminals run opens on its terminal, whatever was remembered, because
     /// nothing that opens it starts it.
     pub(crate) fn selected_dock_layout(&self) -> DockLayout {
+        if self.terminals_hidden_by_card() {
+            return DockLayout::Agent;
+        }
+        self.remembered_dock_layout()
+    }
+
+    /// The selected agent's layout as this surface remembers it, which the
+    /// take-over card leaves alone for when the row comes back.
+    pub(crate) fn remembered_dock_layout(&self) -> DockLayout {
         let Some(session) = self.selected_session() else {
             return DockLayout::Agent;
         };
@@ -9025,7 +9035,7 @@ impl App {
         // keyboard: the remembered layout could hide it and move the keyboard
         // onto the agent mid-keystroke. It applies once focus leaves the dock.
         let typing_into_dock =
-            self.focus == FocusPane::Center && self.focused_part() == CenterPart::Dock;
+            self.focus == FocusPane::Center && self.remembered_focused_part() == CenterPart::Dock;
         if self
             .stopped_layout
             .as_ref()
@@ -9060,6 +9070,11 @@ impl App {
         }
         if let Some(active) = self.active_terminal_id.clone() {
             self.dock_active.insert(session_id, active);
+        }
+        // Under the card the agent is drawn alone, and the part with focus is
+        // kept for when the row comes back.
+        if self.terminals_hidden_by_card() {
+            return;
         }
         // The part being typed into or shown fullscreen keeps the keyboard,
         // whatever the layout draws around it: the pane focus is brought in
@@ -9210,8 +9225,18 @@ impl App {
     ///
     /// The part being typed into, or shown fullscreen, always wins over the
     /// pane focus, so the part that receives bytes is the part on screen with
-    /// the keyboard and the two can never disagree.
+    /// the keyboard and the two can never disagree. Under the take-over card
+    /// an agent's row shows the agent alone, so it is the agent.
     pub(crate) fn focused_part(&self) -> CenterPart {
+        if self.terminals_hidden_by_card() {
+            return CenterPart::Main;
+        }
+        self.remembered_focused_part()
+    }
+
+    /// The focused part as this surface remembers it, which the take-over
+    /// card leaves alone for when the row comes back.
+    fn remembered_focused_part(&self) -> CenterPart {
         match (self.fullscreen_overlay, self.input_target) {
             (FullscreenOverlay::Agent, _) | (_, InputTarget::Agent) => CenterPart::Main,
             (FullscreenOverlay::Terminal, _) | (_, InputTarget::Terminal) => CenterPart::Dock,

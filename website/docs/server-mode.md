@@ -273,6 +273,9 @@ the terminal UI and in the browser alike.
   everyone watching adopts that geometry.
 - **An agent's tabs and terminals go together:** taking one over, or starting an agent from
   the terminal UI, takes all of that agent's tabs and terminals at once.
+- **An agent's terminals stay out of sight until you drive it:** under the card you see the
+  agent alone, with no terminal dock, in the terminal UI and in the browser alike. Take it
+  over and its layout comes back just as you left it.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 
