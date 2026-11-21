@@ -328,6 +328,30 @@ function broughtIntoRangeSentence(
   return `${d.label} ${verb} ${String(value)}${unit}, not ${String(typed)}${range}.`
 }
 
+/// What one Save press says of the rows it saved through the settings write,
+/// which the server keeps quiet on the web, and of every number it brought
+/// into range, or null when it has nothing to say. The other writes answer
+/// their own outcome on the wire.
+function saveConfirmation(
+  saved: readonly SettingDescriptor[],
+  broughtIn: readonly { d: SettingDescriptor; value: SettingValue; typed: SettingValue }[],
+): string | null {
+  const quiet = saved.filter((d) => d.writeTarget === "settings")
+  const plain = quiet.filter((d) => !broughtIn.some((b) => b.d.key === d.key))
+  const parts: string[] = []
+  if (plain.length > 0) parts.push(`Saved ${listNames(plain.map((d) => d.label))}.`)
+  for (const { d, value, typed } of broughtIn) {
+    parts.push(broughtIntoRangeSentence(d, value, typed, saved.includes(d)))
+  }
+  if (quiet.some((d) => d.surface !== "tui")) {
+    parts.push("Every connected browser picks up the change now.")
+  }
+  if (quiet.some((d) => d.surface === "tui" || d.surface === "both")) {
+    parts.push("A running terminal app applies it after its next config reload or restart.")
+  }
+  return parts.length > 0 ? parts.join(" ") : null
+}
+
 function SettingControl({
   d,
   value,
@@ -880,9 +904,9 @@ interface PersistResult {
   failed: string[]
 }
 
-// Every write below answers its own outcome on the wire (an engine status for
-// the settings PATCH, identity, changes-pane and GitHub writes; a reply sentence
-// for Tailscale), so only the nothing-was-sent case is said by the dialog.
+// The identity, changes-pane and GitHub writes answer their own outcome with an
+// engine status and Tailscale with a reply sentence; the settings PATCH's status
+// is quiet on the web, so Save confirms those rows itself (`saveConfirmation`).
 async function persist(
   entries: [SettingDescriptor, SettingValue][],
   originalOf: (d: SettingDescriptor) => SettingValue,
@@ -1339,12 +1363,12 @@ function PreferencesForm({
           value !== overrides[d.key] ? overrides[d.key] : typedOutOfRange.current[d.key]
         return typed === undefined ? [] : [{ d, value, typed }]
       })
-      for (const { d, value } of broughtIn) setOverride(d, value)
-      const persisted = await persist(touched, originalOf)
+      // The typed number is kept with the value in range, so a save that
+      // fails and is pressed again still says what it brought into range.
       for (const { d, value, typed } of broughtIn) {
-        if (persisted.failed.includes(d.key)) continue
-        notifyInfo(broughtIntoRangeSentence(d, value, typed, persisted.saved.includes(d.key)))
+        setOverride(d, value, typeof typed === "number" ? typed : undefined)
       }
+      const persisted = await persist(touched, originalOf)
       // A landed write leaves the draft, so the count and a retry hold only
       // what is still unsaved, and a read-and-flip row is never sent twice.
       if (persisted.saved.length > 0) {
@@ -1362,6 +1386,16 @@ function PreferencesForm({
       if (persisted.failed.length > 0) {
         if (persisted.saved.length > 0) setPartialSave(persisted)
         return
+      }
+      // One confirmation for the whole press: the dialog closes, so without it
+      // nothing on screen says the rows the server answers quietly were saved.
+      const confirmation = saveConfirmation(
+        descriptors.filter((d) => persisted.saved.includes(d.key)),
+        broughtIn,
+      )
+      if (confirmation !== null) {
+        if (persisted.saved.length > 0) notifySuccess(confirmation)
+        else notifyInfo(confirmation)
       }
       if (pw.kind === "write") {
         const write =

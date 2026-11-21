@@ -116,6 +116,7 @@ const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
 const setTailscaleMode = vi.mocked(configApi.setTailscaleMode)
 const notify = await import("@/lib/notify")
 const notifyInfo = vi.mocked(notify.notifyInfo)
+const notifySuccess = vi.mocked(notify.notifySuccess)
 const notifyWarning = vi.mocked(notify.notifyWarning)
 
 const fullBootstrap: Bootstrap = {
@@ -198,6 +199,7 @@ beforeEach(() => {
     message: "saved",
   })
   notifyInfo.mockClear()
+  notifySuccess.mockClear()
   notifyWarning.mockClear()
 })
 
@@ -419,15 +421,23 @@ describe("CustomizeWebappDialog", () => {
     expect(notifyInfo).toHaveBeenCalledWith("Nothing to save: no preference was changed.")
   })
 
-  it("leaves a real save's confirmation to the server's status", async () => {
+  // The server keeps a settings save quiet on the web, and the dialog closes,
+  // so nothing on screen would say the save happened.
+  it("confirms a save the server answers quietly, once for the whole press", async () => {
     seed()
     render(<CustomizeWebappDialog />)
 
     fireEvent.click(field("Copy on select"))
+    const size = field("Terminal font size") as HTMLInputElement
+    fireEvent.change(size, { target: { value: "16" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(notifySuccess).toHaveBeenCalledTimes(1)
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Saved Copy on select and Terminal font size. Every connected browser picks up the change now.",
+    )
     expect(notifyInfo).not.toHaveBeenCalled()
   })
 
@@ -631,8 +641,31 @@ describe("CustomizeWebappDialog", () => {
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     const [patch] = saveSettings.mock.calls[0]
     expect(patch.ui).toEqual({ terminal_font_size: 8 })
-    expect(notifyInfo).toHaveBeenCalledWith(
-      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32.",
+    expect(notifySuccess).toHaveBeenCalledTimes(1)
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32. Every connected browser picks up the change now.",
+    )
+  })
+
+  it("still says a number was brought into range when the save that brought it failed", async () => {
+    seed()
+    saveSettings.mockResolvedValueOnce(false)
+    render(<CustomizeWebappDialog />)
+
+    const input = field("Terminal font size") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "3" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /^Save/ }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    )
+    expect(input.value).toBe("8")
+    fireEvent.click(screen.getByRole("button", { name: /^Save/ }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32. Every connected browser picks up the change now.",
     )
   })
 
@@ -647,8 +680,8 @@ describe("CustomizeWebappDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
-    expect(notifyInfo).toHaveBeenCalledWith(
-      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32.",
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32. Every connected browser picks up the change now.",
     )
   })
 
