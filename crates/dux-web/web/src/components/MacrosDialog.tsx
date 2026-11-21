@@ -350,9 +350,17 @@ function MacrosEditor({
     el.scrollIntoView?.({ block: "nearest" })
   }
 
+  // The macro Save's hint is about stays listed whatever the search or the
+  // filter, so the hint never speaks of a macro nobody can find.
   function visibleOf(list: DraftMacro[], q: string, f: MacroFilter): DraftMacro[] {
     const needle = searchNeedle(q)
-    return list.filter((item) => matchesFilter(item.surface, f) && matchesSearch(item, needle))
+    const blocking = validateMacros(draftToMacros(list))
+    const blockingKey = blocking === null ? null : list[blocking.index].key
+    return list.filter(
+      (item) =>
+        item.key === blockingKey ||
+        (matchesFilter(item.surface, f) && matchesSearch(item, needle)),
+    )
   }
   const visible = visibleOf(items, query, filter)
   const listHeight = useWholeRowsHeight(listRoom, visible.length)

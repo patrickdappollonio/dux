@@ -520,6 +520,18 @@ describe("MacrosDialog editor", () => {
     expect(screen.getByText("Every macro needs a name.")).toBeTruthy()
   })
 
+  it("keeps the macro that blocks Save in the list whatever the search or the filter", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(screen.getByRole("button", { name: "New" }))
+    await typeInto("Search macros", "CARGO")
+    expect(screen.getAllByRole("option")).toHaveLength(2)
+    const filter = screen.getByRole("radiogroup", { name: "Show macros for" })
+    await click(within(filter).getByRole("radio", { name: /Terminal/ }))
+    expect(screen.getAllByRole("option")).toHaveLength(2)
+    expect(screen.getByLabelText("Name")).toHaveProperty("value", "")
+  })
+
   it("says a filter is empty without speaking of a search nobody typed", async () => {
     seed([{ name: "Review", text: "review this", surface: "agent" }])
     render(<MacrosDialog />)
