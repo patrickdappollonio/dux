@@ -23,6 +23,7 @@ import {
 import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import { useDux } from "@/lib/store"
+import { spineListsTerminal } from "@/lib/terminals"
 import type { SelectedTarget, TerminalOwnerRef } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
@@ -170,7 +171,7 @@ export function PaneMenuBody({
   pane?: PaneMenuPane
   folded?: FoldedHeaderControls
 } & PaneMenuSettingsDrill) {
-  const theater = useDux().theater
+  const { theater, spine } = useDux()
   // Under the agent's take-over card nothing names one of its terminals.
   const watched = useAgentRowWatch(
     subject.kind === "agent" ? subject.session.id : null,
@@ -188,8 +189,13 @@ export function PaneMenuBody({
   // The pane's own verbs, when a companion terminal sits under its agent's menu.
   // Labelled and last, so the agent body keeps its order and Close… reads as the
   // terminal's rather than the agent's.
+  // Its editor entries are the agent's, so until the list names the terminal
+  // (and its Close… has something to confirm) the group would be empty.
   const paneActions: ReactNode =
-    subject.kind === "agent" && pane?.kind === "terminal" && !watched ? (
+    subject.kind === "agent" &&
+    pane?.kind === "terminal" &&
+    !watched &&
+    spineListsTerminal(spine?.terminals, pane.terminalId) ? (
       <>
         <DropdownMenuSeparator />
         <TerminalActionsMenu

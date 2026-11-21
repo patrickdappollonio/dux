@@ -289,6 +289,27 @@ describe("an agent's menu over one of its companion terminals", () => {
     ).toBeTruthy()
   })
 
+  // A terminal just created is on screen before the agents list names it, and
+  // until then its group has no Close… to offer and its editor is the agent's.
+  it("adds no empty Terminal group for a terminal the list does not name yet", async () => {
+    render(
+      <PaneMenu
+        subject={{ kind: "agent", session: session() }}
+        pane={{ ...terminalPane, terminalId: "t8" }}
+        appearance="header"
+        settingsDrill={false}
+      />,
+    )
+    await openFrom(screen.getByLabelText(PANE_MENU_AGENT_LABEL))
+    expect(screen.queryByText("Terminal")).toBeNull()
+    for (const entry of ["Open editor here", "Open editor in new tab"]) {
+      expect(labels().filter((t) => t?.includes(entry))).toHaveLength(1)
+    }
+    // Nor a separator with nothing after it.
+    const menu = screen.getByRole("menu")
+    expect(menu.lastElementChild?.getAttribute("role")).not.toBe("separator")
+  })
+
   it("adds nothing when the pane IS the agent's own tab", async () => {
     render(
       <PaneMenu
