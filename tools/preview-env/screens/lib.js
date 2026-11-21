@@ -87,6 +87,12 @@ function projectExport() {
   return project ? `export COMPOSE_PROJECT_NAME=${JSON.stringify(project)} && ` : ""
 }
 
+// One argument for `sg -c`'s shell, byte for byte. Single quotes keep a
+// here-document's newlines, which a double-quoted JSON string turns into `\n`.
+function shellQuote(text) {
+  return `'${text.replace(/'/g, `'\\''`)}'`
+}
+
 function containerSh(script) {
   if (directDocker === null) {
     directDocker = spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0
@@ -99,7 +105,7 @@ function containerSh(script) {
         [
           "docker",
           "-c",
-          `cd ${JSON.stringify(composeDir)} && ${projectExport()}docker compose exec -T dux sh -euc ${JSON.stringify(script)}`,
+          `cd ${JSON.stringify(composeDir)} && ${projectExport()}docker compose exec -T dux sh -euc ${shellQuote(script)}`,
         ],
         { encoding: "utf8" },
       )
@@ -470,12 +476,27 @@ async function armAttention(title = ATTENTION_AGENT, timeoutMs = 40000) {
 // asks for it through `expectStateWord`, which is where every guard lives now.
 const ATTENTION_WORD = "Needs you"
 
+// The sidebar order is posted whole, so the server refuses it while the
+// workspace holds an agent the seed did not make; say so before relighting
+// anything, with the way out.
+async function refuseForeignAgents() {
+  const titles = (await get("/api/v1/sessions")).map((s) => s.title)
+  const foreign = titles.filter((title) => !SIDEBAR_ORDER.includes(title))
+  if (foreign.length === 0 && titles.length === SIDEBAR_ORDER.length) return
+  const named = foreign.length > 0 ? ` (${foreign.join(", ")})` : ""
+  throw new Error(
+    `the preview workspace holds ${titles.length} agents and the screenshot seed makes ${SIDEBAR_ORDER.length}${named}. ` +
+      "The journeys need a fresh preview workspace: wipe it with `docker compose down -v` in tools/preview-env, bring the preview up again, and rerun.",
+  )
+}
+
 // Relight every agent on the fixture its staging asks for. The fixture is read
 // at spawn, so each agent is stopped and started again with the global
 // environment holding the value meant for it.
 async function stage(name) {
   const want = STAGINGS[name]
   if (!want) throw new Error(`unknown staging ${name}; have ${Object.keys(STAGINGS).join(", ")}`)
+  await refuseForeignAgents()
   const by = await agents()
 
   for (const title of SIDEBAR_ORDER) {
