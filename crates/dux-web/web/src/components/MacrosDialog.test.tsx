@@ -631,7 +631,7 @@ describe("MacrosDialog on a phone", () => {
 
 describe("MacrosDialog stale save", () => {
   const stale =
-    "The macro list changed after this dialog read it, so nothing was saved. Reload to see the change, then make your edit again."
+    "The macro list changed after this dialog read it, so nothing was saved. Reload macros shows the list as it is now and drops your edits. Keep editing keeps them, but saving them is refused until you reload."
 
   it("says the list changed and offers to reload it or keep editing", async () => {
     seed(seedMacros, { conflict: stale })

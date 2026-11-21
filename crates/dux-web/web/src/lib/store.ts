@@ -9192,6 +9192,11 @@ function reopenMacrosDialog(edit: MacrosEdit, conflict: string | null): void {
   })
 }
 
+// The dialog's own sentence rather than the server's, which tells the user to
+// make the edit again when the dialog has kept it.
+const MACROS_SAVE_REFUSED =
+  "The macro list changed after this dialog read it, so nothing was saved. Reload macros shows the list as it is now and drops your edits. Keep editing keeps them, but saving them is refused until you reload."
+
 const MACROS_EDIT_BEHIND =
   "The macros were changed elsewhere after these edits were made, so saving them would be refused. Reload to start again from the saved list, which drops these edits."
 
@@ -9294,7 +9299,7 @@ export function saveMacros(edit: MacrosEdit): void {
     }
     // Nothing was written, so the dialog comes back with the edits rather
     // than leaving them only in a toast.
-    reopenMacrosDialog(edit, stale ? e.message : null)
+    reopenMacrosDialog(edit, stale ? MACROS_SAVE_REFUSED : null)
   })
   closeMacrosDialog()
 }

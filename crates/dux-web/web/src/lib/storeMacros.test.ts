@@ -450,7 +450,7 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
 
     // The list changed after the dialog read it: the dialog comes back with
-    // the edits and the server's sentence, and nothing typed is lost.
+    // the edits and a sentence saying what each way out does to them.
     staleMacrosPut = true
     mod.openMacrosDialog()
     const refusedEdit = editOf([], edited, "v1", 1)
@@ -459,7 +459,7 @@ describe("store macros commands", () => {
       expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
     })
     expect(mod.getSnapshot().macrosConflict).toBe(
-      "The macro list changed after this dialog read it.",
+      "The macro list changed after this dialog read it, so nothing was saved. Reload macros shows the list as it is now and drops your edits. Keep editing keeps them, but saving them is refused until you reload.",
     )
     // The same session, the macro that was on screen included.
     expect(mod.getSnapshot().macrosDraft).toEqual(refusedEdit)
