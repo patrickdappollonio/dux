@@ -201,7 +201,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       {branchGit ? (
         <>
           <DropdownMenuSeparator />
-          <AgentStartupItems sessionId={session.id} />
+          <AgentStartupItems sessionId={session.id} changesBlocked={changesBlocked} />
         </>
       ) : null}
       <DropdownMenuSeparator />
@@ -381,7 +381,13 @@ function AgentIdentityItems({
 
 // Startup is its own group so its heading can be dropped with it: a standalone
 // agent has no startup command, and a heading over nothing says nothing.
-function AgentStartupItems({ sessionId }: { sessionId: string }) {
+function AgentStartupItems({
+  sessionId,
+  changesBlocked,
+}: {
+  sessionId: string
+  changesBlocked: boolean
+}) {
   return (
     <DropdownMenuGroup>
       <DropdownMenuLabel>{MENU_GROUP_LABELS.startup}</DropdownMenuLabel>
@@ -393,7 +399,11 @@ function AgentStartupItems({ sessionId }: { sessionId: string }) {
         <Variable />
         Configure environment variables…
       </DropdownMenuItem>
-      <DropdownMenuItem onClick={() => rerunStartupCommand(sessionId)}>
+      {/* Runs a command in the agent's working copy, so it is a change. */}
+      <DropdownMenuItem
+        disabled={changesBlocked}
+        onClick={() => rerunStartupCommand(sessionId)}
+      >
         <Play />
         Rerun startup command
       </DropdownMenuItem>

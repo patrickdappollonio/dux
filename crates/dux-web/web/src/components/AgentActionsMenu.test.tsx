@@ -159,6 +159,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Change agent provider…",
     "Delete agent…",
     "New terminal in the worktree",
+    "Rerun startup command",
   ]
   const enabledLabels = [
     "Project…",
@@ -167,7 +168,6 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Agent info…",
     "Configure startup command…",
     "Configure environment variables…",
-    "Rerun startup command",
     "Startup command logs…",
     "Open editor in new tab",
     "Copy local path",
