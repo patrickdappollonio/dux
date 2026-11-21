@@ -204,7 +204,8 @@ function Shell({
         showCloseButton={false}
         initialFocus={initialFocus}
         finalFocus={finalFocus}
-        className="h-[calc(100dvh-2.5rem)] gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
+        fullHeight
+        className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
       >
         {children}
       </SheetContent>
@@ -641,7 +642,8 @@ function MacrosEditor({
               (editorFocusesName.current ? nameRef.current : backRef.current) ?? true
             }
             finalFocus={listFocusTarget}
-            className="h-[calc(100dvh-2.5rem)] gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
+            fullHeight
+            className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
           >
             <SheetTitle className="sr-only">Edit macro</SheetTitle>
             <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">

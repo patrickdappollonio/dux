@@ -50,3 +50,20 @@ describe("SheetContent close button touch size", () => {
     )
   })
 })
+
+describe("SheetContent full height", () => {
+  // jsdom lays nothing out, so the height the classes resolve to is what can be
+  // pinned; a browser must measure the sheet at the viewport height less 40px.
+  it("keeps a full-height bottom sheet from also asking for its content height", () => {
+    render(
+      <Sheet open>
+        <SheetContent side="bottom" fullHeight>
+          <SheetTitle>Title</SheetTitle>
+        </SheetContent>
+      </Sheet>,
+    )
+    const classes = Array.from(document.querySelector('[data-slot="sheet-content"]')?.classList ?? [])
+    expect(classes).toContain("data-[side=bottom]:h-[calc(100dvh-2.5rem)]")
+    expect(classes).not.toContain("data-[side=bottom]:h-auto")
+  })
+})
