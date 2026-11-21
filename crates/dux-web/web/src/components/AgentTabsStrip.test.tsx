@@ -286,6 +286,16 @@ describe("AgentTabsStrip on a row another device drives", () => {
     expect(sortableProps?.disabled).toBe(true)
   })
 
+  // A disabled button takes no pointer events and no focus, so the reason has
+  // to be readable from what holds it.
+  it("says why the + is disabled while the page is reconnecting, on focus", async () => {
+    registerPaneCover("s1", "spinner", { row: agentRowKey("s1"), driver: "reconnecting" })
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const holder = screen.getByLabelText("New tab").parentElement as HTMLElement
+    act(() => holder.focus())
+    expect((await screen.findAllByText("Reconnecting to this agent")).length).toBeGreaterThan(0)
+  })
+
   // A watcher's drag is a plain select: the pill must not move while it is held.
   it("does not move a pill that is dragged while another device drives the row", () => {
     watch("other")

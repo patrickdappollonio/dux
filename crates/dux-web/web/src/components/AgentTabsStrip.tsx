@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react"
 
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
 import { AttentionDot } from "@/components/AttentionDot"
@@ -97,6 +98,15 @@ export function AgentTabsStrip({
   const defaultProvider = defaultProviderForSession(spine, session)
   const block = useAgentChangeBlock(session)
   const disabled = atCap || creating || block !== null
+  // Said on the + and on the chooser beside it, whichever reason disables them.
+  const newTabHint =
+    block !== null
+      ? addToAgentBlockHint(block)
+      : atCap
+        ? `Tab limit reached (${cap})`
+        : creating
+          ? "Adding…"
+          : `New ${defaultProvider} tab`
 
   return (
     // `max-md:py-0.75` trims the strip's own vertical padding to go with the
@@ -139,17 +149,7 @@ export function AgentTabsStrip({
           and 2px more before the "+" keeps its area off the last pill's ⋯,
           whose own reaches 1px past its pill. */}
       <div className="flex shrink-0 items-center gap-0.5 md:pointer-coarse:ml-0.5 md:pointer-coarse:gap-4">
-        <SimpleTooltip
-          content={
-            block !== null
-              ? addToAgentBlockHint(block)
-              : atCap
-                ? `Tab limit reached (${cap})`
-                : creating
-                  ? "Adding…"
-                  : `New ${defaultProvider} tab`
-          }
-        >
+        <ExplainedWhenDisabled disabled={disabled} hint={newTabHint}>
           <button
             type="button"
             aria-label="New tab"
@@ -165,39 +165,41 @@ export function AgentTabsStrip({
           >
             <Plus className="size-4" />
           </button>
-        </SimpleTooltip>
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button
-                type="button"
-                aria-label="Choose provider for new tab"
-                disabled={disabled}
-                // Height relaxed, width kept, and the same tablet tap margin:
-                // same reasoning as the "+" beside it.
-                className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
-              />
-            }
-          >
-            <ChevronDown className="size-3.5" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {providers.map((p) => {
-              const isDefault = p === defaultProvider
-              return (
-                <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
-                  {isDefault ? <Check /> : <Bot />}
-                  {p}
-                  {isDefault ? (
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      default
-                    </span>
-                  ) : null}
-                </DropdownMenuItem>
-              )
-            })}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        </ExplainedWhenDisabled>
+        <ExplainedWhenDisabled disabled={disabled} hint={disabled ? newTabHint : null}>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label="Choose provider for new tab"
+                  disabled={disabled}
+                  // Height relaxed, width kept, and the same tablet tap margin:
+                  // same reasoning as the "+" beside it.
+                  className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
+                />
+              }
+            >
+              <ChevronDown className="size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {providers.map((p) => {
+                const isDefault = p === defaultProvider
+                return (
+                  <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
+                    {isDefault ? <Check /> : <Bot />}
+                    {p}
+                    {isDefault ? (
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        default
+                      </span>
+                    ) : null}
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </ExplainedWhenDisabled>
       </div>
     </div>
   )

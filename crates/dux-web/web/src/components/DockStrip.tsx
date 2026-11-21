@@ -1,5 +1,6 @@
 import { Ellipsis, Plus, SquareTerminal, X } from "lucide-react"
 
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
@@ -97,7 +98,10 @@ export function DockStrip({
           />
         ))}
       </SortableStrip>
-      <SimpleTooltip content={block === null ? "New terminal" : addToAgentBlockHint(block)}>
+      <ExplainedWhenDisabled
+        disabled={block !== null}
+        hint={block === null ? "New terminal" : addToAgentBlockHint(block)}
+      >
         <button
           type="button"
           aria-label="New terminal"
@@ -109,7 +113,7 @@ export function DockStrip({
         >
           <Plus className="size-4" />
         </button>
-      </SimpleTooltip>
+      </ExplainedWhenDisabled>
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
           other. On a tablet 16px between them keeps their tap areas apart. */}
