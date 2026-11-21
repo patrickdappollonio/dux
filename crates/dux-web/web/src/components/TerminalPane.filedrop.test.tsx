@@ -487,7 +487,9 @@ describe("dropping a file onto an agent", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
     await drop([file("shot.png")])
-    expect(uploadDroppedFile.mock.calls[0][1]).toEqual({ pty: "s1", conn: "42" })
+    const opts = uploadDroppedFile.mock.calls[0][1] as { pty: string; conn: () => string | null }
+    expect(opts.pty).toBe("s1")
+    expect(opts.conn()).toBe("42")
   })
 })
 

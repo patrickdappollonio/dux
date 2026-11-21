@@ -7,6 +7,8 @@
 // caller pastes the returned path over its own already-gated socket.
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
+import { ROW_DRIVEN_STATUS } from "./rowDriven"
+import { takeoverRefusalFor } from "./takeoverFlight"
 
 export interface SavedDropResponse {
   path: string
@@ -31,13 +33,21 @@ export class FileDropApiError extends Error {
 /// included, is a drop on the editor's file tree naming a worktree-relative
 /// folder, where "" is the worktree root. The terminal socket's connection id
 /// travels in `conn` rather than the `x-connection-id` header, which names the
-/// events socket and which the server refuses a PTY-class id in.
+/// events socket and which the server refuses a PTY-class id in. It is read
+/// once a take-over of the pane's row this page pressed has landed, because
+/// the take-over reopens the socket under a new id.
 export async function uploadDroppedFile(
   file: File,
-  opts: { pty: string; conn: string | null; dir?: string },
+  opts: { pty: string; conn: (() => string | null) | null; dir?: string },
 ): Promise<SavedDropResponse> {
+  const held = takeoverRefusalFor(`/api/v1/file-drop?${new URLSearchParams({ pty: opts.pty })}`)
+  if (held !== null) {
+    const refusal = await held
+    if (refusal !== null) throw new FileDropApiError(refusal, ROW_DRIVEN_STATUS)
+  }
   const params = new URLSearchParams({ pty: opts.pty, filename: file.name })
-  if (opts.conn) params.set("conn", opts.conn)
+  const conn = opts.conn?.() ?? null
+  if (conn) params.set("conn", conn)
   if (opts.dir !== undefined) params.set("dir", opts.dir)
   let resp: Response
   try {

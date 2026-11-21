@@ -214,7 +214,7 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
           pty: id,
           // The TERMINAL SOCKET's id, not the events-socket one the other API
           // modules stamp in a header (the server refuses a PTY id there).
-          conn: connId.read(),
+          conn: () => connId.read(),
         })
       } catch (e) {
         outcomes.push({

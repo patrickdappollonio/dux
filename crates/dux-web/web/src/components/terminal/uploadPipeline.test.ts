@@ -25,9 +25,9 @@ vi.mock("@/lib/fileDropApi", () => ({
   },
   uploadDroppedFile: async (
     file: File,
-    opts: { pty: string; conn: string | null },
+    opts: { pty: string; conn: (() => string | null) | null },
   ) => {
-    uploads.push({ name: file.name, opts })
+    uploads.push({ name: file.name, opts: { pty: opts.pty, conn: opts.conn?.() ?? null } })
     return {
       requested_name: file.name,
       saved_name: file.name,

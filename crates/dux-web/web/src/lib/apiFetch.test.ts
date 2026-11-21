@@ -112,6 +112,26 @@ describe("apiFetch", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/files/write"))).toBe(false)
   })
 
+  it("names the terminal connection a drop goes to only once this page's take-over of it has landed", async () => {
+    const { gate } = await load()
+    const flight = await import("./takeoverFlight")
+    const { uploadDroppedFile } = await import("./fileDropApi")
+    routes = async (url) =>
+      url.endsWith("/auth/status")
+        ? json(200, { required_here: true, signed_in: true, password_set: true })
+        : json(200, { requested_name: "a.txt", saved_name: "a.txt", path: "/x/a.txt" })
+    await gate.initAuthGate()
+    let conn = "9"
+    const landed = flight.beginTakeoverFlight("terminal:term-4")
+    const drop = uploadDroppedFile(new File(["x"], "a.txt"), { pty: "term-4", conn: () => conn })
+    // The take-over bounces the socket: the claim lands on its new connection.
+    conn = "12"
+    landed(true)
+    await drop
+    const url = String(fetchMock.mock.calls.find(([u]) => String(u).includes("file-drop"))![0])
+    expect(new URL(url, "http://x").searchParams.get("conn")).toBe("12")
+  })
+
   it("turns a 401 into a sign-out and an interruption the caller can recognise", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()
