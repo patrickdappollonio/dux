@@ -590,3 +590,31 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
   })
 })
+
+// Preferences sets aside on Back the way the Macros dialog does, so its store
+// half is pinned beside the macros one.
+describe("Preferences edits set aside by Back", () => {
+  it("come back with the next opening, by any route, and the toast that offered them goes", async () => {
+    const mod = await loadStore()
+    const { toast } = await import("sonner")
+    mod.openCustomizeWebapp()
+
+    mod.setAsidePreferencesDraft({ "server.title": "renamed" }, 1, true)
+    expect(mod.getSnapshot().customizeWebappOpen).toBe(false)
+    expect(toast.info).toHaveBeenCalledWith(
+      "Preferences closed with 1 unsaved change, and nothing was saved. Restore reopens it with them. The password fields were cleared; they are never kept.",
+      expect.objectContaining({ id: "preferences-set-aside", duration: Infinity }),
+    )
+
+    vi.mocked(toast.dismiss).mockClear()
+    mod.openCustomizeWebapp("network")
+    expect(mod.getSnapshot().customizeWebappDraft).toEqual({ "server.title": "renamed" })
+    expect(mod.getSnapshot().customizeWebappTopic).toBe("network")
+    expect(toast.dismiss).toHaveBeenCalledWith("preferences-set-aside")
+
+    // Taken once: closing without a Back drops them.
+    mod.closeCustomizeWebapp()
+    mod.openCustomizeWebapp()
+    expect(mod.getSnapshot().customizeWebappDraft).toBeNull()
+  })
+})

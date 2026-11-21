@@ -102,11 +102,6 @@ function backtickLines(source: string): string[] {
 // entry that no longer matches anything fails the suite, so the list cannot rot.
 const ALLOWED: { file: string; line: string; reason: string }[] = [
   {
-    file: "components/CustomizeWebappDialog.tsx",
-    line: '"Configure dux. Saved to `config.toml` and applied to every connected browser.",',
-    reason: "The Settings dialog's description, drawn through renderInlineCode, which chips the span.",
-  },
-  {
     file: "components/Welcome.tsx",
     line: 'const parts = tip.split("`")',
     reason: "The welcome tip renderer, splitting on the delimiter it hides.",

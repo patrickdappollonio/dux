@@ -117,7 +117,7 @@ function WeakPasswordBanner() {
           variant="outline"
           size="sm"
           className={BANNER_BUTTON}
-          onClick={() => openCustomizeWebapp()}
+          onClick={() => openCustomizeWebapp("network")}
         >
           Change it in Preferences…
         </Button>

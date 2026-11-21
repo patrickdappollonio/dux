@@ -1,5 +1,18 @@
-import { Fragment, useEffect, useRef, useState } from "react"
-import { Check, Search, ZoomOut } from "lucide-react"
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react"
+import type { KeyboardEvent, ReactNode, RefObject } from "react"
+import {
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  CircleCheck,
+  CircleDot,
+  FileCode,
+  RotateCcw,
+  Search,
+  X,
+  ZoomOut,
+  type LucideIcon,
+} from "lucide-react"
 import {
   notifyError,
   notifyInfo,
@@ -7,6 +20,25 @@ import {
   notifyWarning,
 } from "@/lib/notify"
 
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import {
+  CHANGED_LABEL,
+  TOPIC_ICON,
+  buildWrites,
+  changesLabel,
+  defaultValueText,
+  listNames,
+  resetValue,
+  rowMatches,
+  rowMeta,
+  sameValue,
+  searchWords,
+  settingSearchFields,
+  settingsLabel,
+  topicLabel,
+  zeroText,
+  type View,
+} from "@/components/preferencesModel"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -18,6 +50,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -28,16 +67,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import {
   DEFAULT_FAVICON_HREF,
   FAVICON_COLORS,
   duckFaviconDataUri,
 } from "@/lib/favicon"
+import { FOCUS_RING } from "@/lib/focusRing"
 import {
-  SETTING_GROUPS,
+  SETTING_TOPICS,
   allSettingDescriptors,
+  topicSettings,
   type SettingDescriptor,
+  type SettingTopic,
   type SettingValue,
 } from "@/lib/settingsDescriptors"
 import type { AuthStatus } from "@/lib/authApi"
@@ -58,8 +101,7 @@ import {
   type Strength,
 } from "@/lib/passwordStrength"
 import { firstPasswordUnavailable, storedNotInForceSentence } from "@/lib/authErrors"
-import { inlineCodeDisplayText, renderInlineCode } from "@/lib/inlineMarkdown"
-import { haystackHas, normalizeQuery } from "@/lib/agentSearch"
+import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -67,8 +109,11 @@ import { wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
+  customizeWebappReturnFocus,
   mobileAccessoryBarVisible,
+  openConfigEditor,
   saveSettings,
+  setAsidePreferencesDraft,
   setChangesPaneVisibility,
   setInstanceIdentity,
   useDux,
@@ -90,89 +135,27 @@ function rowId(d: SettingDescriptor): string {
   return `setting-${d.key.replace(/\./g, "-")}`
 }
 
-// Human copy for a descriptor's documented default, shown muted under the
-// label so the row is self-explanatory without leaving the modal.
-function defaultText(d: SettingDescriptor): string {
-  const zero =
-    d.control.kind === "number" && d.control.zeroMeaning
-      ? ` (0 = ${d.control.zeroMeaning})`
-      : ""
-  return defaultLabel(d) + zero
-}
-
-function defaultLabel(d: SettingDescriptor): string {
-  switch (d.control.kind) {
-    case "bool":
-      return `Default: ${d.default ? "On" : "Off"}`
-    case "number": {
-      const unit = d.control.unit ? ` ${d.control.unit}` : ""
-      return `Default: ${d.default}${unit}`
-    }
-    case "enum": {
-      const opt = d.control.options.find((o) => o.value === d.default)
-      return `Default: ${opt?.label ?? String(d.default)}`
-    }
-    case "enum-dynamic":
-      return `Default: ${d.default}`
-    case "text":
-      return d.default ? `Default: ${d.default}` : "Default: empty"
-    case "favicon":
-      return "Default: Original"
-    case "password":
-      return "Default: no password"
-  }
-}
-
-// The Settings search splits its query into words, and a row is shown only
-// when EVERY word is somewhere in what the row shows: its label, its prose, its
-// default and its config key. The fields are the shown text, so a hit is
-// always something the user can see lit.
-function searchWords(query: string): string[] {
-  return normalizeQuery(query).split(/\s+/).filter((w) => w !== "")
-}
-
-function rowMatches(fields: string[], words: string[]): boolean {
-  return words.every((word) => haystackHas(word, ...fields))
-}
-
-// What a row shows, as searched. A locked row shows its lock sentence in place
-// of its description; the password row shows no default. `extra` is any other
-// sentence the row shows, in its backticked source form.
-function settingSearchFields(
-  d: SettingDescriptor,
-  lock: string | null,
-  extra: string[],
-): string[] {
-  const fields = [
-    d.label,
-    inlineCodeDisplayText(lock ?? d.description),
-    d.key,
-    ...extra.map(inlineCodeDisplayText),
-  ]
-  if (d.control.kind !== "password") fields.push(defaultText(d))
-  return fields
-}
-
-// The row's label, lit where the search matched it, and while a search is
-// running its config key on a line of its own, so a key typed from
-// `config.toml` finds the row and shows why.
-function RowHeading({
+// Under a row's prose: its config key while a search runs, so a key typed from
+// `config.toml` shows why the row matched, then where the setting applies.
+function RowFooter({
   d,
   words,
-  label,
+  meta,
 }: {
   d: SettingDescriptor
   words: string[]
-  label: React.ReactNode
+  meta: string
 }) {
   return (
     <>
-      {label}
       {words.length > 0 ? (
         <span className="font-mono text-xs break-all text-muted-foreground">
           <MatchHighlight text={d.key} ranges={matchCharRanges(d.key, words)} />
         </span>
       ) : null}
+      <p className="text-xs text-muted-foreground">
+        <MatchHighlight text={meta} ranges={matchCharRanges(meta, words)} />
+      </p>
     </>
   )
 }
@@ -231,6 +214,7 @@ function NumberControl({
   label,
   min,
   max,
+  unit,
   value,
   onChange,
   disabled,
@@ -239,6 +223,7 @@ function NumberControl({
   label: string
   min: number
   max: number
+  unit?: string
   value: number
   onChange: (v: number) => void
   disabled: boolean
@@ -251,6 +236,7 @@ function NumberControl({
   }
 
   return (
+    <div className="flex items-center gap-2">
     <Input
       id={id}
       type="number"
@@ -274,6 +260,8 @@ function NumberControl({
         if (text.trim() === "") setText(String(value))
       }}
     />
+    {unit ? <span className="text-xs text-muted-foreground">{unit}</span> : null}
+    </div>
   )
 }
 
@@ -309,6 +297,7 @@ function SettingControl({
           label={d.label}
           min={d.control.min}
           max={d.control.max}
+          unit={d.control.unit}
           value={value as number}
           disabled={disabled}
           onChange={(v) => onChange(v)}
@@ -430,7 +419,7 @@ function NotificationPermissionRow({
   }
 
   return (
-    <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
+    <div className="flex flex-col gap-2 border-b py-3 md:flex-row md:items-start md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
         <span className="text-sm font-medium">{lit(NOTIFICATION_PERMISSION_TEXT.title)}</span>
         <p className="text-xs text-muted-foreground">{lit(NOTIFICATION_PERMISSION_TEXT.body)}</p>
@@ -450,24 +439,41 @@ function NotificationPermissionRow({
   )
 }
 
+
+// A row's reset sits beside its control at the control's height: 32px for a
+// mouse, 40px under a finger.
+const RESET_SIZE = "size-8 max-md:size-10 pointer-coarse:size-10"
+
 function SettingRow({
   d,
   value,
   onChange,
+  onReset,
+  changed,
+  meta,
   disabled,
   lock,
   availableProviders,
   words,
+  phone,
+  rowRef,
 }: {
   d: SettingDescriptor
   value: SettingValue
   onChange: (v: SettingValue) => void
+  onReset: () => void
+  /** The draft differs from the documented default: a dot and a reset. */
+  changed: boolean
+  /** The small line: where the setting applies, and more (see `rowMeta`). */
+  meta: string
   disabled: boolean
   /** The sentence saying why this run cannot change the row, or null. */
   lock: string | null
   availableProviders: string[]
   /** The search's words, lit wherever they occur; empty when not searching. */
   words: string[]
+  phone: boolean
+  rowRef: (el: HTMLDivElement | null) => void
 }) {
   const id = rowId(d)
   const labelText = <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
@@ -481,26 +487,64 @@ function SettingRow({
         {labelText}
       </span>
     )
-  const shownDefault = defaultText(d)
+  const zero = zeroText(d)
+  // On a phone a field or the swatches take the row's whole width below the
+  // prose; every other control stays beside it.
+  const stacked = phone && (d.control.kind === "text" || d.control.kind === "favicon")
   return (
-    <div className="flex flex-col gap-2 py-3 first:pt-0 md:flex-row md:items-start md:justify-between md:gap-6">
-      <div className="flex flex-col gap-1">
-        <RowHeading d={d} words={words} label={labelEl} />
+    <div
+      ref={rowRef}
+      data-setting-row={d.key}
+      className={cn("flex gap-3 border-b py-3", stacked ? "flex-col" : "items-start")}
+    >
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-center gap-1.5">
+          {changed ? (
+            <>
+              <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
+              <span className="sr-only">Changed from default:</span>
+            </>
+          ) : null}
+          {labelEl}
+        </div>
         <p className="text-xs text-muted-foreground">
           {renderInlineCode(lock ?? d.description, words)}
         </p>
-        <p className="text-xs text-muted-foreground">
-          <MatchHighlight text={shownDefault} ranges={matchCharRanges(shownDefault, words)} />
-        </p>
+        {zero ? (
+          <p className="text-xs text-muted-foreground">
+            <MatchHighlight text={zero} ranges={matchCharRanges(zero, words)} />
+          </p>
+        ) : null}
+        <RowFooter d={d} words={words} meta={meta} />
       </div>
-      <div className="shrink-0 md:pt-0.5">
-        <SettingControl
-          d={d}
-          value={value}
-          onChange={onChange}
-          disabled={disabled}
-          availableProviders={availableProviders}
-        />
+      <div
+        data-setting-control
+        className={cn("flex items-center gap-1", stacked ? "w-full" : "shrink-0")}
+      >
+        {changed ? (
+          <SimpleTooltip content="Reset to default">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`Reset ${d.label} to ${defaultValueText(d)}`}
+              disabled={disabled}
+              className={cn("shrink-0", RESET_SIZE)}
+              onClick={onReset}
+            >
+              <RotateCcw />
+            </Button>
+          </SimpleTooltip>
+        ) : null}
+        <div className={cn(stacked && "min-w-0 flex-1")}>
+          <SettingControl
+            d={d}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            availableProviders={availableProviders}
+          />
+        </div>
       </div>
     </div>
   )
@@ -620,11 +664,6 @@ function PasswordField({
   )
 }
 
-// The one row that is not a `SettingRow`: three fields, a meter and its own
-// error line, all of it sent through the `"password"` write target by Save.
-// Which fields show is the server's answer about this connection, read again
-// each time Preferences opens: change (a password is set), set the first one
-// (allowed from here), or neither.
 // The sentence under the password row's description: the minimums while the
 // password can be changed from here, otherwise why it cannot. Searched as part
 // of the row.
@@ -639,6 +678,8 @@ function passwordNote(status: AuthStatus | null): string {
   return firstPasswordUnavailable(status.required_reason)
 }
 
+// The one row that is not a `SettingRow`, sent through its own write target by
+// Save. Which fields show is the server's answer, read again on every opening.
 function PasswordSettingRow({
   d,
   status,
@@ -648,6 +689,7 @@ function PasswordSettingRow({
   error,
   disabled,
   words,
+  meta,
 }: {
   d: SettingDescriptor
   status: AuthStatus | null
@@ -657,29 +699,26 @@ function PasswordSettingRow({
   error: string | null
   disabled: boolean
   words: string[]
+  /** The row's small line: where it applies, and its topic where shown. */
+  meta: string
 }) {
   const id = rowId(d)
   const editable =
     status !== null && (status.password_set || status.can_set_first_password)
   const mins = status ? passwordMinimums(status) : null
   return (
-    <div className="flex flex-col gap-3 py-3 first:pt-0">
+    <div data-setting-row={d.key} className="flex flex-col gap-3 border-b py-3">
       <div className="flex flex-col gap-1">
-        <RowHeading
-          d={d}
-          words={words}
-          label={
-            <span id={`${id}-label`} className="text-sm font-medium">
-              <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
-            </span>
-          }
-        />
+        <span id={`${id}-label`} className="text-sm font-medium">
+          <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
+        </span>
         <p className="text-xs text-muted-foreground">
           {renderInlineCode(d.description, words)}
         </p>
         <p className="text-xs text-muted-foreground">
           {renderInlineCode(passwordNote(status), words)}
         </p>
+        <RowFooter d={d} words={words} meta={meta} />
       </div>
       {editable && mins ? (
         <div className="flex flex-col gap-3">
@@ -737,84 +776,6 @@ function PasswordSettingRow({
       ) : null}
     </div>
   )
-}
-
-type SettingsGroup = Record<string, SettingValue>
-
-interface SettingsBody {
-  ui?: SettingsGroup
-  capabilities?: SettingsGroup
-  defaults?: SettingsGroup
-}
-
-// The settings patch, or null when no group changed. An untouched group is
-// omitted rather than sent empty, so the server writes only what the user moved.
-function settingsBody(groups: Required<SettingsBody>): SettingsBody | null {
-  const changed = (rows: SettingsGroup) =>
-    Object.keys(rows).length ? rows : undefined
-  const body: SettingsBody = {
-    ui: changed(groups.ui),
-    capabilities: changed(groups.capabilities),
-    defaults: changed(groups.defaults),
-  }
-  if (!body.ui && !body.capabilities && !body.defaults) return null
-  return body
-}
-
-// Build the write bodies for [descriptor, value] pairs, sending only entries that
-// differ from their pre-touch value; null when there is nothing to write.
-// `originalOf` supplies that baseline and must be override-aware for any field
-// something outside this dialog can flip live, or a toggle back to a stale
-// bootstrap value reads as a no-op. See `writeTarget` in `settingsDescriptors.ts`.
-function buildWrites(
-  entries: [SettingDescriptor, SettingValue][],
-  originalOf: (d: SettingDescriptor) => SettingValue,
-): {
-  identity: { title?: string; favicon?: string } | null
-  settings: SettingsBody | null
-  changesPane: boolean | null
-  github: boolean | null
-  tailscale: string | null
-} {
-  const identity: { title?: string; favicon?: string } = {}
-  const ui: SettingsGroup = {}
-  const capabilities: SettingsGroup = {}
-  const defaults: SettingsGroup = {}
-  let changesPane: boolean | null = null
-  let tailscale: string | null = null
-  let github: boolean | null = null
-  for (const [d, value] of entries) {
-    // The unchanged-row skip. The `github` target posts to a blind read-and-FLIP
-    // endpoint, so emitting an unchanged row would invert the setting.
-    if (value === originalOf(d)) continue
-    // The password has its own path (`savePassword`) and never rides a batch.
-    if (d.writeTarget === "password") continue
-    if (d.writeTarget === "identity") {
-      const field = d.key.split(".")[1] as "title" | "favicon"
-      identity[field] = value as string
-    } else if (d.writeTarget === "changesPane") {
-      changesPane = value as boolean
-    } else if (d.writeTarget === "github") {
-      github = value as boolean
-    } else if (d.writeTarget === "tailscale") {
-      tailscale = value as string
-    } else {
-      const [group, field] = d.key.split(".")
-      // The single flip point for an `inverted` row: everything upstream, the seed,
-      // the switch and the unchanged-row skip, works in shown values only.
-      const wire = d.inverted ? !(value as boolean) : value
-      if (group === "capabilities") capabilities[field] = wire
-      else if (group === "defaults") defaults[field] = wire
-      else ui[field] = wire
-    }
-  }
-  return {
-    identity: Object.keys(identity).length ? identity : null,
-    settings: settingsBody({ ui, capabilities, defaults }),
-    changesPane,
-    github,
-    tailscale,
-  }
 }
 
 // What a persist came to: `ok` is false when any write was refused (each refusal
@@ -882,24 +843,138 @@ async function persist(
   return { ok: (await Promise.all(writes)).every(Boolean), wrote: true }
 }
 
-function CustomizeWebappForm({
+
+// The one height of the controls that sit together in the side list (the
+// search, the topics, Open config.toml…): 32px for a mouse, 40px under a finger.
+const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
+
+// The side list: "Changed from default", then the topics. Each is a button, in
+// the tab order, and the arrow keys, Home and End move between them.
+function TopicNav({
+  view,
+  changedCount,
+  topicHasChanges,
+  dim,
+  phone,
+  navEls,
+  onPick,
+}: {
+  /** The view on screen, or null while a search replaces it. */
+  view: View | null
+  changedCount: number
+  topicHasChanges: (topic: SettingTopic) => boolean
+  dim: boolean
+  phone: boolean
+  navEls: RefObject<Map<View, HTMLButtonElement>>
+  onPick: (view: View) => void
+}) {
+  function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-topic]")]
+    const at = items.findIndex((item) => item === document.activeElement)
+    const next =
+      event.key === "ArrowDown"
+        ? items[Math.min(at + 1, items.length - 1)]
+        : event.key === "ArrowUp"
+          ? items[Math.max(at - 1, 0)]
+          : event.key === "Home"
+            ? items[0]
+            : event.key === "End"
+              ? items[items.length - 1]
+              : undefined
+    if (next === undefined) return
+    event.preventDefault()
+    next.focus()
+  }
+
+  const item = (id: View, label: string, Icon: LucideIcon, count: number, dot: boolean) => (
+    <button
+      key={id}
+      type="button"
+      data-topic={id}
+      ref={(el) => {
+        if (el) navEls.current.set(id, el)
+        else navEls.current.delete(id)
+      }}
+      aria-current={view === id ? "page" : undefined}
+      onClick={() => onPick(id)}
+      className={cn(
+        "flex w-full shrink-0 items-center gap-2 rounded-md border border-transparent px-2 text-sm text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+        FOCUS_RING,
+        phone ? "h-12" : "h-8 pointer-coarse:h-10",
+        view === id && "bg-muted font-medium text-foreground hover:bg-muted",
+      )}
+    >
+      <Icon aria-hidden className="size-4 shrink-0" />
+      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      {dot ? (
+        <>
+          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
+          <span className="sr-only">, some changed from default</span>
+        </>
+      ) : null}
+      <span aria-hidden className="text-xs text-muted-foreground tabular-nums">
+        {count}
+      </span>
+      <span className="sr-only">, {settingsLabel(count)}</span>
+      {phone ? <ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" /> : null}
+    </button>
+  )
+
+  return (
+    <nav
+      aria-label="Preferences topics"
+      onKeyDown={handleKeyDown}
+      className={cn("flex flex-col gap-0.5", dim && "opacity-50")}
+    >
+      {item("changed", CHANGED_LABEL, CircleDot, changedCount, false)}
+      <div aria-hidden className="my-1.5 h-px shrink-0 bg-border" />
+      {SETTING_TOPICS.map((t) =>
+        item(t.id, t.label, TOPIC_ICON[t.id], topicSettings(t.id).length, topicHasChanges(t.id)),
+      )}
+    </nav>
+  )
+}
+
+// How the dialog answers a request to close: the root hands every dismissal to
+// the form, which alone knows whether there is anything to lose.
+interface CloseHandler {
+  // Cancel, Escape, the close button, a press outside: asks first when there
+  // are unsaved changes.
+  request: () => void
+  // The browser's Back, which closes the dialog and cannot be asked to wait,
+  // so unsaved changes are set aside for the next opening.
+  back: () => void
+  // Clears the search if there is one, saying whether there was, so Escape
+  // clears a search before it closes anything.
+  clearSearch: () => boolean
+}
+
+function PreferencesForm({
+  phone,
   saving,
   setSaving,
   savingRef,
-  clearSearchRef,
+  closeRef,
+  confirmsOutlet,
 }: {
+  phone: boolean
   saving: boolean
   setSaving: (v: boolean) => void
-  savingRef: React.RefObject<boolean>
-  /** Filled in with "clear the search if there is one, saying whether there
-   * was", so the dialog's Escape clears a search before it closes anything. */
-  clearSearchRef: React.RefObject<(() => boolean) | null>
+  savingRef: RefObject<boolean>
+  closeRef: RefObject<CloseHandler | null>
+  confirmsOutlet: RefObject<((confirms: ReactNode) => void) | null>
 }) {
   const dux = useDux()
   const { bootstrap } = dux
+  // Read once: what this opening hands the form.
+  const [start] = useState(() => ({
+    topic: dux.customizeWebappTopic ?? null,
+    draft: dux.customizeWebappDraft ?? {},
+  }))
   // `overrides` holds only the fields touched in this dialog session; every other
   // row renders live bootstrap, so another client's change is not reverted on Save.
-  const [overrides, setOverrides] = useState<Record<string, SettingValue>>({})
+  // Every edit and every reset lands here and nothing else: Save writes them.
+  const [overrides, setOverrides] = useState<Record<string, SettingValue>>(start.draft)
   // The password row's fields, kept out of `overrides`: they are never a
   // config value, and they leave this component only through `savePassword`.
   const authPhase = useAuthPhase()
@@ -913,35 +988,41 @@ function CustomizeWebappForm({
     void refreshAuthStatus()
   }, [])
 
-  // The search. Rows it hides keep their edits in `overrides`, so Save still
-  // writes them: hiding a row is a view, never an abandon.
+  // The search covers every topic at once. A row it hides keeps its edit, and
+  // Save still writes it: hiding a row is a view, never an abandon.
   const [query, setQuery] = useState("")
   const words = searchWords(query)
   const searching = words.length > 0
-  useEffect(() => {
-    clearSearchRef.current = () => {
-      if (query === "") return false
-      setQuery("")
-      return true
-    }
-    return () => {
-      clearSearchRef.current = null
-    }
-  }, [query, clearSearchRef])
-  // Type-immediately on a computer; on a phone or a touch screen focusing the
-  // field would pop the soft keyboard over the dialog the moment it opens.
-  const isMobile = useIsMobile()
-  const coarsePointer = useIsCoarsePointer()
-  const searchAutoFocus = !isMobile && !coarsePointer
-  // A password error stops or ends a Save, and it is said on the password row,
-  // so a search that hides that row is cleared to bring the reason on screen.
-  const showPasswordError = (message: string) => {
-    setPasswordError(message)
-    setQuery("")
-  }
+  const [view, setView] = useState<View>(start.topic ?? "look")
+  // On a phone the topics come first and a topic's rows are a second sheet,
+  // which holds a history entry of its own so Back returns to the topics.
+  const [step, setStep] = useState<"topics" | "topic">(start.topic ? "topic" : "topics")
+  // The names a confirmed "Reset all" puts back, frozen while its confirm is up.
+  const [resetAllNames, setResetAllNames] = useState<string[] | null>(null)
+  const [discardOpen, setDiscardOpen] = useState(false)
   const [notificationPermission, setNotificationPermission] = useState(
     initialNotificationPermission,
   )
+
+  const coarsePointer = useIsCoarsePointer()
+  const searchRef = useRef<HTMLInputElement | null>(null)
+  const sheetRef = useRef<HTMLDivElement | null>(null)
+  const backRef = useRef<HTMLButtonElement | null>(null)
+  const navEls = useRef(new Map<View, HTMLButtonElement>())
+  const rowEls = useRef(new Map<string, HTMLDivElement>())
+  // The row whose control takes focus once a reset has taken its reset away.
+  const focusRowAfterReset = useRef<string | null>(null)
+  // Set by a confirmed "Reset all", for the confirm's close to read.
+  const resetAllDone = useRef(false)
+
+  // A password error stops or ends a Save, and it is said on the password row,
+  // so the row is brought on screen: the search cleared and its topic shown.
+  const showPasswordError = (message: string) => {
+    setPasswordError(message)
+    setQuery("")
+    setView("network")
+    if (phone) setStep("topic")
+  }
 
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
@@ -963,6 +1044,60 @@ function CustomizeWebappForm({
   // The row stays editable: the value is saved for the next run.
   const lockOn = (d: SettingDescriptor): string | null =>
     bootstrap ? (d.lockedBy?.(bootstrap) ?? null) : null
+
+  const descriptors = allSettingDescriptors()
+  // The password has no default and no value to compare, so it is never
+  // "changed from default" and has no reset.
+  const resettable = (d: SettingDescriptor) => d.writeTarget !== "password"
+  const differs = (d: SettingDescriptor) =>
+    resettable(d) && !sameValue(d, effective(d), d.default)
+  const changedSettings = descriptors.filter(differs)
+  // A row reset here stays in the Changed list until it is saved, so the
+  // reset can be seen and undone where it was made.
+  const changedList = descriptors.filter(
+    (d) => differs(d) || (resettable(d) && !sameValue(d, originalOf(d), d.default)),
+  )
+  const unsavedSettings = descriptors.filter(
+    (d) => resettable(d) && d.key in overrides && !sameValue(d, overrides[d.key], originalOf(d)),
+  )
+  const passwordTyped =
+    passwordDraft.current !== "" || passwordDraft.next !== "" || passwordDraft.confirm !== ""
+  const unsavedCount = unsavedSettings.length + (passwordTyped ? 1 : 0)
+
+  useEffect(() => {
+    closeRef.current = {
+      request: () => (unsavedCount > 0 ? setDiscardOpen(true) : closeCustomizeWebapp()),
+      back: () => {
+        if (unsavedCount === 0) {
+          closeCustomizeWebapp()
+          return
+        }
+        const draft = Object.fromEntries(unsavedSettings.map((d) => [d.key, overrides[d.key]]))
+        setAsidePreferencesDraft(draft, unsavedCount, passwordTyped)
+      },
+      clearSearch: () => {
+        if (query === "") return false
+        setQuery("")
+        return true
+      },
+    }
+    return () => {
+      closeRef.current = null
+    }
+  })
+
+  // After a reset its button is gone, so focus moves to the control beside it.
+  useEffect(() => {
+    const key = focusRowAfterReset.current
+    if (key === null) return
+    focusRowAfterReset.current = null
+    rowEls.current
+      .get(key)
+      ?.querySelector<HTMLElement>(
+        '[data-setting-control] :is(button, input, [role="switch"], [role="combobox"])',
+      )
+      ?.focus()
+  })
 
   // Refuse to write before the config is loaded: the form seeds from `bootstrap`,
   // so a null one would persist fallback defaults over the real configuration.
@@ -1034,7 +1169,7 @@ function CustomizeWebappForm({
     savingRef.current = true
     setSaving(true)
     try {
-      const touched: [SettingDescriptor, SettingValue][] = allSettingDescriptors()
+      const touched: [SettingDescriptor, SettingValue][] = descriptors
         .filter((d) => d.key in overrides)
         .map((d) => [d, overrides[d.key]])
       const persisted = await persist(touched, originalOf)
@@ -1056,39 +1191,34 @@ function CustomizeWebappForm({
     }
   }
 
-  const resetSection = async (settings: SettingDescriptor[]) => {
-    if (savingRef.current) return
-    if (!requireBootstrap() || !bootstrap) return
-    savingRef.current = true
-    setSaving(true)
-    try {
-      // Identity fields reset to an EMPTY string, not the literal default text:
-      // the server's normalizer resolves empty to the shipped title and favicon.
-      const resetValue = (d: SettingDescriptor): SettingValue =>
-        d.writeTarget === "identity" ? "" : d.default
-      // A locked row is written too: a lock says this run cannot put the value
-      // in force, not that it cannot be saved, and the server saves it for the
-      // next run and says so in its own reply.
-      const entries: [SettingDescriptor, SettingValue][] = settings
-        .filter((d) => d.writeTarget !== "password")
-        .map((d) => [d, resetValue(d)])
-      // Reflect the reset defaults only AFTER the write lands: an optimistic
-      // override would show a failed reset as saved. The dialog stays open either way.
-      const persisted = await persist(entries, originalOf)
-      if (persisted.ok) {
-        setOverrides((o) => {
-          const next = { ...o }
-          for (const [d, value] of entries) next[d.key] = value
-          return next
-        })
-        if (!persisted.wrote) {
-          notifyInfo("Nothing to reset: every setting in this section is already at its default.")
-        }
-      }
-    } finally {
-      savingRef.current = false
-      setSaving(false)
-    }
+  // A reset changes the draft only. A locked row is reset too: its lock says
+  // this run cannot put the value in force, not that it cannot be saved.
+  const resetRow = (d: SettingDescriptor) => {
+    setOverride(d.key, resetValue(d))
+    focusRowAfterReset.current = d.key
+  }
+
+  const confirmResetAll = () => {
+    setOverrides((o) => {
+      const next = { ...o }
+      for (const d of changedSettings) next[d.key] = resetValue(d)
+      return next
+    })
+    resetAllDone.current = true
+    setResetAllNames(null)
+  }
+
+  const pickView = (next: View) => {
+    setQuery("")
+    setView(next)
+    if (phone) setStep("topic")
+  }
+
+  // The config editor reads the file, which does not hold unsaved edits yet,
+  // so it is offered only when there are none.
+  const openConfig = () => {
+    closeCustomizeWebapp()
+    openConfigEditor()
   }
 
   // Whether the permission row shows under the desktop-notifications row.
@@ -1104,188 +1234,563 @@ function CustomizeWebappForm({
     return []
   }
 
-  const shownGroups = SETTING_GROUPS.map((group) => ({
-    group,
-    settings: searching
-      ? group.settings.filter((d) =>
-          rowMatches(settingSearchFields(d, lockOn(d), extraShownText(d)), words),
-        )
-      : group.settings,
-  })).filter(({ settings }) => settings.length > 0)
+  const found = searching
+    ? descriptors.filter((d) =>
+        rowMatches(
+          settingSearchFields(d, lockOn(d), rowMeta(d, differs(d), true), extraShownText(d)),
+          words,
+        ),
+      )
+    : []
+
+  const renderRows = (list: SettingDescriptor[], showTopic: boolean) =>
+    list.map((d) => (
+      <Fragment key={d.key}>
+        {d.control.kind === "password" ? (
+          <PasswordSettingRow
+            d={d}
+            status={authStatus}
+            draft={passwordDraft}
+            onDraft={(next) => {
+              setPasswordDraft(next)
+              setPasswordError(null)
+            }}
+            reading={strengthReading}
+            error={passwordError}
+            disabled={saving}
+            words={words}
+            meta={rowMeta(d, false, showTopic)}
+          />
+        ) : (
+          <SettingRow
+            d={d}
+            value={effective(d)}
+            onChange={(v) => setOverride(d.key, v)}
+            onReset={() => resetRow(d)}
+            changed={differs(d)}
+            meta={rowMeta(d, differs(d), showTopic)}
+            disabled={saving}
+            lock={lockOn(d)}
+            availableProviders={bootstrap?.available_providers ?? []}
+            words={words}
+            phone={phone}
+            rowRef={(el) => {
+              if (el) rowEls.current.set(d.key, el)
+              else rowEls.current.delete(d.key)
+            }}
+          />
+        )}
+        {/* Directly beneath the setting it is a precondition for. */}
+        {d.key === "capabilities.web_notifications" && permissionRowShown(d) ? (
+          <NotificationPermissionRow setPermission={setNotificationPermission} words={words} />
+        ) : null}
+      </Fragment>
+    ))
+
+  const headingClass = "text-base font-medium"
+
+  const searchResults =
+    found.length === 0 ? (
+      <div
+        role="status"
+        className="flex min-h-full flex-1 flex-col items-center justify-center gap-2 px-6 py-10 text-center"
+      >
+        <ZoomOut aria-hidden className="size-7 text-muted-foreground/70" />
+        <p className="text-sm font-medium">
+          No settings match <InlineCode>{query.trim()}</InlineCode>.
+        </p>
+        <p className="max-w-sm text-xs text-muted-foreground">
+          This dialog holds the everyday settings. Everything else in{" "}
+          <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
+          <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
+        </p>
+      </div>
+    ) : (
+      <>
+        <p className={phone ? "pt-1 text-xs text-muted-foreground" : headingClass}>
+          {settingsLabel(found.length)} {found.length === 1 ? "matches" : "match"}{" "}
+          <InlineCode>{query.trim()}</InlineCode>
+        </p>
+        {renderRows(found, true)}
+      </>
+    )
+
+  const resetAllButton =
+    changedSettings.length > 0 ? (
+      <Button
+        variant="outline"
+        disabled={saving}
+        className="shrink-0 max-md:min-h-10 pointer-coarse:min-h-10"
+        onClick={() => setResetAllNames(changedSettings.map((d) => d.label))}
+      >
+        <RotateCcw />
+        Reset all {changedSettings.length}…
+      </Button>
+    ) : null
+
+  const changedEmpty = (
+    <Empty className="min-h-full">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <CircleCheck />
+        </EmptyMedia>
+        <EmptyTitle>Everything is at its default</EmptyTitle>
+        <EmptyDescription>
+          Nothing here differs from what dux ships with. Settings you change show
+          up in this list, each with its own reset.
+        </EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  )
+
+  // The heading of the view on screen, a sheet's title on a phone.
+  const title = (text: string) =>
+    phone ? (
+      <SheetTitle className={headingClass}>{text}</SheetTitle>
+    ) : (
+      <h3 className={headingClass}>{text}</h3>
+    )
+
+  const viewBody =
+    view === "changed" ? (
+      changedList.length === 0 ? (
+        <>
+          {phone ? title(CHANGED_LABEL) : null}
+          {changedEmpty}
+        </>
+      ) : (
+        <>
+          <div className="flex items-start gap-2 pb-1">
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+              {title(CHANGED_LABEL)}
+              {phone ? null : (
+                <p className="text-xs text-muted-foreground">
+                  Everything here differs from what dux ships with. The reset on a
+                  row puts that one back.
+                </p>
+              )}
+            </div>
+            {resetAllButton}
+          </div>
+          {renderRows(changedList, true)}
+        </>
+      )
+    ) : (
+      <>
+        <div className="pb-1">{title(topicLabel(view))}</div>
+        {renderRows(topicSettings(view), false)}
+      </>
+    )
+
+  const searchBox = (
+    <div
+      className={cn(
+        "flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
+        CONTROL_HEIGHT,
+      )}
+    >
+      <Search aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+      <input
+        ref={searchRef}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search settings"
+        aria-label="Search settings"
+        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+      />
+    </div>
+  )
+
+  const nav = (
+    <TopicNav
+      view={searching ? null : phone ? null : view}
+      changedCount={changedSettings.length}
+      topicHasChanges={(topic) => topicSettings(topic).some(differs)}
+      dim={searching && !phone}
+      phone={phone}
+      navEls={navEls}
+      onPick={pickView}
+    />
+  )
+
+  const configHint =
+    unsavedCount > 0
+      ? "Save or cancel your unsaved changes first: config.toml does not have them yet."
+      : null
+  const openConfigButton = (
+    <ExplainedWhenDisabled disabled={unsavedCount > 0} hint={configHint} className="flex w-full rounded-lg">
+      <Button
+        variant="ghost"
+        disabled={unsavedCount > 0}
+        className={cn("w-full justify-start px-2", phone ? "h-12" : CONTROL_HEIGHT)}
+        onClick={openConfig}
+      >
+        <FileCode />
+        Open config.toml…
+      </Button>
+    </ExplainedWhenDisabled>
+  )
+
+  const request = () => closeRef.current?.request()
+
+  const confirms = (
+    <>
+      <ConfirmResetAll
+        names={resetAllNames}
+        onCancel={() => setResetAllNames(null)}
+        onConfirm={confirmResetAll}
+        finalFocus={() => {
+          if (!resetAllDone.current) return true
+          resetAllDone.current = false
+          return (phone ? backRef.current : navEls.current.get("changed")) ?? true
+        }}
+      />
+      <ConfirmDiscardPreferences
+        open={discardOpen}
+        changes={unsavedCount}
+        onKeep={() => setDiscardOpen(false)}
+        onDiscard={() => {
+          setDiscardOpen(false)
+          closeCustomizeWebapp()
+        }}
+      />
+    </>
+  )
+  useLayoutEffect(() => {
+    confirmsOutlet.current?.(confirms)
+  })
+  useLayoutEffect(() => () => confirmsOutlet.current?.(null), [confirmsOutlet])
+
+  const finalFocus = () => customizeWebappReturnFocus() ?? true
+  // Stable, so a render while the dialog is open never asks for it again.
+  const [desktopInitialFocus] = useState(
+    () => () =>
+      (coarsePointer ? navEls.current.get(start.topic ?? "look") : searchRef.current) ?? true,
+  )
+
+  if (phone) {
+    const closeButton = (
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-10 shrink-0"
+        aria-label="Close"
+        onClick={request}
+      >
+        <X />
+      </Button>
+    )
+    const footer = (
+      <div className="flex shrink-0 flex-col gap-2 border-t bg-muted/50 px-4 pt-3 pb-4">
+        <Button disabled={saving} className="h-11 w-full" onClick={save}>
+          {unsavedCount > 0
+            ? `Save ${unsavedCount} ${unsavedCount === 1 ? "change" : "changes"}`
+            : "Save"}
+        </Button>
+        <Button variant="outline" disabled={saving} className="h-11 w-full" onClick={request}>
+          Cancel
+        </Button>
+      </div>
+    )
+    const inTopic = step === "topic"
+    // The footer rides wherever rows are on screen, and wherever there is
+    // something unsaved to keep or drop.
+    const topicHasRows = view !== "changed" || changedList.length > 0
+    return (
+      <SheetContent
+        ref={sheetRef}
+        side="bottom"
+        showCloseButton={false}
+        // The sheet itself: a control focused by the opening would wear its
+        // focus ring, or raise the soft keyboard, for no reason the person gave.
+        initialFocus={() => sheetRef.current ?? true}
+        finalFocus={finalFocus}
+        fullHeight
+        className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
+      >
+        <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
+          <SheetTitle className="flex-1">Preferences</SheetTitle>
+          {closeButton}
+        </div>
+        <div className="shrink-0 px-4 pt-3 pb-1">{searchBox}</div>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-2">
+          {searching ? (
+            searchResults
+          ) : (
+            <>
+              {nav}
+              <div aria-hidden className="my-1.5 h-px shrink-0 bg-border" />
+              {openConfigButton}
+            </>
+          )}
+        </div>
+        {/* The topic's sheet covers this one and carries its own. */}
+        {!inTopic && (searching || unsavedCount > 0) ? footer : null}
+        <Dialog
+          open={inTopic}
+          onOpenChange={(open, details) => {
+            if (open) return
+            // Back is the one close that steps back; Escape and a press
+            // outside close the whole dialog, asking first.
+            if (details.reason === "imperative-action") {
+              setStep("topics")
+              return
+            }
+            details.cancel()
+            request()
+          }}
+        >
+          <SheetContent
+            side="bottom"
+            showCloseButton={false}
+            initialFocus={() => backRef.current ?? true}
+            finalFocus={() => navEls.current.get(view) ?? true}
+            fullHeight
+            className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
+          >
+            <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
+              <Button
+                ref={backRef}
+                variant="ghost"
+                className="h-10 pl-1"
+                aria-label="Back to all topics"
+                onClick={() => setStep("topics")}
+              >
+                <ChevronLeft />
+                Preferences
+              </Button>
+              <div className="flex-1" />
+              {closeButton}
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pt-3 pb-2">
+              {viewBody}
+            </div>
+            {topicHasRows || unsavedCount > 0 ? footer : null}
+          </SheetContent>
+        </Dialog>
+      </SheetContent>
+    )
+  }
 
   return (
-    // A flex column rather than the popup's grid, so the list is the one part
-    // that gives up height when the popup hits its cap (a phone, a short
-    // window): the header, the search and the footer stay put and only the
-    // rows scroll.
-    <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-2xl">
-      <DialogHeader className="shrink-0">
-        <DialogTitle>Settings</DialogTitle>
+    <DialogContent
+      // Type-immediately into the search with a mouse; under a finger focusing
+      // the field would pop the soft keyboard over the dialog the moment it opens.
+      initialFocus={desktopInitialFocus}
+      finalFocus={finalFocus}
+      // A flex column rather than the popup's grid, so only the two columns give
+      // up height when the popup hits its cap.
+      className="flex h-[min(42.5rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[58.75rem]"
+    >
+      <DialogHeader className="shrink-0 pr-8">
+        <DialogTitle>Preferences</DialogTitle>
         <DialogDescription>
-          {renderInlineCode(
-            "Configure dux. Saved to `config.toml` and applied to every connected browser.",
-          )}
+          Saved to <InlineCode>config.toml</InlineCode> and applied to every connected
+          browser.
         </DialogDescription>
       </DialogHeader>
 
-      <div className="flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
-        <Search className="size-4 shrink-0 text-muted-foreground" />
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search settings"
-          aria-label="Search settings"
-          autoFocus={searchAutoFocus}
-          className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-        />
-      </div>
-
-      {/* A fixed height rather than a cap, so the dialog does not shrink as a
-          search narrows the list; it gives way only to the popup's own cap. */}
-      {shownGroups.length === 0 ? (
-        <div
-          role="status"
-          className="flex h-[60vh] min-h-0 shrink flex-col items-center justify-center gap-2 px-6 text-center"
-        >
-          <ZoomOut aria-hidden className="size-7 text-muted-foreground/70" />
-          <p className="text-sm font-medium">
-            No settings match <InlineCode>{query.trim()}</InlineCode>.
-          </p>
-          <p className="max-w-sm text-xs text-muted-foreground">
-            This dialog holds the everyday settings. Everything else in{" "}
-            <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
-            <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
-          </p>
+      <div className="grid min-h-0 flex-1 grid-cols-[13.75rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6">
+        <div className="flex min-h-0 flex-col gap-3">
+          {searchBox}
+          {/* The 3px of padding is the room a topic's focus ring needs inside
+              the clipping scroll box. */}
+          <div className="-m-[3px] min-h-0 shrink overflow-y-auto p-[3px]">{nav}</div>
+          <div className="flex-1" />
+          {openConfigButton}
         </div>
-      ) : (
-        // The 3px of padding on the content is the room a control's focus ring
-        // needs inside the clipping viewport; -ml and the 9px right padding
-        // (12px less the 3px) give it back, so the rows stay in line with the
-        // search field above and the footer below, and the scrollbar keeps its
-        // place.
-        <ScrollArea className="-ml-[3px] h-[60vh] min-h-0 shrink pr-[9px]">
-          <div className="flex flex-col gap-6 px-[3px] pb-[3px]">
-            {shownGroups.map(({ group, settings }) => (
-              <div key={group.surface} className="flex flex-col gap-1">
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    {group.caption}
-                  </p>
-                  {/* A password has no default to reset to. A search hides the
-                      button: the section on screen is not the whole section. */}
-                  {!searching && group.settings.some((d) => d.writeTarget !== "password") ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={saving}
-                      className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0 text-xs"
-                      onClick={() => resetSection(group.settings)}
-                    >
-                      Reset section to defaults…
-                    </Button>
-                  ) : null}
-                </div>
-                <div className="divide-y divide-border">
-                  {settings.map((d) => (
-                    <Fragment key={d.key}>
-                      {d.control.kind === "password" ? (
-                        <PasswordSettingRow
-                          d={d}
-                          status={authStatus}
-                          draft={passwordDraft}
-                          onDraft={(next) => {
-                            setPasswordDraft(next)
-                            setPasswordError(null)
-                          }}
-                          reading={strengthReading}
-                          error={passwordError}
-                          disabled={saving}
-                          words={words}
-                        />
-                      ) : (
-                        <SettingRow
-                          d={d}
-                          value={effective(d)}
-                          onChange={(v) => setOverride(d.key, v)}
-                          disabled={saving}
-                          lock={lockOn(d)}
-                          availableProviders={bootstrap?.available_providers ?? []}
-                          words={words}
-                        />
-                      )}
-                      {/* Directly beneath the setting it is a precondition for. */}
-                      {d.key === "capabilities.web_notifications" && permissionRowShown(d) ? (
-                        <NotificationPermissionRow
-                          setPermission={setNotificationPermission}
-                          words={words}
-                        />
-                      ) : null}
-                    </Fragment>
-                  ))}
-                </div>
-              </div>
-            ))}
+        {/* The 3px of padding on the content is the room a control's focus ring
+            needs inside the clipping viewport; -ml and the 9px right padding
+            (12px less the 3px) give it back, so the rows stay in line with the
+            heading and the scrollbar keeps its place. Keyed by what is shown,
+            so a new view starts at its top. */}
+        <ScrollArea
+          key={searching ? "search" : view}
+          className="-ml-[3px] h-full min-h-0 pr-[9px]"
+        >
+          <div className="flex min-h-full flex-col px-[3px] pb-[3px]">
+            {searching ? searchResults : viewBody}
           </div>
         </ScrollArea>
-      )}
+      </div>
 
-      {/* Misclick-safe spacing between the last row and the footer buttons. */}
-      <div className="h-2 shrink-0" />
-      <DialogFooter className="shrink-0">
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          {/* Cancel is disabled too while a write is in flight: closing the
-              dialog mid-persist would let the pending success close a freshly
-              reopened dialog session, or misread as "the edit was discarded"
-              when the request still lands on the server. */}
-          <Button
-            variant="outline"
-            autoFocus={!searchAutoFocus}
-            disabled={saving}
-            onClick={closeCustomizeWebapp}
-          >
-            Cancel
-          </Button>
-          <Button disabled={saving} onClick={save}>
-            Save
-          </Button>
-        </div>
+      <DialogFooter className="shrink-0 sm:items-center">
+        <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
+          {unsavedCount > 0 ? changesLabel(unsavedCount) : null}
+        </span>
+        {/* Cancel is disabled too while a write is in flight: closing the
+            dialog mid-persist would let the pending success close a freshly
+            reopened dialog session, or misread as "the edit was discarded"
+            when the request still lands on the server. */}
+        <Button variant="outline" disabled={saving} onClick={request}>
+          Cancel
+        </Button>
+        <Button disabled={saving} onClick={save}>
+          Save
+        </Button>
       </DialogFooter>
     </DialogContent>
   )
 }
 
+// Where the form's confirms render: beside the dialog rather than inside it,
+// because base-ui draws no overlay for a dialog nested in another, and a
+// confirm dims what is behind it as the app's other confirms do.
+function ConfirmsOutlet({
+  setterRef,
+}: {
+  setterRef: RefObject<((confirms: ReactNode) => void) | null>
+}) {
+  const [confirms, setConfirms] = useState<ReactNode>(null)
+  useLayoutEffect(() => {
+    setterRef.current = setConfirms
+    return () => {
+      setterRef.current = null
+    }
+  }, [setterRef])
+  return confirms
+}
+
+// "Reset all" puts the listed settings back in the draft only; Save writes it.
+function ConfirmResetAll({
+  names,
+  onCancel,
+  onConfirm,
+  finalFocus,
+}: {
+  names: string[] | null
+  onCancel: () => void
+  onConfirm: () => void
+  finalFocus: () => HTMLElement | boolean
+}) {
+  // Kept through the close, so the closing confirm still says what it said.
+  const [shown, setShown] = useState<string[]>(names ?? [])
+  if (names !== null && names !== shown) setShown(names)
+  const count = shown.length
+  return (
+    <Dialog
+      open={names !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel()
+      }}
+    >
+      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
+        <DialogHeader>
+          <DialogTitle>
+            {count === 1
+              ? "Reset 1 setting to its default?"
+              : `Reset ${count} settings to their defaults?`}
+          </DialogTitle>
+          <DialogDescription>
+            {listNames(shown)} {count === 1 ? "goes" : "go"} back to what dux ships
+            with. <InlineCode>config.toml</InlineCode> is written when you save.
+          </DialogDescription>
+        </DialogHeader>
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            {count === 1 ? "Reset 1 setting" : `Reset ${count} settings`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Closing with unsaved changes asks first: they exist only in this dialog.
+function ConfirmDiscardPreferences({
+  open,
+  changes,
+  onKeep,
+  onDiscard,
+}: {
+  open: boolean
+  changes: number
+  onKeep: () => void
+  onDiscard: () => void
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onKeep()
+      }}
+    >
+      <DialogContent showCloseButton={false} destructive>
+        <DialogHeader>
+          <DialogTitle>Discard unsaved changes?</DialogTitle>
+          <DialogDescription>
+            Preferences has {changesLabel(changes)}. Discarding them leaves{" "}
+            <InlineCode>config.toml</InlineCode> as it was.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={onKeep}>
+            Keep editing
+          </Button>
+          <Button variant="destructive" onClick={onDiscard}>
+            Discard changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Topics beside their settings on a computer; on a phone, a topic's settings
+// are a second sheet over the topics. Every edit and reset waits for Save.
 export function CustomizeWebappDialog() {
-  const { customizeWebappOpen } = useDux()
+  const { customizeWebappOpen, customizeWebappEpoch } = useDux()
+  const isMobile = useIsMobile()
 
   // One persist at a time: the ref gates re-entry synchronously, the state disables
   // the footer, and both gate `onOpenChange` too, so no dismissal orphans a write.
   const savingRef = useRef(false)
   const [saving, setSaving] = useState(false)
-  const clearSearchRef = useRef<(() => boolean) | null>(null)
+  const closeRef = useRef<CloseHandler | null>(null)
+  const confirmsOutlet = useRef<((confirms: ReactNode) => void) | null>(null)
 
   return (
-    <Dialog
-      open={customizeWebappOpen}
-      onOpenChange={(o, details) => {
-        // Escape over a search clears the search and keeps the dialog open;
-        // the next Escape closes it. Back and every other dismissal close as
-        // they always have.
-        if (!o && details.reason === "escape-key" && clearSearchRef.current?.()) {
+    <>
+      <ConfirmsOutlet setterRef={confirmsOutlet} />
+      <Dialog
+        open={customizeWebappOpen}
+        onOpenChange={(open, details) => {
+          if (open || savingRef.current) return
+          const form = closeRef.current
+          if (form === null) {
+            closeCustomizeWebapp()
+            return
+          }
+          // Back is the shared primitive's imperative close; it keeps asking
+          // until the dialog is gone, so it cannot stop at a question.
+          if (details.reason === "imperative-action") {
+            form.back()
+            return
+          }
           details.cancel()
-          return
-        }
-        if (!o && !savingRef.current) closeCustomizeWebapp()
-      }}
-    >
-      {customizeWebappOpen && (
-        <CustomizeWebappForm
-          saving={saving}
-          setSaving={setSaving}
-          savingRef={savingRef}
-          clearSearchRef={clearSearchRef}
-        />
-      )}
-    </Dialog>
+          // Escape over a search clears the search; the next one closes.
+          if (details.reason === "escape-key" && form.clearSearch()) return
+          form.request()
+        }}
+      >
+        {customizeWebappOpen ? (
+          <PreferencesForm
+            key={customizeWebappEpoch}
+            phone={isMobile}
+            saving={saving}
+            setSaving={setSaving}
+            savingRef={savingRef}
+            closeRef={closeRef}
+            confirmsOutlet={confirmsOutlet}
+          />
+        ) : null}
+      </Dialog>
+    </>
   )
 }

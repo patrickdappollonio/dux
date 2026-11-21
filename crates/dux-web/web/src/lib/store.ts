@@ -43,6 +43,7 @@ import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { isMobileViewport } from "@/hooks/use-mobile"
 import { EventsSocket } from "./eventsSocket"
 import type { ReconnectPlanEvent } from "./reconnectingSocket"
+import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes, savedMacrosEdit, type MacrosEdit } from "./macros"
@@ -761,11 +762,15 @@ export interface DuxState {
   /// Set when a save met a file that changed on disk since it was read: the
   /// server's sentence, shown with the choice to reload or keep editing.
   configEditorConflict: string | null
-  // The Preferences dialog (the app menu's "Preferences…"). Gates the
-  // modal that sets the browser tab title + favicon colour + Changes pane
-  // visibility; the dialog seeds its fields from the bootstrap document, so it
-  // needs no state beyond this flag.
+  // The Preferences dialog (the app menu's "Preferences…"). Its rows seed from
+  // the bootstrap document; the store holds only what an opening hands it.
   customizeWebappOpen: boolean
+  /// The topic the dialog opens on, or null for its own first topic.
+  customizeWebappTopic: SettingTopic | null
+  /// Unsaved edits a Back set aside, which the dialog opens with, by config key.
+  customizeWebappDraft: Record<string, SettingValue> | null
+  /// Bumped on every opening, so the dialog's form mounts afresh for each.
+  customizeWebappEpoch: number
   // The one first-load dialog (first-run welcome / post-upgrade what's-new).
   // Null when closed. ONE dialog serves both screens; they differ only in text
   // and buttons, so the shape is shared. See `FirstLoadDialogState`.
@@ -1243,6 +1248,9 @@ let state: DuxState = {
   configEditorToken: null,
   configEditorConflict: null,
   customizeWebappOpen: false,
+  customizeWebappTopic: null,
+  customizeWebappDraft: null,
+  customizeWebappEpoch: 0,
   firstLoad: null,
   firstLoadDismissed: false,
   macrosDialogOpen: false,
@@ -9929,15 +9937,65 @@ export interface StopAllRefusal {
   blockers: AttachedBlocker[]
 }
 
-// The Preferences dialog (the app menu's "Preferences…"). Open/close just flip the
-// gate; the dialog seeds its title, favicon, and Changes pane fields from the
-// bootstrap document.
-export function openCustomizeWebapp(): void {
-  setState({ customizeWebappOpen: true })
+// Opens Preferences on `topic`, with any edits a Back set aside. Call it from
+// the opening handler: focus returns to the control pressed last.
+export function openCustomizeWebapp(topic: SettingTopic | null = null): void {
+  const opener = lastPageControl
+  preferencesReturnFocus = () => (opener?.isConnected ? opener : null)
+  const draft = preferencesSetAside
+  preferencesSetAside = null
+  if (draft !== null) dismissNotification(PREFERENCES_SET_ASIDE_ID)
+  setState({
+    customizeWebappOpen: true,
+    customizeWebappTopic: topic,
+    customizeWebappDraft: draft,
+    customizeWebappEpoch: state.customizeWebappEpoch + 1,
+  })
 }
 
 export function closeCustomizeWebapp(): void {
-  setState({ customizeWebappOpen: false })
+  setState({ customizeWebappOpen: false, customizeWebappDraft: null })
+}
+
+let preferencesReturnFocus: (() => HTMLElement | null) | null = null
+
+/// Where the Preferences dialog hands focus when it closes: the control that
+/// opened it, while that is still on the page.
+export function customizeWebappReturnFocus(): HTMLElement | null {
+  return preferencesReturnFocus?.() ?? null
+}
+
+// The edits a Back closed Preferences on. Back cannot stop to ask, so they
+// are kept for the next opening, and a sticky toast offers them back.
+let preferencesSetAside: Record<string, SettingValue> | null = null
+const PREFERENCES_SET_ASIDE_ID = "preferences-set-aside"
+
+/// Close Preferences on `draft`, keeping it for the next opening. `passwordDropped`
+/// says the password fields held text, which is never kept.
+export function setAsidePreferencesDraft(
+  draft: Record<string, SettingValue>,
+  changes: number,
+  passwordDropped: boolean,
+): void {
+  closeCustomizeWebapp()
+  const password = passwordDropped
+    ? " The password fields were cleared; they are never kept."
+    : ""
+  if (Object.keys(draft).length === 0) {
+    notifyInfo(`Preferences closed without saving.${password}`)
+    return
+  }
+  preferencesSetAside = draft
+  const what = changes === 1 ? "1 unsaved change" : `${changes} unsaved changes`
+  // Sticky: the edits are on no screen while the dialog is closed.
+  notifyInfo(
+    `Preferences closed with ${what}, and nothing was saved. Restore reopens it with them.${password}`,
+    {
+      id: PREFERENCES_SET_ASIDE_ID,
+      sticky: true,
+      action: { label: "Restore", onClick: () => openCustomizeWebapp() },
+    },
+  )
 }
 
 // ── The two first-load screens ───────────────────────────────────────────────

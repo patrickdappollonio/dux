@@ -111,8 +111,10 @@ function status(overrides: Partial<AuthStatus> = {}): AuthStatus {
 }
 
 function seed() {
+  // Opened on the password's topic, as the sign-in banners open it.
   mockState = {
     customizeWebappOpen: true,
+    customizeWebappTopic: "network",
     changesPaneOverride: null,
     bootstrap: {
       available_providers: [],
@@ -160,9 +162,14 @@ describe("the password row", () => {
     expect(screen.getByLabelText("New password again")).toHaveProperty("type", "password")
   })
 
-  it("has no reset-to-defaults for its section", () => {
+  it("is never changed from a default and has no reset, but a typed password is an unsaved change", () => {
     render(<CustomizeWebappDialog />)
-    expect(screen.getAllByRole("button", { name: "Reset section to defaults…" })).toHaveLength(3)
+    type("New password", STRONG)
+    expect(screen.queryByRole("button", { name: /^Reset Password/ })).toBeNull()
+    expect(screen.getByRole("button", { name: /^Changed from default/ }).textContent).toContain(
+      "0, 0 settings",
+    )
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
   })
 
   it("shows the strength live, from weak to excellent, with the hint", async () => {
@@ -267,7 +274,9 @@ describe("the password row", () => {
       bootstrap: { ...mockState.bootstrap!, copy_on_select: true },
     } as DuxState
     render(<CustomizeWebappDialog />)
+    fireEvent.click(screen.getByRole("button", { name: /^Typing and touch/ }))
     fireEvent.click(screen.getByRole("switch", { name: "Copy on select" }))
+    fireEvent.click(screen.getByRole("button", { name: /^Sign-in and network/ }))
     type("New password", "short")
     await save()
     expect(saveSettings).not.toHaveBeenCalled()
@@ -347,7 +356,7 @@ describe("the password row", () => {
 })
 
 describe("the password row under a search", () => {
-  it("clears a search that hides the row when Save stops on a password error", async () => {
+  it("brings the row back on screen when Save stops on a password error", async () => {
     render(<CustomizeWebappDialog />)
     type("Current password", "the old password")
     type("New password", STRONG)
@@ -360,6 +369,19 @@ describe("the password row under a search", () => {
     expect(postPassword).not.toHaveBeenCalled()
     expect(screen.getByRole("alert").textContent).not.toBe("")
     expect(screen.getByLabelText("New password")).toBeTruthy()
+  })
+
+  it("brings its topic back when Save stops on a password error under another topic", async () => {
+    render(<CustomizeWebappDialog />)
+    type("Current password", "the old password")
+    type("New password", "short")
+    fireEvent.click(screen.getByRole("button", { name: /^Appearance/ }))
+    expect(screen.queryByLabelText("New password")).toBeNull()
+
+    await save()
+
+    expect(postPassword).not.toHaveBeenCalled()
+    expect(screen.getByRole("alert").textContent).toBe("Use at least 12 characters.")
   })
 
   it("searches and lights the row's status sentence", () => {

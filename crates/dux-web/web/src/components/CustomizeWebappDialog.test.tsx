@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import type { ReactNode } from "react"
 
 import type { Bootstrap } from "@/lib/bootstrapApi"
@@ -19,8 +19,17 @@ vi.mock("@/lib/store", async (importOriginal) => {
     closeCustomizeWebapp: vi.fn(),
     saveSettings: vi.fn(),
     setChangesPaneVisibility: vi.fn(),
+    setAsidePreferencesDraft: vi.fn(),
+    openConfigEditor: vi.fn(),
   }
 })
+
+let phone = false
+vi.mock("@/hooks/use-mobile", () => ({
+  MOBILE_BREAKPOINT: 768,
+  isMobileViewport: () => phone,
+  useIsMobile: () => phone,
+}))
 
 // The GitHub row does NOT ride the generic settings PATCH: it routes to the
 // dedicated endpoint that also drives the engine's PR-sync side effects.
@@ -77,6 +86,19 @@ function installBootStubs() {
     "fetch",
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })),
+  )
 }
 installBootStubs()
 const { CustomizeWebappDialog } = await import("./CustomizeWebappDialog")
@@ -85,6 +107,10 @@ const setInstanceIdentity = vi.mocked(store.setInstanceIdentity)
 const closeCustomizeWebapp = vi.mocked(store.closeCustomizeWebapp)
 const saveSettings = vi.mocked(store.saveSettings)
 const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
+const setAsidePreferencesDraft = vi.mocked(store.setAsidePreferencesDraft)
+const openConfigEditor = vi.mocked(store.openConfigEditor)
+const { openModals } = await import("@/lib/modalHistory")
+const { SETTING_TOPICS, allSettingDescriptors } = await import("@/lib/settingsDescriptors")
 const { configApi } = await import("@/lib/configApi")
 const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
 const setTailscaleMode = vi.mocked(configApi.setTailscaleMode)
@@ -119,8 +145,8 @@ const fullBootstrap: Bootstrap = {
   // Stated rather than left absent, unlike the rows above it whose `read()`
   // falls back to their own default. This one's absence MEANS OFF (an older
   // server never published it), so leaving it out would make the fixture a
-  // server with the feature switched off, and "reset the section to defaults"
-  // would then legitimately emit it as a change. It must therefore carry the
+  // server with the feature switched off, which "Changed from default" and "Reset all"
+  // would then legitimately count as a change. It must therefore carry the
   // shipped default, and moves whenever that does.
   upload_pasted_text_chars: 4000,
 }
@@ -133,8 +159,38 @@ function seed(overrides: Partial<Bootstrap> = {}) {
   } as unknown as DuxState
 }
 
+// Shows the topic a setting is filed under, then returns its control.
+function field(label: string): HTMLElement {
+  const d = allSettingDescriptors().find((x) => x.label === label)
+  if (!d) throw new Error(`no setting ${label}`)
+  topic(SETTING_TOPICS.find((t) => t.id === d.topic)!.label)
+  return screen.getByLabelText(label)
+}
+
+// Presses a topic, or "Changed from default", in the side list.
+function topic(name: string) {
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${name}`) }))
+}
+
+// Lets the dialog's own opening focus land, which base-ui places a moment
+// after the dialog mounts.
+async function opened() {
+  await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+}
+
+// The browser's Back: the store closes the newest modal holding an entry.
+async function back() {
+  await act(async () => {
+    openModals().at(-1)!.close()
+  })
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)))
+}
+
 beforeEach(() => {
   installBootStubs()
+  phone = false
+  setAsidePreferencesDraft.mockClear()
+  openConfigEditor.mockClear()
   setInstanceIdentity.mockClear().mockResolvedValue(true)
   closeCustomizeWebapp.mockClear()
   saveSettings.mockClear().mockResolvedValue(true)
@@ -155,31 +211,55 @@ afterEach(() => {
 })
 
 describe("CustomizeWebappDialog", () => {
-  it("surface groups render the cross-surface caption", () => {
+  it("is titled as its menu entry is", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(screen.getByRole("dialog", { name: "Preferences" })).toBeTruthy()
+  })
+
+  it("lists the topics with their counts, and says on each row where it applies", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    expect(screen.getByText(/This browser \(Web\)/)).toBeTruthy()
-    expect(screen.getByText(/Both surfaces/)).toBeTruthy()
+    const nav = screen.getByRole("navigation", { name: "Preferences topics" })
+    expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Changed from default2, 2 settings",
+      "Appearance, some changed from default7, 7 settings",
+      "Typing and touch6, 6 settings",
+      "Attention and messages5, 5 settings",
+      "New agents and startup, some changed from default6, 6 settings",
+      "Sign-in and network2, 2 settings",
+      "Terminal app3, 3 settings",
+    ])
+    // Appearance is on screen first; a row in it applies to this browser.
+    const row = screen.getByLabelText("Instance name").closest("[data-setting-row]")!
+    expect(row.textContent).toContain("This browser")
+    expect(field("Attention grace").closest("[data-setting-row]")!.textContent).toContain(
+      "Web and terminal app",
+    )
   })
 
-  it("renders a Switch for each bool setting", async () => {
+  it("renders a Switch for each bool setting, in its topic", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
     // Derived from the descriptors rather than hardcoded, so adding a bool row
     // doesn't fail this test for the wrong reason.
-    const { allSettingDescriptors } = await import("@/lib/settingsDescriptors")
+    let switches = 0
+    for (const t of SETTING_TOPICS) {
+      topic(t.label)
+      switches += screen.queryAllByRole("switch").length
+    }
     const bools = allSettingDescriptors().filter((d) => d.control.kind === "bool")
     expect(bools.length).toBeGreaterThan(0)
-    expect(screen.getAllByRole("switch").length).toBe(bools.length)
+    expect(switches).toBe(bools.length)
   })
 
   it("renders a number input for u64 settings and shows the zero-value hint", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Status message auto-clear") as HTMLInputElement
+    const input = field("Status message auto-clear") as HTMLInputElement
     expect(input.type).toBe("number")
     expect(input.value).toBe("6")
     expect(screen.getByText(/never auto-clear/i)).toBeTruthy()
@@ -192,23 +272,28 @@ describe("CustomizeWebappDialog", () => {
     // Five select rows: pr_banner_position, compose_bar, server.tailscale and
     // ui.extended_keys (static enums), and defaults.provider (enum-dynamic,
     // sourced from available_providers).
-    expect(screen.getAllByRole("combobox").length).toBe(5)
+    let selects = 0
+    for (const t of SETTING_TOPICS) {
+      topic(t.label)
+      selects += screen.queryAllByRole("combobox").length
+    }
+    expect(selects).toBe(5)
   })
 
-  it("shows the documented default for each row", () => {
-    seed()
+  it("names the default on a row once the row differs from it", () => {
+    seed({ title: "prod dux" })
     render(<CustomizeWebappDialog />)
 
-    expect(screen.getByText(/Default: dux\b/)).toBeTruthy()
-    expect(screen.getByText(/Default: 6 seconds/)).toBeTruthy()
-    expect(screen.getAllByText(/Default: On/).length).toBeGreaterThan(0)
+    const row = (label: string) => field(label).closest("[data-setting-row]")!.textContent
+    expect(row("Instance name")).toContain("This browser · default dux")
+    expect(row("Status message auto-clear")).not.toContain("default")
   })
 
   it("keeps title + favicon on the instance-identity endpoint", async () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Instance name") as HTMLInputElement
+    const input = field("Instance name") as HTMLInputElement
     fireEvent.change(input, { target: { value: "prod dux" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
@@ -223,7 +308,7 @@ describe("CustomizeWebappDialog", () => {
 
     // "Copy on select", NOT "Show the Changes pane": that one is bespoke and
     // is covered by its own dedicated test below.
-    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(field("Copy on select"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
@@ -251,9 +336,7 @@ describe("CustomizeWebappDialog", () => {
     })
     render(<CustomizeWebappDialog />)
 
-    const welcomeSwitch = screen.getByLabelText(
-      "Show the welcome screen on a new install",
-    )
+    const welcomeSwitch = field("Show the welcome screen on a new install")
     expect(welcomeSwitch.getAttribute("aria-checked")).toBe("true")
 
     fireEvent.click(welcomeSwitch)
@@ -270,7 +353,7 @@ describe("CustomizeWebappDialog", () => {
     seed({ disable_release_notes: true })
     render(<CustomizeWebappDialog />)
 
-    const notesSwitch = screen.getByLabelText("Show what's new after an update")
+    const notesSwitch = field("Show what's new after an update")
     expect(notesSwitch.getAttribute("aria-checked")).toBe("false")
 
     fireEvent.click(notesSwitch)
@@ -288,7 +371,7 @@ describe("CustomizeWebappDialog", () => {
 
     // The row reflects the store's override-aware effective value (false),
     // not the raw (stale) bootstrap value (true).
-    const paneSwitch = screen.getByLabelText("Show the Changes pane")
+    const paneSwitch = field("Show the Changes pane")
     expect(paneSwitch.getAttribute("aria-checked")).toBe("false")
 
     fireEvent.click(paneSwitch)
@@ -312,7 +395,7 @@ describe("CustomizeWebappDialog", () => {
     ).mobileAccessoryBarOverride = false
     render(<CustomizeWebappDialog />)
 
-    const sw = screen.getByLabelText("Touch terminal keys")
+    const sw = field("Touch terminal keys")
     expect(sw.getAttribute("aria-checked")).toBe("false")
 
     fireEvent.click(sw)
@@ -342,28 +425,12 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(field("Copy on select"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     expect(saveSettings).toHaveBeenCalledTimes(1)
     expect(notifyInfo).not.toHaveBeenCalled()
-  })
-
-  it("says so when a section reset finds every row already at its default", async () => {
-    // The fixture's instance name is the one Web row off its default.
-    seed({ title: "", favicon: "" })
-    render(<CustomizeWebappDialog />)
-
-    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
-
-    await waitFor(() =>
-      expect(notifyInfo).toHaveBeenCalledWith(
-        "Nothing to reset: every setting in this section is already at its default.",
-      ),
-    )
-    expect(setInstanceIdentity).not.toHaveBeenCalled()
-    expect(saveSettings).not.toHaveBeenCalled()
   })
 
   it("disables the form while a save is in flight", async () => {
@@ -376,7 +443,7 @@ describe("CustomizeWebappDialog", () => {
     )
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Instance name") as HTMLInputElement
+    const input = field("Instance name") as HTMLInputElement
     fireEvent.change(input, { target: { value: "renamed" } })
     const saveButton = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
     fireEvent.click(saveButton)
@@ -390,7 +457,7 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Instance name") as HTMLInputElement
+    const input = field("Instance name") as HTMLInputElement
     fireEvent.change(input, { target: { value: "renamed" } })
     const saveButton = screen.getByRole("button", { name: "Save" })
     fireEvent.click(saveButton)
@@ -405,7 +472,7 @@ describe("CustomizeWebappDialog", () => {
     setInstanceIdentity.mockResolvedValue(false)
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Instance name") as HTMLInputElement
+    const input = field("Instance name") as HTMLInputElement
     fireEvent.change(input, { target: { value: "renamed" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
@@ -437,7 +504,7 @@ describe("CustomizeWebappDialog", () => {
     )
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Instance name") as HTMLInputElement
+    const input = field("Instance name") as HTMLInputElement
     fireEvent.change(input, { target: { value: "renamed" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
@@ -450,13 +517,13 @@ describe("CustomizeWebappDialog", () => {
   it("an untouched switch tracks a concurrent client's toggle and never writes it back", async () => {
     seed({ show_changes_pane: true })
     const { rerender } = render(<CustomizeWebappDialog />)
-    const paneSwitch = screen.getByLabelText("Show the Changes pane")
+    const paneSwitch = field("Show the Changes pane")
     expect(paneSwitch.getAttribute("aria-checked")).toBe("true")
 
     seed({ show_changes_pane: false })
     rerender(<CustomizeWebappDialog />)
     expect(
-      screen.getByLabelText("Show the Changes pane").getAttribute("aria-checked"),
+      field("Show the Changes pane").getAttribute("aria-checked"),
     ).toBe("false")
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
@@ -495,69 +562,11 @@ describe("CustomizeWebappDialog", () => {
     expect(blue.className).not.toMatch(/\baspect-square\b/)
   })
 
-  it("resets the Web section to defaults and persists exactly the changed keys", async () => {
-    seed({ title: "prod dux", favicon: "amber", copy_on_select: false })
-    render(<CustomizeWebappDialog />)
-
-    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
-
-    await waitFor(() => expect(setInstanceIdentity).toHaveBeenCalled())
-    expect(setInstanceIdentity).toHaveBeenCalledWith({
-      title: "",
-      favicon: "",
-    })
-    expect(saveSettings).toHaveBeenCalledTimes(1)
-    const [patch] = saveSettings.mock.calls[0]
-    // Only `copy_on_select` differed from its default in this seed. Every
-    // other Web-section key (show_changes_pane is bespoke and already at its
-    // default, web_notifications is already at its default) must be absent,
-    // and no `both`-group key should leak in from a full-descriptor
-    // reset.
-    expect(patch.ui).toEqual({ copy_on_select: true })
-    expect(patch.capabilities ?? {}).toEqual({})
-    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
-  })
-
-  it("resets the Web section's Changes-pane row through setChangesPaneVisibility when it differs from default", async () => {
-    seed({ show_changes_pane: false })
-    render(<CustomizeWebappDialog />)
-
-    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
-
-    await waitFor(() => expect(setChangesPaneVisibility).toHaveBeenCalledWith(true))
-    // show_changes_pane must never ride the generic settings PATCH.
-    for (const call of saveSettings.mock.calls) {
-      const [patch] = call
-      expect(patch.ui ?? {}).not.toHaveProperty("show_changes_pane")
-    }
-  })
-
-  it("a failed reset does not leave the controls showing defaults", async () => {
-    seed({ copy_on_select: false })
-    saveSettings.mockResolvedValue(false)
-    render(<CustomizeWebappDialog />)
-
-    fireEvent.click(screen.getAllByRole("button", { name: /Reset section to defaults/i })[0])
-
-    await waitFor(() => expect(saveSettings).toHaveBeenCalled())
-    await waitFor(() =>
-      expect(
-        (screen.getAllByRole("button", { name: /Reset section to defaults/i })[0] as HTMLButtonElement)
-          .disabled,
-      ).toBe(false),
-    )
-    // The failed write must not have applied the optimistic reset override:
-    // the switch still reflects the pre-reset (non-default) value.
-    expect(
-      screen.getByLabelText("Copy on select").getAttribute("aria-checked"),
-    ).toBe("false")
-  })
-
   it("fires a real number-control change and sends the exact key/value, including the empty-string edge", async () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Status message auto-clear") as HTMLInputElement
+    const input = field("Status message auto-clear") as HTMLInputElement
     fireEvent.change(input, { target: { value: "42" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
@@ -570,7 +579,7 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const input = screen.getByLabelText("Status message auto-clear") as HTMLInputElement
+    const input = field("Status message auto-clear") as HTMLInputElement
     fireEvent.change(input, { target: { value: "42" } })
     fireEvent.change(input, { target: { value: "" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
@@ -587,7 +596,7 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
 
     // ui.attention_grace_seconds caps at 300.
-    const input = screen.getByLabelText("Attention grace") as HTMLInputElement
+    const input = field("Attention grace") as HTMLInputElement
     fireEvent.change(input, { target: { value: "99999" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
@@ -605,7 +614,7 @@ describe("CustomizeWebappDialog", () => {
     // selection when it was preceded by a `pointerdown` on the same item
     // (see `SelectItem.js`'s `allowMouseSelectionRef`), so a bare
     // `fireEvent.click` alone is silently ignored as an untrusted click.
-    const trigger = screen.getByLabelText("PR banner position")
+    const trigger = field("PR banner position")
     fireEvent.click(trigger)
     await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
     const option = await screen.findByRole("option", { name: "Top" })
@@ -625,7 +634,7 @@ describe("CustomizeWebappDialog", () => {
     seed({ available_providers: ["claude", "codex"], global_default_provider: "claude" })
     render(<CustomizeWebappDialog />)
 
-    const trigger = screen.getByLabelText("Default provider for new agents")
+    const trigger = field("Default provider for new agents")
     fireEvent.click(trigger)
     await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
     expect(screen.getByRole("option", { name: "claude" })).toBeTruthy()
@@ -644,14 +653,14 @@ describe("CustomizeWebappDialog", () => {
   it("renders a GitHub integration row", () => {
     seed()
     render(<CustomizeWebappDialog />)
-    expect(screen.getByLabelText("GitHub integration")).toBeTruthy()
+    expect(field("GitHub integration")).toBeTruthy()
   })
 
   it("saves GitHub integration through the dedicated endpoint, not the settings PATCH", async () => {
     seed({ github_integration: false })
     render(<CustomizeWebappDialog />)
 
-    fireEvent.click(screen.getByLabelText("GitHub integration"))
+    fireEvent.click(field("GitHub integration"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
@@ -666,7 +675,7 @@ describe("CustomizeWebappDialog", () => {
   // ── The Tailscale mode row ────────────────────────────────────────────────
 
   async function pickTailscaleMode(label: string) {
-    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    const trigger = field("Bind your Tailscale address")
     fireEvent.click(trigger)
     await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
     const option = await screen.findByRole("option", { name: label })
@@ -680,7 +689,7 @@ describe("CustomizeWebappDialog", () => {
     seed({ tailscale_mode: "auto" })
     render(<CustomizeWebappDialog />)
 
-    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    const trigger = field("Bind your Tailscale address")
     fireEvent.click(trigger)
     await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
     const option = await screen.findByRole("option", { name: "No" })
@@ -701,7 +710,7 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
 
     // Touch a different row so there is a save to perform at all.
-    fireEvent.click(screen.getByLabelText("Copy on select"))
+    fireEvent.click(field("Copy on select"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
@@ -760,9 +769,9 @@ describe("CustomizeWebappDialog", () => {
     seed({ tailscale_mode: "no", tailscale_forced_no: true })
     render(<CustomizeWebappDialog />)
 
-    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    const trigger = field("Bind your Tailscale address")
     expect(trigger.hasAttribute("disabled")).toBe(false)
-    const row = trigger.closest(".flex-col.gap-2")
+    const row = trigger.closest("[data-setting-row]")
     expect(row!.textContent).toContain("--no-tailscale")
     expect(row!.textContent).toContain("next time")
 
@@ -776,47 +785,11 @@ describe("CustomizeWebappDialog", () => {
     seed({ tailscale_mode: "no", tailscale_forced_no: false })
     render(<CustomizeWebappDialog />)
 
-    const trigger = screen.getByLabelText("Bind your Tailscale address")
+    const trigger = field("Bind your Tailscale address")
     expect(trigger.hasAttribute("disabled")).toBe(false)
-    expect(trigger.closest(".flex-col.gap-2")!.textContent).not.toContain(
+    expect(trigger.closest("[data-setting-row]")!.textContent).not.toContain(
       "--no-tailscale",
     )
-  })
-
-  // A lock says this run cannot put the value in force, not that it cannot be
-  // saved: the server saves it for the next run and its reply says so, so a
-  // reset writes the locked row like any other and that reply is the outcome.
-
-  it("writes the locked Tailscale row's default when its section is reset", async () => {
-    setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)
-    // `hyperlinks` is in the same section and differs from its default too.
-    seed({ tailscale_mode: "no", tailscale_forced_no: true, hyperlinks: false })
-    render(<CustomizeWebappDialog />)
-
-    // The Tailscale and hyperlinks rows both live in the "Both surfaces"
-    // section, so reset that one by its caption rather than by position.
-    const caption = screen.getByText(/^Both surfaces\./)
-    fireEvent.click(caption.parentElement!.querySelector("button")!)
-
-    await waitFor(() => expect(notifyWarning).toHaveBeenCalledWith(FORCED_NO_REPLY.message))
-    expect(setTailscaleMode).toHaveBeenCalledWith("auto")
-    expect(saveSettings.mock.calls[0][0].capabilities).toEqual({ hyperlinks: true })
-    expect(notifyInfo).not.toHaveBeenCalled()
-  })
-
-  it("does not say there was nothing to reset when only the locked row was off its default", async () => {
-    setTailscaleMode.mockResolvedValue(FORCED_NO_REPLY)
-    seed({ github_integration: true, tailscale_mode: "yes", tailscale_forced_no: true })
-    render(<CustomizeWebappDialog />)
-
-    const caption = screen.getByText(/^Both surfaces\./)
-    fireEvent.click(caption.parentElement!.querySelector("button")!)
-
-    await waitFor(() => expect(notifyWarning).toHaveBeenCalledWith(FORCED_NO_REPLY.message))
-    expect(setTailscaleMode).toHaveBeenCalledTimes(1)
-    expect(setTailscaleMode).toHaveBeenCalledWith("auto")
-    expect(saveSettings).not.toHaveBeenCalled()
-    expect(notifyInfo).not.toHaveBeenCalled()
   })
 
   // THE HAZARD PIN. The endpoint is a blind read-and-flip while this modal saves
@@ -829,9 +802,9 @@ describe("CustomizeWebappDialog", () => {
 
     // Touch a DIFFERENT row, so there is a save to perform, then flip the GitHub
     // row twice so it is "touched" but lands back on its original value.
-    fireEvent.click(screen.getByLabelText("Copy on select"))
-    fireEvent.click(screen.getByLabelText("GitHub integration"))
-    fireEvent.click(screen.getByLabelText("GitHub integration"))
+    fireEvent.click(field("Copy on select"))
+    fireEvent.click(field("GitHub integration"))
+    fireEvent.click(field("GitHub integration"))
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
@@ -846,7 +819,7 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    const row = screen.getByLabelText("GitHub integration").closest(".flex-col.gap-2")
+    const row = field("GitHub integration").closest("[data-setting-row]")
     expect(row).not.toBeNull()
     const codeEls = row!.querySelectorAll("code")
     expect(codeEls.length).toBeGreaterThan(0)
@@ -876,6 +849,7 @@ describe("CustomizeWebappDialog", () => {
     stubNotifications("default")
     seed()
     render(<CustomizeWebappDialog />)
+    topic("Attention and messages")
     expect(
       screen.getByRole("button", { name: /enable browser notifications/i }),
     ).toBeTruthy()
@@ -885,6 +859,8 @@ describe("CustomizeWebappDialog", () => {
     stubNotifications("granted")
     seed()
     render(<CustomizeWebappDialog />)
+    topic("Attention and messages")
+    expect(field("Desktop notifications")).toBeTruthy()
     expect(
       screen.queryByRole("button", { name: /enable browser notifications/i }),
     ).toBeNull()
@@ -894,6 +870,8 @@ describe("CustomizeWebappDialog", () => {
     stubNotifications("denied")
     seed()
     render(<CustomizeWebappDialog />)
+    topic("Attention and messages")
+    expect(field("Desktop notifications")).toBeTruthy()
     expect(
       screen.queryByRole("button", { name: /enable browser notifications/i }),
     ).toBeNull()
@@ -903,6 +881,8 @@ describe("CustomizeWebappDialog", () => {
     stubNotifications(null)
     seed()
     render(<CustomizeWebappDialog />)
+    topic("Attention and messages")
+    expect(field("Desktop notifications")).toBeTruthy()
     expect(
       screen.queryByRole("button", { name: /enable browser notifications/i }),
     ).toBeNull()
@@ -912,6 +892,8 @@ describe("CustomizeWebappDialog", () => {
     stubNotifications("default")
     seed({ web_notifications: false })
     render(<CustomizeWebappDialog />)
+    topic("Attention and messages")
+    expect(field("Desktop notifications")).toBeTruthy()
     expect(
       screen.queryByRole("button", { name: /enable browser notifications/i }),
     ).toBeNull()
@@ -923,6 +905,7 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
     // dux never auto-prompts: merely opening the dialog must ask for nothing.
     expect(requestPermission).not.toHaveBeenCalled()
+    topic("Attention and messages")
 
     fireEvent.click(
       screen.getByRole("button", { name: /enable browser notifications/i }),
@@ -934,7 +917,7 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
     expect(
-      screen.getByLabelText("Random pet-name default for new agents"),
+      field("Random pet-name default for new agents"),
     ).toBeTruthy()
   })
 
@@ -943,7 +926,7 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
 
     fireEvent.click(
-      screen.getByLabelText("Random pet-name default for new agents"),
+      field("Random pet-name default for new agents"),
     )
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
@@ -961,20 +944,21 @@ describe("CustomizeWebappDialog search", () => {
   const search = () => screen.getByLabelText("Search settings") as HTMLInputElement
   const type = (query: string) => fireEvent.change(search(), { target: { value: query } })
 
-  it("hides rows and whole sections that do not match, and the reset buttons with them", () => {
+  it("searches every topic at once and shows each match's config key and topic", () => {
     seed()
     render(<CustomizeWebappDialog />)
-    expect(screen.getAllByRole("button", { name: "Reset section to defaults…" }).length).toBeGreaterThan(0)
 
-    type("attention")
+    type("font")
 
-    expect(screen.getByLabelText("Show attention indicator")).toBeTruthy()
-    expect(screen.getByLabelText("Attention on terminal bell")).toBeTruthy()
-    expect(screen.queryByLabelText("Copy on select")).toBeNull()
-    expect(screen.getByText(/Both surfaces/)).toBeTruthy()
-    expect(screen.queryByText(/This browser \(Web\)/)).toBeNull()
-    expect(screen.queryByText(/Terminal UI\. These affect/)).toBeNull()
-    expect(screen.queryByRole("button", { name: "Reset section to defaults…" })).toBeNull()
+    expect(screen.getByText("3 settings match")).toBeTruthy()
+    expect(screen.getByLabelText("Terminal font")).toBeTruthy()
+    expect(screen.getByLabelText("Terminal font size")).toBeTruthy()
+    const nerd = screen.getByLabelText("Nerd Font icons").closest("[data-setting-row]")!
+    expect(nerd.textContent).toContain("ui.nerd_font_icons")
+    expect(screen.getByLabelText("Terminal font").closest("[data-setting-row]")!.textContent).toContain(
+      "This browser · Appearance",
+    )
+    expect(screen.queryByLabelText("Instance name")).toBeNull()
   })
 
   it("shows only rows holding every word of the query", () => {
@@ -995,8 +979,7 @@ describe("CustomizeWebappDialog search", () => {
 
     expect(screen.getByLabelText("Send Tab to the agent")).toBeTruthy()
     expect(screen.queryByLabelText("Always show tab strip")).toBeNull()
-    const mark = screen.getByText("tab_reaches")
-    expect(mark.tagName).toBe("MARK")
+    const mark = screen.getAllByText("tab_reaches").find((el) => el.tagName === "MARK")!
     expect(mark.parentElement?.textContent).toBe("ui.tab_reaches_agent")
   })
 
@@ -1019,7 +1002,7 @@ describe("CustomizeWebappDialog search", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
     expect(closeCustomizeWebapp).not.toHaveBeenCalled()
     expect(search().value).toBe("")
-    expect(screen.getByLabelText("Copy on select")).toBeTruthy()
+    expect(screen.getByLabelText("Instance name")).toBeTruthy()
 
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
     expect(closeCustomizeWebapp).toHaveBeenCalled()
@@ -1029,6 +1012,7 @@ describe("CustomizeWebappDialog search", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
+    topic("Typing and touch")
     fireEvent.click(screen.getByLabelText("Copy on select"))
     type("attention")
     expect(screen.queryByLabelText("Copy on select")).toBeNull()
@@ -1052,5 +1036,249 @@ describe("CustomizeWebappDialog focus rings", () => {
       .firstElementChild!
     expect(content.className).toContain("px-[3px]")
     expect(content.className).toContain("pb-[3px]")
+  })
+})
+
+describe("CustomizeWebappDialog resets", () => {
+  const save = () => fireEvent.click(screen.getByRole("button", { name: "Save" }))
+  const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+
+  it("writes nothing when a reset is pressed, before anyone has saved", async () => {
+    seed({ title: "prod dux", copy_on_select: false })
+    render(<CustomizeWebappDialog />)
+    topic("Changed from default")
+
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /^Reset all \d+…$/ })[0],
+    )
+
+    await settle()
+    expect(setInstanceIdentity).not.toHaveBeenCalled()
+    expect(saveSettings).not.toHaveBeenCalled()
+  })
+
+  it("drafts a row's reset, shows it unsaved, and writes it only at Save", async () => {
+    seed({ copy_on_select: false })
+    render(<CustomizeWebappDialog />)
+    await opened()
+    topic("Typing and touch")
+    const row = () => screen.getByLabelText("Copy on select").closest("[data-setting-row]")!
+    expect(row().textContent).toContain("Changed from default:")
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Copy on select to On" }))
+    await settle()
+
+    expect(screen.getByLabelText("Copy on select").getAttribute("aria-checked")).toBe("true")
+    expect(row().textContent).not.toContain("Changed from default:")
+    expect(screen.queryByRole("button", { name: "Reset Copy on select to On" })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByLabelText("Copy on select"))
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
+    expect(saveSettings).not.toHaveBeenCalled()
+
+    save()
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings.mock.calls[0][0]).toEqual({ ui: { copy_on_select: true } })
+  })
+
+  it("counts and marks what differs from the default, the draft included", () => {
+    seed({ title: "", github_integration: true })
+    render(<CustomizeWebappDialog />)
+    const nav = screen.getByRole("navigation", { name: "Preferences topics" })
+    const item = (name: string) =>
+      within(nav).getByRole("button", { name: new RegExp(`^${name}`) }).textContent
+    expect(item("Changed from default")).toContain("0, 0 settings")
+    expect(item("Appearance")).not.toContain("some changed")
+
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "16" } })
+
+    expect(item("Changed from default")).toContain("1, 1 setting")
+    expect(item("Appearance")).toContain("some changed from default")
+  })
+
+  it("shows an empty Changed list when everything is at its default", () => {
+    seed({ title: "", github_integration: true })
+    render(<CustomizeWebappDialog />)
+    topic("Changed from default")
+    expect(screen.getByText("Everything is at its default")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /^Reset all/ })).toBeNull()
+  })
+
+  it("asks before Reset all, and Cancel keeps every setting as it was", async () => {
+    seed({ title: "prod dux", copy_on_select: false })
+    render(<CustomizeWebappDialog />)
+    await opened()
+    topic("Changed from default")
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reset all 3…" }))
+    })
+    const confirm = await screen.findByRole("dialog", {
+      name: "Reset 3 settings to their defaults?",
+    })
+    expect(confirm.textContent).toContain(
+      "Instance name, Copy on select and GitHub integration go back to what dux ships with.",
+    )
+    const cancel = within(confirm).getByRole("button", { name: "Cancel" })
+    expect(document.activeElement).toBe(cancel)
+    fireEvent.click(cancel)
+    await settle()
+
+    expect(screen.getByRole("button", { name: "Reset all 3…" })).toBeTruthy()
+    expect(screen.queryByText(/unsaved change/)).toBeNull()
+  })
+
+  it("drafts every reset Reset all confirms, the bespoke and locked rows included, and Save writes each its own way", async () => {
+    setTailscaleMode.mockResolvedValue({ mode: "auto", warning: true, message: "kept for next run" })
+    seed({
+      title: "prod dux",
+      favicon: "amber",
+      copy_on_select: false,
+      show_changes_pane: false,
+      github_integration: false,
+      tailscale_mode: "no",
+      tailscale_forced_no: true,
+    })
+    render(<CustomizeWebappDialog />)
+    await opened()
+    topic("Changed from default")
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset all 6…" }))
+    const confirm = await screen.findByRole("dialog", {
+      name: "Reset 6 settings to their defaults?",
+    })
+    fireEvent.click(within(confirm).getByRole("button", { name: "Reset 6 settings" }))
+    await settle()
+
+    expect(setInstanceIdentity).not.toHaveBeenCalled()
+    expect(saveSettings).not.toHaveBeenCalled()
+    expect(setChangesPaneVisibility).not.toHaveBeenCalled()
+    expect(toggleGithubIntegration).not.toHaveBeenCalled()
+    expect(setTailscaleMode).not.toHaveBeenCalled()
+    expect(screen.getByText("6 unsaved changes")).toBeTruthy()
+    // The rows stay listed until saved, so the reset can be undone where it was made.
+    expect(screen.getByLabelText("Instance name")).toBeTruthy()
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: /^Changed from default/ }),
+      ),
+    )
+
+    save()
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    // Identity fields go back to empty, which the server resolves to the shipped ones.
+    expect(setInstanceIdentity).toHaveBeenCalledWith({ title: "", favicon: "" })
+    expect(saveSettings.mock.calls[0][0]).toEqual({ ui: { copy_on_select: true } })
+    expect(setChangesPaneVisibility).toHaveBeenCalledWith(true)
+    expect(toggleGithubIntegration).toHaveBeenCalledTimes(1)
+    expect(setTailscaleMode).toHaveBeenCalledWith("auto")
+  })
+})
+
+describe("CustomizeWebappDialog closing", () => {
+  it("asks before Cancel throws unsaved changes away, and Keep editing keeps them", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "renamed" } })
+
+    await opened()
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    })
+    const confirm = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+    expect(document.activeElement).toBe(within(confirm).getByRole("button", { name: "Keep editing" }))
+    expect(confirm.textContent).toContain("1 unsaved change")
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+
+    fireEvent.click(within(confirm).getByRole("button", { name: "Keep editing" }))
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).toBeNull(),
+    )
+    expect((screen.getByLabelText("Instance name") as HTMLInputElement).value).toBe("renamed")
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    fireEvent.click(
+      within(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).getByRole(
+        "button",
+        { name: "Discard changes" },
+      ),
+    )
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
+    expect(setInstanceIdentity).not.toHaveBeenCalled()
+  })
+
+  it("asks on Escape too when there are unsaved changes", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "renamed" } })
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+    expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeTruthy()
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+  })
+
+  it("sets unsaved changes aside on Back, which cannot stop to ask", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "renamed" } })
+    // Moved and moved back: not a change.
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "16" } })
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "14" } })
+
+    await back()
+    expect(setAsidePreferencesDraft).toHaveBeenCalledWith({ "server.title": "renamed" }, 1, false)
+  })
+
+  it("opens on the edits a Back set aside", () => {
+    seed()
+    mockState.customizeWebappDraft = { "server.title": "renamed" }
+    render(<CustomizeWebappDialog />)
+    expect((screen.getByLabelText("Instance name") as HTMLInputElement).value).toBe("renamed")
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
+  })
+
+  it("opens config.toml in its editor, and only when nothing is unsaved", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "renamed" } })
+    const open = screen.getByRole("button", { name: "Open config.toml…" }) as HTMLButtonElement
+    expect(open.disabled).toBe(true)
+
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "old instance" } })
+    fireEvent.click(screen.getByRole("button", { name: "Open config.toml…" }))
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
+    expect(openConfigEditor).toHaveBeenCalled()
+  })
+})
+
+describe("CustomizeWebappDialog on a phone", () => {
+  it("shows the topics first and a topic's settings as a second step, which Back leaves", async () => {
+    phone = true
+    seed()
+    render(<CustomizeWebappDialog />)
+    expect(screen.queryByLabelText("Instance name")).toBeNull()
+
+    topic("Appearance")
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to all topics" })),
+    )
+    fireEvent.change(screen.getByLabelText("Instance name"), { target: { value: "renamed" } })
+    expect(screen.getByRole("button", { name: "Save 1 change" })).toBeTruthy()
+
+    await back()
+    expect(screen.queryByLabelText("Instance name")).toBeNull()
+    expect(screen.getByRole("navigation", { name: "Preferences topics" })).toBeTruthy()
+    expect(setAsidePreferencesDraft).not.toHaveBeenCalled()
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+
+    await back()
+    expect(setAsidePreferencesDraft).toHaveBeenCalledWith({ "server.title": "renamed" }, 1, false)
+  })
+
+  it("opens straight on the topic an opener names", () => {
+    phone = true
+    seed()
+    mockState.customizeWebappTopic = "network"
+    render(<CustomizeWebappDialog />)
+    expect(screen.getByLabelText("Bind your Tailscale address")).toBeTruthy()
   })
 })

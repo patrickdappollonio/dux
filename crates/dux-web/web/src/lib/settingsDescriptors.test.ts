@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { Bootstrap } from "./bootstrapApi"
-import { SETTING_GROUPS, allSettingDescriptors } from "./settingsDescriptors"
+import { SETTING_TOPICS, allSettingDescriptors, topicSettings } from "./settingsDescriptors"
 
 // A fully-populated bootstrap so every descriptor's `read()` has a real,
 // distinguishable value to check against (never the fallback default).
@@ -46,24 +46,23 @@ const sampleBootstrap: Bootstrap = {
 }
 
 describe("settingsDescriptors", () => {
-  it("groups are ordered sign-in, web, both, tui", () => {
-    expect(SETTING_GROUPS.map((g) => g.surface)).toEqual(["signin", "web", "both", "tui"])
+  it("files every setting under exactly one topic the side list shows, and leaves no topic empty", () => {
+    const listed = SETTING_TOPICS.flatMap((t) => topicSettings(t.id).map((d) => d.key))
+    expect(listed.sort()).toEqual(allSettingDescriptors().map((d) => d.key).sort())
+    for (const t of SETTING_TOPICS) expect(topicSettings(t.id).length, t.label).toBeGreaterThan(0)
   })
 
   it("routes the password to its own write target and never through the settings PATCH", () => {
     const d = allSettingDescriptors().find((x) => x.key === "server.auth.password")
     expect(d?.writeTarget).toBe("password")
     expect(d?.control.kind).toBe("password")
-    // Its group holds nothing else, so the group offers no reset to defaults.
-    const group = SETTING_GROUPS.find((g) => g.surface === "signin")
-    expect(group?.settings.map((x) => x.key)).toEqual(["server.auth.password"])
   })
 
   // NOTE: this only catches an accidental key change WITHIN this file (a typo
   // in a descriptor's `key`, or an accidental add/remove). It is NOT a
   // cross-language guard against the Rust config schema, the hand-typed `Set`
   // below lives in this same file, so it can drift right alongside
-  // `SETTING_GROUPS` without failing. The real cross-language guard is the
+  // `SETTINGS` without failing. The real cross-language guard is the
   // "KEEP IN SYNC WITH" comment on `config_schema()` in
   // `crates/dux-tui/src/config.rs`, which is a human-reviewed pointer, not an
   // automated check. A full build-time cross-check against the Rust schema is
