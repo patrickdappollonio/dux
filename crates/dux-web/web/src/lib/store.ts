@@ -10019,14 +10019,15 @@ export interface StopAllRefusal {
   blockers: AttachedBlocker[]
 }
 
-// Opens Preferences on `topic`, with any edits a Back set aside.
+// Opens Preferences on `topic`, with any edits a Back set aside. Named no
+// topic, it opens on the first one holding a set-aside edit, as Restore does.
 export function openCustomizeWebapp(topic: SettingTopic | null = null): void {
   const draft = preferencesSetAside
   preferencesSetAside = null
   if (draft !== null) dismissNotification(PREFERENCES_SET_ASIDE_ID)
   setState({
     customizeWebappOpen: true,
-    customizeWebappTopic: topic,
+    customizeWebappTopic: topic ?? (draft === null ? null : draftTopic(draft)),
     customizeWebappDraft: draft,
     customizeWebappEpoch: state.customizeWebappEpoch + 1,
   })
@@ -10077,7 +10078,7 @@ export function setAsidePreferencesDraft(
     {
       id: PREFERENCES_SET_ASIDE_ID,
       sticky: true,
-      action: { label: "Restore", onClick: () => openCustomizeWebapp(draftTopic(draft)) },
+      action: { label: "Restore", onClick: () => openCustomizeWebapp() },
     },
   )
 }

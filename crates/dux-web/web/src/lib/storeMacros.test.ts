@@ -672,4 +672,15 @@ describe("Preferences edits set aside by Back", () => {
     options.action.props.onClick()
     expect(mod.getSnapshot().customizeWebappTopic).toBe("typing")
   })
+  it("an opening that names no topic lands where Restore would", async () => {
+    const mod = await loadStore()
+    mod.openCustomizeWebapp()
+    mod.setAsidePreferencesDraft(
+      { values: { "ui.copy_on_select": false }, saved: { "ui.copy_on_select": true } },
+      1,
+      false,
+    )
+    mod.openCustomizeWebapp()
+    expect(mod.getSnapshot().customizeWebappTopic).toBe("typing")
+  })
 })
