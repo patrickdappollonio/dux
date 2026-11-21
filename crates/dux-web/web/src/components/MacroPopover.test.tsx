@@ -611,14 +611,62 @@ describe("MacroPopover keyboard walk", () => {
 })
 
 describe("MacroPopover edit pencil", () => {
-  it("opens the Macros dialog on that macro, and does not run it", async () => {
-    render(<MacroPopover target={target} />)
+  // A key press on a focused button as a browser handles it: the keydown, and
+  // unless something prevented it, the click Enter or Space activates.
+  function pressKey(el: HTMLElement, key: "Enter" | " ") {
+    const activate = fireEvent.keyDown(el, { key })
+    if (key === " ") fireEvent.keyUp(el, { key })
+    if (activate) fireEvent.click(el)
+  }
+
+  async function openPicker() {
     fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
     await settle()
+  }
+
+  it("opens the Macros dialog on that macro, and does not run it", async () => {
+    render(<MacroPopover target={target} />)
+    await openPicker()
     fireEvent.click(screen.getByRole("button", { name: "Edit Prompt" }))
     await settle()
     expect(openMacrosDialog).toHaveBeenCalledWith("Prompt")
     expect(runMacro).not.toHaveBeenCalled()
     expect(document.querySelector('[data-slot="popover-content"]')).toBeNull()
+  })
+
+  it.each([
+    ["Enter", "Enter"],
+    ["Space", " "],
+  ] as const)("does the same pressed with %s from the keyboard", async (_, key) => {
+    render(<MacroPopover target={target} />)
+    await openPicker()
+    const pencil = screen.getByRole("button", { name: "Edit Prompt" })
+    act(() => pencil.focus())
+    await act(async () => pressKey(pencil, key))
+    await settle()
+    expect(openMacrosDialog).toHaveBeenCalledWith("Prompt")
+    expect(runMacro).not.toHaveBeenCalled()
+  })
+
+  it("is a control of its own beside the row, not part of the option that runs", async () => {
+    render(<MacroPopover target={target} />)
+    await openPicker()
+    const pencil = screen.getByRole("button", { name: "Edit Prompt" })
+    expect(pencil.closest('[role="option"]')).toBeNull()
+  })
+
+  it("leaves the picker's own keys alone: typing filters and Enter runs the highlighted macro", async () => {
+    render(<MacroPopover target={target} />)
+    await openPicker()
+    const input = document.querySelector<HTMLInputElement>('[data-slot="command-input"]')!
+    fireEvent.change(input, { target: { value: "pro" } })
+    await settle()
+    // A row the search hides takes its pencil with it.
+    expect(screen.queryByRole("button", { name: "Edit Greet" })).toBeNull()
+    expect(screen.getByRole("button", { name: "Edit Prompt" })).toBeTruthy()
+    fireEvent.keyDown(input, { key: "Enter" })
+    await settle()
+    expect(runMacro).toHaveBeenCalledWith("Prompt", target)
+    expect(openMacrosDialog).not.toHaveBeenCalled()
   })
 })
