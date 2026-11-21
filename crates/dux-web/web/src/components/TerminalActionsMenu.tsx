@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { editorRootForTarget } from "@/lib/editorRoot"
+import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { openDeleteTerminal, openEditor, standaloneEditorHash, useDux } from "@/lib/store"
 import { spineListsTerminal } from "@/lib/terminals"
 import type { TerminalOwnerRef } from "@/lib/store"
@@ -66,7 +67,7 @@ export function TerminalActionsMenu({
               <a
                 href={standaloneEditorHash(editorRoot)}
                 target="_blank"
-                rel="noopener"
+                rel={EDITOR_TAB_REL}
               />
             }
           >

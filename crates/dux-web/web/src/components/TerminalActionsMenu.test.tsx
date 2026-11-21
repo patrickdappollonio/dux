@@ -107,7 +107,7 @@ describe("the terminal's own actions", () => {
     await open({ kind: "standalone" })
     const anchor = item("Open editor in new tab").closest("a")
     expect(anchor?.getAttribute("target")).toBe("_blank")
-    expect(anchor?.getAttribute("rel")).toBe("noopener")
+    expect(anchor?.getAttribute("rel")).toBe("opener")
   })
 
   // Close routes into the existing confirm target rather than closing anything:

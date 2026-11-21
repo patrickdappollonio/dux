@@ -835,7 +835,7 @@ describe("FlatAgentList editor menu entries", () => {
     // The first displayed agent is Alpha (name sort in makeState("name")).
     expect(item!.getAttribute("href")).toBe("#/editor/agent/alpha")
     expect(item!.getAttribute("target")).toBe("_blank")
-    expect(item!.getAttribute("rel")).toBe("noopener")
+    expect(item!.getAttribute("rel")).toBe("opener")
     fireEvent.click(item!)
     expect(open).not.toHaveBeenCalled()
   })
@@ -866,7 +866,7 @@ describe("FlatAgentList terminal editor menu entries", () => {
     expect(tab).not.toBeNull()
     expect(tab!.tagName).toBe("A")
     expect(tab!.getAttribute("target")).toBe("_blank")
-    expect(tab!.getAttribute("rel")).toBe("noopener")
+    expect(tab!.getAttribute("rel")).toBe("opener")
     expect(tab!.className).not.toContain("max-md:hidden")
   })
 

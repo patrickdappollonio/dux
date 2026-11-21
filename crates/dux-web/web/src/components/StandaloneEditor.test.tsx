@@ -64,6 +64,7 @@ vi.mock("@/lib/fileApi", () => ({
     createDir: vi.fn(),
     rename: vi.fn(),
     remove: vi.fn(),
+    writable: vi.fn(async () => false),
   },
 }))
 
@@ -564,10 +565,10 @@ describe("the overlay stands down on the standalone surface", () => {
   })
 })
 
-// A standalone editor tab has no pane of the agent's row, so the agents list
-// is its only word on who drives: another device driving makes it read-only,
-// and nobody driving leaves it writable, since it can neither show the card
-// nor take over and the server takes the write.
+// A standalone editor tab has no pane of the agent's row. Opened cold, the
+// agents list is its only word on who drives: another device driving makes it
+// read-only, and nobody driving leaves it writable. Opened from a page, it
+// writes as that page, so the server says whether the driver is its opener.
 describe("the standalone editor tab and who drives the agent", () => {
   const READ_ONLY =
     "Read-only: this agent is active on another device, so its files cannot be changed here. Take over the agent to edit them."
@@ -607,6 +608,78 @@ describe("the standalone editor tab and who drives the agent", () => {
     await mountDrivenBy("another-page")
     expect(screen.getByText(READ_ONLY)).toBeTruthy()
     expect(screen.getByRole("button", { name: /new file/i }).hasAttribute("disabled")).toBe(true)
+  })
+
+  /// Stand a page in as this tab's opener, answering the handshake with `page`.
+  function openedBy(page: string): void {
+    const frame = document.createElement("iframe")
+    document.body.append(frame)
+    const opener = frame.contentWindow as Window
+    opener.postMessage = ((message: { type?: string }) => {
+      if (message.type !== "dux:pages?") return
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "dux:pages", pages: [page] },
+          origin: window.location.origin,
+          source: opener,
+        }),
+      )
+    }) as Window["postMessage"]
+    vi.stubGlobal("opener", opener)
+  }
+
+  async function driver(inputOwner: string): Promise<void> {
+    const spine = mockState.spine!
+    baseState({
+      spine: {
+        ...spine,
+        sessions: spine.sessions.map((s) => ({
+          ...s,
+          tabs: [{ id: SESSION, input_owner: inputOwner }],
+        })),
+      } as DuxState["spine"],
+    })
+  }
+
+  it("opened from the page that drives the agent, writes as that page until another device takes over", async () => {
+    const { fileApi } = await import("@/lib/fileApi")
+    const { resetOpenerVerdicts } = await import("@/lib/openerPage")
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    resetOpenerVerdicts()
+    openedBy("a".repeat(32))
+    vi.mocked(fileApi.writable).mockResolvedValue(true)
+    await seedState({ ownPtyConnIds: {}, ptyOwnership: {} })
+    await driver("the-opener")
+    const { rerender } = render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+
+    const newFile = () => screen.getByRole("button", { name: /new file/i })
+    await waitFor(() => expect(newFile().hasAttribute("disabled")).toBe(false))
+    expect(screen.queryByText(/^Read-only/)).toBeNull()
+    expect(screen.queryByText(/another device/)).toBeNull()
+
+    vi.mocked(fileApi.writable).mockResolvedValue(false)
+    await driver("another-device")
+    rerender(<StandaloneEditorShell />)
+    expect(await screen.findByText(READ_ONLY)).toBeTruthy()
+    expect(newFile().hasAttribute("disabled")).toBe(true)
+
+    // The opener takes the agent back.
+    vi.mocked(fileApi.writable).mockResolvedValue(true)
+    await driver("the-opener-again")
+    rerender(<StandaloneEditorShell />)
+    await waitFor(() => expect(newFile().hasAttribute("disabled")).toBe(false))
+    expect(screen.queryByText(/^Read-only/)).toBeNull()
+  })
+
+  it("opened from a page that only watches, is read-only as that page is", async () => {
+    const { fileApi } = await import("@/lib/fileApi")
+    const { resetOpenerVerdicts } = await import("@/lib/openerPage")
+    resetOpenerVerdicts()
+    openedBy("b".repeat(32))
+    vi.mocked(fileApi.writable).mockResolvedValue(false)
+    await mountDrivenBy("another-page")
+    expect(await screen.findByText(READ_ONLY)).toBeTruthy()
   })
 
   it("stays writable while nobody drives the agent", async () => {

@@ -269,6 +269,19 @@ const fileUrl = (root: EditorRoot, action: string) =>
   `${rootApiBase(root)}/files/${action}`
 
 export const fileApi = {
+  // Whether the server would let this tab write under the root right now:
+  // false while another device drives the root's row, or when it cannot be asked.
+  writable: async (root: EditorRoot): Promise<boolean> => {
+    try {
+      const resp = await apiFetch(fileUrl(root, "writable"), {
+        method: "POST",
+        credentials: "same-origin",
+      })
+      return resp.ok
+    } catch {
+      return false
+    }
+  },
   // The flat file list backing only the "Search files…" box: a full walk of the
   // worktree (minus .git/objects and .git/logs), capped by the server's
   // `[server] search_index_max_files`, with `truncated` set when the cap was

@@ -37,6 +37,7 @@ import {
   X,
 } from "lucide-react"
 import { notifyError, notifyInfo } from "@/lib/notify"
+import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
@@ -931,7 +932,7 @@ function OpenEditorButton({
             <a
               href={standaloneEditorHash(root)}
               target="_blank"
-              rel="noopener"
+              rel={EDITOR_TAB_REL}
             />
           }
         >
@@ -1125,7 +1126,7 @@ function ChangesHeader({
                             <a
                               href={standaloneEditorHash(root)}
                               target="_blank"
-                              rel="noopener"
+                              rel={EDITOR_TAB_REL}
                             />
                           ),
                         }

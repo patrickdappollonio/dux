@@ -1,4 +1,6 @@
+import { assertNever } from "@/lib/assertNever"
 import type { EditorRoot } from "@/lib/editorRoot"
+import { useOpenerVerdict } from "@/lib/openerPage"
 import {
   agentRowKey,
   rowBlockFor,
@@ -62,16 +64,48 @@ export function useAgentChangeBlockSelective(
 }
 
 /// Why this page may not write the files under an editor root, or null when
-/// it may: the agent's answer for an agent's root, and the terminal row's own
-/// for a project or standalone terminal's.
+/// it may: the agent's answer for an agent's root, the terminal row's own for a
+/// terminal's. A standalone editor tab writes as the page that opened it, so
+/// where the spine says another device drives, the server says whether that is its opener.
 export function useEditorRootChangeBlock(root: EditorRoot): RowBlock | null {
   const state = useDux()
   const rowAnswer = useRowWatch(rowKeyOfTarget(root)).block
-  return agentChangeBlock(rowAnswer, () => {
+  const block = agentChangeBlock(rowAnswer, () => {
     if (root.kind === "terminal") return terminalActiveElsewhere(state, root.terminalId)
     const session = state.spine?.sessions.find((s) => s.id === root.sessionId)
     return session !== undefined && sessionActiveElsewhere(state, session)
   })
+  const asOpener = state.standaloneEditor && rowAnswer === undefined && block === "other"
+  const verdict = useOpenerVerdict(root, asOpener ? rowDriverInSpine(state, root) : null)
+  switch (verdict) {
+    case null:
+      return block
+    case "allowed":
+      return null
+    case "asking":
+      return "pending"
+    case "refused":
+      return "other"
+    default:
+      return assertNever(verdict)
+  }
+}
+
+/// The driver the spine names for a root's row, or null when it names none.
+function rowDriverInSpine(state: DuxState, root: EditorRoot): string | null {
+  const terminals = state.spine?.terminals ?? []
+  const owners =
+    root.kind === "terminal"
+      ? [terminals.find((t) => t.id === root.terminalId)?.input_owner]
+      : [
+          ...(state.spine?.sessions.find((s) => s.id === root.sessionId)?.tabs ?? []).map(
+            (tab) => tab.input_owner,
+          ),
+          ...terminals
+            .filter((t) => t.owner.kind === "session" && t.owner.session_id === root.sessionId)
+            .map((t) => t.input_owner),
+        ]
+  return owners.find((owner) => owner !== undefined && owner !== "") ?? null
 }
 
 /// The spine's word on whether another device drives a terminal: a mounted

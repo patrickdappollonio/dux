@@ -1903,7 +1903,7 @@ describe("the Changes pane header's Open editor button", () => {
     expect(link.tagName).toBe("A")
     expect(link.getAttribute("href")).toBe(standaloneEditorHash(agentRoot("s1")))
     expect(link.getAttribute("target")).toBe("_blank")
-    expect(link.getAttribute("rel")).toBe("noopener")
+    expect(link.getAttribute("rel")).toBe("opener")
 
     fireEvent.click(link)
     expect(openEditor).not.toHaveBeenCalled()

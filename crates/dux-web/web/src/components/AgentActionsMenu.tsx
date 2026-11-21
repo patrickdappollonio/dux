@@ -50,6 +50,7 @@ import {
 import { canRecreateWorkingCopy } from "@/lib/recreateWorkingCopy"
 import { agentRoot } from "@/lib/editorRoot"
 import { clipboardWorktree } from "@/lib/flatClipboard"
+import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import {
   addTab,
   createTerminal,
@@ -225,7 +226,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
             <a
               href={standaloneEditorHash(agentRoot(session.id))}
               target="_blank"
-              rel="noopener"
+              rel={EDITOR_TAB_REL}
             />
           }
         >

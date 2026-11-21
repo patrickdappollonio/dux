@@ -34,6 +34,7 @@ import {
 } from "lucide-react"
 import type { PanelImperativeHandle } from "react-resizable-panels"
 import { notify, notifyBusy, notifyError, notifyInfo, notifySuccess } from "@/lib/notify"
+import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { chip, prose } from "@/lib/prose"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { fileApi } from "@/lib/fileApi"
@@ -1892,7 +1893,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               <a
                 href={newTabHash(false)}
                 target="_blank"
-                rel="noopener"
+                rel={EDITOR_TAB_REL}
                 onPointerDown={takeNewTabLink}
                 onContextMenu={takeNewTabLink}
                 onFocus={takeNewTabLink}

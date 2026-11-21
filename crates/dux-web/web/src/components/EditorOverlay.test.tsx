@@ -1813,7 +1813,8 @@ describe("file explorer collapse toggle", () => {
     const link = await screen.findByRole("link", { name: /open in new tab/i })
     expect(link.getAttribute("href")).toContain("#/editor/agent/")
     expect(link.getAttribute("target")).toBe("_blank")
-    expect(link.getAttribute("rel")).toBe("noopener")
+    // The opener is kept on purpose: the new tab writes as this page.
+    expect(link.getAttribute("rel")).toBe("opener")
   })
 
   it("renders in the header, starts expanded, and meets the touch floor", async () => {
