@@ -34,7 +34,7 @@ export function beginTakeoverFlight(row: string): (landed: boolean) => void {
 /// The row keys a request to `path` may change, read from the address alone:
 /// an agent's routes, a terminal's, and a dropped file's pane. Empty for a
 /// request that names no row.
-export function rowsOfRequest(path: string): string[] {
+function rowsOfRequest(path: string): string[] {
   const [route, query = ""] = path.split("?", 2)
   const segments = (route ?? "").split("/").map((segment) => {
     try {
@@ -84,9 +84,4 @@ async function settled(flight: Promise<Outcome>): Promise<string | null> {
     case "late":
       return "This device is still taking it over, so this was not sent and nothing was changed. Try again in a moment."
   }
-}
-
-/// Forget every flight, for tests.
-export function resetTakeoverFlights(): void {
-  flights.clear()
 }
