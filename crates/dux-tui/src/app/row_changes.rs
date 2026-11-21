@@ -6,8 +6,12 @@
 //! drag in flight, or work a worker finished later. So the question is asked
 //! here, at the call that applies the change, and nowhere else in this crate
 //! may make one of these calls: `the_engines_row_changes_are_named_only_here`
-//! fails when another file names one. A refused call changes nothing, says on
-//! the status line who drives the row, and returns `None`.
+//! fails when another file names one of the engine's row-changing methods or
+//! `Command` or `WireCommand` variants, renames or imports those variants, or
+//! writes this window's layout or front-terminal memory, outside the
+//! exceptions it lists with a reason. It reads this crate's source, so a call
+//! made through another crate or a macro is beyond it. A refused call changes
+//! nothing, says on the status line who drives the row, and returns `None`.
 //!
 //! A row with nothing running has no driver and no card, so it is never
 //! refused: starting it is how this surface comes to drive it.
@@ -249,30 +253,105 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    /// What changes an agent's row: the engine's entry points and this
-    /// window's own layout memory, as their calls read with whitespace removed.
-    const ROW_CHANGES: &[&str] = &[
-        ".rename_agent(",
-        ".create_tab(",
-        ".close_tab(",
-        ".change_tab_provider(",
-        ".change_agent_provider(",
-        ".begin_detach_session(",
-        ".begin_recreate_working_copy(",
-        ".claim_startup_rerun(",
-        ".reconnect_plan(",
-        ".create_companion_terminal(",
-        "Command::BeginDeleteSession",
-        "Command::DeleteTerminal",
-        "Command::ToggleAgentAutoReopen",
-        "Command::ReorderAgentTabs",
-        "Command::ReorderTerminals",
-        "Command::DispatchAgentLaunch",
-        "WireCommand::StopAgentTab",
-        "dock_layouts.insert(",
+    /// The engine's methods that change an agent's row.
+    const ENGINE_CALLS: &[&str] = &[
+        "rename_agent",
+        "create_tab",
+        "close_tab",
+        "change_tab_provider",
+        "change_agent_provider",
+        "begin_detach_session",
+        "begin_recreate_working_copy",
+        "claim_startup_rerun",
+        "reconnect_plan",
+        "create_companion_terminal",
+        "kill_tab_runtime",
+        "begin_close_companion_terminal",
     ];
 
-    /// A file's code outside its test module, without comment lines or whitespace.
+    /// The variants of the engine's `Command` that change an agent's row.
+    const COMMANDS: &[&str] = &[
+        "BeginDeleteSession",
+        "FinishDeleteSession",
+        "DispatchAgentLaunch",
+        "ToggleAgentAutoReopen",
+        "DeleteTerminal",
+        "ReorderTerminals",
+        "ReorderAgentTabs",
+    ];
+
+    /// The variants of `WireCommand`, the engine's other entry point, that
+    /// change an agent's row.
+    const WIRE_COMMANDS: &[&str] = &[
+        "StopAgentTab",
+        "CloseAgentTab",
+        "ChangeAgentProvider",
+        "ChangeAgentTabProvider",
+        "DeleteSession",
+        "DetachAgent",
+        "RecreateWorkingCopy",
+        "RenameSession",
+        "ReconnectSession",
+        "RerunStartupCommand",
+        "DeleteTerminal",
+        "KillSessionPty",
+        "ReorderAgentTabs",
+        "ReorderTerminals",
+        "ToggleAgentAutoReopen",
+    ];
+
+    /// This window's own memory of an agent's row: its layout and the
+    /// terminal in front of its dock.
+    const ROW_STATE: &[&str] = &["dock_layouts", "dock_active"];
+
+    /// The methods that only read a map.
+    const READS: &[&str] = &[
+        "get",
+        "contains_key",
+        "iter",
+        "keys",
+        "values",
+        "len",
+        "is_empty",
+    ];
+
+    /// What may stay outside this file, each for its reason: (file, finding).
+    const OUTSIDE: &[(&str, &str, &str)] = &[
+        (
+            "sessions.rs",
+            "names kill_tab_runtime",
+            "the kill-running list, deliberately not gated by the card",
+        ),
+        (
+            "sessions.rs",
+            "names begin_close_companion_terminal",
+            "the kill-running list, deliberately not gated by the card",
+        ),
+        (
+            "sessions.rs",
+            "names Command::FinishDeleteSession",
+            "finishes a delete `row_begin_delete` admitted; refusing it would strand a \
+             half-deleted agent",
+        ),
+        (
+            "dock.rs",
+            "writes dock_active",
+            "remembers the terminal shown in front, which is viewing, like selecting a tab",
+        ),
+        (
+            "mod.rs",
+            "writes dock_active",
+            "remembers the terminal shown in front, which is viewing, like selecting a tab",
+        ),
+        (
+            "sessions.rs",
+            "writes dock_active",
+            "remembers the terminal a new-terminal command opened, after asking who drives",
+        ),
+    ];
+
+    /// A file's code outside its test module, without comment lines, each run
+    /// of whitespace one space.
     fn code_outside_tests(source: &str) -> String {
         let mut code = String::new();
         let mut lines = source.lines().peekable();
@@ -285,10 +364,85 @@ mod tests {
                 break;
             }
             if !line.trim_start().starts_with("//") {
-                code.extend(line.chars().filter(|c| !c.is_whitespace()));
+                code.push(' ');
+                code.push_str(line);
             }
         }
-        code
+        code.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn is_ident(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    /// Every identifier in `code` with the text before and after it.
+    fn identifiers(code: &str) -> Vec<(&str, &str, &str)> {
+        let mut found = Vec::new();
+        let mut start = None;
+        for (at, c) in code.char_indices().chain([(code.len(), ' ')]) {
+            match (is_ident(c), start) {
+                (true, None) => start = Some(at),
+                (false, Some(begun)) => {
+                    found.push((&code[..begun], &code[begun..at], &code[at..]));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// The row changes `code` makes or could hide, in words.
+    fn row_changes_in(code: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (before, word, after) in identifiers(code) {
+            let (before, after) = (before.trim_end(), after.trim_start());
+            if ENGINE_CALLS.contains(&word) {
+                found.push(format!("names {word}"));
+            }
+            let variants = match word {
+                "Command" => COMMANDS,
+                "WireCommand" => WIRE_COMMANDS,
+                _ => &[],
+            };
+            if !variants.is_empty() {
+                let variant = after
+                    .strip_prefix("::")
+                    .map(|rest| rest.split(|c| !is_ident(c)).next().unwrap_or_default());
+                if variant.is_some_and(|variant| variants.contains(&variant)) {
+                    found.push(format!("names {word}::{}", variant.unwrap_or_default()));
+                }
+                // A variant imported bare or an enum under another name would
+                // slip past the spelling above.
+                let path = before
+                    .trim_end_matches(|c: char| is_ident(c) || c == ':')
+                    .trim_end();
+                let aliased = after.starts_with("as ")
+                    || after.starts_with(';')
+                        && path.ends_with('=')
+                        && !path.ends_with("==")
+                        && !path.ends_with("!=");
+                if after.starts_with("::{") || after.starts_with("::*") || aliased {
+                    found.push(format!("renames or imports the variants of {word}"));
+                }
+            }
+            if ROW_STATE.contains(&word) {
+                let method = after
+                    .strip_prefix('.')
+                    .map(|rest| rest.split(|c| !is_ident(c)).next().unwrap_or_default());
+                let assigned = after.starts_with('=') && !after.starts_with("==");
+                let lent = before
+                    .trim_end_matches(|c: char| is_ident(c) || c == '.')
+                    .trim_end()
+                    .ends_with("&mut");
+                if method.is_some_and(|method| !READS.contains(&method)) || assigned || lent {
+                    found.push(format!("writes {word}"));
+                }
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
     }
 
     fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
@@ -303,10 +457,13 @@ mod tests {
     }
 
     /// The structure that keeps a row from being changed by a surface that
-    /// does not drive it: everything that changes an agent's row is called
-    /// from this file alone, behind the question of who drives the row, so a
-    /// dialog, gesture or worker added later cannot reach one without asking.
-    /// A new call belongs behind a `row_*` method here, never on this list.
+    /// does not drive it: outside this file, the crate's code names none of
+    /// the engine's row-changing methods, none of the `Command` or
+    /// `WireCommand` variants that change a row, and writes neither of this
+    /// window's row maps, except the entries `OUTSIDE` gives a reason for. So
+    /// a dialog, gesture or worker added later cannot reach one without
+    /// asking who drives. It reads source text: a call made through another
+    /// crate or a macro is beyond it.
     #[test]
     fn the_engines_row_changes_are_named_only_here() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -314,19 +471,90 @@ mod tests {
         rust_files(&root, &mut files);
         assert!(files.len() > 20, "the crate's sources were found");
         let mut strays = Vec::new();
+        let mut used = std::collections::HashSet::new();
         for file in files {
             // Modules compiled only for tests build their own fixtures.
-            let name = file.file_name().and_then(|name| name.to_str());
-            if matches!(name, Some("row_changes.rs" | "test_support.rs")) {
+            let name = file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if matches!(name, "row_changes.rs" | "test_support.rs") {
                 continue;
             }
             let code = code_outside_tests(&std::fs::read_to_string(&file).expect("a source file"));
-            for change in ROW_CHANGES {
-                if code.contains(change) {
-                    strays.push(format!("{} names {change}", file.display()));
+            for finding in row_changes_in(&code) {
+                match OUTSIDE
+                    .iter()
+                    .position(|(file, allowed, _)| *file == name && *allowed == finding)
+                {
+                    Some(entry) => {
+                        used.insert(entry);
+                    }
+                    None => strays.push(format!("{} {finding}", file.display())),
                 }
             }
         }
         assert!(strays.is_empty(), "{strays:#?}");
+        let stale: Vec<_> = (0..OUTSIDE.len())
+            .filter(|entry| !used.contains(entry))
+            .map(|entry| OUTSIDE[entry])
+            .collect();
+        assert!(stale.is_empty(), "allowed but no longer found: {stale:#?}");
+    }
+
+    /// The spellings that would hide a change from a search for its name are
+    /// found too.
+    #[test]
+    fn the_guard_sees_qualified_aliased_and_lent_spellings() {
+        let cases = [
+            (
+                "return dux_core::wire::WireCommand::DeleteSession {",
+                "names WireCommand::DeleteSession",
+            ),
+            (
+                "Engine::rename_agent(&mut self.engine,",
+                "names rename_agent",
+            ),
+            (
+                "use dux_core::engine::Command as C;",
+                "renames or imports the variants of Command",
+            ),
+            (
+                "use WireCommand::{StopAgentTab};",
+                "renames or imports the variants of WireCommand",
+            ),
+            (
+                "use WireCommand::*;",
+                "renames or imports the variants of WireCommand",
+            ),
+            (
+                "type W = dux_core::wire::WireCommand;",
+                "renames or imports the variants of WireCommand",
+            ),
+            ("self.dock_layouts.entry(id)", "writes dock_layouts"),
+            ("self.dock_active .remove(&id)", "writes dock_active"),
+            ("let map = &mut self.dock_layouts;", "writes dock_layouts"),
+            ("app.dock_layouts = HashMap::new();", "writes dock_layouts"),
+        ];
+        for (code, finding) in cases {
+            assert!(
+                row_changes_in(code).contains(&finding.to_string()),
+                "{code}: {:?}",
+                row_changes_in(code)
+            );
+        }
+        let reads = [
+            "self.dock_layouts.get(&id)",
+            "std::process::Command::new(\"git\")",
+            "let target: WireCommand = next;",
+            "self.dock_layouts == other",
+        ];
+        for code in reads {
+            assert!(
+                row_changes_in(code).is_empty(),
+                "{code}: {:?}",
+                row_changes_in(code)
+            );
+        }
     }
 }
