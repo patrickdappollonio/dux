@@ -1829,6 +1829,14 @@ describe("file explorer collapse toggle", () => {
     // Expanded means the explorer's search box is on screen.
     expect(screen.getByPlaceholderText("Search files…")).toBeTruthy()
   })
+
+  // The divider is a Tab stop wherever it can be dragged, so a screen reader
+  // must hear what it resizes.
+  it("names the divider between the file list and the editor", async () => {
+    await mountWithTab(PATH)
+    await screen.findByRole("button", { name: /hide the file explorer/i })
+    expect(screen.getByRole("separator", { name: "Resize file list" })).toBeTruthy()
+  })
 })
 
 // A file drop that MISSES the file tree must not navigate the tab away.

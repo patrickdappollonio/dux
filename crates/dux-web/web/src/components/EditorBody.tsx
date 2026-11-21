@@ -2199,7 +2199,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               )}
             </div>
           </ResizablePanel>
-          <ResizableHandle />
+          {/* Named, not hidden from the Tab order: a phone's expanded list
+              can still be dragged between its minimum and the content pane's,
+              and a narrow desktop window reaches this layout by width alone,
+              where the keyboard is the way to move it. */}
+          <ResizableHandle aria-label="Resize file list" />
           <ResizablePanel
             id={EDITOR_CONTENT_PANEL_ID}
             minSize={EDITOR_CONTENT_MIN_SIZE_PROP}
