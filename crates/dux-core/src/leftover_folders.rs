@@ -1188,6 +1188,8 @@ mod tests {
         let repo = std::fs::canonicalize(tmp.path()).unwrap().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.name", "dux test"]);
+        git(&repo, &["config", "user.email", "dux-test@example.invalid"]);
         git(&repo, &["commit", "--allow-empty", "-m", "init"]);
         git(&repo, &["branch", "feat-old"]);
         let project = sample_project("p1", repo.to_str().unwrap());

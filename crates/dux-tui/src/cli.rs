@@ -4192,6 +4192,8 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "dux test"]);
+        git(&["config", "user.email", "dux-test@example.invalid"]);
         git(&["commit", "--allow-empty", "-m", "initial"]);
         git(&["branch", "made"]);
         git(&["branch", "theirs"]);
@@ -4281,6 +4283,8 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "dux test"]);
+        git(&["config", "user.email", "dux-test@example.invalid"]);
         git(&["commit", "--allow-empty", "-m", "initial"]);
         let worktrees_root = tempdir.path().join("worktrees");
         let worktree = worktrees_root.join("wt");
