@@ -87,6 +87,11 @@ export type UploadPipelineDeps = {
   isOwner: boolean
   isMobile: boolean
   fileDropEnabled: boolean
+  /// What the pane's row is, an agent (its tabs and its own terminals) or a
+  /// terminal of its own, for a refusal to name.
+  rowSubject: "agent" | "terminal"
+  /// The label of the device driving the row, as `rowDriverLabel` says it.
+  rowDriver: () => string | null
 }
 
 export type UploadPipeline = {
@@ -125,6 +130,8 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     isOwner,
     isMobile,
     fileDropEnabled,
+    rowSubject,
+    rowDriver,
   } = deps
   // The `Ctrl+Shift+v` / `Cmd+Shift+v` text-paste hatch, armed by the key
   // handler and consumed by the `paste` listener the browser fires immediately
@@ -219,12 +226,28 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   ) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
+    // Another device took the row while the gesture was under way (a drag that
+    // began while this page drove it): this page knows, so nothing is sent.
+    const drivenElsewhere =
+      !ownership.read() && !takeoverInFlight(row) && rowBlockFor(row) === "other"
     // Made during this page's take-over of the row: every upload waits for the
     // claim, and a pane other than the one pressed may hear that it drives a
     // moment after the claim has landed, which the whole batch waits for once.
-    const heard = takingOver ? untilOwner(ownership, goneRef.current.signal) : null
+    const heard =
+      takingOver && !drivenElsewhere ? untilOwner(ownership, goneRef.current.signal) : null
 
     for (const [i, file] of files.entries()) {
+      if (drivenElsewhere) {
+        outcomes.push({
+          kind: "refused",
+          requestedName: file.name,
+          reason:
+            i > 0
+              ? NOT_SENT_SAME_REASON
+              : `this ${rowSubject} is active on ${rowDriver() ?? "another device"}, so it was not uploaded. Take over the ${rowSubject} on this device, then try again`,
+        })
+        continue
+      }
       // The drop overlay is already gone and an upload can wait a real amount
       // of time for a server-side slot, so without a spinner nothing visibly
       // happens. Same sonner id as this drop's final report, so the final

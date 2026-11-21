@@ -15,7 +15,12 @@ import { outsideGate } from "@/lib/gateLayer"
 import { inactiveCursorStyle } from "@/lib/composebar"
 import { stackTypingTarget } from "@/lib/layoutModel"
 import { slotTabEndedInView } from "@/lib/agentTabs"
-import { noteTheaterOwnershipLost, settleSlotTabExit } from "@/lib/store"
+import {
+  getSnapshot,
+  noteTheaterOwnershipLost,
+  rowDriverLabel,
+  settleSlotTabExit,
+} from "@/lib/store"
 import type { TerminalOwnerRef } from "@/lib/store"
 import { theaterOwnershipStep, theaterOwnershipWatchStart } from "@/lib/theater"
 import { attachCover, coverOwnsThePane } from "@/lib/attachCover"
@@ -327,6 +332,12 @@ function TerminalPart(props: TerminalPartProps) {
   // part of the agent's row, so its card is about the agent.
   const cardKind: TerminalPartProps["kind"] =
     props.kind === "terminal" && props.owner.kind !== "session" ? "terminal" : "agent"
+  const driverPart =
+    props.kind === "agent"
+      ? { sessionId: props.sessionId }
+      : props.owner.kind === "session"
+        ? { sessionId: props.owner.sessionId }
+        : { terminalId: id }
   const {
     hostRef,
     containerRef,
@@ -521,6 +532,8 @@ function TerminalPart(props: TerminalPartProps) {
     isOwner,
     isMobile,
     fileDropEnabled,
+    rowSubject: cardKind,
+    rowDriver: () => rowDriverLabel(getSnapshot(), driverPart),
   })
 
   const viewerRelayoutRef = useTerminalRelayout({

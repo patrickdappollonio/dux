@@ -117,6 +117,8 @@ function setup(
       isOwner: opts.owner ?? true,
       isMobile: false,
       fileDropEnabled: true,
+      rowSubject: "agent",
+      rowDriver: () => "Firefox on Linux",
     }),
   )
   return {
@@ -292,6 +294,29 @@ describe("the drag gate", () => {
     const { view } = setup()
     const e = { dataTransfer: { types: ["Files"] } } as unknown as React.DragEvent
     expect(view.result.current.paneAcceptsFileDrag(e)).toBe(true)
+  })
+})
+
+describe("a drop on a pane whose row another device took meanwhile", () => {
+  it("is refused here, naming the device, and nothing is uploaded", async () => {
+    const { registerPaneCover } = await import("@/lib/paneCover")
+    const retire = registerPaneCover("p1", "card", { row: "agent:s1", driver: "other" })
+    try {
+      const { view, term } = setup({ owner: false })
+      await act(async () => {
+        await view.result.current.runUpload(
+          [file("a.txt"), file("b.txt")],
+          view.result.current.activeUploadSink(),
+        )
+      })
+      expect(uploads).toEqual([])
+      expect(term.pasted).toEqual([])
+      const report = toasts.filter((t) => t.kind === "final").at(-1)?.text ?? ""
+      expect(report).toContain("this agent is active on Firefox on Linux")
+      expect(report).toContain("not sent, for the same reason")
+    } finally {
+      retire()
+    }
   })
 })
 
