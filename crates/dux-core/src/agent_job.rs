@@ -1301,8 +1301,9 @@ impl CreatePlanContext<'_> {
                         repo_path,
                         leading_branch,
                         self.network_timeout,
-                        // A question ahead of the pull: the pull asks, once.
-                        git::StartedBy::Background,
+                        // Asked only because the user ticked "pull before
+                        // creating" and pressed create.
+                        git::StartedBy::User,
                     ),
                     Ok(false)
                 ) =>
@@ -6909,6 +6910,52 @@ mod tests {
             !status.contains("Warning"),
             "a branch origin never had is not a pull failure: {status}"
         );
+    }
+
+    /// Asking origin whether it has the branch is part of the create the user
+    /// started, so a password program that answers from a wallet signs it in,
+    /// once, and a branch origin never had is still skipped quietly.
+    #[test]
+    fn the_branch_check_before_a_pull_may_be_answered_by_the_users_password_program() {
+        use crate::git::askpass_fixtures::{
+            credential_wanting_remote, recording_askpass,
+            runs_here_without_the_developers_prompts, times_asked,
+        };
+        if !runs_here_without_the_developers_prompts(
+            "agent_job::tests::the_branch_check_before_a_pull_may_be_answered_by_the_users_password_program",
+        ) {
+            return;
+        }
+        let repo = init_test_repo();
+        let main = git_stdout(repo.path(), &["rev-parse", "main"]);
+        let (url, _) = credential_wanting_remote(Some(format!("{main}\trefs/heads/main\n")));
+        let url = url.replacen("http://", "http://user@", 1);
+        let wallet = tempfile::tempdir().unwrap();
+        let askpass = recording_askpass(wallet.path(), "stored");
+        git_in(repo.path(), &["remote", "add", "origin", &url]);
+        git_in(repo.path(), &["config", "core.askPass", &askpass]);
+        git_in(repo.path(), &["switch", "-c", "feature"]);
+
+        let mut project = test_project(repo.path());
+        project.leading_branch = Some("feature".to_string());
+        project.current_branch = "feature".to_string();
+        let request = CreateAgentRequest::NewProject {
+            project,
+            custom_name: Some("local-base".to_string()),
+            use_existing_branch: false,
+            pull_before_create: true,
+            copy_uncommitted_changes: false,
+            cloned: None,
+        };
+        let run = drive_create_job_run(repo.path(), request);
+
+        assert!(run.session.is_some(), "the agent is created");
+        let status = run.status_message.unwrap();
+        assert!(
+            !status.contains("Warning"),
+            "a branch origin never had is not a pull failure: {status}"
+        );
+        assert_eq!(times_asked(wallet.path()), 1, "asked once, by the check");
     }
 
     /// Whether origin has the branch is asked of origin itself: a clone that

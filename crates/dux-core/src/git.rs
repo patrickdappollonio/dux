@@ -18,6 +18,8 @@ use crate::logger;
 use crate::model::{ChangedFile, ProjectBranchStatus};
 use crate::worker::BranchWarningKind;
 
+#[cfg(test)]
+pub(crate) mod askpass_fixtures;
 mod clone;
 mod folding;
 pub(crate) mod listing_child;

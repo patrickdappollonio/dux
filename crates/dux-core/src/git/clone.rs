@@ -370,48 +370,13 @@ impl StderrTail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::askpass_fixtures::{
+        PROMPTLESS, credential_wanting_remote, recording_askpass,
+        runs_here_without_the_developers_prompts, times_asked,
+    };
     use crate::git::test_support::{bare_remote_with_commit, git_command};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
-
-    const PROMPTLESS: &str = "DUX_TEST_PROMPTLESS_PROCESS";
-
-    /// Whether the calling test's body runs in this process. The first call
-    /// runs the test `name` again in a test process of its own whose
-    /// environment names no askpass, display or git configuration of the
-    /// developer's, asserts it passed there, and returns false; in that process
-    /// it returns true.
-    ///
-    /// The production git a clone test runs inherits this process's
-    /// environment, and a test can add variables to it but not take any away,
-    /// so a developer's `SSH_ASKPASS` or `GIT_ASKPASS` would otherwise be what
-    /// git and the stand-in ssh ask, in a window on their desktop.
-    fn runs_here_without_the_developers_prompts(name: &str) -> bool {
-        if std::env::var_os(PROMPTLESS).is_some() {
-            return true;
-        }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([name, "--exact", "--test-threads=1"])
-            .env(PROMPTLESS, "1")
-            .env_remove("SSH_ASKPASS")
-            .env_remove("SSH_ASKPASS_REQUIRE")
-            .env_remove("GIT_ASKPASS")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("GIT_CONFIG_COUNT")
-            .env_remove("GIT_CONFIG_PARAMETERS")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-        let said = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success() && said.contains("test result: ok. 1 passed"),
-            "{name} did not pass on its own:\n{said}"
-        );
-        false
-    }
 
     /// A stand-in for `ssh` at `dir/ssh`, running `body`.
     fn fake_ssh(dir: &Path, body: &str) -> String {
@@ -677,26 +642,6 @@ mod tests {
         String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
     }
 
-    /// A stand-in askpass at `dir/askpass` that records each run in
-    /// `dir/asked` and answers `stored-secret`.
-    fn recording_askpass(dir: &Path) -> String {
-        let script = dir.join("askpass");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\necho \"$*\" >> '{}'\necho stored-secret\n",
-                dir.join("asked").display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        script.to_string_lossy().into_owned()
-    }
-
-    fn times_asked(dir: &Path) -> usize {
-        std::fs::read_to_string(dir.join("asked")).map_or(0, |text| text.lines().count())
-    }
-
     /// An askpass the user configured answers a call they started, wherever
     /// it is named, and is never run for one dux started by itself.
     #[test]
@@ -707,7 +652,7 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let script = recording_askpass(tmp.path());
+        let script = recording_askpass(tmp.path(), "stored-secret");
         let core_askpass = format!("core.askPass={script}");
         let sources = [
             (
@@ -754,7 +699,7 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let script = recording_askpass(tmp.path());
+        let script = recording_askpass(tmp.path(), "stored-secret");
         let seen = tmp.path().join("seen");
         let ssh = fake_ssh(
             tmp.path(),
@@ -785,41 +730,6 @@ mod tests {
         );
     }
 
-    /// A remote at `127.0.0.1` that answers every request with a 401 asking
-    /// for Basic credentials, except one carrying `user:stored`, which gets a
-    /// 404. The `Authorization` header of each request, or `none`, is recorded.
-    fn credential_wanting_remote() -> (String, Arc<Mutex<Vec<String>>>) {
-        use std::io::{BufRead as _, Write as _};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = Arc::clone(&seen);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-                let mut auth = "none".to_string();
-                let mut line = String::new();
-                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
-                    if let Some(value) = line.strip_prefix("Authorization: ") {
-                        auth = value.trim().to_string();
-                    }
-                    line.clear();
-                }
-                let stored = auth == "Basic dXNlcjpzdG9yZWQ=";
-                record.lock().unwrap().push(auth);
-                let reply = if stored {
-                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                } else {
-                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
-                     Content-Length: 0\r\nConnection: close\r\n\r\n"
-                };
-                let _ = stream.write_all(reply.as_bytes());
-            }
-        });
-        (url, seen)
-    }
-
     /// A credential helper that answers from its store signs a call in
     /// whoever started it, and no askpass is run beside it.
     #[test]
@@ -830,8 +740,8 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let script = recording_askpass(tmp.path());
-        let (url, seen) = credential_wanting_remote();
+        let script = recording_askpass(tmp.path(), "stored-secret");
+        let (url, seen) = credential_wanting_remote(None);
         let store = tmp.path().join("credentials");
         let host = url
             .trim_start_matches("http://")
@@ -876,8 +786,8 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let script = recording_askpass(tmp.path());
-        let (url, seen) = credential_wanting_remote();
+        let script = recording_askpass(tmp.path(), "stored-secret");
+        let (url, seen) = credential_wanting_remote(None);
         let repo = tmp.path().join("repo");
         for args in [
             vec!["init", "-q", "-b", "main", repo.to_str().unwrap()],
