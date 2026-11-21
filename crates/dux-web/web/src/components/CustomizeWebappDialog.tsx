@@ -312,6 +312,16 @@ function inControlRange(d: SettingDescriptor, v: SettingValue): SettingValue {
     : v
 }
 
+function broughtIntoRangeSentence(
+  d: SettingDescriptor,
+  saved: SettingValue,
+  typed: SettingValue,
+): string {
+  if (d.control.kind !== "number") return `${d.label} was saved as ${String(saved)}.`
+  const unit = d.control.unit ? ` ${d.control.unit}` : ""
+  return `${d.label} was saved as ${String(saved)}${unit}, not ${String(typed)}: it goes from ${d.control.min} to ${d.control.max}.`
+}
+
 function SettingControl({
   d,
   value,
@@ -1310,7 +1320,16 @@ function PreferencesForm({
       const touched: [SettingDescriptor, SettingValue][] = descriptors
         .filter((d) => d.key in overrides)
         .map((d) => [d, inControlRange(d, overrides[d.key])])
+      // A number brought into range here is shown in its field at once, and
+      // said once it is saved, so nobody is left believing the typed one was.
+      const broughtIn = touched.filter(([d, value]) => value !== overrides[d.key])
+      for (const [d, value] of broughtIn) setOverride(d, value)
       const persisted = await persist(touched, originalOf)
+      for (const [d, value] of broughtIn) {
+        if (persisted.saved.includes(d.key)) {
+          notifyInfo(broughtIntoRangeSentence(d, value, overrides[d.key]))
+        }
+      }
       // A landed write leaves the draft, so the count and a retry hold only
       // what is still unsaved, and a read-and-flip row is never sent twice.
       if (persisted.saved.length > 0) {

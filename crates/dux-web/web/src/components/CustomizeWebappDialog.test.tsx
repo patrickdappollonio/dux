@@ -621,12 +621,17 @@ describe("CustomizeWebappDialog", () => {
     seed()
     render(<CustomizeWebappDialog />)
 
-    fireEvent.change(field("Terminal font size"), { target: { value: "3" } })
+    const input = field("Terminal font size") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "3" } })
     fireEvent.click(screen.getByRole("button", { name: "Save" }))
 
+    expect(input.value).toBe("8")
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     const [patch] = saveSettings.mock.calls[0]
     expect(patch.ui).toEqual({ terminal_font_size: 8 })
+    expect(notifyInfo).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32.",
+    )
   })
 
   it("fires a real select change and sends the exact key/value", async () => {
