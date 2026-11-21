@@ -1891,7 +1891,10 @@ impl App {
             return;
         }
         let pty_size = self.pty_size_for_launch();
-        match self.engine.create_tab(session_id, provider, pty_size) {
+        let Some(created) = self.row_create_tab(session_id, provider, pty_size) else {
+            return;
+        };
+        match created {
             Ok(tab_id) => {
                 // The dispatch happened inside `create_tab`, so the claim is
                 // armed here instead (see `dispatch_agent_launch`).
@@ -2132,9 +2135,10 @@ impl App {
             self.set_error(in_the_way.to_string());
             return false;
         }
-        let reaction = match self.engine.apply(Command::DispatchAgentLaunch {
-            request: Box::new(request),
-        }) {
+        let Some(applied) = self.row_dispatch_launch(request) else {
+            return false;
+        };
+        let reaction = match applied {
             Ok(r) => r,
             Err(e) => {
                 self.set_error(format!("{e:#}"));
@@ -2204,6 +2208,9 @@ impl App {
         };
         match owner {
             TerminalOwner::Session(session_id) => {
+                if self.refuse_row_change_of(&session_id) {
+                    return;
+                }
                 if self.selected_session().map(|s| s.id.as_str()) != Some(session_id.as_str()) {
                     self.reselect_left_session(&session_id);
                     self.close_diff_view();
@@ -2216,7 +2223,7 @@ impl App {
                     .get(&session_id)
                     .is_none_or(|layout| *layout == DockLayout::Agent)
                 {
-                    self.dock_layouts.insert(session_id, DockLayout::Split);
+                    self.row_remember_layout(&session_id, DockLayout::Split);
                 }
             }
             TerminalOwner::Project(_) | TerminalOwner::Standalone => {
@@ -2267,10 +2274,10 @@ impl App {
             return;
         }
         let (rows, cols) = self.pty_size_for_launch();
-        let terminal_id = match self
-            .engine
-            .create_companion_terminal(&session.id, rows, cols)
-        {
+        let Some(created) = self.row_create_terminal(&session.id, rows, cols) else {
+            return;
+        };
+        let terminal_id = match created {
             Ok((id, _label)) => id,
             Err(e) => {
                 self.set_error(terminal_launch_failure("Could not launch terminal", &e));
@@ -2454,10 +2461,10 @@ impl App {
             return;
         }
         let (rows, cols) = self.pty_size_for_launch();
-        let terminal_id = match self
-            .engine
-            .create_companion_terminal(&session.id, rows, cols)
-        {
+        let Some(created) = self.row_create_terminal(&session.id, rows, cols) else {
+            return;
+        };
+        let terminal_id = match created {
             Ok((id, _label)) => id,
             Err(e) => {
                 self.set_error(terminal_launch_failure("Could not launch terminal", &e));
@@ -2819,12 +2826,8 @@ impl App {
         delete_branch: Option<bool>,
         branches: Option<dux_core::branch_history::BranchAnswersWire>,
     ) -> Option<dux_core::engine::Attached> {
-        match self.engine.apply(Command::BeginDeleteSession {
-            session_id: session_id.to_string(),
-            delete_worktree: worktree == dux_core::engine::WorktreeOnDelete::Remove,
-            delete_branch,
-            branches,
-        }) {
+        let begun = self.row_begin_delete(session_id, worktree, delete_branch, branches)?;
+        match begun {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(e) => match super::attachment_presence::attached_refusal(e) {
                 Ok(refused) => return Some(refused),
@@ -2930,9 +2933,7 @@ impl App {
         &mut self,
         terminal_id: &str,
     ) -> Option<dux_core::engine::Attached> {
-        let reaction = match self.engine.apply(Command::DeleteTerminal {
-            terminal_id: terminal_id.to_string(),
-        }) {
+        let reaction = match self.row_close_terminal(terminal_id)? {
             Ok(r) => r,
             Err(e) => {
                 match super::attachment_presence::attached_refusal(e) {
@@ -3042,9 +3043,12 @@ impl App {
 
         let session_id = self.engine.sessions[session_index].id.clone();
         // Retarget the focused tab (Main delegates to the session-level change).
-        let outcome =
-            self.engine
-                .change_tab_provider(&session_id, &prompt.tab_id, &selected.provider)?;
+        let Some(outcome) =
+            self.row_change_tab_provider(&session_id, &prompt.tab_id, &selected.provider)
+        else {
+            return Ok(());
+        };
+        let outcome = outcome?;
         self.rebuild_left_items();
 
         let reconnect_key = self.bindings.label_for(Action::ReconnectAgent);
@@ -3396,13 +3400,9 @@ impl App {
             self.set_error("Select an agent first.");
             return Ok(());
         };
-        let new_enabled = !session.auto_reopen_enabled;
-        let reaction = self.engine.apply(Command::ToggleAgentAutoReopen {
-            branch_name: session.display_label(),
-            session_id: session.id,
-            new_enabled,
-        })?;
-        self.apply_reaction(reaction);
+        if let Some(toggled) = self.row_toggle_auto_reopen(&session) {
+            self.apply_reaction(toggled?);
+        }
         Ok(())
     }
 
@@ -3773,11 +3773,14 @@ impl App {
         };
         // One run per agent at a time, and a hold on the worktree so a removal
         // waits for it; one sentence when either is refused.
-        let claim = match self.engine.claim_startup_rerun(
+        let Some(claimed) = self.row_claim_startup_rerun(
             &session.id,
             &session.display_label(),
             &managed.worktree_path,
-        ) {
+        ) else {
+            return;
+        };
+        let claim = match claimed {
             Ok(claim) => claim,
             Err(refusal) => {
                 self.set_error(refusal.to_string());
@@ -4724,6 +4727,9 @@ impl App {
         mode: dux_core::engine::ReconnectMode,
         view: LaunchView,
     ) -> Result<()> {
+        if self.refuse_row_change_of(session_id) {
+            return Ok(());
+        }
         // A start ends any other agent in the same folder, a forced one this
         // agent's own run too: all of it is reserved before anything is torn down.
         let mut scope = self.engine.launch_conflict_scope(session_id);
@@ -4742,7 +4748,10 @@ impl App {
             }
         };
         let pty_size = self.pty_size_for_launch();
-        match self.engine.reconnect_plan(session_id, mode, pty_size)? {
+        let Some(plan) = self.row_reconnect_plan(session_id, mode, pty_size) else {
+            return Ok(());
+        };
+        match plan? {
             dux_core::engine::ReconnectPlan::AlreadyConnected { message } => {
                 self.set_info(message);
             }

@@ -1411,10 +1411,7 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        self.in_row_pass(|app| {
-            app.keep_row_view();
-            app.route_key(key)
-        })
+        self.in_input_pass(Ok(false), |app| app.route_key(key))
     }
 
     fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -2028,6 +2025,10 @@ impl App {
     /// dropped, because feeding the characters to the binding lookup would fire
     /// hotkeys.
     pub(crate) fn handle_paste(&mut self, text: &str) {
+        self.in_input_pass((), |app| app.route_paste(text));
+    }
+
+    fn route_paste(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -9601,7 +9602,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if answer == ConfirmAnswer::Cancel {
+        if answer == ConfirmAnswer::Cancel || self.refuse_row_change_of(&session_id) {
             return false;
         }
         if let Err(in_the_way) = self
@@ -9620,7 +9621,10 @@ impl App {
                 return false;
             }
         };
-        match self.engine.begin_detach_session(&session_id) {
+        let Some(detach) = self.row_begin_detach(&session_id) else {
+            return false;
+        };
+        match detach {
             // The row went between opening the dialog and answering it.
             dux_core::engine::DetachSessionOutcome::UnknownSession => {
                 self.set_warning("That agent is gone, so there was nothing to detach.");
@@ -9669,7 +9673,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if answer == ConfirmAnswer::Cancel {
+        if answer == ConfirmAnswer::Cancel || self.refuse_row_change_of(&session_id) {
             return false;
         }
         let reservation = if restart_tabs {
@@ -9684,14 +9688,17 @@ impl App {
         } else {
             None
         };
-        match self.engine.begin_recreate_working_copy(
+        let Some(begun) = self.row_begin_recreate(
             &session_id,
             if restart_tabs {
                 dux_core::engine::TabsAfterRecreate::Restart
             } else {
                 dux_core::engine::TabsAfterRecreate::Leave
             },
-        ) {
+        ) else {
+            return false;
+        };
+        match begun {
             Ok(reaction) => {
                 // The tabs stop only once the checkout lands, under the same
                 // key, so nobody attaches to them until its final.
@@ -9934,10 +9941,11 @@ impl App {
         if answer == ConfirmAnswer::Cancel {
             return false;
         }
-        match self.guarded_by(&asked, |app| {
-            app.engine
-                .apply_wire(dux_core::wire::WireCommand::StopAgentTab { session_id, tab_id })
-        }) {
+        let Some(stopped) = self.guarded_by(&asked, |app| app.row_stop_tab(&session_id, &tab_id))
+        else {
+            return false;
+        };
+        match stopped {
             Ok(outcome) => {
                 self.engine.sync_has_active_processes();
                 self.rebuild_left_items();
@@ -9961,7 +9969,7 @@ impl App {
             _ => return false,
         };
         let asked = std::mem::replace(&mut self.prompt, PromptState::None);
-        if answer == ConfirmAnswer::Cancel {
+        if answer == ConfirmAnswer::Cancel || self.refuse_row_change_of(&session_id) {
             return false;
         }
         if let Err(in_the_way) = self.engine.check_admission(
@@ -10004,7 +10012,10 @@ impl App {
         // going: a close lands beside the closed tab like a browser tab.
         let strip_before = self.session_tab_ids(&session_id);
         let closing_the_tab_on_screen = self.focused_tab_id(&session_id) == tab_id;
-        match self.engine.close_tab(&session_id, &tab_id) {
+        let Some(closed) = self.row_close_tab(&session_id, &tab_id) else {
+            return false;
+        };
+        match closed {
             Ok(outcome) => {
                 // The neighbour decides where the user lands when the tab on
                 // screen closed. Otherwise a promotion decides: the tab that took
@@ -11738,9 +11749,13 @@ impl App {
                     self.fullscreen_overlay = FullscreenOverlay::Terminal;
                 }
             }
-            // The card is where a row this surface does not drive is taken over.
-            Some(LeftItem::Session(_)) if self.refuse_row_change() => {
+            // Looking at a row this surface does not drive: its card, where it
+            // is taken over, in place of whatever the center pane showed.
+            Some(LeftItem::Session(_)) if self.agent_row_card().is_some() => {
+                self.close_diff_view();
+                self.center_mode = CenterMode::Agent;
                 self.focus = FocusPane::Center;
+                self.reload_changed_files();
             }
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
@@ -12523,6 +12538,10 @@ impl App {
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             return;
         };
+        if self.refuse_row_change_of(&session_id) {
+            self.mouse_drag = None;
+            return;
+        }
         let edge = if row <= stack.y {
             Some(DockLayout::Term)
         } else if row >= stack.bottom().saturating_sub(1) {
@@ -13126,10 +13145,7 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
-        self.in_row_pass(|app| {
-            app.keep_row_view();
-            app.route_mouse(mouse)
-        })
+        self.in_input_pass(false, |app| app.route_mouse(mouse))
     }
 
     fn route_mouse(&mut self, mouse: MouseEvent) -> bool {

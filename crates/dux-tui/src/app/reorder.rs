@@ -300,9 +300,7 @@ impl App {
         docked.sort_by_key(|(_, order)| *order);
         let docked: Vec<String> = docked.into_iter().map(|(id, _)| id.clone()).collect();
         terminal_order.extend(docked);
-        if let Err(err) = self.engine.apply(Command::ReorderTerminals {
-            terminal_ids: terminal_order,
-        }) {
+        if let Err(err) = self.reorder_list_terminals(terminal_order) {
             self.set_error(format!("Could not reorder the list: {err}"));
             return;
         }

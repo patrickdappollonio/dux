@@ -11,7 +11,6 @@ use super::input::contains_point;
 use super::reorder::{MoveDir, move_in_order, move_to_target};
 use super::{App, DrawnTabStrip, PillStrip, TabDragState};
 use crossterm::event::MouseEvent;
-use dux_core::engine::Command;
 use dux_core::ids::{SessionIdRef, TabIdRef};
 
 impl App {
@@ -91,7 +90,7 @@ impl App {
                 return;
             }
             let moved = move_to_target(&order, &drag.source_id, &target);
-            self.apply_dock_order(&drag.source_id, &order, &moved);
+            self.apply_dock_order(&drag.session_id, &drag.source_id, &order, &moved);
             return;
         }
         let order = self.session_tab_ids(&drag.session_id);
@@ -173,10 +172,10 @@ impl App {
         }
         let total = after.len();
         let place = after.iter().position(|id| id == moved_id).map(|i| i + 1);
-        match self.engine.apply(Command::ReorderAgentTabs {
-            session_id: session_id.to_string(),
-            tab_ids: after,
-        }) {
+        let Some(stored) = self.row_reorder_tabs(session_id, after) else {
+            return;
+        };
+        match stored {
             Ok(reaction) => self.apply_reaction(reaction),
             Err(err) => {
                 self.set_error(format!("Could not reorder the tabs. {err}"));

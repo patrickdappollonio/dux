@@ -195,6 +195,10 @@ pub(crate) enum BackgroundServing {
 
 impl App {
     pub(crate) fn drain_events(&mut self) {
+        self.in_row_pass(Self::drain_event_sources);
+    }
+
+    fn drain_event_sources(&mut self) {
         // The release-notes worker's PAYLOAD rides its own channel (the keyed
         // busy→final status rides the engine channel below as a
         // `StatusOpCompleted`), so fold it in on the same tick.
@@ -454,7 +458,10 @@ impl App {
                 self.input_target = InputTarget::None;
             }
             self.fullscreen_overlay = FullscreenOverlay::None;
-            self.set_info("Terminal exited. Press the terminal key to launch a new one.");
+            // Under the card this surface is not shown the agent's terminals.
+            if self.agent_row_card().is_none() {
+                self.set_info("Terminal exited. Press the terminal key to launch a new one.");
+            }
         }
         self.rebuild_left_items();
         self.reconcile_center_target();
@@ -501,6 +508,9 @@ impl App {
     }
 
     fn apply_resume_fallback_sweep(&mut self) {
+        if self.engine.resume_fallback_candidates.is_empty() {
+            return;
+        }
         let sweep_size = self.pty_size_for_launch();
         for reaction in self.engine.sweep_resume_fallbacks(sweep_size) {
             self.mark_frame_dirty();
@@ -536,6 +546,9 @@ impl App {
         // Tabs a recreate stopped start again once the pass above has seen the
         // last of them go, through the same launch path a resume fallback
         // takes, and the recreate's spinner is answered by its final.
+        if self.engine.pending_tab_restarts.is_empty() {
+            return;
+        }
         let restarts = self
             .engine
             .sweep_recreate_restarts(self.pty_size_for_launch());

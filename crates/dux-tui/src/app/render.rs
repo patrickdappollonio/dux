@@ -2334,7 +2334,7 @@ impl App {
         self.publish_drawn_attachments();
         // A take-over this frame carried lifts the card now, so the view it
         // gives back is in place before the next key.
-        self.keep_row_view();
+        let _ = self.keep_row_view();
     }
 
     fn render_frame(&mut self, frame: &mut Frame<'_>) {
@@ -14534,13 +14534,16 @@ impl App {
             self.agent_tab_regions.clear();
         }
         match self.fullscreen_overlay {
-            FullscreenOverlay::Agent => {
-                self.render_fullscreen_agent(frame);
-                return;
-            }
             // An agent's row under the take-over card shows the agent alone,
             // maximized too.
-            FullscreenOverlay::Terminal if self.terminals_hidden_by_card() => {
+            FullscreenOverlay::Agent | FullscreenOverlay::Terminal
+                if self.terminals_hidden_by_card() =>
+            {
+                self.render_fullscreen_agent(frame);
+                self.keep_covered_row_open();
+                return;
+            }
+            FullscreenOverlay::Agent => {
                 self.render_fullscreen_agent(frame);
                 return;
             }

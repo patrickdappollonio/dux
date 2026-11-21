@@ -17,7 +17,6 @@ use crate::keybindings::Action;
 use crate::model::SessionSurface;
 use crate::theme::FocusState;
 use components::FocusStep;
-use dux_core::engine::Command;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::prelude::{Style, Widget};
@@ -96,10 +95,13 @@ impl App {
     /// layout draws. A stopped agent's layout lasts while it stays stopped;
     /// starting it returns to the one remembered.
     pub(crate) fn set_dock_layout(&mut self, session_id: &str, layout: DockLayout) {
+        if self.refuse_row_change_of(session_id) {
+            return;
+        }
         let running = self.selected_session().is_some_and(|s| s.id == session_id)
             && self.selected_agent_running();
         if running {
-            self.dock_layouts.insert(session_id.to_string(), layout);
+            self.row_remember_layout(session_id, layout);
             // A layout held while the agent's terminal had the keyboard is
             // replaced by the one asked for now.
             self.stopped_layout = None;
@@ -216,13 +218,19 @@ impl App {
             ));
             return;
         }
-        self.apply_dock_order(&active, &order, &moved);
+        self.apply_dock_order(&session_id, &active, &order, &moved);
     }
 
     /// Hand a new dock order to the engine and confirm it. Only this agent's
     /// terminals change places, and only among the places they already hold,
     /// so no other dock and no row of the list moves.
-    pub(crate) fn apply_dock_order(&mut self, moved_id: &str, before: &[String], after: &[String]) {
+    pub(crate) fn apply_dock_order(
+        &mut self,
+        session_id: &str,
+        moved_id: &str,
+        before: &[String],
+        after: &[String],
+    ) {
         if after == before {
             return;
         }
@@ -244,10 +252,10 @@ impl App {
                 }
             })
             .collect();
-        if let Err(err) = self
-            .engine
-            .apply(Command::ReorderTerminals { terminal_ids })
-        {
+        let Some(stored) = self.row_reorder_dock(session_id, terminal_ids) else {
+            return;
+        };
+        if let Err(err) = stored {
             self.set_error(format!("Could not reorder the terminals. {err}"));
             return;
         }
@@ -369,35 +377,39 @@ impl App {
             }
         }
         if self.terminals_hidden_by_card() {
-            self.keep_hidden_dock_attached();
+            self.keep_covered_row_open();
         }
         self.render_stack_takeover_card(frame);
     }
 
-    /// Under the card the dock is not drawn, yet the row it belongs to is still
-    /// open here: the dock stays attached wherever its layout would draw it, and
-    /// a take-over the agent's part could not spend (it has no pty) is spent by
-    /// the dock's terminal, or another tab of the row, at the grid it already has.
-    fn keep_hidden_dock_attached(&mut self) {
-        if self.remembered_dock_layout() != DockLayout::Agent {
+    /// The row under the card is still open here: its hidden dock stays attached
+    /// where the remembered view draws it, and a pty of the row carries an armed
+    /// take-over no drawn part spent.
+    pub(super) fn keep_covered_row_open(&mut self) {
+        if self.remembered_dock_layout() != DockLayout::Agent
+            || self.fullscreen_overlay == FullscreenOverlay::Terminal
+        {
             self.note_drawn_pty(CenterPart::Dock);
+        }
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return;
+        };
+        let row = dux_core::pty_owners::RowKey::Agent(session_id.clone());
+        if self.pending_pty_takeover.as_ref() != Some(&row) {
+            return;
         }
         let Some(pty_id) = self
             .part_pty_id(CenterPart::Dock)
-            .or_else(|| self.selected_row_probe())
+            .or_else(|| self.row_probe_of(&session_id))
         else {
             return;
         };
-        let armed_here = self
-            .pending_pty_takeover
-            .as_ref()
-            .is_some_and(|armed| *armed == self.engine.pty_row(&pty_id));
-        let grid = self
+        // The child keeps the grid it has; its own pane sends this window's next frame.
+        let (rows, cols) = self
             .pty_client_for(&pty_id)
-            .and_then(crate::pty::PtyClient::grid_size);
-        if armed_here && let Some((rows, cols)) = grid {
-            let _ = self.resize_pty_if_permitted(&pty_id, rows, cols);
-        }
+            .and_then(crate::pty::PtyClient::grid_size)
+            .unwrap_or_else(|| self.pty_size_for_launch());
+        let _ = self.resize_pty_if_permitted(&pty_id, rows, cols);
     }
 
     /// Whether the frame is drawing an agent's stack in the center pane, where

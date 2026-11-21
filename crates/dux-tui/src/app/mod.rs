@@ -5372,6 +5372,7 @@ mod picker_lists;
 mod render;
 mod reorder;
 mod row_card;
+mod row_changes;
 mod sessions;
 #[cfg(test)]
 mod standalone_chooser;
@@ -6143,6 +6144,10 @@ impl App {
     }
 
     fn prepare_run_tick(&mut self) {
+        self.in_row_pass(Self::run_tick_work);
+    }
+
+    fn run_tick_work(&mut self) {
         self.drain_events();
         // A `dux config set` (or a hand-run `kill -USR1`) asks for a reload.
         if self.reload_config_on_signal() {
@@ -7077,10 +7082,7 @@ impl App {
     }
 
     pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
-        self.in_row_pass(|app| {
-            app.keep_row_view();
-            app.run_command(command)
-        })
+        self.in_input_pass(Ok(()), |app| app.run_command(command))
     }
 
     #[expect(
@@ -8808,7 +8810,10 @@ impl App {
     ) -> bool {
         // The engine owns the whole rename, the branch worker included, so the
         // web's rename runs the same rules and says the same sentences.
-        match self.engine.rename_agent(session_id, new_name, rename) {
+        let Some(renamed) = self.row_rename_agent(session_id, new_name, rename) else {
+            return false;
+        };
+        match renamed {
             Ok(reaction) => {
                 self.apply_reaction(reaction);
                 true
@@ -8887,26 +8892,6 @@ impl App {
 
     pub(crate) fn running_companion_terminal_count(&self) -> usize {
         self.engine.companion_terminals.len()
-    }
-
-    /// The running terminals this surface may count: every terminal that is a
-    /// row of the list, and an agent's only while this surface drives its row.
-    pub(crate) fn shown_terminal_count(&self) -> usize {
-        let Some(conn_id) = self.pty_ownership_conn_id() else {
-            return self.running_companion_terminal_count();
-        };
-        let owners = self.row_owners();
-        self.engine
-            .companion_terminals
-            .values()
-            .filter(|terminal| match terminal.owner.as_ref() {
-                TerminalOwnerRef::Session(session_id) => {
-                    owners.get(&dux_core::pty_owners::RowKey::Agent(session_id.to_string()))
-                        == Some(&conn_id)
-                }
-                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => true,
-            })
-            .count()
     }
 
     /// The project and standalone terminals, which are rows of the agents list
@@ -9050,7 +9035,11 @@ impl App {
     /// selection change and before every frame, so a terminal that ended or a
     /// row that moved can never leave the center aimed at something gone.
     pub(crate) fn reconcile_center_target(&mut self) {
-        self.keep_row_view();
+        self.in_row_pass(Self::aim_center_at_selected_row);
+    }
+
+    fn aim_center_at_selected_row(&mut self) {
+        let _ = self.keep_row_view();
         if let Some(terminal_id) = self.selected_terminal_row() {
             if self.active_terminal_id.as_deref() != Some(terminal_id.as_str()) {
                 self.active_terminal_id = Some(terminal_id);
