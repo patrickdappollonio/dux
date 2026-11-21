@@ -336,9 +336,11 @@ function TaskManagerBody() {
               >
                 {/* Destructive here, unlike a `⋯` menu's neutral items: a dialog
                     footer button is the surface `variant="destructive"` is
-                    reserved for. */}
+                    reserved for. The wrapper stretches in the phone's column
+                    footer and the button fills it, as Done does. */}
                 <Button
                   variant="destructive"
+                  className="max-sm:w-full"
                   disabled={nothingToStop !== null}
                   onClick={openStopAll}
                 >
