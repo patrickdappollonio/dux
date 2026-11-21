@@ -224,6 +224,7 @@ import type {
   TerminalView,
 } from "./types"
 import { sessionLabel, supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
+import { lastPageControl } from "@/lib/pageControl"
 import {
   renameBlockedReason,
   renamePayload,
@@ -9125,24 +9126,6 @@ export function runMacro(name: string, target: SelectedTarget): MacroDestination
 
 let macrosReturnFocus: (() => HTMLElement | null) | null = null
 
-// The last control pressed or focused outside every dialog and menu. An opener
-// that names no return target is a menu row, which has closed by the time the
-// dialog does, so focus goes back to the control that opened that menu.
-const POPUP_LAYER = '[role="dialog"], [role="alertdialog"], [role="menu"]'
-const CONTROL = 'button, a[href], input, textarea, select, [tabindex]:not([tabindex="-1"])'
-let lastPageControl: HTMLElement | null = null
-
-function notePageControl(event: Event): void {
-  if (!(event.target instanceof Element) || event.target.closest(POPUP_LAYER)) return
-  const control = event.target.closest(CONTROL)
-  if (control instanceof HTMLElement) lastPageControl = control
-}
-
-if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
-  document.addEventListener("pointerdown", notePageControl, true)
-  document.addEventListener("focusin", notePageControl, true)
-}
-
 // Open the macro-editor dialog, on the edits a Back set aside when there are
 // any, else on the saved list (copied, so edits never touch the bootstrap).
 // Runs in the click/palette handler that opens the dialog, never an effect.
@@ -9151,7 +9134,7 @@ export function openMacrosDialog(
   select: string | null = null,
   returnFocus: (() => HTMLElement | null) | null = null,
 ): void {
-  const opener = lastPageControl
+  const opener = lastPageControl()
   macrosReturnFocus =
     returnFocus ?? (() => (opener?.isConnected ? opener : null))
   const setAside = macrosSetAside

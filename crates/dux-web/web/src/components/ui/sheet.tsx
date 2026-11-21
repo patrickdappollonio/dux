@@ -6,13 +6,23 @@ import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
+import { useFocusFallback } from "@/lib/pageControl"
 import { XIcon } from "lucide-react"
 
 // Every sheet closes on the browser's Back, the way its close does
-// (`useBackDismiss`).
+// (`useBackDismiss`), and one whose opener has gone when it closes hands focus
+// to the page control that opened the menu it came from (`useFocusFallback`).
 function Sheet({ ...props }: SheetPrimitive.Root.Props) {
   const back = useBackDismiss(props)
-  return <SheetPrimitive.Root data-slot="sheet" {...props} {...back} />
+  const onOpenChangeComplete = useFocusFallback(props.open, props.onOpenChangeComplete)
+  return (
+    <SheetPrimitive.Root
+      data-slot="sheet"
+      {...props}
+      {...back}
+      onOpenChangeComplete={onOpenChangeComplete}
+    />
+  )
 }
 
 function SheetTrigger({ ...props }: SheetPrimitive.Trigger.Props) {

@@ -4,6 +4,7 @@ import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
+import { useFocusFallback } from "@/lib/pageControl"
 import { XIcon } from "lucide-react"
 
 // Every dialog closes on the browser's Back, the way its Cancel does
@@ -13,12 +14,23 @@ import { XIcon } from "lucide-react"
 // than from the user's own click or tap (a screen raised at boot, a server's
 // answer, a target that vanished). Back must never be what dismisses those,
 // and their entry would land in history with no gesture behind it.
+//
+// A dialog whose opener has gone when it closes hands focus to the page
+// control that opened the menu it came from (`useFocusFallback`).
 function Dialog({
   historyEntry = true,
   ...props
 }: DialogPrimitive.Root.Props & { historyEntry?: boolean }) {
   const back = useBackDismiss(props, historyEntry)
-  return <DialogPrimitive.Root data-slot="dialog" {...props} {...back} />
+  const onOpenChangeComplete = useFocusFallback(props.open, props.onOpenChangeComplete)
+  return (
+    <DialogPrimitive.Root
+      data-slot="dialog"
+      {...props}
+      {...back}
+      onOpenChangeComplete={onOpenChangeComplete}
+    />
+  )
 }
 
 function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {
