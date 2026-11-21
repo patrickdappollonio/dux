@@ -168,6 +168,7 @@ const { ChangedFiles } = await import("./ChangedFiles")
 // against the router's own grammar rather than a hand-written string.
 const { standaloneEditorHash } = await import("@/lib/store")
 const { agentRoot } = await import("@/lib/editorRoot")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 // The layout is chosen by width alone, below the md breakpoint for the phone.
 function setViewportWidth(width: number) {
@@ -2557,5 +2558,122 @@ describe("a folded folder row", () => {
     expect(menu.getByText("Stage")).toBeTruthy()
     expect(menu.getByText("Discard…")).toBeTruthy()
     expect(menu.queryByText("Edit")).toBeNull()
+  })
+})
+
+// While this page does not drive the agent, the pane still reads (the list,
+// diffs, the filter, refresh) but offers no git write: the server refuses them
+// from a page that does not drive the row, and a control that only ever earns
+// a refusal is a lie about what this page can do.
+describe("the Changes pane while this page does not drive the agent", () => {
+  const OTHER =
+    "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here."
+  let retire: (() => void) | null = null
+  function driveElsewhere() {
+    act(() => {
+      retire = registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
+    })
+  }
+  function takeOver() {
+    act(() => {
+      retire?.()
+      retire = registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
+    })
+  }
+  beforeEach(() => stageOne.mockClear())
+  afterEach(() => {
+    retire?.()
+    retire = null
+    resetPaneCovers()
+  })
+
+  const itemOf = (menu: ReturnType<typeof within>, text: string) =>
+    menu.getByText(text).closest('[role="menuitem"]') as HTMLElement
+  const reasonOf = (item: HTMLElement) => {
+    const id = item.getAttribute("aria-describedby")
+    return id ? document.getElementById(id)?.textContent ?? null : null
+  }
+
+  it("greys out commit, push and pull with the reason and keeps refresh", async () => {
+    mockState = withFiles([["staged.ts", "M"]], [])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const menu = within(await screen.findByRole("menu"))
+    for (const text of ["Commit…", "Push", "Pull"]) {
+      const item = itemOf(menu, text)
+      expect(item.getAttribute("aria-disabled"), text).toBe("true")
+      expect(reasonOf(item), text).toBe(OTHER)
+    }
+    expect(menu.getAllByText(OTHER)).toHaveLength(1)
+    expect(itemOf(menu, "Refresh changes").getAttribute("aria-disabled")).not.toBe("true")
+  })
+
+  it("greys out a row's stage and discard but keeps its editor", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+    const menu = within(await screen.findByRole("menu"))
+    for (const text of ["Stage", "Discard…"]) {
+      const item = itemOf(menu, text)
+      expect(item.getAttribute("aria-disabled"), text).toBe("true")
+      expect(reasonOf(item), text).toBe(OTHER)
+    }
+    expect(itemOf(menu, "Edit").getAttribute("aria-disabled")).not.toBe("true")
+    fireEvent.click(itemOf(menu, "Stage"))
+    expect(stageOne).not.toHaveBeenCalled()
+  })
+
+  it("greys out the selection's verbs but keeps selecting", () => {
+    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"], ["b.ts", "M"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    check("a.ts")
+    check("staged.ts")
+    const menu = selectionMenu()
+    for (const name of ["Stage 1", "Unstage 1", "Discard 1…"]) {
+      const item = menu.getByRole("menuitem", { name })
+      expect(item.getAttribute("aria-disabled"), name).toBe("true")
+      expect(reasonOf(item), name).toBe(OTHER)
+    }
+    expect(menu.getAllByText(OTHER)).toHaveLength(1)
+    const selectAll = menu.getByRole("menuitem", { name: /^Select all/ })
+    expect(selectAll.getAttribute("aria-disabled")).not.toBe("true")
+  })
+
+  it("gives the writes back the moment this page takes over, and takes them on losing it", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    takeOver()
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+    let menu = within(await screen.findByRole("menu"))
+    expect(itemOf(menu, "Stage").getAttribute("aria-disabled")).not.toBe("true")
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+
+    driveElsewhere()
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+    menu = within(await screen.findByRole("menu"))
+    expect(itemOf(menu, "Stage").getAttribute("aria-disabled")).toBe("true")
+  })
+
+  // A race the page lost: the server's sentence is what the person reads.
+  it("shows the server's refusal of a stage in its own words", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    stageOne.mockRejectedValueOnce(
+      new Error("Pixel 9 is driving this agent, so this page cannot change its files."),
+    )
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Actions for a.ts"))
+    const menu = within(await screen.findByRole("menu"))
+    fireEvent.click(menu.getByText("Stage"))
+    await vi.waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Pixel 9 is driving this agent, so this page cannot change its files.",
+      ),
+    )
+    expect(notifySuccess).not.toHaveBeenCalled()
   })
 })

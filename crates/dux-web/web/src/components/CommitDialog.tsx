@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useId, useState } from "react"
 import { Loader2 } from "lucide-react"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
@@ -11,16 +11,27 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  agentChangeBlockReason,
+  useAgentChangeBlockById,
+} from "@/hooks/use-agent-active-elsewhere"
 import { closeCommit, getSnapshot, setCommitDraft, useDux } from "@/lib/store"
 
 export function CommitDialog() {
   const { commitTarget, commitDraft } = useDux()
   const [committing, setCommitting] = useState(false)
+  const reasonId = useId()
+  // A page that does not drive the agent keeps the message it was writing,
+  // read-only, and gets it back to commit once it takes over.
+  const block = useAgentChangeBlockById(commitTarget ?? "")
+  const reason =
+    commitTarget !== null && block !== null ? agentChangeBlockReason(block) : null
+  const blocked = reason !== null
 
   const isOpen = commitTarget !== null
 
   async function handleCommit() {
-    if (!commitTarget || !commitDraft.trim() || committing) return
+    if (!commitTarget || !commitDraft.trim() || committing || blocked) return
     // What this commit was sent from: the dialog's opening, its agent and the
     // exact text in the box.
     const sentFrom = {
@@ -73,6 +84,8 @@ export function CommitDialog() {
           value={commitDraft}
           onChange={(e) => setCommitDraft(e.target.value)}
           className="min-h-24 resize-none"
+          readOnly={blocked}
+          aria-describedby={blocked ? reasonId : undefined}
           autoFocus
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -81,14 +94,20 @@ export function CommitDialog() {
             }
           }}
         />
+        {blocked ? (
+          <p id={reasonId} className="text-sm text-muted-foreground">
+            {reason}
+          </p>
+        ) : null}
         <DialogFooter>
           <Button variant="outline" onClick={() => closeCommit()}>
             Cancel
           </Button>
           <Button
             onClick={handleCommit}
-            disabled={committing || !commitDraft.trim()}
+            disabled={committing || !commitDraft.trim() || blocked}
             aria-busy={committing}
+            aria-describedby={blocked ? reasonId : undefined}
           >
             {committing ? (
               <Loader2 className="motion-safe:animate-spin" />

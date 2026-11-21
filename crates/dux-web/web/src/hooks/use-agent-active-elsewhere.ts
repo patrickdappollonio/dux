@@ -1,11 +1,18 @@
+import type { EditorRoot } from "@/lib/editorRoot"
 import {
   agentRowKey,
   rowBlockFor,
+  rowKeyOfTarget,
   useAgentRowWatch,
   useRowWatch,
   type RowBlock,
 } from "@/lib/paneCover"
-import { sessionActiveElsewhere, useDux } from "@/lib/store"
+import {
+  sessionActiveElsewhere,
+  useDux,
+  useDuxSelector,
+  type DuxState,
+} from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
 /// Why this device may not change an agent right now, or null when it may. A
@@ -40,6 +47,42 @@ export function useAgentChangeBlockById(sessionId: string): RowBlock | null {
   )
 }
 
+/// The same answer by id for a surface that subscribes selectively, so it
+/// re-renders when the answer changes rather than on every store change.
+export function useAgentChangeBlockSelective(
+  sessionId: string | null,
+): RowBlock | null {
+  const rowAnswer = useAgentRowWatch(sessionId).block
+  const spineElsewhere = useDuxSelector((state) => {
+    const session = state.spine?.sessions.find((s) => s.id === sessionId)
+    return session !== undefined && sessionActiveElsewhere(state, session)
+  })
+  if (sessionId === null) return null
+  return agentChangeBlock(rowAnswer, () => spineElsewhere)
+}
+
+/// Why this page may not write the files under an editor root, or null when
+/// it may: the agent's answer for an agent's root, and the terminal row's own
+/// for a project or standalone terminal's.
+export function useEditorRootChangeBlock(root: EditorRoot): RowBlock | null {
+  const state = useDux()
+  const rowAnswer = useRowWatch(rowKeyOfTarget(root)).block
+  return agentChangeBlock(rowAnswer, () => {
+    if (root.kind === "terminal") return terminalActiveElsewhere(state, root.terminalId)
+    const session = state.spine?.sessions.find((s) => s.id === root.sessionId)
+    return session !== undefined && sessionActiveElsewhere(state, session)
+  })
+}
+
+/// The spine's word on whether another device drives a terminal: a mounted
+/// pane's verdict first, then the terminal's owner against this page's own ids.
+function terminalActiveElsewhere(state: DuxState, terminalId: string): boolean {
+  const local = state.ptyOwnership?.[terminalId]
+  if (local !== undefined) return local === "elsewhere"
+  const owner = state.spine?.terminals.find((t) => t.id === terminalId)?.input_owner
+  return owner !== undefined && owner !== "" && !state.ownPtyConnIds?.[owner]
+}
+
 /// The same answer for every agent of a list, by session id.
 export function useAgentChangeBlocks(
   sessions: readonly SessionView[],
@@ -69,6 +112,24 @@ export function agentChangeBlockReason(block: RowBlock): string {
       return "This device is reconnecting to this agent, so actions that modify it are disabled until it hears again who is driving."
     case "pending":
       return "This device is still connecting to this agent, so actions that modify it are disabled until it knows who is driving."
+  }
+}
+
+/// Why an editor is read-only right now, said once at its head, for an agent's
+/// working copy or a terminal's folder.
+export function editorReadOnlyReason(
+  block: RowBlock,
+  subject: "agent" | "terminal",
+): string {
+  switch (block) {
+    case "other":
+      return `Read-only: this ${subject} is active on another device, so its files cannot be changed here. Take over the ${subject} to edit them.`
+    case "nobody":
+      return `Read-only: nobody is driving this ${subject}, this device included, so its files cannot be changed here. Take over the ${subject} to edit them.`
+    case "reconnecting":
+      return `Read-only while this device reconnects to this ${subject}: its files can be changed again once it hears who is driving.`
+    case "pending":
+      return `Read-only while this device connects to this ${subject}: its files can be changed once it knows who is driving.`
   }
 }
 

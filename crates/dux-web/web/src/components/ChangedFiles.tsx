@@ -104,16 +104,16 @@ import {
   openEditor,
   openStandaloneEditorInThisTab,
   refreshChanges,
-  sessionActiveElsewhere,
   standaloneEditorHash,
   toggleChangesPane,
   useDuxSelector,
 } from "@/lib/store"
 import {
   addToAgentBlockHint,
-  agentChangeBlock,
+  agentChangeBlockReason,
+  useAgentChangeBlockSelective,
 } from "@/hooks/use-agent-active-elsewhere"
-import { useAgentRowWatch } from "@/lib/paneCover"
+import type { RowBlock } from "@/lib/paneCover"
 import type { ChangesSlice, DuxState } from "@/lib/store"
 import {
   buildChangesItems,
@@ -390,6 +390,8 @@ interface FileRowProps {
   // the filter reads the listing's paths, so a row inside an expanded folder
   // is shown because its folder matched, not because of its own name.
   needle: string
+  // Why stage, unstage and discard are greyed out, or null when they work.
+  writeBlocked: string | null
 }
 
 // What makes an element a row of the treegrid's keyboard: its place among the
@@ -449,8 +451,10 @@ const FileRow = memo(function FileRow({
   rowIndex,
   active,
   needle,
+  writeBlocked,
 }: FileRowProps) {
   const grid: GridRowProps = { rowIndex, active }
+  const writeReasonId = useId()
   const inTabOrder = active
   const { kind } = fileStatusMeta(file.status)
   const [busy, setBusy] = useState(false)
@@ -677,24 +681,43 @@ const FileRow = memo(function FileRow({
                   Edit
                 </DropdownMenuItem>
               )}
-              {showStageAction && (
-                <DropdownMenuItem onClick={() => void runAction()}>
-                  {action === "stage" ? <Plus /> : <Minus />}
-                  {action === "stage" ? "Stage" : "Unstage"}
-                </DropdownMenuItem>
-              )}
-              {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
-                * and the confirm dialog carry the danger and the item itself
-                * stays neutral. */}
-              {showDiscard && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={runDiscard}>
-                    <Undo2 />
-                    Discard…
+              {/* A real group, because the primitive's label part reads its
+                * group from context. The label is said once above the writes
+                * it greys out, which name it as their description. Edit
+                * stays: the editor opens read-only. */}
+              <DropdownMenuGroup>
+                {writeBlocked !== null && (showStageAction || showDiscard) && (
+                  <DropdownMenuLabel id={writeReasonId} className="max-w-64">
+                    {writeBlocked}
+                  </DropdownMenuLabel>
+                )}
+                {showStageAction && (
+                  <DropdownMenuItem
+                    disabled={writeBlocked !== null}
+                    aria-describedby={writeBlocked !== null ? writeReasonId : undefined}
+                    onClick={() => void runAction()}
+                  >
+                    {action === "stage" ? <Plus /> : <Minus />}
+                    {action === "stage" ? "Stage" : "Unstage"}
                   </DropdownMenuItem>
-                </>
-              )}
+                )}
+                {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
+                  * and the confirm dialog carry the danger and the item itself
+                  * stays neutral. */}
+                {showDiscard && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      disabled={writeBlocked !== null}
+                      aria-describedby={writeBlocked !== null ? writeReasonId : undefined}
+                      onClick={runDiscard}
+                    >
+                      <Undo2 />
+                      Discard…
+                    </DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           ) : null}
         </DropdownMenu>
@@ -974,6 +997,8 @@ interface ChangesHeaderProps {
   // Why the editor cannot open the agent's directory, and so why no terminal
   // can start in it either, or null when both can.
   editorBlocked: string | null
+  // Why this page may not change the agent, or null when it may.
+  changeBlock: RowBlock | null
 }
 
 // The pane's one header, in every state an agent can put the pane in: loaded,
@@ -988,6 +1013,7 @@ function ChangesHeader({
   isMobile,
   gitBlocked,
   editorBlocked,
+  changeBlock,
 }: ChangesHeaderProps) {
   const reasonId = useId()
   const editorReasonId = useId()
@@ -996,19 +1022,18 @@ function ChangesHeader({
   // While this device does not drive the agent, a terminal opened here would
   // join a row it does not drive, so New terminal is disabled with that
   // reason, unless the gone directory already gave it one.
-  const rowBlock = useAgentRowWatch(sessionId).block
-  const spineElsewhere = useDuxSelector((state) => {
-    const session = state.spine?.sessions.find((s) => s.id === sessionId)
-    return session !== undefined && sessionActiveElsewhere(state, session)
-  })
-  const terminalBlock = agentChangeBlock(rowBlock, () => spineElsewhere)
   const terminalBlocked =
     editorBlocked ??
-    (terminalBlock === null ? null : addToAgentBlockHint(terminalBlock))
+    (changeBlock === null ? null : addToAgentBlockHint(changeBlock))
+  // Commit, push and pull write, so a page that does not drive the agent gets
+  // them greyed with that reason; Refresh only reads, so it is greyed for a
+  // quiet pane alone.
+  const writeBlocked =
+    gitBlocked ?? (changeBlock === null ? null : agentChangeBlockReason(changeBlock))
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.
-  const blocked = gitBlocked !== null
+  const blocked = writeBlocked !== null
   // Folded, the editor and terminal items carry their own reason the same way.
   // A gone directory greys both kinds of item with one sentence, which the
   // menu then says once, above the editor items, for all of them.
@@ -1016,7 +1041,7 @@ function ChangesHeader({
   const terminalReason = folded ? terminalBlocked : null
   // Said once, above the editor items, when it is the editor's reason too.
   const terminalReasonOwn = terminalReason !== null && terminalReason !== editorReason
-  const gitReasonShared = editorReason !== null && gitBlocked === editorReason
+  const gitReasonShared = editorReason !== null && writeBlocked === editorReason
   const describedBy = blocked
     ? gitReasonShared
       ? editorReasonId
@@ -1142,7 +1167,7 @@ function ChangesHeader({
             <DropdownMenuGroup>
               {blocked && !gitReasonShared ? (
                 <DropdownMenuLabel id={reasonId} className="max-w-64">
-                  {gitBlocked}
+                  {writeBlocked}
                 </DropdownMenuLabel>
               ) : null}
               {/* Greyed out rather than absent while the pane is quiet: these
@@ -1193,8 +1218,8 @@ function ChangesHeader({
                 </>
               ) : null}
               <DropdownMenuItem
-                disabled={blocked}
-                aria-describedby={describedBy}
+                disabled={gitBlocked !== null}
+                aria-describedby={gitBlocked !== null ? describedBy : undefined}
                 onClick={() => {
                   void forceRefreshChanges().catch((error) =>
                     notifyError(
@@ -1235,6 +1260,8 @@ interface BulkToolbarProps {
   onDiscard: () => void
   onToggleVisible: () => void
   onClear: () => void
+  // Why every verb is greyed out, said once at the head of the menu, or null.
+  writeBlocked: string | null
 }
 
 // Why a bulk verb is disabled when every selected row is one it would leave
@@ -1258,9 +1285,16 @@ function BulkToolbar({
   onDiscard,
   onToggleVisible,
   onClear,
+  writeBlocked,
 }: BulkToolbarProps) {
   const stageReasonId = useId()
   const discardReasonId = useId()
+  const writeReasonId = useId()
+  const blocked = writeBlocked !== null
+  // A blocked verb names the one reason at the head of the menu, and the
+  // narrower "nothing to" reasons stand down so it is said once.
+  const stageNothing = !blocked && counts.unstaged === 0
+  const discardNothing = !blocked && counts.discard === 0
   const showStage = selected.unstaged.size > 0
   const showUnstage = selected.staged.size > 0
   const ticked = selected.staged.size + selected.unstaged.size
@@ -1292,16 +1326,23 @@ function BulkToolbar({
             * rather than a click that silently does nothing, and the label
             * above it, which it names as its description, says why. */}
           <DropdownMenuGroup>
-            {showStage && counts.unstaged === 0 ? (
+            {blocked ? (
+              <DropdownMenuLabel id={writeReasonId} className="max-w-64">
+                {writeBlocked}
+              </DropdownMenuLabel>
+            ) : null}
+            {showStage && stageNothing ? (
               <DropdownMenuLabel id={stageReasonId} className="max-w-64">
                 {NOTHING_TO_STAGE}
               </DropdownMenuLabel>
             ) : null}
             {showStage ? (
               <DropdownMenuItem
-                disabled={busy !== null || counts.unstaged === 0}
+                disabled={blocked || busy !== null || counts.unstaged === 0}
                 aria-busy={busy === "stage"}
-                aria-describedby={counts.unstaged === 0 ? stageReasonId : undefined}
+                aria-describedby={
+                  blocked ? writeReasonId : stageNothing ? stageReasonId : undefined
+                }
                 onClick={() => onRunBulk("stage")}
               >
                 {busy === "stage" ? <Loader2 className="motion-safe:animate-spin" /> : <Plus />}
@@ -1310,8 +1351,9 @@ function BulkToolbar({
             ) : null}
             {showUnstage ? (
               <DropdownMenuItem
-                disabled={busy !== null}
+                disabled={blocked || busy !== null}
                 aria-busy={busy === "unstage"}
+                aria-describedby={blocked ? writeReasonId : undefined}
                 onClick={() => onRunBulk("unstage")}
               >
                 {busy === "unstage" ? <Loader2 className="motion-safe:animate-spin" /> : <Minus />}
@@ -1325,15 +1367,17 @@ function BulkToolbar({
             <>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
-                {counts.discard === 0 ? (
+                {discardNothing ? (
                   <DropdownMenuLabel id={discardReasonId} className="max-w-64">
                     {NOTHING_TO_DISCARD}
                   </DropdownMenuLabel>
                 ) : null}
                 <DropdownMenuItem
-                  disabled={busy !== null || counts.discard === 0}
+                  disabled={blocked || busy !== null || counts.discard === 0}
                   aria-busy={busy === "discard"}
-                  aria-describedby={counts.discard === 0 ? discardReasonId : undefined}
+                  aria-describedby={
+                    blocked ? writeReasonId : discardNothing ? discardReasonId : undefined
+                  }
                   onClick={onDiscard}
                 >
                   {busy === "discard" ? <Loader2 className="motion-safe:animate-spin" /> : <Undo2 />}
@@ -1505,6 +1549,7 @@ interface ChangesListProps {
   onToggle: (section: "staged" | "unstaged", path: string) => void
   // Expand a folded folder row, or collapse it.
   onToggleFolder: (section: "staged" | "unstaged", file: ChangedFileView) => void
+  writeBlocked: string | null
 }
 
 function ChangesList({
@@ -1519,6 +1564,7 @@ function ChangesList({
   branchGit,
   onToggle,
   onToggleFolder,
+  writeBlocked,
 }: ChangesListProps) {
   const hasChanges = changed.staged.length > 0 || changed.unstaged.length > 0
   const hasMatches = filtered.staged.length > 0 || filtered.unstaged.length > 0
@@ -1909,6 +1955,7 @@ function ChangesList({
         rowIndex={grid.rowIndex}
         active={grid.active}
         needle={query.trim().toLowerCase()}
+        writeBlocked={writeBlocked}
       />
     )
   }
@@ -2181,6 +2228,9 @@ export const ChangedFiles = memo(function ChangedFiles() {
   // page lives, so an expansion re-renders this pane and nothing else.
   const expansions = useExpansions(selectedSessionId ?? "")
   const controller = useChangedFilesController(selectedSessionId, changes, expansions)
+  const changeBlock = useAgentChangeBlockSelective(selectedSessionId)
+  // Why the rows' and the selection's git writes are greyed out, or null.
+  const writeBlocked = changeBlock === null ? null : agentChangeBlockReason(changeBlock)
   // A checked row inside a checked folder a delete acts on is already part of
   // it. A row a delete does not act on covers nothing, and is still handed to
   // the dialog so it can say why it is left out.
@@ -2273,6 +2323,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
           isMobile={isMobile}
           gitBlocked={gitBlocked}
           editorBlocked={editorBlocked}
+          changeBlock={changeBlock}
         />
         <CardContent className="flex min-h-0 flex-1 flex-col p-0">
           {branchShown !== null ? <NoBranchCheckedOut branch={branchShown} /> : null}
@@ -2303,6 +2354,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
               onDiscard={openDiscardMany}
               onToggleVisible={toggleVisible}
               onClear={clearSelection}
+              writeBlocked={writeBlocked}
             />
           ) : null}
           {bodyInstead ? null : (
@@ -2318,6 +2370,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
               branchGit={branchGit}
               onToggle={toggleOne}
               onToggleFolder={toggleFolderRow}
+              writeBlocked={writeBlocked}
             />
           )}
         </CardContent>

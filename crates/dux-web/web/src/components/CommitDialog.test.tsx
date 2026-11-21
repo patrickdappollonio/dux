@@ -87,3 +87,51 @@ describe("CommitDialog: the commit's answer", () => {
     expect(box.value).toBe("the next message")
   })
 })
+
+// A commit is a git write, refused by the server from a page that does not
+// drive the agent, so the dialog keeps the message and offers no commit.
+describe("CommitDialog while this page does not drive the agent", () => {
+  it("keeps the message, refuses the commit with the reason, and gives it back on take-over", async () => {
+    const { agentRowKey, registerPaneCover, resetPaneCovers } = await import(
+      "@/lib/paneCover"
+    )
+    const { closeCommit } = await import("@/lib/store")
+    act(() => openCommit("agent-a"))
+    act(() => setCommitDraft("a message"))
+    let retire = () => {}
+    act(() => {
+      retire = registerPaneCover("agent-a", "card", {
+        row: agentRowKey("agent-a"),
+        driver: "other",
+      })
+    })
+    render(<CommitDialog />)
+    const box = screen.getByPlaceholderText("Commit message…") as HTMLTextAreaElement
+    const button = screen.getByRole("button", { name: "Commit" })
+    expect(box.value).toBe("a message")
+    expect(box.readOnly).toBe(true)
+    expect(button.hasAttribute("disabled")).toBe(true)
+    expect(
+      screen.getByText(
+        "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here.",
+      ),
+    ).toBeTruthy()
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true })
+    expect(commit).not.toHaveBeenCalled()
+
+    act(() => {
+      retire()
+      retire = registerPaneCover("agent-a", "none", {
+        row: agentRowKey("agent-a"),
+        driver: "this",
+      })
+    })
+    expect(box.readOnly).toBe(false)
+    expect(button.hasAttribute("disabled")).toBe(false)
+    act(() => {
+      retire()
+      resetPaneCovers()
+      closeCommit()
+    })
+  })
+})
