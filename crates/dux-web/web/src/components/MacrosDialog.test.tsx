@@ -738,4 +738,46 @@ describe("MacrosDialog focus on a phone", () => {
     await settle()
     expect(document.activeElement).toBe(trigger)
   })
+
+  // The phone's app menu is a sheet that has closed by the time the dialog
+  // does, taking the row that opened the dialog with it.
+  it("hands focus back to the app menu's button when opened from the menu sheet", async () => {
+    phone = true
+    const { openMacrosDialog } = await import("@/lib/store")
+    const { rerender } = render(
+      <>
+        <button>Menu</button>
+        <div role="dialog">
+          <button>Edit macros…</button>
+        </div>
+      </>,
+    )
+    const menuButton = screen.getByRole("button", { name: "Menu" })
+    fireEvent.pointerDown(menuButton)
+    const menuRow = screen.getByRole("button", { name: "Edit macros…" })
+    menuRow.focus()
+    fireEvent.pointerDown(menuRow)
+    openMacrosDialog()
+    seed(seedMacros)
+    rerender(
+      <>
+        <button>Menu</button>
+        <MacrosDialog />
+      </>,
+    )
+    await settle()
+    await click(row("Build"))
+    await typeInto("Text", "cargo build --release")
+    await settle()
+    await click(screen.getByRole("button", { name: "Save 1 change" }))
+    mockState = { ...mockState, macrosDialogOpen: false }
+    rerender(
+      <>
+        <button>Menu</button>
+        <MacrosDialog />
+      </>,
+    )
+    await settle()
+    expect(document.activeElement).toBe(menuButton)
+  })
 })
