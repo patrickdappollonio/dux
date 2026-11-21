@@ -121,15 +121,38 @@ describe("apiFetch", () => {
         ? json(200, { required_here: true, signed_in: true, password_set: true })
         : json(200, { requested_name: "a.txt", saved_name: "a.txt", path: "/x/a.txt" })
     await gate.initAuthGate()
-    let conn = "9"
-    const landed = flight.beginTakeoverFlight("terminal:term-4")
-    const drop = uploadDroppedFile(new File(["x"], "a.txt"), { pty: "term-4", conn: () => conn })
-    // The take-over bounces the socket: the claim lands on its new connection.
-    conn = "12"
+    // A project terminal, an agent's extra tab and an agent's docked terminal:
+    // each pane's pty id differs from its row's key.
+    for (const [pty, row] of [
+      ["term-4", "terminal:term-4"],
+      ["tab-2", "agent:s1"],
+      ["dock-1", "agent:s1"],
+    ]) {
+      fetchMock.mockClear()
+      let conn = "9"
+      const landed = flight.beginTakeoverFlight(row)
+      const drop = uploadDroppedFile(new File(["x"], "a.txt"), { pty, row, conn: () => conn })
+      // The take-over bounces the socket: the claim lands on its new connection.
+      conn = "12"
+      landed(true)
+      await drop
+      const url = String(fetchMock.mock.calls.find(([u]) => String(u).includes("file-drop"))![0])
+      expect(new URL(url, "http://x").searchParams.get("conn")).toBe("12")
+    }
+  })
+
+  it("holds a reorder of the terminals while any take-over is in flight", async () => {
+    const { api, gate } = await load()
+    const flight = await import("./takeoverFlight")
+    await gate.initAuthGate()
+    const landed = flight.beginTakeoverFlight("agent:s1")
+    const reorder = api.apiFetch("/api/v1/terminals/reorder", { method: "POST", body: "{}" })
+    const sent = () => fetchMock.mock.calls.filter(([u]) => String(u).includes("/reorder")).length
+    await Promise.resolve()
+    expect(sent()).toBe(0)
     landed(true)
-    await drop
-    const url = String(fetchMock.mock.calls.find(([u]) => String(u).includes("file-drop"))![0])
-    expect(new URL(url, "http://x").searchParams.get("conn")).toBe("12")
+    await reorder
+    expect(sent()).toBe(1)
   })
 
   it("turns a 401 into a sign-out and an interruption the caller can recognise", async () => {

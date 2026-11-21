@@ -118,6 +118,7 @@ import { performTreeDrop } from "@/lib/editorDrop"
 import type { DroppedItems } from "@/lib/editorDrop"
 import { nextFileDropToastId } from "@/lib/fileDrop"
 import { uploadDroppedFile } from "@/lib/fileDropApi"
+import { rowKeyOfTarget } from "@/lib/paneCover"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -1484,7 +1485,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         // check it feeds exists only so a viewer who cannot paste is told
         // before a file is written. A tree drop pastes nothing, so there is
         // nothing to check and no socket to name.
-        uploadDroppedFile(file, { pty: rootPtyId(root), conn: null, dir: into }),
+        uploadDroppedFile(file, {
+          pty: rootPtyId(root),
+          row: rowKeyOfTarget(root),
+          conn: null,
+          dir: into,
+        }),
       revalidateDirs,
       refreshSearchIndex,
       // Local, not wire: the upload is a fetch this tab awaits, so a

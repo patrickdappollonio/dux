@@ -508,6 +508,7 @@ function TerminalPart(props: TerminalPartProps) {
   // shares, its sinks, its batch loop and its one toast.
   const upload = useUploadPipeline({
     id,
+    row,
     kind,
     live,
     ownership,

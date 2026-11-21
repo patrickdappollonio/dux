@@ -8,7 +8,7 @@
 
 import { apiFetch, rethrowAuthInterruption } from "./apiFetch"
 import { ROW_DRIVEN_STATUS } from "./rowDriven"
-import { takeoverRefusalFor } from "./takeoverFlight"
+import { takeoverRefusalForRow } from "./takeoverFlight"
 
 export interface SavedDropResponse {
   path: string
@@ -35,12 +35,13 @@ export class FileDropApiError extends Error {
 /// travels in `conn` rather than the `x-connection-id` header, which names the
 /// events socket and which the server refuses a PTY-class id in. It is read
 /// once a take-over of the pane's row this page pressed has landed, because
-/// the take-over reopens the socket under a new id.
+/// the take-over reopens the socket under a new id. `row` is the row key of
+/// the pane or the editor root, which the pty id alone does not say.
 export async function uploadDroppedFile(
   file: File,
-  opts: { pty: string; conn: (() => string | null) | null; dir?: string },
+  opts: { pty: string; row: string; conn: (() => string | null) | null; dir?: string },
 ): Promise<SavedDropResponse> {
-  const held = takeoverRefusalFor(`/api/v1/file-drop?${new URLSearchParams({ pty: opts.pty })}`)
+  const held = takeoverRefusalForRow(opts.row)
   if (held !== null) {
     const refusal = await held
     if (refusal !== null) throw new FileDropApiError(refusal, ROW_DRIVEN_STATUS)

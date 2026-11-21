@@ -100,6 +100,7 @@ function setup(
   const view = renderHook(() =>
     useUploadPipeline({
       id: "p1",
+      row: "agent:s1",
       kind: opts.kind ?? "agent",
       live,
       ownership,
@@ -286,5 +287,25 @@ describe("the drag gate", () => {
     const { view } = setup()
     const e = { dataTransfer: { types: ["Files"] } } as unknown as React.DragEvent
     expect(view.result.current.paneAcceptsFileDrag(e)).toBe(true)
+  })
+})
+
+describe("a drop made while this page's take-over of the row is in flight", () => {
+  it("is taken by a pane still under its card, and lands once that pane hears it drives", async () => {
+    const flight = await import("@/lib/takeoverFlight")
+    const landed = flight.beginTakeoverFlight("agent:s1")
+    const { view, term, setOwner } = setup({ owner: false })
+    const drag = { dataTransfer: { types: ["Files"] } } as unknown as React.DragEvent
+    expect(view.result.current.paneAcceptsFileDrag(drag)).toBe(true)
+    const drop = view.result.current.runUpload(
+      [file("a.txt")],
+      view.result.current.activeUploadSink(),
+    )
+    landed(true)
+    setTimeout(() => setOwner(true), 120)
+    await act(async () => {
+      await drop
+    })
+    expect(term.pasted).toHaveLength(1)
   })
 })

@@ -32,10 +32,12 @@ export function beginTakeoverFlight(row: string): (landed: boolean) => void {
 }
 
 /// The row keys a request to `path` may change, read from the address alone:
-/// an agent's routes, a terminal's, and a dropped file's pane. Empty for a
-/// request that names no row.
+/// an agent's routes and a terminal's, and every row for a reorder of the
+/// terminals, which names them in its body. Empty for a request that names no
+/// row. A dropped file names its pane's pty, which says nothing of the row, so
+/// its upload asks by row itself (`takeoverRefusalForRow`).
 function rowsOfRequest(path: string): string[] {
-  const [route, query = ""] = path.split("?", 2)
+  const [route] = path.split("?", 1)
   const segments = (route ?? "").split("/").map((segment) => {
     try {
       return decodeURIComponent(segment)
@@ -50,11 +52,14 @@ function rowsOfRequest(path: string): string[] {
   const session = after("sessions")
   if (session !== undefined && session !== "") return [`agent:${session}`]
   const terminal = after("terminals")
+  if (terminal === "reorder") return [...flights.keys()]
   if (terminal !== undefined && terminal !== "") return [`terminal:${terminal}`]
-  // A pane names its pty by a session id or a terminal id, and only the row
-  // key says which.
-  const pane = segments.includes("file-drop") ? new URLSearchParams(query).get("pty") : null
-  return pane === null || pane === "" ? [] : [`agent:${pane}`, `terminal:${pane}`]
+  return []
+}
+
+/// Is a take-over this page pressed on `row` still waiting for the server?
+export function takeoverInFlight(row: string): boolean {
+  return flights.has(row)
 }
 
 /// Wait out a take-over in flight on a row `path` would change. Null, at once,
@@ -63,10 +68,22 @@ function rowsOfRequest(path: string): string[] {
 /// landed, or of the sentence to refuse the request with, unsent.
 export function takeoverRefusalFor(path: string): Promise<string | null> | null {
   if (flights.size === 0) return null
-  const flight = rowsOfRequest(path)
+  return refusalForRows(rowsOfRequest(path))
+}
+
+/// The same wait for a request known to change `row`.
+export function takeoverRefusalForRow(row: string): Promise<string | null> | null {
+  return refusalForRows([row])
+}
+
+function refusalForRows(rows: readonly string[]): Promise<string | null> | null {
+  const waits = rows
     .map((row) => flights.get(row))
-    .find((found) => found !== undefined)
-  return flight === undefined ? null : settled(flight)
+    .filter((found) => found !== undefined)
+    .map(settled)
+  if (waits.length === 0) return null
+  // The first refusal of any of them, once every one has settled.
+  return Promise.all(waits).then((said) => said.find((s) => s !== null) ?? null)
 }
 
 async function settled(flight: Promise<Outcome>): Promise<string | null> {

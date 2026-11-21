@@ -28,6 +28,7 @@ import {
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
 import { isRowDriven } from "@/lib/rowDriven"
+import { TAKEOVER_WAIT_MS, takeoverInFlight } from "@/lib/takeoverFlight"
 import { notify, notifyBusy, notifyError } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { registerAttachCapability } from "@/lib/attachRegistry"
@@ -56,6 +57,9 @@ export type UploadPipelineDeps = {
   /// The pty this pane streams: the field the upload route stamps, and the key
   /// the attach capability is published under.
   id: string
+  /// The row key of the pane's row, which a take-over this page pressed is
+  /// keyed by.
+  row: string
   /// An agent pane and a terminal pane word their toast differently and resolve
   /// the paste form from different places, so the kind is a real parameter.
   kind: "agent" | "terminal"
@@ -102,6 +106,7 @@ export type UploadPipeline = {
 export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   const {
     id,
+    row,
     kind,
     live,
     ownership,
@@ -194,6 +199,10 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   ) {
     if (files.length === 0) return
     const outcomes: DropOutcome[] = []
+    // Made while this page's take-over of the row was in flight: every upload
+    // waits for it, and a pane other than the one pressed may hear that it
+    // drives a moment after the claim has landed.
+    const takingOver = takeoverInFlight(row)
 
     for (const [i, file] of files.entries()) {
       // The drop overlay is already gone and an upload can wait a real amount
@@ -212,6 +221,7 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       try {
         saved = await uploadDroppedFile(file, {
           pty: id,
+          row,
           // The TERMINAL SOCKET's id, not the events-socket one the other API
           // modules stamp in a header (the server refuses a PTY id there).
           conn: () => connId.read(),
@@ -254,7 +264,11 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
 
       // Asked IMMEDIATELY BEFORE this delivery, not once at the start of the
       // drop: ownership can move and the socket can close between two files.
-      const unavailable = sink.unavailable()
+      if (takingOver) await untilOwner(ownership)
+      const unavailable =
+        takingOver && !ownership.read()
+          ? "this device's take-over had not reached this pane yet"
+          : sink.unavailable()
       if (unavailable !== null) {
         outcomes.push({
           kind: "saved-not-sent",
@@ -465,7 +479,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   function paneAcceptsFileDrag(e: React.DragEvent): boolean {
     return (
       fileDropEnabled &&
-      isOwner &&
+      // A pane still under its card while this page's take-over of the row is
+      // in flight takes the drop, which waits for the claim.
+      (isOwner || takeoverInFlight(row)) &&
       !isMobile &&
       dragCarriesFiles(e.dataTransfer.types)
     )
@@ -478,5 +494,15 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     armForcedTextPaste,
     onClipboardPaste,
     paneAcceptsFileDrag,
+  }
+}
+
+/// Wait, at most as long as a change waits for a take-over, for this pane to
+/// hear that it drives its pty. The verdict is a channel with no subscription,
+/// so it is read again every 50ms.
+async function untilOwner(ownership: OwnershipVerdict): Promise<void> {
+  const deadline = Date.now() + TAKEOVER_WAIT_MS
+  while (!ownership.read() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
