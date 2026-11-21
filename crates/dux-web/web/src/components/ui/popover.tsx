@@ -4,6 +4,7 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
+import { usePopupFinalFocus } from "@/lib/popupFinalFocus"
 import {
   SHEET_BACKDROP_CLASS,
   SHEET_POPUP_CLASS,
@@ -33,6 +34,7 @@ function PopoverContent({
   side = "bottom",
   sideOffset = 4,
   anchor,
+  finalFocus,
   ...props
 }: PopoverPrimitive.Popup.Props &
   Pick<
@@ -43,6 +45,7 @@ function PopoverContent({
   // Sheet mode hands initial focus to the popup rather than the first tabbable
   // element, so a popover sheet with an input does not raise the soft keyboard.
   const sheetPopupRef = React.useRef<HTMLDivElement | null>(null)
+  const [attachPopup, closeFocus] = usePopupFinalFocus(finalFocus)
   if (isMobile) {
     // The bottom-sheet presentation, shared with the dropdown menus, on the same
     // parts as the desktop branch so the popover contract rides through unchanged.
@@ -64,8 +67,12 @@ function PopoverContent({
         >
           <PopoverPrimitive.Popup
             data-slot="popover-content"
-            ref={sheetPopupRef}
+            ref={(el) => {
+              sheetPopupRef.current = el
+              attachPopup(el)
+            }}
             initialFocus={() => sheetPopupRef.current}
+            finalFocus={closeFocus}
             className={cn(SHEET_POPUP_CLASS, className)}
             {...props}
           />
@@ -91,6 +98,8 @@ function PopoverContent({
             "z-50 flex max-h-(--available-height) w-72 origin-(--transform-origin) flex-col gap-2.5 rounded-lg bg-popover p-2.5 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-hidden duration-100 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
             className
           )}
+          ref={attachPopup}
+          finalFocus={closeFocus}
           {...props}
         />
       </PopoverPrimitive.Positioner>

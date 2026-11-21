@@ -6,6 +6,7 @@ import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
+import { usePopupFinalFocus } from "@/lib/popupFinalFocus"
 import {
   SHEET_BACKDROP_CLASS,
   SHEET_POPUP_CLASS,
@@ -56,6 +57,7 @@ function DropdownMenuContent({
   side = "bottom",
   sideOffset = 4,
   className,
+  finalFocus,
   ...props
 }: MenuPrimitive.Popup.Props &
   Pick<
@@ -63,6 +65,7 @@ function DropdownMenuContent({
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
   const isMobile = useIsMobile()
+  const [attachPopup, closeFocus] = usePopupFinalFocus(finalFocus)
   if (isMobile) {
     // The same Portal, Positioner and Popup parts as the desktop branch, so
     // every menu-content convention rides through unchanged and only geometry
@@ -85,6 +88,8 @@ function DropdownMenuContent({
           <MenuPrimitive.Popup
             data-slot="dropdown-menu-content"
             className={cn(SHEET_POPUP_CLASS, className)}
+            ref={attachPopup}
+            finalFocus={closeFocus}
             {...props}
           />
         </MenuPrimitive.Positioner>
@@ -107,6 +112,8 @@ function DropdownMenuContent({
           // the min-width floor. Menus size to their widest item instead, with a
           // wider floor and a screen-edge cap.
           className={cn("z-50 max-h-(--available-height) w-max min-w-40 max-w-(--available-width) origin-(--transform-origin) overflow-x-hidden overflow-y-auto overscroll-contain rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 outline-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:overflow-hidden data-closed:fade-out-0 data-closed:zoom-out-95", className )}
+          ref={attachPopup}
+          finalFocus={closeFocus}
           {...props}
         />
       </MenuPrimitive.Positioner>
