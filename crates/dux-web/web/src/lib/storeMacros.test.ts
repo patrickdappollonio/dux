@@ -49,6 +49,9 @@ let staleMacrosPut = false
 let holdMacrosPut: Promise<void> | null = null
 // The version a successful macros PUT answers with, absent unless set.
 let savedMacrosVersion: string | undefined
+// When set, the global environment PUT answers the 409 a table that changed
+// since is given.
+let staleGlobalEnvPut = false
 
 function makeBootstrap(macros: MacroView[]): Bootstrap {
   return {
@@ -94,6 +97,20 @@ const fetchMock = vi.fn(async (url: string) => {
       status: 200,
       json: async () => makeBootstrap(bootstrapMacros),
       text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.includes("/api/v1/global-env") && staleGlobalEnvPut) {
+    const body = JSON.stringify({
+      error: "changed",
+      message:
+        "The global environment changed after this dialog read it, so nothing was saved. Reload to see the change, then make your edit again.",
+    })
+    return {
+      ok: false,
+      status: 409,
+      json: async () => JSON.parse(body),
+      text: async () => body,
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -163,6 +180,7 @@ beforeEach(() => {
   staleMacrosPut = false
   holdMacrosPut = null
   savedMacrosVersion = undefined
+  staleGlobalEnvPut = false
   vi.stubGlobal("location", { host: "localhost:0" })
   vi.stubGlobal("localStorage", {
     getItem: () => null,
@@ -278,6 +296,23 @@ describe("store macros dialog", () => {
     mod.openMacrosDialog()
     expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
     expect(mod.getSnapshot().macrosDraft).toBeNull()
+  })
+})
+
+describe("store global environment dialog", () => {
+  it("a refused save comes back with the edits and says what each way out does to them", async () => {
+    const mod = await loadStore()
+    staleGlobalEnvPut = true
+    mod.openGlobalEnv()
+    mod.saveGlobalEnv({ FOO: "edited" })
+    mod.closeGlobalEnv()
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().globalEnvOpen).toBe(true)
+    })
+    expect(mod.getSnapshot().globalEnvConflict).toBe(
+      "The global environment changed after this dialog read it, so nothing was saved. Reload the environment shows it as it is now and drops your edits. Keep editing keeps them, but saving them is refused until you reload.",
+    )
+    expect(mod.getSnapshot().globalEnvDraft).toEqual({ FOO: "edited" })
   })
 })
 

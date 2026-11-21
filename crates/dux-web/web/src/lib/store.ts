@@ -6954,6 +6954,11 @@ export function closeGlobalEnv(): void {
   setState({ globalEnvOpen: false, globalEnvDraft: null, globalEnvConflict: null })
 }
 
+// The dialog's own sentence rather than the server's, which tells the user to
+// make the edit again when the dialog has kept it.
+const GLOBAL_ENV_SAVE_REFUSED =
+  "The global environment changed after this dialog read it, so nothing was saved. Reload the environment shows it as it is now and drops your edits. Keep editing keeps them, but saving them is refused until you reload."
+
 // The dialog closes as it saves; a save refused because the table changed since
 // the dialog read it reopens the dialog with these edits and the refusal on it.
 export function saveGlobalEnv(env: Record<string, string>): void {
@@ -6973,7 +6978,7 @@ export function saveGlobalEnv(env: Record<string, string>): void {
         globalEnvOpen: true,
         globalEnvVersion: version,
         globalEnvDraft: env,
-        globalEnvConflict: e.message,
+        globalEnvConflict: GLOBAL_ENV_SAVE_REFUSED,
         globalEnvEpoch: state.globalEnvEpoch + 1,
         globalEnvSession: state.globalEnvSession + 1,
       })
