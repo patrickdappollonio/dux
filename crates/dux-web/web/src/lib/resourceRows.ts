@@ -19,7 +19,7 @@ import { matchWireOwner, ownerKey } from "./terminalOwner"
 import { groupTerminalsByOwnerKey, terminalTitle } from "./terminals"
 import type { ProjectView, SessionView, TerminalView } from "./types"
 import { sessionLabel } from "@/lib/agentWorkspace"
-import { isFirstTab } from "@/lib/agentTabs"
+import { isFirstTab, tabLabels } from "@/lib/agentTabs"
 
 export type TaskRowKind = "dux" | "agent" | "terminal" | "total"
 
@@ -201,7 +201,10 @@ export function taskManagerRows(
 //
 // Only agent TABS gate on liveness: a detached/exited agent's tabs have no live
 // PTY, so they are not a running task (matching the modal this replaces). The
-// gate must NOT reach that agent's terminals, which the caller emits.
+// gate must NOT reach that agent's terminals, which the caller emits. An extra
+// tab with no process is left out for the same reason: its Force stop would
+// close the tab rather than stop anything. The first tab stays as the agent's
+// row, whose Force stop stops the agent's other tabs.
 export function agentTabRows(
   session: SessionView,
   byId: ReadonlyMap<string, ResourceStatsView>,
@@ -215,30 +218,27 @@ export function agentTabRows(
     return a.order - b.order
   })
 
-  // 1-based position among this session's EXTRA tabs, in the same stable order,
-  // so two same-provider tabs never share a Stop label.
-  let nestedIndex = 0
+  // The strip's own names, so two same-provider tabs never share a Stop label.
+  const names = tabLabels(session.tabs)
+  const stripLabels = new Map(session.tabs.map((tab, i) => [tab.id, names[i]] as const))
 
-  return tabs.map((tab) => {
+  return tabs.flatMap((tab) => {
     const isSlot = isFirstTab(session, tab.id)
-    if (!isSlot) nestedIndex += 1
+    if (!isSlot && !tab.has_live_process) return []
+    const tabName = stripLabels.get(tab.id) ?? tab.provider
     return {
       key: `tab:${tab.id}`,
       kind: "agent" as const,
-      // The slot tab carries the agent's identity; an extra tab is identified
-      // by the provider running in it.
-      name: isSlot ? label : tab.provider,
+      // The slot tab carries the agent's identity; an extra tab is named as
+      // the tab strip names it.
+      name: isSlot ? label : tabName,
       detail: isSlot ? tab.provider : null,
       nested: !isSlot,
-      // A dormant tab is still actionable, so it keeps its Stop control. WHICH
-      // act that is rides on `nested`, which `handleStop` reads rather than
-      // asking again: a first tab STOPS the agent, an extra tab is closed,
-      // because a process monitor's Stop ends a process rather than deleting
-      // the row it is showing numbers for.
+      // WHICH act the Stop control is rides on `nested`, which `handleStop`
+      // reads rather than asking again: a first tab STOPS the agent, an extra
+      // tab is closed, ending its process.
       stoppable: true,
-      stopLabel: isSlot
-        ? `Force stop ${label}`
-        : `Force stop ${tab.provider} tab ${nestedIndex} in ${label}`,
+      stopLabel: isSlot ? `Force stop ${label}` : `Force stop ${tabName} tab in ${label}`,
       sessionId: session.id,
       projectId: null,
       targetId: tab.id,

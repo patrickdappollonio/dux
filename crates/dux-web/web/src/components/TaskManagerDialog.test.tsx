@@ -285,7 +285,7 @@ describe("TaskManagerDialog", () => {
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
 
-    const stop = await screen.findByLabelText("Force stop codex tab 1 in fix-auth")
+    const stop = await screen.findByLabelText("Force stop codex tab in fix-auth")
     fireEvent.click(stop)
     expect(openCloseTab).toHaveBeenCalledWith("s1", "b2")
     expect(openForceStopAgent).not.toHaveBeenCalled()
@@ -559,7 +559,8 @@ describe("TaskManagerDialog", () => {
   })
 
   it("renders_a_row_without_stats_as_dashes_but_still_stoppable", async () => {
-    // A dormant tab has no sample. It must still render and still be stoppable.
+    // A tab born since the last poll has no sample. It must still render and
+    // still be stoppable.
     seed({
       spine: {
         sessions: [
@@ -567,7 +568,7 @@ describe("TaskManagerDialog", () => {
             id: "s1",
             tabs: [
               tab({ id: "s1" }),
-              tab({ id: "t2", order: 1, provider: "codex", has_live_process: false }),
+              tab({ id: "t2", order: 1, provider: "codex" }),
             ],
           }),
         ],
@@ -577,10 +578,9 @@ describe("TaskManagerDialog", () => {
 
     const row = await screen.findByTestId("task-row-tab:t2")
     expect(row.textContent).toContain("-")
-    // The extra tab's Stop label carries the owning agent and its position,
-    // not just the bare provider: "Stop codex" alone would
-    // collide with any other codex extra tab on any other agent.
-    expect(screen.getByLabelText("Force stop codex tab 1 in feat")).toBeTruthy()
+    // The extra tab's Stop label carries the owning agent, not just the tab's
+    // name: "Stop codex" alone would collide with any other agent's codex tab.
+    expect(screen.getByLabelText("Force stop codex tab in feat")).toBeTruthy()
   })
 
   it("expands_child_processes_for_a_terminal", async () => {

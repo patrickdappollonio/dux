@@ -228,9 +228,16 @@ describe("taskManagerRows", () => {
   })
 
   it("renders_row_without_stats_as_dashes", () => {
-    // A dormant tab (or one born since the last poll) has no stats. It must
-    // still render, and must still be stoppable. Never drop a killable row for
-    // lack of numbers.
+    // A tab born since the last poll has no stats. It must still render, and
+    // must still be stoppable. Never drop a killable row for lack of numbers.
+    const sessions = [session({ id: "s1", tabs: [tab({ id: "s1" }), tab({ id: "t2" })] })]
+    const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
+    const unsampled = rows.find((r) => r.key === "tab:t2")
+    expect(unsampled?.stats).toBeNull()
+    expect(unsampled?.stoppable).toBe(true)
+  })
+
+  it("leaves out an extra tab with no process, which has nothing to stop", () => {
     const sessions = [
       session({
         id: "s1",
@@ -238,10 +245,7 @@ describe("taskManagerRows", () => {
       }),
     ]
     const rows = taskManagerRows(sessions, [duxStat, totalStat], [], [])
-    const dormant = rows.find((r) => r.key === "tab:t2")
-    expect(dormant).toBeDefined()
-    expect(dormant?.stats).toBeNull()
-    expect(dormant?.stoppable).toBe(true)
+    expect(rows.map((r) => r.key)).toEqual(["dux", "tab:s1", "total"])
   })
 
   it("drops_orphan_stats_not_in_spine", () => {
@@ -532,16 +536,18 @@ describe("agentTabRows", () => {
     expect(rows[1]).toMatchObject({ name: "codex", detail: null, nested: true })
   })
 
-  it("numbers same-provider extra tabs so their Stop labels differ", () => {
+  it("names same-provider extra tabs as the tab strip does, so their Stop labels differ", () => {
     const s = session({
       id: "s1",
       slot_tab_id: "t1",
       tabs: [tab({ id: "t1" }), tab({ id: "t2", order: 1 }), tab({ id: "t3", order: 2 })],
     })
-    expect(agentTabRows(s, noStats).map((r) => r.stopLabel)).toEqual([
+    const rows = agentTabRows(s, noStats)
+    expect(rows.map((r) => r.name)).toEqual(["feat", "claude 2", "claude 3"])
+    expect(rows.map((r) => r.stopLabel)).toEqual([
       "Force stop feat",
-      "Force stop claude tab 1 in feat",
-      "Force stop claude tab 2 in feat",
+      "Force stop claude 2 tab in feat",
+      "Force stop claude 3 tab in feat",
     ])
   })
 
