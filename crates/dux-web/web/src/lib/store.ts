@@ -10133,7 +10133,9 @@ export function leftRunningProse(left: readonly LeftRunning[]): Prose {
       if (index > 0) out.push(index === parts.length - 1 ? " and " : ", ")
       out.push(...leftPartProse(part))
     })
-    out.push(`. ${said}`)
+    // The server's sentence is about one row, so after several it is said as
+    // the answer each of them got.
+    out.push(parts.length === 1 ? `. ${said}` : `. Each was refused with the same answer: ${said}`)
   }
   for (const [block, parts] of byBlock) {
     if (out.length > 0) out.push(" ")

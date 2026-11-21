@@ -665,7 +665,7 @@ describe("store companion-terminal lifecycle", () => {
     drivenUrls.set("/api/v1/sessions/s2/kill", DRIVEN)
     const mod = await loadStore()
     expect(await stopAllSaid(mod)).toBe(
-      `Nothing was stopped. Left running: agent agentx and agent agenty. ${DRIVEN}`,
+      `Nothing was stopped. Left running: agent agentx and agent agenty. Each was refused with the same answer: ${DRIVEN}`,
     )
   })
 
