@@ -343,7 +343,8 @@ own.
 > Looking is never refused, and neither are forking the agent, its pull requests, project
 > settings and project git, macros and other settings, or moving the row in the list.
 > While nobody is driving, the server refuses nothing; the browser still asks you to press
-> **Take over** first.
+> **Take over** first. The device that is driving is never refused, and an editor in its
+> own browser tab counts as the tab it was opened from.
 
 ![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 

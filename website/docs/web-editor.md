@@ -287,10 +287,18 @@ disk version, or cancel. Cancelling keeps your text exactly as typed.
 
 > [!IMPORTANT]
 > While another device is driving the agent (or the terminal the editor is rooted at),
-> saving, creating, renaming, moving and deleting are refused with a message naming that
-> device, and what you typed stays in the tab. Take the agent over and save again. The
-> editor's own browser tab never drives anything, so it can save only while nobody is
-> driving or after the tab showing the agent has gone. Opening and reading files always works.
+> the editor is read-only: a line at its top says why, saving, creating, renaming, moving,
+> deleting and uploading are greyed out, and what you typed stays in the tab, unsaved. Take
+> the agent over and save again. A change that is sent anyway is refused by dux with a
+> message naming the device that is driving. Opening and reading files always works.
+>
+> An editor in its own browser tab edits as the tab it was opened from. Opened from the
+> device that is driving, with **Open editor in new tab** or the phone's **Open editor**,
+> it can save; when another device takes the agent over it turns read-only, and it can
+> save again once the tab it came from takes the agent back. Opened from a bookmark or a
+> pasted link, or wherever the browser gives the new tab no link back to the tab it came
+> from, it has no tab behind it: it can save while nobody is driving and is read-only
+> while any device is. While nobody is driving, every editor tab can save.
 
 ## Creating, renaming, moving, and deleting files
 

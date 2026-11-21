@@ -130,8 +130,9 @@ Clicking a row still opens its diff; only the checkbox selects. On a phone the d
 
 > [!IMPORTANT]
 > While another device is driving the agent, stage, unstage, discard, commit, push and pull
-> are refused with a message naming that device. Press **Take over** on the agent first.
-> Reading the list and the diffs always works.
+> are greyed out with the reason, and one sent anyway is refused by dux with a message
+> naming that device. Press **Take over** on the agent first. Reading the list and the
+> diffs always works.
 
 ## Commit, push, pull
 

@@ -284,11 +284,12 @@ the terminal UI and in the browser alike.
 - **Nothing changes an agent you do not drive:** while the card is up, starting or
   restarting it, adding, closing, stopping or reordering its tabs and terminals, renaming,
   detaching, deleting or recreating it, changing its provider or auto-reopen, rerunning its
-  startup command, and changing how it shares the pane with its terminals are off. The
-  browser disables them; the terminal UI refuses them and says on its status line who is
-  driving and how to take over. In the terminal UI, staging, unstaging, discarding,
-  committing, pushing and pulling in its Changes pane are refused the same way, and one
-  already running when the other device took over finishes. That holds for something you
+  startup command, changing how it shares the pane with its terminals, and staging,
+  unstaging, discarding, committing, pushing and pulling in its Changes pane are off, and
+  in the browser so is changing its files in the editor. The browser disables them with
+  the reason; the terminal UI refuses them and says on its status line who is driving and
+  how to take over. In the terminal UI a git change already running when the other device
+  took over finishes. That holds for something you
   began before the other device took over, too: in the terminal UI an open dialog about the
   agent closes, a commit message you were writing stops taking typing (what you typed
   stays), and a tab or divider drag stops, with the same line saying why.
