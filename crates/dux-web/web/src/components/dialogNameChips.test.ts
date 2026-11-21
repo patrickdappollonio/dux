@@ -56,8 +56,9 @@ function scannedFiles(): { name: string; source: string }[] {
 // ("Reload config") is not, and is not matched.
 const QUOTE_BEFORE_NAME =
   /(&ldquo;|“|&lsquo;|‘|&quot;|&#34;|&#39;|&apos;)[ \t]*[{<]|["'][{<]|["']\$\{/g
-// The ad hoc chip the shared component replaced: any monospace span.
-const HAND_ROLLED_CHIP = /<span\s+className="[^"]*\bfont-mono\b[^"]*"/g
+// The ad hoc chip the shared component replaced: any monospace span, its class
+// written as a string or as the first string handed to `cn`.
+const HAND_ROLLED_CHIP = /<span\s+className=(?:"|\{cn\(\s*")[^"]*\bfont-mono\b[^"]*"/g
 
 // The same chip one level up: StartTruncatedText renders its own span, so a
 // monospace class handed to it is a monospace span all the same. Its props may
@@ -103,7 +104,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
   {
     file: "components/MacrosDialog.tsx",
-    line: '<span className="truncate font-mono text-xs text-muted-foreground">',
+    line: '<span className={cn("truncate font-mono text-xs text-muted-foreground", WHOLE_MARKS)}>',
     reason: "A macro row's preview of its text: a list row, out of the chip rule's scope.",
   },
   {
@@ -209,6 +210,7 @@ describe("the name-delimiter detector", () => {
       '<span className="break-all font-mono">{path}</span>',
       '<span className="font-mono">{path}</span>',
       '<span className="truncate font-mono text-xs">{path}</span>',
+      '<span className={cn("truncate font-mono", MARKS)}>{path}</span>',
       '<p>Delete "{name}"?</p>',
       '<p>Delete "<b>{name}</b>"?</p>',
       "<p>Delete '{name}'?</p>",
