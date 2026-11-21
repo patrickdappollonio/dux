@@ -141,20 +141,6 @@ describe("apiFetch", () => {
     }
   })
 
-  it("holds a reorder of the terminals while any take-over is in flight", async () => {
-    const { api, gate } = await load()
-    const flight = await import("./takeoverFlight")
-    await gate.initAuthGate()
-    const landed = flight.beginTakeoverFlight("agent:s1")
-    const reorder = api.apiFetch("/api/v1/terminals/reorder", { method: "POST", body: "{}" })
-    const sent = () => fetchMock.mock.calls.filter(([u]) => String(u).includes("/reorder")).length
-    await Promise.resolve()
-    expect(sent()).toBe(0)
-    landed(true)
-    await reorder
-    expect(sent()).toBe(1)
-  })
-
   it("turns a 401 into a sign-out and an interruption the caller can recognise", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()

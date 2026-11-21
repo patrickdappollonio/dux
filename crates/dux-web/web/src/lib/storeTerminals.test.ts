@@ -967,6 +967,25 @@ describe("store agent stack", () => {
     expect(mod.getSnapshot().stackTabs.s1).toBe(slot)
   })
 
+  it("holds a dock's reorder for a take-over of its own row, never another row's", async () => {
+    withSessionStatus("active", [companion("t1", 1), companion("t2", 2)])
+    const mod = await loadStore()
+    const flight = await import("./takeoverFlight")
+    const sent = () => calls.filter(([u]) => u === "/api/v1/terminals/reorder").length
+    const other = flight.beginTakeoverFlight("agent:s2")
+    mod.reorderDock("s1", ["t2", "t1"])
+    await tick()
+    expect(sent()).toBe(1)
+    other(false)
+
+    const own = flight.beginTakeoverFlight("agent:s1")
+    mod.reorderDock("s1", ["t1", "t2"])
+    await tick()
+    expect(sent()).toBe(1)
+    own(true)
+    await vi.waitFor(() => expect(sent()).toBe(2))
+  })
+
   it("reorders one dock among the places its terminals hold, leaving every other terminal put", async () => {
     withSessionStatus("active", [
       companion("t1", 1),

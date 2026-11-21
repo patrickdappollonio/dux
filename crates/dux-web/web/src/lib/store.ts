@@ -48,6 +48,7 @@ import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
 import { deviceLabel } from "./deviceLabel"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
+import { takeoverRefusalForRows } from "./takeoverFlight"
 import { macroPayloadBytes, savedMacrosEdit, type MacrosEdit } from "./macros"
 import { unsavedChangesLabel } from "./unsavedChanges"
 import { normalizeLeftover } from "./leftoverFolder"
@@ -9063,19 +9064,50 @@ export function reorderAgents(orderedIds: string[]): void {
 // order: it refuses one that moves the terminals of an agent another device
 // drives, and what a caller does on the strength of the new order waits for that.
 export function reorderTerminals(orderedIds: string[]): Promise<boolean> {
+  const rows = agentRowsReordered(shownTerminalOrder(), orderedIds)
   setState({ pendingTerminalOrder: orderedIds })
-  return terminalsApi.reorder(orderedIds).then(
-    () => true,
-    (e) => {
-      // A rejected reorder is never reconciled by a spine, so the overlay would
-      // linger forever. Clear it so the UI snaps back to the authoritative order,
-      // then surface the failure. Only this request's own overlay: a later
-      // reorder that replaced it is still waiting on its own answer.
-      if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
-      notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
-      return false
-    },
-  )
+  const fail = (message: string) => {
+    // A rejected reorder is never reconciled by a spine, so the overlay would
+    // linger forever. Clear it so the UI snaps back to the authoritative order,
+    // then surface the failure. Only this request's own overlay: a later
+    // reorder that replaced it is still waiting on its own answer.
+    if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
+    notifyError(message)
+    return false
+  }
+  const send = () =>
+    terminalsApi.reorder(orderedIds).then(
+      () => true,
+      (e) => fail(e instanceof Error ? e.message : "Could not reorder the terminals."),
+    )
+  // A take-over this page pressed on a row the order changes is waited out
+  // first, as `apiFetch` waits for a request whose address names its row.
+  const held = takeoverRefusalForRows(rows)
+  if (held === null) return send()
+  return held.then((refusal) => (refusal === null ? send() : fail(refusal)))
+}
+
+/// Every terminal id in the order on screen: the one just dragged, or the spine's.
+function shownTerminalOrder(): string[] {
+  const all = (state.spine?.terminals ?? []).slice().sort((a, b) => a.sort_order - b.sort_order)
+  const pending = state.pendingTerminalOrder
+  return (pending ? reorderById(all, pending) : all).map((t) => t.id)
+}
+
+/// The rows of the agents whose own terminals `next` puts in another order
+/// than `before`, which are the rows the server judges a reorder by.
+function agentRowsReordered(before: readonly string[], next: readonly string[]): string[] {
+  const agentOf = new Map<string, string>()
+  for (const t of state.spine?.terminals ?? []) {
+    if (t.owner.kind === "session") agentOf.set(t.id, t.owner.session_id)
+  }
+  const agents = new Set(agentOf.values())
+  return [...agents]
+    .filter((agent) => {
+      const of = (ids: readonly string[]) => ids.filter((id) => agentOf.get(id) === agent).join("\n")
+      return of(before) !== of(next)
+    })
+    .map(agentRowKey)
 }
 
 // Place project and standalone terminals' rows in the agents list, each right
@@ -9104,11 +9136,7 @@ export function placeTerminalsInList(placements: Record<string, string | null>):
 // terminals trade the places they already hold and nothing else moves: no
 // other dock, and no row of the agents list, whose sort mode stays as it is.
 export function reorderDock(sessionId: string, dockOrder: string[]): void {
-  const all = (state.spine?.terminals ?? [])
-    .slice()
-    .sort((a, b) => a.sort_order - b.sort_order)
-  const pending = state.pendingTerminalOrder
-  const base = (pending ? reorderById(all, pending) : all).map((t) => t.id)
+  const base = shownTerminalOrder()
   const mine = new Set(dockTerminalIds(sessionId))
   const next = dockOrder.filter((id) => mine.has(id))
   if (next.length !== mine.size) return
