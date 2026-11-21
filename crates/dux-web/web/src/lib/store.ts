@@ -9273,7 +9273,7 @@ export function reloadMacrosDraft(): Promise<void> {
       setState({
         macrosDraft: savedMacrosEdit(b.macros, b.macros_version ?? null),
         macrosConflict: null,
-            macrosDraftEpoch: state.macrosDraftEpoch + 1,
+        macrosDraftEpoch: state.macrosDraftEpoch + 1,
       }),
     )
     .catch(() => notifyError("Could not reload the macros. Try again in a moment."))
