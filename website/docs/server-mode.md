@@ -764,7 +764,7 @@ in [Configuration](/docs/configuration).
 
 You do not need shell access to the machine to change settings:
 
-![The Settings dialog scrolled to the row that chooses whether dux binds your Tailscale address.](/screens/preferences-dialog.png)
+![The Preferences dialog showing the row that chooses whether dux binds your Tailscale address.](/screens/preferences-dialog.png)
 
 - **Configuration → Edit config file…** in the cog menu opens a raw Monaco TOML editor
   over your actual `config.toml`.

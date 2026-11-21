@@ -807,26 +807,47 @@ pick one. The full story is in
 ## Editing settings from the web
 
 The **Preferences…** dialog holds every web-adjustable setting, a curated set of
-`[server]`, `[ui]`, `[capabilities]` and `[defaults]` preferences, grouped by which
-surface they affect:
+`[server]`, `[ui]`, `[capabilities]` and `[defaults]` preferences, filed by topic in a list
+down its side:
 
-- **Signing in**: the web password.
-- **This browser (Web)**: the instance name and favicon above, copy-on-select, the terminal
-  font and its size, desktop notifications, the Changes pane default, the touch compose bar
-  and terminal keys, and whether dropped and pasted files stay hidden from git or long
-  pastes become a file.
-- **Both surfaces**: status-message auto-clear, the attention indicator, its grace period
-  and the terminal bell, reopening agents on startup, the always-show-tab-strip preference (which covers an agent's tab strip and its terminal dock's strip together),
-  the PR banner position, clickable hyperlinks, GitHub integration, whether dux binds your
-  Tailscale address, the welcome and what's-new screens, the default provider, and whether
-  new agents start with a random pet name.
-- **Terminal UI only**: whether Tab reaches the agent, and Nerd Font icons.
+- **Appearance**: the instance name and favicon above, the Changes pane default, the
+  terminal font and its size, the always-show-tab-strip preference (which covers an agent's
+  tab strip and its terminal dock's strip together), and the PR banner position.
+- **Typing and touch**: copy-on-select, the touch compose bar and terminal keys, whether
+  dropped and pasted files stay hidden from git or long pastes become a file, and clickable
+  hyperlinks.
+- **Attention and messages**: desktop notifications, status-message auto-clear, and the
+  attention indicator, its grace period and the terminal bell.
+- **New agents and startup**: reopening agents on startup, GitHub integration, whether new
+  agents start with a random pet name, the welcome and what's-new screens, and the default
+  provider.
+- **Sign-in and network**: the web password, and whether dux binds your Tailscale address.
+- **Terminal app**: whether Tab reaches the agent, Nerd Font icons, and extended keys.
 
-Lost in there? Type in **Search settings** at the top and the list shrinks to the rows
-holding every word you typed, in a row's name, description, default or config key, so
-`server.tailscale` finds its row too, with each hit highlighted. Escape clears the search
-first and closes the dialog on the second press; anything you changed in a row the search
-hid is still saved, and if a new password is refused, the search clears so you can see why.
+Each row says on a small line where it applies: **This browser**, **Web and terminal app**,
+**Terminal app**, or, for the password, **Every browser**. On a phone the topics come first,
+and tapping one opens its settings; Back takes you back to the topics.
+
+Every change you make, resets included, waits for **Save**. The footer counts what is not
+saved yet, **Cancel** drops it all, and closing the dialog with changes still pending asks
+before throwing them away. The browser's Back cannot stop to ask, so it closes the dialog
+and keeps your changes: a toast offers **Restore**, and the next time you open Preferences
+they are back. Typed passwords are the one thing never kept.
+
+A setting that differs from what dux ships with carries a dot and its own reset button, and
+its small line names the default. **Changed from default**, at the top of the side list,
+gathers every such setting in one place, with **Reset all** to put them all back after you
+confirm. Like any other change, a reset only writes `config.toml` when you save.
+
+Lost in there? Type in **Search settings** at the top and every topic is searched at once,
+for rows holding every word you typed in a row's name, description, small line or config
+key, so `server.tailscale` finds its row too. Each match shows its config key and its topic,
+with each hit highlighted. Escape clears the search first and closes the dialog on the second
+press; anything you changed in a row the search hid is still saved, and if a new password is
+refused, the dialog brings the password row back on screen so you can see why.
+
+**Open config.toml…** at the bottom of the side list opens the raw file in its editor. It
+waits until nothing is unsaved, because the file does not have those changes yet.
 
 The Tailscale row does more than save a value: it also moves the listener that is
 serving right now and tells you what happened to it. Choosing **No** from a browser

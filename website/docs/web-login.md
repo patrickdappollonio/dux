@@ -66,7 +66,7 @@ is running, `dux config set` asks it to reload, waits for the answer, and the pa
 force as soon as it has reloaded.
 
 You can also set the first password from the browser, in **Preferences…** under
-**Signing in**, with one restriction:
+**Sign-in and network**, with one restriction:
 
 - **Allowed** from the machine dux runs on, or from your tailnet.
 - **Refused** anywhere else, where the browser is told to use `dux config set`. That way a
@@ -76,7 +76,7 @@ You can also set the first password from the browser, in **Preferences…** unde
   connection to `localhost` really is this machine. The browser there is told the same,
   and why.
 
-![The Password row at the top of Preferences, under Signing in: the current password field, a new password typed into the next field with a five-step strength meter reading Excellent under it, and the field to type it again.](/screens/preferences-password.png)
+![The Password row in Preferences, under Sign-in and network: the current password field, a new password typed into the next field with a five-step strength meter reading Excellent under it, and the field to type it again.](/screens/preferences-password.png)
 
 To remove the password again:
 
@@ -248,7 +248,7 @@ A command-line sign-in outlives a browser's:
 ## Changing the password
 
 From a terminal, run `dux config set server.auth.password` again. From the browser, open
-**Preferences…**, fill in the current password and the new one twice under **Signing in**,
+**Preferences…**, fill in the current password and the new one twice under **Sign-in and network**,
 and save. Leaving the fields empty keeps the password you have.
 
 Either way, every browser is signed out, the one you changed it from included, and signs

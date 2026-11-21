@@ -135,7 +135,8 @@ them, and it has no effect on the terminal UI. Two things gate them, on purpose:
    notification while you are looking at dux. The gate is the window being hidden or
    unfocused, not which agent you have selected.
 2. **You have to opt in.** dux never auto-prompts for notification permission. Open
-   **Preferences…** from the cog menu and use **Enable browser notifications** once. It
+   **Preferences…** from the cog menu and use **Enable browser notifications**, under
+   **Attention and messages**, once. It
    sits under the **Desktop notifications** setting it unlocks, and appears only while
    notifications are enabled in config and you have not granted permission yet.
 

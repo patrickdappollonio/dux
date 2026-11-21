@@ -345,7 +345,7 @@ Server mode can also raise a **real browser desktop notification** when an agent
 you:
 
 - It is strictly opt-in: dux never auto-prompts. Open **Preferences…** from the cog menu, use
-  **Enable browser notifications** once, and grant permission.
+  **Enable browser notifications** under **Attention and messages** once, and grant permission.
 - It fires only while the dux browser window is hidden or unfocused, and only for the agent
   whose view you have open.
 - It is governed by the `web_notifications` capability, detailed in
