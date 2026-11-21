@@ -286,6 +286,17 @@ describe("AgentTabsStrip on a row another device drives", () => {
     expect(sortableProps?.disabled).toBe(true)
   })
 
+  // A watcher's drag is a plain select: the pill must not move while it is held.
+  it("does not move a pill that is dragged while another device drives the row", () => {
+    watch("other")
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+    const pill = screen.getAllByRole("tab")[1]
+    fireEvent.mouseDown(pill, { button: 0, clientX: 10, clientY: 10 })
+    fireEvent.mouseMove(document, { clientX: 30, clientY: 10 })
+    fireEvent.mouseMove(document, { clientX: 31, clientY: 10 })
+    expect(pill.style.transform).toBe("")
+  })
+
   it("reorders while this device drives the row", () => {
     registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
