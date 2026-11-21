@@ -617,7 +617,8 @@ describe("store companion-terminal lifecycle", () => {
     )
   })
 
-  it("names the device driving a row no pane here shows, once this page heard it take over", async () => {
+  it("names the device driving a row no pane here shows, from the workspace document", async () => {
+    const ua = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
     spineBody = {
       projects: [{ id: "p1", name: "Repo" }],
       sessions: [
@@ -626,18 +627,44 @@ describe("store companion-terminal lifecycle", () => {
           project_id: "p1",
           title: "agentx",
           status: "active",
-          tabs: [{ id: "a1", input_owner: "conn-other" }],
+          tabs: [{ id: "a1", input_owner: "conn-other", input_owner_device: ua }],
         },
       ],
       terminals: [],
       sidebar: { groups: [] },
     }
     const mod = await loadStore()
-    const { notifyPtyOwner } = await import("./ptyOwnership")
-    const { deviceLabel } = await import("./deviceLabel")
+    await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull())
+    expect(mod.stopAllPlan(mod.getSnapshot()).left[0]?.device).toBe("Firefox on Linux")
+  })
+
+  it("never names this device as the driver of a row it is reconnecting to", async () => {
     const ua = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
-    notifyPtyOwner("a1", "conn-other", 7, ua)
-    expect(mod.stopAllPlan(mod.getSnapshot()).left[0]?.device).toBe(deviceLabel(ua))
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "agentx",
+          status: "active",
+          tabs: [{ id: "a1", input_owner: "conn-mine", input_owner_device: ua }],
+        },
+      ],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull())
+    const { agentRowKey, registerPaneCover } = await import("./paneCover")
+    registerPaneCover("a1", "spinner", { row: agentRowKey("s1"), driver: "reconnecting" })
+    const { notifyPtyOwner } = await import("./ptyOwnership")
+    notifyPtyOwner("a1", "conn-mine", 7, ua)
+    const { proseText } = await import("./prose")
+    expect(proseText(mod.leftRunningProse(mod.stopAllPlan(mod.getSnapshot()).left))).toBe(
+      "Left running, because this device is reconnecting to it: agent agentx. " +
+        "It can be stopped once this device hears who drives it.",
+    )
   })
 
   // The panic button is the ONE caller that skips the shutdown grace. A polite

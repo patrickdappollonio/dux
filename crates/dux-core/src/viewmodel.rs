@@ -887,6 +887,11 @@ pub struct TerminalView {
     /// a fresh one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_owner: Option<String>,
+    /// The raw `User-Agent` of the device behind [`Self::input_owner`], when it
+    /// sent one. Stamped by the same overlay, so a page with no socket of the
+    /// row can still name who drives it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_owner_device: Option<String>,
     /// A project or standalone terminal's manual place in the agents list: the
     /// agent its row sits right after in the stored agent order, absent for the
     /// top. Projected from [`crate::model::CompanionTerminal::list_after`]; an
@@ -1032,6 +1037,11 @@ pub struct AgentTabView {
     /// and not by me" locally, without ever attaching to that agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_owner: Option<String>,
+    /// The raw `User-Agent` of the device behind [`Self::input_owner`], when it
+    /// sent one. Stamped by the same overlay, so a page with no socket of the
+    /// row can still name who drives it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_owner_device: Option<String>,
 }
 
 /// Everything the browser needs to write a DROPPED file's path into one pane:
@@ -1486,6 +1496,7 @@ impl Engine {
             // Always `None` here: PTY ownership lives in the web layer's
             // registry, so the spine overlay stamps it. See the field's doc.
             input_owner: None,
+            input_owner_device: None,
             label: t.label.clone(),
             has_output: t.client.has_output(),
             // A terminal is Working when it is streaming output OR a foreground app
@@ -1736,6 +1747,7 @@ impl Engine {
             // layer's per-PTY-socket registry, which overlays it onto the built
             // spine (see the field doc).
             input_owner: None,
+            input_owner_device: None,
         }
     }
 

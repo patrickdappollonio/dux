@@ -36,6 +36,7 @@ import {
 import {
   addToAgentBlockHint,
   agentChangeBlockReason,
+  useRowDriverLabel,
   useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
@@ -238,6 +239,7 @@ function TabPill({
   block: RowBlock | null
 }) {
   const changesBlocked = block !== null
+  const device = useRowDriverLabel({ sessionId: session.id })
   const { setNodeRef, style, listeners, isDragging } = usePillSort(tab.id)
   // No successor means no slot to hand on, which is the one close the server
   // refuses. Answered from the tab list rather than from slot-ness, because
@@ -346,7 +348,7 @@ function TabPill({
             {block !== null ? (
               <DropdownMenuGroup>
                 <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                  {agentChangeBlockReason(block)}
+                  {agentChangeBlockReason(block, device)}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
               </DropdownMenuGroup>

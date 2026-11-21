@@ -138,6 +138,7 @@ import { EditorReadOnlyBanner } from "@/components/EditorReadOnlyBanner"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import {
   editorReadOnlyReason,
+  useRowDriverLabel,
   useEditorRootChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 import {
@@ -302,10 +303,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // refuses the write. Every write below is greyed with this sentence, and a
   // dirty buffer keeps its text, read-only, until this page drives again.
   const changeBlock = useEditorRootChangeBlock(root)
+  const driver = useRowDriverLabel(
+    root.kind === "terminal" ? { terminalId: root.terminalId } : { sessionId: root.sessionId },
+  )
   const writeBlocked =
     changeBlock === null
       ? null
-      : editorReadOnlyReason(changeBlock, root.kind === "agent" ? "agent" : "terminal")
+      : editorReadOnlyReason(changeBlock, root.kind === "agent" ? "agent" : "terminal", driver)
   const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null

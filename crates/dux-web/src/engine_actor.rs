@@ -33,6 +33,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::pty_owners::PtySizeOwners;
 use crate::row_asker::RowAsker;
 use dux_core::engine::RowChange;
+use dux_core::pty_owners::OwnerRecord;
 
 /// A PTY subscription: an RAII unsubscribe guard, an initial repaint snapshot,
 /// and the live byte stream the caller forwards. Drop the guard to detach
@@ -4420,7 +4421,7 @@ fn owned_spine_at(
     owners: &PtySizeOwners,
 ) -> (dux_core::viewmodel::SpineView, u64) {
     let mut spine = engine.spine();
-    let (map, owners_epoch) = owners.input_owners_snapshot();
+    let (map, owners_epoch) = owners.input_owner_records_snapshot();
     if !map.is_empty() {
         for session in &mut spine.sessions {
             overlay_session_input_owners(session, &map);
@@ -4447,24 +4448,19 @@ fn owned_spine_at(
 /// collection rather than under a session.
 fn overlay_session_input_owners(
     session: &mut dux_core::viewmodel::SessionView,
-    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, u64>,
+    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, OwnerRecord>,
 ) {
-    let row_owner = owners
-        .get(&dux_core::pty_owners::RowKey::Agent(session.id.clone()))
-        .copied();
+    let row_owner = owners.get(&dux_core::pty_owners::RowKey::Agent(session.id.clone()));
     for tab in &mut session.tabs {
         // A tab still standing alone (claimed before any surface placed it in
         // its row) answers for itself, as the registry does.
-        let alone = || {
-            owners
-                .get(&dux_core::pty_owners::RowKey::Terminal(tab.id.clone()))
-                .copied()
-        };
-        if let Some(conn_id) = row_owner.or_else(alone) {
+        let alone = || owners.get(&dux_core::pty_owners::RowKey::Terminal(tab.id.clone()));
+        if let Some(record) = row_owner.or_else(alone) {
             // Stringified so the wire shape matches the `pty.owner` handover
             // frames' `owner` field, which is what the client compares its own
             // PTY-socket ids against.
-            tab.input_owner = Some(conn_id.to_string());
+            tab.input_owner = Some(record.conn_id.to_string());
+            tab.input_owner_device.clone_from(&record.device);
         }
     }
 }
@@ -4480,7 +4476,7 @@ fn overlay_session_input_owners(
 /// tell a stale driver name from a fresh one.
 fn overlay_terminal_input_owners(
     terminals: &mut [dux_core::viewmodel::TerminalView],
-    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, u64>,
+    owners: &std::collections::HashMap<dux_core::pty_owners::RowKey, OwnerRecord>,
 ) {
     for terminal in terminals {
         let agent = match &terminal.owner {
@@ -4494,8 +4490,9 @@ fn overlay_terminal_input_owners(
         // registry does.
         let row = dux_core::pty_owners::RowKey::of(&terminal.id, agent);
         let alone = dux_core::pty_owners::RowKey::Terminal(terminal.id.clone());
-        if let Some(conn_id) = owners.get(&row).or_else(|| owners.get(&alone)) {
-            terminal.input_owner = Some(conn_id.to_string());
+        if let Some(record) = owners.get(&row).or_else(|| owners.get(&alone)) {
+            terminal.input_owner = Some(record.conn_id.to_string());
+            terminal.input_owner_device.clone_from(&record.device);
         }
     }
 }
@@ -5645,7 +5642,7 @@ fn session_with_terminals(
     Vec<dux_core::viewmodel::TerminalView>,
 )> {
     engine.session_view(id).map(|mut session| {
-        overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot().0);
+        overlay_session_input_owners(&mut session, &input_owners.input_owner_records_snapshot().0);
         let terminals =
             engine.terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(id));
         (session, terminals)
@@ -9093,6 +9090,7 @@ mod tests {
             id: id.to_string(),
             owner,
             input_owner: None,
+            input_owner_device: None,
             label: "Terminal 1".to_string(),
             has_output: false,
             working: false,
@@ -9534,6 +9532,36 @@ mod tests {
         };
         assert_eq!(slot_owner("s1"), Some("7".to_string()));
         assert_eq!(slot_owner("s2"), None);
+    }
+
+    /// A page with no socket of a driven row reads the driver's device from the
+    /// document, on the agent's tabs and on its terminals alike.
+    #[test]
+    fn the_overlay_names_the_driving_device_beside_its_connection() {
+        let (_tmp, paths) = temp_paths();
+        seed_session(&paths, "s1");
+        let engine = bootstrap_engine(&paths).expect("bootstrap");
+        let owners = crate::pty_owners::PtySizeOwners::default();
+        owners.join_row(
+            "term-1",
+            dux_core::pty_owners::RowKey::Agent("s1".to_string()),
+        );
+        let claim = owners.may_write("term-1", 7, Some("Phone UA"), || {});
+        assert!(claim.allowed, "the free row is claimed by its first writer");
+
+        let spine = owned_spine(&engine, &owners);
+        let tab = &spine.sessions[0].tabs[0];
+        assert_eq!(tab.input_owner.as_deref(), Some("7"));
+        assert_eq!(tab.input_owner_device.as_deref(), Some("Phone UA"));
+
+        let mut terminals = vec![sample_terminal_view(
+            "term-1",
+            dux_core::viewmodel::TerminalOwnerView::Session {
+                session_id: "s1".to_string(),
+            },
+        )];
+        overlay_terminal_input_owners(&mut terminals, &owners.input_owner_records_snapshot().0);
+        assert_eq!(terminals[0].input_owner_device.as_deref(), Some("Phone UA"));
     }
 
     /// The overlay must iterate EVERY session's tabs, not merely find a first

@@ -3,6 +3,7 @@ import type { ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import {
   agentChangeBlockReason,
+  useRowDriverLabel,
   startAgentBlockHint,
   useAgentChangeBlockById,
 } from "@/hooks/use-agent-active-elsewhere"
@@ -28,12 +29,13 @@ export function StartAgentButton({
   children: ReactNode
 }) {
   const block = useAgentChangeBlockById(sessionId)
+  const device = useRowDriverLabel({ sessionId })
   const why =
     block === null
       ? null
       : reason === "hint"
         ? startAgentBlockHint(block)
-        : agentChangeBlockReason(block)
+        : agentChangeBlockReason(block, device)
   return (
     <>
       {why !== null && reason === "hint" ? (

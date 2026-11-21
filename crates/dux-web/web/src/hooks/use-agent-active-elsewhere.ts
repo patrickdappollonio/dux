@@ -191,8 +191,23 @@ export function drivenElsewhereHint(driven: readonly DrivenElsewhere[]): string 
 
 /// Why a menu's entries that change the agent are disabled right now, said once
 /// at the head of the menu.
-export function agentChangeBlockReason(block: RowBlock): string {
-  return changeBlockReason(block, "agent")
+export function agentChangeBlockReason(block: RowBlock, device: string | null = null): string {
+  return changeBlockReason(block, "agent", device)
+}
+
+/// The label of the device driving a part's row, as `rowDriverLabel` says it,
+/// re-read when a pane of any row hears a new driver.
+export function useRowDriverLabel(
+  part: { sessionId: string } | { terminalId: string } | null,
+): string | null {
+  useRowWatch(null)
+  const sessionId = part !== null && "sessionId" in part ? part.sessionId : null
+  const terminalId = part !== null && "terminalId" in part ? part.terminalId : null
+  return useDuxSelector((state) => {
+    if (sessionId !== null) return rowDriverLabel(state, { sessionId })
+    if (terminalId !== null) return rowDriverLabel(state, { terminalId })
+    return null
+  })
 }
 
 /// Why controls that change an agent's or a terminal's row are disabled,
@@ -238,10 +253,11 @@ export function usePartChangeReason(): (
 export function editorReadOnlyReason(
   block: RowBlock,
   subject: "agent" | "terminal",
+  device: string | null = null,
 ): string {
   switch (block) {
     case "other":
-      return `Read-only: this ${subject} is active on another device, so its files cannot be changed here. Take over the ${subject} to edit them.`
+      return `Read-only: this ${subject} is active on ${device ?? "another device"}, so its files cannot be changed here. Take over the ${subject} to edit them.`
     case "nobody":
       return `Read-only: nobody is driving this ${subject}, this device included, so its files cannot be changed here. Take over the ${subject} to edit them.`
     case "reconnecting":

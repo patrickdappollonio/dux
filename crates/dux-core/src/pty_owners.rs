@@ -974,13 +974,25 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn input_owners_snapshot(&self) -> (std::collections::HashMap<RowKey, u64>, u64) {
-        let owners = self.lock();
-        let map = owners
-            .map
-            .iter()
-            .map(|(row, record)| (row.clone(), record.conn_id))
+        let (records, epoch) = self.input_owner_records_snapshot();
+        let map = records
+            .into_iter()
+            .map(|(row, record)| (row, record.conn_id))
             .collect();
-        (map, owners.epoch)
+        (map, epoch)
+    }
+
+    /// [`Self::input_owners_snapshot`] with each owner's device, so a document
+    /// built from it can name the driving device without a socket of the row.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
+    pub fn input_owner_records_snapshot(
+        &self,
+    ) -> (std::collections::HashMap<RowKey, OwnerRecord>, u64) {
+        let owners = self.lock();
+        (owners.map.clone(), owners.epoch)
     }
 }
 

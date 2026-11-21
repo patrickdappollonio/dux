@@ -188,14 +188,12 @@ describe("project confirmations name the project as a chip", () => {
     expect((screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it("Delete project names the device driving its terminal once this page heard it take over", async () => {
-    const { notifyPtyOwner } = await import("@/lib/ptyOwnership")
+  it("Delete project names the device driving its terminal from the workspace document", async () => {
     const { deviceLabel } = await import("@/lib/deviceLabel")
     const { drivenElsewhereHint, useProjectDrivenElsewhere } = await import(
       "@/hooks/use-agent-active-elsewhere"
     )
     const ua = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
-    notifyPtyOwner("term-4", "conn-firefox", 3, ua)
     seed({
       deleteProjectTarget: "p1",
       ownPtyConnIds: {},
@@ -203,7 +201,7 @@ describe("project confirmations name the project as a chip", () => {
         projects: [project],
         sessions: [],
         terminals: [
-          { id: "term-4", owner: { kind: "project", project_id: "p1" }, label: "Terminal 4", input_owner: "conn-firefox" },
+          { id: "term-4", owner: { kind: "project", project_id: "p1" }, label: "Terminal 4", input_owner: "conn-firefox", input_owner_device: ua },
         ],
         sidebar: { groups: [] },
       },

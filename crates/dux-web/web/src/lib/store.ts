@@ -46,7 +46,8 @@ import type { ReconnectPlanEvent } from "./reconnectingSocket"
 import { SETTING_TOPICS, allSettingDescriptors } from "./settingsDescriptors"
 import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
-import { notifyPtyOwner, ownerDeviceLabel, resetPtyOwnerEpochs } from "./ptyOwnership"
+import { deviceLabel } from "./deviceLabel"
+import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes, savedMacrosEdit, type MacrosEdit } from "./macros"
 import { unsavedChangesLabel } from "./unsavedChanges"
 import { normalizeLeftover } from "./leftoverFolder"
@@ -9952,32 +9953,36 @@ export function partChangeBlock(
 }
 
 /** The label of the device driving a part's row, or null when this page does
- * not know it: a mounted pane of the row heard it, or a take-over this page
- * heard named the connection the workspace document says drives the row. */
+ * not know it: a mounted pane of the row heard it, or the workspace document
+ * names the device behind a connection that is not this page's. */
 export function rowDriverLabel(
   s: DuxState,
   part: { sessionId: string } | { terminalId: string },
 ): string | null {
   const terminals = s.spine?.terminals ?? []
+  const named = (owners: readonly { input_owner?: string; input_owner_device?: string }[]) =>
+    deviceLabel(
+      owners.find(
+        (o) =>
+          o.input_owner !== undefined &&
+          o.input_owner !== "" &&
+          !s.ownPtyConnIds?.[o.input_owner],
+      )?.input_owner_device,
+    )
   if ("sessionId" in part) {
-    const heard = rowDriverDevice(agentRowKey(part.sessionId))
-    if (heard !== null) return heard
-    const owners = [
-      ...(s.spine?.sessions.find((x) => x.id === part.sessionId)?.tabs ?? []).map(
-        (tab) => tab.input_owner,
-      ),
-      ...terminals
-        .filter((t) => t.owner.kind === "session" && t.owner.session_id === part.sessionId)
-        .map((t) => t.input_owner),
-    ]
-    return ownerDeviceLabel(owners.find((owner) => owner !== undefined && owner !== ""))
+    return (
+      rowDriverDevice(agentRowKey(part.sessionId)) ??
+      named([
+        ...(s.spine?.sessions.find((x) => x.id === part.sessionId)?.tabs ?? []),
+        ...terminals.filter(
+          (t) => t.owner.kind === "session" && t.owner.session_id === part.sessionId,
+        ),
+      ])
+    )
   }
   // A project or standalone terminal, a row of its own, as `partChangeBlock`.
   const row = rowKeyOfPart({ kind: "terminal", id: part.terminalId, owner: { kind: "project" } })
-  return (
-    rowDriverDevice(row) ??
-    ownerDeviceLabel(terminals.find((t) => t.id === part.terminalId)?.input_owner)
-  )
+  return rowDriverDevice(row) ?? named(terminals.filter((t) => t.id === part.terminalId))
 }
 
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
@@ -10050,7 +10055,7 @@ export function stopAllPlan(s: DuxState): {
         id: session.id,
         name: sessionLabel(session),
         terminals: own,
-        device: rowDriverLabel(s, { sessionId: session.id }),
+        device: block === "other" ? rowDriverLabel(s, { sessionId: session.id }) : null,
         block,
       })
     }
@@ -10070,7 +10075,7 @@ export function stopAllPlan(s: DuxState): {
         id: t.id,
         name: t.label,
         terminals: 0,
-        device: rowDriverLabel(s, { terminalId: t.id }),
+        device: block === "other" ? rowDriverLabel(s, { terminalId: t.id }) : null,
         block,
       })
     }

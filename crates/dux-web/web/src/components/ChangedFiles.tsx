@@ -113,6 +113,7 @@ import {
   addToAgentBlockHint,
   agentChangeBlockReason,
   useAgentChangeBlockSelective,
+  useRowDriverLabel,
 } from "@/hooks/use-agent-active-elsewhere"
 import type { RowBlock } from "@/lib/paneCover"
 import type { ChangesSlice, DuxState } from "@/lib/store"
@@ -1029,8 +1030,9 @@ function ChangesHeader({
   // Commit, push and pull write, so a page that does not drive the agent gets
   // them greyed with that reason; Refresh only reads, so it is greyed for a
   // quiet pane alone.
+  const driver = useRowDriverLabel({ sessionId })
   const writeBlocked =
-    gitBlocked ?? (changeBlock === null ? null : agentChangeBlockReason(changeBlock))
+    gitBlocked ?? (changeBlock === null ? null : agentChangeBlockReason(changeBlock, driver))
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
   // once at the head of the menu rather than repeated under each row.
@@ -2230,8 +2232,11 @@ export const ChangedFiles = memo(function ChangedFiles() {
   const expansions = useExpansions(selectedSessionId ?? "")
   const controller = useChangedFilesController(selectedSessionId, changes, expansions)
   const changeBlock = useAgentChangeBlockSelective(selectedSessionId)
+  const driver = useRowDriverLabel(
+    selectedSessionId === null ? null : { sessionId: selectedSessionId },
+  )
   // Why the rows' and the selection's git writes are greyed out, or null.
-  const writeBlocked = changeBlock === null ? null : agentChangeBlockReason(changeBlock)
+  const writeBlocked = changeBlock === null ? null : agentChangeBlockReason(changeBlock, driver)
   // A checked row inside a checked folder a delete acts on is already part of
   // it. A row a delete does not act on covers nothing, and is still handed to
   // the dialog so it can say why it is left out.

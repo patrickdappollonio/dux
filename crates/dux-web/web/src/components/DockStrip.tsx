@@ -16,6 +16,7 @@ import {
 import {
   addToAgentBlockHint,
   agentChangeBlockReason,
+  useRowDriverLabel,
   useAgentChangeBlockById,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useKeepCueClocks } from "@/hooks/use-keep-cue-clocks"
@@ -158,6 +159,7 @@ function DockPill({
 }) {
   const { setNodeRef, style, listeners, isDragging } = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
+  const device = useRowDriverLabel({ sessionId })
   return (
     <div
       ref={setNodeRef}
@@ -228,7 +230,7 @@ function DockPill({
               {block !== null ? (
                 <DropdownMenuGroup>
                   <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                    {agentChangeBlockReason(block)}
+                    {agentChangeBlockReason(block, device)}
                   </DropdownMenuLabel>
                   <DropdownMenuSeparator />
                 </DropdownMenuGroup>

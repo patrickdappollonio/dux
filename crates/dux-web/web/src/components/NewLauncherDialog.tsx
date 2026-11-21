@@ -14,6 +14,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   agentChangeBlockReason,
+  useRowDriverLabel,
   useAgentChangeBlocks,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useSearchPick } from "@/hooks/use-search-pick"
@@ -440,6 +441,7 @@ function AgentPickRow({
   onPick: () => void
 }) {
   const name = sessionLabel(session)
+  const device = useRowDriverLabel({ sessionId: session.id })
   const word = stateWord(session)
   // The same flag the sidebar row's cue fires on, so the word pulses and
   // carries its ellipsis exactly when it reads the busy word.
@@ -484,7 +486,7 @@ function AgentPickRow({
             button takes no pointer events and a finger has no hover. */}
         {block !== null ? (
           <span className="text-xs leading-snug text-foreground/85">
-            {agentChangeBlockReason(block)}
+            {agentChangeBlockReason(block, device)}
           </span>
         ) : null}
       </span>

@@ -165,6 +165,9 @@ export interface AgentTabView {
    * identity and each client compares it against its own `ownPtyConnIds` (see
    * `sessionActiveElsewhere`). */
   input_owner?: string
+  /** The raw `User-Agent` of the device behind `input_owner`, when it sent one:
+   * how a page with no socket of the row names who drives it. */
+  input_owner_device?: string
 }
 
 export interface TerminalView {
@@ -184,6 +187,8 @@ export interface TerminalView {
    * or absent when nobody does. The exact mirror of `AgentTabView.input_owner`,
    * and read the same way. */
   input_owner?: string
+  /** The mirror of `AgentTabView.input_owner_device`. */
+  input_owner_device?: string
   /** The command running in the terminal's foreground, or null when the shell
    * itself is idle; refreshed by the engine at most every ~2s. The displayed
    * title follows it when present, falling back to `label` (`terminalTitle`). */

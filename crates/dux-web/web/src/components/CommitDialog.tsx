@@ -13,6 +13,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   agentChangeBlockReason,
+  useRowDriverLabel,
   useAgentChangeBlockById,
 } from "@/hooks/use-agent-active-elsewhere"
 import { closeCommit, getSnapshot, setCommitDraft, useDux } from "@/lib/store"
@@ -24,8 +25,9 @@ export function CommitDialog() {
   // A page that does not drive the agent keeps the message it was writing,
   // read-only, and gets it back to commit once it takes over.
   const block = useAgentChangeBlockById(commitTarget ?? "")
+  const device = useRowDriverLabel(commitTarget === null ? null : { sessionId: commitTarget })
   const reason =
-    commitTarget !== null && block !== null ? agentChangeBlockReason(block) : null
+    commitTarget !== null && block !== null ? agentChangeBlockReason(block, device) : null
   const blocked = reason !== null
 
   const isOpen = commitTarget !== null

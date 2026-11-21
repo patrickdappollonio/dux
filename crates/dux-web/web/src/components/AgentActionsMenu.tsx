@@ -75,6 +75,7 @@ import {
 import type { SessionView } from "@/lib/types"
 import {
   agentChangeBlockReason,
+  useRowDriverLabel,
   useAgentChangeBlock,
 } from "@/hooks/use-agent-active-elsewhere"
 
@@ -105,6 +106,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
   // disable, with the reason as an inline label: a disabled item takes no
   // pointer events and touch has no hover.
   const block = useAgentChangeBlock(session)
+  const device = useRowDriverLabel({ sessionId: session.id })
   const changesBlocked = block !== null
   // Whether there is a process to ask to shut down at all. The SERVER's answer,
   // from the same oracle the engine's teardown and the terminal UI's palette
@@ -117,7 +119,7 @@ export function AgentActionsMenu({ session }: { session: SessionView }) {
       {block !== null ? (
         <DropdownMenuGroup>
           <DropdownMenuLabel className="max-w-60 whitespace-normal">
-            {agentChangeBlockReason(block)}
+            {agentChangeBlockReason(block, device)}
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
         </DropdownMenuGroup>
