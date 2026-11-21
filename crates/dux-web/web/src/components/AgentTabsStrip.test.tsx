@@ -18,9 +18,9 @@ const openCloseTabMock = vi.fn()
 const openStopTabMock = vi.fn()
 const clickTabMock = vi.fn()
 const reorderTabsMock = vi.fn()
-// The real strip, with its props captured: a drag cannot run under jsdom (the
-// pure part of it is in SortableStrip.test.tsx), so the tests hand the strip
-// the drop its drag would have produced.
+// The real strip, with its props captured. A drag runs under jsdom, but every
+// rect is empty, so where it would drop cannot be computed (the pure part is in
+// SortableStrip.test.tsx); the tests hand the strip the drop it would produce.
 let sortableProps: {
   ids: string[]
   onReorder: (next: string[]) => void
@@ -296,6 +296,43 @@ describe("AgentTabsStrip on a row another device drives", () => {
     expect((await screen.findAllByText("Reconnecting to this agent")).length).toBeGreaterThan(0)
   })
 
+  // Pressing + puts the add in flight, which disables it until the tab lands.
+  // The control the user pressed is the one that keeps the focus throughout.
+  it("keeps the same + and chooser, and the focus, while an add is in flight", () => {
+    const { rerender } = render(
+      <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />,
+    )
+    const plus = screen.getByLabelText("New tab")
+    const chooser = screen.getByLabelText("Choose provider for new tab")
+    act(() => plus.focus())
+    for (const inFlight of [["s1"], []]) {
+      mockState = { ...mockState, createTabInFlight: inFlight }
+      rerender(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+      expect(screen.getByLabelText("New tab")).toBe(plus)
+      expect(screen.getByLabelText("Choose provider for new tab")).toBe(chooser)
+      expect(document.activeElement).toBe(plus)
+    }
+  })
+
+  // A tap opens the reason; once the control changes state nobody asked again,
+  // so neither the old reason nor the new label is left on screen.
+  it("closes a tapped reason when the + changes state, and never reopens it", async () => {
+    mockState = { ...mockState, createTabInFlight: ["s1"] }
+    const { rerender } = render(
+      <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />,
+    )
+    fireEvent.click(screen.getByLabelText("New tab").parentElement!)
+    expect((await screen.findAllByText("Adding…")).length).toBeGreaterThan(0)
+    for (const [inFlight, text] of [[[], "New codex tab"], [["s1"], "Adding…"]] as const) {
+      mockState = { ...mockState, createTabInFlight: [...inFlight] }
+      rerender(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 400))
+      })
+      expect(screen.queryByText(text)).toBeNull()
+    }
+  })
+
   // A watcher's drag is a plain select: the pill must not move while it is held.
   it("does not move a pill that is dragged while another device drives the row", () => {
     watch("other")
@@ -502,9 +539,27 @@ describe("AgentTabsStrip on a touch tablet", () => {
     expect(wrapper.className).toContain("overflow-hidden")
   })
 
+  // A disabled button takes no pointer events, so its own tap margin is dead;
+  // what holds it must carry the 40px area that a tap reads the reason from.
+  it("gives a disabled + and chooser the same 40px tap area on what holds them", () => {
+    render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={2} />)
+    for (const label of ["New tab", "Choose provider for new tab"]) {
+      const holder = screen.getByLabelText(label).parentElement!
+      expect(Array.from(holder.classList)).toEqual(
+        expect.arrayContaining([
+          "relative",
+          "after:absolute",
+          "after:-inset-2",
+          "after:hidden",
+          "md:pointer-coarse:after:block",
+        ]),
+      )
+    }
+  })
+
   it("keeps the + and chooser tap areas apart and the chooser's clear of the pane divider", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    const group = screen.getByLabelText("New tab").parentElement!
+    const group = screen.getByLabelText("New tab").closest("div")!
     expect(group.className).toContain("md:pointer-coarse:gap-4")
     // And the + clear of the last pill's ⋯.
     expect(group.className).toContain("md:pointer-coarse:ml-0.5")

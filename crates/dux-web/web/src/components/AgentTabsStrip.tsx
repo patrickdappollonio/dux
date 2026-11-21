@@ -60,6 +60,11 @@ import type { AgentTabView, SessionView } from "@/lib/types"
 const FIRST_TAB_HINT =
   "The agent's first tab: the one that starts when you open a stopped agent."
 
+// A disabled + or chooser takes no pointer events, so its own tablet tap margin
+// is dead; the wrapper that explains it carries the same 8px a side instead.
+const DISABLED_TAP_AREA =
+  "relative after:absolute after:-inset-2 after:hidden md:pointer-coarse:after:block"
+
 // The provider-tab strip at the top of the center pane; whether it shows is the
 // caller's decision. All tabs render uniformly: clicking a
 // pill focuses it, the hover-revealed ⋯ retargets the provider and closes the
@@ -149,7 +154,11 @@ export function AgentTabsStrip({
           and 2px more before the "+" keeps its area off the last pill's ⋯,
           whose own reaches 1px past its pill. */}
       <div className="flex shrink-0 items-center gap-0.5 md:pointer-coarse:ml-0.5 md:pointer-coarse:gap-4">
-        <ExplainedWhenDisabled disabled={disabled} hint={newTabHint}>
+        <ExplainedWhenDisabled
+          disabled={disabled}
+          hint={newTabHint}
+          disabledClassName={DISABLED_TAP_AREA}
+        >
           <button
             type="button"
             aria-label="New tab"
@@ -166,7 +175,11 @@ export function AgentTabsStrip({
             <Plus className="size-4" />
           </button>
         </ExplainedWhenDisabled>
-        <ExplainedWhenDisabled disabled={disabled} hint={disabled ? newTabHint : null}>
+        <ExplainedWhenDisabled
+          disabled={disabled}
+          hint={disabled ? newTabHint : null}
+          disabledClassName={DISABLED_TAP_AREA}
+        >
           <DropdownMenu>
             <DropdownMenuTrigger
               render={

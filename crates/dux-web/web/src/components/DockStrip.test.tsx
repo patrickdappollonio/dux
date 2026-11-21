@@ -14,9 +14,9 @@ const selectTerminalMock = vi.fn()
 const reorderDockMock = vi.fn()
 const openDeleteTerminalMock = vi.fn()
 const createTerminalMock = vi.fn()
-// The real strip, with its props captured: a drag cannot run under jsdom (the
-// pure part of it is in SortableStrip.test.tsx), so the tests hand the strip
-// the drop its drag would have produced.
+// The real strip, with its props captured. A drag runs under jsdom, but every
+// rect is empty, so where it would drop cannot be computed (the pure part is in
+// SortableStrip.test.tsx); the tests hand the strip the drop it would produce.
 let sortableProps: {
   ids: string[]
   onReorder: (next: string[]) => void
@@ -191,6 +191,24 @@ describe("DockStrip on a row this device does not drive", () => {
       expect(close?.getAttribute("aria-disabled")).toBe("true")
     },
   )
+
+  // The block arrives and leaves while the user sits on the +: it is the same
+  // control throughout, so the keyboard focus stays where it was.
+  it("keeps the same +, and the focus, as the row's block appears and clears", () => {
+    render(strip([terminal("t1", 1)]))
+    const plus = screen.getByLabelText("New terminal")
+    act(() => plus.focus())
+    let release = () => {}
+    act(() => {
+      release = registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
+    })
+    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("New terminal")).toBe(plus)
+    act(() => release())
+    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", false)
+    expect(screen.getByLabelText("New terminal")).toBe(plus)
+    expect(document.activeElement).toBe(plus)
+  })
 
   it("keeps all of it on a row this device drives", () => {
     registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
