@@ -370,6 +370,28 @@ describe("TaskManagerDialog", () => {
     ).toBeTruthy()
   })
 
+  it("the stop-all confirm counts only what this page may stop and names what it leaves", () => {
+    seed({
+      stopAllOpen: true,
+      ownPtyConnIds: {},
+      spine: {
+        sessions: [
+          session({ id: "s1", title: "agentx", tabs: [{ id: "s1", input_owner: "conn-other" }] } as never),
+          session({ id: "s2", title: "agenty" }),
+        ],
+        terminals: [
+          { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+          { id: "t2", label: "Terminal 2", owner: { kind: "project", project_id: "p1" } },
+        ],
+      },
+    } as unknown as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const body = screen.getByText(/This stops/)
+    expect(body.textContent).toContain("This stops 1 agent and 1 terminal")
+    const left = screen.getByText(/another device drives/)
+    expect([...left.querySelectorAll("code")].map((c) => c.textContent)).toEqual(["agentx"])
+  })
+
   it("stop_all_confirms_before_killing", async () => {
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     const { rerender } = render(<TaskManagerDialog />)

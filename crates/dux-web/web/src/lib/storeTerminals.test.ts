@@ -406,6 +406,42 @@ describe("store companion-terminal lifecycle", () => {
     ).toEqual(["/api/v1/sessions/s1/terminals/t1?force_connected=k1"])
   })
 
+  it("stopAllRunning leaves alone the rows another device drives, and counts only the rest", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "agentx",
+          status: "active",
+          tabs: [{ id: "s1", input_owner: "conn-other" }],
+        },
+        { id: "s2", project_id: "p1", title: "agenty", status: "active", tabs: [{ id: "s2" }] },
+      ],
+      terminals: [
+        { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+        { id: "pt1", label: "Terminal 2", owner: { kind: "project", project_id: "p1" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull())
+    const plan = mod.stopAllPlan(mod.getSnapshot())
+    expect(plan.agents).toEqual(["s2"])
+    expect(plan.terminals).toEqual(["pt1"])
+    expect(plan.left).toEqual([
+      { kind: "agent", id: "s1", name: "agentx", terminals: 1, device: null },
+    ])
+
+    calls = []
+    await mod.stopAllRunning()
+    const sent = calls
+      .filter(([, init]) => init?.method === "DELETE" || init?.method === "POST")
+      .map(([u]) => u)
+    expect(sent).toEqual(["/api/v1/sessions/s2/kill", "/api/v1/projects/p1/terminals/pt1"])
+  })
+
   // The panic button is the ONE caller that skips the shutdown grace. A polite
   // wait per agent is the opposite of what somebody pressing "Stop everything"
   // is asking for, so the flag has to be on this path and off every other one.

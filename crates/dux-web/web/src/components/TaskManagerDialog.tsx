@@ -44,9 +44,13 @@ import {
   type TaskRowKind,
 } from "@/lib/resourceRows"
 import { resourcesApi, type ResourceStatsView } from "@/lib/resourcesApi"
+import { useRowWatch } from "@/lib/paneCover"
+import { renderProse } from "@/lib/prose"
 import {
   closeStopAll,
+  leftRunningProse,
   type StopAllRefusal,
+  stopAllPlan,
   closeTaskManager,
   openCloseTab,
   openDeleteTerminal,
@@ -624,12 +628,14 @@ function MobileRow({
 // The bulk stop's confirmation, nested inside the Task Manager and destructive-
 // styled, unlike the Task Manager itself.
 function ConfirmStopAllDialog({ open }: { open: boolean }) {
-  const { spine } = useDux()
-  const sessions = spine?.sessions ?? []
-  const agents = sessions.filter((s) => s.status === "active").length
-  // Every terminal of every owner, which is exactly what `stopAllRunning` will
-  // stop: one flat collection, so the count cannot miss an owner kind.
-  const terminals = spine?.terminals.length ?? 0
+  const state = useDux()
+  // Re-read whenever a pane hears who drives its row.
+  useRowWatch(null)
+  // Exactly what `stopAllRunning` will stop, and the rows it leaves to the
+  // device that drives them.
+  const plan = stopAllPlan(state)
+  const agents = plan.agents.length
+  const terminals = plan.terminals.length
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     open,
     "stop-all",
@@ -667,6 +673,9 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
             destroyed and cannot be recovered.
           </DialogDescription>
         </DialogHeader>
+        {plan.left.length > 0 ? (
+          <p className="text-sm text-muted-foreground">{renderProse(leftRunningProse(plan.left))}</p>
+        ) : null}
         <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />

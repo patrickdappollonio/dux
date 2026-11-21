@@ -28,6 +28,9 @@ interface CoverEntry {
   kind: AttachCover["kind"]
   row: string
   driver: PaneDriver
+  /** The driving device's label, when another device drives and the pane heard
+   * which. */
+  device: string | null
 }
 
 const covers = createKeyedRegistry<CoverEntry>()
@@ -78,12 +81,14 @@ export function rowKeyOfTarget(
 export function registerPaneCover(
   ptyId: string,
   kind: AttachCover["kind"],
-  opts: { row?: string; driver?: PaneDriver } = {},
+  opts: { row?: string; driver?: PaneDriver; device?: string | null } = {},
 ): () => void {
+  const driver = opts.driver !== undefined ? opts.driver : kind === "card" ? "other" : null
   return covers.register(ptyId, {
     kind,
     row: opts.row ?? `pty:${ptyId}`,
-    driver: opts.driver !== undefined ? opts.driver : kind === "card" ? "other" : null,
+    driver,
+    device: driver === "other" ? (opts.device ?? null) : null,
   })
 }
 
@@ -166,6 +171,11 @@ export function rowBlockFor(row: string | null): RowBlock | null | undefined {
   if (drivers.includes("reconnecting")) return "reconnecting"
   if (drivers.includes("pending")) return "pending"
   return undefined
+}
+
+/** The label of the device a mounted pane heard drives the row, or null. */
+export function rowDriverDevice(row: string): string | null {
+  return rowEntries(row).find((entry) => entry.device !== null)?.device ?? null
 }
 
 export type RowWatch = {

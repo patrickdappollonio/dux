@@ -802,8 +802,8 @@ function TerminalPart(props: TerminalPartProps) {
           ? "other"
           : "nobody"
   useLayoutEffect(
-    () => registerPaneCover(id, cover.kind, { row, driver }),
-    [id, cover.kind, row, driver],
+    () => registerPaneCover(id, cover.kind, { row, driver, device: takeoverLabel }),
+    [id, cover.kind, row, driver, takeoverLabel],
   )
 
   // Where a picked macro goes, published under this pane's pty id for the Macros

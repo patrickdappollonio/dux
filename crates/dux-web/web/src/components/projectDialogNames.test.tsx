@@ -141,6 +141,53 @@ describe("project confirmations name the project as a chip", () => {
     expect(removeProject).toHaveBeenLastCalledWith("p1", ["k1"])
   })
 
+  it("Remove project names the agent another device drives and offers no Remove", () => {
+    seed({
+      removeProjectTarget: "p1",
+      ownPtyConnIds: { "conn-mine": true },
+      spine: {
+        projects: [project],
+        sessions: [
+          {
+            id: "s1",
+            title: "agentx",
+            workspace: { kind: "managed", project_id: "p1", branch_name: "agentx" },
+            tabs: [{ id: "s1", input_owner: "conn-other" }],
+          },
+        ],
+        terminals: [],
+        sidebar: { groups: [] },
+      },
+    } as unknown as Partial<DuxState>)
+    render(<RemoveProjectDialog />)
+    const note = screen.getByText(/driven from another device/)
+    expect(chips(note)).toEqual(["agentx"])
+    const remove = screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement
+    expect(remove.disabled).toBe(true)
+    const calls = vi.mocked(store.removeProject).mock.calls.length
+    fireEvent.click(remove)
+    expect(vi.mocked(store.removeProject).mock.calls.length).toBe(calls)
+  })
+
+  it("Delete project names a project terminal another device drives and offers no Delete", () => {
+    seed({
+      deleteProjectTarget: "p1",
+      ownPtyConnIds: {},
+      spine: {
+        projects: [project],
+        sessions: [],
+        terminals: [
+          { id: "term-3", owner: { kind: "project", project_id: "p1" }, label: "Terminal 3", input_owner: "conn-other" },
+        ],
+        sidebar: { groups: [] },
+      },
+    } as unknown as Partial<DuxState>)
+    render(<DeleteProjectDialog />)
+    const note = screen.getByText(/driven from another device/)
+    expect(chips(note)).toEqual(["Terminal 3"])
+    expect((screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
   it("Check out default branch names the project and its current base", () => {
     seed({ checkoutDefaultBranchTarget: "p1" } as Partial<DuxState>)
     render(<CheckoutDefaultBranchDialog />)

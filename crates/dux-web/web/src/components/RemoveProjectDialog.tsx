@@ -1,7 +1,12 @@
 import {
   AttachedSection,
+  DrivenElsewhereSection,
   GuardedConfirmButton,
 } from "@/components/AttachedSection"
+import {
+  drivenElsewhereHint,
+  useProjectDrivenElsewhere,
+} from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
@@ -28,6 +33,7 @@ export function RemoveProjectDialog() {
     isOpen,
     removeProjectTarget,
   )
+  const driven = useProjectDrivenElsewhere(removeProjectTarget)
   const project = spine?.projects.find((p) => p.id === removeProjectTarget)
   // For an orphaned ("ghost") project there is no project record, so fall back
   // to the short-id name the sidebar shows for its group.
@@ -60,6 +66,7 @@ export function RemoveProjectDialog() {
             {renderProse(removeProjectProse(name, agentCount))}
           </DialogDescription>
         </DialogHeader>
+        <DrivenElsewhereSection driven={driven} />
         <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
@@ -74,6 +81,7 @@ export function RemoveProjectDialog() {
           </Button>
           <GuardedConfirmButton
             verb="Remove"
+            drivenHint={drivenElsewhereHint(driven)}
             blockers={blockers}
             pending={pending}
             onConfirm={() => void handleConfirm()}

@@ -1,9 +1,12 @@
 import { assertNever } from "@/lib/assertNever"
 import type { EditorRoot } from "@/lib/editorRoot"
 import { useOpenerVerdict } from "@/lib/openerPage"
+import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   agentRowKey,
   rowBlockFor,
+  rowDriverDevice,
+  rowKeyOfPart,
   rowKeyOfTarget,
   useAgentRowWatch,
   useRowWatch,
@@ -11,6 +14,7 @@ import {
 } from "@/lib/paneCover"
 import {
   sessionActiveElsewhere,
+  terminalActiveElsewhere,
   useDux,
   useDuxSelector,
   type DuxState,
@@ -111,15 +115,6 @@ function agentActiveElsewhere(state: DuxState, sessionId: string | null): boolea
   return session !== undefined && sessionActiveElsewhere(state, session)
 }
 
-/// The spine's word on whether another device drives a terminal: a mounted
-/// pane's verdict first, then the terminal's owner against this page's own ids.
-function terminalActiveElsewhere(state: DuxState, terminalId: string): boolean {
-  const local = state.ptyOwnership?.[terminalId]
-  if (local !== undefined) return local === "elsewhere"
-  const owner = state.spine?.terminals.find((t) => t.id === terminalId)?.input_owner
-  return owner !== undefined && owner !== "" && !state.ownPtyConnIds?.[owner]
-}
-
 /// The same answer for every agent of a list, by session id.
 export function useAgentChangeBlocks(
   sessions: readonly SessionView[],
@@ -135,6 +130,55 @@ export function useAgentChangeBlocks(
       ),
     ]),
   )
+}
+
+/// An agent or a terminal of a project that another device drives, by name,
+/// with that device's label when a mounted pane of it heard which.
+export interface DrivenElsewhere {
+  kind: "agent" | "terminal"
+  name: string
+  device: string | null
+}
+
+/// Every agent and project terminal of `projectId` this page can tell another
+/// device drives: a change to the project would change their rows, which the
+/// server refuses.
+export function useProjectDrivenElsewhere(projectId: string | null): DrivenElsewhere[] {
+  const state = useDux()
+  useRowWatch(null)
+  if (projectId === null) return []
+  const agents = (state.spine?.sessions ?? [])
+    .filter((session) => workspaceProjectId(session.workspace) === projectId)
+    .filter(
+      (session) =>
+        agentChangeBlock(rowBlockFor(agentRowKey(session.id)), () =>
+          sessionActiveElsewhere(state, session),
+        ) === "other",
+    )
+    .map((session) => ({
+      kind: "agent" as const,
+      name: sessionLabel(session),
+      device: rowDriverDevice(agentRowKey(session.id)),
+    }))
+  const terminals = (state.spine?.terminals ?? [])
+    .filter((t) => t.owner.kind === "project" && t.owner.project_id === projectId)
+    .map((t) => ({ t, row: rowKeyOfPart({ kind: "terminal", id: t.id, owner: { kind: "project" } }) }))
+    .filter(
+      ({ t, row }) =>
+        agentChangeBlock(rowBlockFor(row), () => terminalActiveElsewhere(state, t.id)) ===
+        "other",
+    )
+    .map(({ t, row }) => ({ kind: "terminal" as const, name: t.label, device: rowDriverDevice(row) }))
+  return [...agents, ...terminals]
+}
+
+/** The disabled confirm's hint while another device drives part of what it
+ * would change. */
+export function drivenElsewhereHint(driven: readonly DrivenElsewhere[]): string | null {
+  if (driven.length === 0) return null
+  return driven.length === 1
+    ? `Another device is driving this ${driven[0].kind}. Take it over on this device first.`
+    : "Another device is driving parts of this. Take them over on this device first."
 }
 
 /// Why a menu's entries that change the agent are disabled right now, said once

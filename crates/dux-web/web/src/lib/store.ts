@@ -97,7 +97,15 @@ import {
   notifyWarning,
   setStatusClearSeconds,
 } from "./notify"
-import { chip, type Prose, type ProseName, prose, wireProse } from "./prose"
+import { formatRegularCount } from "./formatRegularCount"
+import {
+  chip,
+  type Prose,
+  type ProseName,
+  type ProseSegment,
+  prose,
+  wireProse,
+} from "./prose"
 import {
   type ProjectSettingsSubject,
   projectSettingsSaved,
@@ -119,7 +127,14 @@ import { applyAttentionFavicon } from "./favicon"
 import { statusToastAllowed } from "./statusRouting"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { tabPosition, tabTitle } from "./tabTitle"
-import { agentRowKey, rowWatchedFor, subscribePaneCovers } from "./paneCover"
+import {
+  agentRowKey,
+  rowBlockFor,
+  rowDriverDevice,
+  rowKeyOfPart,
+  rowWatchedFor,
+  subscribePaneCovers,
+} from "./paneCover"
 import { isRowDriven } from "./rowDriven"
 import {
   type RawWorkspace,
@@ -9904,6 +9919,15 @@ export function sessionActiveElsewhere(
   )
 }
 
+/// The spine's word on whether another device drives a terminal: a mounted
+/// pane's verdict first, then the terminal's owner against this page's own ids.
+export function terminalActiveElsewhere(s: DuxState, terminalId: string): boolean {
+  const local = s.ptyOwnership?.[terminalId]
+  if (local !== undefined) return local === "elsewhere"
+  const owner = s.spine?.terminals.find((t) => t.id === terminalId)?.input_owner
+  return owner !== undefined && owner !== "" && !s.ownPtyConnIds?.[owner]
+}
+
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
 // gate; the dialog derives its rows from the spine and polls the stats itself
 // while open.
@@ -9924,20 +9948,118 @@ export function closeStopAll(): void {
   setState({ stopAllOpen: false })
 }
 
+/** A row "Force stop everything" leaves running because another device drives
+ * it: an agent with its own terminals, or a terminal that is a row of its own. */
+export interface LeftRunning {
+  kind: "agent" | "terminal"
+  id: string
+  name: string
+  /** An agent's own running terminals, left with it. */
+  terminals: number
+  /** The driving device's label, when a mounted pane of the row heard it. */
+  device: string | null
+}
+
+/** What "Force stop everything" stops: every running agent and every terminal,
+ * except the rows this page already knows another device drives, which the
+ * server would refuse. */
+export function stopAllPlan(s: DuxState): {
+  agents: string[]
+  terminals: string[]
+  left: LeftRunning[]
+} {
+  const sessions = s.spine?.sessions ?? []
+  const terminals = s.spine?.terminals ?? []
+  const elsewhere = (row: string, spine: () => boolean) => {
+    const block = rowBlockFor(row)
+    return block === undefined ? spine() : block === "other"
+  }
+  const drivenAgents = new Set(
+    sessions
+      .filter((session) => elsewhere(agentRowKey(session.id), () => sessionActiveElsewhere(s, session)))
+      .map((session) => session.id),
+  )
+  const left: LeftRunning[] = []
+  const agents: string[] = []
+  for (const session of sessions) {
+    const own = terminals.filter(
+      (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
+    ).length
+    if (!drivenAgents.has(session.id)) {
+      if (session.status === "active") agents.push(session.id)
+    } else if (session.status === "active" || own > 0) {
+      left.push({
+        kind: "agent",
+        id: session.id,
+        name: sessionLabel(session),
+        terminals: own,
+        device: rowDriverDevice(agentRowKey(session.id)),
+      })
+    }
+  }
+  const stopped: string[] = []
+  for (const t of terminals) {
+    if (t.owner.kind === "session") {
+      if (!drivenAgents.has(t.owner.session_id)) stopped.push(t.id)
+      continue
+    }
+    const row = rowKeyOfPart({ kind: "terminal", id: t.id, owner: t.owner })
+    if (elsewhere(row, () => terminalActiveElsewhere(s, t.id))) {
+      left.push({ kind: "terminal", id: t.id, name: t.label, terminals: 0, device: rowDriverDevice(row) })
+    } else {
+      stopped.push(t.id)
+    }
+  }
+  return { agents, terminals: stopped, left }
+}
+
+/** What "Force stop everything" leaves running, and why. */
+export function leftRunningProse(left: readonly LeftRunning[]): Prose {
+  const out: ProseSegment[] = [
+    "Left running, because another device drives ",
+    left.length === 1 ? "it: " : "them: ",
+  ]
+  left.forEach((part, index) => {
+    if (index > 0) out.push(index === left.length - 1 ? " and " : ", ")
+    out.push(`${part.kind} `, chip(part.name))
+    if (part.terminals > 0) {
+      out.push(` with its ${formatRegularCount(part.terminals, "terminal")}`)
+    }
+    if (part.device !== null) out.push(" (driven from ", chip(part.device), ")")
+  })
+  out.push(
+    left.length === 1
+      ? ". Take it over on this device first to stop it."
+      : ". Take them over on this device first to stop them.",
+  )
+  return out
+}
+
+function leftRunningNotice(
+  stopped: { agents: number; terminals: number },
+  left: readonly LeftRunning[],
+): Prose {
+  const counts = [
+    ...(stopped.agents > 0 ? [formatRegularCount(stopped.agents, "agent")] : []),
+    ...(stopped.terminals > 0 ? [formatRegularCount(stopped.terminals, "terminal")] : []),
+  ]
+  return [
+    counts.length === 0 ? "Nothing was stopped. " : `Stopped ${counts.join(" and ")}. `,
+    ...leftRunningProse(left),
+  ]
+}
+
 // Force-stop every running agent (detached, not closed, so its tabs survive) and every
 // terminal. Stops refused for somebody attached come back; `only` retries exactly those.
 export async function stopAllRunning(
   only: StopAllRefusal | null = null,
   accepted: readonly string[] | null = null,
 ): Promise<StopAllRefusal | null> {
-  const agents =
-    only?.agents ??
-    (state.spine?.sessions ?? [])
-      .filter((s) => s.status === "active")
-      .map((s) => s.id)
+  const plan = only === null ? stopAllPlan(state) : null
+  const agents = only?.agents ?? plan?.agents ?? []
   // One flat collection, so every terminal of every owner is reached by one
   // loop and no owner kind can be missed.
-  const terminals = only?.terminals ?? (state.spine?.terminals ?? []).map((t) => t.id)
+  const terminals = only?.terminals ?? plan?.terminals ?? []
   // One row of the agents list at a time: an agent with its own terminals, or
   // a terminal that is a row of its own. A row another device drives refuses
   // every stop in it the same way, so its first refusal ends that row's stops
@@ -9955,54 +10077,77 @@ export async function stopAllRunning(
   const refusedAgents: string[] = []
   const refusedTerminals: string[] = []
   const blockers = new Map<string, AttachedBlocker>()
-  const driven: string[] = []
-  const stop = async (request: Promise<unknown>, fallback: string): Promise<"went" | "attached" | "driven"> => {
+  const left: LeftRunning[] = [...(plan?.left ?? [])]
+  const stopped = { agents: 0, terminals: 0 }
+  const stop = async (
+    kind: "agents" | "terminals",
+    request: Promise<unknown>,
+    fallback: string,
+  ): Promise<"went" | "attached" | "driven"> => {
     try {
       await request
+      stopped[kind] += 1
       return "went"
     } catch (e) {
       if (e instanceof AttachedError) {
         for (const blocker of e.blockers) blockers.set(blocker.key, blocker)
         return "attached"
       }
-      if (isRowDriven(e)) {
-        driven.push(e.message)
-        return "driven"
-      }
+      if (isRowDriven(e)) return "driven"
       notifyError(e instanceof Error ? e.message : fallback)
       return "went"
+    }
+  }
+  // A row the server says another device drives, though this page did not know.
+  const drivenRow = (row: { agent: string | null; terminals: string[] }, from: number) => {
+    const session =
+      row.agent === null ? undefined : state.spine?.sessions.find((s) => s.id === row.agent)
+    if (session !== undefined) {
+      left.push({
+        kind: "agent",
+        id: session.id,
+        name: sessionLabel(session),
+        terminals: row.terminals.length,
+        device: null,
+      })
+      return
+    }
+    for (const id of row.terminals.slice(from)) {
+      const t = state.spine?.terminals.find((x) => x.id === id)
+      left.push({ kind: "terminal", id, name: t?.label ?? id, terminals: 0, device: null })
     }
   }
   await Promise.all(
     [...rows.values()].map(async (row) => {
       if (row.agent !== null) {
         const answer = await stop(
+          "agents",
           sessionsApi.kill(row.agent, true, accepted),
           "Could not kill the agent.",
         )
         if (answer === "attached") refusedAgents.push(row.agent)
-        if (answer === "driven") return
+        if (answer === "driven") {
+          drivenRow(row, 0)
+          return
+        }
       }
-      for (const id of row.terminals) {
+      for (const [index, id] of row.terminals.entries()) {
         const owner = findTerminalOwner(id)
         if (owner === undefined) continue
         const answer = await stop(
+          "terminals",
           terminalDeleteRequest(owner, id, accepted),
           "Could not close the terminal.",
         )
         if (answer === "attached") refusedTerminals.push(id)
-        if (answer === "driven") return
+        if (answer === "driven") {
+          drivenRow(row, index)
+          return
+        }
       }
     }),
   )
-  if (driven.length > 0) {
-    const others = driven.length - 1
-    notifyError(
-      others === 0
-        ? `One agent or terminal was left running. ${driven[0]}`
-        : `${driven.length} agents or terminals were left running, each driven from another device. The first: ${driven[0]}`,
-    )
-  }
+  if (left.length > 0) notifyWarning(leftRunningNotice(stopped, left))
   if (refusedAgents.length === 0 && refusedTerminals.length === 0) return null
   return {
     agents: refusedAgents,

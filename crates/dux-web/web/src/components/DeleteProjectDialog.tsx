@@ -1,7 +1,12 @@
 import {
   AttachedSection,
+  DrivenElsewhereSection,
   GuardedConfirmButton,
 } from "@/components/AttachedSection"
+import {
+  drivenElsewhereHint,
+  useProjectDrivenElsewhere,
+} from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { Button } from "@/components/ui/button"
 import {
@@ -100,6 +105,7 @@ export function DeleteProjectDialog() {
     isOpen,
     deleteProjectTarget,
   )
+  const driven = useProjectDrivenElsewhere(deleteProjectTarget)
   const name = project?.name
   const projectSessions =
     spine?.sessions.filter(
@@ -133,6 +139,7 @@ export function DeleteProjectDialog() {
           </DialogDescription>
         </DialogHeader>
         {isOpen && <ProjectWorktreeFiles agents={worktrees} />}
+        <DrivenElsewhereSection driven={driven} />
         <AttachedSection blockers={blockers} />
         {/* Misclick-safe spacing between the body and the buttons. */}
         <div className="h-2" />
@@ -147,6 +154,7 @@ export function DeleteProjectDialog() {
           </Button>
           <GuardedConfirmButton
             verb="Delete"
+            drivenHint={drivenElsewhereHint(driven)}
             blockers={blockers}
             pending={pending}
             onConfirm={() => void handleConfirm()}
