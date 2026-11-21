@@ -17,8 +17,9 @@ use dux_core::ids::TabIdRef;
 use dux_core::pty_owners::RowKey;
 
 /// Whether `action`, on the selected agent, would change its row: start or
-/// stop any of it, add, close or reorder a tab or terminal, or change what the
-/// agent is. Exhaustive, so a new action does not compile until it is decided.
+/// stop any of it, add, close or reorder a tab or terminal, change what the
+/// agent is, or write to its working copy's git state. Exhaustive, so a new
+/// action does not compile until it is decided.
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per action, so a new action does not compile until it is decided"
@@ -42,7 +43,13 @@ pub(crate) fn changes_agent_row(action: Action) -> bool {
         | Action::ShowTerminal
         | Action::CycleTerminalLayout
         | Action::NewTerminal
-        | Action::CloseTerminal => true,
+        | Action::CloseTerminal
+        | Action::StageUnstage
+        | Action::CommitChanges
+        | Action::DiscardChanges
+        | Action::EngageCommitInput
+        | Action::PushToRemote
+        | Action::PullFromRemote => true,
         // Looking: under the card each shows the card and starts nothing.
         Action::FocusAgent
         | Action::InteractAgent
@@ -97,12 +104,6 @@ pub(crate) fn changes_agent_row(action: Action) -> bool {
         | Action::ScrollToBottom
         | Action::ScrollToTop
         | Action::OpenDiff
-        | Action::StageUnstage
-        | Action::CommitChanges
-        | Action::DiscardChanges
-        | Action::EngageCommitInput
-        | Action::PushToRemote
-        | Action::PullFromRemote
         | Action::SearchFiles
         | Action::SearchNext
         | Action::ExitCommitInput
@@ -456,6 +457,9 @@ impl App {
             | PromptState::ConfirmDetachAgent { session_id, .. }
             | PromptState::ConfirmRecreateWorkingCopy { session_id, .. }
             | PromptState::RenameSession { session_id, .. } => Some(session_id.clone()),
+            PromptState::ConfirmDiscardFile { .. } if self.selected_terminal_row().is_none() => {
+                self.selected_session().map(|session| session.id.clone())
+            }
             PromptState::ConfirmDeleteTerminal { terminal_id, .. } => self
                 .engine
                 .companion_terminals
@@ -513,8 +517,9 @@ impl App {
         }
     }
 
-    /// Abandon a strip or divider drag, and a dialog whose answer would change
-    /// a row, that the card has come up over, saying why. True when one went.
+    /// Abandon a strip or divider drag, a dialog whose answer would change a
+    /// row, and an engaged commit message, that the card has come up over,
+    /// saying why. True when one went.
     fn drop_work_the_card_came_up_over(&mut self) -> bool {
         let mut dropped = false;
         if let Some(drag) = &self.tab_drag
@@ -535,6 +540,11 @@ impl App {
             && self.refuse_row_change_of(&session_id)
         {
             self.prompt = PromptState::None;
+            dropped = true;
+        }
+        // The typed message stays, for a commit after a take-over.
+        if self.input_target == InputTarget::CommitMessage && self.refuse_row_change() {
+            self.input_target = InputTarget::None;
             dropped = true;
         }
         if dropped {
@@ -922,31 +932,10 @@ mod tests {
         (Action::DeleteProject, "project-level, decided separately"),
         (Action::RemoveProject, "project-level, decided separately"),
         (Action::ManageWorktrees, "project-level, decided separately"),
-        (
-            Action::RefreshChanges,
-            "the Changes pane, decided separately",
-        ),
-        (Action::OpenDiff, "the Changes pane, decided separately"),
-        (Action::StageUnstage, "the Changes pane, decided separately"),
-        (
-            Action::CommitChanges,
-            "the Changes pane, decided separately",
-        ),
-        (
-            Action::DiscardChanges,
-            "the Changes pane, decided separately",
-        ),
-        (
-            Action::EngageCommitInput,
-            "the Changes pane, decided separately",
-        ),
-        (Action::PushToRemote, "the Changes pane, decided separately"),
-        (
-            Action::PullFromRemote,
-            "the Changes pane, decided separately",
-        ),
-        (Action::SearchFiles, "the Changes pane, decided separately"),
-        (Action::SearchNext, "the Changes pane, decided separately"),
+        (Action::RefreshChanges, "reads the Changes pane"),
+        (Action::OpenDiff, "reads the Changes pane"),
+        (Action::SearchFiles, "reads the Changes pane"),
+        (Action::SearchNext, "reads the Changes pane"),
         (
             Action::OpenCurrentPullRequest,
             "pull requests, decided separately",
@@ -998,8 +987,6 @@ mod tests {
         (Action::ChangeProjectBaseBranch, "runs git on a worker"),
         (Action::ManageWorktrees, "runs git on a worker"),
         (Action::RefreshChanges, "runs git on a worker"),
-        (Action::PushToRemote, "runs git push on a worker"),
-        (Action::PullFromRemote, "runs git pull on a worker"),
     ];
 
     fn not_run(action: Action) -> bool {
@@ -1394,7 +1381,12 @@ mod tests {
             | Action::MoveTabRight
             | Action::ShowTerminal
             | Action::CycleTerminalLayout
-            | Action::NewTerminal => Finish::AtOnce,
+            | Action::NewTerminal
+            | Action::StageUnstage
+            | Action::EngageCommitInput
+            | Action::PushToRemote
+            | Action::PullFromRemote => Finish::AtOnce,
+            Action::CommitChanges | Action::DiscardChanges => git_dialog(action),
             Action::RenameSession => Finish::Dialog {
                 open: |app| palette(app, "rename-agent"),
                 confirm: |app| {
@@ -1480,6 +1472,57 @@ mod tests {
         }
     }
 
+    /// A changed file of the agent's working copy, as the Changes pane lists it.
+    fn changed_file(path: &str) -> dux_core::model::ChangedFile {
+        dux_core::model::ChangedFile {
+            status: "M".to_string(),
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            diff_excluded: false,
+            renamed_from: None,
+            kind: dux_core::model::ChangedFileKind::File,
+        }
+    }
+
+    /// The agent the open dialog, or the engaged commit message, is about.
+    fn dialog_open_on(app: &App) -> Option<String> {
+        if app.input_target == InputTarget::CommitMessage {
+            return app.selected_session().map(|session| session.id.clone());
+        }
+        app.prompt_row_target()
+    }
+
+    /// How a git write in the Changes pane finishes through its dialog.
+    fn git_dialog(action: Action) -> Finish {
+        match action {
+            Action::CommitChanges => Finish::Dialog {
+                open: |app| {
+                    app.engine.staged_files = vec![changed_file("staged.txt")];
+                    app.focus = FocusPane::Files;
+                    let key = key_for(app, Action::EngageCommitInput, BindingScope::Files);
+                    app.handle_key(key).unwrap();
+                    app.commit_input.set_text("A message".to_string());
+                },
+                confirm: |app| app.execute_commit().unwrap(),
+            },
+            Action::DiscardChanges => Finish::Dialog {
+                open: |app| {
+                    app.engine.unstaged_files = vec![changed_file("notes.md")];
+                    app.focus = FocusPane::Files;
+                    app.right_section = crate::app::RightSection::Unstaged;
+                    app.files_index = 0;
+                    app.confirm_discard_selected_file();
+                },
+                confirm: |app| {
+                    app.resolve_confirm_discard_file(ConfirmAnswer::Confirm);
+                },
+            },
+            other => unreachable!("{other:?} opens no git dialog"),
+        }
+    }
+
     /// Point the open provider picker at a provider the agent does not use.
     fn another_provider(app: &mut App) {
         let PromptState::ChangeAgentProvider(prompt) = &mut app.prompt else {
@@ -1516,13 +1559,17 @@ mod tests {
                 let (mut app, seat) = driving();
                 open(&mut app);
                 assert_eq!(
-                    app.prompt_row_target().as_deref(),
+                    dialog_open_on(&app).as_deref(),
                     Some(SESSION),
                     "{what}: its dialog is open on the agent: {}",
                     said(&app)
                 );
                 browser_takes(&seat);
-                let before = row_state(&app, &seat);
+                let mut before = row_state(&app, &seat);
+                if through_a_key && before.view.input_target == InputTarget::CommitMessage {
+                    // The key drops the engaged message as it closes a dialog.
+                    before.view.input_target = InputTarget::None;
+                }
                 quiet(&mut app);
                 if through_a_key {
                     app.handle_key(enter()).unwrap();
@@ -1536,12 +1583,22 @@ mod tests {
                 );
                 if through_a_key {
                     assert!(matches!(app.prompt, PromptState::None), "{what}");
+                    assert_ne!(app.input_target, InputTarget::CommitMessage, "{what}");
                 }
+                let busy = dux_core::statusline::StatusTone::Busy.as_wire();
+                assert!(
+                    app.status
+                        .snapshot()
+                        .iter()
+                        .all(|status| status.tone != busy),
+                    "{what}: a git change started: {}",
+                    said(&app)
+                );
                 app.prompt = PromptState::None;
                 assert_eq!(row_state(&app, &seat), before, "{what}");
             }
         }
-        assert!(walked >= 9, "the dialogs were walked");
+        assert!(walked >= 11, "the dialogs were walked");
     }
 
     /// Every engine call that changes an agent's row refuses for a row this
@@ -2246,6 +2303,115 @@ mod tests {
         let words: Vec<&str> = pane.iter().map(|(_, word)| *word).collect();
         assert!(!words.contains(&"Type"), "{words:?}");
         assert!(words.contains(&"Fullscreen"), "{words:?}");
+
+        app.focus = FocusPane::Files;
+        let files = app.footer_hints_for(crate::keybindings::HintContext::Files);
+        let words: Vec<&str> = files.iter().map(|(_, word)| *word).collect();
+        for refused in [
+            "Stage/Unstage",
+            "Commit",
+            "Discard",
+            "Commit msg",
+            "Push",
+            "Pull",
+        ] {
+            assert!(!words.contains(&refused), "{refused}: {words:?}");
+        }
+        assert!(
+            words.contains(&"Diff") && words.contains(&"Search"),
+            "{words:?}"
+        );
+        let text = |line: ratatui::text::Line<'static>| -> String {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let list = text(app.files_hint_line(200));
+        assert!(!list.contains("stage") && list.contains("search"), "{list}");
+        let commit = text(app.commit_hint_line(crate::theme::FocusState::Unfocused, 200));
+        assert!(
+            !commit.contains("edit") && !commit.contains("commit"),
+            "{commit}"
+        );
+    }
+
+    /// Under the card the commit message box does not engage from the diff key
+    /// on it or a click into it, and says why.
+    #[test]
+    fn under_the_card_the_commit_message_box_does_not_engage() {
+        let (mut app, _seat) = covered(Driver::Browser);
+        app.engine.staged_files = vec![changed_file("staged.txt")];
+        app.focus = FocusPane::Files;
+        app.right_section = crate::app::RightSection::CommitInput;
+        let _ = render_rows(&mut app, 160, 40);
+        quiet(&mut app);
+        let open = key_for(&app, Action::OpenDiff, BindingScope::Files);
+        app.handle_key(open).unwrap();
+        assert_ne!(app.input_target, InputTarget::CommitMessage, "by key");
+        assert!(said(&app).contains("so nothing changed"), "{}", said(&app));
+
+        let area = app.mouse_layout.commit_text_area.expect("the box is drawn");
+        quiet(&mut app);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            mouse(&mut app, kind, area.x + 1, area.y);
+        }
+        assert_ne!(app.input_target, InputTarget::CommitMessage, "by click");
+        assert!(said(&app).contains("so nothing changed"), "{}", said(&app));
+    }
+
+    /// A git change already running in the agent's working copy when the card
+    /// comes up finishes, and the next one asked for is refused.
+    #[test]
+    fn a_git_change_running_when_the_card_comes_up_finishes_and_no_new_one_starts() {
+        let (mut app, seat) = driving();
+        let worktree = app.engine.paths.worktrees_root.clone();
+        for name in ["first.txt", "second.txt"] {
+            std::fs::write(worktree.join(name), "x\n").unwrap();
+        }
+        let staged = || {
+            let out = std::process::Command::new("git")
+                .args(["diff", "--cached", "--name-only"])
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let stage = key_for(&app, Action::StageUnstage, BindingScope::Files);
+        let select = |app: &mut App, path: &str| {
+            app.engine.unstaged_files = vec![changed_file(path)];
+            app.focus = FocusPane::Files;
+            app.right_section = crate::app::RightSection::Unstaged;
+            app.files_index = 0;
+        };
+        // Holding the working copy's lane keeps the stage queued, so it is
+        // still running when the browser takes the row.
+        let lane = dux_core::changes_lane::ticket(&worktree).wait();
+        select(&mut app, "first.txt");
+        app.handle_key(stage).unwrap();
+        browser_takes(&seat);
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.agent_row_card().is_some());
+        drop(lane);
+        for _ in 0..500 {
+            app.drain_events();
+            if staged().contains("first.txt") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(staged().contains("first.txt"), "the running stage finished");
+
+        select(&mut app, "second.txt");
+        quiet(&mut app);
+        app.handle_key(stage).unwrap();
+        assert!(said(&app).contains("so nothing changed"), "{}", said(&app));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app.drain_events();
+        assert!(!staged().contains("second.txt"), "a new stage started");
     }
 
     /// The take-over line names what is taken over: the agent over an agent's

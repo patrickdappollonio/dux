@@ -286,14 +286,18 @@ the terminal UI and in the browser alike.
   detaching, deleting or recreating it, changing its provider or auto-reopen, rerunning its
   startup command, and changing how it shares the pane with its terminals are off. The
   browser disables them; the terminal UI refuses them and says on its status line who is
-  driving and how to take over. That holds for something you began before the other device
-  took over, too: in the terminal UI an open dialog about the agent closes and a tab or
-  divider drag stops, with the same line saying why.
+  driving and how to take over. In the terminal UI, staging, unstaging, discarding,
+  committing, pushing and pulling in its Changes pane are refused the same way, and one
+  already running when the other device took over finishes. That holds for something you
+  began before the other device took over, too: in the terminal UI an open dialog about the
+  agent closes, a commit message you were writing stops taking typing (what you typed
+  stays), and a tab or divider drag stops, with the same line saying why.
 - **Looking is always allowed:** selecting the agent or one of its tabs, showing it from
   the list or the command palette, maximizing it to look at the card and leaving fullscreen
   again, its info and its logs keep working under the card, and none of it starts the agent,
-  even one that is stopped. Pull requests, project commands and moving the agent in the
-  list are not held back by the card either.
+  even one that is stopped, and so does reading its Changes pane and its diffs. Pull
+  requests, project commands and moving the agent in the list are not held back by the card
+  either.
 - **The server refuses it too:** a change to an agent another device is driving that
   arrives from a browser or from the `dux` command line is refused by dux itself, with a
   sentence naming the driver, whatever the screen that sent it had enabled. That includes

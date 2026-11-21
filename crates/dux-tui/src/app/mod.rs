@@ -72,11 +72,11 @@ use text_input::TextInput;
 
 pub(crate) use dux_core::worker::{
     AgentLaunchKind, BranchWarningKind, BrowserEntry, CreateAgentRequest, NonDefaultBranchAction,
-    ProjectWorktreeEntry, PullTarget, ResourceStats, WorkerEvent,
+    ProjectWorktreeEntry, ResourceStats, WorkerEvent,
 };
 #[cfg(test)]
 pub(crate) use dux_core::worker::{
-    AgentLaunchReadyData, CreateAgentBranchInspection, ProcessInfo, ResourceKind,
+    AgentLaunchReadyData, CreateAgentBranchInspection, ProcessInfo, PullTarget, ResourceKind,
 };
 
 /// Status key shared by every hint that describes what the interface is doing

@@ -16,6 +16,8 @@
 //! A row with nothing running has no driver and no card, so it is never
 //! refused: starting it is how this surface comes to drive it.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 use dux_core::branch_history::BranchAnswersWire;
 use dux_core::engine::{
@@ -26,7 +28,8 @@ use dux_core::engine::{
 use dux_core::model::{AgentSession, ProviderKind};
 use dux_core::status_text::StatusText;
 use dux_core::wire::{WireCommand, WireCommandOutcome};
-use dux_core::worker::AgentLaunchRequest;
+use dux_core::worker::{AgentLaunchRequest, PullTarget};
+use dux_core::worktree_ops::WorktreeOpGuard;
 
 use super::{App, DockLayout, TerminalOwnerRef};
 
@@ -238,6 +241,97 @@ impl App {
         }))
     }
 
+    pub(crate) fn row_stage_file(
+        &mut self,
+        session_id: &str,
+        worktree_path: PathBuf,
+        path: String,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::StageFile {
+            worktree_path,
+            path,
+        }))
+    }
+
+    pub(crate) fn row_unstage_file(
+        &mut self,
+        session_id: &str,
+        worktree_path: PathBuf,
+        path: String,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::UnstageFile {
+            worktree_path,
+            path,
+        }))
+    }
+
+    pub(crate) fn row_discard_file(
+        &mut self,
+        session_id: &str,
+        worktree_path: PathBuf,
+        path: String,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::DiscardFileLive {
+            worktree_path,
+            path,
+        }))
+    }
+
+    /// Hold `worktree` for a whole-folder stage, unstage or delete that runs on
+    /// this crate's own worker rather than through the engine.
+    pub(crate) fn row_hold_for_git_change(
+        &mut self,
+        session_id: &str,
+        worktree: &Path,
+        what: &str,
+    ) -> Option<Result<WorktreeOpGuard>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.hold_for_git_change(worktree, what))
+    }
+
+    pub(crate) fn row_commit(
+        &mut self,
+        session_id: &str,
+        worktree_path: PathBuf,
+        message: String,
+        success_message: String,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::CommitChanges {
+            worktree_path,
+            message,
+            success_message,
+        }))
+    }
+
+    pub(crate) fn row_push(
+        &mut self,
+        session_id: &str,
+        worktree_path: PathBuf,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::Push { worktree_path }))
+    }
+
+    pub(crate) fn row_pull(
+        &mut self,
+        session_id: &str,
+        repo_path: PathBuf,
+        busy_message: StatusText,
+        already_running_message: StatusText,
+    ) -> Option<Result<EventReaction>> {
+        self.permitted_row(session_id)?;
+        Some(self.engine.apply(Command::Pull {
+            repo_path,
+            target: PullTarget::Session,
+            busy_message,
+            already_running_message,
+        }))
+    }
+
     /// Remember `layout` as how `session_id` shares the center pane with its
     /// terminals.
     pub(crate) fn row_remember_layout(
@@ -267,6 +361,7 @@ mod tests {
         "create_companion_terminal",
         "kill_tab_runtime",
         "begin_close_companion_terminal",
+        "hold_for_git_change",
     ];
 
     /// The variants of the engine's `Command` that change an agent's row.
@@ -278,6 +373,13 @@ mod tests {
         "DeleteTerminal",
         "ReorderTerminals",
         "ReorderAgentTabs",
+        "StageFile",
+        "UnstageFile",
+        "DiscardFile",
+        "DiscardFileLive",
+        "CommitChanges",
+        "Push",
+        "Pull",
     ];
 
     /// The variants of `WireCommand`, the engine's other entry point, that
@@ -298,6 +400,12 @@ mod tests {
         "ReorderAgentTabs",
         "ReorderTerminals",
         "ToggleAgentAutoReopen",
+        "StageFile",
+        "UnstageFile",
+        "DiscardFile",
+        "CommitChanges",
+        "Push",
+        "Pull",
     ];
 
     /// This window's own memory of an agent's row: its layout and the
@@ -332,6 +440,11 @@ mod tests {
             "names Command::FinishDeleteSession",
             "finishes a delete `row_begin_delete` admitted; refusing it would strand a \
              half-deleted agent",
+        ),
+        (
+            "sessions.rs",
+            "names Command::Pull",
+            "pulls a project, deliberately not gated by the card",
         ),
         (
             "dock.rs",

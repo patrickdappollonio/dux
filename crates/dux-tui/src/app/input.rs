@@ -2828,6 +2828,9 @@ impl App {
         }
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Files) {
+            if changes_agent_row(action) && self.refuse_row_change() {
+                return Ok(());
+            }
             match action {
                 Action::MoveDown if self.right_section != RightSection::CommitInput => {
                     let len = self.current_files_len();
@@ -2848,7 +2851,7 @@ impl App {
                 }
                 Action::OpenDiff => {
                     if self.right_section == RightSection::CommitInput {
-                        if !self.engine.staged_files.is_empty() {
+                        if !self.engine.staged_files.is_empty() && !self.refuse_row_change() {
                             self.input_target = InputTarget::CommitMessage;
                         }
                     } else {
@@ -3118,16 +3121,16 @@ impl App {
             return Ok(());
         }
         let path = file.path.clone();
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return Ok(());
+        };
         let reaction = match self.right_section {
-            RightSection::Unstaged => self.engine.apply(Command::StageFile {
-                worktree_path: worktree,
-                path,
-            })?,
-            RightSection::Staged => self.engine.apply(Command::UnstageFile {
-                worktree_path: worktree,
-                path,
-            })?,
+            RightSection::Unstaged => self.row_stage_file(&session_id, worktree, path),
+            RightSection::Staged => self.row_unstage_file(&session_id, worktree, path),
             RightSection::CommitInput => return Ok(()),
+        };
+        let Some(reaction) = reaction.transpose()? else {
+            return Ok(());
         };
         // The stage runs on a worker, whose completion reads the listing again.
         self.apply_reaction(reaction);
@@ -3197,7 +3200,7 @@ impl App {
         };
     }
 
-    fn execute_commit(&mut self) -> Result<()> {
+    pub(crate) fn execute_commit(&mut self) -> Result<()> {
         if self.selected_session().is_none() {
             self.set_error("Select a session first.");
             return Ok(());
@@ -3222,11 +3225,15 @@ impl App {
             .filter(|session| session.supports_branch_git())
             .map(|_| self.bindings.label_for(Action::PushToRemote));
         let success_message = commit_success_message(push_key.as_deref());
-        let reaction = self.engine.apply(Command::CommitChanges {
-            worktree_path: worktree,
-            message: message.clone(),
-            success_message,
-        })?;
+        let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+            return Ok(());
+        };
+        let Some(reaction) = self
+            .row_commit(&session_id, worktree, message.clone(), success_message)
+            .transpose()?
+        else {
+            return Ok(());
+        };
         // The typed message is cleared when the commit's final says it
         // landed (see the status arm of `apply_reaction`); the changes list is
         // read again when the worker finishes.
@@ -3308,9 +3315,9 @@ impl App {
                 return Ok(());
             }
         };
-        let reaction = self.engine.apply(Command::Push {
-            worktree_path: worktree,
-        })?;
+        let Some(reaction) = self.row_push(&session_id, worktree).transpose()? else {
+            return Ok(());
+        };
         self.apply_reaction(reaction);
         Ok(())
     }
@@ -3336,17 +3343,21 @@ impl App {
                 return Ok(());
             }
         };
-        let reaction = self.engine.apply(Command::Pull {
-            repo_path: PathBuf::from(managed.worktree_path.clone()),
-            target: PullTarget::Session,
-            busy_message: "Pulling latest changes from remote\u{2026}"
-                .to_string()
-                .into(),
-            already_running_message:
+        let Some(reaction) = self
+            .row_pull(
+                &session_id,
+                PathBuf::from(managed.worktree_path.clone()),
+                "Pulling latest changes from remote\u{2026}"
+                    .to_string()
+                    .into(),
                 "Pull already in progress for this worktree. Wait for the current pull to finish."
                     .to_string()
                     .into(),
-        })?;
+            )
+            .transpose()?
+        else {
+            return Ok(());
+        };
         self.apply_reaction(reaction);
         Ok(())
     }
@@ -10192,13 +10203,13 @@ impl App {
             // what the discard may touch: a folder that has since taken the
             // name is refused.
             // The listing is read again when the discard's worker finishes.
-            let reaction = self.engine.apply(Command::DiscardFileLive {
-                worktree_path: worktree,
-                path: file_path,
-            });
-            match reaction {
-                Ok(reaction) => self.apply_reaction(reaction),
-                Err(e) => self.set_error(format!("Discard failed: {e}")),
+            let Some(session_id) = self.selected_session().map(|session| session.id.clone()) else {
+                return false;
+            };
+            match self.row_discard_file(&session_id, worktree, file_path) {
+                Some(Ok(reaction)) => self.apply_reaction(reaction),
+                Some(Err(e)) => self.set_error(format!("Discard failed: {e}")),
+                None => {}
             }
         }
         false
@@ -11950,6 +11961,9 @@ impl App {
     }
 
     fn engage_commit_input(&mut self) {
+        if self.refuse_row_change() {
+            return;
+        }
         self.focus = FocusPane::Files;
         self.right_section = RightSection::CommitInput;
         self.input_target = InputTarget::CommitMessage;

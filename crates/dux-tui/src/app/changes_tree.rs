@@ -757,12 +757,13 @@ impl App {
             FolderOp::Unstage => "unstage the folder",
             FolderOp::Delete => "delete the folder's files",
         };
-        let hold = match self.engine.hold_for_git_change(&worktree, what) {
-            Ok(hold) => hold,
-            Err(refused) => {
+        let hold = match self.row_hold_for_git_change(&session_id, &worktree, what) {
+            Some(Ok(hold)) => hold,
+            Some(Err(refused)) => {
                 self.set_error(refused.to_string());
                 return;
             }
+            None => return,
         };
         // A delete follows the one destructive protocol: the folder is
         // claimed first, without waiting (a claim already held refuses it at

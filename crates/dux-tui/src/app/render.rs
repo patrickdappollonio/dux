@@ -5982,7 +5982,10 @@ impl App {
         let stage_key = self.bindings.label_for(Action::StageUnstage);
         let search_key = self.bindings.label_for(Action::SearchFiles);
         let next_key = self.bindings.label_for(Action::SearchNext);
-        let mut hints = vec![Hint::key(stage_key, "stage/unstage")];
+        let mut hints = Vec::new();
+        if !self.terminals_hidden_by_card() {
+            hints.push(Hint::key(stage_key, "stage/unstage"));
+        }
         if self.files_search_active {
             // The search row is a type-immediately filter whose way out is the
             // literal Enter and Escape (`handle_files_search_key`), not a
@@ -6003,6 +6006,8 @@ impl App {
     pub(super) fn commit_hint_line(&self, focused: FocusState, width: u16) -> Line<'static> {
         let hints = if focused == FocusState::Focused {
             vec![Hint::key(self.bindings.labels_for(Action::ExitCommitInput), "exit").pinned()]
+        } else if self.terminals_hidden_by_card() {
+            Vec::new()
         } else {
             vec![
                 Hint::key(self.bindings.labels_for(Action::EngageCommitInput), "edit"),
