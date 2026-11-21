@@ -90,6 +90,10 @@ interface FileTreeProps {
   // a folder, which dux does not take. The tree is the only place that can see
   // the `DataTransfer`, so it sorts the two apart and the caller reports both.
   onFilesDropped?: (dir: string, dropped: DroppedItems) => void
+  // Why the right-click menu's writes are greyed out, or null when they work.
+  // A drop is still taken, so the browser does not open the file in place of
+  // the page, and `onFilesDropped` refuses it with the reason.
+  writeBlocked?: string | null
 }
 
 // Which drop target is under the pointer, as a row identity rather than a
@@ -115,6 +119,7 @@ export function FileTree({
   onLoadedDirsChange,
   fileDropEnabled = false,
   onFilesDropped,
+  writeBlocked = null,
 }: FileTreeProps) {
   // The picker behind "Upload here…". It feeds the same `onFilesDropped` the
   // drag does, with the same per-row destination, so the two gestures cannot
@@ -668,6 +673,7 @@ export function FileTree({
                     onMove={() => onMove(row.path, true)}
                     onDelete={() => onDelete(row.path, true)}
                     onInfo={() => onInfo(row.path, true)}
+                    writeBlocked={writeBlocked}
                   />
                 </ContextMenu>
               </li>
@@ -761,6 +767,7 @@ export function FileTree({
                     onMove={() => onMove(row.path, false)}
                     onDelete={() => onDelete(row.path, false)}
                     onInfo={() => onInfo(row.path, false)}
+                    writeBlocked={writeBlocked}
                   />
                 </ContextMenu>
               </li>
@@ -780,6 +787,7 @@ export function FileTree({
         onMove={noop}
         onDelete={noop}
         onInfo={noop}
+        writeBlocked={writeBlocked}
       />
       </ContextMenu>
     </ScrollArea>

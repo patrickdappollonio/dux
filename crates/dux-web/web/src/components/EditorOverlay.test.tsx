@@ -3083,10 +3083,11 @@ describe("the explorer bar's controls", () => {
     const { EditorOverlay } = await import("@/components/EditorOverlay")
     render(<EditorOverlay />)
 
+    // New file sits in the wrapper that explains it while it is disabled.
     const newFile = await screen.findByRole("button", { name: "New file" })
     const menu = screen.getByRole("button", { name: "Explorer actions" })
-    expect(newFile.parentElement).toBe(menu.parentElement)
-    expect(newFile.parentElement!.className).toContain("gap-2")
+    expect(newFile.parentElement!.parentElement).toBe(menu.parentElement)
+    expect(menu.parentElement!.className).toContain("gap-2")
   })
 
   // jsdom cannot evaluate media queries, so the classes are what can be pinned.
@@ -3100,7 +3101,7 @@ describe("the explorer bar's controls", () => {
       expect(button.className).toContain("max-md:size-10")
     }
     // Clear of the explorer divider's 10px touch band on its right.
-    const bar = screen.getByRole("button", { name: "New file" }).parentElement!
+    const bar = screen.getByRole("button", { name: "Explorer actions" }).parentElement!
     expect(bar.className).toContain("pointer-coarse:pr-2.5")
   })
 
@@ -4523,3 +4524,143 @@ describe("the editor's keyboard walk", () => {
     }
   })
 })
+
+// The upload behind a file dropped on the tree, spied so a refused drop can be
+// seen to send nothing.
+const uploadMock = vi.hoisted(() => vi.fn())
+vi.mock("@/lib/fileDropApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/fileDropApi")>()),
+  uploadDroppedFile: (...a: unknown[]) => uploadMock(...a),
+}))
+
+// A page that does not drive the row the editor's root belongs to may read
+// every file but write none: the server refuses those writes, and a buffer
+// that took keystrokes it could never save would lose them on close.
+describe("the editor while this page does not drive the row", () => {
+  const AGENT_READ_ONLY =
+    "Read-only: this agent is active on another device, so its files cannot be changed here. Take over the agent to edit them."
+  let retire: () => void = () => {}
+  function drive(row: string, driver: "other" | "this") {
+    act(() => {
+      retire()
+      retire = registerPaneCoverForTest(row, driver)
+    })
+  }
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    readMock.mockResolvedValue({ path: PATH, content: ON_DISK, binary: false, read_only: false })
+    writeMock.mockResolvedValue({ modified: "2026-01-01T00:00:00+00:00", size: TYPED.length })
+  })
+
+  afterEach(async () => {
+    retire()
+    retire = () => {}
+    const { resetPaneCovers } = await import("@/lib/paneCover")
+    resetPaneCovers()
+    cleanup()
+    vi.unstubAllGlobals()
+    treeMock.mockImplementation(async () => ({ dir: "", entries: [] }))
+  })
+
+  it("keeps a dirty buffer's text, read-only and unsavable, and lets it save again on take-over", async () => {
+    const box = await mountWithDirtyTab()
+    const save = () => screen.getByRole("button", { name: /save/i })
+
+    drive("agent:s1", "other")
+    expect(screen.getByText(AGENT_READ_ONLY)).toBeTruthy()
+    expect(box.value).toBe(TYPED)
+    expect(box.dataset.readOnly).toBe("true")
+    expect(save().hasAttribute("disabled")).toBe(true)
+
+    drive("agent:s1", "this")
+    expect(screen.queryByText(AGENT_READ_ONLY)).toBeNull()
+    expect(box.dataset.readOnly).toBe("false")
+    expect(save().hasAttribute("disabled")).toBe(false)
+    fireEvent.click(save())
+    await waitFor(() => expect(writeMock).toHaveBeenCalled())
+    expect(writeMock.mock.calls[0]![2]).toBe(TYPED)
+  })
+
+  it("greys out creating, renaming, moving and deleting, and refuses a dropped file out loud", async () => {
+    treeMock.mockImplementation(async () => ({
+      dir: "",
+      entries: [{ name: "src", path: "src", is_dir: true, is_symlink: false, expandable: true }],
+    }))
+    const { EditorOverlay } = await import("@/components/EditorOverlay")
+    const { getSnapshot } = await import("@/lib/store")
+    const snapshot = getSnapshot()
+    mockState = {
+      ...snapshot,
+      bootstrap: { ...snapshot.bootstrap, file_drop_max_bytes: 1024 },
+      editorTarget: { root: agentRoot(SESSION), initialPath: null },
+      editorTabs: {},
+    } as DuxState
+    drive("agent:s1", "other")
+    render(<EditorOverlay />)
+
+    expect(screen.getByRole("button", { name: /new file/i }).hasAttribute("disabled")).toBe(true)
+    const row = await screen.findByText("src")
+    fireEvent.contextMenu(row)
+    for (const item of ["New File…", "New Folder…", "Upload here…", "Rename…", "Move…", "Delete…"]) {
+      const el = (await screen.findByText(item)).closest('[role="menuitem"]')!
+      expect(el.getAttribute("aria-disabled"), item).toBe("true")
+    }
+    expect(
+      (await screen.findByText("Folder info…")).closest('[role="menuitem"]')!.getAttribute("aria-disabled"),
+    ).not.toBe("true")
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+
+    fireEvent.drop(row, {
+      dataTransfer: {
+        types: ["Files"],
+        files: [new File(["x"], "logo.png")],
+        items: [{ kind: "file", type: "", webkitGetAsEntry: () => ({ isDirectory: false, name: "logo.png" }) }],
+        dropEffect: "none",
+      },
+    })
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(String(toastError.mock.calls.at(-1)![0])).toContain(AGENT_READ_ONLY)
+    expect(uploadMock).not.toHaveBeenCalled()
+  })
+
+  it("follows a project or standalone terminal's own row for a terminal-rooted editor", async () => {
+    await mountTerminalRootedTab()
+    const box = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    expect(box.dataset.readOnly).toBe("false")
+    drive("terminal:t1", "other")
+    expect(
+      screen.getByText(
+        "Read-only: this terminal is active on another device, so its files cannot be changed here. Take over the terminal to edit them.",
+      ),
+    ).toBeTruthy()
+    expect(box.dataset.readOnly).toBe("true")
+    drive("terminal:t1", "this")
+    expect(box.dataset.readOnly).toBe("false")
+  })
+
+  it("shows the server's own sentence when it refuses a save anyway", async () => {
+    writeMock.mockRejectedValue(
+      new Error("Pixel 9 is driving this agent, so this page cannot change its files."),
+    )
+    const box = await mountWithDirtyTab()
+    fireEvent.click(screen.getByRole("button", { name: /save/i }))
+    await waitFor(() => expect(toastError).toHaveBeenCalled())
+    expect(String(toastError.mock.calls[0]![0])).toBe(
+      "Pixel 9 is driving this agent, so this page cannot change its files.",
+    )
+    expect(toastSuccess).not.toHaveBeenCalled()
+    expect(box.value).toBe(TYPED)
+  })
+})
+
+function registerPaneCoverForTest(row: string, driver: "other" | "this"): () => void {
+  return paneCover.registerPaneCover("test-pane", driver === "other" ? "card" : "none", {
+    row,
+    driver,
+  })
+}
+const paneCover = await import("@/lib/paneCover")

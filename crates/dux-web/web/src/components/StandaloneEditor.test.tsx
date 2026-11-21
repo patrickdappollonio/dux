@@ -563,3 +563,55 @@ describe("the overlay stands down on the standalone surface", () => {
     expect(screen.queryByTestId("code-editor")).toBeNull()
   })
 })
+
+// A standalone editor tab has no pane of the agent's row, so the agents list
+// is its only word on who drives: another device driving makes it read-only,
+// and nobody driving leaves it writable, since it can neither show the card
+// nor take over and the server takes the write.
+describe("the standalone editor tab and who drives the agent", () => {
+  const READ_ONLY =
+    "Read-only: this agent is active on another device, so its files cannot be changed here. Take over the agent to edit them."
+
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+  })
+
+  async function mountDrivenBy(inputOwner: string | undefined) {
+    await seedState({})
+    const spine = mockState.spine!
+    baseState({
+      ownPtyConnIds: {},
+      ptyOwnership: {},
+      spine: {
+        ...spine,
+        sessions: spine.sessions.map((s) => ({
+          ...s,
+          tabs: [{ id: SESSION, input_owner: inputOwner }],
+        })),
+      } as DuxState["spine"],
+    })
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    render(<StandaloneEditorShell />)
+    await screen.findByTestId("code-editor")
+  }
+
+  it("is read-only while the agents list says another device drives the agent", async () => {
+    await mountDrivenBy("another-page")
+    expect(screen.getByText(READ_ONLY)).toBeTruthy()
+    expect(screen.getByRole("button", { name: /new file/i }).hasAttribute("disabled")).toBe(true)
+  })
+
+  it("stays writable while nobody drives the agent", async () => {
+    await mountDrivenBy(undefined)
+    expect(screen.queryByText(/^Read-only/)).toBeNull()
+    expect(screen.getByRole("button", { name: /new file/i }).hasAttribute("disabled")).toBe(false)
+  })
+})

@@ -132,6 +132,12 @@ import type { ReloadFileTarget } from "@/components/ConfirmReloadFileDialog"
 import { EditorIcon } from "@/components/EditorIcon"
 import { FileDiskBanner } from "@/components/FileDiskBanner"
 import { EncodingNotice } from "@/components/EncodingNotice"
+import { EditorReadOnlyBanner } from "@/components/EditorReadOnlyBanner"
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import {
+  editorReadOnlyReason,
+  useEditorRootChangeBlock,
+} from "@/hooks/use-agent-active-elsewhere"
 import {
   ConfirmReopenEncodingDialog,
   type ReopenEncodingTarget,
@@ -289,6 +295,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // so every diff affordance below is ABSENT rather than disabled, and the
   // store refuses the mode even when an address asks for it.
   const hasDiff = rootHasDiff(root)
+  // Why this page may read the root's files but not write them, or null when
+  // it may write: it does not drive the row they belong to, and the server
+  // refuses the write. Every write below is greyed with this sentence, and a
+  // dirty buffer keeps its text, read-only, until this page drives again.
+  const changeBlock = useEditorRootChangeBlock(root)
+  const writeBlocked =
+    changeBlock === null
+      ? null
+      : editorReadOnlyReason(changeBlock, root.kind === "agent" ? "agent" : "terminal")
   const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
@@ -1232,7 +1247,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // this route.
   function save(): void {
     // A busy file is answered by `writeBuffer`, which says so.
-    if (!activeTab || binary || !dirty) return
+    if (!activeTab || binary || !dirty || writeBlocked !== null) return
     writeBuffer(
       activeTab.id,
       activeTab.path,
@@ -1248,7 +1263,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // hold refuses the whole save and writes nothing.
   function saveWithEncoding(choice: SaveEncoding): void {
     if (!activeTab || binary || hardReadOnly || fileBusy || !fileReady) return
-    if (!activeBuffer) return
+    if (!activeBuffer || writeBlocked !== null) return
     // What the file is now; that row is inert, so a save from here is always
     // a conversion.
     if (sameSaveEncoding(choice, bufferReadEncoding(activeBuffer))) return
@@ -1317,6 +1332,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       .finally(() => setOpeningEditor(false))
   }
 
+  // A dialog opened before this page stopped driving the row, or a drop, still
+  // reaches a write: it is refused here out loud, with the reason, rather than
+  // sent for the server to refuse.
+  function refusedWhileBlocked(): boolean {
+    if (writeBlocked === null) return false
+    notifyError(writeBlocked)
+    return true
+  }
+
   // New File… / New Folder…, unified: `newEntryTarget.kind` picks the server
   // call. On success the dialog closes; a NEW file is also opened (pinned,
   // forced to file mode (it can't have a diff since it was just created),
@@ -1326,6 +1350,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // submitting flag always clears.
   function handleNewEntrySubmit(name: string): Promise<void> {
     if (!newEntryTarget) return Promise.resolve()
+    if (refusedWhileBlocked()) return Promise.resolve()
     const { kind, dir } = newEntryTarget
     const path = joinName(dir, name)
     const create =
@@ -1361,6 +1386,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // appearing in the other). On error the dialog stays open for a retry.
   function handleRenameSubmit(newName: string): Promise<void> {
     if (!renameEntryTarget) return Promise.resolve()
+    if (refusedWhileBlocked()) return Promise.resolve()
     const from = renameEntryTarget.path
     const to = computeRenameTarget(from, newName)
     return fileApi
@@ -1387,6 +1413,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // ordering lives in `lib/moveEntry`; this is only the wiring.
   function handleMoveSubmit(destDir: string): Promise<void> {
     if (!moveEntryTarget) return Promise.resolve()
+    if (refusedWhileBlocked()) return Promise.resolve()
     return performMove(moveEntryTarget.path, destDir, {
       rename: (from, to) => fileApi.rename(root, from, to),
       clearTarget: () => setMoveEntryTarget(null),
@@ -1412,6 +1439,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     const target = deleteEntryTarget
     if (!target || savingPaths.has(target.path)) return
     setDeleteEntryTarget(null)
+    if (refusedWhileBlocked()) return
     fileApi
       .remove(root, target.path)
       .then(() => {
@@ -1445,6 +1473,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The refresh afterwards is the move path's, for the same reason: the tree's
   // cached listing of that directory and the flat search index both went stale.
   function handleFilesDropped(dir: string, dropped: DroppedItems): void {
+    if (refusedWhileBlocked()) return
     const toastId = nextFileDropToastId()
     void performTreeDrop(dir, dropped, {
       upload: (file, into) =>
@@ -1524,7 +1553,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         </DropdownMenuSub>
         {!inDiff && !hardReadOnly && (
           <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={fileBusy}>
+            <DropdownMenuSubTrigger disabled={fileBusy || writeBlocked !== null}>
               <SaveAll />
               Save with encoding
             </DropdownMenuSubTrigger>
@@ -1661,17 +1690,25 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // commits the user's work, so it is the header's primary act. A
     // user-approved exception, like the launcher corner's filled split button; it still
     // keeps the header's one height.
+    // The wrapper is there whether or not the save is blocked, so the button
+    // never remounts when this page gains or loses the row.
     return (
-      <Button
-        variant="default"
-        className={cn(HEADER_CONTROL, "max-md:h-10")}
-        disabled={!dirty || fileBusy || readOnly}
-        aria-busy={isSaving}
-        onClick={save}
+      <ExplainedWhenDisabled
+        disabled={writeBlocked !== null}
+        hint={writeBlocked}
+        className="rounded-lg"
       >
-        {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
-        Save
-      </Button>
+        <Button
+          variant="default"
+          className={cn(HEADER_CONTROL, "max-md:h-10")}
+          disabled={!dirty || fileBusy || readOnly || writeBlocked !== null}
+          aria-busy={isSaving}
+          onClick={save}
+        >
+          {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
+          Save
+        </Button>
+      </ExplainedWhenDisabled>
     )
   }
 
@@ -1998,6 +2035,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   function renderWorkspace(): React.ReactNode {
     return (
       <>
+        {writeBlocked !== null && <EditorReadOnlyBanner reason={writeBlocked} />}
         {/* Tab strip, only renders once the session has at least one tab. */}
         <EditorTabsStrip root={root} />
 
@@ -2075,17 +2113,25 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     className="h-8 pl-7 text-sm"
                   />
                 </div>
-                <SimpleTooltip content="New file">
+                {/* Its own name while it works, the reason while this page
+                    may not write, on a wrapper that is always there so the
+                    button never remounts when that changes. */}
+                <ExplainedWhenDisabled
+                  disabled={writeBlocked !== null}
+                  hint={writeBlocked ?? "New file"}
+                  className="rounded-md"
+                >
                   <Button
                     size="icon-sm"
                     variant="ghost"
                     aria-label="New file"
                     className="max-md:size-10 pointer-coarse:size-10"
+                    disabled={writeBlocked !== null}
                     onClick={() => setNewEntryTarget({ kind: "file", dir: "" })}
                   >
                     <FilePlus />
                   </Button>
-                </SimpleTooltip>
+                </ExplainedWhenDisabled>
                 {/* The explorer's own menu, on every surface: the tree keeps
                     itself fresh on events, and this is the way to ask it
                     anyway. Sized with New file beside it. */}
@@ -2195,6 +2241,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   // it has. The window closes in one fetch.
                   fileDropEnabled={(bootstrap?.file_drop_max_bytes ?? 0) > 0}
                   onFilesDropped={handleFilesDropped}
+                  writeBlocked={writeBlocked}
                 />
               )}
             </div>
@@ -2289,6 +2336,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   }}
                   onEditorChange={setCodeEditor}
                   onImageDims={setImageDims}
+                  writeBlocked={writeBlocked}
                 />
               </div>
             </div>
@@ -2391,6 +2439,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         onOverwrite={() => {
           const target = saveConflict!
           setSaveConflict(null)
+          if (refusedWhileBlocked()) return
           // No token: the whole meaning of Overwrite is to save without the
           // guard, and the body is the one the refused save carried.
           writeBuffer(target.tabId, target.path, target.body, target.encoding)
@@ -2639,6 +2688,8 @@ interface EditorContentPaneProps {
   onMonacoReady: (monaco: MonacoInstance) => void
   onEditorChange: (editor: LiveCodeEditor | null) => void
   onImageDims: (dims: ImageDimensions | null) => void
+  // Why this page may not write the file, or null when it may.
+  writeBlocked: string | null
 }
 
 function EditorContentPane(props: EditorContentPaneProps) {
@@ -2748,6 +2799,7 @@ function FileContentPane({
   onSave,
   onMonacoReady,
   onEditorChange,
+  writeBlocked,
 }: ActiveEditorContentProps) {
   if (buffer?.fileError && !isBufferStale(buffer, tab.path)) {
     return (
@@ -2780,8 +2832,12 @@ function FileContentPane({
           // A read that names the file's style hands the text over in LF
           // (see `editorTextOf`); an older server names none.
           lfText={(buffer?.eol ?? null) !== null}
-          readOnly={(buffer?.readOnly ?? false) || (buffer?.readingLock ?? null) !== null}
-          readOnlyReason={readOnlyReasonOf(buffer)}
+          readOnly={
+            (buffer?.readOnly ?? false) ||
+            (buffer?.readingLock ?? null) !== null ||
+            writeBlocked !== null
+          }
+          readOnlyReason={readOnlyReasonOf(buffer) ?? writeBlocked ?? undefined}
         />
       </Suspense>
     </ChunkBoundary>
