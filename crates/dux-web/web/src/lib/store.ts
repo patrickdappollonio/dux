@@ -4448,8 +4448,15 @@ function movesScreen(
 // browser has already moved its cursor, so this only mirrors the destination
 // into state and must never write the URL back.
 function applyUrlRoute(): void {
-  const hash = currentHash()
-  const route = parseRoute(hash)
+  let route = parseRoute(currentHash())
+  const phoneAddress = phoneEditorAddress(route)
+  if (phoneAddress !== null) {
+    rewriteEntry(phoneAddress)
+    // Gone onto a neighbouring entry that already held it: that landing
+    // applies the address.
+    if (currentHash() !== phoneAddress) return
+    route = parseRoute(phoneAddress)
+  }
   // The surface bit follows the URL immediately, spine or no spine: which
   // shell renders must not wait on a fetch, and it is what lets the
   // standalone header's plain-anchor open-in-dux link (and a Back across it)
@@ -4502,6 +4509,15 @@ function applyUrlRoute(): void {
     traversing = false
     landing = "new"
   }
+}
+
+// The phone's editor address for the computer's in-page editor address, which
+// a phone cannot show (its overlay does not render there), or null for any
+// other address. The menu's own entry opens the same address on a phone.
+function phoneEditorAddress(route: Route): string | null {
+  if (!isMobileViewport() || route.standalone) return null
+  if (route.editor === null || route.target === null) return null
+  return standaloneEditorHash(editorRootForTarget(route.target), route.editor)
 }
 
 // How the page arrived at the entry it is on: back or forward onto one it
@@ -5027,6 +5043,10 @@ function restoreDeepLink(spine: Spine): void {
   const link = pendingDeepLink
   if (!link) return
   pendingDeepLink = null // one-shot, whatever the outcome
+  if (phoneEditorAddress(parseRoute(currentHash())) !== null) {
+    applyUrlRoute()
+    return
+  }
   resolveRoute(spine, {
     target: link,
     stack: pendingDeepLinkStack,

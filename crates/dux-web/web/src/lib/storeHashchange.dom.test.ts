@@ -162,6 +162,52 @@ describe("a plain hash anchor drives the router", () => {
     }
   })
 
+  // The computer's in-page editor address has no overlay to show it on a
+  // phone, so it becomes the phone's own editor address for the same place.
+  describe("on a phone, the computer's editor address", () => {
+    let wide = 0
+    beforeEach(() => {
+      wide = window.innerWidth
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 })
+    })
+    afterEach(() => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: wide })
+    })
+
+    it("is rewritten in place when the page opens on it", async () => {
+      window.location.hash = "#/agent/s1/editor/file/a.ts"
+      const length = history.length
+      const mod = await import("./store")
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().standaloneEditor).toBe(true)
+      })
+      expect(window.location.hash).toBe("#/editor/agent/s1/file/a.ts")
+      expect(history.length).toBe(length)
+      expect(mod.getSnapshot().editorRoute).toMatchObject({ mode: "file", path: "a.ts" })
+    })
+
+    it("is rewritten in place when a link arrives on it", async () => {
+      window.location.hash = "#/agent/s1"
+      const mod = await import("./store")
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().spine).not.toBeNull()
+      })
+      const anchor = document.createElement("a")
+      anchor.href = "#/agent/s1/editor/file/a.ts"
+      document.body.appendChild(anchor)
+      anchor.click()
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().standaloneEditor).toBe(true)
+      })
+      expect(window.location.hash).toBe("#/editor/agent/s1/file/a.ts")
+      history.back()
+      await vi.waitFor(() => {
+        expect(mod.getSnapshot().standaloneEditor).toBe(false)
+      })
+      expect(window.location.hash).toBe("#/agent/s1")
+    })
+  })
+
   it("the standalone editor's Up control pushes the agent's Changes screen, never stepping back", async () => {
     window.location.hash = "#/editor/agent/s1/file/a.ts"
     const mod = await import("./store")
