@@ -828,20 +828,26 @@ Each row says on a small line where it applies: **This browser**, **Web and term
 **Terminal app**, or, for the password, **Every browser**. On a phone the topics come first,
 and tapping one opens its settings; Back takes you back to the topics.
 
-Every change you make, resets included, waits for **Save**. The footer counts what is not
-saved yet, **Cancel** drops it all, and closing the dialog with changes still pending asks
-before throwing them away. The browser's Back cannot stop to ask, so it closes the dialog
-and keeps your changes: a toast offers **Restore**, and the next time you open Preferences
-they are back. Typed passwords are the one thing never kept.
+Every change you make, resets included, waits for **Save**. A row you changed says
+**Not saved yet** and what its saved value is, with a button that puts the saved value back,
+so one change can be undone without dropping the rest. If the saved value moves while your
+change waits (another browser or the terminal app saved it), the row says what it is now.
+The footer counts what is not saved yet, **Cancel** drops it all, and closing the dialog with
+changes still pending asks before throwing them away. The browser's Back cannot stop to ask,
+so it closes the dialog and keeps your changes: a toast offers **Restore**, which reopens
+Preferences on the topic they are in. Typed passwords are the one thing never kept. If part of
+a save is refused, the dialog stays open, says which settings were saved and which were not,
+and the next **Save** sends only those still unsaved.
 
 A setting that differs from what dux ships with carries a dot and its own reset button, and
 its small line names the default. **Changed from default**, at the top of the side list,
 gathers every such setting in one place, with **Reset all** to put them all back after you
-confirm. Like any other change, a reset only writes `config.toml` when you save.
+confirm. Like any other change, a reset only writes `config.toml` when you save, and a
+setting you reset stays in that list, with the button that puts it back, until you leave it.
 
 Lost in there? Type in **Search settings** at the top and every topic is searched at once,
-for rows holding every word you typed in a row's name, description, small line or config
-key, so `server.tailscale` finds its row too. Each match shows its config key and its topic,
+for rows holding every word you typed in a setting's name, description, choices, config key
+or topic, so `server.tailscale` finds its row too. Each match shows its config key and its topic,
 with each hit highlighted. Escape clears the search first and closes the dialog on the second
 press; anything you changed in a row the search hid is still saved, and if a new password is
 refused, the dialog brings the password row back on screen so you can see why.

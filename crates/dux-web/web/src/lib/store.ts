@@ -43,6 +43,7 @@ import { nextActiveSessionId, type FlatSortKey } from "./flatList"
 import { isMobileViewport } from "@/hooks/use-mobile"
 import { EventsSocket } from "./eventsSocket"
 import type { ReconnectPlanEvent } from "./reconnectingSocket"
+import { SETTING_TOPICS, allSettingDescriptors } from "./settingsDescriptors"
 import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
@@ -768,7 +769,7 @@ export interface DuxState {
   /// The topic the dialog opens on, or null for its own first topic.
   customizeWebappTopic: SettingTopic | null
   /// Unsaved edits a Back set aside, which the dialog opens with, by config key.
-  customizeWebappDraft: Record<string, SettingValue> | null
+  customizeWebappDraft: PreferencesDraft | null
   /// Bumped on every opening, so the dialog's form mounts afresh for each.
   customizeWebappEpoch: number
   // The one first-load dialog (first-run welcome / post-upgrade what's-new).
@@ -9954,15 +9955,28 @@ export function closeCustomizeWebapp(): void {
   setState({ customizeWebappOpen: false, customizeWebappDraft: null })
 }
 
+/// Edits Preferences did not save: each row's draft value, and the saved value
+/// it was made over.
+export interface PreferencesDraft {
+  values: Record<string, SettingValue>
+  saved: Record<string, SettingValue>
+}
+
 // The edits a Back closed Preferences on. Back cannot stop to ask, so they
 // are kept for the next opening, and a sticky toast offers them back.
-let preferencesSetAside: Record<string, SettingValue> | null = null
+let preferencesSetAside: PreferencesDraft | null = null
 const PREFERENCES_SET_ASIDE_ID = "preferences-set-aside"
+
+// The first topic, in the side list's order, holding one of `draft`'s edits.
+function draftTopic(draft: PreferencesDraft): SettingTopic | null {
+  const edited = allSettingDescriptors().filter((d) => d.key in draft.values)
+  return SETTING_TOPICS.find((t) => edited.some((d) => d.topic === t.id))?.id ?? null
+}
 
 /// Close Preferences on `draft`, keeping it for the next opening. `passwordDropped`
 /// says the password fields held text, which is never kept.
 export function setAsidePreferencesDraft(
-  draft: Record<string, SettingValue>,
+  draft: PreferencesDraft,
   changes: number,
   passwordDropped: boolean,
 ): void {
@@ -9970,7 +9984,7 @@ export function setAsidePreferencesDraft(
   const password = passwordDropped
     ? " The password fields were cleared; they are never kept."
     : ""
-  if (Object.keys(draft).length === 0) {
+  if (Object.keys(draft.values).length === 0) {
     notifyInfo(`Preferences closed without saving.${password}`)
     return
   }
@@ -9982,7 +9996,7 @@ export function setAsidePreferencesDraft(
     {
       id: PREFERENCES_SET_ASIDE_ID,
       sticky: true,
-      action: { label: "Restore", onClick: () => openCustomizeWebapp() },
+      action: { label: "Restore", onClick: () => openCustomizeWebapp(draftTopic(draft)) },
     },
   )
 }

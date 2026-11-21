@@ -9,6 +9,7 @@ import {
   FileCode,
   RotateCcw,
   Search,
+  Undo2,
   X,
   ZoomOut,
   type LucideIcon,
@@ -36,6 +37,7 @@ import {
   settingSearchFields,
   settingsLabel,
   topicLabel,
+  valueText,
   zeroText,
   type View,
 } from "@/components/preferencesModel"
@@ -136,6 +138,7 @@ function rowId(d: SettingDescriptor): string {
 
 // Under a row's prose: its config key while a search runs, so a key typed from
 // `config.toml` shows why the row matched, then where the setting applies.
+// Only what the search reads is lit.
 function RowFooter({
   d,
   words,
@@ -143,7 +146,7 @@ function RowFooter({
 }: {
   d: SettingDescriptor
   words: string[]
-  meta: string
+  meta: ReturnType<typeof rowMeta>
 }) {
   return (
     <>
@@ -153,7 +156,15 @@ function RowFooter({
         </span>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        <MatchHighlight text={meta} ranges={matchCharRanges(meta, words)} />
+        {meta.map((part, i) => (
+          <Fragment key={part.text}>
+            {i > 0 ? " · " : null}
+            <MatchHighlight
+              text={part.text}
+              ranges={part.searched ? matchCharRanges(part.text, words) : []}
+            />
+          </Fragment>
+        ))}
       </p>
     </>
   )
@@ -448,7 +459,10 @@ function SettingRow({
   value,
   onChange,
   onReset,
+  onUndo,
   changed,
+  saved,
+  savedMoved,
   meta,
   disabled,
   lock,
@@ -461,10 +475,15 @@ function SettingRow({
   value: SettingValue
   onChange: (v: SettingValue) => void
   onReset: () => void
+  onUndo: () => void
   /** The draft differs from the documented default: a dot and a reset. */
   changed: boolean
+  /** The saved value while the draft differs from it, else null. */
+  saved: SettingValue | null
+  /** The saved value is no longer the one the edit was made over. */
+  savedMoved: boolean
   /** The small line: where the setting applies, and more (see `rowMeta`). */
-  meta: string
+  meta: ReturnType<typeof rowMeta>
   disabled: boolean
   /** The sentence saying why this run cannot change the row, or null. */
   lock: string | null
@@ -514,6 +533,13 @@ function SettingRow({
             <MatchHighlight text={zero} ranges={matchCharRanges(zero, words)} />
           </p>
         ) : null}
+        {saved !== null ? (
+          <p className={cn("text-xs", savedMoved ? "text-dux-warning" : "text-muted-foreground")}>
+            {savedMoved
+              ? `Not saved yet. The saved value changed to ${valueText(d, saved)} since this edit was made.`
+              : `Not saved yet. Saved: ${valueText(d, saved)}`}
+          </p>
+        ) : null}
         <RowFooter d={d} words={words} meta={meta} />
       </div>
       <div
@@ -526,12 +552,29 @@ function SettingRow({
               type="button"
               variant="ghost"
               size="icon"
+              data-reset
               aria-label={`Reset ${d.label} to ${defaultValueText(d)}`}
               disabled={disabled}
               className={cn("shrink-0", RESET_SIZE)}
               onClick={onReset}
             >
               <RotateCcw />
+            </Button>
+          </SimpleTooltip>
+        ) : null}
+        {saved !== null ? (
+          <SimpleTooltip content="Put back the saved value">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              data-undo
+              aria-label={`Put ${d.label} back to its saved value, ${valueText(d, saved)}`}
+              disabled={disabled}
+              className={cn("shrink-0", RESET_SIZE)}
+              onClick={onUndo}
+            >
+              <Undo2 />
             </Button>
           </SimpleTooltip>
         ) : null}
@@ -699,7 +742,7 @@ function PasswordSettingRow({
   disabled: boolean
   words: string[]
   /** The row's small line: where it applies, and its topic where shown. */
-  meta: string
+  meta: ReturnType<typeof rowMeta>
 }) {
   const id = rowId(d)
   const editable =
@@ -777,12 +820,11 @@ function PasswordSettingRow({
   )
 }
 
-// What a persist came to: `ok` is false when any write was refused (each refusal
-// raised its own error), and `wrote` is false when no row differed from what is
-// in force, so nothing was sent at all.
+// The keys of the rows sent, by whether their write landed (each refusal raised
+// its own error). Both empty: nothing differed, so nothing was sent.
 interface PersistResult {
-  ok: boolean
-  wrote: boolean
+  saved: string[]
+  failed: string[]
 }
 
 // Every write below answers its own outcome on the wire (an engine status for
@@ -796,14 +838,15 @@ async function persist(
     entries,
     originalOf,
   )
-  const writes: Promise<boolean>[] = []
-  if (identity) writes.push(setInstanceIdentity(identity))
-  if (settings) writes.push(saveSettings(settings))
-  if (changesPane !== null) writes.push(setChangesPaneVisibility(changesPane))
+  const writes = new Map<SettingDescriptor["writeTarget"], Promise<boolean>>()
+  if (identity) writes.set("identity", setInstanceIdentity(identity))
+  if (settings) writes.set("settings", saveSettings(settings))
+  if (changesPane !== null) writes.set("changesPane", setChangesPaneVisibility(changesPane))
   // `github` is non-null ONLY when the row changed, which is what makes it safe
   // to drive a read-and-flip endpoint from an explicit-value UI.
   if (github !== null) {
-    writes.push(
+    writes.set(
+      "github",
       configApi
         .toggleGithubIntegration()
         .then(() => true)
@@ -819,7 +862,8 @@ async function persist(
   // on success: saved and "the listener went away" are different outcomes.
   if (tailscale !== null) {
     const mode = tailscale
-    writes.push(
+    writes.set(
+      "tailscale",
       configApi
         .setTailscaleMode(mode)
         .then((reply) => {
@@ -838,8 +882,15 @@ async function persist(
         }),
     )
   }
-  if (writes.length === 0) return { ok: true, wrote: false }
-  return { ok: (await Promise.all(writes)).every(Boolean), wrote: true }
+  const targets = [...writes.keys()]
+  const outcomes = await Promise.all(writes.values())
+  const landed = new Set(targets.filter((_, i) => outcomes[i]))
+  const result: PersistResult = { saved: [], failed: [] }
+  for (const [d, value] of entries) {
+    if (d.writeTarget === "password" || sameValue(d, value, originalOf(d))) continue
+    result[landed.has(d.writeTarget) ? "saved" : "failed"].push(d.key)
+  }
+  return result
 }
 
 
@@ -968,12 +1019,24 @@ function PreferencesForm({
   // Read once: what this opening hands the form.
   const [start] = useState(() => ({
     topic: dux.customizeWebappTopic ?? null,
-    draft: dux.customizeWebappDraft ?? {},
+    draft: dux.customizeWebappDraft ?? { values: {}, saved: {} },
   }))
   // `overrides` holds only the fields touched in this dialog session; every other
   // row renders live bootstrap, so another client's change is not reverted on Save.
   // Every edit and every reset lands here and nothing else: Save writes them.
-  const [overrides, setOverrides] = useState<Record<string, SettingValue>>(start.draft)
+  const [overrides, setOverrides] = useState<Record<string, SettingValue>>(start.draft.values)
+  // The saved value each override was made over, so a row can say when the
+  // saved value has moved since.
+  const [editedOver, setEditedOver] = useState<Record<string, SettingValue>>(start.draft.saved)
+  // Rows a write from this dialog has saved, with the bootstrap they were
+  // written over. The written value is the saved one until a bootstrap arrives.
+  const [written, setWritten] = useState<
+    Record<string, { value: SettingValue; over: typeof bootstrap }>
+  >({})
+  // What the last Save that only partly went through saved and did not.
+  const [partialSave, setPartialSave] = useState<{ saved: string[]; failed: string[] } | null>(
+    null,
+  )
   // The password row's fields, kept out of `overrides`: they are never a
   // config value, and they leave this component only through `savePassword`.
   const authPhase = useAuthPhase()
@@ -996,8 +1059,8 @@ function PreferencesForm({
   // On a phone the topics come first and a topic's rows are a second sheet,
   // which holds a history entry of its own so Back returns to the topics.
   const [step, setStep] = useState<"topics" | "topic">(start.topic ? "topic" : "topics")
-  // The names a confirmed "Reset all" puts back, frozen while its confirm is up.
-  const [resetAllNames, setResetAllNames] = useState<string[] | null>(null)
+  // The rows a confirmed "Reset all" puts back, frozen while its confirm is up.
+  const [resetAll, setResetAll] = useState<{ keys: string[]; names: string[] } | null>(null)
   const [discardOpen, setDiscardOpen] = useState(false)
   const [notificationPermission, setNotificationPermission] = useState(
     initialNotificationPermission,
@@ -1009,8 +1072,9 @@ function PreferencesForm({
   const backRef = useRef<HTMLButtonElement | null>(null)
   const navEls = useRef(new Map<View, HTMLButtonElement>())
   const rowEls = useRef(new Map<string, HTMLDivElement>())
-  // The row whose control takes focus once a reset has taken its reset away.
-  const focusRowAfterReset = useRef<string | null>(null)
+  // The row that takes focus once a reset or an undo has removed the button
+  // pressed, and the button it prefers, else the row's control.
+  const focusAfter = useRef<{ key: string; prefer: string } | null>(null)
   // Set by a confirmed "Reset all", for the confirm's close to read.
   const resetAllDone = useRef(false)
 
@@ -1027,6 +1091,8 @@ function PreferencesForm({
   // override for must read the override-aware selector rather than raw bootstrap:
   // the rule is override-awareness, not `writeTarget`.
   const originalOf = (d: SettingDescriptor): SettingValue => {
+    const saved = written[d.key]
+    if (saved !== undefined && saved.over === bootstrap) return saved.value
     if (d.writeTarget === "changesPane") return changesPaneVisible(dux)
     if (d.key === "ui.mobile_accessory_bar") return mobileAccessoryBarVisible(dux)
     return bootstrap ? d.read(bootstrap) : d.default
@@ -1036,8 +1102,29 @@ function PreferencesForm({
     if (d.key in overrides) return overrides[d.key]
     return originalOf(d)
   }
-  const setOverride = (key: string, value: SettingValue) =>
-    setOverrides((o) => ({ ...o, [key]: value }))
+
+  // A row edited, reset or put back stays in the Changed view or the search
+  // results it was in until that list is left.
+  const listScope = searching ? `search ${query}` : view
+  const [kept, setKept] = useState<{ scope: string; keys: string[] }>({ scope: "", keys: [] })
+  const keptHere = kept.scope === listScope ? kept.keys : []
+  const keep = (keys: string[]) =>
+    setKept((k) => ({
+      scope: listScope,
+      keys: [...(k.scope === listScope ? k.keys : []), ...keys],
+    }))
+
+  const setOverride = (d: SettingDescriptor, value: SettingValue) => {
+    setOverrides((o) => ({ ...o, [d.key]: value }))
+    setEditedOver((e) => ({ ...e, [d.key]: originalOf(d) }))
+    keep([d.key])
+  }
+  const dropOverrides = (keys: string[]) => {
+    const drop = (o: Record<string, SettingValue>) =>
+      Object.fromEntries(Object.entries(o).filter(([k]) => !keys.includes(k)))
+    setOverrides(drop)
+    setEditedOver(drop)
+  }
 
   // What this RUN of the server cannot put in force for the row, if anything.
   // The row stays editable: the value is saved for the next run.
@@ -1045,20 +1132,27 @@ function PreferencesForm({
     bootstrap ? (d.lockedBy?.(bootstrap) ?? null) : null
 
   const descriptors = allSettingDescriptors()
-  // The password has no default and no value to compare, so it is never
-  // "changed from default" and has no reset.
-  const resettable = (d: SettingDescriptor) => d.writeTarget !== "password"
+  // Neither the password nor a row this server does not publish (until edited
+  // here) has a value anyone chose, so neither is changed nor reset.
+  const resettable = (d: SettingDescriptor) =>
+    d.writeTarget !== "password" &&
+    (d.key in overrides || bootstrap === null || d.published?.(bootstrap) !== false)
   const differs = (d: SettingDescriptor) =>
     resettable(d) && !sameValue(d, effective(d), d.default)
   const changedSettings = descriptors.filter(differs)
   // A row reset here stays in the Changed list until it is saved, so the
   // reset can be seen and undone where it was made.
   const changedList = descriptors.filter(
-    (d) => differs(d) || (resettable(d) && !sameValue(d, originalOf(d), d.default)),
+    (d) =>
+      differs(d) ||
+      (resettable(d) && !sameValue(d, originalOf(d), d.default)) ||
+      keptHere.includes(d.key),
   )
-  const unsavedSettings = descriptors.filter(
-    (d) => resettable(d) && d.key in overrides && !sameValue(d, overrides[d.key], originalOf(d)),
-  )
+  const unsaved = (d: SettingDescriptor) =>
+    d.writeTarget !== "password" &&
+    d.key in overrides &&
+    !sameValue(d, overrides[d.key], originalOf(d))
+  const unsavedSettings = descriptors.filter(unsaved)
   const passwordTyped =
     passwordDraft.current !== "" || passwordDraft.next !== "" || passwordDraft.confirm !== ""
   const unsavedCount = unsavedSettings.length + (passwordTyped ? 1 : 0)
@@ -1071,7 +1165,12 @@ function PreferencesForm({
           closeCustomizeWebapp()
           return
         }
-        const draft = Object.fromEntries(unsavedSettings.map((d) => [d.key, overrides[d.key]]))
+        const draft = {
+          values: Object.fromEntries(unsavedSettings.map((d) => [d.key, overrides[d.key]])),
+          saved: Object.fromEntries(
+            unsavedSettings.map((d) => [d.key, editedOver[d.key] ?? originalOf(d)]),
+          ),
+        }
         setAsidePreferencesDraft(draft, unsavedCount, passwordTyped)
       },
       clearSearch: () => {
@@ -1085,17 +1184,19 @@ function PreferencesForm({
     }
   })
 
-  // After a reset its button is gone, so focus moves to the control beside it.
+  // After a reset or an undo its button is gone, so focus moves to the button
+  // that took its place, else the control beside it.
   useEffect(() => {
-    const key = focusRowAfterReset.current
-    if (key === null) return
-    focusRowAfterReset.current = null
-    rowEls.current
-      .get(key)
-      ?.querySelector<HTMLElement>(
+    const after = focusAfter.current
+    if (after === null) return
+    focusAfter.current = null
+    const row = rowEls.current.get(after.key)
+    ;(
+      row?.querySelector<HTMLElement>(after.prefer) ??
+      row?.querySelector<HTMLElement>(
         '[data-setting-control] :is(button, input, [role="switch"], [role="combobox"])',
       )
-      ?.focus()
+    )?.focus()
   })
 
   // Refuse to write before the config is loaded: the form seeds from `bootstrap`,
@@ -1165,6 +1266,7 @@ function PreferencesForm({
       return
     }
     setPasswordError(null)
+    setPartialSave(null)
     savingRef.current = true
     setSaving(true)
     try {
@@ -1172,7 +1274,20 @@ function PreferencesForm({
         .filter((d) => d.key in overrides)
         .map((d) => [d, overrides[d.key]])
       const persisted = await persist(touched, originalOf)
-      if (!persisted.ok) return
+      // A landed write leaves the draft, so the count and a retry hold only
+      // what is still unsaved, and a read-and-flip row is never sent twice.
+      if (persisted.saved.length > 0) {
+        const over = bootstrap
+        setWritten((w) => ({
+          ...w,
+          ...Object.fromEntries(persisted.saved.map((k) => [k, { value: overrides[k], over }])),
+        }))
+        dropOverrides(persisted.saved)
+      }
+      if (persisted.failed.length > 0) {
+        if (persisted.saved.length > 0) setPartialSave(persisted)
+        return
+      }
       if (pw.kind === "write") {
         const write =
           pw.current === undefined ? { next: pw.next } : { current: pw.current, next: pw.next }
@@ -1182,7 +1297,9 @@ function PreferencesForm({
       }
       // The action did nothing because every row already held: said, because a
       // dialog closing in silence reads the same as a save that went nowhere.
-      if (!persisted.wrote) notifyInfo("Nothing to save: no preference was changed.")
+      if (persisted.saved.length === 0) {
+        notifyInfo("Nothing to save: no preference was changed.")
+      }
       closeCustomizeWebapp()
     } finally {
       savingRef.current = false
@@ -1193,18 +1310,23 @@ function PreferencesForm({
   // A reset changes the draft only. A locked row is reset too: its lock says
   // this run cannot put the value in force, not that it cannot be saved.
   const resetRow = (d: SettingDescriptor) => {
-    setOverride(d.key, resetValue(d))
-    focusRowAfterReset.current = d.key
+    setOverride(d, resetValue(d))
+    focusAfter.current = { key: d.key, prefer: "[data-undo]" }
+  }
+
+  // Puts the saved value back: the row's edit or reset is dropped.
+  const undoRow = (d: SettingDescriptor) => {
+    dropOverrides([d.key])
+    keep([d.key])
+    focusAfter.current = { key: d.key, prefer: "[data-reset]" }
   }
 
   const confirmResetAll = () => {
-    setOverrides((o) => {
-      const next = { ...o }
-      for (const d of changedSettings) next[d.key] = resetValue(d)
-      return next
-    })
+    for (const d of descriptors) {
+      if (resetAll?.keys.includes(d.key)) setOverride(d, resetValue(d))
+    }
     resetAllDone.current = true
-    setResetAllNames(null)
+    setResetAll(null)
   }
 
   const pickView = (next: View) => {
@@ -1235,10 +1357,8 @@ function PreferencesForm({
 
   const found = searching
     ? descriptors.filter((d) =>
-        rowMatches(
-          settingSearchFields(d, lockOn(d), rowMeta(d, differs(d), true), extraShownText(d)),
-          words,
-        ),
+        keptHere.includes(d.key) ||
+        rowMatches(settingSearchFields(d, lockOn(d), extraShownText(d)), words),
       )
     : []
 
@@ -1264,9 +1384,14 @@ function PreferencesForm({
           <SettingRow
             d={d}
             value={effective(d)}
-            onChange={(v) => setOverride(d.key, v)}
+            onChange={(v) => setOverride(d, v)}
             onReset={() => resetRow(d)}
+            onUndo={() => undoRow(d)}
             changed={differs(d)}
+            saved={unsaved(d) ? originalOf(d) : null}
+            savedMoved={
+              unsaved(d) && d.key in editedOver && !sameValue(d, editedOver[d.key], originalOf(d))
+            }
             meta={rowMeta(d, differs(d), showTopic)}
             disabled={saving}
             lock={lockOn(d)}
@@ -1320,7 +1445,12 @@ function PreferencesForm({
         variant="outline"
         disabled={saving}
         className="shrink-0 max-md:min-h-10 pointer-coarse:min-h-10"
-        onClick={() => setResetAllNames(changedSettings.map((d) => d.label))}
+        onClick={() =>
+          setResetAll({
+            keys: changedSettings.map((d) => d.key),
+            names: changedSettings.map((d) => d.label),
+          })
+        }
       >
         <RotateCcw />
         Reset all {changedSettings.length}…
@@ -1365,7 +1495,7 @@ function PreferencesForm({
               {phone ? null : (
                 <p className="text-xs text-muted-foreground">
                   Everything here differs from what dux ships with. The reset on a
-                  row puts that one back.
+                  row puts that one back, and a row you reset stays until you leave.
                 </p>
               )}
             </div>
@@ -1432,11 +1562,20 @@ function PreferencesForm({
 
   const request = () => closeRef.current?.request()
 
+  const labelsOf = (keys: string[]) =>
+    descriptors.filter((d) => keys.includes(d.key)).map((d) => d.label)
+  const partialNotice =
+    partialSave === null ? null : (
+      <p role="status" className="text-xs text-dux-warning">
+        {`Part of the save went through. Saved: ${listNames(labelsOf(partialSave.saved))}. Not saved: ${listNames(labelsOf(partialSave.failed))}, still marked unsaved; Save tries ${partialSave.failed.length === 1 ? "it" : "them"} again.`}
+      </p>
+    )
+
   const confirms = (
     <>
       <ConfirmResetAll
-        names={resetAllNames}
-        onCancel={() => setResetAllNames(null)}
+        names={resetAll?.names ?? null}
+        onCancel={() => setResetAll(null)}
         onConfirm={confirmResetAll}
         finalFocus={() => {
           if (!resetAllDone.current) return true
@@ -1480,6 +1619,7 @@ function PreferencesForm({
     )
     const footer = (
       <div className="flex shrink-0 flex-col gap-2 border-t bg-muted/50 px-4 pt-3 pb-4">
+        {partialNotice}
         <Button disabled={saving} className="h-11 w-full" onClick={save}>
           {unsavedCount > 0
             ? `Save ${unsavedCount} ${unsavedCount === 1 ? "change" : "changes"}`
@@ -1610,6 +1750,7 @@ function PreferencesForm({
         </ScrollArea>
       </div>
 
+      {partialNotice}
       <DialogFooter className="shrink-0 sm:items-center">
         <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
           {unsavedCount > 0 ? changesLabel(unsavedCount) : null}

@@ -25,32 +25,39 @@ export function sameValue(d: SettingDescriptor, a: SettingValue, b: SettingValue
   return comparable(d, a) === comparable(d, b)
 }
 
-// The value a reset drafts. Identity fields go back to EMPTY rather than the
-// shipped text, so the file follows the shipped title and favicon from then on.
+// The value a reset drafts: EMPTY for identity fields, so the file follows the
+// shipped title and favicon. The server sends the resolved title, so an
+// explicit `title = "dux"` reads as the default, offers no reset and stays.
 export function resetValue(d: SettingDescriptor): SettingValue {
   return d.writeTarget === "identity" ? "" : d.default
 }
 
-// The documented default as a row's small line names it.
-export function defaultValueText(d: SettingDescriptor): string {
+// A value as a row names it in words.
+export function valueText(d: SettingDescriptor, value: SettingValue): string {
+  const v = comparable(d, value)
   switch (d.control.kind) {
     case "bool":
-      return d.default ? "On" : "Off"
+      return v ? "On" : "Off"
     case "number":
-      return d.control.unit ? `${d.default} ${d.control.unit}` : String(d.default)
+      return d.control.unit ? `${v} ${d.control.unit}` : String(v)
     case "enum": {
-      const opt = d.control.options.find((o) => o.value === d.default)
-      return opt?.label ?? String(d.default)
+      const opt = d.control.options.find((o) => o.value === v)
+      return opt?.label ?? String(v)
     }
     case "enum-dynamic":
-      return String(d.default)
+      return String(v)
     case "text":
-      return d.default === "" ? "empty" : String(d.default)
+      return v === "" ? "empty" : String(v)
     case "favicon":
-      return "Original"
+      return v === "" ? "Original" : String(v).charAt(0).toUpperCase() + String(v).slice(1)
     case "password":
       return "no password"
   }
+}
+
+// The documented default as a row's small line names it.
+export function defaultValueText(d: SettingDescriptor): string {
+  return valueText(d, d.default)
 }
 
 // What 0 means for a number row that gives it a meaning of its own.
@@ -78,14 +85,19 @@ export function topicLabel(topic: SettingTopic): string {
   return SETTING_TOPICS.find((t) => t.id === topic)?.label ?? topic
 }
 
-// A row's small line: where the setting applies, its default once it differs
-// from it, and, outside its own topic, the topic it is filed under.
-export function rowMeta(d: SettingDescriptor, changed: boolean, showTopic: boolean): string {
-  const parts = [SURFACE_LABEL[d.surface]]
-  if (changed) parts.push(`default ${defaultValueText(d)}`)
+// A row's small line: where it applies, its default once it differs from it,
+// and outside its own topic that topic, the one part the search reads.
+export function rowMeta(
+  d: SettingDescriptor,
+  changed: boolean,
+  showTopic: boolean,
+): { text: string; searched: boolean }[] {
+  const surface = SURFACE_LABEL[d.surface]
   const topic = topicLabel(d.topic)
-  if (showTopic && topic !== parts[0]) parts.push(topic)
-  return parts.join(" · ")
+  const parts = [{ text: surface, searched: showTopic && topic === surface }]
+  if (changed) parts.push({ text: `default ${defaultValueText(d)}`, searched: false })
+  if (showTopic && topic !== surface) parts.push({ text: topic, searched: true })
+  return parts
 }
 
 export function changesLabel(count: number): string {
@@ -102,10 +114,8 @@ export function listNames(names: string[]): string {
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`
 }
 
-// The search splits its query into words, and a row is shown only when EVERY
-// word is somewhere in what the row shows: its label, its prose, its config
-// key and its small lines. The fields are the shown text, so a hit is always
-// something the user can see lit.
+// A row is shown only when EVERY word of the query is in its label, prose,
+// config key, options or topic, never in where it applies or its default.
 export function searchWords(query: string): string[] {
   return normalizeQuery(query).split(/\s+/).filter((w) => w !== "")
 }
@@ -114,20 +124,20 @@ export function rowMatches(fields: string[], words: string[]): boolean {
   return words.every((word) => haystackHas(word, ...fields))
 }
 
-// What a row shows, as searched. A locked row shows its lock sentence in place
-// of its description. `extra` is any other sentence the row shows, in its
+// What a row is searched by. A locked row shows its lock sentence in place of
+// its description. `extra` is any other sentence the row shows, in its
 // backticked source form.
 export function settingSearchFields(
   d: SettingDescriptor,
   lock: string | null,
-  meta: string,
   extra: string[],
 ): string[] {
   const fields = [
     d.label,
     inlineCodeDisplayText(lock ?? d.description),
     d.key,
-    meta,
+    topicLabel(d.topic),
+    ...(d.control.kind === "enum" ? d.control.options.map((o) => o.label) : []),
     ...extra.map(inlineCodeDisplayText),
   ]
   const zero = zeroText(d)

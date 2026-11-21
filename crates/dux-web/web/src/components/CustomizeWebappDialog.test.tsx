@@ -142,12 +142,8 @@ const fullBootstrap: Bootstrap = {
   always_show_tab_strip: false,
   attention_indicator: true,
   attention_on_bell: true,
-  // Stated rather than left absent, unlike the rows above it whose `read()`
-  // falls back to their own default. This one's absence MEANS OFF (an older
-  // server never published it), so leaving it out would make the fixture a
-  // server with the feature switched off, which "Changed from default" and "Reset all"
-  // would then legitimately count as a change. It must therefore carry the
-  // shipped default, and moves whenever that does.
+  // Stated rather than left absent: absence is an older server that never
+  // published it, which a test of its own covers.
   upload_pasted_text_chars: 4000,
 }
 
@@ -1071,7 +1067,10 @@ describe("CustomizeWebappDialog resets", () => {
     expect(screen.getByLabelText("Copy on select").getAttribute("aria-checked")).toBe("true")
     expect(row().textContent).not.toContain("Changed from default:")
     expect(screen.queryByRole("button", { name: "Reset Copy on select to On" })).toBeNull()
-    expect(document.activeElement).toBe(screen.getByLabelText("Copy on select"))
+    expect(row().textContent).toContain("Not saved yet. Saved: Off")
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Put Copy on select back to its saved value, Off" }),
+    )
     expect(screen.getByText("1 unsaved change")).toBeTruthy()
     expect(saveSettings).not.toHaveBeenCalled()
 
@@ -1225,12 +1224,19 @@ describe("CustomizeWebappDialog closing", () => {
     fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "14" } })
 
     await back()
-    expect(setAsidePreferencesDraft).toHaveBeenCalledWith({ "server.title": "renamed" }, 1, false)
+    expect(setAsidePreferencesDraft).toHaveBeenCalledWith(
+      { values: { "server.title": "renamed" }, saved: { "server.title": "old instance" } },
+      1,
+      false,
+    )
   })
 
   it("opens on the edits a Back set aside", () => {
     seed()
-    mockState.customizeWebappDraft = { "server.title": "renamed" }
+    mockState.customizeWebappDraft = {
+      values: { "server.title": "renamed" },
+      saved: { "server.title": "old instance" },
+    }
     render(<CustomizeWebappDialog />)
     expect((screen.getByLabelText("Instance name") as HTMLInputElement).value).toBe("renamed")
     expect(screen.getByText("1 unsaved change")).toBeTruthy()
@@ -1271,7 +1277,11 @@ describe("CustomizeWebappDialog on a phone", () => {
     expect(closeCustomizeWebapp).not.toHaveBeenCalled()
 
     await back()
-    expect(setAsidePreferencesDraft).toHaveBeenCalledWith({ "server.title": "renamed" }, 1, false)
+    expect(setAsidePreferencesDraft).toHaveBeenCalledWith(
+      { values: { "server.title": "renamed" }, saved: { "server.title": "old instance" } },
+      1,
+      false,
+    )
   })
 
   it("opens straight on the topic an opener names", () => {
@@ -1280,5 +1290,201 @@ describe("CustomizeWebappDialog on a phone", () => {
     mockState.customizeWebappTopic = "network"
     render(<CustomizeWebappDialog />)
     expect(screen.getByLabelText("Bind your Tailscale address")).toBeTruthy()
+  })
+
+  // The topics' sheet takes its entry first, so Back from a topic opened
+  // straight away still stops on the topics.
+  it("Back goes to the topics first when it opened straight on a topic", async () => {
+    phone = true
+    seed()
+    mockState.customizeWebappTopic = "network"
+    render(<CustomizeWebappDialog />)
+    await opened()
+    expect(openModals()).toHaveLength(2)
+
+    await back()
+    expect(screen.queryByLabelText("Bind your Tailscale address")).toBeNull()
+    expect(screen.getByRole("navigation", { name: "Preferences topics" })).toBeTruthy()
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+
+    await back()
+    expect(closeCustomizeWebapp).toHaveBeenCalled()
+  })
+})
+
+describe("CustomizeWebappDialog unsaved rows", () => {
+  const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+  const rowOf = (label: string) => screen.getByLabelText(label).closest("[data-setting-row]")!
+
+  it("says what is saved on a reset row and puts it back where the reset was made", async () => {
+    seed({ title: "prod dux" })
+    render(<CustomizeWebappDialog />)
+    await opened()
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Instance name to dux" }))
+    await settle()
+    expect(rowOf("Instance name").textContent).toContain("Not saved yet. Saved: prod dux")
+    const undo = screen.getByRole("button", {
+      name: "Put Instance name back to its saved value, prod dux",
+    })
+    expect(document.activeElement).toBe(undo)
+
+    fireEvent.click(undo)
+    await settle()
+    expect((screen.getByLabelText("Instance name") as HTMLInputElement).value).toBe("prod dux")
+    expect(rowOf("Instance name").textContent).not.toContain("Not saved yet")
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Reset Instance name to dux" }),
+    )
+    expect(screen.queryByText(/unsaved change/)).toBeNull()
+  })
+
+  it("offers the saved value back after an ordinary edit too", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "16" } })
+    expect(rowOf("Terminal font size").textContent).toContain("Not saved yet. Saved: 14 px")
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Put Terminal font size back to its saved value, 14 px" }),
+    )
+    expect((screen.getByLabelText("Terminal font size") as HTMLInputElement).value).toBe("14")
+    expect(screen.queryByText(/unsaved change/)).toBeNull()
+  })
+
+  it("keeps a reset row in Changed from default, with focus on it", async () => {
+    seed({ title: "", github_integration: true })
+    render(<CustomizeWebappDialog />)
+    await opened()
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "16" } })
+    topic("Changed from default")
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Terminal font size to 14 px" }))
+    await settle()
+
+    expect(screen.getByLabelText("Terminal font size")).toBeTruthy()
+    expect(document.activeElement).toBe(screen.getByLabelText("Terminal font size"))
+  })
+
+  it("keeps a search result whose matching sentence an edit took away", async () => {
+    vi.stubGlobal("Notification", { permission: "default", requestPermission: vi.fn() })
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "grant" } })
+    const toggle = screen.getByLabelText("Desktop notifications")
+
+    fireEvent.click(toggle)
+
+    expect(screen.getByLabelText("Desktop notifications")).toBeTruthy()
+  })
+
+  it("says on a restored edit that the saved value has moved since the edit was made", () => {
+    seed({ terminal_font_size: 18 })
+    mockState.customizeWebappDraft = {
+      values: { "ui.terminal_font_size": 16 },
+      saved: { "ui.terminal_font_size": 14 },
+    }
+    render(<CustomizeWebappDialog />)
+    expect(rowOf("Terminal font size").textContent).toContain(
+      "The saved value changed to 18 px since this edit was made.",
+    )
+  })
+
+  it("says so when the server changes a row while it holds an unsaved edit", () => {
+    seed()
+    const { rerender } = render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Terminal font size"), { target: { value: "16" } })
+    expect(rowOf("Terminal font size").textContent).not.toContain("changed to")
+
+    seed({ terminal_font_size: 20 })
+    rerender(<CustomizeWebappDialog />)
+    expect(rowOf("Terminal font size").textContent).toContain(
+      "The saved value changed to 20 px since this edit was made.",
+    )
+  })
+
+  it("after a partial save says what was saved, and a retry sends only the rest", async () => {
+    seed({ github_integration: false, tailscale_mode: "auto" })
+    setTailscaleMode.mockRejectedValueOnce(new Error("refused"))
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(field("Terminal font size"), { target: { value: "16" } })
+    fireEvent.click(field("GitHub integration"))
+    const trigger = field("Bind your Tailscale address")
+    fireEvent.click(trigger)
+    await waitFor(() => expect(trigger.getAttribute("aria-expanded")).toBe("true"))
+    const option = await screen.findByRole("option", { name: "No" })
+    fireEvent.pointerDown(option, { pointerType: "mouse" })
+    fireEvent.click(option)
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    const notice = await screen.findByText(/^Part of the save went through/)
+    expect(notice.textContent).toBe(
+      "Part of the save went through. Saved: Terminal font size and GitHub integration. Not saved: Bind your Tailscale address, still marked unsaved; Save tries it again.",
+    )
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
+    expect(closeCustomizeWebapp).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(toggleGithubIntegration).toHaveBeenCalledTimes(1)
+    expect(saveSettings).toHaveBeenCalledTimes(1)
+    expect(setTailscaleMode).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe("CustomizeWebappDialog search scope", () => {
+  const type = (query: string) =>
+    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: query } })
+
+  it("does not match where a row applies, nor the default it names", () => {
+    seed({ title: "prod dux" })
+    render(<CustomizeWebappDialog />)
+    type("browser")
+    expect(screen.queryByLabelText("Terminal font size")).toBeNull()
+    type("app")
+    expect(screen.queryByLabelText("Attention grace")).toBeNull()
+    type("default")
+    expect(screen.queryByLabelText("Instance name")).toBeNull()
+  })
+
+  it("matches option labels and topic names", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    type("top")
+    expect(screen.getByLabelText("PR banner position")).toBeTruthy()
+    type("sign-in network")
+    expect(screen.getByLabelText("Bind your Tailscale address")).toBeTruthy()
+  })
+})
+
+describe("CustomizeWebappDialog edge rows", () => {
+  const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+
+  it("treats a long-paste row an older server does not publish as unchanged", () => {
+    seed({ title: "", github_integration: true, upload_pasted_text_chars: undefined })
+    render(<CustomizeWebappDialog />)
+    const nav = screen.getByRole("navigation", { name: "Preferences topics" })
+    expect(
+      within(nav).getByRole("button", { name: /^Changed from default/ }).textContent,
+    ).toContain("0, 0 settings")
+  })
+
+  it("Reset all resets exactly the settings its confirm named", async () => {
+    seed({ title: "prod dux", github_integration: true })
+    const { rerender } = render(<CustomizeWebappDialog />)
+    await opened()
+    topic("Changed from default")
+    fireEvent.click(screen.getByRole("button", { name: "Reset all 1…" }))
+    const confirm = await screen.findByRole("dialog", { name: "Reset 1 setting to its default?" })
+
+    seed({ title: "prod dux", github_integration: true, copy_on_select: false })
+    rerender(<CustomizeWebappDialog />)
+    fireEvent.click(within(confirm).getByRole("button", { name: "Reset 1 setting" }))
+    await settle()
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(setInstanceIdentity).toHaveBeenCalledWith({ title: "" })
+    expect(saveSettings).not.toHaveBeenCalled()
   })
 })

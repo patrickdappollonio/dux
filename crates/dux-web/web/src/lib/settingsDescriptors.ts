@@ -84,6 +84,9 @@ export interface SettingDescriptor {
    * row this is not the effective value the dialog shows; the override-aware
    * `changesPaneVisible()` in `store.ts` is. */
   read: (b: Bootstrap) => SettingValue
+  /** False when this server does not publish the field and `read` falls back
+   * to something other than `default`: the row then counts as unchanged. */
+  published?: (b: Bootstrap) => boolean
 }
 
 /** What a row is about, which is what the dialog's side list groups by. */
@@ -271,6 +274,7 @@ export const SETTINGS: SettingDescriptor[] = [
     // Absent means off rather than the shipped default: an older server
     // publishes nothing here and `TerminalPane` reads that as 0.
     read: (b) => b.upload_pasted_text_chars ?? 0,
+    published: (b) => b.upload_pasted_text_chars !== undefined,
   },
   {
     key: "capabilities.web_notifications",
