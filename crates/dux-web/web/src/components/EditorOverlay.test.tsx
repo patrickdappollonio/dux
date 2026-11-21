@@ -204,6 +204,9 @@ vi.mock("@/lib/fileApi", async (importOriginal) => ({
 // the only thing that knows in production, so the stub hands `onReady` a fake
 // instance shaped like the one narrow read `EditorBody` makes of it.
 let selectionActive = false
+// Called with the stand-in editor's value whenever React commits it, for a test
+// that needs something to happen after the commit and before passive effects.
+let onStubCommit: ((value: string) => void) | null = null
 // The live editor the stand-in hands the status bar: a cursor parked at a known
 // place in a known model, with events that never fire.
 // The file the stand-in editor's model is for, and where the person is in it.
@@ -265,6 +268,7 @@ function codeEditorStub() {
       <StubEditorLifecycle onEditorChange={onEditorChange} />
       <textarea
         ref={() => {
+          onStubCommit?.(value)
           // The whole surface `EditorBody` touches on the instance: the
           // selection read the freshness check makes, and the model lookup
           // its disposal effect makes.
@@ -2618,6 +2622,37 @@ describe("when the file changes on disk underneath the editor", () => {
     put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
     fireEvent(window, new Event("focus"))
     await waitFor(() => expect(editor().value).toBe(AGENT_TEXT))
+  })
+
+  // React runs passive effects in a later task than the commit that put the
+  // loaded text on screen, so a focus can land between the two; a microtask
+  // queued from the commit lands there too. The first mount only loads the
+  // lazy editor, so the second one commits its read the way a page does.
+  it("does not drop a focus that lands between the load's commit and its effects", async () => {
+    await mountOne()
+    cleanup()
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+    onStubCommit = (value) => {
+      if (value !== ON_DISK) return
+      onStubCommit = null
+      put(PATH, AGENT_TEXT, "2026-02-02T00:00:00+00:00")
+      queueMicrotask(() => window.dispatchEvent(new Event("focus")))
+    }
+    try {
+      const { getSnapshot } = await import("@/lib/store")
+      mockState = {
+        ...getSnapshot(),
+        editorTarget: { root: agentRoot(SESSION), initialPath: PATH },
+        editorTabs: {
+          [rootKey(agentRoot(SESSION))]: { tabs: [tab(TAB_ID, PATH)], activeId: TAB_ID },
+        },
+      } as DuxState
+      render(<Overlay />)
+      await waitFor(() => expect(editor().value).toBe(AGENT_TEXT), { timeout: 2000 })
+    } finally {
+      onStubCommit = null
+    }
   })
 
   it("never silently replaces a buffer with unsaved edits", async () => {

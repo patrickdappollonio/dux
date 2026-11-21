@@ -5,7 +5,7 @@
 // overlay stands down while the tab is the standalone surface), so there is
 // never a second Monaco model set or a second buffer map over the same files.
 import { changedStatusLookup } from "@/lib/changedFiles"
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   Check,
   ChevronLeft,
@@ -360,9 +360,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // The live buffers and changed-files slice, for the same reason `tabsRef`
   // exists: the freshness check and the save both resolve LATER, and they must
   // decide against the buffer and the slice as they are at that moment, not as
-  // they were when the request went out.
+  // they were when the request went out. Copied in the commit itself: passive
+  // effects can run a task later, and a window focus landing in between would
+  // find the buffer from before its read and drop the check.
   const buffersRef = useRef(buffers)
-  useEffect(() => {
+  useLayoutEffect(() => {
     buffersRef.current = buffers
   })
 
