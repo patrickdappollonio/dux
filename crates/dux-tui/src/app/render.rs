@@ -9255,14 +9255,15 @@ impl App {
         self.clear_overlay_area(frame, area);
         let details_block = self.themed_overlay_block("Change Base Branch");
         let details = self.change_base_branch_details(&prompt, details_block.inner(area).width);
-        // A wrapped fetch note takes rows from the list, which keeps a few.
-        let details_height = usize_to_u16_wrapping(details.len())
-            .saturating_add(2)
-            .min(area.height.saturating_sub(6))
-            .max(4);
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(details_height), Constraint::Min(3)])
+            .constraints([
+                Constraint::Length(change_base_branch_details_height(
+                    details.len(),
+                    area.height,
+                )),
+                Constraint::Min(3),
+            ])
             .areas(area);
         let details_inner = details_block.inner(details_area);
 
@@ -9336,15 +9337,7 @@ impl App {
                 ListItem::new(Line::from(spans))
             })
             .collect::<Vec<_>>();
-        let empty = if prompt.loading {
-            "Fetching origin and listing branches…".to_string()
-        } else if let Some(error) = &prompt.error {
-            format!("Could not list branches: {error}")
-        } else if prompt.branches.is_empty() {
-            "No branches to switch to.".to_string()
-        } else {
-            "No matching branches.".to_string()
-        };
+        let empty = change_base_branch_empty_text(&prompt);
         let rendered = PickerList::new(items, Some(prompt.list.selected), empty)
             .block(list_block)
             .render(frame, list_area, &self.theme);
@@ -16393,6 +16386,29 @@ fn status_footer_lines(status_text: &str, width: u16, countdown_columns: usize) 
     } else {
         1
     }
+}
+
+/// What the Change base branch picker's list says when it shows no row.
+fn change_base_branch_empty_text(prompt: &crate::app::ChangeBaseBranchPrompt) -> String {
+    if prompt.loading {
+        "Fetching origin and listing branches…".to_string()
+    } else if let Some(error) = &prompt.error {
+        format!("Could not list branches: {error}")
+    } else if prompt.branches.is_empty() {
+        "No branches to switch to.".to_string()
+    } else {
+        "No matching branches.".to_string()
+    }
+}
+
+/// The Change base branch picker's header height for `lines` of details in a
+/// modal `modal_height` tall: a wrapped fetch note takes rows from the branch
+/// list, which keeps a few.
+fn change_base_branch_details_height(lines: usize, modal_height: u16) -> u16 {
+    usize_to_u16_wrapping(lines)
+        .saturating_add(2)
+        .min(modal_height.saturating_sub(6))
+        .max(4)
 }
 
 /// Whether closing one tab detaches its agent: it does when the close removes
