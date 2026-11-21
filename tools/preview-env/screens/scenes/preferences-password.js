@@ -1,5 +1,5 @@
-// The Password row at the head of Preferences, in a browser signed in with a
-// password, with a new one half typed so the strength meter shows. Nothing is
+// The Password row at the head of Preferences' Sign-in and network topic, in a
+// browser signed in with a password, with a new one half typed so the strength meter shows. Nothing is
 // saved: the dialog is shot open and the browser closed.
 const {
   boxOf,
@@ -28,12 +28,13 @@ module.exports = {
     await clickText(page, "Settings")
     await clickText(page, "Preferences", "[role=menuitem],button")
     await sleep(1200)
+    await clickText(page, "Sign-in and network", "[data-topic]")
     const fresh = '[role="dialog"] input[autocomplete="new-password"]'
     await page.waitForSelector(fresh, { timeout: 15000 })
     await page.type(fresh, NEW_PASSWORD, { delay: 20 })
     await sleep(1200)
     await clearToasts(page)
-    await expectDialogOpen(page, "Settings")
+    await expectDialogOpen(page, "Preferences")
     await expectVisibleText(page, "Current password")
     await expectVisible(page, '[role="dialog"] [aria-label="Password strength"]', "the strength meter")
     // From the dialog's top to just under the row's last field, so the picture
