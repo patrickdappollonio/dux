@@ -375,7 +375,8 @@ itself and a total.
   trouble. **Detach agent…** is the polite alternative.
 - **Force stop** on an agent's first row ends the agent and every tab it is running; on an
   extra tab it closes the tab; on a terminal it destroys the terminal.
-- **Force stop everything…** does the same to every agent and terminal in one go. Both
+- **Force stop everything…** does the same to every agent and terminal in one go, except
+  the ones another device is driving, which it names and leaves running. Both
   confirmations say so before you commit.
 
 > [!WARNING]
