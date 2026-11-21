@@ -18,6 +18,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     setInstanceIdentity: vi.fn(),
     closeCustomizeWebapp: vi.fn(),
     saveSettings: vi.fn(),
+    currentBootstrap: vi.fn(),
     setChangesPaneVisibility: vi.fn(),
     setAsidePreferencesDraft: vi.fn(),
     openConfigEditor: vi.fn(),
@@ -106,6 +107,7 @@ const store = await import("@/lib/store")
 const setInstanceIdentity = vi.mocked(store.setInstanceIdentity)
 const closeCustomizeWebapp = vi.mocked(store.closeCustomizeWebapp)
 const saveSettings = vi.mocked(store.saveSettings)
+const currentBootstrap = vi.mocked(store.currentBootstrap)
 const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 const setAsidePreferencesDraft = vi.mocked(store.setAsidePreferencesDraft)
 const openConfigEditor = vi.mocked(store.openConfigEditor)
@@ -191,6 +193,8 @@ beforeEach(() => {
   setInstanceIdentity.mockClear().mockResolvedValue(true)
   closeCustomizeWebapp.mockClear()
   saveSettings.mockClear().mockResolvedValue(true)
+  // The server holds what the page holds unless a test says otherwise.
+  currentBootstrap.mockReset().mockImplementation(async () => mockState.bootstrap)
   setChangesPaneVisibility.mockClear().mockResolvedValue(true)
   toggleGithubIntegration.mockClear().mockResolvedValue(undefined as never)
   setTailscaleMode.mockClear().mockResolvedValue({
@@ -439,6 +443,39 @@ describe("CustomizeWebappDialog", () => {
       "Saved Copy on select and Terminal font size. Every connected browser picks up the change now.",
     )
     expect(notifyInfo).not.toHaveBeenCalled()
+  })
+
+  // The config can change under an open dialog before this page hears of it.
+  it("does not send or claim to save a row the server already holds", async () => {
+    seed({ copy_on_select: true })
+    currentBootstrap.mockResolvedValueOnce({ ...fullBootstrap, copy_on_select: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(field("Copy on select"))
+    fireEvent.change(field("Terminal font size"), { target: { value: "16" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings.mock.calls[0][0].ui).toEqual({ terminal_font_size: 16 })
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Saved Terminal font size. Copy on select was already set that way, so it was not saved again. Every connected browser picks up the change now.",
+    )
+  })
+
+  it("says nothing was saved when the server already holds every row", async () => {
+    seed({ copy_on_select: true })
+    currentBootstrap.mockResolvedValueOnce({ ...fullBootstrap, copy_on_select: false })
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.click(field("Copy on select"))
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(saveSettings).not.toHaveBeenCalled()
+    expect(notifySuccess).not.toHaveBeenCalled()
+    expect(notifyInfo).toHaveBeenCalledWith(
+      "Copy on select was already set that way, so it was not saved again.",
+    )
   })
 
   it("disables the form while a save is in flight", async () => {

@@ -2126,6 +2126,12 @@ function loadBootstrap(): void {
     })
 }
 
+/// The bootstrap as the server holds it now, for a save that compares against
+/// it, or null when the server could not be asked.
+export function currentBootstrap(): Promise<Bootstrap | null> {
+  return refetchBootstrap().catch(() => null)
+}
+
 // `loadBootstrap` under the same newest-wins rule, but resolving the document for
 // a caller that reseeds from it and letting a failure reach that caller.
 function refetchBootstrap(): Promise<Bootstrap> {

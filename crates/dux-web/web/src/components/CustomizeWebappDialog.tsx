@@ -114,6 +114,7 @@ import { wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
+  currentBootstrap,
   mobileAccessoryBarVisible,
   openConfigEditor,
   saveSettings,
@@ -329,12 +330,14 @@ function broughtIntoRangeSentence(
 }
 
 /// What one Save press says of the rows it saved through the settings write,
-/// which the server keeps quiet on the web, and of every number it brought
-/// into range, or null when it has nothing to say. The other writes answer
+/// which the server keeps quiet on the web, of every number it brought into
+/// range, and of the rows the server already held, or null when it has nothing
+/// to say. The other writes answer
 /// their own outcome on the wire.
 function saveConfirmation(
   saved: readonly SettingDescriptor[],
   broughtIn: readonly { d: SettingDescriptor; value: SettingValue; typed: SettingValue }[],
+  already: readonly SettingDescriptor[],
 ): string | null {
   const quiet = saved.filter((d) => d.writeTarget === "settings")
   const plain = quiet.filter((d) => !broughtIn.some((b) => b.d.key === d.key))
@@ -342,6 +345,13 @@ function saveConfirmation(
   if (plain.length > 0) parts.push(`Saved ${listNames(plain.map((d) => d.label))}.`)
   for (const { d, value, typed } of broughtIn) {
     parts.push(broughtIntoRangeSentence(d, value, typed, saved.includes(d)))
+  }
+  if (already.length > 0) {
+    parts.push(
+      already.length === 1
+        ? `${already[0].label} was already set that way, so it was not saved again.`
+        : `${listNames(already.map((d) => d.label))} were already set that way, so they were not saved again.`,
+    )
   }
   if (quiet.some((d) => d.surface !== "tui")) {
     parts.push("Every connected browser picks up the change now.")
@@ -1167,13 +1177,14 @@ function PreferencesForm({
   // The pre-touch baseline for a row. Any field the store tracks an optimistic
   // override for must read the override-aware selector rather than raw bootstrap:
   // the rule is override-awareness, not `writeTarget`.
-  const originalOf = (d: SettingDescriptor): SettingValue => {
+  const originalIn = (d: SettingDescriptor, b: typeof bootstrap): SettingValue => {
     const saved = written[d.key]
-    if (saved !== undefined && saved.over === bootstrap) return saved.value
+    if (saved !== undefined && saved.over === b) return saved.value
     if (d.writeTarget === "changesPane") return changesPaneVisible(dux)
     if (d.key === "ui.mobile_accessory_bar") return mobileAccessoryBarVisible(dux)
-    return bootstrap ? d.read(bootstrap) : d.default
+    return b ? d.read(b) : d.default
   }
+  const originalOf = (d: SettingDescriptor): SettingValue => originalIn(d, bootstrap)
 
   const effective = (d: SettingDescriptor): SettingValue => {
     if (d.key in overrides) return overrides[d.key]
@@ -1368,11 +1379,24 @@ function PreferencesForm({
       for (const { d, value, typed } of broughtIn) {
         setOverride(d, value, typeof typed === "number" ? typed : undefined)
       }
-      const persisted = await persist(touched, originalOf)
+      // Compared against what the server holds now rather than what this page
+      // last heard: the config can change under an open dialog, and a row it
+      // already holds is neither sent nor said to be saved.
+      const over = (await currentBootstrap()) ?? bootstrap
+      const savedValue = (d: SettingDescriptor) => originalIn(d, over)
+      const already = touched
+        .filter(
+          ([d, value]) =>
+            d.writeTarget !== "password" &&
+            !sameValue(d, value, originalOf(d)) &&
+            sameValue(d, value, savedValue(d)),
+        )
+        .map(([d]) => d)
+      if (already.length > 0) dropOverrides(already.map((d) => d.key))
+      const persisted = await persist(touched, savedValue)
       // A landed write leaves the draft, so the count and a retry hold only
       // what is still unsaved, and a read-and-flip row is never sent twice.
       if (persisted.saved.length > 0) {
-        const over = bootstrap
         setWritten((w) => ({
           ...w,
           ...Object.fromEntries(
@@ -1392,6 +1416,7 @@ function PreferencesForm({
         persisted.failed.length === 0
           ? broughtIn
           : broughtIn.filter(({ d }) => persisted.saved.includes(d.key)),
+        already,
       )
       if (confirmation !== null) {
         if (persisted.saved.length > 0) notifySuccess(confirmation)
@@ -1410,7 +1435,7 @@ function PreferencesForm({
       }
       // The action did nothing because every row already held: said, because a
       // dialog closing in silence reads the same as a save that went nowhere.
-      if (persisted.saved.length === 0 && broughtIn.length === 0) {
+      if (persisted.saved.length === 0 && broughtIn.length === 0 && already.length === 0) {
         notifyInfo("Nothing to save: no preference was changed.")
       }
       closeCustomizeWebapp()
