@@ -109,11 +109,14 @@ page.
 2. Type to filter.
 3. Click a macro or press Enter to send it.
 
+Each macro in the picker has a pencil beside it. The pencil opens the macro in the editor
+instead of sending it, whether you click it, tap it, or Tab to it and press Enter.
+
 The text simply appears at the prompt; there is no confirmation toast. If the pane's message
 box is your typing surface, the macro lands in the box instead, ready for you to edit and
 send.
 
-![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a search field and an Edit macros link at the bottom.](/screens/macro-popover.png)
+![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a pencil beside each one, a search field, and an Edit macros link at the bottom.](/screens/macro-popover.png)
 
 If a pane has no macros for its surface, the popover says so and points you at the
 editor. With no macros at all, it links straight to **Edit macros**.
@@ -176,23 +179,38 @@ hand-edits survive: dux preserves your formatting and ordering.
 
 ## Managing macros in the web UI
 
-Open the cog menu and pick **Configuration → Edit macros…**, or click **Edit macros**
-from any terminal pane's macro popover. A dialog opens with the same list in declaration
-order:
+Open the cog menu and pick **Configuration → Edit macros…**, click **Edit macros** at the
+bottom of any pane's macro picker, or click the pencil beside a macro to open the editor
+on that one.
 
-- **Add macro** opens a form for a new entry: a name, the text, and a surface picker
-  (`Agent` / `Terminal` / `Both`).
-- The pencil button on a row edits it through the same form. Renaming keeps its position
-  in the list.
-- The trash button stages a deletion and asks you to confirm inline.
-- **Drag a row** to reorder the list. A reorder saves right away, when the list is
-  valid; nothing else needs **Save** for it.
-- **Save** writes the whole list at once; **Cancel** discards your changes.
+On a computer, the list sits on the left and the selected macro's editor on the right. On a
+phone, the list comes first: tap a macro to open its editor, and the back arrow, or your
+phone's own Back, takes you to the list again.
 
-If the list changed somewhere else while the dialog was open (another browser, or a
-script), Save is refused and nothing is written, so the other change is not lost. The
-dialog keeps your edits and offers to reload the list, which drops them, or to keep
-editing so you can copy what you need first.
+- **Search** filters by name and text. **All**, **Agent** and **Terminal** narrow the list to
+  the macros that pane would offer, with a count on each.
+- **New** adds a macro. Give it a name, choose where it is **Shown on** (`Agent`, `Terminal`
+  or `Both`; the editor says what each one means), and write its text.
+- **The `⋯` beside the name** duplicates the macro, moves it to the top, or deletes it.
+  Delete asks first.
+- **Drag a row** to reorder the list. On a touch screen, press and hold the row first.
+
+Nothing is written while you work. A dot marks every macro you changed, the dialog counts
+your unsaved changes, and **Save** writes them all in one go. If something stops the save,
+such as a missing name or two macros with the same name, the dialog says what and offers
+to take you to the macro concerned.
+
+> [!TIP]
+> Closing with unsaved changes is safe. **Cancel**, Escape or the close button ask before
+> they throw anything away. Your browser's Back (from the list, on a phone) closes the
+> dialog without asking and keeps your changes instead: a message offers to **Restore**
+> them, and the next time you open the editor, whichever way you open it, they are still
+> there. They are only gone once you discard them.
+
+If the list changed somewhere else after you started (another browser, or the command
+line), Save is refused and nothing is written, so the other change is not lost. The dialog
+keeps your edits and offers to reload the list, which drops them, or to keep editing so
+you can copy what you need first.
 
 ## Managing macros from the command line
 
