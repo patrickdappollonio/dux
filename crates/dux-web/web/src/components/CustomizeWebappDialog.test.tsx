@@ -669,6 +669,21 @@ describe("CustomizeWebappDialog", () => {
     )
   })
 
+  it("says a number was brought into range when it was saved and another row's write failed", async () => {
+    seed()
+    setInstanceIdentity.mockResolvedValueOnce(false)
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.change(field("Terminal font size"), { target: { value: "3" } })
+    fireEvent.change(field("Instance name"), { target: { value: "new instance" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await screen.findByText(/^Part of the save went through/)
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32. Every connected browser picks up the change now.",
+    )
+  })
+
   it("says a number brought into range on leaving the field was saved instead of the one typed", async () => {
     seed()
     render(<CustomizeWebappDialog />)

@@ -1383,19 +1383,23 @@ function PreferencesForm({
         }))
         dropOverrides(persisted.saved)
       }
-      if (persisted.failed.length > 0) {
-        if (persisted.saved.length > 0) setPartialSave(persisted)
-        return
-      }
-      // One confirmation for the whole press: the dialog closes, so without it
-      // nothing on screen says the rows the server answers quietly were saved.
+      // One confirmation for the whole press, said for the part that was saved
+      // even when another part failed: a saved row leaves the draft, so this is
+      // the only place its number brought into range is ever said. Every other
+      // row keeps its note in the draft for the retry to say.
       const confirmation = saveConfirmation(
         descriptors.filter((d) => persisted.saved.includes(d.key)),
-        broughtIn,
+        persisted.failed.length === 0
+          ? broughtIn
+          : broughtIn.filter(({ d }) => persisted.saved.includes(d.key)),
       )
       if (confirmation !== null) {
         if (persisted.saved.length > 0) notifySuccess(confirmation)
         else notifyInfo(confirmation)
+      }
+      if (persisted.failed.length > 0) {
+        if (persisted.saved.length > 0) setPartialSave(persisted)
+        return
       }
       if (pw.kind === "write") {
         const write =
