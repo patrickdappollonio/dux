@@ -4301,8 +4301,17 @@ fn fingerprint_halves(spine: &dux_core::viewmodel::SpineView) -> (String, String
 /// [`dux_core::viewmodel::AgentTabView::input_owner`] for why the engine
 /// cannot fill this itself.
 fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::SpineView {
+    owned_spine_at(engine, owners).0
+}
+
+/// [`owned_spine`] with the ownership epoch its owners are true as of, which the
+/// workspace document carries so a browser can order it against a later handover.
+fn owned_spine_at(
+    engine: &Engine,
+    owners: &PtySizeOwners,
+) -> (dux_core::viewmodel::SpineView, u64) {
     let mut spine = engine.spine();
-    let map = owners.input_owners_snapshot();
+    let (map, owners_epoch) = owners.input_owners_snapshot();
     if !map.is_empty() {
         for session in &mut spine.sessions {
             overlay_session_input_owners(session, &map);
@@ -4312,7 +4321,7 @@ fn owned_spine(engine: &Engine, owners: &PtySizeOwners) -> dux_core::viewmodel::
         // [`overlay_terminal_input_owners`] for the cost this accepts.
         overlay_terminal_input_owners(&mut spine.terminals, &map);
     }
-    spine
+    (spine, owners_epoch)
 }
 
 /// The pure half of the overlay: stamp the driver of ONE session's row onto
@@ -4407,24 +4416,33 @@ pub(crate) struct WorkspaceDoc {
     pub(crate) json: Arc<str>,
 }
 
-/// Serialize one workspace document with `rev` as a top-level field alongside
-/// the spine's own fields. Flattening keeps every existing field exactly where
-/// it was, so `rev` is purely additive to the REST body.
+/// Serialize one workspace document with `rev` and `owners_epoch` as top-level
+/// fields alongside the spine's own fields. Flattening keeps every existing
+/// field exactly where it was, so both are purely additive to the REST body.
 ///
 /// A serialization failure cannot happen for this type, but if it ever did, the
 /// fallback still carries the rev: a client that applies an empty document is
 /// merely stale, while a client that applies a document whose rev it cannot
 /// order would be wrong.
-fn serialize_workspace(rev: u64, spine: &dux_core::viewmodel::SpineView) -> Arc<str> {
+fn serialize_workspace(
+    rev: u64,
+    owners_epoch: u64,
+    spine: &dux_core::viewmodel::SpineView,
+) -> Arc<str> {
     #[derive(serde::Serialize)]
     struct Revisioned<'a> {
         rev: u64,
+        owners_epoch: u64,
         #[serde(flatten)]
         spine: &'a dux_core::viewmodel::SpineView,
     }
-    serde_json::to_string(&Revisioned { rev, spine })
-        .unwrap_or_else(|_| format!("{{\"rev\":{rev}}}"))
-        .into()
+    serde_json::to_string(&Revisioned {
+        rev,
+        owners_epoch,
+        spine,
+    })
+    .unwrap_or_else(|_| format!("{{\"rev\":{rev}}}"))
+    .into()
 }
 
 /// Loop-local state for the change-gated spine check and its self-healing
@@ -4443,8 +4461,11 @@ struct SpineCheck {
     prev_sessions_fp: String,
     /// The cached workspace document: the `GET /api/v1/workspace` body and the
     /// pushed frame's payload, one serialization, rebuilt only when a half
-    /// actually changes.
+    /// actually changes or the ownership epoch moves.
     doc: Arc<WorkspaceDoc>,
+    /// The ownership epoch `doc` is stamped with. Unchanged owners are restamped
+    /// when it moves, or a browser would ignore them as older than a handover it heard.
+    doc_owners_epoch: u64,
     /// The `mutation_version` value at the last fingerprint compare.
     last_checked_mutation: u64,
     /// The `streaming_version` value at the last fingerprint compare.
@@ -4484,11 +4505,11 @@ impl SpineCheck {
         // check re-runs rather than missing it until the backstop.
         let last_checked_ownership = owners.ownership_generation();
         // ONE build feeds both the fingerprints and the cache (see `owned_spine`).
-        let spine = owned_spine(engine, owners);
+        let (spine, doc_owners_epoch) = owned_spine_at(engine, owners);
         let (prev_projects_fp, prev_sessions_fp) = fingerprint_halves(&spine);
         let doc = Arc::new(WorkspaceDoc {
             rev: FIRST_WORKSPACE_REV,
-            json: serialize_workspace(FIRST_WORKSPACE_REV, &spine),
+            json: serialize_workspace(FIRST_WORKSPACE_REV, doc_owners_epoch, &spine),
         });
         // `send_replace`, not `send`: `watch::Sender::send` fails and DROPS the
         // value when no receiver is alive, and the only long-lived receiver is
@@ -4498,6 +4519,7 @@ impl SpineCheck {
             prev_projects_fp,
             prev_sessions_fp,
             doc,
+            doc_owners_epoch,
             last_checked_mutation: 0,
             last_checked_streaming: 0,
             last_checked_ownership,
@@ -4511,7 +4533,8 @@ impl SpineCheck {
     /// compare (the serialize) only when `mutation_version` or `streaming_version`
     /// moved since the last check, OR the slow backstop fired. On a real change to
     /// either half, sends the matching coarse [`SpineChange`] and rebuilds the
-    /// cached spine JSON. Idle intervals return immediately, doing zero work.
+    /// cached spine JSON, which a moved ownership epoch alone also rebuilds.
+    /// Idle intervals return immediately, doing zero work.
     fn maybe_check(
         &mut self,
         engine: &Engine,
@@ -4548,7 +4571,7 @@ impl SpineCheck {
         // ONE build feeds both the fingerprints and (below) the cache, so the
         // served JSON can never describe a different ownership snapshot than
         // the fingerprint that gated its `sessions.changed`.
-        let spine = owned_spine(engine, owners);
+        let (spine, owners_epoch) = owned_spine_at(engine, owners);
         let (projects_fp, sessions_fp) = fingerprint_halves(&spine);
         let mut spine_changed = false;
         if projects_fp != self.prev_projects_fp {
@@ -4562,17 +4585,19 @@ impl SpineCheck {
             spine_changed = true;
         }
         // Rebuild the cached workspace document only when a half actually
-        // changed, so the common case (no change) skips the full serialization.
+        // changed or the ownership epoch moved (see `doc_owners_epoch`), so the
+        // common case (no change) skips the full serialization.
         // This is the one chokepoint that rewrites the cache, so it is also
         // where the revision is minted and where the document is published to
         // every connected client. An idle interval publishes nothing at all: a
         // client's applied revision only ever moves because the document did.
-        if spine_changed {
+        if spine_changed || owners_epoch != self.doc_owners_epoch {
             let rev = self.doc.rev.saturating_add(1);
             self.doc = Arc::new(WorkspaceDoc {
                 rev,
-                json: serialize_workspace(rev, &spine),
+                json: serialize_workspace(rev, owners_epoch, &spine),
             });
+            self.doc_owners_epoch = owners_epoch;
             workspace_tx.send_replace(Some(Arc::clone(&self.doc)));
         }
     }
@@ -5365,7 +5390,7 @@ fn session_with_terminals(
     Vec<dux_core::viewmodel::TerminalView>,
 )> {
     engine.session_view(id).map(|mut session| {
-        overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot());
+        overlay_session_input_owners(&mut session, &input_owners.input_owners_snapshot().0);
         let terminals =
             engine.terminal_views_for_owner(dux_core::model::TerminalOwnerRef::Session(id));
         (session, terminals)
@@ -9013,12 +9038,14 @@ mod tests {
         );
 
         // Take-over: a connection claims the session-slot tab's PTY.
-        owners.claim(
-            engine
-                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
-                .as_str(),
-            42,
-        );
+        let claimed = owners
+            .claim(
+                engine
+                    .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                    .as_str(),
+                42,
+            )
+            .expect("an unowned pty is claimed");
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
@@ -9028,6 +9055,16 @@ mod tests {
         assert!(
             check.doc.json.contains(r#""input_owner":"42""#),
             "the served spine must carry the owning connection id: {}",
+            check.doc.json
+        );
+        // The same epoch the claim's `pty.owner` and the next handshake carry, so
+        // a browser can order this document against both.
+        assert!(
+            check
+                .doc
+                .json
+                .contains(&format!(r#""owners_epoch":{claimed}"#)),
+            "the served spine must be stamped with the claim's epoch: {}",
             check.doc.json
         );
 
@@ -9053,14 +9090,35 @@ mod tests {
         );
         assert!(rx.try_recv().is_err(), "and must emit no event");
 
+        // The owner lets go and claims again between two checks. The owners read
+        // the same, but a document still stamped with the first claim would be
+        // older than the second claim's `pty.owner` and ignored while true.
+        let slot = engine
+            .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+            .to_string();
+        owners.release(&slot, 42).expect("the owner is released");
+        let reclaimed = owners.claim(&slot, 42).expect("the free pty is claimed");
+        check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
+        assert!(
+            check
+                .doc
+                .json
+                .contains(&format!(r#""owners_epoch":{reclaimed}"#)),
+            "an unchanged owner is restamped with the newer epoch: {}",
+            check.doc.json
+        );
+        assert!(rx.try_recv().is_err(), "and no half changed, so no event");
+
         // The owner disconnects: the release must clear the published field so
         // a crashed device never leaves the agent permanently owned.
-        owners.release(
-            engine
-                .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
-                .as_str(),
-            42,
-        );
+        let released = owners
+            .release(
+                engine
+                    .slot_tab_id_of(dux_core::ids::SessionIdRef::new("s1"))
+                    .as_str(),
+                42,
+            )
+            .expect("the owner is released");
         check.maybe_check(&engine, 0, 0, &owners, &tx, &workspace_tx);
         assert_eq!(
             rx.try_recv(),
@@ -9070,6 +9128,14 @@ mod tests {
         assert!(
             !check.doc.json.contains("input_owner"),
             "and the served spine must drop the owner field"
+        );
+        assert!(
+            check
+                .doc
+                .json
+                .contains(&format!(r#""owners_epoch":{released}"#)),
+            "and be stamped with the release's epoch: {}",
+            check.doc.json
         );
     }
 

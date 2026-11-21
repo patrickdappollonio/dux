@@ -423,6 +423,8 @@ impl PtySizeOwners {
             if !owners.map.contains_key(&row) {
                 owners.map.insert(row.clone(), record);
             }
+            // Either way some pty's owner changed, which is what the epoch counts.
+            owners.epoch += 1;
             owners.generation += 1;
         }
         owners.row_of.insert(pty_id.to_string(), row.clone());
@@ -930,17 +932,23 @@ impl PtySizeOwners {
     /// ones no surface has placed yet included. Cloned because the lock must
     /// not be held across the spine projection.
     ///
+    /// Paired with the ownership epoch read under the same lock, as of which
+    /// the copy is true, so a browser can order it against a handshake or `pty.owner`.
+    ///
     /// # Panics
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
-    pub fn input_owners_snapshot(&self) -> std::collections::HashMap<RowKey, u64> {
-        self.owners
+    pub fn input_owners_snapshot(&self) -> (std::collections::HashMap<RowKey, u64>, u64) {
+        let owners = self
+            .owners
             .lock()
-            .expect("the pty owners lock is not poisoned")
+            .expect("the pty owners lock is not poisoned");
+        let map = owners
             .map
             .iter()
             .map(|(row, record)| (row.clone(), record.conn_id))
-            .collect()
+            .collect();
+        (map, owners.epoch)
     }
 }
 
@@ -1087,15 +1095,19 @@ mod tests {
         let owners = PtySizeOwners::default();
         let a = owners.next_conn_id();
         let b = owners.next_conn_id();
-        assert!(owners.claim("s1-slot", a).is_some());
+        let claimed = owners.claim("s1-slot", a).expect("claimed");
         owners.join_row("s1-slot", RowKey::Agent("s1".to_string()));
         owners.join_row("term-1", RowKey::Agent("s1".to_string()));
         assert!(owners.is_owner("term-1", a), "the claim moved to the row");
+        assert!(
+            owners.input_owners_snapshot().1 > claimed,
+            "term-1 gained an owner, so a snapshot from before the move must order before it"
+        );
 
         assert!(owners.claim("s2-slot", b).is_some());
         owners.join_row("s2-slot", RowKey::Agent("s1".to_string()));
         assert!(owners.is_owner("s2-slot", a), "the row's driver wins");
-        assert_eq!(owners.input_owners_snapshot().len(), 1);
+        assert_eq!(owners.input_owners_snapshot().0.len(), 1);
     }
 
     /// Self-succession at row level: a returning connection names the row's
@@ -2022,18 +2034,20 @@ mod tests {
         let owners = PtySizeOwners::default();
         let a = owners.next_conn_id();
 
-        assert!(owners.input_owners_snapshot().is_empty());
-        owners.claim("s1", a);
-        assert_eq!(
-            owners
-                .input_owners_snapshot()
-                .get(&RowKey::Terminal("s1".to_string())),
-            Some(&a)
-        );
-        let _ = owners.release("s1", a);
+        assert!(owners.input_owners_snapshot().0.is_empty());
+        let claimed = owners.claim("s1", a).expect("claimed");
+        let (map, epoch) = owners.input_owners_snapshot();
+        assert_eq!(map.get(&RowKey::Terminal("s1".to_string())), Some(&a));
+        assert_eq!(epoch, claimed, "the snapshot is true as of the claim");
+        let released = owners.release("s1", a).expect("released");
+        let (map, epoch) = owners.input_owners_snapshot();
         assert!(
-            owners.input_owners_snapshot().is_empty(),
+            map.is_empty(),
             "a disconnected owner must vanish from the published set"
+        );
+        assert_eq!(
+            epoch, released,
+            "and the release moves the stamp past the claim"
         );
     }
 

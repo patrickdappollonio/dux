@@ -16,7 +16,11 @@ import { useTerminalOwnership } from "./ownership"
 // The ledger is the machine's one external side effect, so it is recorded rather than
 // stubbed away: "does this pane publish a verdict, and which" is half of what
 // the four states mean.
-const { ledger } = vi.hoisted(() => ({ ledger: [] as [string, string][] }))
+const { ledger, spine } = vi.hoisted(() => ({
+  ledger: [] as [string, string][],
+  // The ownership epoch the applied spine document was stamped with.
+  spine: { owners_epoch: undefined as number | undefined },
+}))
 // The store is replaced outright rather than spread over: importing it for real
 // touches localStorage at module scope, and the machine wants exactly one
 // function out of it.
@@ -24,6 +28,8 @@ vi.mock("@/lib/store", () => ({
   noteAgentPtyOwnership: (id: string, verdict: string) => {
     ledger.push([id, verdict])
   },
+  useDuxSelector: <T>(select: (state: { spine: typeof spine }) => T): T =>
+    select({ spine }),
 }))
 
 class PtyFake {
@@ -67,7 +73,11 @@ function setup(
       }),
     { initialProps: { spineInputOwner: opts.spineInputOwner } },
   )
-  const setSpineInputOwner = (spineInputOwner: string | null | undefined) => {
+  const setSpineInputOwner = (
+    spineInputOwner: string | null | undefined,
+    ownersEpoch?: number,
+  ) => {
+    spine.owners_epoch = ownersEpoch
     act(() => view.rerender({ spineInputOwner }))
   }
   return { view, pty, reconnecting, setSpineInputOwner }
@@ -75,6 +85,7 @@ function setup(
 
 beforeEach(() => {
   ledger.length = 0
+  spine.owners_epoch = undefined
   resetPtyOwnerEpochs()
   forgetHeldConnIds()
   setVisibility("visible")
@@ -902,6 +913,30 @@ describe("self-succession names the ghost it expects to displace", () => {
   })
 })
 
+// The spine rides the events socket and the handshake the terminal's own, with
+// nothing ordering the two, so a document built before this page became the
+// driver can arrive after it did.
+describe("a spine document older than what this pane has heard", () => {
+  it("does not demote the driver its handshake named", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.connId.write("seat-1"))
+    act(() => view.result.current.seedFromConnected("seat-1", "seat-1", 5))
+    setSpineInputOwner("previous", 4)
+    expect(view.result.current.isOwner).toBe(true)
+    expect(ledger.at(-1)).toEqual(["p1", "mine"])
+  })
+
+  it("does not demote the driver a handover named, across an events reconnect", () => {
+    const { view, setSpineInputOwner } = setup()
+    act(() => view.result.current.connId.write("seat-1"))
+    act(() => view.result.current.seedFromConnected("seat-1", "previous", 5))
+    act(() => notifyPtyOwner("p1", "seat-1", 7, undefined))
+    act(() => resetPtyOwnerEpochs())
+    setSpineInputOwner("previous", 6)
+    expect(view.result.current.isOwner).toBe(true)
+  })
+})
+
 describe("the spine corrects a phantom owner", () => {
   it("demotes a pane the spine says another connection drives", () => {
     const { view, setSpineInputOwner } = setup()
@@ -979,6 +1014,14 @@ describe("a word heard while this socket has no id", () => {
     setSpineInputOwner("theirs")
     expect(view.result.current.isOwner).toBe(false)
     expect(view.result.current.ownershipKnown).toBe(true)
+    expect(ledger.at(-1)).toEqual(["p1", "elsewhere"])
+  })
+
+  it("demotes at once, while reconnecting, on a spine as new as its handshake", () => {
+    const { view, setSpineInputOwner } = driving()
+    act(() => view.result.current.notePtyConn("connecting"))
+    setSpineInputOwner("theirs", 1)
+    expect(view.result.current.isOwner).toBe(false)
     expect(ledger.at(-1)).toEqual(["p1", "elsewhere"])
   })
 

@@ -33,7 +33,7 @@ import {
   onServerRunChanged,
   runIdentityConfirmedAs,
 } from "@/lib/serverRun"
-import { noteAgentPtyOwnership } from "@/lib/store"
+import { noteAgentPtyOwnership, useDuxSelector } from "@/lib/store"
 import type { ConnState } from "@/lib/types"
 
 import type {
@@ -281,6 +281,16 @@ export function useTerminalOwnership(
   // newest one it heard is the newest one applied, which a superseded handshake
   // defers to.
   const eventHeardRef = useRef(false)
+  // The newest ownership epoch this pane heard from a handshake or `pty.owner`;
+  // unlike the page's applied marks it survives an events reconnect.
+  const heardEpochRef = useRef<number | undefined>(undefined)
+  const noteHeardEpoch = (epoch: number | undefined) => {
+    if (epoch === undefined) return
+    heardEpochRef.current = Math.max(heardEpochRef.current ?? epoch, epoch)
+  }
+  // The ownership epoch the spine document was stamped with. Read in the same
+  // render as `spineInputOwner`, so the two always come from one document.
+  const spineOwnersEpoch = useDuxSelector((s) => s.spine?.owners_epoch)
 
   // Device names survive events reconnects and are replaced only by a handover,
   // handshake, or a refetched spine owner. The same spine read corrects the
@@ -298,10 +308,20 @@ export function useTerminalOwnership(
   //     and the ghost clause already covers the version that will be granted.
   //   - Before this mount's first handshake it decides nothing: after a reload
   //     the spine can still name the replaced page, which this one cannot recognise.
+  //   - A document older than the newest handshake or `pty.owner` this pane
+  //     heard decides nothing: it can name the driver this page has since replaced.
   useEffect(() => {
     if (conn !== "open") return
     // The server has not answered the question: no evidence, so no correction.
     if (spineInputOwner === undefined) return
+    if (
+      spineOwnersEpoch !== undefined &&
+      [heardEpochRef.current, appliedPtyOwnerEpoch(id)].some(
+        (heard) => heard !== undefined && spineOwnersEpoch < heard,
+      )
+    ) {
+      return
+    }
     const myConnId = connId.read()
     // The spine naming us is the grant landing, whichever way it reached us.
     if (spineInputOwner !== null && spineInputOwner === myConnId) {
@@ -317,7 +337,7 @@ export function useTerminalOwnership(
     if (!handshakeSeenRef.current) return
     ownership.write(false)
     setOwnerPresent(true)
-  }, [conn, spineInputOwner, connId, ownership])
+  }, [conn, spineInputOwner, spineOwnersEpoch, id, connId, ownership])
 
   // Handles a `pty.owner` heard while this socket has no id that names one of
   // this page's ids or frees the row, which only the next handshake can judge;
@@ -347,6 +367,7 @@ export function useTerminalOwnership(
     return onPtyOwner((ptyId, ownerId, device) => {
       if (ptyId !== id) return
       eventHeardRef.current = true
+      noteHeardEpoch(appliedPtyOwnerEpoch(id))
       // Any handover for this pty is the server ANSWERING, so a pressed claim of
       // ours is no longer in flight and stops shielding the verdict from the
       // spine. This event is the definitive word either way.
@@ -418,6 +439,7 @@ export function useTerminalOwnership(
   ) {
     setHandshakeSeen(true)
     handshakeSeenRef.current = true
+    noteHeardEpoch(ownerEpoch)
     const appliedEpoch = appliedPtyOwnerEpoch(id)
     const superseded = handshakeSuperseded(ownerEpoch, appliedEpoch)
     if (!superseded) {

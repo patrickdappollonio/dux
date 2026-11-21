@@ -27,6 +27,12 @@ export interface Spine {
    * Recorded only by the apply that accepts the document, so a stale delivery
    * cannot put back an older reading (`lib/serverClock.ts`). */
   clock?: number
+  /** The ownership epoch every `input_owner` in this document is true as of:
+   * the counter the `connected` handshake's `owner_epoch` and every
+   * `pty.owner` epoch come from, so a pane can tell a document built before the
+   * newest word it heard from one built after. Meaningless across server
+   * restarts. */
+  owners_epoch?: number
   /** Every known project, in display order. */
   projects: ProjectView[]
   /** Every agent session, in display order. */
