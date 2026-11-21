@@ -1338,6 +1338,17 @@ describe("the drop overlay", () => {
     expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
   })
 
+  it("goes when its drag leaves, though the pane stopped taking drops meanwhile", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    fireEvent.dragEnter(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.getByTestId("file-drop-overlay")).toBeTruthy()
+    act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))
+    act(() => notifyPtyOwner("s1", "someone-else", undefined, undefined))
+    fireEvent.dragLeave(pane, { dataTransfer: fileTransfer([]) })
+    expect(screen.queryByTestId("file-drop-overlay")).toBeNull()
+  })
+
   it("never appears for a viewer who does not hold input", async () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     act(() => FakePtySocket.instances.at(-1)!.onConnected("42"))

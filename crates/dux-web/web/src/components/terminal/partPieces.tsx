@@ -94,25 +94,28 @@ export function TerminalPaneSurface({
       }
       data-stack-part={partId}
       onPointerDownCapture={onPress}
+      // A drag the pane took is judged once, at its first enter: the rest of
+      // it is the pane's whatever the pane would say of a new one, or its
+      // leave or drop would be refused and its overlay would outlive it.
       onDragEnter={(event) => {
-        if (!upload.paneAcceptsFileDrag(event)) return
+        if (dragDepthRef.current === 0 && !upload.paneAcceptsFileDrag(event)) return
         event.preventDefault()
         dragDepthRef.current += 1
         setDragActive(true)
       }}
       onDragOver={(event) => {
-        if (!upload.paneAcceptsFileDrag(event)) return
+        if (dragDepthRef.current === 0 && !upload.paneAcceptsFileDrag(event)) return
         // Browsers refuse a drop unless dragover cancels their default navigation.
         event.preventDefault()
         event.dataTransfer.dropEffect = "copy"
       }}
-      onDragLeave={(event) => {
-        if (!upload.paneAcceptsFileDrag(event)) return
-        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+      onDragLeave={() => {
+        if (dragDepthRef.current === 0) return
+        dragDepthRef.current -= 1
         if (dragDepthRef.current === 0) setDragActive(false)
       }}
       onDrop={(event) => {
-        if (!upload.paneAcceptsFileDrag(event)) return
+        if (dragDepthRef.current === 0 && !upload.paneAcceptsFileDrag(event)) return
         event.preventDefault()
         dragDepthRef.current = 0
         setDragActive(false)
