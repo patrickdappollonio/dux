@@ -1,14 +1,8 @@
 import { useState } from "react"
 
+import { FormDialogContent } from "@/components/FormDialogContent"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -18,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { envToText, parseEnv } from "@/lib/env"
 import { closeProjectSettings, updateProjectSettings, useDux } from "@/lib/store"
@@ -82,17 +77,27 @@ function ProjectSettingsForm({
     if (await updateProjectSettings(project.id, patch)) closeProjectSettings()
   }
 
+  const phone = useIsMobile()
   return (
-    <DialogContent showCloseButton={false} className="sm:max-w-lg">
-      <DialogHeader>
-        <DialogTitle>
+    <FormDialogContent
+      phone={phone}
+      title={
+        <>
           Project settings: <InlineCode>{project.name}</InlineCode>
-        </DialogTitle>
-        <DialogDescription>
-          Per-project overrides. Leave a field on the inherited default to fall
-          back to the global configuration.
-        </DialogDescription>
-      </DialogHeader>
+        </>
+      }
+      description="Per-project overrides. Leave a field on the inherited default to fall back to the global configuration."
+      onClose={closeProjectSettings}
+      className="sm:max-w-lg"
+      footer={
+        <>
+          <Button variant="outline" onClick={closeProjectSettings}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave}>Save</Button>
+        </>
+      }
+    >
 
       <div className="grid gap-4">
         <div className="grid gap-2">
@@ -152,14 +157,7 @@ function ProjectSettingsForm({
           />
         </div>
       </div>
-
-      <DialogFooter>
-        <Button variant="outline" onClick={closeProjectSettings}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave}>Save</Button>
-      </DialogFooter>
-    </DialogContent>
+    </FormDialogContent>
   )
 }
 

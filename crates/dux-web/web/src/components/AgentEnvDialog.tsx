@@ -1,16 +1,11 @@
 import { useState } from "react"
 
+import { FormDialogContent } from "@/components/FormDialogContent"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { envToText, parseEnv } from "@/lib/env"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
@@ -38,32 +33,41 @@ function AgentEnvForm({
     if (await updateProjectSettings(project.id, patch, "environment")) closeAgentEnv()
   }
 
+  // On a phone, focusing the text would raise the keyboard over the form.
+  const phone = useIsMobile()
   return (
-    <DialogContent showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>
+    <FormDialogContent
+      phone={phone}
+      title={
+        <>
           Environment: <InlineCode>{agentName}</InlineCode>
-        </DialogTitle>
-        <DialogDescription>
+        </>
+      }
+      description={
+        <>
           KEY=VALUE per line, applied to every agent and terminal in project{" "}
           <InlineCode>{project.name}</InlineCode> (layered over the
           global env). This applies to the whole project, not just this agent.
-        </DialogDescription>
-      </DialogHeader>
+        </>
+      }
+      onClose={closeAgentEnv}
+      footer={
+        <>
+          <Button variant="outline" onClick={closeAgentEnv}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleSave()}>Save</Button>
+        </>
+      }
+    >
       <Textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="KEY=VALUE"
-        className="min-h-48 font-mono"
-        autoFocus
+        className="min-h-48 font-mono max-md:flex-1"
+        autoFocus={!phone}
       />
-      <DialogFooter>
-        <Button variant="outline" onClick={closeAgentEnv}>
-          Cancel
-        </Button>
-        <Button onClick={() => void handleSave()}>Save</Button>
-      </DialogFooter>
-    </DialogContent>
+    </FormDialogContent>
   )
 }
 

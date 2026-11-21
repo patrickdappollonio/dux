@@ -1,16 +1,11 @@
 import { useState } from "react"
 
+import { FormDialogContent } from "@/components/FormDialogContent"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeAgentStartupCommand,
@@ -44,18 +39,33 @@ function AgentStartupCommandForm({
     }
   }
 
+  // On a phone, focusing the text would raise the keyboard over the form.
+  const phone = useIsMobile()
   return (
-    <DialogContent showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>
+    <FormDialogContent
+      phone={phone}
+      title={
+        <>
           Startup command: <InlineCode>{agentName}</InlineCode>
-        </DialogTitle>
-        <DialogDescription>
+        </>
+      }
+      description={
+        <>
           Runs after each agent or terminal launches in project{" "}
           <InlineCode>{project.name}</InlineCode>. This applies to
           every agent in the project, not just this one. Leave empty to clear it.
-        </DialogDescription>
-      </DialogHeader>
+        </>
+      }
+      onClose={closeAgentStartupCommand}
+      footer={
+        <>
+          <Button variant="outline" onClick={closeAgentStartupCommand}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleSave()}>Save</Button>
+        </>
+      }
+    >
       <Textarea
         value={startup}
         onChange={(e) => setStartup(e.target.value)}
@@ -69,15 +79,9 @@ function AgentStartupCommandForm({
         }}
         placeholder="npm run dev"
         className="min-h-16 font-mono"
-        autoFocus
+        autoFocus={!phone}
       />
-      <DialogFooter>
-        <Button variant="outline" onClick={closeAgentStartupCommand}>
-          Cancel
-        </Button>
-        <Button onClick={() => void handleSave()}>Save</Button>
-      </DialogFooter>
-    </DialogContent>
+    </FormDialogContent>
   )
 }
 
