@@ -601,6 +601,34 @@ describe("CustomizeWebappDialog", () => {
     expect(patch.ui).toEqual({ attention_grace_seconds: 300 })
   })
 
+  it("lets a number below the minimum stand while typing and brings it into range on leaving the field", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    const input = field("Terminal font size") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "" } })
+    fireEvent.change(input, { target: { value: "1" } })
+    expect(input.value).toBe("1")
+    fireEvent.change(input, { target: { value: "16" } })
+    expect(input.value).toBe("16")
+
+    fireEvent.change(input, { target: { value: "2" } })
+    fireEvent.blur(input)
+    expect(input.value).toBe("8")
+  })
+
+  it("brings a number still out of range into range when Save is pressed without leaving the field", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    fireEvent.change(field("Terminal font size"), { target: { value: "3" } })
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    const [patch] = saveSettings.mock.calls[0]
+    expect(patch.ui).toEqual({ terminal_font_size: 8 })
+  })
+
   it("fires a real select change and sends the exact key/value", async () => {
     seed()
     render(<CustomizeWebappDialog />)
@@ -975,8 +1003,14 @@ describe("CustomizeWebappDialog search", () => {
 
     expect(screen.getByLabelText("Send Tab to the agent")).toBeTruthy()
     expect(screen.queryByLabelText("Always show tab strip")).toBeNull()
-    const mark = screen.getAllByText("tab_reaches").find((el) => el.tagName === "MARK")!
-    expect(mark.parentElement?.textContent).toBe("ui.tab_reaches_agent")
+    // The key may wrap after a dot or an underscore, so the lit run can be
+    // drawn in pieces; together they are the words searched.
+    const key = [...document.querySelectorAll("span.font-mono")].find(
+      (el) => el.textContent === "ui.tab_reaches_agent",
+    )!
+    expect([...key.querySelectorAll("mark")].map((m) => m.textContent).join("")).toBe(
+      "tab_reaches",
+    )
   })
 
   it("says so when nothing matches", () => {

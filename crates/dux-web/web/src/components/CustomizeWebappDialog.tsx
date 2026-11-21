@@ -139,6 +139,27 @@ function rowId(d: SettingDescriptor): string {
   return `setting-${d.key.replace(/\./g, "-")}`
 }
 
+// A config key wraps after a dot or an underscore, never inside a word.
+function ConfigKey({ text, words }: { text: string; words: string[] }) {
+  const ranges = matchCharRanges(text, words)
+  const pieces = text.split(/(?<=[._])/)
+  let offset = 0
+  return pieces.map((piece, i) => {
+    const at = offset
+    offset += Array.from(piece).length
+    const own = ranges
+      .map((r) => ({ start: r.start - at, end: r.end - at }))
+      .filter((r) => r.end > 0)
+      .map((r) => ({ start: Math.max(0, r.start), end: r.end }))
+    return (
+      <Fragment key={at}>
+        {i > 0 ? <wbr /> : null}
+        <MatchHighlight text={piece} ranges={own} />
+      </Fragment>
+    )
+  })
+}
+
 // Under a row's prose: its config key while a search runs, so a key typed from
 // `config.toml` shows why the row matched, then where the setting applies.
 // Only what the search reads is lit.
@@ -154,8 +175,8 @@ function RowFooter({
   return (
     <>
       {words.length > 0 ? (
-        <span className="font-mono text-xs break-all text-muted-foreground">
-          <MatchHighlight text={d.key} ranges={matchCharRanges(d.key, words)} />
+        <span className="font-mono text-xs break-words text-muted-foreground">
+          <ConfigKey text={d.key} words={words} />
         </span>
       ) : null}
       <p className="text-xs text-muted-foreground">
@@ -213,15 +234,15 @@ function FaviconControl({
   )
 }
 
-// Clamps to the nearer bound WHILE TYPING, so a number field never rejects a
-// keystroke mid-edit. An out-of-range configured value degrades to the documented
-// default instead (`clampTerminalFontSize`); the two answer different questions.
+// An out-of-range configured value degrades to the documented default instead
+// (`clampTerminalFontSize`); a number typed here is brought to the nearer bound.
 function clampToControl(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }
 
-// Local text preserves an empty in-progress field without committing it as zero.
-// Finite values commit within bounds; external value changes resync during render.
+// A number typed out of range is brought into range on leaving the field or on
+// Save, never per keystroke, so typing 16 into a field whose minimum is 8 can
+// pass through 1. Local text keeps an empty field without committing it as zero.
 function NumberControl({
   id,
   label,
@@ -265,17 +286,30 @@ function NumberControl({
         if (raw.trim() === "") return
         const parsed = Number(raw)
         if (!Number.isFinite(parsed)) return
-        onChange(clampToControl(parsed, min, max))
+        onChange(parsed)
       }}
       onBlur={() => {
         // Leaving the field empty reverts the displayed text to the last committed
         // value, rather than stranding a blank input over a stale override.
-        if (text.trim() === "") setText(String(value))
+        if (text.trim() === "") {
+          setText(String(value))
+          return
+        }
+        const inRange = clampToControl(value, min, max)
+        if (inRange !== value) onChange(inRange)
       }}
     />
     {unit ? <span className="text-xs text-muted-foreground">{unit}</span> : null}
     </div>
   )
+}
+
+// A number still out of range when Save is pressed (its field never lost focus)
+// is saved at the nearer bound, the value leaving the field would have given.
+function inControlRange(d: SettingDescriptor, v: SettingValue): SettingValue {
+  return d.control.kind === "number" && typeof v === "number"
+    ? clampToControl(v, d.control.min, d.control.max)
+    : v
 }
 
 function SettingControl({
@@ -1275,7 +1309,7 @@ function PreferencesForm({
     try {
       const touched: [SettingDescriptor, SettingValue][] = descriptors
         .filter((d) => d.key in overrides)
-        .map((d) => [d, overrides[d.key]])
+        .map((d) => [d, inControlRange(d, overrides[d.key])])
       const persisted = await persist(touched, originalOf)
       // A landed write leaves the draft, so the count and a retry hold only
       // what is still unsaved, and a read-and-flip row is never sent twice.
@@ -1283,7 +1317,11 @@ function PreferencesForm({
         const over = bootstrap
         setWritten((w) => ({
           ...w,
-          ...Object.fromEntries(persisted.saved.map((k) => [k, { value: overrides[k], over }])),
+          ...Object.fromEntries(
+            touched
+              .filter(([d]) => persisted.saved.includes(d.key))
+              .map(([d, value]) => [d.key, { value, over }]),
+          ),
         }))
         dropOverrides(persisted.saved)
       }

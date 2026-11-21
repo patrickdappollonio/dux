@@ -337,6 +337,8 @@ describe("the password row", () => {
     render(<CustomizeWebappDialog />)
     expect(screen.queryByLabelText("New password")).toBeNull()
     expect(document.body.textContent).toContain("dux config set server.auth.password")
+    const row = document.querySelector('[data-setting-row="server.auth.password"]')!
+    expect(row.textContent!.split("dux config set server.auth.password").length - 1).toBe(1)
   })
 
   it("says it cannot be changed here when the sign-in status is unknown, and asks again", () => {

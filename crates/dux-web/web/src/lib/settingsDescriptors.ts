@@ -125,7 +125,7 @@ export const SETTINGS: SettingDescriptor[] = [
     key: "server.auth.password",
     label: "Password",
     description:
-      "Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included. The first password can only be set from this machine, your tailnet, or with `dux config set server.auth.password`.",
+      "Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included.",
     surface: "signin",
     topic: "network",
     control: { kind: "password" },

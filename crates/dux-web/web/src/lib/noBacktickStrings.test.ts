@@ -138,7 +138,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
   {
     file: "lib/settingsDescriptors.ts",
-    line: '"Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included. The first password can only be set from this machine, your tailnet, or with `dux config set server.auth.password`.",',
+    line: '"Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included.",',
     reason: "A setting's description, drawn through renderInlineCode in the Settings dialog.",
   },
   {

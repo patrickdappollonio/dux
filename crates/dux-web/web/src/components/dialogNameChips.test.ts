@@ -139,7 +139,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
   {
     file: "components/CustomizeWebappDialog.tsx",
-    line: '<span className="font-mono text-xs break-all text-muted-foreground">',
+    line: '<span className="font-mono text-xs break-words text-muted-foreground">',
     reason:
       "A setting row's config key, on a line of its own under the label while searching: part of the row, not a name in a sentence.",
   },
