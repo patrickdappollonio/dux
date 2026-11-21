@@ -273,16 +273,23 @@ the terminal UI and in the browser alike.
   everyone watching adopts that geometry.
 - **An agent's tabs and terminals go together:** taking one over, or starting an agent from
   the terminal UI, takes all of that agent's tabs and terminals at once.
-- **An agent's terminals stay out of sight until you drive it:** under the card you see the
-  agent alone, with no terminal dock, in the terminal UI and in the browser alike, and the
-  terminal UI's count of running terminals in its top bar leaves them out. Take it over and
-  its layout, and the part you were typing into, come back just as you left them.
+- **An agent's terminals stay out of its pane until you drive it:** under the card you see
+  the agent alone, with no terminal dock, in the terminal UI and in the browser alike, and
+  the terminal UI's count of running terminals in its top bar leaves them out. The terminal
+  UI's kill-running list and resource monitor still list every running terminal. Take the
+  agent over, from the windowed pane or a maximized one, and its layout and the part you
+  were typing into come back just as they were when the card came up.
 - **Nothing changes an agent you do not drive:** while the card is up, starting or
   restarting it, adding, closing, stopping or reordering its tabs and terminals, renaming,
-  detaching, deleting or recreating it, changing its provider or auto-reopen, and rerunning
-  its startup command are off. The browser disables them; the terminal UI refuses them and
-  says on its status line who is driving and how to take over. Selecting one of its tabs,
-  its info and its logs keep working.
+  detaching, deleting or recreating it, changing its provider or auto-reopen, rerunning its
+  startup command, and changing how it shares the pane with its terminals are off. The
+  browser disables them; the terminal UI refuses them and says on its status line who is
+  driving and how to take over. That holds for something you began before the other device
+  took over, too: in the terminal UI an open dialog about the agent closes and a tab or
+  divider drag stops, with the same line saying why.
+- **Looking is always allowed:** selecting the agent or one of its tabs, its info and its
+  logs keep working under the card. Git actions in the Changes pane, pull requests, project
+  commands and moving the agent in the list are not held back by the card either.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 
