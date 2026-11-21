@@ -28,8 +28,7 @@ const BAND_BUTTON =
 
 /**
  * The band in place of a stopped agent's tab strip. It carries Start only when
- * nothing else on screen does, which is when the terminal is maximized; beside
- * the short card the card carries it. A first tab whose last run ended badly
+ * nothing else on screen does: beside the short card the card carries it. A first tab whose last run ended badly
  * shows how it ended, with the run's last output one click away.
  */
 export function StoppedAgentBand({

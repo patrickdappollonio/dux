@@ -126,7 +126,9 @@ export function AgentStack({
     <StoppedAgentBand
       sessionId={sessionId}
       slotTab={session.tabs.find((t) => t.id === model.slotTabId)}
-      withStart={layout === "terminal"}
+      // Unless the short card on screen carries the agent's Start: the card of
+      // any other tab starts that tab alone.
+      withStart={!(on.agent && model.agentCard === "short")}
     />
   ) : (watching ? model.agentStripShown : model.stripsShown) ? (
     <AgentTabsStrip session={session} activeTabId={model.tabId} maxTabs={maxTabs} />

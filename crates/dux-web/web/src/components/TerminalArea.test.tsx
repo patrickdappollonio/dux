@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useEffect } from "react"
 import { fireAnimationStart } from "@/test/animationEvents"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 
 import { agentRowKey, registerPaneCover, resetPaneCovers } from "@/lib/paneCover"
 import type { DuxState } from "@/lib/store"
@@ -1169,6 +1169,19 @@ describe("TerminalArea dock", () => {
       expect(screen.getAllByRole("button", { name: "Start" })).toHaveLength(1)
       expect(screen.getByTestId("stopped-agent-band").querySelector("button")).toBeNull()
       expect(paneProps.map((p) => (p as { id: string }).id)).toEqual(["t1"])
+    })
+
+    it("carries Start in the band when the tab beside the dock is not the first tab", async () => {
+      const state = dockState({ stopped: true, layout: "split", tabs: 2 })
+      mockState = {
+        ...state,
+        selectedTarget: { kind: "agent", sessionId: "s1", tabId: state.spine!.sessions[0].tabs[1].id },
+      } as DuxState
+      render(<TerminalArea />)
+      const band = await screen.findByTestId("stopped-agent-band")
+      expect(screen.queryByTestId("stopped-agent-short-card")).toBeNull()
+      fireEvent.click(within(band).getByRole("button", { name: "Start" }))
+      expect(startStoppedAgentMock).toHaveBeenCalledWith("s1", "s1")
     })
 
     it("says how a crashed first tab ended, with its last output a click away", async () => {
