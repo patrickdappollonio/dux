@@ -298,19 +298,26 @@ describe("AgentTabsStrip on a row another device drives", () => {
 
   // Pressing + puts the add in flight, which disables it until the tab lands.
   // The control the user pressed is the one that keeps the focus throughout.
-  it("keeps the same + and chooser, and the focus, while an add is in flight", () => {
+  // A browser takes focus off a button the moment it is disabled, which jsdom
+  // does not; the + here does it the browser's way, so the wrapper must take
+  // the focus itself rather than leave it on the page body.
+  it("keeps the same + and chooser, and the focus on the control, while an add is in flight", () => {
     const { rerender } = render(
       <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />,
     )
     const plus = screen.getByLabelText("New tab")
     const chooser = screen.getByLabelText("Choose provider for new tab")
+    blurWhenDisabled(plus)
     act(() => plus.focus())
-    for (const inFlight of [["s1"], []]) {
-      mockState = { ...mockState, createTabInFlight: inFlight }
+    for (const [inFlight, focused] of [
+      [["s1"], plus.parentElement],
+      [[], plus],
+    ] as const) {
+      mockState = { ...mockState, createTabInFlight: [...inFlight] }
       rerender(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
       expect(screen.getByLabelText("New tab")).toBe(plus)
       expect(screen.getByLabelText("Choose provider for new tab")).toBe(chooser)
-      expect(document.activeElement).toBe(plus)
+      expect(document.activeElement).toBe(focused)
     }
   })
 
@@ -699,3 +706,13 @@ describe("arrow keys between tab pills", () => {
     expect(document.activeElement).toBe(pills[last])
   })
 })
+
+// What a browser does to a focused button that becomes disabled. jsdom blurs
+// only a focusable element, so the blur goes first.
+function blurWhenDisabled(button: HTMLElement) {
+  const setAttribute = button.setAttribute.bind(button)
+  button.setAttribute = (name: string, value: string) => {
+    if (name === "disabled") button.blur()
+    setAttribute(name, value)
+  }
+}
