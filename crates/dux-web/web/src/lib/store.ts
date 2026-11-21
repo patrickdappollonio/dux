@@ -9138,7 +9138,7 @@ function notePageControl(event: Event): void {
   if (control instanceof HTMLElement) lastPageControl = control
 }
 
-if (typeof document !== "undefined") {
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
   document.addEventListener("pointerdown", notePageControl, true)
   document.addEventListener("focusin", notePageControl, true)
 }
