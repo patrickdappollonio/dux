@@ -475,7 +475,7 @@ describe("store macros commands", () => {
 
     // A refusal that answers after the user has opened the editor again
     // belongs to the earlier save: the editing session now open keeps its
-    // draft, the refused edits are kept aside, and the notice says so.
+    // draft, and the notice says so.
     mod.closeMacrosDialog()
     staleMacrosPut = true
     let answer = () => {}
@@ -495,7 +495,6 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosConflict).toContain("earlier save")
     expect(mod.getSnapshot().macrosDraft).toBe(current)
     expect(mod.getSnapshot().macrosDraftEpoch).toBe(epoch)
-    expect(mod.getSnapshot().macrosRejected).toEqual(refused)
   })
 
   it("saveMacros reopens the dialog with the edits when the server refuses them", async () => {

@@ -58,8 +58,8 @@ export function macrosForTarget(
   return macros.filter((m) => macroMatchesSurface(m.surface, target.kind))
 }
 
-// The surface options for the editor's Select, in config-comment order with the
-// wording mirrored from the canonical `config.toml` `[macros]` comment.
+// The surface options for the editor's "Shown on" choice, in config-comment order
+// with the wording mirrored from the canonical `config.toml` `[macros]` comment.
 export const MACRO_SURFACE_OPTIONS: {
   value: MacroSurface
   label: string
@@ -115,44 +115,6 @@ export function validateMacros(macros: MacroView[]): MacroProblem | null {
 // Narrow an arbitrary string to a known `MacroSurface`.
 export function isMacroSurface(value: string): value is MacroSurface {
   return value === "agent" || value === "terminal" || value === "both"
-}
-
-// Commit reducer for the editor's per-row form: appends when adding, otherwise
-// replaces the entry at `index` in place, which is what keeps a renamed macro in its
-// list position. Returns a new array and never mutates `prev`.
-export function commitMacro(
-  prev: MacroView[],
-  index: number | "new",
-  macro: MacroView,
-): MacroView[] {
-  if (index === "new") return [...prev, macro]
-  return prev.map((m, i) => (i === index ? macro : m))
-}
-
-// Sortable ids for the editor list's drag and drop, positional rather than
-// name-based: a draft may transiently hold duplicate names and the ids must be
-// unique. The list changes only on drop, so they are stable for a whole drag.
-export function macroDragIds(macros: MacroView[]): string[] {
-  return macros.map((_, index) => `macro-${index}`)
-}
-
-// Applies a drag's end, moving the macro at `activeId`'s slot to `overId`'s.
-// Returns `prev` by reference for a same-slot drop or an id that names no slot, so a
-// caller can detect the no-op.
-export function reorderMacrosByDrag(
-  prev: MacroView[],
-  activeId: string,
-  overId: string,
-): MacroView[] {
-  if (activeId === overId) return prev
-  const ids = macroDragIds(prev)
-  const from = ids.indexOf(activeId)
-  const to = ids.indexOf(overId)
-  if (from === -1 || to === -1) return prev
-  const next = prev.slice()
-  const [moved] = next.splice(from, 1)
-  next.splice(to, 0, moved)
-  return next
 }
 
 // A macro as the Macros dialog edits it: `origin` is the index in the saved

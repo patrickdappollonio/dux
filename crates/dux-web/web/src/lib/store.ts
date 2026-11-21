@@ -785,10 +785,8 @@ export interface DuxState {
   // Bumped whenever the draft is reseeded under an open dialog, so the editor
   // remounts with it.
   macrosDraftEpoch: number
-  // Which opening of the editor is on screen, as `globalEnvSession` is, and
-  // the edits of an earlier save refused under a newer one.
+  // Which opening of the editor is on screen, as `globalEnvSession` is.
   macrosEditSession: number
-  macrosRejected: MacroView[] | null
   // Which screen the mobile shell is showing. DERIVED from the route, never kept
   // independently of it: no focused target is home, a focused target is the
   // terminal screen, and the changes screen is a `/changes` suffix on the
@@ -1251,7 +1249,6 @@ let state: DuxState = {
   macrosConflict: null,
   macrosDraftEpoch: 0,
   macrosEditSession: 0,
-  macrosRejected: null,
   mobileScreen: "home",
   routeNotFound: null,
   pendingAgentOrder: null,
@@ -9128,7 +9125,6 @@ export function openMacrosDialog(select: string | null = null): void {
       ? savedMacrosEdit(bootstrap.macros, bootstrap.macros_version ?? null, select)
       : null,
     macrosConflict: null,
-    macrosRejected: null,
     macrosDraftEpoch: state.macrosDraftEpoch + 1,
     macrosEditSession: state.macrosEditSession + 1,
   })
@@ -9146,7 +9142,6 @@ function reopenMacrosDialog(edit: MacrosEdit, conflict: string | null): void {
     macrosDialogOpen: true,
     macrosDraft: edit,
     macrosConflict: conflict ?? (behind ? MACROS_EDIT_BEHIND : null),
-    macrosRejected: null,
     macrosDraftEpoch: state.macrosDraftEpoch + 1,
     macrosEditSession: state.macrosEditSession + 1,
   })
@@ -9205,8 +9200,7 @@ export function reloadMacrosDraft(): Promise<void> {
       setState({
         macrosDraft: savedMacrosEdit(b.macros, b.macros_version ?? null),
         macrosConflict: null,
-        macrosRejected: null,
-        macrosDraftEpoch: state.macrosDraftEpoch + 1,
+            macrosDraftEpoch: state.macrosDraftEpoch + 1,
       }),
     )
     .catch(() => notifyError("Could not reload the macros. Try again in a moment."))
@@ -9238,10 +9232,7 @@ export function saveMacros(edit: MacrosEdit): void {
     if (state.macrosDialogOpen && state.macrosEditSession !== session) {
       // The editor was opened again since: leave that edit as it is.
       if (stale) {
-        setState({
-          macrosRejected: macros,
-          macrosConflict: earlierSaveRefused("macro list"),
-        })
+        setState({ macrosConflict: earlierSaveRefused("macro list") })
       }
       return
     }
