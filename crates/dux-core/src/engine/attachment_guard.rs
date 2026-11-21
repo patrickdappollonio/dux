@@ -205,9 +205,7 @@ impl Engine {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
             force: false,
             accepted: None,
-            asker: crate::attachments::Asker::Connection(
-                crate::attachments::TERMINAL_UI_CONNECTION.to_string(),
-            ),
+            asker: crate::attachments::Asker::TerminalUi,
         });
         let watch = self
             .operation_in_dispatch

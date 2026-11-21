@@ -50,6 +50,15 @@ pub struct TuiOwnership {
 }
 
 impl TuiOwnership {
+    /// The terminal UI's seat on `owners`, taken on first asking
+    /// ([`PtySizeOwners::seat_terminal_ui`]).
+    pub fn seat(owners: Arc<PtySizeOwners>) -> Self {
+        Self {
+            conn_id: owners.seat_terminal_ui(),
+            owners,
+        }
+    }
+
     /// Claim `pty_id`'s whole row for the terminal UI if nobody is driving it,
     /// and hand back the handover to announce for every pty of the row, or
     /// nothing when nothing changed hands.
@@ -396,11 +405,7 @@ mod tests {
     use super::*;
 
     fn seat() -> TuiOwnership {
-        let owners = Arc::new(PtySizeOwners::default());
-        TuiOwnership {
-            conn_id: owners.next_conn_id(),
-            owners,
-        }
+        TuiOwnership::seat(Arc::new(PtySizeOwners::default()))
     }
 
     /// A pty nobody drives is claimed for the terminal UI, under its device

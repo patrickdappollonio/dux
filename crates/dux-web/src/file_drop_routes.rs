@@ -251,9 +251,7 @@ async fn drop_pty(
             .into());
     };
 
-    if let Some(refusal) = refused_drop(state, &pty, query).await {
-        return Err(refusal.into());
-    }
+    admit_drop(state, &pty, query).await?;
     Ok(pty)
 }
 
@@ -285,15 +283,20 @@ fn held_elsewhere(state: &AppState, pty: &str, query: &DropQuery) -> Option<Resp
 
 /// The refusal for a drop that may not land: [`held_elsewhere`]'s for a viewer
 /// who could not paste, then the engine's while another device drives the row.
-async fn refused_drop(state: &AppState, pty: &str, query: &DropQuery) -> Option<Response> {
+/// Otherwise the folders the saved file must not land in, which only the
+/// write itself can check: a terminal's drop lands wherever its shell stands.
+async fn admit_drop(
+    state: &AppState,
+    pty: &str,
+    query: &DropQuery,
+) -> Result<dux_core::engine::DrivenFolders, crate::rest_common::RouteRejection> {
     if let Some(refusal) = held_elsewhere(state, pty, query) {
-        return Some(refusal);
+        return Err(refusal.into());
     }
-    let admitted = state
+    state
         .engine
-        .admit_row_change(RowChange::Pty(pty.to_string()))
-        .await;
-    admitted.err().map(IntoResponse::into_response)
+        .admit_write(RowChange::Pty(pty.to_string()))
+        .await
 }
 
 /// Read and discard what is left of a refused drop's body, up to `limit` bytes,
@@ -340,6 +343,26 @@ fn body_refusal(rejection: &BytesRejection, max_bytes: usize) -> Response {
         .into_response()
 }
 
+/// The answer to a drop that was not saved. A refusal (an unusable name, a
+/// symlink in the way, a destination that cannot be written) is a client
+/// condition and names its reason, so the browser can put that reason in the
+/// toast rather than a generic one. Two have a status of their own: the folder
+/// it would land in is being removed (the `409` the worktree hold answers
+/// with), and that folder is inside the folder of an agent another device
+/// drives (the `423` every such change gets).
+fn unsaved_drop_response(e: &std::io::Error) -> Response {
+    if e.kind() == std::io::ErrorKind::ResourceBusy {
+        return (StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    let driven = e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<dux_core::engine::RowDriven>());
+    match driven {
+        Some(driven) => crate::row_asker::driven_refusal(&driven.to_string()).into_response(),
+        None => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
 /// Takes the raw request rather than a body extractor, because an extractor is
 /// run before the handler's first line: the refusals in [`drop_pty`] would then
 /// come only after the whole body had been buffered. A refusal still reads the
@@ -368,9 +391,10 @@ async fn upload_dropped_file(
         Ok(bytes) => bytes,
         Err(rejection) => return body_refusal(&rejection, state.file_drop_max_bytes),
     };
-    if let Some(refusal) = refused_drop(&state, &pty, &query).await {
-        return refusal;
-    }
+    let driven_folders = match admit_drop(&state, &pty, &query).await {
+        Ok(folders) => folders,
+        Err(refusal) => return refusal.into_response(),
+    };
 
     let destination = match query.dir.clone() {
         Some(dir) => {
@@ -395,16 +419,16 @@ async fn upload_dropped_file(
     // has begun rather than creating the upload directory in a folder that is
     // going.
     let hold = match &worktree {
-        Some(worktree) => match crate::git_routes::hold_root_for_write(
+        // Who drives was asked just above, once the body was in.
+        Some(worktree) => match crate::git_routes::hold_paths(
             &state,
-            &RowChange::Pty(pty.clone()),
-            worktree,
+            vec![worktree.clone()],
             dux_core::worktree_ops::WorktreeOpKind::Upload,
             "save the dropped file",
         )
         .await
         {
-            Ok(hold) => Some(hold),
+            Ok(mut holds) => Some(holds.swap_remove(0)),
             Err(r) => return r.into_response(),
         },
         None => None,
@@ -424,6 +448,11 @@ async fn upload_dropped_file(
         let dir = destination
             .open()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        // Judged by where it lands: a shell can stand inside the folder of an
+        // agent another device drives.
+        if let Some(driven) = driven_folders.refusal_inside(dir.path()) {
+            return Err(std::io::Error::other(driven.clone()));
+        }
         // The folder the file actually lands in is held too, whatever pane the
         // drop came from: a terminal's shell can stand inside an agent's
         // worktree that is being removed, and the drop must neither land there
@@ -469,15 +498,7 @@ async fn upload_dropped_file(
             };
             axum::Json(body).into_response()
         }
-        // A refusal (an unusable name, a symlink in the way, a destination that
-        // cannot be written) is a client condition and names its reason, so the
-        // browser can put that reason in the toast rather than a generic one.
-        // The folder it would land in is being removed: the same 409 the
-        // worktree hold above answers with.
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ResourceBusy => {
-            (StatusCode::CONFLICT, e.to_string()).into_response()
-        }
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Ok(Err(e)) => unsaved_drop_response(&e),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("file drop task failed: {e}"),

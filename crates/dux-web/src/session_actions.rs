@@ -999,6 +999,21 @@ struct PatchSessionResponse {
     provider_change: Option<String>,
 }
 
+/// What a request that changes several fields answers when one of them
+/// failed: `why` alone when nothing had been changed, and otherwise which
+/// fields were changed and stay changed, which were not, and why.
+fn partly_applied(changed: &[&str], unchanged: &[&str], why: &str) -> String {
+    if changed.is_empty() {
+        return why.to_string();
+    }
+    format!(
+        "Only part of this request was applied. dux changed {} and that stays changed; it did \
+         not change {}. What stopped it: {why}",
+        changed.join(" and "),
+        unchanged.join(" or "),
+    )
+}
+
 async fn patch_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1020,9 +1035,45 @@ async fn patch_session(
     {
         return rejection.into_response();
     }
+    // Asked once for the whole request, before any field is applied: the
+    // fields are separate commands, and a request refused at its second one
+    // would otherwise have applied its first.
+    if let Err(refused) = state
+        .engine
+        .admit_row_change(dux_core::engine::RowChange::Agent(id.clone()))
+        .await
+    {
+        return refused.into_response();
+    }
+    // Each command is still judged as it is applied, so a take-over landing
+    // between two of them refuses the later one. The answer then says which
+    // fields had been changed already.
+    let asked = [
+        (body.title.is_some(), "the name"),
+        (
+            body.auto_reopen.is_some(),
+            "whether it reopens when dux starts",
+        ),
+        (body.provider.is_some(), "the provider"),
+    ];
+    let fields: Vec<&str> = asked
+        .iter()
+        .filter_map(|(asked, field)| asked.then_some(*field))
+        .collect();
+    let mut applied = 0;
+    let stopped = |applied: usize, why: String| {
+        let (changed, unchanged) = fields.split_at(applied);
+        crate::row_asker::RowAsker::current()
+            .amend_refusal(|sentence| partly_applied(changed, unchanged, sentence));
+        (
+            StatusCode::BAD_REQUEST,
+            partly_applied(changed, unchanged, &why),
+        )
+            .into_response()
+    };
 
-    if let Some(title) = body.title
-        && let Err(e) = state
+    if let Some(title) = body.title {
+        if let Err(e) = state
             .engine
             .apply_wire_scoped(
                 WireCommand::RenameSession {
@@ -1033,12 +1084,14 @@ async fn patch_session(
                 scope.clone(),
             )
             .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
+        {
+            return stopped(applied, e);
+        }
+        applied += 1;
     }
 
-    if let Some(enabled) = body.auto_reopen
-        && let Err(e) = state
+    if let Some(enabled) = body.auto_reopen {
+        if let Err(e) = state
             .engine
             .apply_wire_scoped(
                 WireCommand::ToggleAgentAutoReopen {
@@ -1048,8 +1101,10 @@ async fn patch_session(
                 scope.clone(),
             )
             .await
-    {
-        return (StatusCode::BAD_REQUEST, e).into_response();
+        {
+            return stopped(applied, e);
+        }
+        applied += 1;
     }
 
     let mut provider_change = None;
@@ -1065,7 +1120,7 @@ async fn patch_session(
             )
             .await
         {
-            return (StatusCode::BAD_REQUEST, e).into_response();
+            return stopped(applied, e);
         }
         // A provider change never kills a running agent; it takes effect on the
         // next reconnect. Tell the caller so it does not assume the live switch.
@@ -1623,6 +1678,39 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::test_support::router_no_auth;
+
+    /// A request refused at a later field says what it had changed by then,
+    /// in the answer the refusal is sent with; one refused before any change
+    /// keeps the refusal as it was.
+    #[test]
+    fn a_request_stopped_partway_says_what_it_changed() {
+        let asker = crate::row_asker::RowAsker::default();
+        assert!(!asker.amend_refusal(|_| unreachable!("nothing was refused")));
+        asker.refuse("Another device drives it.".to_string());
+        assert_eq!(
+            super::partly_applied(&[], &["the name"], "Another device drives it."),
+            "Another device drives it."
+        );
+        assert!(
+            asker.amend_refusal(|why| {
+                super::partly_applied(&["the name"], &["the provider"], why)
+            })
+        );
+        let mut answered = String::new();
+        asker.amend_refusal(|sentence| {
+            answered = sentence.to_string();
+            sentence.to_string()
+        });
+        assert!(answered.contains("dux changed the name"), "{answered}");
+        assert!(
+            answered.contains("did not change the provider"),
+            "{answered}"
+        );
+        assert!(
+            answered.ends_with("Another device drives it."),
+            "{answered}"
+        );
+    }
 
     #[tokio::test]
     async fn rerun_startup_command_404_for_unknown_session() {

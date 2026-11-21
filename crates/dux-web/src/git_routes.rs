@@ -279,8 +279,16 @@ fn hold_path_blocking(
 /// first in the returned list. Taken off the async runtime, as
 /// [`hold_root_for_write`] is.
 ///
-/// `row` is the row of the agents list the write belongs to: the write is
-/// refused first while another device drives that row.
+/// `row` is the row of the agents list the write was sent through. The write
+/// is refused first while another device drives that row, or drives an agent
+/// whose folder a target lies in (the root itself, with no targets): a write is
+/// judged by where it lands, whatever root it came through.
+///
+/// The question is answered once, here, and the write that follows runs to
+/// its end: a take-over that lands after the answer does not stop a write
+/// already let through, as it does not stop a git change the terminal UI has
+/// running. Holding the row against a take-over until the write is done would
+/// make a press on the card wait out a pull or a push.
 pub(crate) async fn hold_targets_for_write(
     state: &AppState,
     row: &RowChange,
@@ -289,10 +297,72 @@ pub(crate) async fn hold_targets_for_write(
     kind: dux_core::worktree_ops::WorktreeOpKind,
     what: &str,
 ) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
-    state.engine.admit_row_change(row.clone()).await?;
-    let ops = state.engine.worktree_ops().clone();
+    let folders = state.engine.admit_write(row.clone()).await?;
     let mut paths = vec![root.to_path_buf()];
     paths.extend(targets.iter().map(|target| root.join(target)));
+    let landing = if targets.is_empty() {
+        paths.clone()
+    } else {
+        paths[1..].to_vec()
+    };
+    refuse_landing(folders, landing, Landing::At).await?;
+    hold_paths(state, paths, kind, what).await
+}
+
+/// How a write treats the paths it names.
+#[derive(Clone, Copy)]
+pub(crate) enum Landing {
+    /// It creates or overwrites at the path.
+    At,
+    /// It removes or moves the path, with everything under it.
+    Taking,
+}
+
+/// Refuse a write to `paths` when one of them lands in the folder of an agent
+/// another device drives (`folders`, from
+/// [`crate::engine_actor::EngineHandle::admit_write`]), with the `423` naming
+/// that agent and its driver. The comparison resolves every path on disk, so
+/// it runs off the async runtime, and only when some agent is driven by
+/// another device at all.
+pub(crate) async fn refuse_landing(
+    folders: dux_core::engine::DrivenFolders,
+    paths: Vec<PathBuf>,
+    landing: Landing,
+) -> Result<(), RouteRejection> {
+    if folders.is_empty() {
+        return Ok(());
+    }
+    let refusal = tokio::task::spawn_blocking(move || {
+        paths.iter().find_map(|path| {
+            match landing {
+                Landing::At => folders.refusal_inside(path),
+                Landing::Taking => folders.refusal_touching(path),
+            }
+            .map(ToString::to_string)
+        })
+    })
+    .await;
+    match refusal {
+        Ok(None) => Ok(()),
+        Ok(Some(sentence)) => Err(crate::row_asker::driven_refusal(&sentence)),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the check of where the write lands failed: {e}"),
+        )
+            .into_response()
+            .into()),
+    }
+}
+
+/// Hold every one of `paths` for a write, the root first, asking nothing
+/// about who drives: for a caller that has asked already.
+pub(crate) async fn hold_paths(
+    state: &AppState,
+    paths: Vec<PathBuf>,
+    kind: dux_core::worktree_ops::WorktreeOpKind,
+    what: &str,
+) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
+    let ops = state.engine.worktree_ops().clone();
     let what = what.to_string();
     match tokio::task::spawn_blocking(move || {
         paths

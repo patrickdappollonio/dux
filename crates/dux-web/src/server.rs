@@ -2196,6 +2196,7 @@ async fn handle_pty_socket(
     let seat = seat_pty_socket(&pty_size_owners, &target, &attach);
     let conn_id = seat.id();
     let viewed = attach.client.viewed;
+    let page = attach.client.page.clone();
     // The release, on EVERY exit path. A socket that gave up on its opening
     // sends has to let go of the pty too (it may have claimed it at the
     // handshake), and so does one a panic unwinds through: leaving it held wedges
@@ -2236,7 +2237,7 @@ async fn handle_pty_socket(
     // Bind the guard for the socket's full lifetime. Dropping it when this
     // function returns removes the subscriber immediately on disconnect.
     let Some((_viewer_guard, repaint, rx)) =
-        subscribe_or_close(&engine, &target, viewed, &sink, peer_ip).await
+        subscribe_or_close(&engine, &target, (viewed, page), &sink, peer_ip).await
     else {
         // The console's count is decremented by `_client_count_guard` above,
         // on this return like any other; saying so again here would count
@@ -2316,12 +2317,19 @@ fn seat_pty_socket(
 
 /// Subscribe a terminal socket to its PTY. An agent subscribe also
 /// launches/resumes the provider if it isn't running yet (the same flow the
-/// legacy Subscribe uses); a terminal subscribe attaches to an already-created
-/// companion terminal. A failure closes the socket with the provider-gone code.
+/// legacy Subscribe uses), unless that would change a row another device
+/// drives: the socket's page is who asks, and a socket from anybody but the
+/// driver starts nothing there. A terminal subscribe attaches to an
+/// already-created companion terminal. A failure, a tab left unstarted
+/// included, closes the socket with the provider-gone code: there is no
+/// process to attach to, and the client must not retry into the same answer.
 async fn subscribe_or_close(
     engine: &EngineHandle,
     target: &PtyTarget,
-    viewed: crate::engine_actor::PaneVisibility,
+    (viewed, page): (
+        crate::engine_actor::PaneVisibility,
+        Option<dux_core::pty_owners::PageId>,
+    ),
     sink: &SharedSink,
     peer_ip: IpAddr,
 ) -> Option<crate::engine_actor::PtySubscription> {
@@ -2329,7 +2337,9 @@ async fn subscribe_or_close(
         // A tab subscribe resolves through the same tab-keyed `subscribe_pty`; for a
         // dormant extra tab this launches it via `launch_agent`, which resolves
         // resume vs. fresh dynamically per `tab_resume_decision` (not always fresh).
-        PtyTarget::Agent(id) | PtyTarget::Tab(id) => engine.subscribe_pty(id.clone(), viewed).await,
+        PtyTarget::Agent(id) | PtyTarget::Tab(id) => {
+            engine.subscribe_pty(id.clone(), viewed, page).await
+        }
         PtyTarget::Terminal(id) => engine.subscribe_terminal(id.clone()).await,
     };
     match subscription {

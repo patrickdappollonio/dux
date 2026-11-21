@@ -1175,7 +1175,8 @@ async fn delete_entry<R: EditorRoot>(
 
 /// Run an editor delete or move of `targets` (relative to `root`) behind the
 /// one gate every destructive file operation passes, refused first while
-/// another device drives `row`. Removing or moving a
+/// another device drives `row`, or drives an agent whose folder a target is,
+/// is inside or contains. Removing or moving a
 /// folder removes or moves everything under it (an agent's worktree inside a
 /// terminal's root, a standalone agent's folder, a project's repository,
 /// something dux started there), so:
@@ -1200,7 +1201,9 @@ async fn destructive_editor_op(
     + Send
     + 'static,
 ) -> Result<(), crate::rest_common::RouteRejection> {
-    state.engine.admit_row_change(row.clone()).await?;
+    let folders = state.engine.admit_write(row.clone()).await?;
+    let taken = targets.iter().map(|target| root.join(target)).collect();
+    crate::git_routes::refuse_landing(folders, taken, crate::git_routes::Landing::Taking).await?;
     // Off the async runtime: a claim may wait (bounded) for a removal
     // running inside the folder.
     let guard = {

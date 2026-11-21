@@ -152,11 +152,7 @@ impl BackgroundServer {
         let shutdown_flag = handle.shutdown_flag();
         // The connection id comes from the same process-global counter every
         // browser socket draws from, so the two compare and cannot collide.
-        let owners = handle.pty_input_owners();
-        let ownership = dux_core::background_serve::TuiOwnership {
-            conn_id: owners.next_conn_id(),
-            owners,
-        };
+        let ownership = dux_core::background_serve::TuiOwnership::seat(handle.pty_input_owners());
         // Seeded BEFORE any leg is spawned below: nothing can be connected yet,
         // so no browser tab that is already reconnecting can win a plain-attach
         // claim first, and every handshake reads the terminal UI as the owner.

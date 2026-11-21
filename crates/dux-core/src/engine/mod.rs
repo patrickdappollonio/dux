@@ -126,7 +126,7 @@ pub use removal::{
 };
 pub use rename::{BranchPushed, BranchRename, branch_rename_refusal, rename_branch_note_prose};
 pub use resume_fallback::ResumeFallbackOutcome;
-pub use row_guard::{RowChange, RowDriven, row_change};
+pub use row_guard::{DrivenFolders, Reach, RowChange, RowDriven, row_change};
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
     format_panic_payload,

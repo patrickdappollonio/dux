@@ -1325,11 +1325,8 @@ pub(crate) mod tests {
         /// as the other device in the registry.
         pub(crate) fn serving_with_ownership() -> (Box<Self>, Arc<Mutex<Recorded>>, TuiOwnership) {
             let recorded = Arc::new(Mutex::new(Recorded::default()));
-            let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
-            let ownership = TuiOwnership {
-                conn_id: owners.next_conn_id(),
-                owners,
-            };
+            let ownership =
+                TuiOwnership::seat(Arc::new(dux_core::pty_owners::PtySizeOwners::default()));
             (
                 Box::new(Self {
                     serving: true,
@@ -2207,15 +2204,13 @@ pub(crate) mod tests {
     fn a_companion_with_no_core_is_never_lent_the_engine_and_a_socket_core_is() {
         let mut app = test_app(default_bindings());
         let companion = |control_core: bool, recorded: &Arc<Mutex<Recorded>>| {
-            let owners = Arc::new(dux_core::pty_owners::PtySizeOwners::default());
             Box::new(FakeCompanion {
                 serving: false,
                 control_core,
                 recorded: Arc::clone(recorded),
-                ownership: TuiOwnership {
-                    conn_id: owners.next_conn_id(),
-                    owners,
-                },
+                ownership: TuiOwnership::seat(Arc::new(
+                    dux_core::pty_owners::PtySizeOwners::default(),
+                )),
             })
         };
         let recorded = Arc::new(Mutex::new(Recorded::default()));

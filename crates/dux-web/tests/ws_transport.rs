@@ -3032,7 +3032,8 @@ async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     // Undriven: the creator's own resize takes the terminal and the agent.
     let (addr, _tmp) = boot().await;
     let terminal = create_terminal_via_rest(addr, "s1").await;
-    let path = format!("/ws/sessions/s1/terminals/{terminal}/pty");
+    let page = "0123456789abcdef0123456789abcdef";
+    let path = format!("/ws/sessions/s1/terminals/{terminal}/pty?page={page}");
     let (mut creator, hello) = owner_on_open(addr, &path).await;
     assert_eq!(hello["owner"], serde_json::Value::Null);
     let creator_id = hello["id"].as_str().expect("an id").to_string();
@@ -3045,7 +3046,10 @@ async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     next_event_frame(&mut creator, "size", Duration::from_secs(8))
         .await
         .expect("the creator's resize applied");
-    let (_agent, hello) = owner_on_open(addr, "/ws/sessions/s1/pty").await;
+    // The agent is not running, and a socket starts it only for the row's
+    // driver, so the creator's page is the one that opens it.
+    let agent_path = format!("/ws/sessions/s1/pty?page={page}");
+    let (_agent, hello) = owner_on_open(addr, &agent_path).await;
     assert_eq!(
         hello["owner"].as_str(),
         Some(creator_id.as_str()),

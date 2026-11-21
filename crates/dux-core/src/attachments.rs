@@ -247,8 +247,9 @@ pub enum Asker {
     /// A client that proves nothing about itself: the command line, a direct call.
     #[default]
     Nobody,
-    /// The terminal UI, by its connection.
-    Connection(String),
+    /// The terminal UI, known by the seat it holds on the ownership record
+    /// ([`PtySizeOwners::terminal_ui_seat`]).
+    TerminalUi,
     /// A browser request naming these pages: its own, and the page that opened
     /// it when it is an editor tab.
     Pages(Vec<PageId>),
@@ -674,27 +675,24 @@ impl Attachments {
     }
 
     /// Who drives `row`, judged for `asker`. A page drives it when the driver
-    /// is the seat its own terminal sockets share on the row; a connection,
-    /// when one of its attachments holds that seat.
+    /// is the seat its own terminal sockets share on the row; the terminal UI,
+    /// when the driver is its seat on the record, whatever it has drawn.
     pub fn row_driver(&self, row: &RowKey, asker: &Asker) -> RowDriver {
         self.with(|state| {
             let pages: &[PageId] = match asker {
                 Asker::Pages(pages) => pages,
-                Asker::Nobody | Asker::Connection(_) => &[],
+                Asker::Nobody | Asker::TerminalUi => &[],
             };
-            let Some((owner, seated)) = state
-                .owners
-                .as_ref()
-                .and_then(|owners| owners.driver_of(row, pages))
-            else {
+            let Some(owners) = state.owners.as_ref() else {
+                return RowDriver::Nobody;
+            };
+            let Some((owner, seated)) = owners.driver_of(row, pages) else {
                 return RowDriver::Nobody;
             };
             let drives = match asker {
                 Asker::Nobody => false,
                 Asker::Pages(_) => seated,
-                Asker::Connection(asker) => state.attachments.values().any(|attachment| {
-                    attachment.connection == *asker && attachment.pty_conn == Some(owner.conn_id)
-                }),
+                Asker::TerminalUi => owners.terminal_ui_seat() == Some(owner.conn_id),
             };
             if drives {
                 RowDriver::Asker

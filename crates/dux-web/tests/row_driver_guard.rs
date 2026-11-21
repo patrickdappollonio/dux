@@ -316,7 +316,9 @@ fn assert_refused(what: &str, answer: &(u16, String)) {
 
 /// Whether a handler changes a row a device may be driving.
 enum Decision {
-    /// Refused while another device drives the row.
+    /// Refused while another device drives a row the request would change:
+    /// the one it names, or one it reaches (an agent a project removal ends,
+    /// an agent whose folder a write lands in).
     Gated,
     /// Open to everybody, for this reason.
     Open(&'static str),
@@ -324,7 +326,11 @@ enum Decision {
 
 const READ: Decision = Decision::Open("a read sent as a POST");
 const CONFIG: Decision = Decision::Open("config and preferences");
-const PROJECT: Decision = Decision::Open("project-level settings, git and folders");
+const PROJECT: Decision = Decision::Open("project settings, and adding a project");
+const WORKTREE_MANAGER: Decision = Decision::Open(
+    "removes a working copy or leftover folder no agent has; one an agent has is refused by the \
+     manager's own admission",
+);
 const PULL_REQUESTS: Decision = Decision::Open("pull-request bookkeeping");
 const NEW_ROW: Decision = Decision::Open("makes a new row nobody drives yet");
 const LIST_ORDER: Decision = Decision::Open("where rows sit in the list");
@@ -396,19 +402,13 @@ const DECISIONS: &[(&str, Decision)] = &[
     ("reorder_pull_requests", PULL_REQUESTS),
     ("add_project", PROJECT),
     ("patch_project", PROJECT),
-    ("pull_project", PROJECT),
-    ("checkout_default", PROJECT),
-    ("change_base_branch", PROJECT),
-    (
-        "remove_project",
-        Decision::Open("ends rows, which the attachment guard judges against everybody attached"),
-    ),
-    ("delete_worktree", PROJECT),
-    ("delete_leftover_folder", PROJECT),
-    (
-        "mkdir",
-        Decision::Open("makes a folder in the folder browser, in no row"),
-    ),
+    ("pull_project", Decision::Gated),
+    ("checkout_default", Decision::Gated),
+    ("change_base_branch", Decision::Gated),
+    ("remove_project", Decision::Gated),
+    ("delete_worktree", WORKTREE_MANAGER),
+    ("delete_leftover_folder", WORKTREE_MANAGER),
+    ("mkdir", Decision::Gated),
     ("update_macros", CONFIG),
     ("set_macro", CONFIG),
     ("remove_macro", CONFIG),
@@ -440,25 +440,8 @@ const DECISIONS: &[(&str, Decision)] = &[
 /// The handlers the server's sources register under `post`, `put`, `patch` or
 /// `delete`, test modules left out.
 fn changing_handlers() -> BTreeSet<String> {
-    fn sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("read the source directory") {
-            let path = entry.expect("a directory entry").path();
-            if path.is_dir() {
-                sources(&path, found);
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                found.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    sources(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
-    );
     let mut handlers = BTreeSet::new();
-    for file in files {
-        let text = std::fs::read_to_string(&file).expect("read a source file");
-        let text = text.split("#[cfg(test)]").next().unwrap_or_default();
+    for text in server_sources() {
         for method in ["post(", "put(", "patch(", "delete("] {
             for (at, _) in text.match_indices(method) {
                 // `.delete(` chained onto another method's `)` is a route;
@@ -483,6 +466,124 @@ fn changing_handlers() -> BTreeSet<String> {
         }
     }
     handlers
+}
+
+/// The text of every source file of the server, each cut at its test module.
+fn server_sources() -> Vec<String> {
+    fn sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read the source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    files
+        .iter()
+        .map(|file| {
+            let text = std::fs::read_to_string(file).expect("read a source file");
+            // At the test module, not at the first test-only item: a file
+            // may have one of those above its routes.
+            text.split("#[cfg(test)]\nmod ")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+/// What opening a WebSocket route can cause.
+enum Opening {
+    /// It starts a tab that is not running, so it is judged as a start of that
+    /// tab: a socket from anybody but the driver starts nothing in a driven row.
+    Starts,
+    /// It starts nothing, for this reason. What it types and resizes is the
+    /// ownership record's own business.
+    Nothing(&'static str),
+}
+
+const A_TERMINAL_IS_RUNNING: Opening =
+    Opening::Nothing("a terminal runs for as long as it exists, so there is none to start");
+
+/// Every handler that upgrades to a WebSocket, with what opening it can cause.
+/// A handler missing here fails `every_socket_route_has_a_decision`.
+const SOCKETS: &[(&str, Opening)] = &[
+    (
+        "ws_events_upgrade",
+        Opening::Nothing("the events stream, which carries no change"),
+    ),
+    ("ws_session_pty_upgrade", Opening::Starts),
+    ("ws_tab_pty_upgrade", Opening::Starts),
+    ("ws_terminal_pty_upgrade", A_TERMINAL_IS_RUNNING),
+    ("ws_project_terminal_pty_upgrade", A_TERMINAL_IS_RUNNING),
+    ("ws_standalone_terminal_pty_upgrade", A_TERMINAL_IS_RUNNING),
+];
+
+/// The functions in the server's sources that take a `WebSocketUpgrade`, test
+/// modules left out.
+fn socket_handlers() -> BTreeSet<String> {
+    let mut handlers = BTreeSet::new();
+    for text in server_sources() {
+        // A handler takes the upgrade as its first parameter; a struct field
+        // of that type is not one.
+        for (at, _) in text.match_indices(": WebSocketUpgrade") {
+            let Some(signature) = text[..at]
+                .trim_end_matches(|c: char| c == '_' || c.is_alphanumeric())
+                .trim_end()
+                .strip_suffix('(')
+            else {
+                continue;
+            };
+            let name: String = signature
+                .chars()
+                .rev()
+                .take_while(|c| *c == '_' || c.is_alphanumeric())
+                .collect();
+            handlers.insert(name.chars().rev().collect());
+        }
+    }
+    handlers
+}
+
+/// Opening a socket is not a changing method, and it can still change a row:
+/// each handler that upgrades to one says what opening it can cause.
+#[test]
+fn every_socket_route_has_a_decision() {
+    let decided: BTreeSet<String> = SOCKETS
+        .iter()
+        .map(|(name, opening)| {
+            if let Opening::Nothing(reason) = opening {
+                assert!(!reason.is_empty(), "{name} starts nothing with no reason");
+            }
+            (*name).to_string()
+        })
+        .collect();
+    assert_eq!(
+        socket_handlers(),
+        decided,
+        "every handler that upgrades to a WebSocket is listed in SOCKETS, and nothing else is"
+    );
+}
+
+/// The socket routes that start a stopped tab, by the path each is opened at
+/// for agent `s1`'s first tab.
+fn sockets_that_start() -> Vec<String> {
+    SOCKETS
+        .iter()
+        .filter(|(_, opening)| matches!(opening, Opening::Starts))
+        .map(|(name, _)| match *name {
+            "ws_session_pty_upgrade" => "/ws/sessions/s1/pty".to_string(),
+            "ws_tab_pty_upgrade" => "/ws/sessions/s1/tabs/s1-slot/pty".to_string(),
+            other => panic!("{other} starts a tab and no test opens it; add its path here"),
+        })
+        .collect()
 }
 
 fn gated_handlers() -> BTreeSet<String> {
@@ -526,6 +627,8 @@ const AGENT: &str = "/api/v1/sessions/s1";
 
 /// The terminals the walk has running beside agent `s1`.
 struct Terminals {
+    /// The agent's folder, which is also the project's checkout.
+    folder: String,
     docked: String,
     docked_too: String,
     of_project: String,
@@ -559,6 +662,7 @@ fn requests_for_the_agent_and_its_parts(terminals: &Terminals) -> Vec<Ask> {
         docked_too,
         of_project,
         standalone,
+        ..
     } = terminals;
     let none = serde_json::Value::Null;
     let tab = format!("{AGENT}/tabs/s1-slot");
@@ -645,6 +749,35 @@ fn requests_for_the_agent_and_its_parts(terminals: &Terminals) -> Vec<Ask> {
     ]
 }
 
+/// Requests that name the project the agent is in: removing it ends the agent,
+/// and its own git runs in the checkout the test agent has as its folder.
+fn requests_for_the_project() -> Vec<Ask> {
+    let none = serde_json::Value::Null;
+    vec![
+        ask(
+            "remove_project",
+            Method::DELETE,
+            "/api/v1/projects/p1".into(),
+            none.clone(),
+        ),
+        post(
+            "pull_project",
+            "/api/v1/projects/p1/pull".into(),
+            none.clone(),
+        ),
+        post(
+            "checkout_default",
+            "/api/v1/projects/p1/checkout-default".into(),
+            none,
+        ),
+        post(
+            "change_base_branch",
+            "/api/v1/projects/p1/base-branch".into(),
+            json!({ "branch": "main" }),
+        ),
+    ]
+}
+
 fn requests_for_files(terminals: &Terminals) -> Vec<Ask> {
     let file = json!({ "path": "f.txt" });
     let files = json!({ "paths": ["f.txt"] });
@@ -710,6 +843,11 @@ fn requests_for_files(terminals: &Terminals) -> Vec<Ask> {
             "/api/v1/file-drop?pty=s1&filename=dropped.txt&dir=".into(),
             json!("dropped"),
         ),
+        post(
+            "mkdir",
+            "/api/v1/browse/mkdir".into(),
+            json!({ "parent": terminals.folder, "name": "made" }),
+        ),
     ]
 }
 
@@ -738,6 +876,7 @@ async fn every_gated_route_refuses_whoever_does_not_drive_the_row() {
     watcher.show(addr, "/ws/sessions/s1/pty").await;
 
     let terminals = Terminals {
+        folder: tmp.path().to_string_lossy().into_owned(),
         docked,
         docked_too,
         of_project,
@@ -745,6 +884,7 @@ async fn every_gated_route_refuses_whoever_does_not_drive_the_row() {
     };
     let mut requests = requests_for_the_agent_and_its_parts(&terminals);
     requests.extend(requests_for_files(&terminals));
+    requests.extend(requests_for_the_project());
 
     let walked: BTreeSet<String> = requests
         .iter()
@@ -778,7 +918,7 @@ async fn every_gated_route_refuses_whoever_does_not_drive_the_row() {
         std::fs::read_to_string(root.join("f.txt")).expect("the file is still there"),
         "two\n"
     );
-    for untouched in ["new.txt", "new-dir", "g.txt", ".dux-uploads"] {
+    for untouched in ["new.txt", "new-dir", "g.txt", ".dux-uploads", "made"] {
         assert!(!root.join(untouched).exists(), "{untouched} was made");
     }
     let (status, body) = send(addr, &Method::GET, agent, None, As::Nobody).await;
@@ -964,4 +1104,292 @@ async fn the_driving_page_needs_no_events_connection() {
         std::fs::read_to_string(tmp.path().join("f.txt")).expect("the saved file"),
         "three\n"
     );
+}
+
+/// Whether the terminal socket at `path` sends its `connected` frame, or is
+/// closed without one.
+async fn attaches(addr: SocketAddr, path: &str, user_agent: &str) -> bool {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = format!("ws://{addr}{path}")
+        .into_client_request()
+        .expect("build the websocket request");
+    request.headers_mut().insert(
+        "user-agent",
+        user_agent.parse().expect("a valid user agent header"),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("open the websocket");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), ws.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if serde_json::from_str::<serde_json::Value>(&text)
+                    .is_ok_and(|frame| frame["event"] == "connected")
+                {
+                    return true;
+                }
+            }
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => return false,
+            Ok(Some(Ok(_))) | Err(_) => {}
+        }
+    }
+    panic!("{path} neither attached nor closed");
+}
+
+async fn agent_is_running(addr: SocketAddr) -> bool {
+    let (_, body) = send(addr, &Method::GET, AGENT, None, As::Nobody).await;
+    let agent: serde_json::Value = serde_json::from_str(&body).expect("the agent");
+    agent["tabs"][0]["has_live_process"] == true
+}
+
+/// Opening a terminal socket on a stopped agent starts it, so a socket from
+/// anybody but the driver starts nothing while another device drives the row
+/// through the agent's terminal; the driver's own socket starts it as before.
+#[tokio::test]
+async fn a_socket_starts_nothing_in_a_row_another_device_drives() {
+    let (addr, _tmp) = boot().await;
+    let docked = create_terminal(addr, "/api/v1/sessions/s1/terminals").await;
+    let mut driver = Page::open(addr, FIREFOX).await;
+    let socket = driver
+        .show(addr, &format!("/ws/sessions/s1/terminals/{docked}/pty"))
+        .await;
+    driver.type_into(socket).await;
+    wait_until_driving(addr, &driver.events, 1).await;
+
+    let watcher = mint_page_id();
+    let unnamed = sockets_that_start();
+    let named = unnamed.iter().map(|path| format!("{path}?page={watcher}"));
+    for path in unnamed.iter().cloned().chain(named) {
+        assert!(
+            !attaches(addr, &path, SAFARI).await,
+            "{path} attached to a stopped agent another device drives"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !agent_is_running(addr).await,
+        "a socket from a device that does not drive the row started the agent"
+    );
+    // A terminal that is running is still watched by anybody.
+    assert!(
+        attaches(
+            addr,
+            &format!("/ws/sessions/s1/terminals/{docked}/pty?page={watcher}"),
+            SAFARI
+        )
+        .await
+    );
+
+    driver.show(addr, "/ws/sessions/s1/pty").await;
+    assert!(
+        agent_is_running(addr).await,
+        "the driver's socket starts it"
+    );
+    assert!(
+        attaches(addr, &format!("/ws/sessions/s1/pty?page={watcher}"), SAFARI).await,
+        "anybody watches an agent that is running"
+    );
+}
+
+/// Removing a project ends every agent in it, so it is refused while another
+/// device drives one of them, a list of accepted blockers included; the driver
+/// may, over whoever merely has the agent open, and so may a blanket go-ahead.
+#[tokio::test]
+async fn removing_a_project_is_judged_for_every_agent_it_ends() {
+    let (addr, _tmp) = boot().await;
+    let mut driver = Page::open(addr, FIREFOX).await;
+    let socket = driver.show(addr, "/ws/sessions/s1/pty").await;
+    driver.type_into(socket).await;
+    wait_until_driving(addr, &driver.events, 1).await;
+    let mut watcher = Page::open(addr, SAFARI).await;
+    watcher.show(addr, "/ws/sessions/s1/pty").await;
+
+    let project = "/api/v1/projects/p1";
+    for path in [
+        project.to_string(),
+        format!("{project}?delete_worktrees=true"),
+        format!("{project}?force_connected=0123456789abcdef"),
+    ] {
+        for sender in [As::Nobody, As::Page(&watcher.id)] {
+            let answer = send(addr, &Method::DELETE, &path, None, sender).await;
+            assert_refused(&format!("DELETE {path}"), &answer);
+            assert!(answer.1.contains("feat"), "names the agent: {}", answer.1);
+        }
+    }
+    let (status, _) = send(addr, &Method::GET, AGENT, None, As::Nobody).await;
+    assert_eq!(status, 200, "the driven agent is still there");
+
+    // The driver is still told who else has the agent open, and goes ahead
+    // over exactly them.
+    let as_driver = As::Page(&driver.id);
+    let (status, body) = send(addr, &Method::DELETE, project, None, as_driver).await;
+    assert_eq!(status, 409, "{body}");
+    let attached: serde_json::Value = serde_json::from_str(&body).expect("the blockers");
+    let keys: Vec<&str> = attached["blockers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|blocker| blocker["key"].as_str())
+        .collect();
+    let over_them = format!("{project}?force_connected={}", keys.join(","));
+    let (status, body) = send(addr, &Method::DELETE, &over_them, None, as_driver).await;
+    assert_eq!(status, 204, "the driver over whoever has it open: {body}");
+}
+
+/// A blanket go-ahead removes a project over the device driving its agent.
+#[tokio::test]
+async fn a_blanket_go_ahead_removes_a_project_over_a_driver() {
+    let (addr, _tmp) = boot().await;
+    let mut driver = Page::open(addr, FIREFOX).await;
+    let socket = driver.show(addr, "/ws/sessions/s1/pty").await;
+    driver.type_into(socket).await;
+    wait_until_driving(addr, &driver.events, 1).await;
+    let (status, body) = send(
+        addr,
+        &Method::DELETE,
+        "/api/v1/projects/p1",
+        None,
+        As::Forcing,
+    )
+    .await;
+    assert_eq!(status, 204, "{body}");
+}
+
+/// Writes that name no part of agent `s1` and land in its folder: through the
+/// editor of a project terminal rooted there (`files`), a drop on that
+/// terminal, the folder browser by the folder's own path and through a link
+/// to it, and the project's own git.
+fn writes_through_other_roots(
+    files: &str,
+    of_project: &str,
+    folder: &str,
+    through_link: &str,
+) -> Vec<(&'static str, String, serde_json::Value)> {
+    let write = json!({ "path": "f.txt", "content": "three\n" });
+    let drop_in_shell = format!("/api/v1/file-drop?pty={of_project}&filename=dropped.txt");
+    vec![
+        ("write", format!("{files}/write"), write),
+        (
+            "create",
+            format!("{files}/create-file"),
+            json!({ "path": "new.txt" }),
+        ),
+        (
+            "mkdir",
+            format!("{files}/create-dir"),
+            json!({ "path": "new-dir" }),
+        ),
+        (
+            "rename",
+            format!("{files}/rename"),
+            json!({ "from": "f.txt", "to": "g.txt" }),
+        ),
+        (
+            "delete",
+            format!("{files}/delete"),
+            json!({ "path": "f.txt" }),
+        ),
+        ("a drop on the terminal", drop_in_shell, json!("dropped")),
+        (
+            "the folder browser",
+            "/api/v1/browse/mkdir".to_string(),
+            json!({ "parent": folder, "name": "made" }),
+        ),
+        (
+            "the folder browser through a link",
+            "/api/v1/browse/mkdir".to_string(),
+            json!({ "parent": through_link, "name": "made" }),
+        ),
+        (
+            "the project's pull",
+            "/api/v1/projects/p1/pull".to_string(),
+            serde_json::Value::Null,
+        ),
+        (
+            "the project's checkout",
+            "/api/v1/projects/p1/checkout-default".to_string(),
+            serde_json::Value::Null,
+        ),
+        (
+            "the project's base branch",
+            "/api/v1/projects/p1/base-branch".to_string(),
+            json!({ "branch": "main" }),
+        ),
+    ]
+}
+
+/// A write is judged by where it lands: through a project terminal's editor,
+/// the folder browser or the project's own git, it is refused when it lands in
+/// the working copy of an agent another device drives, and goes through for
+/// the driver and while nobody drives.
+#[tokio::test]
+async fn a_write_through_another_root_is_judged_by_where_it_lands() {
+    let (addr, tmp) = boot().await;
+    let of_project = create_terminal(addr, "/api/v1/projects/p1/terminals").await;
+    let files = format!("/api/v1/projects/p1/terminals/{of_project}/files");
+    let write = |content: &str| json!({ "path": "f.txt", "content": content });
+
+    let (status, body) = send(
+        addr,
+        &Method::POST,
+        &format!("{files}/write"),
+        Some(&write("open\n")),
+        As::Nobody,
+    )
+    .await;
+    assert_eq!(status, 200, "nobody drives the agent yet: {body}");
+
+    let mut driver = Page::open(addr, FIREFOX).await;
+    let socket = driver.show(addr, "/ws/sessions/s1/pty").await;
+    driver.type_into(socket).await;
+    wait_until_driving(addr, &driver.events, 1).await;
+
+    let folder = tmp.path().to_string_lossy().into_owned();
+    let linked = tmp.path().with_extension("link");
+    std::os::unix::fs::symlink(tmp.path(), &linked).expect("link to the working copy");
+    let through_link = linked.to_string_lossy().into_owned();
+    let requests = writes_through_other_roots(&files, &of_project, &folder, &through_link);
+    for (what, path, body) in &requests {
+        let body = (!body.is_null()).then_some(body);
+        let answer = send(addr, &Method::POST, path, body, As::Nobody).await;
+        assert_refused(what, &answer);
+        assert!(
+            answer.1.contains("feat"),
+            "{what} names the agent: {}",
+            answer.1
+        );
+    }
+    let root = tmp.path();
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).expect("the file is still there"),
+        "open\n"
+    );
+    for untouched in ["new.txt", "new-dir", "g.txt", "made", "dropped.txt"] {
+        assert!(!root.join(untouched).exists(), "{untouched} was made");
+    }
+
+    let (status, body) = send(
+        addr,
+        &Method::POST,
+        &format!("{files}/write"),
+        Some(&write("driver\n")),
+        As::Page(&driver.id),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "the driver through the project terminal: {body}"
+    );
+    // A folder outside every driven working copy is nobody's.
+    let elsewhere = tempfile::tempdir().expect("a folder of its own");
+    let (status, body) = send(
+        addr,
+        &Method::POST,
+        "/api/v1/browse/mkdir",
+        Some(&json!({ "parent": elsewhere.path().to_string_lossy(), "name": "made" })),
+        As::Nobody,
+    )
+    .await;
+    assert_eq!(status, 200, "a folder in no driven working copy: {body}");
 }

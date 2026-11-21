@@ -15,7 +15,7 @@
 //! Outside a request there is no asker: a change sent from there is judged as
 //! a client naming no page, which a driven row refuses.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use axum::extract::Request;
 use axum::http::StatusCode;
@@ -45,7 +45,7 @@ pub(crate) struct RowAsker {
     pages: Vec<PageId>,
     /// Whether the request said to go ahead over everybody.
     force: bool,
-    refused: Arc<OnceLock<String>>,
+    refused: Arc<Mutex<Option<String>>>,
 }
 
 impl RowAsker {
@@ -53,6 +53,15 @@ impl RowAsker {
     /// connection when it is answering none.
     pub(crate) fn current() -> Self {
         ASKING.try_with(Clone::clone).unwrap_or_default()
+    }
+
+    /// The asker a terminal socket of `page` is: that page, or a client
+    /// naming none. A socket has no request to say more, so it never forces.
+    pub(crate) fn of_socket(page: Option<PageId>) -> Self {
+        Self {
+            pages: page.into_iter().collect(),
+            ..Self::default()
+        }
     }
 
     /// Who the engine judges this asker's change to a driven row as.
@@ -69,9 +78,30 @@ impl RowAsker {
         self.force
     }
 
-    /// The engine refused this asker's change with `sentence`.
+    /// The engine refused this asker's change with `sentence`. The first
+    /// refusal of a request is the one it is answered with.
     pub(crate) fn refuse(&self, sentence: String) {
-        let _ = self.refused.set(sentence);
+        self.refusal().get_or_insert(sentence);
+    }
+
+    /// Reword the refusal this request will be answered with, when it has one:
+    /// for a route that had applied part of the request before the refusal,
+    /// which the engine's sentence cannot know. Answers whether there was one.
+    pub(crate) fn amend_refusal(&self, reword: impl FnOnce(&str) -> String) -> bool {
+        let mut refusal = self.refusal();
+        match refusal.as_deref().map(reword) {
+            Some(reworded) => {
+                *refusal = Some(reworded);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn refusal(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -99,14 +129,19 @@ fn named_pages(headers: &axum::http::HeaderMap) -> Vec<PageId> {
 pub(crate) async fn identify(request: Request, next: Next) -> Response {
     let asker = RowAsker {
         pages: named_pages(request.headers()),
+        // Read here for every route, whether or not the route reads the
+        // parameter itself. On a route that does not, this is the only effect
+        // it has: going ahead over a driver. No route is known where it
+        // changes anything else.
         force: axum::extract::Query::<ForceConnectedQuery>::try_from_uri(request.uri())
             .is_ok_and(|axum::extract::Query(force)| force.over_everybody()),
         refused: Arc::default(),
     };
-    let refused = Arc::clone(&asker.refused);
+    let answered = asker.clone();
     let response = ASKING.scope(asker, next.run(request)).await;
-    match refused.get() {
-        Some(sentence) => driven_refusal(sentence).into_response(),
+    let refusal = answered.refusal().clone();
+    match refusal {
+        Some(sentence) => driven_refusal(&sentence).into_response(),
         None => response,
     }
 }

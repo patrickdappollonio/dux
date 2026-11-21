@@ -199,10 +199,12 @@ pub(crate) enum EngineRequest {
     LateStatusFinalsWaiting(oneshot::Sender<usize>),
     /// Subscribe to a tab's PTY, launching it when dormant. The flag says
     /// whether the pane opening it is on screen: only a pane on screen counts
-    /// as looking at the tab (see [`note_tab_looked_at`]).
+    /// as looking at the tab (see [`note_tab_looked_at`]). The asker is the
+    /// page the socket names: a launch is a change to the tab's row.
     SubscribePty(
         String,
         PaneVisibility,
+        RowAsker,
         oneshot::Sender<Result<PtySubscription, String>>,
     ),
     /// A pane that was mounted off screen came on screen: the same "looking at
@@ -285,8 +287,13 @@ pub(crate) enum EngineRequest {
         oneshot::Sender<Result<(), String>>,
     ),
     /// Ask whether the asker may make a change the web layer carries out by
-    /// itself (a file write, a git change): `Err` is the refusal's sentence.
-    AdmitRowChange(RowChange, RowAsker, oneshot::Sender<Result<(), String>>),
+    /// itself (a file write, a git change): `Err` is the refusal's sentence,
+    /// `Ok` the folders a write must still be checked against.
+    AdmitRowChange(
+        RowChange,
+        RowAsker,
+        oneshot::Sender<Result<dux_core::engine::DrivenFolders, String>>,
+    ),
     /// Resolve the owning session id of an EXTRA tab (instant lookup), or
     /// `None` when the tab id is unknown or names a session's first tab, whose
     /// owner is resolved from that session's slot pointer rather than looked up.
@@ -1492,7 +1499,7 @@ impl EngineHandle {
     }
 
     /// Whether this request's asker may make `change`, for a change the web
-    /// layer carries out by itself.
+    /// layer carries out by itself that writes nothing to the disk.
     ///
     /// # Errors
     ///
@@ -1502,6 +1509,23 @@ impl EngineHandle {
         &self,
         change: RowChange,
     ) -> Result<(), crate::rest_common::RouteRejection> {
+        self.admit_write(change).await.map(|_| ())
+    }
+
+    /// Whether this request's asker may write to the disk through `through`,
+    /// answering the folders no destination of the write may be inside
+    /// ([`dux_core::engine::Engine::admit_write`]). The caller checks its
+    /// destinations against them off the async runtime
+    /// ([`crate::git_routes::refuse_landing`]).
+    ///
+    /// # Errors
+    ///
+    /// `423` with the engine's sentence while another device drives the row,
+    /// `503` when the engine is gone.
+    pub(crate) async fn admit_write(
+        &self,
+        through: RowChange,
+    ) -> Result<dux_core::engine::DrivenFolders, crate::rest_common::RouteRejection> {
         use axum::response::IntoResponse;
         let unavailable = || {
             crate::rest_common::RouteRejection::from(
@@ -1515,7 +1539,7 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::AdmitRowChange(
-                change,
+                through,
                 RowAsker::current(),
                 tx,
             ))
@@ -1599,14 +1623,27 @@ impl EngineHandle {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Subscribe to a tab's PTY for a terminal socket of `page`, starting the
+    /// tab when it is not running.
+    ///
+    /// # Errors
+    ///
+    /// The sentence to log when there is nothing to attach to: the tab could
+    /// not be started, or starting it would change a row another device drives.
     pub(crate) async fn subscribe_pty(
         &self,
         session_id: String,
         viewed: PaneVisibility,
+        page: Option<dux_core::pty_owners::PageId>,
     ) -> Result<PtySubscription, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::SubscribePty(session_id, viewed, tx))
+            .send(EngineRequest::SubscribePty(
+                session_id,
+                viewed,
+                RowAsker::of_socket(page),
+                tx,
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -3845,7 +3882,7 @@ impl EngineService {
             // over-broad `true` only costs a serialize.
             let moves_spine = request_mutates_spine(&req);
             match req {
-                EngineRequest::SubscribePty(tab_id, viewed, reply) => {
+                EngineRequest::SubscribePty(tab_id, viewed, _, reply) => {
                     handle_subscribe(
                         engine,
                         &mut self.pending,
@@ -4792,12 +4829,19 @@ fn row_policy(asker: &RowAsker) -> dux_core::attachments::Policy {
 /// wildcard arm, so a new request does not build until it is answered for here.
 fn request_row_change(req: &EngineRequest) -> Option<(RowChange, &RowAsker)> {
     match req {
-        EngineRequest::CreateTerminal(session_id, _, asker, _)
-        | EngineRequest::CreateAgentTab(session_id, _, _, asker, _) => {
+        EngineRequest::CreateTerminal(session_id, _, asker, _) => {
             Some((RowChange::Agent(session_id.clone()), asker))
         }
+        // A new tab is started as it is made.
+        EngineRequest::CreateAgentTab(session_id, _, _, asker, _) => {
+            Some((RowChange::StartAgent(session_id.clone()), asker))
+        }
         EngineRequest::StartAgentTab(tab_id, _, asker, _) => {
-            Some((RowChange::Pty(tab_id.clone()), asker))
+            Some((RowChange::StartPty(tab_id.clone()), asker))
+        }
+        // Opening a terminal socket on a tab that is not running starts it.
+        EngineRequest::SubscribePty(tab_id, _, asker, _) => {
+            Some((RowChange::OpenPty(tab_id.clone()), asker))
         }
         EngineRequest::AdmitRowChange(change, asker, _) => Some((change.clone(), asker)),
 
@@ -4814,8 +4858,8 @@ fn request_row_change(req: &EngineRequest) -> Option<(RowChange, &RowAsker)> {
         // Pull-request bookkeeping.
         | EngineRequest::AttachPullRequest(..)
         // A terminal socket's own traffic, gated by the ownership record itself
-        // where it types or resizes.
-        | EngineRequest::SubscribePty(..)
+        // where it types or resizes. A terminal is running for as long as it
+        // exists, so a socket on one starts nothing.
         | EngineRequest::PtyShown(..)
         | EngineRequest::WritePty(..)
         | EngineRequest::ResizePty(..)
@@ -4890,8 +4934,9 @@ fn admit_request(engine: &mut Engine, req: EngineRequest) -> Option<EngineReques
     match req {
         EngineRequest::CreateTerminal(_, _, _, reply)
         | EngineRequest::CreateAgentTab(_, _, _, _, reply) => answer(reply, Err(sentence)),
-        EngineRequest::StartAgentTab(_, _, _, reply)
-        | EngineRequest::AdmitRowChange(_, _, reply) => answer(reply, Err(sentence)),
+        EngineRequest::StartAgentTab(_, _, _, reply) => answer(reply, Err(sentence)),
+        EngineRequest::AdmitRowChange(_, _, reply) => answer(reply, Err(sentence)),
+        EngineRequest::SubscribePty(_, _, _, reply) => answer(reply, Err(sentence)),
         // Only the requests `request_row_change` names a change for get here.
         _ => {}
     }
@@ -5233,7 +5278,14 @@ fn handle_request(
             );
         }
         // Refused ones never get here: `admit_request` answers them.
-        EngineRequest::AdmitRowChange(_, _, reply) => answer(reply, Ok(())),
+        EngineRequest::AdmitRowChange(change, asker, reply) => {
+            engine.dispatch_policy = Some(row_policy(&asker));
+            let folders = engine
+                .admit_write(&change)
+                .map_err(|driven| driven.to_string());
+            engine.dispatch_policy = None;
+            answer(reply, folders);
+        }
         EngineRequest::SlotTabId(session_id, reply) => {
             answer(reply, slot_tab_id(engine, &session_id));
         }
@@ -10315,7 +10367,12 @@ mod tests {
             ),
             (
                 "SubscribePty",
-                EngineRequest::SubscribePty("s1".into(), PaneVisibility::OnScreen, dead_reply()),
+                EngineRequest::SubscribePty(
+                    "s1".into(),
+                    PaneVisibility::OnScreen,
+                    RowAsker::default(),
+                    dead_reply(),
+                ),
                 true,
             ),
             (

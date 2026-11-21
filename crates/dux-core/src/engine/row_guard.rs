@@ -10,11 +10,22 @@
 //! [`Engine::admit_row_change`] itself. What the engine does afterwards to
 //! finish an admitted change is never judged again.
 //!
+//! A request is judged for every row it would change, not only the one it
+//! names. [`RowChange`] says what a request is, and [`Engine::rows_changed`]
+//! is the one place that turns that into rows: removing a project is every
+//! agent and terminal in it, a start is also every agent it would stop. A
+//! write to the disk is judged by where it lands as well as by the row it was
+//! sent through: [`Engine::admit_write`] answers the row and hands back the
+//! folder of every agent another device drives ([`DrivenFolders`]), which the
+//! writer checks its destinations against off the engine thread.
+//!
 //! Who is asking comes from [`Engine::dispatch_policy`], as it does for the
 //! attachment guard; with none it is the terminal UI.
 
+use std::path::{Path, PathBuf};
+
 use super::Engine;
-use crate::attachments::{Asker, RowDriver, TERMINAL_UI_CONNECTION};
+use crate::attachments::{Asker, RowDriver};
 use crate::model::TerminalOwner;
 use crate::pty_owners::RowKey;
 use crate::wire::WireCommand;
@@ -29,11 +40,38 @@ pub enum RowChange {
     /// A new order for every terminal: the row of each agent whose own
     /// terminals would change places.
     TerminalOrder(Vec<String>),
-    /// No driven row: a read, a new row, a project, the list's order, config.
+    /// Starting this agent: its row, and the row of every agent running in
+    /// its folder, which a start stops.
+    StartAgent(String),
+    /// Starting this tab: as [`Self::StartAgent`] for the tab's agent.
+    StartPty(String),
+    /// Opening a terminal socket on this tab, which starts a tab that is not
+    /// running: [`Self::StartPty`] then, and nothing while it runs or is
+    /// already starting.
+    OpenPty(String),
+    /// Removing this project: the row of every agent in it and of each of its
+    /// own terminals.
+    Project(String),
+    /// Git in this project's own checkout: the row of every agent whose
+    /// folder is that checkout.
+    ProjectCheckout(String),
+    /// No driven row: a read, a new row, the list's order, config.
     NoRow,
 }
 
-/// A change refused because another device drives the row it would change.
+/// How a refused request reaches the driven row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The request names the row.
+    Named,
+    /// The request names something else and would change this row too; the
+    /// row's label.
+    Also(String),
+    /// The request would write inside this agent's folder; the agent's label.
+    Inside(String),
+}
+
+/// A change refused because another device drives a row it would change.
 /// Nothing was changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowDriven {
@@ -41,6 +79,8 @@ pub struct RowDriven {
     pub row: RowKey,
     /// The driver's short label, `None` when it said nothing usable about itself.
     pub driver: Option<String>,
+    /// How the request reaches that row.
+    pub reach: Reach,
 }
 
 impl std::fmt::Display for RowDriven {
@@ -50,16 +90,68 @@ impl std::fmt::Display for RowDriven {
             RowKey::Terminal(_) => "terminal",
         };
         let who = self.driver.as_deref().unwrap_or("another device");
-        write!(
-            f,
-            "This {what} is being driven from {who} right now, and only the device driving \
-             it can change it, so dux did not make the change. Take it over on this device \
-             first, then try again."
-        )
+        match &self.reach {
+            Reach::Named => write!(
+                f,
+                "This {what} is being driven from {who} right now, and only the device \
+                 driving it can change it, so dux did not make the change. Take it over on \
+                 this device first, then try again."
+            ),
+            Reach::Also(label) => write!(
+                f,
+                "This would also change the {what} \"{label}\", which is being driven from \
+                 {who} right now, and only the device driving it can change it, so dux did \
+                 not make the change. Take that {what} over on this device first, then try \
+                 again."
+            ),
+            Reach::Inside(label) => write!(
+                f,
+                "This would write inside the folder of the agent \"{label}\", which is being \
+                 driven from {who} right now, and only the device driving it can change its \
+                 files through dux, so dux did not make the change. Take that agent over on \
+                 this device first, then try again."
+            ),
+        }
     }
 }
 
 impl std::error::Error for RowDriven {}
+
+/// The folder of every agent another device drives, as one asker sees them:
+/// what a write to the disk is checked against ([`Engine::admit_write`]).
+#[derive(Clone, Debug, Default)]
+pub struct DrivenFolders(Vec<(PathBuf, RowDriven)>);
+
+impl DrivenFolders {
+    /// Whether no agent is driven by another device, so no write can land in
+    /// one's folder and nothing needs checking.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The refusal for a write to `path` when it is one of these folders or
+    /// anywhere inside one, under every spelling of both
+    /// ([`crate::worktree_ops::folder_contains`]), so a symbolic link on the way
+    /// changes nothing. Reads the disk: call it off the engine thread and off
+    /// the async runtime.
+    pub fn refusal_inside(&self, path: &Path) -> Option<&RowDriven> {
+        self.0
+            .iter()
+            .find(|(folder, _)| crate::worktree_ops::folder_contains(folder, path))
+            .map(|(_, refusal)| refusal)
+    }
+
+    /// [`Self::refusal_inside`], and also when `path` is a folder one of these
+    /// is inside: for a delete or a move, which takes everything under it.
+    pub fn refusal_touching(&self, path: &Path) -> Option<&RowDriven> {
+        self.refusal_inside(path).or_else(|| {
+            self.0
+                .iter()
+                .find(|(folder, _)| crate::worktree_ops::folder_contains(path, folder))
+                .map(|(_, refusal)| refusal)
+        })
+    }
+}
 
 /// What `command` would change. Exhaustive, so a new command does not build
 /// until it is given an answer here.
@@ -78,9 +170,11 @@ pub fn row_change(command: &WireCommand) -> RowChange {
         | WireCommand::DeleteSession { session_id, .. }
         | WireCommand::KillSessionPty { session_id }
         | WireCommand::DetachAgent { session_id, .. }
-        | WireCommand::RecreateWorkingCopy { session_id, .. }
+        | WireCommand::RecreateWorkingCopy {
+            session_id,
+            restart_tabs: false,
+        }
         | WireCommand::RenameSession { session_id, .. }
-        | WireCommand::ReconnectSession { session_id, .. }
         | WireCommand::ChangeAgentProvider { session_id, .. }
         // Its tabs.
         | WireCommand::ReorderAgentTabs { session_id, .. }
@@ -89,34 +183,45 @@ pub fn row_change(command: &WireCommand) -> RowChange {
         | WireCommand::ChangeAgentTabProvider { session_id, .. } => {
             RowChange::Agent(session_id.clone())
         }
+        // Each of these starts the agent, or tabs of it.
+        WireCommand::ReconnectSession { session_id, .. }
+        | WireCommand::RecreateWorkingCopy {
+            session_id,
+            restart_tabs: true,
+        } => RowChange::StartAgent(session_id.clone()),
         WireCommand::DeleteTerminal { terminal_id } => RowChange::Pty(terminal_id.clone()),
         WireCommand::ReorderTerminals { terminal_ids } => {
             RowChange::TerminalOrder(terminal_ids.clone())
         }
+        // Ends every agent and terminal of the project.
+        WireCommand::RemoveProject { project_id } | WireCommand::DeleteProject { project_id } => {
+            RowChange::Project(project_id.clone())
+        }
+        // Git in the project's own checkout, which an agent may have as its folder.
+        WireCommand::PullProject { project_id }
+        | WireCommand::CheckoutProjectDefaultBranch { project_id }
+        | WireCommand::ChangeProjectBaseBranch { project_id, .. } => {
+            RowChange::ProjectCheckout(project_id.clone())
+        }
 
         // A fork reads the agent and makes a new row.
         WireCommand::ForkSession { .. }
-        // New rows, which nobody drives yet.
+        // New rows, which nobody drives yet. A new agent never shares a folder
+        // with another: creation refuses a folder an agent already has.
         | WireCommand::CreateAgent { .. }
         | WireCommand::CreateStandaloneAgent { .. }
         | WireCommand::CreateAgentFromWorktree { .. }
         | WireCommand::CreateAgentFromPr { .. }
-        // Projects: their settings, their own git, adding them. Removing one
-        // ends rows, which the attachment guard judges against everybody attached.
-        | WireCommand::PullProject { .. }
+        // Projects: their settings, and adding them.
         | WireCommand::UpdateProjectProvider { .. }
         | WireCommand::UpdateProjectAutoReopen { .. }
         | WireCommand::UpdateProjectStartupCommand { .. }
         | WireCommand::UpdateProjectEnv { .. }
-        | WireCommand::CheckoutProjectDefaultBranch { .. }
-        | WireCommand::ChangeProjectBaseBranch { .. }
         | WireCommand::AddProject { .. }
         | WireCommand::AddProjectCheckoutDefault { .. }
         | WireCommand::AddProjectCreateInitialCommit { .. }
         | WireCommand::AddProjectInitRepo { .. }
         | WireCommand::CloneProject { .. }
-        | WireCommand::RemoveProject { .. }
-        | WireCommand::DeleteProject { .. }
         // Pull-request bookkeeping.
         | WireCommand::AttachPullRequest { .. }
         | WireCommand::DetachPullRequest { .. }
@@ -157,34 +262,79 @@ pub fn row_change(command: &WireCommand) -> RowChange {
 }
 
 impl Engine {
+    /// Who the question is asked as, and whether they said to go ahead over
+    /// everybody. Going ahead over named blockers accepts those attachments
+    /// only, never a driver.
+    fn row_asker(&self) -> (Asker, bool) {
+        match &self.dispatch_policy {
+            Some(policy) => (
+                policy.asker.clone(),
+                policy.force && policy.accepted.is_none(),
+            ),
+            None => (Asker::TerminalUi, false),
+        }
+    }
+
+    /// The refusal when another device drives `row`, as `asker` sees it.
+    fn driven_by_another(&self, row: &RowKey, asker: &Asker, reach: Reach) -> Option<RowDriven> {
+        match self.attachments.row_driver(row, asker) {
+            RowDriver::Another { device } => Some(RowDriven {
+                row: row.clone(),
+                driver: device
+                    .as_deref()
+                    .and_then(crate::device_label::short_device_label),
+                reach,
+            }),
+            RowDriver::Nobody | RowDriver::Asker => None,
+        }
+    }
+
     /// Whether whoever is asking may make `change`: yes when no row it touches
-    /// is driven, when the asker drives it, or when the asker said to go ahead
-    /// over everybody.
+    /// is driven, when the asker drives each one that is, or when the asker
+    /// said to go ahead over everybody.
     ///
     /// # Errors
     ///
     /// [`RowDriven`] naming the device that drives a row the change touches.
     pub fn admit_row_change(&self, change: &RowChange) -> Result<(), RowDriven> {
-        let terminal_ui = Asker::Connection(TERMINAL_UI_CONNECTION.to_string());
-        let (asker, forced) = match &self.dispatch_policy {
-            // Going ahead over named blockers accepts those attachments only.
-            Some(policy) => (&policy.asker, policy.force && policy.accepted.is_none()),
-            None => (&terminal_ui, false),
-        };
+        let (asker, forced) = self.row_asker();
         if forced {
             return Ok(());
         }
-        for row in self.rows_changed(change) {
-            if let RowDriver::Another { device } = self.attachments.row_driver(&row, asker) {
-                return Err(RowDriven {
-                    row,
-                    driver: device
-                        .as_deref()
-                        .and_then(crate::device_label::short_device_label),
-                });
+        for (row, reach) in self.rows_changed(change) {
+            if let Some(driven) = self.driven_by_another(&row, &asker, reach) {
+                return Err(driven);
             }
         }
         Ok(())
+    }
+
+    /// [`Self::admit_row_change`] for a write to the disk sent through
+    /// `through`, answering what the writer still has to check: the folder of
+    /// every agent another device drives, which no destination may be inside
+    /// ([`DrivenFolders::refusal_inside`]). Empty when the asker said to go
+    /// ahead over everybody.
+    ///
+    /// # Errors
+    ///
+    /// [`RowDriven`] when another device drives a row `through` touches.
+    pub fn admit_write(&self, through: &RowChange) -> Result<DrivenFolders, RowDriven> {
+        self.admit_row_change(through)?;
+        let (asker, forced) = self.row_asker();
+        if forced {
+            return Ok(DrivenFolders::default());
+        }
+        Ok(DrivenFolders(
+            self.sessions
+                .iter()
+                .filter_map(|session| {
+                    let row = RowKey::Agent(session.id.clone());
+                    let reach = Reach::Inside(session.display_label());
+                    let driven = self.driven_by_another(&row, &asker, reach)?;
+                    Some((PathBuf::from(session.directory()), driven))
+                })
+                .collect(),
+        ))
     }
 
     /// [`Self::admit_row_change`] for a wire command.
@@ -192,13 +342,111 @@ impl Engine {
         self.admit_row_change(&row_change(command))
     }
 
-    fn rows_changed(&self, change: &RowChange) -> Vec<RowKey> {
+    /// Every row `change` would change, each with how the request reaches it.
+    /// The one place a request's effect on rows it does not name is worked out.
+    fn rows_changed(&self, change: &RowChange) -> Vec<(RowKey, Reach)> {
+        let named = |row: RowKey| vec![(row, Reach::Named)];
         match change {
-            RowChange::Agent(session_id) => vec![RowKey::Agent(session_id.clone())],
-            RowChange::Pty(pty_id) => vec![self.pty_row(pty_id)],
-            RowChange::TerminalOrder(order) => self.agents_reordered_by(order),
+            RowChange::Agent(session_id) => named(RowKey::Agent(session_id.clone())),
+            RowChange::Pty(pty_id) => named(self.pty_row(pty_id)),
+            RowChange::TerminalOrder(order) => self
+                .agents_reordered_by(order)
+                .into_iter()
+                .map(|row| (row, Reach::Named))
+                .collect(),
+            RowChange::StartAgent(session_id) => {
+                let mut rows = named(RowKey::Agent(session_id.clone()));
+                rows.extend(self.agents_a_start_would_stop(session_id));
+                rows
+            }
+            RowChange::StartPty(pty_id) => {
+                let row = self.pty_row(pty_id);
+                let stopped = match &row {
+                    RowKey::Agent(session_id) => self.agents_a_start_would_stop(session_id),
+                    RowKey::Terminal(_) => Vec::new(),
+                };
+                let mut rows = named(row);
+                rows.extend(stopped);
+                rows
+            }
+            RowChange::OpenPty(pty_id) => {
+                let tab = crate::ids::TabIdRef::new(pty_id);
+                let starts = !self.providers.contains_key(tab)
+                    && !self.is_in_flight(&super::InFlightKey::AgentLaunch(tab.to_owned()));
+                if starts {
+                    self.rows_changed(&RowChange::StartPty(pty_id.clone()))
+                } else {
+                    Vec::new()
+                }
+            }
+            RowChange::Project(project_id) => {
+                let scope = self.project_scope(project_id);
+                let agents = scope.agents.iter().map(|session_id| {
+                    (
+                        RowKey::Agent(session_id.clone()),
+                        Reach::Also(self.agent_label(session_id)),
+                    )
+                });
+                let terminals = self
+                    .companion_terminals
+                    .iter()
+                    .filter(|(_, terminal)| {
+                        terminal.owner == TerminalOwner::Project(project_id.clone())
+                    })
+                    .map(|(id, terminal)| {
+                        (
+                            RowKey::Terminal(id.clone()),
+                            Reach::Also(terminal.label.clone()),
+                        )
+                    });
+                agents.chain(terminals).collect()
+            }
+            RowChange::ProjectCheckout(project_id) => {
+                let Some(checkout) = self
+                    .projects
+                    .iter()
+                    .find(|project| &project.id == project_id)
+                    .map(|project| project.path.clone())
+                else {
+                    return Vec::new();
+                };
+                self.sessions
+                    .iter()
+                    .filter(|session| {
+                        crate::project_browser::same_directory(session.directory(), &checkout)
+                    })
+                    .map(|session| {
+                        (
+                            RowKey::Agent(session.id.clone()),
+                            Reach::Also(session.display_label()),
+                        )
+                    })
+                    .collect()
+            }
             RowChange::NoRow => Vec::new(),
         }
+    }
+
+    /// The agents a start of `session_id` would stop, the ones
+    /// [`Engine::launch_conflict_scope`] names.
+    fn agents_a_start_would_stop(&self, session_id: &str) -> Vec<(RowKey, Reach)> {
+        self.launch_conflict_scope(session_id)
+            .agents
+            .iter()
+            .map(|other| {
+                (
+                    RowKey::Agent(other.clone()),
+                    Reach::Also(self.agent_label(other)),
+                )
+            })
+            .collect()
+    }
+
+    fn agent_label(&self, session_id: &str) -> String {
+        self.session_by_id(session_id).map_or_else(
+            || session_id.to_string(),
+            crate::model::AgentSession::display_label,
+        )
     }
 
     /// The agents whose own terminals `order` would put in a different order
@@ -232,9 +480,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::attachments::{ConnectionFacts, Policy, Surface, Target, TargetKind};
+    use crate::attachments::Policy;
     use crate::engine::test_support::{sample_project, sample_session, test_engine};
-    use crate::pty_owners::{PtySizeOwners, ResizeIntent};
+    use crate::pty_owners::{PageId, PtySizeOwners, ResizeIntent};
 
     const FIREFOX: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
 
@@ -277,42 +525,18 @@ mod tests {
         (engine, tmp, worktree, owners, companion, standalone)
     }
 
-    /// A browser tab `events` with the agent's first tab open on seat `seat`.
-    fn open_the_agent(engine: &Engine, events: &str, seat: u64) {
-        engine.attachments.register(
-            events,
-            ConnectionFacts {
-                surface: Surface::Browser,
-                device: Some(FIREFOX.to_string()),
-                address: Some("192.168.1.5".parse().unwrap()),
-                verified: false,
-                events: true,
-                browser: None,
-            },
-            None,
-        );
-        engine
-            .attachments
-            .attach(
-                events,
-                Target {
-                    kind: TargetKind::Tab,
-                    id: "s1-slot".to_string(),
-                    agent: Some("s1".to_string()),
-                },
-                None,
-                Some(seat),
-            )
-            .expect("attach");
+    fn page(raw: &str) -> PageId {
+        PageId::parse(&raw.repeat(32)).expect("a page id")
     }
 
-    fn asked_by(
-        engine: &mut Engine,
-        asker: Option<&str>,
-        change: &RowChange,
-    ) -> Result<(), String> {
+    /// `change` asked as a browser request naming `pages`.
+    fn asked_by(engine: &mut Engine, pages: &[PageId], change: &RowChange) -> Result<(), String> {
         engine.dispatch_policy = Some(Policy {
-            asker: asker.map_or(Asker::Nobody, |asker| Asker::Connection(asker.to_string())),
+            asker: if pages.is_empty() {
+                Asker::Nobody
+            } else {
+                Asker::Pages(pages.to_vec())
+            },
             ..Policy::default()
         });
         let answer = engine.admit_row_change(change).map_err(|e| e.to_string());
@@ -321,78 +545,37 @@ mod tests {
     }
 
     /// The whole rule in one walk: anybody while nobody drives, then only the
-    /// driver, through a take-over and the driver's page closing.
+    /// page whose seat holds the row, through a take-over and the driver's
+    /// sockets closing.
     #[test]
     fn a_driven_row_is_changed_only_by_its_driver() {
         let (mut engine, _tmp, _worktree, owners, companion, standalone) = serving_engine();
         let agent = RowChange::Agent("s1".to_string());
-        let (first, second) = (owners.next_conn_id(), owners.next_conn_id());
-        open_the_agent(&engine, "e1", first);
-        open_the_agent(&engine, "e2", second);
+        let first = owners.take_seat(Some(&page("a")), "s1-slot");
+        let second = owners.take_seat(Some(&page("b")), "s1-slot");
 
-        for asker in [Some("e1"), Some("e2"), None] {
-            asked_by(&mut engine, asker, &agent).expect("nobody drives the row yet");
+        for pages in [vec![page("a")], vec![page("b")], Vec::new()] {
+            asked_by(&mut engine, &pages, &agent).expect("nobody drives the row yet");
         }
 
-        owners.may_write("s1-slot", first, Some(FIREFOX), || {});
-        asked_by(&mut engine, Some("e1"), &agent).expect("the driver");
-        for asker in [Some("e2"), None, Some("no-such-connection")] {
-            let refused = asked_by(&mut engine, asker, &agent).expect_err("not the driver");
+        owners.may_write("s1-slot", first.id(), Some(FIREFOX), || {});
+        asked_by(&mut engine, &[page("a")], &agent).expect("the driving page");
+        asked_by(&mut engine, &[page("c"), page("a")], &agent)
+            .expect("an editor tab the driving page opened");
+        for pages in [vec![page("b")], vec![page("c")], Vec::new()] {
+            let refused = asked_by(&mut engine, &pages, &agent).expect_err("not the driver");
             assert!(refused.contains("Firefox on Linux"), "{refused}");
             assert!(refused.contains("did not make the change"), "{refused}");
         }
         // The agent's terminal is the agent's row; a standalone terminal is its own.
-        asked_by(&mut engine, Some("e2"), &RowChange::Pty(companion)).expect_err("the agent's row");
-        asked_by(&mut engine, Some("e2"), &RowChange::Pty(standalone)).expect("a row of its own");
-        asked_by(&mut engine, Some("e2"), &RowChange::NoRow).expect("no row");
+        asked_by(&mut engine, &[page("b")], &RowChange::Pty(companion))
+            .expect_err("the agent's row");
+        asked_by(&mut engine, &[page("b")], &RowChange::Pty(standalone)).expect("a row of its own");
+        asked_by(&mut engine, &[page("b")], &RowChange::NoRow).expect("no row");
         // With no policy the asker is the terminal UI, which does not drive it.
         engine
             .admit_row_change(&agent)
             .expect_err("the terminal UI is not the driver");
-
-        let taken = owners.claim_for_resize(
-            "s1-slot",
-            second,
-            ResizeIntent::TakeOver {
-                expected_owner: None,
-            },
-            Some(FIREFOX),
-            |_| {},
-        );
-        assert!(taken.apply);
-        asked_by(&mut engine, Some("e2"), &agent).expect("the driver right after taking over");
-        asked_by(&mut engine, Some("e1"), &agent).expect_err("the device that lost the row");
-
-        owners.release("s1-slot", second);
-        asked_by(&mut engine, Some("e1"), &agent).expect("nobody drives once the driver has gone");
-    }
-
-    /// A page drives the row while the driver is the seat its own sockets
-    /// share there: not before it claims, and not after it loses the row.
-    #[test]
-    fn a_page_is_the_driver_while_its_seat_holds_the_row() {
-        use crate::pty_owners::PageId;
-        let (mut engine, _tmp, _worktree, owners, _, _) = serving_engine();
-        let agent = RowChange::Agent("s1".to_string());
-        let page = |raw: &str| PageId::parse(&raw.repeat(32)).expect("a page id");
-        let mut asked = |pages: Vec<PageId>| {
-            engine.dispatch_policy = Some(Policy {
-                asker: Asker::Pages(pages),
-                ..Policy::default()
-            });
-            let answer = engine.admit_row_change(&agent).map_err(|e| e.to_string());
-            engine.dispatch_policy = None;
-            answer
-        };
-
-        let first = owners.take_seat(Some(&page("a")), "s1-slot");
-        let second = owners.take_seat(Some(&page("b")), "s1-slot");
-        owners.may_write("s1-slot", first.id(), Some(FIREFOX), || {});
-        asked(vec![page("a")]).expect("the driving page");
-        asked(vec![page("c"), page("a")]).expect("an editor tab the driving page opened");
-        asked(vec![page("b")]).expect_err("a page that only watches");
-        asked(vec![page("c")]).expect_err("a page with no socket on the row");
-        asked(Vec::new()).expect_err("no page at all");
 
         let taken = owners.claim_for_resize(
             "s1-slot",
@@ -404,11 +587,160 @@ mod tests {
             |_| {},
         );
         assert!(taken.apply);
-        asked(vec![page("b")]).expect("the driver right after taking over");
-        asked(vec![page("a")]).expect_err("the page that lost the row");
+        asked_by(&mut engine, &[page("b")], &agent).expect("the driver right after taking over");
+        asked_by(&mut engine, &[page("a")], &agent).expect_err("the page that lost the row");
 
         owners.leave_seat(&second);
-        asked(vec![page("a")]).expect("nobody drives once the driver's sockets have gone");
+        asked_by(&mut engine, &[page("a")], &agent)
+            .expect("nobody drives once the driver's sockets have gone");
+    }
+
+    /// A request is judged for every row it would change: removing a project
+    /// for each agent and terminal in it, the project's own git for an agent
+    /// whose folder is that checkout, and a start for the agent it would stop.
+    #[test]
+    fn a_request_is_judged_for_rows_it_does_not_name() {
+        let (mut engine, _tmp, worktree, owners, _, _) = serving_engine();
+        let seat = owners.take_seat(Some(&page("a")), "s1-slot");
+        owners.may_write("s1-slot", seat.id(), Some(FIREFOX), || {});
+        let folder = worktree.path().to_string_lossy().to_string();
+
+        // A second agent in the same folder, not running, and the first running.
+        let mut second = sample_session("s2", "p1", "feat/signup");
+        second
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = folder.clone();
+        engine.sessions.push(second);
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let running = crate::pty::PtyClient::spawn("/bin/sh", &args, worktree.path(), 24, 80, 100)
+            .expect("spawn the running agent");
+        engine
+            .providers
+            .insert(crate::ids::TabId::new("s1-slot"), running);
+        engine.projects[0].path = folder;
+
+        for (what, change) in [
+            ("removing the project", RowChange::Project("p1".to_string())),
+            (
+                "git in the checkout the agent has as its folder",
+                RowChange::ProjectCheckout("p1".to_string()),
+            ),
+            (
+                "starting an agent in the same folder",
+                RowChange::StartAgent("s2".to_string()),
+            ),
+            (
+                "starting that agent's tab",
+                RowChange::StartPty("s2-slot".to_string()),
+            ),
+            (
+                "opening a socket on that agent's stopped tab",
+                RowChange::OpenPty("s2-slot".to_string()),
+            ),
+        ] {
+            let refused = asked_by(&mut engine, &[], &change).expect_err(what);
+            assert!(refused.contains("Firefox on Linux"), "{what}: {refused}");
+            assert!(
+                refused.contains("s1-title"),
+                "{what} names the agent: {refused}"
+            );
+            asked_by(&mut engine, &[page("a")], &change).expect(what);
+        }
+        // A socket on a tab that is running starts nothing, so anybody opens it.
+        asked_by(&mut engine, &[], &RowChange::OpenPty("s1-slot".to_string()))
+            .expect("watching a running tab");
+        // A project with no driven agent in it, and one the agent is not in.
+        asked_by(&mut engine, &[], &RowChange::Project("p2".to_string())).expect("another project");
+        engine.projects[0].path = "/repo".to_string();
+        asked_by(
+            &mut engine,
+            &[],
+            &RowChange::ProjectCheckout("p1".to_string()),
+        )
+        .expect("a checkout no agent has as its folder");
+    }
+
+    /// A write is checked against the folder of every agent another device
+    /// drives, through a symbolic link too, and against none for the driver.
+    #[test]
+    fn a_write_is_judged_by_the_driven_folder_it_lands_in() {
+        let (mut engine, _tmp, worktree, owners, _, standalone) = serving_engine();
+        let seat = owners.take_seat(Some(&page("a")), "s1-slot");
+        owners.may_write("s1-slot", seat.id(), Some(FIREFOX), || {});
+        let through = RowChange::Pty(standalone);
+        let mut folders = |pages: &[PageId], force: bool| {
+            engine.dispatch_policy = Some(Policy {
+                asker: Asker::Pages(pages.to_vec()),
+                force,
+                ..Policy::default()
+            });
+            let folders = engine
+                .admit_write(&through)
+                .expect("nobody drives the terminal");
+            engine.dispatch_policy = None;
+            folders
+        };
+
+        let watcher = folders(&[page("b")], false);
+        let inside = worktree.path().join("src/new.rs");
+        let refused = watcher.refusal_inside(&inside).expect("inside the folder");
+        assert!(refused.to_string().contains("s1-title"), "{refused}");
+        assert!(
+            refused.to_string().contains("Firefox on Linux"),
+            "{refused}"
+        );
+        let outside = tempfile::tempdir().expect("another folder");
+        assert!(watcher.refusal_inside(outside.path()).is_none());
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(worktree.path(), &link).expect("a link to the folder");
+        assert!(watcher.refusal_inside(&link.join("new.rs")).is_some());
+        // Deleting or moving a folder takes an agent's folder inside it along.
+        let parent = worktree.path().parent().expect("a parent");
+        assert!(watcher.refusal_inside(parent).is_none());
+        assert!(watcher.refusal_touching(parent).is_some());
+
+        assert!(folders(&[page("a")], false).is_empty(), "the driver");
+        assert!(folders(&[page("b")], true).is_empty(), "a blanket go-ahead");
+    }
+
+    /// The terminal UI drives a row while its seat holds it, whatever panes it
+    /// drew last: it is let through with nothing attached, and refused once a
+    /// browser has taken the row.
+    #[test]
+    fn the_terminal_ui_is_judged_by_its_seat() {
+        let (engine, _tmp, _worktree, owners, _, _) = serving_engine();
+        let agent = RowChange::Agent("s1".to_string());
+        let seat = crate::background_serve::TuiOwnership::seat(Arc::clone(&owners));
+        owners.may_write(
+            "s1-slot",
+            seat.conn_id,
+            Some(crate::background_serve::TUI_DEVICE_LABEL),
+            || {},
+        );
+        engine
+            .admit_row_change(&agent)
+            .expect("the terminal UI drives the row and has drawn none of it");
+
+        let browser = owners.next_conn_id();
+        let taken = owners.claim_for_resize(
+            "s1-slot",
+            browser,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            Some(FIREFOX),
+            |_| {},
+        );
+        assert!(taken.apply);
+        let refused = engine
+            .admit_row_change(&agent)
+            .expect_err("a browser took the row");
+        assert!(
+            refused.to_string().contains("Firefox on Linux"),
+            "{refused}"
+        );
     }
 
     /// Going ahead over everybody gets past a driver; going ahead over named
@@ -418,7 +750,6 @@ mod tests {
         let (mut engine, _tmp, _worktree, owners, _, _) = serving_engine();
         let agent = RowChange::Agent("s1".to_string());
         let seat = owners.next_conn_id();
-        open_the_agent(&engine, "e1", seat);
         owners.may_write("s1-slot", seat, Some(FIREFOX), || {});
 
         engine.dispatch_policy = Some(Policy {
@@ -443,9 +774,8 @@ mod tests {
     #[test]
     fn a_refused_wire_command_changes_nothing() {
         let (mut engine, _tmp, _worktree, owners, _, _) = serving_engine();
-        let seat = owners.next_conn_id();
-        open_the_agent(&engine, "e1", seat);
-        owners.may_write("s1-slot", seat, Some(FIREFOX), || {});
+        let seat = owners.take_seat(Some(&page("a")), "s1-slot");
+        owners.may_write("s1-slot", seat.id(), Some(FIREFOX), || {});
         let before = engine.sessions[0].auto_reopen_enabled;
         let toggle = || WireCommand::ToggleAgentAutoReopen {
             session_id: "s1".to_string(),
@@ -458,7 +788,7 @@ mod tests {
         assert_eq!(engine.sessions[0].auto_reopen_enabled, before);
 
         engine.dispatch_policy = Some(Policy {
-            asker: Asker::Connection("e1".to_string()),
+            asker: Asker::Pages(vec![page("a")]),
             ..Policy::default()
         });
         engine

@@ -284,6 +284,9 @@ pub struct PtySizeOwners {
     /// How many times a method here took the lock. See
     /// [`Self::lock_acquisitions`].
     lock_acquisitions: std::sync::atomic::AtomicU64,
+    /// The terminal UI's connection id on this record, once it has taken its
+    /// seat. See [`Self::seat_terminal_ui`].
+    terminal_ui: std::sync::OnceLock<u64>,
 }
 
 /// The answer of [`PtySizeOwners::row_owner`]: who drives a row, as of one
@@ -371,6 +374,20 @@ impl PtySizeOwners {
     /// from [`NEXT_CONN_ID`], so ids stay unique across serve cycles.
     pub fn next_conn_id(&self) -> u64 {
         NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Seat the terminal UI on this record and answer its connection id: a
+    /// fresh one the first time, the same one after. Recorded here so a
+    /// question about who drives a row can tell the terminal UI by the id its
+    /// claims carry.
+    pub fn seat_terminal_ui(&self) -> u64 {
+        *self.terminal_ui.get_or_init(|| self.next_conn_id())
+    }
+
+    /// The terminal UI's connection id on this record, `None` when no
+    /// terminal UI has taken a seat on it.
+    pub fn terminal_ui_seat(&self) -> Option<u64> {
+        self.terminal_ui.get().copied()
     }
 
     /// Seat a freshly attached terminal socket for `pty_id`, which must already

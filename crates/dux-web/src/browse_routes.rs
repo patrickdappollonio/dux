@@ -141,7 +141,10 @@ struct MkdirReply {
 /// The joined target is bounded on the same character cap the parent carries,
 /// so a maximal parent and a maximal name cannot build a folder the inspect
 /// route then refuses to look at.
-async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
+///
+/// A folder can be made anywhere, so this is a write judged by where it lands
+/// alone: refused inside the folder of an agent another device drives.
+async fn mkdir(State(state): State<AppState>, Json(body): Json<MkdirBody>) -> Response {
     let parent = body.parent;
     // The parent is checked as a path string: present, absolute and bounded.
     // Classifying what is there is the inspect endpoint's job, not this route's.
@@ -191,6 +194,21 @@ async fn mkdir(State(_state): State<AppState>, Json(body): Json<MkdirBody>) -> R
             "the folder's full path is too long",
         )
             .into_response();
+    }
+
+    let landing = match state
+        .engine
+        .admit_write(dux_core::engine::RowChange::NoRow)
+        .await
+    {
+        Ok(folders) => {
+            let at = crate::git_routes::Landing::At;
+            crate::git_routes::refuse_landing(folders, vec![target.clone()], at).await
+        }
+        Err(refused) => Err(refused),
+    };
+    if let Err(refused) = landing {
+        return refused.into_response();
     }
 
     // Filesystem write off the reactor (the browse precedent). `create_dir`,
