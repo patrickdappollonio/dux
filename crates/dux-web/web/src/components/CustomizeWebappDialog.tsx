@@ -109,7 +109,6 @@ import { wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
-  customizeWebappReturnFocus,
   mobileAccessoryBarVisible,
   openConfigEditor,
   saveSettings,
@@ -1461,7 +1460,6 @@ function PreferencesForm({
   })
   useLayoutEffect(() => () => confirmsOutlet.current?.(null), [confirmsOutlet])
 
-  const finalFocus = () => customizeWebappReturnFocus() ?? true
   // Stable, so a render while the dialog is open never asks for it again.
   const [desktopInitialFocus] = useState(
     () => () =>
@@ -1504,7 +1502,6 @@ function PreferencesForm({
         // The sheet itself: a control focused by the opening would wear its
         // focus ring, or raise the soft keyboard, for no reason the person gave.
         initialFocus={() => sheetRef.current ?? true}
-        finalFocus={finalFocus}
         fullHeight
         className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
       >
@@ -1577,7 +1574,6 @@ function PreferencesForm({
       // Type-immediately into the search with a mouse; under a finger focusing
       // the field would pop the soft keyboard over the dialog the moment it opens.
       initialFocus={desktopInitialFocus}
-      finalFocus={finalFocus}
       // A flex column rather than the popup's grid, so only the two columns give
       // up height when the popup hits its cap.
       className="flex h-[min(42.5rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[58.75rem]"

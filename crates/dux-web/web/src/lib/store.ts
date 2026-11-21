@@ -9937,11 +9937,8 @@ export interface StopAllRefusal {
   blockers: AttachedBlocker[]
 }
 
-// Opens Preferences on `topic`, with any edits a Back set aside. Call it from
-// the opening handler: focus returns to the control pressed last.
+// Opens Preferences on `topic`, with any edits a Back set aside.
 export function openCustomizeWebapp(topic: SettingTopic | null = null): void {
-  const opener = lastPageControl
-  preferencesReturnFocus = () => (opener?.isConnected ? opener : null)
   const draft = preferencesSetAside
   preferencesSetAside = null
   if (draft !== null) dismissNotification(PREFERENCES_SET_ASIDE_ID)
@@ -9955,14 +9952,6 @@ export function openCustomizeWebapp(topic: SettingTopic | null = null): void {
 
 export function closeCustomizeWebapp(): void {
   setState({ customizeWebappOpen: false, customizeWebappDraft: null })
-}
-
-let preferencesReturnFocus: (() => HTMLElement | null) | null = null
-
-/// Where the Preferences dialog hands focus when it closes: the control that
-/// opened it, while that is still on the page.
-export function customizeWebappReturnFocus(): HTMLElement | null {
-  return preferencesReturnFocus?.() ?? null
 }
 
 // The edits a Back closed Preferences on. Back cannot stop to ask, so they
