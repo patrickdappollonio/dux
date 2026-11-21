@@ -143,6 +143,30 @@ impl OwnersState {
         Some(self.epoch)
     }
 
+    /// Place `pty_id` in `row`; see [`PtySizeOwners::join_row`].
+    fn place(&mut self, pty_id: &str, row: RowKey) {
+        if self.row_of.contains_key(pty_id) {
+            return;
+        }
+        let alone = RowKey::Terminal(pty_id.to_string());
+        if row != alone
+            && let Some(record) = self.map.remove(&alone)
+        {
+            self.members.remove(&alone);
+            if !self.map.contains_key(&row) {
+                self.map.insert(row.clone(), record);
+            }
+            // Either way some pty's owner changed, which is what the epoch counts.
+            self.epoch += 1;
+            self.generation += 1;
+        }
+        self.row_of.insert(pty_id.to_string(), row.clone());
+        self.members
+            .entry(row)
+            .or_default()
+            .insert(pty_id.to_string());
+    }
+
     /// Every pty known to be in `row`, sorted.
     fn members_of(&self, row: &RowKey) -> Vec<String> {
         self.members
@@ -257,6 +281,21 @@ pub enum GridApplyOutcome<T> {
 pub struct PtySizeOwners {
     /// The owner map and its counters, under one lock.
     pub owners: std::sync::Mutex<OwnersState>,
+    /// How many times a method here took the lock. See
+    /// [`Self::lock_acquisitions`].
+    lock_acquisitions: std::sync::atomic::AtomicU64,
+}
+
+/// The answer of [`PtySizeOwners::row_owner`]: who drives a row, as of one
+/// generation of the owner map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowOwner {
+    /// The driving connection's id, `None` when nobody drives the row.
+    pub conn_id: Option<u64>,
+    /// The driver's raw `User-Agent`, `None` when it sent none or nobody drives.
+    pub device: Option<String>,
+    /// [`PtySizeOwners::ownership_generation`] as of this answer.
+    pub generation: u64,
 }
 
 /// The source of every connection id in the process.
@@ -312,6 +351,22 @@ pub enum ResizeIntent {
 }
 
 impl PtySizeOwners {
+    /// Take the owners lock, counting the acquisition.
+    fn lock(&self) -> std::sync::MutexGuard<'_, OwnersState> {
+        self.lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.owners
+            .lock()
+            .expect("the pty owners lock is not poisoned")
+    }
+
+    /// How many times this registry's methods have taken its lock, which is
+    /// what a surface's questions cost and what a test of that cost counts.
+    pub fn lock_acquisitions(&self) -> u64 {
+        self.lock_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Allocate a process-unique id for a freshly attached PTY socket. Drawn
     /// from [`NEXT_CONN_ID`], so ids stay unique across serve cycles.
     pub fn next_conn_id(&self) -> u64 {
@@ -333,10 +388,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn take_seat(&self, page: Option<&PageId>, pty_id: &str) -> Seat {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let key = page.map(|page| (page.clone(), owners.row_noting(pty_id)));
         let id = match &key {
             Some(key) => {
@@ -376,10 +428,7 @@ impl PtySizeOwners {
         if seat.left.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return None;
         }
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         if let Some(key) = &seat.key
             && let Some(entry) = owners.seats.get_mut(key)
             && entry.id == seat.id
@@ -408,31 +457,25 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn join_row(&self, pty_id: &str, row: RowKey) {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
-        if owners.row_of.contains_key(pty_id) {
-            return;
+        self.lock().place(pty_id, row);
+    }
+
+    /// Who drives `row` right now, with `pty_id` placed in the row first:
+    /// what [`Self::join_row`] followed by [`Self::current_owner`] answers, in
+    /// one lock acquisition, for a surface that asks on every frame.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
+    pub fn row_owner(&self, pty_id: &str, row: RowKey) -> RowOwner {
+        let mut owners = self.lock();
+        owners.place(pty_id, row);
+        let record = owners.map.get(&owners.row_for(pty_id));
+        RowOwner {
+            conn_id: record.map(|r| r.conn_id),
+            device: record.and_then(|r| r.device.clone()),
+            generation: owners.generation,
         }
-        let alone = RowKey::Terminal(pty_id.to_string());
-        if row != alone
-            && let Some(record) = owners.map.remove(&alone)
-        {
-            owners.members.remove(&alone);
-            if !owners.map.contains_key(&row) {
-                owners.map.insert(row.clone(), record);
-            }
-            // Either way some pty's owner changed, which is what the epoch counts.
-            owners.epoch += 1;
-            owners.generation += 1;
-        }
-        owners.row_of.insert(pty_id.to_string(), row.clone());
-        owners
-            .members
-            .entry(row)
-            .or_default()
-            .insert(pty_id.to_string());
     }
 
     /// Every pty known to share `pty_id`'s row, `pty_id` included, sorted: the
@@ -442,10 +485,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn row_members(&self, pty_id: &str) -> Vec<String> {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let row = owners.row_noting(pty_id);
         owners.members_of(&row)
     }
@@ -463,10 +503,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn current_owner(&self, pty_id: &str) -> (Option<u64>, u64, Option<String>) {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         let record = owners.map.get(&owners.row_for(pty_id));
         (
             record.map(|r| r.conn_id),
@@ -523,10 +560,7 @@ impl PtySizeOwners {
             epoch: None,
             seq: None,
         };
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let row = owners.row_noting(pty_id);
         let mut outcome = match owners.map.get(&row) {
             Some(record) if record.conn_id == conn_id => ResizeClaim {
@@ -607,10 +641,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn is_owner(&self, pty_id: &str, conn_id: u64) -> bool {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         owners
             .map
             .get(&owners.row_for(pty_id))
@@ -626,10 +657,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn held_by_another(&self, pty_id: &str, conn_id: u64) -> bool {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         owners
             .map
             .get(&owners.row_for(pty_id))
@@ -667,10 +695,7 @@ impl PtySizeOwners {
         device: Option<&str>,
         enqueue: impl FnOnce(),
     ) -> WriteClaim {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let row = owners.row_noting(pty_id);
         let claim = match owners.map.get(&row) {
             Some(record) if record.conn_id == conn_id => WriteClaim {
@@ -713,10 +738,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn write_if_owner(&self, pty_id: &str, conn_id: u64, write: impl FnOnce()) -> bool {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         let allowed = owners
             .map
             .get(&owners.row_for(pty_id))
@@ -742,10 +764,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release(&self, pty_id: &str, conn_id: u64) -> Option<u64> {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let row = owners.row_noting(pty_id);
         owners.release_row(row, conn_id)
     }
@@ -763,10 +782,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn release_all(&self, conn_id: u64) -> Vec<(String, u64)> {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let mut held: Vec<RowKey> = owners
             .map
             .iter()
@@ -811,10 +827,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn accept_grid_apply(&self, pty_id: &str, seq: u64, rows: u16, cols: u16) -> bool {
-        let mut owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let mut owners = self.lock();
         let landed = owners.applied.entry(pty_id.to_string()).or_default();
         if seq <= landed.seq {
             return false;
@@ -831,10 +844,7 @@ impl PtySizeOwners {
     /// so re-applying the returned geometry is the fix. It terminates, because
     /// the winner's own check returns `None`.
     pub(crate) fn superseding_grid(&self, pty_id: &str, seq: u64) -> Option<(u16, u16)> {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         let landed = owners.applied.get(pty_id)?;
         (landed.seq > seq).then_some((landed.rows, landed.cols))
     }
@@ -883,13 +893,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn grid_seq(&self, pty_id: &str) -> u64 {
-        self.owners
-            .lock()
-            .expect("the pty owners lock is not poisoned")
-            .grid_seq
-            .get(pty_id)
-            .copied()
-            .unwrap_or(0)
+        self.lock().grid_seq.get(pty_id).copied().unwrap_or(0)
     }
 
     /// The seq of the last resize that actually REACHED the child, or 0 before
@@ -904,9 +908,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn applied_grid_seq(&self, pty_id: &str) -> u64 {
-        self.owners
-            .lock()
-            .expect("the pty owners lock is not poisoned")
+        self.lock()
             .applied
             .get(pty_id)
             .map_or(0, |landed| landed.seq)
@@ -920,10 +922,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn ownership_generation(&self) -> u64 {
-        self.owners
-            .lock()
-            .expect("the pty owners lock is not poisoned")
-            .generation
+        self.lock().generation
     }
 
     /// A point-in-time copy of the owner map (row -> owning connection id), so
@@ -939,10 +938,7 @@ impl PtySizeOwners {
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
     pub fn input_owners_snapshot(&self) -> (std::collections::HashMap<RowKey, u64>, u64) {
-        let owners = self
-            .owners
-            .lock()
-            .expect("the pty owners lock is not poisoned");
+        let owners = self.lock();
         let map = owners
             .map
             .iter()
@@ -955,6 +951,24 @@ impl PtySizeOwners {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A surface asks about a row on every frame: the answer is what joining
+    /// the pty and then asking for its owner gives, for one lock acquisition.
+    #[test]
+    fn row_owner_places_the_pty_and_answers_under_one_lock() {
+        let owners = PtySizeOwners::default();
+        let driver = owners.next_conn_id();
+        owners.join_row("tab", RowKey::Agent("agent".to_string()));
+        owners.claim("tab", driver).expect("the row was free");
+
+        let before = owners.lock_acquisitions();
+        let row = owners.row_owner("terminal", RowKey::Agent("agent".to_string()));
+        assert_eq!(owners.lock_acquisitions() - before, 1);
+        assert_eq!(row.conn_id, Some(driver));
+        assert_eq!(row.generation, owners.ownership_generation());
+        assert_eq!(owners.current_owner("terminal").0, Some(driver));
+        assert_eq!(owners.row_members("tab"), ["tab", "terminal"]);
+    }
 
     /// A take-over that takes from whoever holds the pty.
     const TAKE_OVER: ResizeIntent = ResizeIntent::TakeOver {
