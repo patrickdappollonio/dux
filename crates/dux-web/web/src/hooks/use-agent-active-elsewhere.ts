@@ -55,10 +55,7 @@ export function useAgentChangeBlockSelective(
   sessionId: string | null,
 ): RowBlock | null {
   const rowAnswer = useAgentRowWatch(sessionId).block
-  const spineElsewhere = useDuxSelector((state) => {
-    const session = state.spine?.sessions.find((s) => s.id === sessionId)
-    return session !== undefined && sessionActiveElsewhere(state, session)
-  })
+  const spineElsewhere = useDuxSelector((state) => agentActiveElsewhere(state, sessionId))
   if (sessionId === null) return null
   return agentChangeBlock(rowAnswer, () => spineElsewhere)
 }
@@ -72,8 +69,7 @@ export function useEditorRootChangeBlock(root: EditorRoot): RowBlock | null {
   const rowAnswer = useRowWatch(rowKeyOfTarget(root)).block
   const block = agentChangeBlock(rowAnswer, () => {
     if (root.kind === "terminal") return terminalActiveElsewhere(state, root.terminalId)
-    const session = state.spine?.sessions.find((s) => s.id === root.sessionId)
-    return session !== undefined && sessionActiveElsewhere(state, session)
+    return agentActiveElsewhere(state, root.sessionId)
   })
   const asOpener = state.standaloneEditor && rowAnswer === undefined && block === "other"
   const verdict = useOpenerVerdict(root, asOpener ? rowDriverInSpine(state, root) : null)
@@ -106,6 +102,13 @@ function rowDriverInSpine(state: DuxState, root: EditorRoot): string | null {
             .map((t) => t.input_owner),
         ]
   return owners.find((owner) => owner !== undefined && owner !== "") ?? null
+}
+
+/// The spine's word on whether another device drives an agent, false while the
+/// spine does not list it.
+function agentActiveElsewhere(state: DuxState, sessionId: string | null): boolean {
+  const session = state.spine?.sessions.find((s) => s.id === sessionId)
+  return session !== undefined && sessionActiveElsewhere(state, session)
 }
 
 /// The spine's word on whether another device drives a terminal: a mounted
