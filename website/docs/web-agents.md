@@ -378,7 +378,8 @@ itself and a total.
 - **Force stop everything…** does the same to every agent and terminal in one go, except
   the ones whose own **Force stop** is disabled on this device (another device is driving
   them, or nobody is until you take over), which it names and leaves running, saying why.
-  Both confirmations say so before you commit.
+  Both confirmations say so before you commit. When every running agent and terminal is
+  one of those, the button is disabled and says why.
 
 > [!WARNING]
 > Terminals, unlike agents, are **destroyed** when killed, not detached.
