@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 const startDormantTab = vi.fn()
 vi.mock("@/lib/store", () => ({
   startDormantTab,
+  rowDriverLabel: () => null,
   // `Welcome` reads the tips off the bootstrap document.
   useDux: () => ({ bootstrap: { welcome_tips: ["Try the `cog` menu"] } }),
 }))

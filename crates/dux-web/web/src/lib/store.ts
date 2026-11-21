@@ -10001,7 +10001,7 @@ export function rowDriverLabel(
     return (
       rowDriverDevice(agentRowKey(part.sessionId)) ??
       named([
-        ...(s.spine?.sessions.find((x) => x.id === part.sessionId)?.tabs ?? []),
+        ...((s.spine?.sessions ?? []).find((x) => x.id === part.sessionId)?.tabs ?? []),
         ...terminals.filter(
           (t) => t.owner.kind === "session" && t.owner.session_id === part.sessionId,
         ),

@@ -75,7 +75,7 @@ describe("stopped agent band", () => {
 
   it("keeps the 28px buttons and gives each a 7px margin above and below, a 40px tap area across the 1px border (a browser must measure 40px), that cannot overlap its neighbour", () => {
     render(<StoppedAgentBand sessionId="s1" slotTab={tab} withStart />)
-    for (const name of ["Last output", "Start"]) {
+    for (const name of ["Last output", "Start the agent"]) {
       const classes = classesOf(screen.getByRole("button", { name }))
       expect(classes, `${name} keeps its visible height`).toContain("h-7")
       expect(classes, `${name} needs a 40px tap area`).toEqual(

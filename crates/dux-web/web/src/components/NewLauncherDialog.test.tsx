@@ -17,6 +17,7 @@ const { calls, spy, state } = vi.hoisted(() => {
 vi.mock("@/lib/store", async (importOriginal) => ({
   sessionActiveElsewhere: (await importOriginal<typeof import("@/lib/store")>())
     .sessionActiveElsewhere,
+  rowDriverLabel: (await importOriginal<typeof import("@/lib/store")>()).rowDriverLabel,
   useDux: () => state.current,
   closeNewLauncher: spy("closeNewLauncher"),
   createTerminal: spy("createTerminal"),

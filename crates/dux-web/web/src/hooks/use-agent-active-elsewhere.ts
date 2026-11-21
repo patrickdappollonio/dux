@@ -200,14 +200,9 @@ export function agentChangeBlockReason(block: RowBlock, device: string | null = 
 export function useRowDriverLabel(
   part: { sessionId: string } | { terminalId: string } | null,
 ): string | null {
+  const state = useDux()
   useRowWatch(null)
-  const sessionId = part !== null && "sessionId" in part ? part.sessionId : null
-  const terminalId = part !== null && "terminalId" in part ? part.terminalId : null
-  return useDuxSelector((state) => {
-    if (sessionId !== null) return rowDriverLabel(state, { sessionId })
-    if (terminalId !== null) return rowDriverLabel(state, { terminalId })
-    return null
-  })
+  return part === null ? null : rowDriverLabel(state, part)
 }
 
 /// Why controls that change an agent's or a terminal's row are disabled,
