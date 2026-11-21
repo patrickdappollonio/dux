@@ -71,6 +71,7 @@ export function DockStrip({
   const ids = terminals.map((t) => t.id)
   const attachStrip = useKeepCueClocks(ids.join("\n"))
   const block = useAgentChangeBlockById(sessionId)
+  const device = useRowDriverLabel({ sessionId })
   return (
     // A tablet gets the tab strip's spacing: 8px between pills, so one pill's ⋯
     // tap margin stays clear of the next pill, and an 18px end, since the pane
@@ -101,7 +102,7 @@ export function DockStrip({
       </SortableStrip>
       <ExplainedWhenDisabled
         disabled={block !== null}
-        hint={block === null ? "New terminal" : addToAgentBlockHint(block)}
+        hint={block === null ? "New terminal" : addToAgentBlockHint(block, device)}
         // The disabled button's own tap margin is dead, so its wrapper carries
         // the same one, 2px shorter on the left where it holds the button's margin.
         disabledClassName="relative after:absolute after:-inset-y-2 after:-right-2 after:-left-1.5 after:hidden md:pointer-coarse:after:block"

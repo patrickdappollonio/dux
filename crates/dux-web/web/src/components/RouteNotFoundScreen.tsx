@@ -15,6 +15,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
   useAgentChangeBlock,
+  useRowDriverLabel,
 } from "@/hooks/use-agent-active-elsewhere"
 import { assertNever } from "@/lib/assertNever"
 import {
@@ -57,6 +58,7 @@ export function TerminalNotFound({
       ? spine?.sessions.find((s) => s.id === owner.sessionId)
       : undefined
   const block = useAgentChangeBlock(agent)
+  const device = useRowDriverLabel(agent === undefined ? null : { sessionId: agent.id })
   const blocked = block !== null
   const reasonId = useId()
   return (
@@ -100,7 +102,7 @@ export function TerminalNotFound({
           * finger has none. */}
         {newTerminal !== null && block !== null ? (
           <p id={reasonId} className="w-full text-center text-sm text-muted-foreground">
-            {addToAgentBlockHint(block)}
+            {addToAgentBlockHint(block, device)}
           </p>
         ) : null}
       </EmptyContent>

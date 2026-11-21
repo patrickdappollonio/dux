@@ -282,14 +282,16 @@ export function startAgentBlockHint(block: RowBlock): string {
   }
 }
 
-/// Why this device cannot add a tab or a terminal to the agent right now.
-export function addToAgentBlockHint(block: RowBlock): string {
+/// Why this device cannot add a tab or a terminal to the agent right now,
+/// naming the driving device when it is known.
+export function addToAgentBlockHint(block: RowBlock, device: string | null): string {
   switch (block) {
     case "reconnecting":
       return "Reconnecting to this agent"
     case "pending":
       return "Still connecting to this agent"
     case "other":
+      return `This agent is active on ${device ?? "another device"}. Take over to add a tab or a terminal`
     case "nobody":
       return "Take over to add a tab or a terminal"
   }

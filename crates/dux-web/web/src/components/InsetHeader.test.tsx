@@ -722,7 +722,13 @@ describe("InsetHeader under the agent's take-over card", () => {
     expect(newTab).toHaveProperty("disabled", true)
     // A finger has no hover: a tap on what holds the disabled button says why.
     fireEvent.click(newTab.parentElement!)
-    expect((await screen.findAllByText("Take over to add a tab or a terminal")).length).toBeGreaterThan(0)
+    expect(
+      (
+        await screen.findAllByText(
+          "This agent is active on another device. Take over to add a tab or a terminal",
+        )
+      ).length,
+    ).toBeGreaterThan(0)
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")

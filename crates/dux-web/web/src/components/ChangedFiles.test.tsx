@@ -2692,6 +2692,24 @@ describe("the Changes pane while this page does not drive the agent", () => {
     expect(itemOf(menu, "Stage").getAttribute("aria-disabled")).toBe("true")
   })
 
+  it("names the driving device on the disabled New terminal button", async () => {
+    mockState = withFiles([], [["a.ts", "M"]])
+    act(() => {
+      retire = registerPaneCover("s1", "card", {
+        row: agentRowKey("s1"),
+        driver: "other",
+        device: "Chrome on Linux",
+      })
+    })
+    render(<ChangedFiles />)
+    // A tap on the disabled control opens its hint.
+    fireEvent.click(screen.getByLabelText("New terminal").parentElement!)
+    expect(await screen.findByText(/Take over to add a tab or a terminal/)).toBeTruthy()
+    expect(screen.getByText(/Take over to add a tab or a terminal/).textContent).toBe(
+      "This agent is active on Chrome on Linux. Take over to add a tab or a terminal",
+    )
+  })
+
   // A race the page lost: the server's sentence is what the person reads.
   it("shows the server's refusal of a stage in its own words", async () => {
     mockState = withFiles([], [["a.ts", "M"]])

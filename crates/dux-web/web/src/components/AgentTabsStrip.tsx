@@ -103,11 +103,12 @@ export function AgentTabsStrip({
   const creating = createTabInFlight.includes(session.id)
   const defaultProvider = defaultProviderForSession(spine, session)
   const block = useAgentChangeBlock(session)
+  const device = useRowDriverLabel({ sessionId: session.id })
   const disabled = atCap || creating || block !== null
   // Said on the + and on the chooser beside it, whichever reason disables them.
   const newTabHint =
     block !== null
-      ? addToAgentBlockHint(block)
+      ? addToAgentBlockHint(block, device)
       : atCap
         ? `Tab limit reached (${cap})`
         : creating

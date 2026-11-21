@@ -1024,13 +1024,13 @@ function ChangesHeader({
   // While this device does not drive the agent, a terminal opened here would
   // join a row it does not drive, so New terminal is disabled with that
   // reason, unless the gone directory already gave it one.
+  const driver = useRowDriverLabel({ sessionId })
   const terminalBlocked =
     editorBlocked ??
-    (changeBlock === null ? null : addToAgentBlockHint(changeBlock))
+    (changeBlock === null ? null : addToAgentBlockHint(changeBlock, driver))
   // Commit, push and pull write, so a page that does not drive the agent gets
   // them greyed with that reason; Refresh only reads, so it is greyed for a
   // quiet pane alone.
-  const driver = useRowDriverLabel({ sessionId })
   const writeBlocked =
     gitBlocked ?? (changeBlock === null ? null : agentChangeBlockReason(changeBlock, driver))
   // Every git item carries the one reason line as its description, so a

@@ -20,6 +20,7 @@ import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import {
   addToAgentBlockHint,
   useAgentChangeBlock,
+  useRowDriverLabel,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import { useIsTruncated } from "@/hooks/use-truncated"
@@ -276,7 +277,11 @@ function HeaderPaneMenu({
 }) {
   const { theater } = useDux()
   const newTabBlock = useAgentChangeBlock(newTabSession)
-  const newTabBlocked = newTabBlock === null ? null : addToAgentBlockHint(newTabBlock)
+  const newTabDevice = useRowDriverLabel(
+    newTabSession === null ? null : { sessionId: newTabSession.id },
+  )
+  const newTabBlocked =
+    newTabBlock === null ? null : addToAgentBlockHint(newTabBlock, newTabDevice)
   const pendingRef = useRef<"new-tab" | "macros" | null>(null)
   const [adding, setAdding] = useState(false)
   const [macrosOpen, setMacrosOpen] = useState(false)

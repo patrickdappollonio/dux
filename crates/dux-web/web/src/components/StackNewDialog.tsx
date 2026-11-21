@@ -15,6 +15,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
   useAgentChangeBlock,
+  useRowDriverLabel,
 } from "@/hooks/use-agent-active-elsewhere"
 import { defaultProviderForSession } from "@/lib/agentTabs"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
@@ -33,6 +34,7 @@ import type { SessionView } from "@/lib/types"
 export function NewTabButton({ session }: { session: SessionView }) {
   const [adding, setAdding] = useState(false)
   const block = useAgentChangeBlock(session)
+  const device = useRowDriverLabel({ sessionId: session.id })
   // Mounted whatever the button shows, so the dialog hears the block arrive
   // while it is open and closes for good.
   const dialog = (
@@ -42,7 +44,7 @@ export function NewTabButton({ session }: { session: SessionView }) {
     <>
       <ExplainedWhenDisabled
         disabled={block !== null}
-        hint={block === null ? "New agent tab or terminal" : addToAgentBlockHint(block)}
+        hint={block === null ? "New agent tab or terminal" : addToAgentBlockHint(block, device)}
         className="rounded-lg"
       >
         <Button
@@ -79,6 +81,7 @@ export function StackNewDialog({
   // The take-over card coming up closes the dialog for good; a device still
   // waiting to hear who drives keeps it open with its rows disabled.
   const block = useAgentChangeBlock(session)
+  const device = useRowDriverLabel({ sessionId: session.id })
   const changesBlocked = block !== null
   const underCard = block === "other" || block === "nobody"
   useEffect(() => {
@@ -99,7 +102,7 @@ export function StackNewDialog({
           <DialogTitle>Add to this agent</DialogTitle>
           <DialogDescription>
             {block !== null
-              ? addToAgentBlockHint(block)
+              ? addToAgentBlockHint(block, device)
               : "Another tab works in the same worktree; a terminal opens in its dock."}
           </DialogDescription>
         </DialogHeader>
