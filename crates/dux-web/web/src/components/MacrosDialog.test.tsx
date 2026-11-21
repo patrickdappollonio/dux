@@ -345,6 +345,32 @@ describe("MacrosDialog closing", () => {
     expect(closeMacrosDialogMock).not.toHaveBeenCalled()
   })
 
+  it.each([false, true])(
+    "hands focus back to where it was when the discard confirm closes (phone: %s)",
+    async (onPhone) => {
+      phone = onPhone
+      seed(seedMacros, { select: 0 })
+      render(<MacrosDialog />)
+      await typeInto("Text", "changed")
+      const text = screen.getByLabelText("Text")
+      text.focus()
+
+      await press(text, "Escape")
+      const ask = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+      await press(ask, "Escape")
+      await settle()
+      expect(document.activeElement).toBe(text)
+
+      const cancel = screen.getAllByRole("button", { name: "Cancel" }).at(-1)!
+      cancel.focus()
+      await click(cancel)
+      const again = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
+      await click(within(again).getByRole("button", { name: "Keep editing" }))
+      await settle()
+      expect(document.activeElement).toBe(cancel)
+    },
+  )
+
   it("sets unsaved changes aside on Back, which cannot stop to ask", async () => {
     seed(seedMacros)
     render(<MacrosDialog />)

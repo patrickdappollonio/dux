@@ -296,6 +296,8 @@ function MacrosEditor({
   const [step, setStep] = useState<"list" | "edit">(start.step)
   const [deleteKey, setDeleteKey] = useState<number | null>(null)
   const [discardOpen, setDiscardOpen] = useState(false)
+  // Focused when the discard confirm opened; it has no trigger to return to.
+  const discardFrom = useRef<Element | null>(null)
   // The macros added here that the user has typed into: one not typed into
   // yet is not called nameless before anything was asked of it.
   const [touched, setTouched] = useState<ReadonlySet<number>>(() => new Set())
@@ -335,7 +337,11 @@ function MacrosEditor({
 
   useEffect(() => {
     closeRef.current = {
-      request: () => (changes > 0 ? setDiscardOpen(true) : closeMacrosDialog()),
+      request: () => {
+        if (changes === 0) return closeMacrosDialog()
+        discardFrom.current = document.activeElement
+        setDiscardOpen(true)
+      },
       back: () => (changes > 0 ? setAsideMacrosDraft(currentEdit(), changes) : closeMacrosDialog()),
     }
     return () => {
@@ -635,6 +641,10 @@ function MacrosEditor({
         open={discardOpen}
         changes={changes}
         onKeep={() => setDiscardOpen(false)}
+        finalFocus={() => {
+          const from = discardFrom.current
+          return from instanceof HTMLElement && from.isConnected ? from : true
+        }}
         onDiscard={() => {
           setDiscardOpen(false)
           closeMacrosDialog()
@@ -1266,11 +1276,13 @@ function ConfirmDiscardMacros({
   open,
   changes,
   onKeep,
+  finalFocus,
   onDiscard,
 }: {
   open: boolean
   changes: number
   onKeep: () => void
+  finalFocus: () => HTMLElement | boolean
   onDiscard: () => void
 }) {
   return (
@@ -1280,7 +1292,7 @@ function ConfirmDiscardMacros({
         if (!next) onKeep()
       }}
     >
-      <DialogContent showCloseButton={false} destructive>
+      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
         <DialogHeader>
           <DialogTitle>Discard unsaved changes?</DialogTitle>
           <DialogDescription>
