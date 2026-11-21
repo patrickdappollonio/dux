@@ -259,7 +259,8 @@ function NumberControl({
   max: number
   unit?: string
   value: number
-  onChange: (v: number) => void
+  /** `typed` is the out-of-range number a clamp on leaving the field replaced. */
+  onChange: (v: number, typed?: number) => void
   disabled: boolean
 }) {
   const [text, setText] = useState(String(value))
@@ -296,7 +297,7 @@ function NumberControl({
           return
         }
         const inRange = clampToControl(value, min, max)
-        if (inRange !== value) onChange(inRange)
+        if (inRange !== value) onChange(inRange, value)
       }}
     />
     {unit ? <span className="text-xs text-muted-foreground">{unit}</span> : null}
@@ -312,14 +313,19 @@ function inControlRange(d: SettingDescriptor, v: SettingValue): SettingValue {
     : v
 }
 
+/// What Save says of a number it brought into range: saved in place of the one
+/// typed, or kept, when the value in range is the one already saved.
 function broughtIntoRangeSentence(
   d: SettingDescriptor,
-  saved: SettingValue,
+  value: SettingValue,
   typed: SettingValue,
+  saved: boolean,
 ): string {
-  if (d.control.kind !== "number") return `${d.label} was saved as ${String(saved)}.`
-  const unit = d.control.unit ? ` ${d.control.unit}` : ""
-  return `${d.label} was saved as ${String(saved)}${unit}, not ${String(typed)}: it goes from ${d.control.min} to ${d.control.max}.`
+  const unit = d.control.kind === "number" && d.control.unit ? ` ${d.control.unit}` : ""
+  const range =
+    d.control.kind === "number" ? `: it goes from ${d.control.min} to ${d.control.max}` : ""
+  const verb = saved ? "was saved as" : "stays"
+  return `${d.label} ${verb} ${String(value)}${unit}, not ${String(typed)}${range}.`
 }
 
 function SettingControl({
@@ -331,7 +337,7 @@ function SettingControl({
 }: {
   d: SettingDescriptor
   value: SettingValue
-  onChange: (v: SettingValue) => void
+  onChange: (v: SettingValue, typed?: number) => void
   disabled: boolean
   availableProviders: string[]
 }) {
@@ -343,7 +349,7 @@ function SettingControl({
           id={id}
           aria-label={d.label}
           checked={value as boolean}
-          onCheckedChange={onChange}
+          onCheckedChange={(v) => onChange(v)}
           disabled={disabled}
         />
       )
@@ -357,7 +363,7 @@ function SettingControl({
           unit={d.control.unit}
           value={value as number}
           disabled={disabled}
-          onChange={(v) => onChange(v)}
+          onChange={onChange}
         />
       )
     case "enum":
@@ -520,7 +526,7 @@ function SettingRow({
 }: {
   d: SettingDescriptor
   value: SettingValue
-  onChange: (v: SettingValue) => void
+  onChange: (v: SettingValue, typed?: number) => void
   onReset: () => void
   onUndo: () => void
   /** The draft differs from the documented default: a dot and a reset. */
@@ -1161,7 +1167,12 @@ function PreferencesForm({
       keys: [...(k.scope === listScope ? k.keys : []), ...keys],
     }))
 
-  const setOverride = (d: SettingDescriptor, value: SettingValue) => {
+  // The number a field held before leaving it brought it into range, by key,
+  // for Save to say what it saved in its place.
+  const typedOutOfRange = useRef<Record<string, number>>({})
+  const setOverride = (d: SettingDescriptor, value: SettingValue, typed?: number) => {
+    if (typed === undefined) delete typedOutOfRange.current[d.key]
+    else typedOutOfRange.current[d.key] = typed
     setOverrides((o) => ({ ...o, [d.key]: value }))
     setEditedOver((e) => ({ ...e, [d.key]: originalOf(d) }))
     keep([d.key])
@@ -1320,15 +1331,19 @@ function PreferencesForm({
       const touched: [SettingDescriptor, SettingValue][] = descriptors
         .filter((d) => d.key in overrides)
         .map((d) => [d, inControlRange(d, overrides[d.key])])
-      // A number brought into range here is shown in its field at once, and
-      // said once it is saved, so nobody is left believing the typed one was.
-      const broughtIn = touched.filter(([d, value]) => value !== overrides[d.key])
-      for (const [d, value] of broughtIn) setOverride(d, value)
+      // A number brought into range, here or on leaving its field, is shown in
+      // its field at once and said once it is saved, so nobody is left
+      // believing the typed one was.
+      const broughtIn = touched.flatMap(([d, value]) => {
+        const typed =
+          value !== overrides[d.key] ? overrides[d.key] : typedOutOfRange.current[d.key]
+        return typed === undefined ? [] : [{ d, value, typed }]
+      })
+      for (const { d, value } of broughtIn) setOverride(d, value)
       const persisted = await persist(touched, originalOf)
-      for (const [d, value] of broughtIn) {
-        if (persisted.saved.includes(d.key)) {
-          notifyInfo(broughtIntoRangeSentence(d, value, overrides[d.key]))
-        }
+      for (const { d, value, typed } of broughtIn) {
+        if (persisted.failed.includes(d.key)) continue
+        notifyInfo(broughtIntoRangeSentence(d, value, typed, persisted.saved.includes(d.key)))
       }
       // A landed write leaves the draft, so the count and a retry hold only
       // what is still unsaved, and a read-and-flip row is never sent twice.
@@ -1357,7 +1372,7 @@ function PreferencesForm({
       }
       // The action did nothing because every row already held: said, because a
       // dialog closing in silence reads the same as a save that went nowhere.
-      if (persisted.saved.length === 0) {
+      if (persisted.saved.length === 0 && broughtIn.length === 0) {
         notifyInfo("Nothing to save: no preference was changed.")
       }
       closeCustomizeWebapp()
@@ -1444,7 +1459,7 @@ function PreferencesForm({
           <SettingRow
             d={d}
             value={effective(d)}
-            onChange={(v) => setOverride(d, v)}
+            onChange={(v, typed) => setOverride(d, v, typed)}
             onReset={() => resetRow(d)}
             onUndo={() => undoRow(d)}
             changed={differs(d)}

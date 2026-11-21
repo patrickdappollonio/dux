@@ -634,6 +634,22 @@ describe("CustomizeWebappDialog", () => {
     )
   })
 
+  it("says a number brought into range on leaving the field was saved instead of the one typed", async () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+
+    const input = field("Terminal font size") as HTMLInputElement
+    fireEvent.change(input, { target: { value: "3" } })
+    // A mouse press on Save takes focus off the field first.
+    fireEvent.blur(input)
+    fireEvent.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
+    expect(notifyInfo).toHaveBeenCalledWith(
+      "Terminal font size was saved as 8 px, not 3: it goes from 8 to 32.",
+    )
+  })
+
   it("fires a real select change and sends the exact key/value", async () => {
     seed()
     render(<CustomizeWebappDialog />)
