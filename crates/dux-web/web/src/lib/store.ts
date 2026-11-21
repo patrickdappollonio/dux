@@ -4052,10 +4052,18 @@ function traverseExactly(
     return false
   }
   // A traversal onto the entry the page is already on (the user's own Back got
-  // there first) fires no popstate, so the promise lands it too.
+  // there first) fires no popstate, so the promise lands it too. Chrome can
+  // settle the promise before it fires the traversal's popstate, which is then
+  // the same landing arriving on whatever the landing wrote, and is ignored.
   committed.then(
     () => {
-      if (pendingTraversal === pending) landTraversal()
+      if (pendingTraversal !== pending) return
+      landTraversal()
+      landedAt = {
+        key: navigationApi()?.currentEntry?.key ?? null,
+        hash: currentHash(),
+        moves: cursorMoves,
+      }
     },
     () => {
       if (pendingTraversal !== pending) return

@@ -1286,6 +1286,36 @@ describe("moving in pushes, and Back unwinds exactly", () => {
       expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1"])
       expect(index).toBe(2)
     })
+
+    // Chrome settles a traversal's `committed` before it fires the traversal's
+    // popstate, so a move that waited for the dialog's entry to go is written
+    // first, and the popstate then arrives on the entry it wrote.
+    it("does not land again on a move it wrote before the traversal's popstate arrived", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1", terminals: ["t1"] }])
+      mod.selectTerminal("t1", { kind: "session", sessionId: "s1" })
+      await openDialog()
+      const traverse = vi.spyOn(fakeNavigation, "traverseTo").mockImplementation((key: string) => {
+        index = entryKeys.indexOf(key)
+        applyCurrentEntry()
+        setTimeout(() => {
+          for (const listener of [...popstateListeners]) listener()
+        }, 0)
+        const committed = Promise.resolve()
+        return { committed, finished: committed }
+      })
+      // A terminal the page has just created, which no spine lists yet.
+      mod.selectTerminal("t2", { kind: "session", sessionId: "s1" })
+      await settle()
+      await settle()
+      traverse.mockRestore()
+      expect(loc.hash).toBe("#/agent/s1/terminal/t2")
+      expect(mod.getSnapshot().routeNotFound).toBeNull()
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "terminal",
+        terminalId: "t2",
+        owner: { kind: "session", sessionId: "s1" },
+      })
+    })
   })
 })
 
