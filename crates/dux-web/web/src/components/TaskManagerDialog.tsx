@@ -52,6 +52,7 @@ import {
   closeStopAll,
   leftRunningProse,
   type StopAllRefusal,
+  stopAllNothingReason,
   stopAllPlan,
   closeTaskManager,
   openCloseTab,
@@ -97,7 +98,8 @@ export function TaskManagerDialog() {
 }
 
 function TaskManagerBody() {
-  const { spine } = useDux()
+  const state = useDux()
+  const { spine } = state
   // ONE layout renders at a time, not two hidden behind CSS: rendering both would
   // duplicate every row, and every Stop control, in the DOM.
   const isMobile = useIsMobile()
@@ -121,6 +123,8 @@ function TaskManagerBody() {
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
   const summary = useMemo(() => taskManagerSummary(rows), [rows])
   const changeReason = usePartChangeReason()
+  // Every running row this device may not change leaves the bulk stop nothing.
+  const nothingToStop = stopAllNothingReason(stopAllPlan(state))
   // Why a row's Force stop is disabled: stopping changes the row it belongs to.
   function stopBlocked(row: TaskRow): string | null {
     if (!row.stoppable || row.targetId === null) return null
@@ -325,11 +329,22 @@ function TaskManagerBody() {
               </p>
             ) : null}
             {empty ? null : (
-              // Destructive here, unlike a `⋯` menu's neutral items: a dialog footer
-              // button is the surface `variant="destructive"` is reserved for.
-              <Button variant="destructive" onClick={openStopAll}>
-                Force stop everything…
-              </Button>
+              <ExplainedWhenDisabled
+                disabled={nothingToStop !== null}
+                hint={nothingToStop}
+                className="rounded-lg"
+              >
+                {/* Destructive here, unlike a `⋯` menu's neutral items: a dialog
+                    footer button is the surface `variant="destructive"` is
+                    reserved for. */}
+                <Button
+                  variant="destructive"
+                  disabled={nothingToStop !== null}
+                  onClick={openStopAll}
+                >
+                  Force stop everything…
+                </Button>
+              </ExplainedWhenDisabled>
             )}
             <Button variant="outline" autoFocus onClick={closeTaskManager}>
               Done
@@ -658,8 +673,6 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
   // Exactly what `stopAllRunning` will stop, and the rows it leaves to the
   // device that drives them.
   const plan = stopAllPlan(state)
-  const agents = plan.agents.length
-  const terminals = plan.terminals.length
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     open,
     "stop-all",
@@ -672,6 +685,10 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
     setWasOpen(open)
     if (!open) setRefused(null)
   }
+  // What the press will stop: the whole plan, or only the refused stops.
+  const agents = (refused?.agents ?? plan.agents).length
+  const terminals = (refused?.terminals ?? plan.terminals).length
+  const nothingToStop = refused === null ? stopAllNothingReason(plan) : null
 
   async function handleConfirm() {
     const done = await confirm(async (accepted) => {
@@ -717,6 +734,7 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
             blockers={blockers}
             pending={pending}
             onConfirm={() => void handleConfirm()}
+            drivenHint={nothingToStop}
           />
         </DialogFooter>
       </DialogContent>

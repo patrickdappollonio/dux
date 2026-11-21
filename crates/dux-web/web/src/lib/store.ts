@@ -46,7 +46,7 @@ import type { ReconnectPlanEvent } from "./reconnectingSocket"
 import { SETTING_TOPICS, allSettingDescriptors } from "./settingsDescriptors"
 import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
-import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
+import { notifyPtyOwner, ownerDeviceLabel, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes, savedMacrosEdit, type MacrosEdit } from "./macros"
 import { unsavedChangesLabel } from "./unsavedChanges"
 import { normalizeLeftover } from "./leftoverFolder"
@@ -104,6 +104,7 @@ import {
   type ProseName,
   type ProseSegment,
   prose,
+  proseText,
   wireProse,
 } from "./prose"
 import {
@@ -9950,6 +9951,35 @@ export function partChangeBlock(
   return terminalActiveElsewhere(s, part.terminalId) ? "other" : null
 }
 
+/** The label of the device driving a part's row, or null when this page does
+ * not know it: a mounted pane of the row heard it, or a take-over this page
+ * heard named the connection the workspace document says drives the row. */
+export function rowDriverLabel(
+  s: DuxState,
+  part: { sessionId: string } | { terminalId: string },
+): string | null {
+  const terminals = s.spine?.terminals ?? []
+  if ("sessionId" in part) {
+    const heard = rowDriverDevice(agentRowKey(part.sessionId))
+    if (heard !== null) return heard
+    const owners = [
+      ...(s.spine?.sessions.find((x) => x.id === part.sessionId)?.tabs ?? []).map(
+        (tab) => tab.input_owner,
+      ),
+      ...terminals
+        .filter((t) => t.owner.kind === "session" && t.owner.session_id === part.sessionId)
+        .map((t) => t.input_owner),
+    ]
+    return ownerDeviceLabel(owners.find((owner) => owner !== undefined && owner !== ""))
+  }
+  // A project or standalone terminal, a row of its own, as `partChangeBlock`.
+  const row = rowKeyOfPart({ kind: "terminal", id: part.terminalId, owner: { kind: "project" } })
+  return (
+    rowDriverDevice(row) ??
+    ownerDeviceLabel(terminals.find((t) => t.id === part.terminalId)?.input_owner)
+  )
+}
+
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the
 // gate; the dialog derives its rows from the spine and polls the stats itself
 // while open.
@@ -9979,10 +10009,15 @@ export interface LeftRunning {
   name: string
   /** An agent's own running terminals, left with it. */
   terminals: number
-  /** The driving device's label, when a mounted pane of the row heard it. */
+  /** An agent that was stopped, so only its terminals were left. */
+  agentStopped?: boolean
+  /** The driving device's label, when this page knows it. */
   device: string | null
   /** Why this page may not change the row. */
   block: RowBlock
+  /** What the server said when it refused the row, which then says why in
+   * place of `block` and `device`. */
+  said?: string
 }
 
 /** What "Force stop everything" stops: every running agent and every terminal,
@@ -10015,7 +10050,7 @@ export function stopAllPlan(s: DuxState): {
         id: session.id,
         name: sessionLabel(session),
         terminals: own,
-        device: rowDriverDevice(agentRowKey(session.id)),
+        device: rowDriverLabel(s, { sessionId: session.id }),
         block,
       })
     }
@@ -10030,8 +10065,14 @@ export function stopAllPlan(s: DuxState): {
     if (block === null) {
       stopped.push(t.id)
     } else {
-      const row = rowKeyOfPart({ kind: "terminal", id: t.id, owner: t.owner })
-      left.push({ kind: "terminal", id: t.id, name: t.label, terminals: 0, device: rowDriverDevice(row), block })
+      left.push({
+        kind: "terminal",
+        id: t.id,
+        name: t.label,
+        terminals: 0,
+        device: rowDriverLabel(s, { terminalId: t.id }),
+        block,
+      })
     }
   }
   return { agents, terminals: stopped, left }
@@ -10041,23 +10082,47 @@ export function stopAllPlan(s: DuxState): {
  * reason, in the order the reasons are first met. */
 export function leftRunningProse(left: readonly LeftRunning[]): Prose {
   const byBlock = new Map<RowBlock, LeftRunning[]>()
-  for (const part of left) byBlock.set(part.block, [...(byBlock.get(part.block) ?? []), part])
   const out: ProseSegment[] = []
+  for (const part of left) {
+    if (part.said === undefined) {
+      byBlock.set(part.block, [...(byBlock.get(part.block) ?? []), part])
+      continue
+    }
+    if (out.length > 0) out.push(" ")
+    out.push("Left running: ", ...leftPartProse(part), `. ${part.said}`)
+  }
   for (const [block, parts] of byBlock) {
     if (out.length > 0) out.push(" ")
     const one = parts.length === 1
     out.push(leftRunningLead(block, one))
     parts.forEach((part, index) => {
       if (index > 0) out.push(index === parts.length - 1 ? " and " : ", ")
-      out.push(`${part.kind} `, chip(part.name))
-      if (part.terminals > 0) {
-        out.push(` with its ${formatRegularCount(part.terminals, "terminal")}`)
-      }
+      out.push(...leftPartProse(part))
       if (part.device !== null) out.push(" (driven from ", chip(part.device), ")")
     })
     out.push(leftRunningTail(block, one))
   }
   return out
+}
+
+/** Why "Force stop everything" would stop nothing from this device, or null
+ * while it stops something. */
+export function stopAllNothingReason(plan: ReturnType<typeof stopAllPlan>): string | null {
+  if (plan.agents.length + plan.terminals.length > 0) return null
+  if (plan.left.length === 0) return "Nothing is running that this would stop."
+  return `Nothing running can be stopped from this device. ${proseText(leftRunningProse(plan.left))}`
+}
+
+function leftPartProse(part: LeftRunning): ProseSegment[] {
+  if (part.agentStopped === true) {
+    return [`${formatRegularCount(part.terminals, "terminal")} of agent `, chip(part.name)]
+  }
+  if (part.terminals === 0) return [`${part.kind} `, chip(part.name)]
+  return [
+    `${part.kind} `,
+    chip(part.name),
+    ` with its ${formatRegularCount(part.terminals, "terminal")}`,
+  ]
 }
 
 function leftRunningLead(block: RowBlock, one: boolean): string {
@@ -10122,13 +10187,14 @@ export async function stopAllRunning(
   // a terminal that is a row of its own. A row another device drives refuses
   // every stop in it the same way, so its first refusal ends that row's stops
   // and the rows refused are said once, together, below.
-  const rows = new Map<string, { agent: string | null; terminals: string[] }>()
-  for (const id of agents) rows.set(agentRowKey(id), { agent: id, terminals: [] })
+  type StopRow = { agent: string | null; session: string | null; terminals: string[] }
+  const rows = new Map<string, StopRow>()
+  for (const id of agents) rows.set(agentRowKey(id), { agent: id, session: id, terminals: [] })
   for (const id of terminals) {
     const owner = findTerminalOwner(id)
-    const key =
-      owner?.kind === "session" ? agentRowKey(owner.sessionId) : `terminal:${id}`
-    const row = rows.get(key) ?? { agent: null, terminals: [] }
+    const session = owner?.kind === "session" ? owner.sessionId : null
+    const key = session !== null ? agentRowKey(session) : `terminal:${id}`
+    const row = rows.get(key) ?? { agent: null, session, terminals: [] }
     row.terminals.push(id)
     rows.set(key, row)
   }
@@ -10141,43 +10207,59 @@ export async function stopAllRunning(
     kind: "agents" | "terminals",
     request: Promise<unknown>,
     fallback: string,
-  ): Promise<"went" | "attached" | "driven"> => {
+  ): Promise<"stopped" | "failed" | "attached" | { said: string }> => {
     try {
       await request
       stopped[kind] += 1
-      return "went"
+      return "stopped"
     } catch (e) {
       if (e instanceof AttachedError) {
         for (const blocker of e.blockers) blockers.set(blocker.key, blocker)
         return "attached"
       }
-      if (isRowDriven(e)) return "driven"
+      // The refusal's own sentence: the server's names the device driving the
+      // row, and the one `apiFetch` gives for this page's own take-over says
+      // that it did not land.
+      if (isRowDriven(e)) return { said: e.message }
       notifyError(e instanceof Error ? e.message : fallback)
-      return "went"
+      return "failed"
     }
   }
-  // A row the server says another device drives, though this page did not know.
-  const drivenRow = (row: { agent: string | null; terminals: string[] }, from: number) => {
+  // A row the server refused at its terminal `from` on (0 for the agent itself),
+  // though this page did not know: everything of it from there is left.
+  const refusedRow = (row: StopRow, from: number, agentStopped: boolean, said: string) => {
     const session =
-      row.agent === null ? undefined : state.spine?.sessions.find((s) => s.id === row.agent)
+      row.session === null ? undefined : state.spine?.sessions.find((s) => s.id === row.session)
+    const rest = row.terminals.slice(from)
     if (session !== undefined) {
       left.push({
         kind: "agent",
         id: session.id,
         name: sessionLabel(session),
-        terminals: row.terminals.length,
+        terminals: rest.length,
+        agentStopped,
         device: null,
         block: "other",
+        said,
       })
       return
     }
-    for (const id of row.terminals.slice(from)) {
+    for (const id of rest) {
       const t = state.spine?.terminals.find((x) => x.id === id)
-      left.push({ kind: "terminal", id, name: t?.label ?? id, terminals: 0, device: null, block: "other" })
+      left.push({
+        kind: "terminal",
+        id,
+        name: t?.label ?? id,
+        terminals: 0,
+        device: null,
+        block: "other",
+        said,
+      })
     }
   }
   await Promise.all(
     [...rows.values()].map(async (row) => {
+      let agentStopped = false
       if (row.agent !== null) {
         const answer = await stop(
           "agents",
@@ -10185,10 +10267,11 @@ export async function stopAllRunning(
           "Could not kill the agent.",
         )
         if (answer === "attached") refusedAgents.push(row.agent)
-        if (answer === "driven") {
-          drivenRow(row, 0)
+        if (typeof answer === "object") {
+          refusedRow(row, 0, false, answer.said)
           return
         }
+        agentStopped = answer === "stopped"
       }
       for (const [index, id] of row.terminals.entries()) {
         const owner = findTerminalOwner(id)
@@ -10199,8 +10282,8 @@ export async function stopAllRunning(
           "Could not close the terminal.",
         )
         if (answer === "attached") refusedTerminals.push(id)
-        if (answer === "driven") {
-          drivenRow(row, index)
+        if (typeof answer === "object") {
+          refusedRow(row, index, agentStopped, answer.said)
           return
         }
       }

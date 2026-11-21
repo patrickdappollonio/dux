@@ -18,7 +18,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => ({
       ...actual.getSnapshot(),
-      spine: { sessions: [], terminals: listedTerminals.map((id) => ({ id })) },
+      spine: { sessions: [], terminals: listedTerminals.map((id) => ({ id, owner: { kind: "standalone" } })) },
     }),
     openEditor: openEditorMock,
     openDeleteTerminal: openDeleteTerminalMock,

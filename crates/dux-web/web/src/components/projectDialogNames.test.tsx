@@ -188,6 +188,38 @@ describe("project confirmations name the project as a chip", () => {
     expect((screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it("Delete project names the device driving its terminal once this page heard it take over", async () => {
+    const { notifyPtyOwner } = await import("@/lib/ptyOwnership")
+    const { deviceLabel } = await import("@/lib/deviceLabel")
+    const { drivenElsewhereHint, useProjectDrivenElsewhere } = await import(
+      "@/hooks/use-agent-active-elsewhere"
+    )
+    const ua = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
+    notifyPtyOwner("term-4", "conn-firefox", 3, ua)
+    seed({
+      deleteProjectTarget: "p1",
+      ownPtyConnIds: {},
+      spine: {
+        projects: [project],
+        sessions: [],
+        terminals: [
+          { id: "term-4", owner: { kind: "project", project_id: "p1" }, label: "Terminal 4", input_owner: "conn-firefox" },
+        ],
+        sidebar: { groups: [] },
+      },
+    } as unknown as Partial<DuxState>)
+    render(<DeleteProjectDialog />)
+    const label = deviceLabel(ua) ?? ""
+    expect(chips(screen.getByText(/driven from/))).toEqual(["Terminal 4", label])
+    let hint: string | null = null
+    function Probe() {
+      hint = drivenElsewhereHint(useProjectDrivenElsewhere("p1"))
+      return null
+    }
+    render(<Probe />)
+    expect(hint).toBe(`${label} is driving a terminal of this project. Take it over on this device first.`)
+  })
+
   it("Check out default branch names the project and its current base", () => {
     seed({ checkoutDefaultBranchTarget: "p1" } as Partial<DuxState>)
     render(<CheckoutDefaultBranchDialog />)

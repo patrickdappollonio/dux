@@ -5,7 +5,6 @@ import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 import {
   agentRowKey,
   rowBlockFor,
-  rowDriverDevice,
   rowKeyOfPart,
   rowKeyOfTarget,
   useAgentRowWatch,
@@ -14,6 +13,7 @@ import {
 } from "@/lib/paneCover"
 import {
   partChangeBlock,
+  rowDriverLabel,
   sessionActiveElsewhere,
   terminalActiveElsewhere,
   useDux,
@@ -159,7 +159,7 @@ export function useProjectDrivenElsewhere(projectId: string | null): DrivenElsew
     .map((session) => ({
       kind: "agent" as const,
       name: sessionLabel(session),
-      device: rowDriverDevice(agentRowKey(session.id)),
+      device: rowDriverLabel(state, { sessionId: session.id }),
     }))
   const terminals = (state.spine?.terminals ?? [])
     .filter((t) => t.owner.kind === "project" && t.owner.project_id === projectId)
@@ -169,17 +169,24 @@ export function useProjectDrivenElsewhere(projectId: string | null): DrivenElsew
         agentChangeBlock(rowBlockFor(row), () => terminalActiveElsewhere(state, t.id)) ===
         "other",
     )
-    .map(({ t, row }) => ({ kind: "terminal" as const, name: t.label, device: rowDriverDevice(row) }))
+    .map(({ t }) => ({
+      kind: "terminal" as const,
+      name: t.label,
+      device: rowDriverLabel(state, { terminalId: t.id }),
+    }))
   return [...agents, ...terminals]
 }
 
-/** The disabled confirm's hint while another device drives part of what it
- * would change. */
+/** A project dialog's disabled confirm's hint while another device drives an
+ * agent or a terminal of the project. */
 export function drivenElsewhereHint(driven: readonly DrivenElsewhere[]): string | null {
   if (driven.length === 0) return null
-  return driven.length === 1
-    ? `Another device is driving this ${driven[0].kind}. Take it over on this device first.`
-    : "Another device is driving parts of this. Take them over on this device first."
+  if (driven.length > 1) {
+    return "Other devices are driving agents or terminals of this project. Take them over on this device first."
+  }
+  const [part] = driven
+  const who = part.device ?? "Another device"
+  return `${who} is driving ${part.kind === "agent" ? "an agent" : "a terminal"} of this project. Take it over on this device first.`
 }
 
 /// Why a menu's entries that change the agent are disabled right now, said once
@@ -188,11 +195,16 @@ export function agentChangeBlockReason(block: RowBlock): string {
   return changeBlockReason(block, "agent")
 }
 
-/// Why controls that change an agent's or a terminal's row are disabled.
-export function changeBlockReason(block: RowBlock, subject: "agent" | "terminal"): string {
+/// Why controls that change an agent's or a terminal's row are disabled,
+/// naming the driving device when it is known.
+export function changeBlockReason(
+  block: RowBlock,
+  subject: "agent" | "terminal",
+  device: string | null = null,
+): string {
   switch (block) {
     case "other":
-      return `This ${subject} is active on another device, so actions that modify it are disabled. Take over the ${subject} to use them here.`
+      return `This ${subject} is active on ${device ?? "another device"}, so actions that modify it are disabled. Take over the ${subject} to use them here.`
     case "nobody":
       return `Nobody is driving this ${subject}, this device included, so actions that modify it are disabled. Take over the ${subject} to use them here.`
     case "reconnecting":
@@ -213,7 +225,11 @@ export function usePartChangeReason(): (
   return (part) => {
     const block = partChangeBlock(state, part)
     if (block === null) return null
-    return changeBlockReason(block, "sessionId" in part ? "agent" : "terminal")
+    return changeBlockReason(
+      block,
+      "sessionId" in part ? "agent" : "terminal",
+      rowDriverLabel(state, part),
+    )
   }
 }
 

@@ -9,6 +9,18 @@ import "./store"
 
 import type { Bootstrap } from "./bootstrapApi"
 
+const warned = vi.hoisted(() => vi.fn())
+vi.mock("./notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./notify")>()
+  return {
+    ...actual,
+    notifyWarning: (...args: Parameters<typeof actual.notifyWarning>) => {
+      warned(args[0])
+      return actual.notifyWarning(...args)
+    },
+  }
+})
+
 // Exercises the store's companion-terminal lifecycle wiring: createTerminal
 // POSTs the nested REST endpoint and focuses the returned terminal; deleteTerminal
 // resolves the owning session from the spine and DELETEs the nested endpoint. The
@@ -58,6 +70,9 @@ let reorderFail = false
 // A terminal DELETE to this exact URL is refused because somebody else is
 // attached to it.
 let attachedUrl: string | null = null
+// A change sent to one of these URLs is refused as the server refuses a change
+// to a row another device drives, with this sentence.
+let drivenUrls = new Map<string, string>()
 // When set, a terminal create waits for it before answering.
 let createGate: Promise<void> | null = null
 // What the server's live terminal list holds right now. The workspace document
@@ -110,6 +125,22 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       status: 201,
       json: async () => ({ terminal_id: "t9", label: "Terminal 2" }),
       text: async () => JSON.stringify({ terminal_id: "t9", label: "Terminal 2" }),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (drivenUrls.has(u)) {
+    return {
+      ok: false,
+      status: 423,
+      text: async () => drivenUrls.get(u),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u.endsWith("/kill")) {
+    return {
+      ok: true,
+      status: 204,
+      text: async () => "",
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -169,6 +200,8 @@ class FakeWebSocket {
 
 beforeEach(() => {
   calls = []
+  drivenUrls = new Map()
+  warned.mockClear()
   reorderFail = false
   liveTerminals = []
   spineBody = {
@@ -517,6 +550,94 @@ describe("store companion-terminal lifecycle", () => {
       .filter(([, init]) => init?.method === "DELETE" || init?.method === "POST")
       .map(([u]) => u)
     expect(sent).toEqual(["/api/v1/terminals/t9"])
+  })
+
+  const DRIVEN =
+    "This agent is being driven from Firefox on Linux right now, and only the device driving it can change it, so dux did not make the change. Take it over on this device first, then try again."
+
+  async function stopAllSaid(mod: Awaited<ReturnType<typeof loadStore>>): Promise<string> {
+    const { proseText } = await import("./prose")
+    await mod.stopAllRunning()
+    expect(warned).toHaveBeenCalledOnce()
+    return proseText(warned.mock.calls[0][0])
+  }
+
+  it("stopAllRunning says what the server said of a row it refused", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        { id: "s1", project_id: "p1", title: "agentx", status: "active", tabs: [{ id: "a1" }] },
+      ],
+      terminals: [
+        { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    drivenUrls.set("/api/v1/sessions/s1/kill", DRIVEN)
+    const mod = await loadStore()
+    expect(await stopAllSaid(mod)).toBe(
+      `Nothing was stopped. Left running: agent agentx with its 1 terminal. ${DRIVEN}`,
+    )
+  })
+
+  it("stopAllRunning counts a stopped agent once and leaves only its refused terminals", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        { id: "s1", project_id: "p1", title: "agentx", status: "active", tabs: [{ id: "a1" }] },
+      ],
+      terminals: [
+        { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+        { id: "t2", label: "Terminal 2", owner: { kind: "session", session_id: "s1" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    drivenUrls.set("/api/v1/sessions/s1/terminals/t1", DRIVEN)
+    const mod = await loadStore()
+    expect(await stopAllSaid(mod)).toBe(
+      `Stopped 1 agent. Left running: 2 terminals of agent agentx. ${DRIVEN}`,
+    )
+  })
+
+  it("stopAllRunning words an idle agent's refused terminals as the agent's", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        { id: "s1", project_id: "p1", title: "agentx", status: "detached", tabs: [{ id: "a1" }] },
+      ],
+      terminals: [
+        { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    drivenUrls.set("/api/v1/sessions/s1/terminals/t1", DRIVEN)
+    const mod = await loadStore()
+    expect(await stopAllSaid(mod)).toBe(
+      `Nothing was stopped. Left running: agent agentx with its 1 terminal. ${DRIVEN}`,
+    )
+  })
+
+  it("names the device driving a row no pane here shows, once this page heard it take over", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "agentx",
+          status: "active",
+          tabs: [{ id: "a1", input_owner: "conn-other" }],
+        },
+      ],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    const { notifyPtyOwner } = await import("./ptyOwnership")
+    const { deviceLabel } = await import("./deviceLabel")
+    const ua = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
+    notifyPtyOwner("a1", "conn-other", 7, ua)
+    expect(mod.stopAllPlan(mod.getSnapshot()).left[0]?.device).toBe(deviceLabel(ua))
   })
 
   // The panic button is the ONE caller that skips the shutdown grace. A polite

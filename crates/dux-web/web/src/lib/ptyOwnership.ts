@@ -1,3 +1,5 @@
+import { deviceLabel } from "./deviceLabel"
+
 // Client half of the per-PTY owner model mirrored from the server's
 // `PtySizeOwners`: one owner drives a shared PTY's size and typing, everyone
 // else watches, and every handover arrives as a `pty.owner` broadcast carrying
@@ -147,6 +149,19 @@ export function appliedPtyOwnerEpoch(ptyId: string): number | undefined {
   return lastEpochByPty.get(ptyId)
 }
 
+// The device behind each owning connection a `pty.owner` named, as its raw
+// `User-Agent`. The workspace document names a row's driver by connection id
+// only, so this is how a row with no pane mounted here gets its device named.
+// A connection id is never reused within one server run, and a new run reloads
+// the page.
+const deviceByOwner = new Map<string, string>()
+
+/// The label of the device behind an owning connection, or null when no
+/// `pty.owner` this page heard named it.
+export function ownerDeviceLabel(ownerId: string | null | undefined): string | null {
+  return ownerId ? deviceLabel(deviceByOwner.get(ownerId)) : null
+}
+
 export function notifyPtyOwner(
   ptyId: string,
   ownerId: string | undefined,
@@ -161,6 +176,7 @@ export function notifyPtyOwner(
     if (last !== undefined && epoch <= last) return
     lastEpochByPty.set(ptyId, epoch)
   }
+  if (ownerId && device) deviceByOwner.set(ownerId, device)
   // Snapshot so a listener that unsubscribes during dispatch can't perturb the
   // live iteration.
   for (const cb of [...ptyOwnerListeners]) cb(ptyId, ownerId, device)

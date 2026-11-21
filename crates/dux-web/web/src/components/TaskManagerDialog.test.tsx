@@ -392,6 +392,64 @@ describe("TaskManagerDialog", () => {
     expect([...left.querySelectorAll("code")].map((c) => c.textContent)).toEqual(["agentx"])
   })
 
+  it("offers no Force stop everything while every running row is another device's", async () => {
+    const blocked = {
+      ownPtyConnIds: {},
+      spine: {
+        sessions: [
+          session({ id: "s1", title: "agentx", tabs: [tab({ id: "s1", input_owner: "conn-other" })] }),
+        ],
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [
+          projectTerminal({ id: "t2", projectId: "p1", label: "Terminal 2", input_owner: "conn-other" }),
+        ],
+      },
+    } as Partial<DuxState>
+    seed(blocked)
+    const { rerender } = render(<TaskManagerDialog />)
+    const footer = (await screen.findByText("Force stop everything…")).closest("button")!
+    expect(footer.disabled).toBe(true)
+    fireEvent.click(footer.parentElement!)
+    expect(await screen.findByText(/Nothing running can be stopped from this device/)).toBeTruthy()
+
+    // A confirm already open when the last stoppable row went has nothing to press.
+    seed({ ...blocked, stopAllOpen: true })
+    rerender(<TaskManagerDialog />)
+    const confirm = (await screen.findByText("Force stop everything")).closest("button")!
+    expect(confirm.disabled).toBe(true)
+  })
+
+  it("counts what a go-ahead would stop once somebody attached refused the first press", async () => {
+    seed({
+      stopAllOpen: true,
+      spine: {
+        sessions: [session({ id: "s1" }), session({ id: "s2" })],
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [projectTerminal({ id: "pt-1", projectId: "p1", label: "Terminal 2" })],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    expect(screen.getByText(/This stops 2 agents and 1 terminal/)).toBeTruthy()
+    stopAllRunning.mockResolvedValueOnce({
+      agents: ["s1"],
+      terminals: [],
+      blockers: [
+        {
+          surface: "browser",
+          device: null,
+          address: "10.0.0.7",
+          verified: false,
+          driving: false,
+          target: { kind: "tab", id: "s1", agent: "s1" },
+          key: "k1",
+        },
+      ],
+    })
+    fireEvent.click(await screen.findByText("Force stop everything"))
+    await screen.findByText("Force stop everything anyway")
+    expect(screen.getByText(/This stops 1 agent and 0 terminals/)).toBeTruthy()
+  })
+
   it("disables the per-row stop on what another device drives, and says why", async () => {
     seed({
       ownPtyConnIds: {},
