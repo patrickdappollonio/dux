@@ -33,6 +33,7 @@ const { ConfirmDeleteTerminalDialog } = await import(
   "./ConfirmDeleteTerminalDialog"
 )
 const store = await import("@/lib/store")
+const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function term(overrides: Partial<TerminalView>): TerminalView {
   return {
@@ -77,6 +78,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetPaneCovers()
   vi.unstubAllGlobals()
 })
 
@@ -150,5 +152,18 @@ describe("ConfirmDeleteTerminalDialog", () => {
     deleteTerminal.mockResolvedValueOnce(null)
     fireEvent.click(override)
     expect(deleteTerminal).toHaveBeenLastCalledWith("term-1", ["k1"])
+  })
+
+  // Closing changes the terminal's row, so the dialog cannot be confirmed over
+  // a row this device does not drive, even when it opened before the card came up.
+  it("cannot close a terminal whose row this device does not drive", () => {
+    seedProjectTerminal(term({}))
+    registerPaneCover("term-1", "card", { row: "terminal:term-1", driver: "nobody" })
+    vi.mocked(store.deleteTerminal).mockClear()
+    render(<ConfirmDeleteTerminalDialog />)
+    const button = screen.getByRole("button", { name: "Close terminal" }) as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    fireEvent.click(button)
+    expect(vi.mocked(store.deleteTerminal)).not.toHaveBeenCalled()
   })
 })

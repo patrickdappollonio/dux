@@ -134,6 +134,7 @@ import {
   rowKeyOfPart,
   rowWatchedFor,
   subscribePaneCovers,
+  type RowBlock,
 } from "./paneCover"
 import { isRowDriven } from "./rowDriven"
 import {
@@ -9927,6 +9928,26 @@ export function terminalActiveElsewhere(s: DuxState, terminalId: string): boolea
   if (local !== undefined) return local === "elsewhere"
   const owner = s.spine?.terminals.find((t) => t.id === terminalId)?.input_owner
   return owner !== undefined && owner !== "" && !s.ownPtyConnIds?.[owner]
+}
+
+/** Why this page may not change the row a part belongs to, or null when it
+ * may. An agent's tab or terminal answers for the agent's row, a project or
+ * standalone terminal for its own. A mounted pane of the row answers first;
+ * without one the spine can only say that another device drives. */
+export function partChangeBlock(
+  s: DuxState,
+  part: { sessionId: string } | { terminalId: string },
+): RowBlock | null {
+  if ("sessionId" in part) {
+    const answer = rowBlockFor(agentRowKey(part.sessionId))
+    if (answer !== undefined) return answer
+    const session = s.spine?.sessions.find((x) => x.id === part.sessionId)
+    return session !== undefined && sessionActiveElsewhere(s, session) ? "other" : null
+  }
+  const row = rowKeyOfPart({ kind: "terminal", id: part.terminalId, owner: { kind: "project" } })
+  const answer = rowBlockFor(row)
+  if (answer !== undefined) return answer
+  return terminalActiveElsewhere(s, part.terminalId) ? "other" : null
 }
 
 // The Task Manager (the app menu's "Task Manager…"). Open/close just flip the

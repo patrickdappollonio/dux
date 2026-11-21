@@ -18,7 +18,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => ({
       ...actual.getSnapshot(),
-      spine: { terminals: listedTerminals.map((id) => ({ id })) },
+      spine: { sessions: [], terminals: listedTerminals.map((id) => ({ id })) },
     }),
     openEditor: openEditorMock,
     openDeleteTerminal: openDeleteTerminalMock,
@@ -43,6 +43,7 @@ installStubs()
 const { TerminalActionsMenu } = await import("./TerminalActionsMenu")
 const { editorRootForTarget } = await import("@/lib/editorRoot")
 const { standaloneEditorHash } = await import("@/lib/store")
+const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 const {
   DropdownMenu,
   DropdownMenuContent,
@@ -54,6 +55,7 @@ afterEach(() => {
   listedTerminals = ["t7"]
   openEditorMock.mockClear()
   openDeleteTerminalMock.mockClear()
+  resetPaneCovers()
   vi.unstubAllGlobals()
 })
 
@@ -140,5 +142,23 @@ describe("the terminal's own actions", () => {
     await open({ kind: "standalone" })
     expect(screen.getByText("Terminal")).toBeTruthy()
     expect(screen.queryByRole("separator")).toBeNull()
+  })
+
+  // Closing changes the terminal's row, so while this device does not drive
+  // it, a card being up with nobody driving included, Close… is disabled and
+  // the menu says why.
+  it("disables Close… on a terminal row nobody drives, saying why", async () => {
+    registerPaneCover("t7", "card", { row: "terminal:t7", driver: "nobody" })
+    await open({ kind: "standalone" })
+    expect(item("Close…").getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getByText(/Nobody is driving this terminal/)).toBeTruthy()
+  })
+
+  // An agent's terminal belongs to the agent's row, whose own menu already
+  // says why its changes are disabled.
+  it("disables an agent terminal's Close… while another device drives the agent", async () => {
+    registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
+    await open({ kind: "session", sessionId: "s1" })
+    expect(item("Close…").getAttribute("aria-disabled")).toBe("true")
   })
 })

@@ -13,6 +13,7 @@ import {
   type RowBlock,
 } from "@/lib/paneCover"
 import {
+  partChangeBlock,
   sessionActiveElsewhere,
   terminalActiveElsewhere,
   useDux,
@@ -201,10 +202,8 @@ export function changeBlockReason(block: RowBlock, subject: "agent" | "terminal"
   }
 }
 
-/// Why this page may not change the row a part belongs to, or null when it
-/// may: an agent's tab or terminal answers for the agent's row, a project or
-/// standalone terminal for its own. For a surface that lists parts of many
-/// rows with none of them mounted in it.
+/// Why this page may not change the row a part belongs to, in words, or null
+/// when it may.
 export function usePartChangeReason(): (
   part: { sessionId: string } | { terminalId: string },
 ) => string | null {
@@ -212,17 +211,9 @@ export function usePartChangeReason(): (
   // Re-renders on any pane's change, so every answer below stays current.
   useRowWatch(null)
   return (part) => {
-    if ("sessionId" in part) {
-      const block = agentChangeBlock(rowBlockFor(agentRowKey(part.sessionId)), () =>
-        agentActiveElsewhere(state, part.sessionId),
-      )
-      return block === null ? null : changeBlockReason(block, "agent")
-    }
-    const row = rowKeyOfPart({ kind: "terminal", id: part.terminalId, owner: { kind: "project" } })
-    const block = agentChangeBlock(rowBlockFor(row), () =>
-      terminalActiveElsewhere(state, part.terminalId),
-    )
-    return block === null ? null : changeBlockReason(block, "terminal")
+    const block = partChangeBlock(state, part)
+    if (block === null) return null
+    return changeBlockReason(block, "sessionId" in part ? "agent" : "terminal")
   }
 }
 

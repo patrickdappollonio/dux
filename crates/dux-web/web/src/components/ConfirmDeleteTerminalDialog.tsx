@@ -12,12 +12,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeDeleteTerminal,
   deleteTerminal,
   useDux,
 } from "@/lib/store"
+import { ownerRefFromWire, ownerSessionId } from "@/lib/terminalOwner"
 import { terminalForeground } from "@/lib/terminals"
 import type { TerminalView } from "@/lib/types"
 
@@ -50,6 +52,14 @@ export function ConfirmDeleteTerminalDialog() {
   // Terminal 1?"); the running command appears in the warning body instead,
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
   const title = terminal?.label ?? ""
+  // Closing changes the row the terminal belongs to, so the confirm is
+  // disabled, with the reason, while this device does not drive that row.
+  const partChangeReason = usePartChangeReason()
+  const sessionId = terminal ? ownerSessionId(ownerRefFromWire(terminal.owner)) : null
+  const drivenHint =
+    terminal === undefined
+      ? null
+      : partChangeReason(sessionId !== null ? { sessionId } : { terminalId: terminal.id })
   const foreground = terminal ? terminalForeground(terminal) : null
 
   async function handleConfirm() {
@@ -98,6 +108,7 @@ export function ConfirmDeleteTerminalDialog() {
             verb="Close terminal"
             blockers={blockers}
             pending={pending}
+            drivenHint={drivenHint}
             onConfirm={() => void handleConfirm()}
           />
         </DialogFooter>
