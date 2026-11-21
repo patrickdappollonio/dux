@@ -582,17 +582,16 @@ describe("the Changes pane header in a quiet state", () => {
     expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "q1" })
   })
 
-  it("greys out the editor, with the reason, once the folder is gone", () => {
+  it("greys out the editor, with the reason, once the folder is gone", async () => {
     mockState = folderAt("missing", folderStates[4]!.sentence)
     render(<ChangedFiles />)
     const button = screen.getByLabelText("Open editor")
     expect(button.hasAttribute("disabled")).toBe(true)
-    const cell = button.closest("[data-slot=card-action]") as HTMLElement
+    expect(screen.queryByText("This folder no longer exists on disk.")).toBeNull()
+    act(() => button.parentElement!.focus())
     expect(
-      within(cell)
-        .getAllByTestId("tooltip-content")
-        .some((node) => node.textContent === "This folder no longer exists on disk."),
-    ).toBe(true)
+      (await screen.findAllByText("This folder no longer exists on disk.")).length,
+    ).toBeGreaterThan(0)
   })
 
   // A managed agent keeps its branch features, so its Push and Pull are on

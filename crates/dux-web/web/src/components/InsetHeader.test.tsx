@@ -718,7 +718,11 @@ describe("InsetHeader under the agent's take-over card", () => {
   it("names no terminal and adds nothing while another device drives it", async () => {
     watching(true)
     expect(chip("terminal")).toBeNull()
-    expect(screen.getByTestId("new-tab-disabled")).toBeTruthy()
+    const newTab = screen.getByRole("button", { name: /new tab/i })
+    expect(newTab).toHaveProperty("disabled", true)
+    // A finger has no hover: a tap on what holds the disabled button says why.
+    fireEvent.click(newTab.parentElement!)
+    expect((await screen.findAllByText("Take over to add a tab or a terminal")).length).toBeGreaterThan(0)
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
@@ -727,7 +731,7 @@ describe("InsetHeader under the agent's take-over card", () => {
   it("names no terminal and adds nothing while nobody drives it", async () => {
     watching(false)
     expect(chip("terminal")).toBeNull()
-    expect(screen.getByTestId("new-tab-disabled")).toBeTruthy()
+    expect(screen.getByRole("button", { name: /new tab/i })).toHaveProperty("disabled", true)
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
     expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")

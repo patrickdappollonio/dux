@@ -41,6 +41,7 @@ import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -865,11 +866,11 @@ function OpenEditorButton({
     // A plain disabled button on both form factors: a disabled anchor is not
     // a thing, and there is no address worth keeping for a root that is gone.
     return (
-      <ExplainedWhenIdle why={unavailable}>
+      <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
         <Button {...shared} disabled>
           <FileCode2 />
         </Button>
-      </ExplainedWhenIdle>
+      </ExplainedWhenDisabled>
     )
   }
   return (
@@ -920,11 +921,11 @@ function NewTerminalButton({
   } as const
   if (unavailable !== null) {
     return (
-      <ExplainedWhenIdle why={unavailable}>
+      <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
         <Button {...shared} disabled>
           <SquareTerminal />
         </Button>
-      </ExplainedWhenIdle>
+      </ExplainedWhenDisabled>
     )
   }
   return (
@@ -1225,28 +1226,6 @@ const NOTHING_TO_STAGE =
   "Nothing selected can be staged: a worktree of this repository, and a folder holding only repositories, are left out of a stage."
 const NOTHING_TO_DISCARD =
   "Nothing selected can be discarded: a worktree of this repository, and a folder holding only repositories, have nothing a delete would remove."
-
-// A disabled button takes no pointer events, so its explanation hangs off a
-// focusable wrapper around it, through the shared tooltip. With nothing to
-// explain the button renders bare.
-function ExplainedWhenIdle({
-  why,
-  children,
-}: {
-  why: string | null
-  children: React.ReactElement
-}) {
-  if (why === null) return children
-  // The wrapper is what takes keyboard focus, so it wears the ring the
-  // disabled button inside it cannot.
-  return (
-    <SimpleTooltip content={why}>
-      <span tabIndex={0} className={cn("inline-flex rounded-lg", FOCUS_RING)}>
-        {children}
-      </span>
-    </SimpleTooltip>
-  )
-}
 
 // A ticked selection is acted on from one row that never wraps: a button
 // naming how many rows are ticked, whose menu holds the verbs with the files

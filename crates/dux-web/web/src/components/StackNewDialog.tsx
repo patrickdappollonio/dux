@@ -2,7 +2,7 @@ import { Bot, Plus, SquareTerminal } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { useEffect, useState, type ReactNode } from "react"
 
-import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -38,47 +38,26 @@ export function NewTabButton({ session }: { session: SessionView }) {
   const dialog = (
     <StackNewDialog session={session} open={adding} onClose={() => setAdding(false)} />
   )
-  if (block !== null) {
-    // A disabled button takes no pointer events, so the hint hangs off a
-    // focusable wrapper, which wears the focus ring the button cannot.
-    return (
-      <>
-        <SimpleTooltip content={addToAgentBlockHint(block)}>
-          <span
-            tabIndex={0}
-            data-testid="new-tab-disabled"
-            className={cn("inline-flex shrink-0 rounded-lg", FOCUS_RING)}
-          >
-            <Button
-              variant="outline"
-              size="default"
-              className="shrink-0 pointer-coarse:h-10"
-              disabled
-            >
-              <Plus />
-              New tab…
-            </Button>
-          </span>
-        </SimpleTooltip>
-        {dialog}
-      </>
-    )
-  }
   return (
     <>
-      <SimpleTooltip content="New agent tab or terminal">
+      <ExplainedWhenDisabled
+        disabled={block !== null}
+        hint={block === null ? "New agent tab or terminal" : addToAgentBlockHint(block)}
+        className="rounded-lg"
+      >
         <Button
           variant="outline"
           // `default` like Theater and Macros beside it: one height, and the
           // label changes only the width. 40px tall under a finger, like them.
           size="default"
           className="shrink-0 pointer-coarse:h-10"
+          disabled={block !== null}
           onClick={() => setAdding(true)}
         >
           <Plus />
           New tab…
         </Button>
-      </SimpleTooltip>
+      </ExplainedWhenDisabled>
       {dialog}
     </>
   )
