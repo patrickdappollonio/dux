@@ -184,15 +184,45 @@ export function drivenElsewhereHint(driven: readonly DrivenElsewhere[]): string 
 /// Why a menu's entries that change the agent are disabled right now, said once
 /// at the head of the menu.
 export function agentChangeBlockReason(block: RowBlock): string {
+  return changeBlockReason(block, "agent")
+}
+
+/// Why controls that change an agent's or a terminal's row are disabled.
+export function changeBlockReason(block: RowBlock, subject: "agent" | "terminal"): string {
   switch (block) {
     case "other":
-      return "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here."
+      return `This ${subject} is active on another device, so actions that modify it are disabled. Take over the ${subject} to use them here.`
     case "nobody":
-      return "Nobody is driving this agent, this device included, so actions that modify it are disabled. Take over the agent to use them here."
+      return `Nobody is driving this ${subject}, this device included, so actions that modify it are disabled. Take over the ${subject} to use them here.`
     case "reconnecting":
-      return "This device is reconnecting to this agent, so actions that modify it are disabled until it hears again who is driving."
+      return `This device is reconnecting to this ${subject}, so actions that modify it are disabled until it hears again who is driving.`
     case "pending":
-      return "This device is still connecting to this agent, so actions that modify it are disabled until it knows who is driving."
+      return `This device is still connecting to this ${subject}, so actions that modify it are disabled until it knows who is driving.`
+  }
+}
+
+/// Why this page may not change the row a part belongs to, or null when it
+/// may: an agent's tab or terminal answers for the agent's row, a project or
+/// standalone terminal for its own. For a surface that lists parts of many
+/// rows with none of them mounted in it.
+export function usePartChangeReason(): (
+  part: { sessionId: string } | { terminalId: string },
+) => string | null {
+  const state = useDux()
+  // Re-renders on any pane's change, so every answer below stays current.
+  useRowWatch(null)
+  return (part) => {
+    if ("sessionId" in part) {
+      const block = agentChangeBlock(rowBlockFor(agentRowKey(part.sessionId)), () =>
+        agentActiveElsewhere(state, part.sessionId),
+      )
+      return block === null ? null : changeBlockReason(block, "agent")
+    }
+    const row = rowKeyOfPart({ kind: "terminal", id: part.terminalId, owner: { kind: "project" } })
+    const block = agentChangeBlock(rowBlockFor(row), () =>
+      terminalActiveElsewhere(state, part.terminalId),
+    )
+    return block === null ? null : changeBlockReason(block, "terminal")
   }
 }
 

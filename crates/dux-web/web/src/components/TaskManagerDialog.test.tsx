@@ -392,6 +392,36 @@ describe("TaskManagerDialog", () => {
     expect([...left.querySelectorAll("code")].map((c) => c.textContent)).toEqual(["agentx"])
   })
 
+  it("disables the per-row stop on what another device drives, and says why", async () => {
+    seed({
+      ownPtyConnIds: {},
+      spine: {
+        sessions: [
+          session({ id: "s1", title: "agentx", tabs: [tab({ id: "s1", input_owner: "conn-other" })] }),
+          session({ id: "s2", title: "agenty" }),
+        ],
+        projects: [{ id: "p1", name: "Repo" }],
+        terminals: [
+          terminal({ id: "t1", label: "Terminal 1" }),
+          projectTerminal({ id: "t2", projectId: "p1", label: "Terminal 2", input_owner: "conn-other" }),
+          projectTerminal({ id: "t3", projectId: "p1", label: "Terminal 3" }),
+        ],
+      },
+    } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const stop = (label: string) => screen.getByLabelText(label) as HTMLButtonElement
+    await screen.findByLabelText("Force stop agentx")
+    expect(stop("Force stop agentx").disabled).toBe(true)
+    expect(stop("Force stop Terminal 1").disabled).toBe(true)
+    expect(stop("Force stop Terminal 2").disabled).toBe(true)
+    expect(stop("Force stop agenty").disabled).toBe(false)
+    expect(stop("Force stop Terminal 3").disabled).toBe(false)
+    fireEvent.click(stop("Force stop Terminal 2").parentElement!)
+    expect(
+      await screen.findByText(/This terminal is active on another device/),
+    ).toBeTruthy()
+  })
+
   it("stop_all_confirms_before_killing", async () => {
     seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
     const { rerender } = render(<TaskManagerDialog />)

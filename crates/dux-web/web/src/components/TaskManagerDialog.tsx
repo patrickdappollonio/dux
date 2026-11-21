@@ -14,6 +14,7 @@ import {
   AttachedSection,
   GuardedConfirmButton,
 } from "@/components/AttachedSection"
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -25,6 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { formatRegularCount } from "@/lib/formatRegularCount"
@@ -118,6 +120,14 @@ function TaskManagerBody() {
   const empty = nothingRunning(rows)
   const stale = now !== null && statsAreStale(now, lastSuccessAt)
   const summary = useMemo(() => taskManagerSummary(rows), [rows])
+  const changeReason = usePartChangeReason()
+  // Why a row's Force stop is disabled: stopping changes the row it belongs to.
+  function stopBlocked(row: TaskRow): string | null {
+    if (!row.stoppable || row.targetId === null) return null
+    return row.sessionId !== null
+      ? changeReason({ sessionId: row.sessionId })
+      : changeReason({ terminalId: row.targetId })
+  }
 
   // Poll while visible. Each tick schedules the next from how long the fetch took,
   // so a slow round-trip does not stretch the cadence; a closed dialog polls nothing.
@@ -275,6 +285,7 @@ function TaskManagerBody() {
                       expanded={expanded.has(row.key)}
                       onToggle={() => toggleExpanded(row.key)}
                       onStop={() => handleStop(row)}
+                      stopBlocked={stopBlocked(row)}
                     />
                   ))}
                 </tbody>
@@ -291,6 +302,7 @@ function TaskManagerBody() {
                       expanded={expanded.has(row.key)}
                       onToggle={() => toggleExpanded(row.key)}
                       onStop={() => handleStop(row)}
+                      stopBlocked={stopBlocked(row)}
                     />
                   ))}
                 </div>
@@ -430,11 +442,14 @@ function DesktopRow({
   expanded,
   onToggle,
   onStop,
+  stopBlocked,
 }: {
   row: TaskRow
   expanded: boolean
   onToggle: () => void
   onStop: () => void
+  /** Why the stop is disabled, or null while it is not. */
+  stopBlocked: string | null
 }) {
   const isTotal = row.kind === "total"
   const { cpu, mem, procs } = statCells(row.stats)
@@ -481,16 +496,19 @@ function DesktopRow({
         <td className="py-1.5 pr-2 text-right tabular-nums">{mem}</td>
         <td className="py-1.5 text-right">
           {row.stoppable ? (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onStop}
-              aria-label={row.stopLabel}
-              className="max-md:min-h-10 pointer-coarse:min-h-10"
-            >
-              <CircleStop aria-hidden />
-              Force stop
-            </Button>
+            <ExplainedWhenDisabled disabled={stopBlocked !== null} hint={stopBlocked} className="rounded-lg">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onStop}
+                disabled={stopBlocked !== null}
+                aria-label={row.stopLabel}
+                className="max-md:min-h-10 pointer-coarse:min-h-10"
+              >
+                <CircleStop aria-hidden />
+                Force stop
+              </Button>
+            </ExplainedWhenDisabled>
           ) : (
             <NoStop />
           )}
@@ -542,11 +560,14 @@ function MobileRow({
   expanded,
   onToggle,
   onStop,
+  stopBlocked,
 }: {
   row: TaskRow
   expanded: boolean
   onToggle: () => void
   onStop: () => void
+  /** Why the stop is disabled, or null while it is not. */
+  stopBlocked: string | null
 }) {
   const isTotal = row.kind === "total"
   const { cpu, mem, procs } = statCells(row.stats)
@@ -582,16 +603,19 @@ function MobileRow({
           </div>
         </div>
         {row.stoppable ? (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={onStop}
-            aria-label={row.stopLabel}
-            className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0"
-          >
-            <CircleStop aria-hidden />
-            Force stop
-          </Button>
+          <ExplainedWhenDisabled disabled={stopBlocked !== null} hint={stopBlocked} className="rounded-lg">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onStop}
+              disabled={stopBlocked !== null}
+              aria-label={row.stopLabel}
+              className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0"
+            >
+              <CircleStop aria-hidden />
+              Force stop
+            </Button>
+          </ExplainedWhenDisabled>
         ) : null}
       </div>
       {expanded ? (
