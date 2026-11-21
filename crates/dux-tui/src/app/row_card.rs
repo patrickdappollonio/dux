@@ -564,6 +564,10 @@ impl App {
     /// instead. True when work the card came up over was dropped.
     pub(crate) fn keep_row_view(&mut self) -> bool {
         let dropped = self.drop_work_the_card_came_up_over();
+        if let Some(terminal_id) = self.selected_terminal_row() {
+            self.keep_terminal_row_view(&terminal_id);
+            return dropped;
+        }
         let selected = self.selected_session().map(|session| session.id.clone());
         let covered = self.agent_row_card().is_some();
         match (self.held_row_view.take(), selected) {
@@ -587,6 +591,24 @@ impl App {
             _ => {}
         }
         dropped
+    }
+
+    /// A terminal's own row gives nothing back on a take-over; the hold only
+    /// marks that the card is up, so serving ending under it lands the row.
+    fn keep_terminal_row_view(&mut self, terminal_id: &str) {
+        let key = format!("terminal:{terminal_id}");
+        let covered = self.card_covers_center();
+        match self.held_row_view.take() {
+            Some((held, view)) if held == key => {
+                if covered {
+                    self.held_row_view = Some((held, view));
+                } else if self.pty_ownership_conn_id().is_none() {
+                    self.land_windowed_and_not_typing();
+                }
+            }
+            _ if covered => self.held_row_view = Some((key, self.current_row_view())),
+            _ => {}
+        }
     }
 
     /// Serving is ending: a maximized or typed-into view under a card would
@@ -2071,6 +2093,36 @@ mod tests {
             "maximized after retirement"
         );
         assert!(app.held_row_view.is_none());
+    }
+
+    /// The same holds over a standalone terminal's own row, typed into and
+    /// maximized when the card came up over it.
+    #[test]
+    fn the_serve_retiring_under_a_terminal_rows_card_lands_windowed_and_not_typing() {
+        let (mut app, _recorded, _seat) = app_with_a_live_pty_running("sleep 5");
+        crate::app::test_support::add_terminal(
+            &mut app,
+            "term-1",
+            dux_core::model::TerminalOwner::Standalone,
+        );
+        app.reselect_left_terminal("term-1");
+        app.focus = FocusPane::Center;
+        app.input_target = InputTarget::Terminal;
+        app.fullscreen_overlay = FullscreenOverlay::Terminal;
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.card_covers_center(), "the card is up");
+        app.companion = None;
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "typing after retirement"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "maximized after retirement"
+        );
     }
 
     /// A change in the same burst of input as the take-over, before any frame
