@@ -2316,6 +2316,10 @@ impl App {
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame<'_>) {
+        self.in_row_pass(|app| app.render_pass(frame));
+    }
+
+    fn render_pass(&mut self, frame: &mut Frame<'_>) {
         // The panes this frame draws are the terminals this surface is
         // attached to (see `attachment_presence`).
         self.drawn_ptys.clear();
@@ -2328,6 +2332,9 @@ impl App {
             .collect();
         self.expire_stale_pty_takeover(&drawn);
         self.publish_drawn_attachments();
+        // A take-over this frame carried lifts the card now, so the view it
+        // gives back is in place before the next key.
+        self.keep_row_view();
     }
 
     fn render_frame(&mut self, frame: &mut Frame<'_>) {
@@ -2564,14 +2571,7 @@ impl App {
 
     /// The live-terminal count chip's text, or `None` when none are running.
     fn running_terminals_chip(&self) -> Option<String> {
-        let hidden = self.selected_session().map_or(0, |session| {
-            self.dock_terminal_ids(&session.id).len()
-                - self.visible_dock_terminal_ids(&session.id).len()
-        });
-        match self
-            .running_companion_terminal_count()
-            .saturating_sub(hidden)
-        {
+        match self.shown_terminal_count() {
             0 => None,
             count => Some(format!(
                 "{} {}",
@@ -6242,14 +6242,10 @@ impl App {
             }
             return hints;
         }
-        let mut hints = self.bindings.hints_for(ctx);
-        if self.terminals_hidden_by_card() {
-            let hidden = [
-                self.bindings.label_for(Action::ShowTerminal),
-                self.bindings.label_for(Action::CycleTerminalLayout),
-            ];
-            hints.retain(|(key, _)| !hidden.contains(key));
-        }
+        let covered = self.terminals_hidden_by_card();
+        let mut hints = self.bindings.hints_for(ctx, |action| {
+            !(covered && super::row_card::changes_agent_row(action))
+        });
         if matches!(ctx, HintContext::Files) {
             self.name_the_folder_key(&mut hints);
         }

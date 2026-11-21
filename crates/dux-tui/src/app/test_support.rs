@@ -360,6 +360,8 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         clone_draft: None,
         macro_editor_version: None,
         pending_pty_takeover: None,
+        row_card_memo: crate::app::row_card::RowCardMemo::default(),
+        held_row_view: None,
         last_refused_pty_resize: None,
         scroll_mode: std::collections::HashSet::new(),
         last_diff_height: 0,

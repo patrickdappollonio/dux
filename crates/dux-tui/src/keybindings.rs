@@ -2282,10 +2282,15 @@ impl RuntimeBindings {
         }
     }
 
-    /// Status-bar hints for a given context, in display order.
-    pub(crate) fn hints_for(&self, ctx: HintContext) -> Vec<(String, &'static str)> {
+    /// Status-bar hints for a given context, in display order, for the
+    /// actions `keep` accepts.
+    pub(crate) fn hints_for(
+        &self,
+        ctx: HintContext,
+        keep: impl Fn(Action) -> bool,
+    ) -> Vec<(String, &'static str)> {
         let mut result = Vec::new();
-        for b in &self.bindings {
+        for b in self.bindings.iter().filter(|b| keep(b.action)) {
             for &(hint_ctx, desc) in b.hint_contexts {
                 if hint_ctx == ctx {
                     // For MoveDown/MoveUp, show combined "j/k" style label
@@ -3308,7 +3313,7 @@ mod tests {
     #[test]
     fn hints_for_returns_dynamic_labels() {
         let bindings = default_bindings();
-        let hints = bindings.hints_for(HintContext::LeftProject);
+        let hints = bindings.hints_for(HintContext::LeftProject, |_| true);
         assert_ne!(hints, Vec::<(String, &str)>::new());
         // MoveDown hint should show combined j/k label
         let move_hint = hints.iter().find(|(_, desc)| *desc == "Move");

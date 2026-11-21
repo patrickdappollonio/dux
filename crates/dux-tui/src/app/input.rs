@@ -4,6 +4,7 @@ use super::components::{ButtonPressedTarget, FocusStep, PressedButton, next_focu
 use super::modal::{
     ModalKeyStep, binding_lookup_is_suppressed, click_target, focus_move_step, modal_key_step,
 };
+use super::row_card::changes_agent_row;
 use super::*;
 use crate::numeric::{u32_to_u16_wrapping, usize_to_u16_wrapping};
 use dux_core::engine::{Command, EventReaction, StatusUpdate};
@@ -1354,7 +1355,7 @@ impl App {
 
     /// Give focus to `part` of the center pane, when it is one the layout draws.
     fn focus_center_part(&mut self, part: Option<CenterPart>) {
-        if self.terminals_hidden_by_card() {
+        if self.agent_row_card().is_some() {
             return;
         }
         if let Some(part) = part {
@@ -1410,6 +1411,13 @@ impl App {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.in_row_pass(|app| {
+            app.keep_row_view();
+            app.route_key(key)
+        })
+    }
+
+    fn route_key(&mut self, key: KeyEvent) -> Result<bool> {
         if self.server_log_viewer.is_some() {
             self.handle_server_log_key(key);
             return Ok(false);
@@ -1491,6 +1499,11 @@ impl App {
         }
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
+            // Activating the row answers for itself, landing on the card.
+            let activates = matches!(action, Action::FocusAgent | Action::ToggleFullscreen);
+            if !activates && changes_agent_row(action) && self.refuse_row_change() {
+                return Ok(());
+            }
             match action {
                 Action::MoveDown => self.move_left_cursor_down(),
                 Action::MoveUp => self.move_left_cursor_up(),
@@ -1798,6 +1811,9 @@ impl App {
     }
 
     fn handle_center_agent_action(&mut self, action: Action, key: KeyEvent) -> Result<()> {
+        if changes_agent_row(action) && self.refuse_row_change() {
+            return Ok(());
+        }
         if self.handle_center_tab_action(action)? {
             return Ok(());
         }
@@ -1823,11 +1839,7 @@ impl App {
             // A stopped agent beside its terminals starts its first tab,
             // whichever part has focus.
             Action::ReconnectAgent if self.selected_agent_stopped_beside_dock() => {
-                if self.terminals_hidden_by_card() {
-                    self.refuse_under_takeover_card();
-                } else {
-                    self.start_stopped_agent();
-                }
+                self.start_stopped_agent();
             }
             Action::ReconnectAgent => {
                 self.activate_center_agent(OnDormant::Launch, LaunchView::Minimized)?;
@@ -11718,12 +11730,17 @@ impl App {
     /// reopens fullscreen. `InteractAgent` keeps its own jump-straight-to-
     /// fullscreen path in `handle_left_key`.
     fn activate_selected_left_item(&mut self, on_dormant: OnDormant) -> Result<()> {
-        match self.left_items().get(self.selected_left) {
+        let item = self.left_items().get(self.selected_left).copied();
+        match item {
             Some(LeftItem::Terminal(_)) => {
                 self.open_selected_terminal_row();
                 if on_dormant == OnDormant::Leave {
                     self.fullscreen_overlay = FullscreenOverlay::Terminal;
                 }
+            }
+            // The card is where a row this surface does not drive is taken over.
+            Some(LeftItem::Session(_)) if self.refuse_row_change() => {
+                self.focus = FocusPane::Center;
             }
             Some(LeftItem::Session(_)) => {
                 self.center_mode = CenterMode::Agent;
@@ -11788,7 +11805,7 @@ impl App {
         on_dormant: OnDormant,
         view: LaunchView,
     ) -> Result<()> {
-        if !matches!(self.center_mode, CenterMode::Agent) {
+        if !matches!(self.center_mode, CenterMode::Agent) || self.refuse_row_change() {
             return Ok(());
         }
         if self.focused_surface() == SessionSurface::Terminal {
@@ -12426,7 +12443,10 @@ impl App {
             if let Some(session_id) = self.selected_session().map(|s| s.id.clone()) {
                 self.focus = FocusPane::Center;
                 self.set_focused_tab(&session_id, &tab_id);
-                self.arm_tab_drag(&tab_id);
+                // Selecting a tab is viewing; dragging one reorders the row.
+                if self.agent_row_card().is_none() {
+                    self.arm_tab_drag(&tab_id);
+                }
             }
             return true;
         }
@@ -13106,6 +13126,13 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        self.in_row_pass(|app| {
+            app.keep_row_view();
+            app.route_mouse(mouse)
+        })
+    }
+
+    fn route_mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.server_log_viewer.is_some() {
             self.handle_server_log_mouse(mouse);
             return false;
@@ -13206,7 +13233,7 @@ impl App {
     /// Launch whatever dormant tab the card is currently about. The same act the
     /// focus-agent binding performs, so the button and the key cannot diverge.
     fn start_focused_dormant_tab(&mut self) {
-        if self.terminals_hidden_by_card() {
+        if self.refuse_row_change() {
             return;
         }
         if self.selected_agent_stopped_beside_dock() {

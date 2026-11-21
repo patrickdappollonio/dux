@@ -83,21 +83,6 @@ impl App {
         self.dock_terminal_ids(session_id)
     }
 
-    /// Say that a key that would change the selected agent's row did nothing
-    /// because this surface does not drive it, without saying what the row
-    /// holds.
-    pub(crate) fn refuse_under_takeover_card(&mut self) {
-        let name = self.selected_session().map_or_else(
-            || "This agent".to_string(),
-            dux_core::model::AgentSession::display_label,
-        );
-        let key = self.bindings.label_for(Action::FocusAgent);
-        self.set_info(format!(
-            "This window is not driving {name}, so nothing changed. Press {key} on the card \
-             to take it over first."
-        ));
-    }
-
     /// Whether the dock of the selected agent has focus.
     pub(crate) fn dock_has_focus(&self) -> bool {
         self.focus == FocusPane::Center
@@ -140,8 +125,7 @@ impl App {
     /// terminals has nothing to share the pane with, which is said rather than
     /// done silently.
     pub(crate) fn cycle_terminal_layout(&mut self) {
-        if self.terminals_hidden_by_card() {
-            self.refuse_under_takeover_card();
+        if self.refuse_row_change() {
             return;
         }
         if let Some(terminal) = self.selected_terminal_row() {
@@ -393,12 +377,15 @@ impl App {
     /// Under the card the dock is not drawn, yet the row it belongs to is still
     /// open here: the dock stays attached wherever its layout would draw it, and
     /// a take-over the agent's part could not spend (it has no pty) is spent by
-    /// the dock's terminal at the grid it already has.
+    /// the dock's terminal, or another tab of the row, at the grid it already has.
     fn keep_hidden_dock_attached(&mut self) {
         if self.remembered_dock_layout() != DockLayout::Agent {
             self.note_drawn_pty(CenterPart::Dock);
         }
-        let Some(pty_id) = self.part_pty_id(CenterPart::Dock) else {
+        let Some(pty_id) = self
+            .part_pty_id(CenterPart::Dock)
+            .or_else(|| self.selected_row_probe())
+        else {
             return;
         };
         let armed_here = self
@@ -406,7 +393,7 @@ impl App {
             .as_ref()
             .is_some_and(|armed| *armed == self.engine.pty_row(&pty_id));
         let grid = self
-            .part_client(CenterPart::Dock)
+            .pty_client_for(&pty_id)
             .and_then(crate::pty::PtyClient::grid_size);
         if armed_here && let Some((rows, cols)) = grid {
             let _ = self.resize_pty_if_permitted(&pty_id, rows, cols);

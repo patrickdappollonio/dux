@@ -142,6 +142,12 @@ pub(crate) fn launch_claims_its_pty(kind: &dux_core::worker::AgentLaunchKind) ->
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread asked the registry who drives a pty.
+    pub(crate) static REGISTRY_ASKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What prose calls a driver that gave dux no name for itself. The status line
 /// has to finish its sentence, so it needs a noun phrase where the card simply
 /// changes its title.
@@ -164,6 +170,18 @@ impl App {
         Some(seat)
     }
 
+    /// Who drives each row, in one ask; empty when nothing is serving.
+    pub(super) fn row_owners(
+        &self,
+    ) -> std::collections::HashMap<dux_core::pty_owners::RowKey, u64> {
+        let Some(seat) = self.pty_ownership() else {
+            return std::collections::HashMap::new();
+        };
+        #[cfg(test)]
+        REGISTRY_ASKS.with(|asks| asks.set(asks.get() + 1));
+        seat.owners.input_owners_snapshot().0
+    }
+
     /// This surface's id in the ownership record, or `None` when nothing is
     /// serving.
     pub(super) fn pty_ownership_conn_id(&self) -> Option<u64> {
@@ -178,6 +196,8 @@ impl App {
         let Some(seat) = self.pty_ownership_for(pty_id) else {
             return PtyDriver::Free;
         };
+        #[cfg(test)]
+        REGISTRY_ASKS.with(|asks| asks.set(asks.get() + 1));
         let (owner, _, device) = seat.owners.current_owner(pty_id);
         match owner {
             None => PtyDriver::Free,
@@ -216,18 +236,31 @@ impl App {
         self.pty_takeover_card(&self.part_pty_id(part)?)
     }
 
-    /// The card over the selected agent's row, and the pty it was read from:
-    /// the focused tab's, or any of the agent's terminals'.
+    /// The card over the selected agent's row, and the pty it was read from.
     pub(crate) fn agent_row_card(&self) -> Option<(PtyTakeoverCard, String)> {
         self.pty_ownership()?;
         if self.selected_terminal_row().is_some() {
             return None;
         }
+        let probe = self.selected_row_probe()?;
+        self.row_card_memo.answer(&probe, || {
+            Some((self.pty_takeover_card(&probe)?, probe.clone()))
+        })
+    }
+
+    /// One live pty of the selected agent's row: the registry keeps one driver
+    /// per row, so any of them answers for all. The focused tab's comes first.
+    pub(crate) fn selected_row_probe(&self) -> Option<String> {
         let session_id = self.selected_session()?.id.clone();
-        self.part_pty_id(CenterPart::Main)
+        let live = |tab: &String| self.engine.providers.contains_key(TabIdRef::new(tab));
+        let focused = self.focused_tab_id(&session_id);
+        if live(&focused) {
+            return Some(focused);
+        }
+        self.session_tab_ids(&session_id)
             .into_iter()
-            .chain(self.dock_terminal_ids(&session_id))
-            .find_map(|pty_id| Some((self.pty_takeover_card(&pty_id)?, pty_id)))
+            .find(live)
+            .or_else(|| self.dock_terminal_ids(&session_id).into_iter().next())
     }
 
     fn pty_takeover_card(&self, pty_id: &str) -> Option<PtyTakeoverCard> {
@@ -535,7 +568,7 @@ impl App {
     /// order the web actor's own lookup uses. Resolved from the id rather than
     /// from the selection, because the sizing chokepoint must resize the child it
     /// was given, not whatever the cursor is on by the time it runs.
-    fn pty_client_for(&self, pty_id: &str) -> Option<&PtyClient> {
+    pub(super) fn pty_client_for(&self, pty_id: &str) -> Option<&PtyClient> {
         // A pty id of unknown kind: which map answers is the classification.
         self.engine
             .providers
@@ -665,6 +698,8 @@ impl App {
         if events.is_empty() {
             return;
         }
+        // Every change of driver this surface makes is published here.
+        self.row_card_memo.forget();
         if let Some(companion) = self.companion.as_mut() {
             companion.publish_ownership_events(events);
         }
@@ -672,7 +707,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::app::background_server::BackgroundServerStart;
     use crate::app::background_server::tests::{FakeCompanion, Recorded};
@@ -689,7 +724,7 @@ mod tests {
 
     /// An app with a serving companion, plus the registry seat the companion
     /// handed it and the record of what it published.
-    fn serving_app() -> (
+    pub(crate) fn serving_app() -> (
         App,
         std::sync::Arc<std::sync::Mutex<Recorded>>,
         TuiOwnership,
@@ -1054,7 +1089,7 @@ mod tests {
 
     /// The same fixture with the child's script named, so a test that needs real
     /// scrollback to scroll into can ask for a chatty one.
-    fn app_with_a_live_pty_running(
+    pub(crate) fn app_with_a_live_pty_running(
         script: &str,
     ) -> (
         App,
@@ -1114,7 +1149,7 @@ mod tests {
     }
 
     /// Draw the whole app at `width` x `height` and hand back its rows.
-    fn render_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+    pub(crate) fn render_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -2628,7 +2663,7 @@ mod tests {
 
     /// An agent with a terminal docked under it, the row driven by a browser:
     /// the stack is drawn in the split with the dock focused.
-    fn a_browser_driving_a_docked_row() -> (App, TuiOwnership, String) {
+    pub(crate) fn a_browser_driving_a_docked_row() -> (App, TuiOwnership, String) {
         let (mut app, _recorded, seat) =
             app_with_a_live_pty_running(&format!("printf {CHILD_MARKER}; sleep 5"));
         app.engine.config.terminal.command = "cat".to_string();
@@ -2638,8 +2673,9 @@ mod tests {
             .create_companion_terminal("session-1", 24, 80)
             .expect("companion terminal");
         app.focus = FocusPane::Center;
-        app.reconcile_center_target();
+        app.active_terminal_id = Some(terminal_id.clone());
         app.session_surface = SessionSurface::Terminal;
+        app.reconcile_center_target();
         let browser = seat.owners.next_conn_id();
         seat.owners
             .claim_for_resize(
@@ -2770,7 +2806,7 @@ mod tests {
     }
 
     /// The text of `area` in a drawn frame, one string per row.
-    fn text_in(rows: &[String], area: ratatui::layout::Rect) -> String {
+    pub(crate) fn text_in(rows: &[String], area: ratatui::layout::Rect) -> String {
         rows.iter()
             .skip(usize::from(area.y))
             .take(usize::from(area.height))
@@ -2829,6 +2865,12 @@ mod tests {
                 assert!(
                     !rows.iter().any(|row| row.contains(&key)),
                     "{key} hinted in {case}"
+                );
+            }
+            for word in [" Type", " Reconnect"] {
+                assert!(
+                    !rows.iter().any(|row| row.contains(word)),
+                    "{word:?} hinted in {case}"
                 );
             }
             assert!(app.mouse_layout.dock_pills.is_empty(), "{case}");
@@ -2929,11 +2971,9 @@ mod tests {
         press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
         press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(
-            !matches!(app.prompt, PromptState::ConfirmDeleteTerminal { .. }),
-            "{:?}",
-            app.prompt
+            matches!(app.prompt, PromptState::None),
+            "the close binding opened a dialog under the card"
         );
-        app.prompt = PromptState::None;
         app.focus = FocusPane::Left;
         press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
         app.focus = FocusPane::Center;

@@ -1977,10 +1977,13 @@ impl App {
     /// sole live tab of that provider (see `tab_resume_decision`); otherwise fresh.
     pub(crate) fn launch_focused_extra_tab(
         &mut self,
-        _session_id: &str,
+        session_id: &str,
         tab_id: &str,
         view: LaunchView,
     ) {
+        if self.selected_session().is_some_and(|s| s.id == session_id) && self.refuse_row_change() {
+            return;
+        }
         // Resolution, per-provider resume decision, message wording and the
         // request build are the single-source `Engine::dormant_tab_launch_request`
         // shared with the web, so the two surfaces cannot drift. `None` (unknown
@@ -2243,6 +2246,9 @@ impl App {
 
     /// Always spawns a new companion terminal for the selected session.
     pub(crate) fn show_companion_terminal(&mut self) {
+        if self.refuse_row_change() {
+            return;
+        }
         let Some(session) = self.selected_session().cloned() else {
             self.set_error("Select an agent session first.");
             return;
@@ -2354,8 +2360,7 @@ impl App {
     /// reached through the explicit `new-terminal-for-project` command (via the
     /// project chooser), never by guessing from what is selected.
     pub(crate) fn show_or_open_first_terminal(&mut self) {
-        if self.terminals_hidden_by_card() {
-            self.refuse_under_takeover_card();
+        if self.refuse_row_change() {
             return;
         }
         let Some(session) = self.selected_session() else {
@@ -4696,6 +4701,9 @@ impl App {
     /// toggle passes [`LaunchView::Fullscreen`], and every other caller lands the completed launch
     /// focused but minimized. See `launch_seeks_fullscreen`.
     pub(crate) fn reconnect_selected_session(&mut self, view: LaunchView) -> Result<()> {
+        if self.refuse_row_change() {
+            return Ok(());
+        }
         let Some(session_id) = self.selected_session().map(|s| s.id.clone()) else {
             self.set_error("Select a stopped agent first to reconnect.");
             return Ok(());
@@ -6027,6 +6035,8 @@ mod tests {
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
+            row_card_memo: crate::app::row_card::RowCardMemo::default(),
+            held_row_view: None,
             last_refused_pty_resize: None,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,

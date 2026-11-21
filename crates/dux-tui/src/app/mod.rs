@@ -695,6 +695,10 @@ pub(crate) struct App {
     /// Only meaningful while a background server is serving; a row left here
     /// when serving stops is cleared with the rest of the participation state.
     pub(crate) pending_pty_takeover: Option<dux_core::pty_owners::RowKey>,
+    /// The selected agent row's take-over card, asked once per pass.
+    pub(crate) row_card_memo: row_card::RowCardMemo,
+    /// The agent whose row the card covers, and the view a take-over gives back.
+    pub(crate) held_row_view: Option<(String, row_card::RowView)>,
     /// The last resize this surface was REFUSED, as (pty id, rows, cols), so the
     /// refusal is logged when it is news rather than on every frame.
     ///
@@ -5367,6 +5371,7 @@ mod no_branch_notice;
 mod picker_lists;
 mod render;
 mod reorder;
+mod row_card;
 mod sessions;
 #[cfg(test)]
 mod standalone_chooser;
@@ -5740,6 +5745,8 @@ impl App {
             clone_draft: None,
             macro_editor_version: None,
             pending_pty_takeover: None,
+            row_card_memo: crate::app::row_card::RowCardMemo::default(),
+            held_row_view: None,
             last_refused_pty_resize: None,
             scroll_mode: std::collections::HashSet::new(),
             last_diff_height: 0,
@@ -7069,12 +7076,26 @@ impl App {
             .collect()
     }
 
+    pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
+        self.in_row_pass(|app| {
+            app.keep_row_view();
+            app.run_command(command)
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one short arm per palette command, each handing the command to the method that carries it out"
     )]
-    pub(crate) fn execute_command(&mut self, command: &str) -> Result<()> {
+    fn run_command(&mut self, command: &str) -> Result<()> {
         let command = command.trim();
+        let action = dux_core::palette::PALETTE_COMMANDS
+            .iter()
+            .find(|palette| palette.name == command)
+            .map(|palette| palette.action);
+        if action.is_some_and(row_card::changes_agent_row) && self.refuse_row_change() {
+            return Ok(());
+        }
         match command {
             "new-agent" => {
                 self.create_agent_for_selected_project();
@@ -8868,6 +8889,26 @@ impl App {
         self.engine.companion_terminals.len()
     }
 
+    /// The running terminals this surface may count: every terminal that is a
+    /// row of the list, and an agent's only while this surface drives its row.
+    pub(crate) fn shown_terminal_count(&self) -> usize {
+        let Some(conn_id) = self.pty_ownership_conn_id() else {
+            return self.running_companion_terminal_count();
+        };
+        let owners = self.row_owners();
+        self.engine
+            .companion_terminals
+            .values()
+            .filter(|terminal| match terminal.owner.as_ref() {
+                TerminalOwnerRef::Session(session_id) => {
+                    owners.get(&dux_core::pty_owners::RowKey::Agent(session_id.to_string()))
+                        == Some(&conn_id)
+                }
+                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => true,
+            })
+            .count()
+    }
+
     /// The project and standalone terminals, which are rows of the agents list
     /// (an agent's own terminals live in its dock instead), in no particular
     /// order: the list orders them with the agents.
@@ -9009,6 +9050,7 @@ impl App {
     /// selection change and before every frame, so a terminal that ended or a
     /// row that moved can never leave the center aimed at something gone.
     pub(crate) fn reconcile_center_target(&mut self) {
+        self.keep_row_view();
         if let Some(terminal_id) = self.selected_terminal_row() {
             if self.active_terminal_id.as_deref() != Some(terminal_id.as_str()) {
                 self.active_terminal_id = Some(terminal_id);
