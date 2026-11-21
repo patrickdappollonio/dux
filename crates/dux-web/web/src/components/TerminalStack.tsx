@@ -776,11 +776,14 @@ function TerminalPart(props: TerminalPartProps) {
   // pane is painted then either.
   const coverOwnsPane = coverOwnsThePane(cover)
   // A verdict that this page drives stands only while the socket can hear the
-  // server: cut off, another device may have taken the row unheard.
+  // server: cut off, another device may have taken the row unheard. A verdict
+  // the server unsettled while the socket was down is still a reconnect.
   const driver: PaneDriver = connectionLost
     ? null
     : !ownershipKnown
-      ? "pending"
+      ? handshakeSeen && !hearingServer
+        ? "reconnecting"
+        : "pending"
       : isOwner
         ? hearingServer
           ? "this"

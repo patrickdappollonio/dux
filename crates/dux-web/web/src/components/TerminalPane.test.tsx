@@ -6358,6 +6358,23 @@ describe("TerminalPane knows whether it drives before it acts on it", () => {
     expect(rowBlockFor(row)).toBeNull()
   })
 
+  // The server frees the row when the dropped socket is reaped, which leaves
+  // the verdict for the next handshake to judge; the page is still reconnecting.
+  it("says it is reconnecting for the whole outage, after the server frees the row too", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onReconnecting())
+    act(() => notifyPtyOwner("s1", undefined, 7))
+    expect(rowBlockFor(row)).toBe("reconnecting")
+    expect(takeOver()).toBeNull()
+  })
+
+  it("is still connecting, not reconnecting, before it has ever heard who drives", () => {
+    FakePtySocket.autoHandshake = false
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    act(() => last().onReconnecting())
+    expect(rowBlockFor(row)).toBe("pending")
+  })
+
   it("keeps the row's changes out of reach while its socket is parked", () => {
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
     last().emit("closed")
