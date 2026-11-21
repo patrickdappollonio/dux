@@ -265,6 +265,10 @@ describe("store companion-terminal lifecycle", () => {
     const before = mod.getSnapshot().selectedTarget
     await createWithStaleWorkspace(mod)
     expect(mod.getSnapshot().selectedTarget).toEqual(before)
+    // The answer came from the server's live list, not the stale workspace.
+    expect(
+      calls.some(([u, init]) => u === "/api/v1/terminals" && (init?.method ?? "GET") === "GET"),
+    ).toBe(true)
   })
 
   it("opens a new terminal the server lists live even while its cached workspace does not yet", async () => {

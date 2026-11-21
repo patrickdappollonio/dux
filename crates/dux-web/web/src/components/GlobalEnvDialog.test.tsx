@@ -61,6 +61,9 @@ describe("GlobalEnvDialog", () => {
   it("does not focus the text on a phone, where that raises the keyboard", () => {
     phone = true
     render(<GlobalEnvDialog />)
+    expect(document.querySelector('[data-slot="sheet-content"]')?.contains(
+      screen.getByPlaceholderText("KEY=VALUE"),
+    )).toBe(true)
     expect(document.activeElement).not.toBe(screen.getByPlaceholderText("KEY=VALUE"))
     expect(screen.getByRole("button", { name: "Save" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy()

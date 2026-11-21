@@ -90,6 +90,8 @@ describe("ConfigEditorDialog", () => {
     const { rerender } = render(<ConfigEditorDialog />)
     await new Promise((r) => setTimeout(r, 50))
     const opened = document.activeElement
+    // Opening put focus inside the popup, so the comparison below is about it.
+    expect(screen.getByRole("dialog").contains(opened)).toBe(true)
     seed({ configEditorOpen: true, configEditorContent: "[ui]\n" })
     rerender(<ConfigEditorDialog />)
     await screen.findByTestId("code-editor")
