@@ -14,7 +14,9 @@ const { calls, spy, state } = vi.hoisted(() => {
       )
   return { calls, spy, state: { current: {} as Record<string, unknown> } }
 })
-vi.mock("@/lib/store", () => ({
+vi.mock("@/lib/store", async (importOriginal) => ({
+  sessionActiveElsewhere: (await importOriginal<typeof import("@/lib/store")>())
+    .sessionActiveElsewhere,
   useDux: () => state.current,
   closeNewLauncher: spy("closeNewLauncher"),
   createTerminal: spy("createTerminal"),
@@ -28,6 +30,7 @@ vi.mock("@/lib/store", () => ({
 }))
 
 import { NewLauncherDialog } from "@/components/NewLauncherDialog"
+import { agentRowKey, registerPaneCover } from "@/lib/paneCover"
 
 const managed = (id: string, title: string, project: string) => ({
   id,
@@ -209,5 +212,61 @@ describe("NewLauncherDialog agent step", () => {
     expect(screen.queryByRole("button", { name: "New…" })).toBeNull()
     fireEvent.click(screen.getByText("design-notes").closest("button")!)
     expect(calls).toEqual(["closeNewLauncher", "createTerminal(s3)"])
+  })
+
+  describe("an agent another device drives", () => {
+    const drivenBy = (owner: string) => [{ id: "t", input_owner: owner }]
+    const reason =
+      "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here."
+    const agentRow = (title: string) =>
+      screen.getByText(title).closest("button") as HTMLButtonElement
+    let retire: (() => void) | null = null
+    afterEach(() => {
+      retire?.()
+      retire = null
+    })
+
+    it("cannot be picked and says who drives it, while this page's and nobody's can", () => {
+      const sessions = (state.current.spine as { sessions: Record<string, unknown>[] })
+        .sessions
+      sessions[0]!.tabs = drivenBy("conn-other")
+      sessions[1]!.tabs = drivenBy("conn-mine")
+      state.current = { ...state.current, ownPtyConnIds: { "conn-mine": true } }
+      render(<NewLauncherDialog />)
+      fireEvent.click(row("New terminal for an agent"))
+      expect(agentRow("polish-onboarding").disabled).toBe(true)
+      expect(agentRow("polish-onboarding").textContent).toContain(reason)
+      expect(agentRow("fix-login-redirect").disabled).toBe(false)
+      expect(agentRow("design-notes").disabled).toBe(false)
+      // Enter on a search that leaves only the driven agent picks nothing.
+      const search = screen.getByRole("searchbox", { name: "Search agents" })
+      fireEvent.change(search, { target: { value: "polish" } })
+      fireEvent.keyDown(search, { key: "Enter" })
+      expect(calls).toEqual([])
+    })
+
+    // A pane of the row on this page hears a take-over before the spine does.
+    it("cannot be picked once a pane of its row hears another device drive it", () => {
+      retire = registerPaneCover("pty-1", "card", {
+        row: agentRowKey("s3"),
+        driver: "other",
+      })
+      render(<NewLauncherDialog />)
+      fireEvent.click(row("New terminal for an agent"))
+      expect(agentRow("design-notes").disabled).toBe(true)
+    })
+
+    it("still opens the step when no agent can be picked, and says why", () => {
+      for (const session of (state.current.spine as { sessions: Record<string, unknown>[] })
+        .sessions)
+        session.tabs = drivenBy("conn-other")
+      state.current = { ...state.current, newLauncherStep: "pick-agent" }
+      render(<NewLauncherDialog />)
+      expect(
+        screen.getByText(
+          "None of these agents can get a terminal from this device right now; each one says why.",
+        ),
+      ).toBeTruthy()
+    })
   })
 })

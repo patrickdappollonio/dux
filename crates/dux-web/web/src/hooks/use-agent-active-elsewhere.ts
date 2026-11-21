@@ -1,4 +1,10 @@
-import { useAgentRowWatch, type RowBlock } from "@/lib/paneCover"
+import {
+  agentRowKey,
+  rowBlockFor,
+  useAgentRowWatch,
+  useRowWatch,
+  type RowBlock,
+} from "@/lib/paneCover"
 import { sessionActiveElsewhere, useDux } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
 
@@ -31,6 +37,23 @@ export function useAgentChangeBlockById(sessionId: string): RowBlock | null {
   return agentChangeBlock(
     rowAnswer,
     () => session !== undefined && sessionActiveElsewhere(state, session),
+  )
+}
+
+/// The same answer for every agent of a list, by session id.
+export function useAgentChangeBlocks(
+  sessions: readonly SessionView[],
+): Map<string, RowBlock | null> {
+  const state = useDux()
+  // Re-renders on any pane's change, so every row's answer below stays current.
+  useRowWatch(null)
+  return new Map(
+    sessions.map((session) => [
+      session.id,
+      agentChangeBlock(rowBlockFor(agentRowKey(session.id)), () =>
+        sessionActiveElsewhere(state, session),
+      ),
+    ]),
   )
 }
 

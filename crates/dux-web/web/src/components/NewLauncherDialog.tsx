@@ -12,6 +12,10 @@ import {
 } from "@/components/ui/dialog"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
+import {
+  agentChangeBlockReason,
+  useAgentChangeBlocks,
+} from "@/hooks/use-agent-active-elsewhere"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { agentRowVisual } from "@/lib/agentRow"
 import { agentTerminalGroups } from "@/lib/agentTerminalPick"
@@ -26,6 +30,7 @@ import { stateWord } from "@/lib/flatList"
 import { FOCUS_RING, ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { closeNewLauncher, createTerminal, useDux } from "@/lib/store"
+import type { RowBlock } from "@/lib/paneCover"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -286,6 +291,10 @@ function moveFocusAmongRows(event: KeyboardEvent<HTMLElement>) {
 // The second step behind "New terminal for an agent": which agent's directory
 // the terminal opens in. Picking one opens it through the same action the
 // agent's own menu runs. `onBack` is null when the step is the whole dialog.
+//
+// A terminal joins its agent's row, so an agent this device may not change is
+// listed but cannot be picked. One nobody drives can: the terminal lands in a
+// row no other device is using.
 function AgentStep({
   phone,
   onBack,
@@ -308,13 +317,19 @@ function AgentStep({
     [spine, query],
   )
   const sessions = groups.flatMap((group) => group.sessions)
+  const blocks = useAgentChangeBlocks(sessions)
+  const pickBlock = (session: SessionView): RowBlock | null => {
+    const block = blocks.get(session.id) ?? null
+    return block === "nobody" ? null : block
+  }
+  const pickable = sessions.filter((session) => pickBlock(session) === null)
   const pickAgent = (session: SessionView) => {
     closeNewLauncher()
     createTerminal(session.id)
   }
   const pick = useSearchPick({
     query,
-    items: sessions,
+    items: pickable,
     keyOf: (session) => session.id,
     onPick: pickAgent,
   })
@@ -366,6 +381,12 @@ function AgentStep({
             autoFocus
           />
         </div>
+        {sessions.length > 0 && pickable.length === 0 ? (
+          <p className="px-2 pt-1 text-sm text-foreground">
+            None of these agents can get a terminal from this device right now;
+            each one says why.
+          </p>
+        ) : null}
         <div className="flex flex-col gap-0.5" onKeyDown={moveFocusAmongRows}>
           {sessions.length === 0 ? (
             <p className="px-2 py-4 text-sm text-muted-foreground">
@@ -392,6 +413,7 @@ function AgentStep({
                     id={pick.rowId(session.id)}
                     active={pick.activeKey === session.id}
                     needle={needle}
+                    block={pickBlock(session)}
                     onPick={() => pickAgent(session)}
                   />
                 ))}
@@ -409,12 +431,14 @@ function AgentPickRow({
   id,
   active,
   needle,
+  block,
   onPick,
 }: {
   session: SessionView
   id: string
   active: boolean
   needle: string
+  block: RowBlock | null
   onPick: () => void
 }) {
   const name = sessionLabel(session)
@@ -432,19 +456,23 @@ function AgentPickRow({
       type="button"
       id={id}
       data-launcher-row=""
+      disabled={block !== null}
       onClick={onPick}
       className={cn(
-        "flex min-h-13 w-full items-center gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:bg-accent motion-reduce:transition-none",
+        "group flex min-h-13 w-full items-center gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none motion-reduce:transition-none",
         FOCUS_RING,
         active && ACTIVE_ROW_RING,
       )}
     >
-      <Bot aria-hidden="true" className="size-[18px] shrink-0 text-muted-foreground" />
+      <Bot
+        aria-hidden="true"
+        className="size-[18px] shrink-0 text-muted-foreground group-disabled:opacity-50"
+      />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-sm">
+        <span className="truncate text-sm group-disabled:opacity-50">
           <MatchHighlight text={name} ranges={matchCharRanges(name, [needle])} />
         </span>
-        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground">
+        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground group-disabled:opacity-50">
           <RowStateWord key={word.label} word={word} working={working} />
           {/* The agent row's own separator: a dot, centered because a box
               with no text has no baseline. */}
@@ -454,6 +482,13 @@ function AgentPickRow({
           />
           <AgentFolder session={session} />
         </span>
+        {/* Written out at full strength rather than in a tooltip: a disabled
+            button takes no pointer events and a finger has no hover. */}
+        {block !== null ? (
+          <span className="text-xs leading-snug text-foreground/85">
+            {agentChangeBlockReason(block)}
+          </span>
+        ) : null}
       </span>
     </button>
   )
