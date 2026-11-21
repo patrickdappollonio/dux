@@ -128,6 +128,11 @@ Clicking a row still opens its diff; only the checkbox selects. On a phone the d
 > [!CAUTION]
 > **Discard is destructive**, so it always confirms first, and the dialog says which case applies. An untracked file is **permanently deleted from disk**. A tracked file is **restored to its last committed state**. dux checks the file's live state at the moment you confirm.
 
+> [!IMPORTANT]
+> While another device is driving the agent, stage, unstage, discard, commit, push and pull
+> are refused with a message naming that device. Press **Take over** on the agent first.
+> Reading the list and the diffs always works.
+
 ## Commit, push, pull
 
 The changes pane's header carries three controls: an **Open editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone), a **New terminal** button that opens a shell in that agent's worktree (or its folder, for a standalone agent) and docks it under the agent, and the `⋯` menu with the rest:

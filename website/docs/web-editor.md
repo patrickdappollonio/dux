@@ -285,6 +285,13 @@ disk version, or cancel. Cancelling keeps your text exactly as typed.
 > file that changes while you sit on its tab with the window already focused and git
 > silent, and looking away and back resolves it.
 
+> [!IMPORTANT]
+> While another device is driving the agent (or the terminal the editor is rooted at),
+> saving, creating, renaming, moving and deleting are refused with a message naming that
+> device, and what you typed stays in the tab. Take the agent over and save again. The
+> editor's own browser tab never drives anything, so it can save only while nobody is
+> driving or after the tab showing the agent has gone. Opening and reading files always works.
+
 ## Creating, renaming, moving, and deleting files
 
 Right-click anywhere in the file tree:

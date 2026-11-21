@@ -292,8 +292,13 @@ the terminal UI and in the browser alike.
 - **Looking is always allowed:** selecting the agent or one of its tabs, showing it from
   the list or the command palette, maximizing it to look at the card and leaving fullscreen
   again, its info and its logs keep working under the card, and none of it starts the agent,
-  even one that is stopped. Git actions in the Changes pane, pull requests, project commands
-  and moving the agent in the list are not held back by the card either.
+  even one that is stopped. Pull requests, project commands and moving the agent in the
+  list are not held back by the card either.
+- **The server refuses it too:** a change to an agent another device is driving that
+  arrives from a browser or from the `dux` command line is refused by dux itself, with a
+  sentence naming the driver, whatever the screen that sent it had enabled. That includes
+  git changes in its working copy and file edits through the web editor. See
+  [Only the driving device changes what it drives](/docs/web-workspace).
 - **Take over, then act:** in the terminal UI a change you ask for right after pressing
   Take over, before the screen has redrawn, goes ahead once the take-over has landed, and
   is refused like any other if it has not.

@@ -324,6 +324,27 @@ dev server. A terminal you open on an agent somebody else is driving is theirs t
 watch it until you press **Take over**. A project or standalone terminal is driven on its
 own.
 
+> [!IMPORTANT]
+> **Only the driving device changes what it drives.** While another device is driving an
+> agent, dux itself refuses every change to it from anywhere else, whichever screen or
+> command asked:
+>
+> - its tabs and terminals: adding, closing, stopping, starting, reordering, changing a
+>   tab's provider;
+> - the agent: starting, restarting, stopping, deleting, renaming, recreating its working
+>   copy, changing its provider or auto-reopen, rerunning its startup command;
+> - its files: stage, unstage, discard, commit, push and pull, saving, creating, renaming,
+>   moving or deleting a file in the editor, and dropping a file onto it.
+>
+> For a project or standalone terminal somebody else is driving, closing it and editing
+> files through its editor are refused the same way. The refusal names the device that is
+> driving and says nothing was changed. Press **Take over** and do it again.
+>
+> Looking is never refused, and neither are forking the agent, its pull requests, project
+> settings and project git, macros and other settings, or moving the row in the list.
+> While nobody is driving, the server refuses nothing; the browser still asks you to press
+> **Take over** first.
+
 ![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 
 **The terminal UI is one of those devices.** When dux is [serving in the background of a running TUI](/docs/server-mode#serve-in-the-background-and-keep-the-tui), that terminal can hold a terminal or be a watcher like any browser, and the card names it as `the dux TUI`. It shows the same card, with the same words, when your browser is the one driving.

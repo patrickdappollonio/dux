@@ -429,7 +429,9 @@ Only the device that currently holds input can drop or paste. Terminals in dux a
 many-watchers (see [The workspace in the browser](/docs/web-workspace)), and the drop target
 only appears for the writer. This applies to the two **pane** drops and to a file attached
 from the input or row menus. A drop on the editor's file tree pastes nothing, so it needs no
-input ownership, and a watcher can do it, **Upload here…** included.
+input ownership: anybody can do it while nobody is driving the agent or terminal,
+**Upload here…** included. While another device is driving it, the drop is refused with a
+message naming that device, like every other change to what it drives.
 
 A watcher who pastes an image is told rather than ignored: nothing is uploaded, and a toast
 says the image was not saved and that taking over is the way to paste it here.
