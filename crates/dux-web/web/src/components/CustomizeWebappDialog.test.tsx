@@ -227,9 +227,11 @@ describe("CustomizeWebappDialog", () => {
       "Sign-in and network2, 2 settings",
       "Terminal app3, 3 settings",
     ])
-    // Appearance is on screen first; a row in it applies to this browser.
+    // Appearance is on screen first; a row in it applies to the web, in every
+    // browser, as the dialog's header says.
     const row = screen.getByLabelText("Instance name").closest("[data-setting-row]")!
-    expect(row.textContent).toContain("This browser")
+    expect(row.textContent).toContain("Web ·")
+    expect(row.textContent).not.toContain("This browser")
     expect(field("Attention grace").closest("[data-setting-row]")!.textContent).toContain(
       "Web and terminal app",
     )
@@ -281,7 +283,7 @@ describe("CustomizeWebappDialog", () => {
     render(<CustomizeWebappDialog />)
 
     const row = (label: string) => field(label).closest("[data-setting-row]")!.textContent
-    expect(row("Instance name")).toContain("This browser · default dux")
+    expect(row("Instance name")).toContain("Web · default dux")
     expect(row("Status message auto-clear")).not.toContain("default")
   })
 
@@ -1001,7 +1003,7 @@ describe("CustomizeWebappDialog search", () => {
     const nerd = screen.getByLabelText("Nerd Font icons").closest("[data-setting-row]")!
     expect(nerd.textContent).toContain("ui.nerd_font_icons")
     expect(screen.getByLabelText("Terminal font").closest("[data-setting-row]")!.textContent).toContain(
-      "This browser · Appearance",
+      "Web · Appearance",
     )
     expect(screen.queryByLabelText("Instance name")).toBeNull()
   })

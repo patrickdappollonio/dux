@@ -856,8 +856,9 @@ down its side:
 - **Sign-in and network**: the web password, and whether dux binds your Tailscale address.
 - **Terminal app**: whether Tab reaches the agent, Nerd Font icons, and extended keys.
 
-Each row says on a small line where it applies: **This browser**, **Web and terminal app**,
-**Terminal app**, or, for the password, **Every browser**. On a phone the topics come first,
+Each row says on a small line where it applies: **Web**, **Web and terminal app**,
+**Terminal app**, or, for the password, **Every browser**. Every setting is saved to
+`config.toml`, so a **Web** setting applies in every browser, not just this one. On a phone the topics come first,
 and tapping one opens its settings; Back takes you back to the topics.
 
 Every change you make, resets included, waits for **Save**. A row you changed says

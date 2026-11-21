@@ -18,8 +18,9 @@ import {
   MIN_TERMINAL_FONT_SIZE,
 } from "./terminalFont"
 
-/** Which surface a row affects. `signin` is the web login every browser goes
- * through, which is neither this browser's preference nor the terminal app's. */
+/** Which surface a row affects. Every row is saved to `config.toml`, so a web
+ * row applies in every browser. `signin` is the web login every browser goes
+ * through, which is neither the web's preference nor the terminal app's. */
 export type SettingSurface = "signin" | "web" | "both" | "tui"
 
 export type SettingControl =
@@ -105,7 +106,7 @@ export const SETTING_TOPICS: { id: SettingTopic; label: string }[] = [
 /** Where a row's setting applies, as the row's small line says it. */
 export const SURFACE_LABEL: Record<SettingSurface, string> = {
   signin: "Every browser",
-  web: "This browser",
+  web: "Web",
   both: "Web and terminal app",
   tui: "Terminal app",
 }
