@@ -27,9 +27,11 @@ const BAND_BUTTON =
   "h-7 shrink-0 relative after:absolute after:-inset-y-[7px] after:inset-x-0 after:hidden max-md:after:block pointer-coarse:after:block"
 
 /**
- * The band in place of a stopped agent's tab strip. It carries Start only when
- * nothing else on screen does: beside the short card the card carries it. A first tab whose last run ended badly
- * shows how it ended, with the run's last output one click away.
+ * The band in place of a stopped agent's tab strip. It carries the agent's
+ * Start unless the short card beside the dock carries it; beside another tab's
+ * card both are on screen, the card's starting that tab alone. A first tab
+ * whose last run ended badly shows how it ended, with the run's last output
+ * one click away.
  */
 export function StoppedAgentBand({
   sessionId,
@@ -75,6 +77,7 @@ export function StoppedAgentBand({
           reason="hint"
           size="sm"
           className={BAND_BUTTON}
+          label="Start the agent"
           onStart={() => startStoppedAgent(sessionId, slotTab.id)}
         >
           Start

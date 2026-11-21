@@ -1107,7 +1107,7 @@ describe("TerminalArea dock", () => {
         render(<TerminalArea />)
         await screen.findByTestId("stopped-agent-band")
         watch("t1")
-        const starts = screen.getAllByRole("button", { name: "Start", hidden: true })
+        const starts = screen.getAllByRole("button", { name: /^Start/, hidden: true })
         expect(starts.length).toBeGreaterThan(0)
         expect(starts.every(outOfReach)).toBe(true)
         expect(stackProps.at(-1)).toMatchObject({ cardTopPx: 0 })
@@ -1150,7 +1150,7 @@ describe("TerminalArea dock", () => {
       expect(onScreen("agent")).toBe(false)
       expect(onScreen("dock")).toBe(true)
       expect(paneProps.map((p) => (p as { id: string }).id)).toEqual(["t1"])
-      fireEvent.click(screen.getByRole("button", { name: "Start" }))
+      fireEvent.click(screen.getByRole("button", { name: "Start the agent" }))
       expect(startStoppedAgentMock).toHaveBeenCalledWith("s1", "s1")
     })
 
@@ -1180,8 +1180,11 @@ describe("TerminalArea dock", () => {
       render(<TerminalArea />)
       const band = await screen.findByTestId("stopped-agent-band")
       expect(screen.queryByTestId("stopped-agent-short-card")).toBeNull()
-      fireEvent.click(within(band).getByRole("button", { name: "Start" }))
+      fireEvent.click(within(band).getByRole("button", { name: "Start the agent" }))
       expect(startStoppedAgentMock).toHaveBeenCalledWith("s1", "s1")
+      // The tab's own card starts that tab, so the two are told apart by name.
+      const names = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent)
+      expect(names.filter((n) => n?.startsWith("Start"))).toEqual(["Start the agent", "Start session"])
     })
 
     it("says how a crashed first tab ended, with its last output a click away", async () => {

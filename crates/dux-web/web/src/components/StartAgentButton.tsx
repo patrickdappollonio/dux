@@ -19,6 +19,7 @@ export function StartAgentButton({
   reason = "full",
   size,
   className,
+  label,
   children,
 }: {
   sessionId: string
@@ -26,6 +27,9 @@ export function StartAgentButton({
   reason?: "full" | "hint"
   size?: "sm"
   className?: string
+  /** The accessible name, when the visible words alone would match another
+   * Start on screen that starts something else. */
+  label?: string
   children: ReactNode
 }) {
   const block = useAgentChangeBlockById(sessionId)
@@ -41,7 +45,13 @@ export function StartAgentButton({
       {why !== null && reason === "hint" ? (
         <span className="shrink-0 text-xs text-muted-foreground">{why}</span>
       ) : null}
-      <Button size={size} className={className} disabled={why !== null} onClick={onStart}>
+      <Button
+        size={size}
+        className={className}
+        aria-label={label}
+        disabled={why !== null}
+        onClick={onStart}
+      >
         {children}
       </Button>
       {why !== null && reason === "full" ? (
