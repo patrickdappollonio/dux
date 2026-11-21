@@ -9,12 +9,10 @@ import {
 import { FOCUS_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 
-// A control's hover hint that stays readable while the control is disabled. A
-// disabled button takes no pointer events and no focus, so the hint hangs off a
-// wrapper around it, which takes the focus, and the ring, the button cannot.
-// A tap on the wrapper opens it too, because a finger has no hover. The wrapper
-// is there whether or not the control is disabled, so flipping `disabled`
-// never remounts the control and the focus stays on it.
+// A control's hint that stays readable while it is disabled: a disabled button
+// takes no pointer events or focus, so the hint hangs off a wrapper that takes
+// the focus, the ring and, for a finger, a tap. The wrapper is there either way,
+// so flipping `disabled` never remounts the control or drops its focus.
 export function ExplainedWhenDisabled({
   disabled,
   hint,
