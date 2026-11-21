@@ -182,7 +182,8 @@ impl App {
         };
         let row = seat.owners.row_owner(pty_id, self.engine.pty_row(pty_id));
         self.row_card_memo.first_placing(seat.conn_id, pty_id);
-        self.row_card_memo.note_generation(row.generation);
+        self.row_card_memo
+            .note_generation(seat.conn_id, row.generation);
         match row.conn_id {
             None => PtyDriver::Free,
             Some(conn) if conn == seat.conn_id => PtyDriver::Mine,
@@ -596,11 +597,17 @@ impl App {
             // who pressed a button that has not visibly done anything yet.
             return;
         }
+        // An agent's row is taken over whole, whichever of its parts is shown.
+        let what = if self.selected_terminal_row().is_none() && self.selected_session().is_some() {
+            "agent"
+        } else {
+            "terminal"
+        };
         let message = match card {
             PtyTakeoverCard::Elsewhere { device } => {
                 let device = device.unwrap_or_else(|| UNNAMED_DEVICE.to_string());
                 format!(
-                    "Taking this terminal over from {device}. Typing here reaches it again, its \
+                    "Taking this {what} over from {device}. Typing here reaches it again, its \
                      size follows this window, and that device keeps watching without being able \
                      to type."
                 )
@@ -609,9 +616,10 @@ impl App {
             // window gains rather than who it was taken from. The arm is still a
             // flagged claim, so a browser's plain attach landing between the
             // press and the render that carries it does not win the pty.
-            PtyTakeoverCard::Free => "Taking control of this terminal. Nobody was driving it, so \
-                 typing here reaches it now and its size follows this window."
-                .to_string(),
+            PtyTakeoverCard::Free => format!(
+                "Taking control of this {what}. Nobody was driving it, so typing here reaches it \
+                 now and its size follows this window."
+            ),
         };
         self.set_info(message);
         self.pending_pty_takeover = Some(row);

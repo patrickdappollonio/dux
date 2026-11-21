@@ -404,12 +404,17 @@ impl App {
         else {
             return;
         };
+        self.spend_take_over_on(&pty_id);
+    }
+
+    /// Carry the take-over armed for `pty_id`'s row by a resize of it now.
+    pub(super) fn spend_take_over_on(&mut self, pty_id: &str) {
         // The child keeps the grid it has; its own pane sends this window's next frame.
         let (rows, cols) = self
-            .pty_client_for(&pty_id)
+            .pty_client_for(pty_id)
             .and_then(crate::pty::PtyClient::grid_size)
             .unwrap_or_else(|| self.pty_size_for_launch());
-        let _ = self.resize_pty_if_permitted(&pty_id, rows, cols);
+        let _ = self.resize_pty_if_permitted(pty_id, rows, cols);
     }
 
     /// Whether the frame is drawing an agent's stack in the center pane, where

@@ -784,6 +784,9 @@ pub(crate) struct App {
     pub(crate) mouse_layout: MouseLayoutState,
     pub(crate) overlay_layout: OverlayMouseLayoutState,
     pub(crate) mouse_drag: Option<DraggedDivider>,
+    /// The split share when the dock divider was grabbed, which a drag the
+    /// take-over card cuts off gives back.
+    pub(crate) dock_drag_began_pct: u16,
     /// The live drag-to-reorder gesture over a sidebar row (an agent's or a
     /// terminal's), or `None` when no row is being dragged. Armed by a left press
     /// on a reorderable row and retired on release, on a host resize, on focus
@@ -5762,6 +5765,7 @@ impl App {
             mouse_layout: MouseLayoutState::default(),
             overlay_layout: OverlayMouseLayoutState::default(),
             mouse_drag: None,
+            dock_drag_began_pct: terminal_dock_pct,
             row_drag: None,
             tab_drag: None,
             last_tab_strip: None,
@@ -9035,11 +9039,15 @@ impl App {
     /// selection change and before every frame, so a terminal that ended or a
     /// row that moved can never leave the center aimed at something gone.
     pub(crate) fn reconcile_center_target(&mut self) {
-        self.in_row_pass(Self::aim_center_at_selected_row);
+        self.in_row_pass(|app| {
+            app.aim_center_at_selected_row();
+            // After the aim, so a view held on arriving at a covered row is
+            // the one arriving gives, as it is with this surface driving.
+            let _ = app.keep_row_view();
+        });
     }
 
     fn aim_center_at_selected_row(&mut self) {
-        let _ = self.keep_row_view();
         if let Some(terminal_id) = self.selected_terminal_row() {
             if self.active_terminal_id.as_deref() != Some(terminal_id.as_str()) {
                 self.active_terminal_id = Some(terminal_id);

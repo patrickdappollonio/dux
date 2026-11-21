@@ -2332,6 +2332,13 @@ impl App {
             .collect();
         self.expire_stale_pty_takeover(&drawn);
         self.publish_drawn_attachments();
+        // A closed tab or an ended terminal is never placed again.
+        let engine = &self.engine;
+        self.row_card_memo.forget_placed_unless(|pty_id| {
+            engine.agent_tabs.contains_key(TabIdRef::new(pty_id))
+                || engine.providers.contains_key(TabIdRef::new(pty_id))
+                || engine.companion_terminals.contains_key(pty_id)
+        });
         // A take-over this frame carried lifts the card now, so the view it
         // gives back is in place before the next key.
         let _ = self.keep_row_view();
@@ -6242,9 +6249,14 @@ impl App {
             }
             return hints;
         }
+        // Under the card a refused key is not offered, nor the agent pane's
+        // focus key as typing: there it takes the row over, which the card's
+        // own hint line names.
         let covered = self.terminals_hidden_by_card();
+        let card_key = covered && matches!(ctx, HintContext::Center);
         let mut hints = self.bindings.hints_for(ctx, |action| {
-            !(covered && super::row_card::changes_agent_row(action))
+            !(covered && super::row_card::changes_agent_row(action)
+                || card_key && action == Action::FocusAgent)
         });
         if matches!(ctx, HintContext::Files) {
             self.name_the_folder_key(&mut hints);

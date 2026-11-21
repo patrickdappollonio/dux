@@ -1496,9 +1496,7 @@ impl App {
         }
 
         if let Some(action) = self.bindings.lookup(&key, BindingScope::Left) {
-            // Activating the row answers for itself, landing on the card.
-            let activates = matches!(action, Action::FocusAgent | Action::ToggleFullscreen);
-            if !activates && changes_agent_row(action) && self.refuse_row_change() {
+            if changes_agent_row(action) && self.refuse_row_change() {
                 return Ok(());
             }
             match action {
@@ -1533,6 +1531,18 @@ impl App {
                 Action::OpenWorktreeInEditor => self.open_selected_worktree_in_default_editor(),
                 Action::ChooseWorktreeEditor => self.open_worktree_editor_picker(),
                 Action::ToggleProject => self.toggle_collapse_selected_project(),
+                // Under the card the same view, with nothing typed into.
+                Action::InteractAgent if self.agent_row_card().is_some() => {
+                    self.activate_selected_left_item(OnDormant::Leave)?;
+                    self.input_target = InputTarget::None;
+                    if self
+                        .selected_session()
+                        .is_some_and(|s| self.engine.providers.contains_key(s.slot_tab_id()))
+                    {
+                        self.session_surface = SessionSurface::Agent;
+                        self.fullscreen_overlay = FullscreenOverlay::Agent;
+                    }
+                }
                 Action::InteractAgent => {
                     if self.selected_session().is_some()
                         && self
@@ -11820,7 +11830,16 @@ impl App {
         on_dormant: OnDormant,
         view: LaunchView,
     ) -> Result<()> {
-        if !matches!(self.center_mode, CenterMode::Agent) || self.refuse_row_change() {
+        if !matches!(self.center_mode, CenterMode::Agent) {
+            return Ok(());
+        }
+        // A row this surface does not drive is only looked at: its card,
+        // maximized by the fullscreen-seeking gestures, and nothing started.
+        if self.agent_row_card().is_some() {
+            self.focus = FocusPane::Center;
+            if view == LaunchView::Fullscreen {
+                self.fullscreen_overlay = FullscreenOverlay::Agent;
+            }
             return Ok(());
         }
         if self.focused_surface() == SessionSurface::Terminal {
@@ -12539,7 +12558,7 @@ impl App {
             return;
         };
         if self.refuse_row_change_of(&session_id) {
-            self.mouse_drag = None;
+            self.abandon_dock_divider_drag();
             return;
         }
         let edge = if row <= stack.y {
@@ -13048,6 +13067,7 @@ impl App {
             && let Some(drag) = self.resize_drag_at_mouse(mouse.column, mouse.row)
         {
             self.mouse_drag = Some(drag);
+            self.dock_drag_began_pct = self.terminal_dock_pct;
             self.update_dragged_panes(mouse.column, mouse.row);
             return;
         }

@@ -25,10 +25,7 @@ use dux_core::pty_owners::RowKey;
 )]
 pub(crate) fn changes_agent_row(action: Action) -> bool {
     match action {
-        Action::FocusAgent
-        | Action::InteractAgent
-        | Action::ToggleFullscreen
-        | Action::ReconnectAgent
+        Action::ReconnectAgent
         | Action::ForceReconnectAgent
         | Action::DeleteSession
         | Action::RenameSession
@@ -46,7 +43,11 @@ pub(crate) fn changes_agent_row(action: Action) -> bool {
         | Action::CycleTerminalLayout
         | Action::NewTerminal
         | Action::CloseTerminal => true,
-        Action::MoveDown
+        // Looking: under the card each shows the card and starts nothing.
+        Action::FocusAgent
+        | Action::InteractAgent
+        | Action::ToggleFullscreen
+        | Action::MoveDown
         | Action::MoveUp
         | Action::ToggleProject
         | Action::NewAgent
@@ -196,7 +197,8 @@ struct DrivenRows {
 pub(crate) struct RowCardMemo {
     passes: Cell<u32>,
     answers: RefCell<HashMap<String, RowAnswer>>,
-    generation: Cell<Option<u64>>,
+    /// The registry's generation this pass heard, and the seat it heard it as.
+    generation: Cell<Option<(u64, u64)>>,
     driven: RefCell<Option<DrivenRows>>,
     placed: RefCell<(Option<u64>, HashSet<String>)>,
 }
@@ -246,21 +248,31 @@ impl RowCardMemo {
         placed.1.insert(pty_id.to_string())
     }
 
-    /// Remember the registry's generation an answer of this pass came with.
-    pub(crate) fn note_generation(&self, generation: u64) {
+    /// Remember the registry's generation an answer of this pass came with,
+    /// as the seat `conn_id` heard it.
+    pub(crate) fn note_generation(&self, conn_id: u64, generation: u64) {
         if self.passes.get() > 0 {
-            self.generation.set(Some(generation));
+            self.generation.set(Some((conn_id, generation)));
         }
     }
 
-    /// The registry's generation, asking `ask` only when this pass has not heard it.
-    fn generation(&self, ask: impl FnOnce() -> u64) -> u64 {
-        if let Some(generation) = self.generation.get() {
+    /// The registry's generation as the seat `conn_id` hears it, asking `ask`
+    /// only when this pass has heard it as that seat: a generation another
+    /// seat heard is another registry's.
+    fn generation(&self, conn_id: u64, ask: impl FnOnce() -> u64) -> u64 {
+        if let Some((heard_by, generation)) = self.generation.get()
+            && heard_by == conn_id
+        {
             return generation;
         }
         let generation = ask();
-        self.note_generation(generation);
+        self.note_generation(conn_id, generation);
         generation
+    }
+
+    /// Forget every pty placed in its row that `exists` no longer knows.
+    pub(crate) fn forget_placed_unless(&self, exists: impl Fn(&str) -> bool) {
+        self.placed.borrow_mut().1.retain(|pty_id| exists(pty_id));
     }
 }
 
@@ -341,7 +353,17 @@ impl App {
 
     /// Whether this surface may not change `session_id`'s row, saying on the
     /// status line who drives it and how to take it over when it may not.
+    ///
+    /// A take-over armed for the row and not yet carried by a frame is carried
+    /// first, so a change in the same burst of input as the press applies
+    /// once the claim has landed, and is refused when it has not.
     pub(crate) fn refuse_row_change_of(&mut self, session_id: &str) -> bool {
+        let armed = Some(RowKey::Agent(session_id.to_string()));
+        if self.pending_pty_takeover == armed
+            && let Some(pty_id) = self.row_probe_of(session_id)
+        {
+            self.spend_take_over_on(&pty_id);
+        }
         let Some((card, _)) = self.row_card_of(session_id) else {
             return false;
         };
@@ -371,7 +393,7 @@ impl App {
     fn driven_agent_rows(&self) -> std::cell::Ref<'_, Option<DrivenRows>> {
         let memo = &self.row_card_memo;
         if let Some(seat) = self.pty_ownership() {
-            let generation = memo.generation(|| seat.owners.ownership_generation());
+            let generation = memo.generation(seat.conn_id, || seat.owners.ownership_generation());
             let fresh = memo.driven.borrow().as_ref().is_some_and(|driven| {
                 driven.conn_id == seat.conn_id && driven.generation == generation
             });
@@ -506,7 +528,7 @@ impl App {
             dropped = true;
         }
         if self.mouse_drag == Some(DraggedDivider::Dock) && self.refuse_row_change() {
-            self.mouse_drag = None;
+            self.abandon_dock_divider_drag();
             dropped = true;
         }
         if let Some(session_id) = self.prompt_row_target()
@@ -521,6 +543,13 @@ impl App {
         dropped
     }
 
+    /// End a divider drag without saving it, the split share back to what it
+    /// was when the drag began.
+    pub(crate) fn abandon_dock_divider_drag(&mut self) {
+        self.mouse_drag = None;
+        self.terminal_dock_pct = self.dock_drag_began_pct;
+    }
+
     fn current_row_view(&self) -> RowView {
         RowView {
             input_target: self.input_target,
@@ -530,8 +559,9 @@ impl App {
     }
 
     /// Hold the selected agent's view when the card comes up over its row and
-    /// give it back when the card lifts, unless the selection moved meanwhile.
-    /// True when work the card came up over was dropped.
+    /// give it back when a take-over lifts the card. Leaving the row lets go
+    /// of it, and serving ending lands the row windowed and not typing
+    /// instead. True when work the card came up over was dropped.
     pub(crate) fn keep_row_view(&mut self) -> bool {
         let dropped = self.drop_work_the_card_came_up_over();
         let selected = self.selected_session().map(|session| session.id.clone());
@@ -540,6 +570,10 @@ impl App {
             (Some((held, view)), Some(selected)) if held == selected => {
                 if covered {
                     self.held_row_view = Some((held, view));
+                } else if self.pty_ownership_conn_id().is_none() {
+                    // Serving ended with no stop to land it (the serve retired
+                    // itself): nothing was taken over, so nothing is given back.
+                    self.land_windowed_and_not_typing();
                 } else if self.row_probe_of(&selected).is_some() {
                     self.input_target = view.input_target;
                     self.fullscreen_overlay = view.fullscreen_overlay;
@@ -574,10 +608,21 @@ impl App {
             return;
         }
         self.held_row_view = None;
-        if typing {
+        self.land_windowed_and_not_typing();
+    }
+
+    /// Leave the agent or terminal typed into or shown maximized.
+    fn land_windowed_and_not_typing(&mut self) {
+        if matches!(
+            self.input_target,
+            InputTarget::Agent | InputTarget::Terminal
+        ) {
             self.input_target = InputTarget::None;
         }
-        if maximized {
+        if matches!(
+            self.fullscreen_overlay,
+            FullscreenOverlay::Agent | FullscreenOverlay::Terminal
+        ) {
             self.fullscreen_overlay = FullscreenOverlay::None;
         }
         self.mark_frame_dirty();
@@ -743,6 +788,9 @@ mod tests {
     /// The actions that may act under the card, and why. Every other action,
     /// from a key or the palette, is refused out loud.
     const ALLOWED: &[(Action, &str)] = &[
+        (Action::FocusAgent, LOOKS),
+        (Action::InteractAgent, LOOKS),
+        (Action::ToggleFullscreen, LOOKS),
         (Action::MoveDown, "moves the selection"),
         (Action::MoveUp, "moves the selection"),
         (Action::NextTab, "selecting a tab is viewing"),
@@ -906,6 +954,10 @@ mod tests {
         ),
     ];
 
+    /// Why an action is allowed when it shows the card and starts nothing,
+    /// which the walk also holds it to by saying no refusal.
+    const LOOKS: &str = "looks at the row, showing its card and starting nothing";
+
     /// Allowed actions this walk does not run, each for what running it would
     /// reach outside the test.
     const NOT_RUN: &[(Action, &str)] = &[
@@ -955,7 +1007,9 @@ mod tests {
 
     /// One act under the card, judged: the row and what a take-over gives
     /// back are untouched, and an act not on the allowed list says it was refused
-    /// and opens nothing.
+    /// and opens nothing. An act that moves the selection off the row resets
+    /// what a take-over gives back, as leaving the row does, so that alone may
+    /// differ then.
     fn judge(
         app: &mut App,
         seat: &TuiOwnership,
@@ -968,6 +1022,10 @@ mod tests {
             std::time::Duration::from_secs(60),
         );
         act(app);
+        let left_the_row = app
+            .selected_session()
+            .is_none_or(|session| session.id != SESSION)
+            || app.selected_terminal_row().is_some();
         let _ = render_rows(app, 160, 40);
         if !allowed(action) {
             let said: Vec<String> = app
@@ -990,10 +1048,22 @@ mod tests {
                 "{what}: opened {:?}",
                 std::mem::discriminant(&app.prompt)
             );
+        } else if ALLOWED.contains(&(action, LOOKS)) {
+            assert!(
+                !said(app).contains("so nothing changed"),
+                "{what}: looking was refused: {}",
+                said(app)
+            );
         }
         settle(app);
         let _ = render_rows(app, 160, 40);
-        assert_eq!(row_state(app, seat), before, "{what}");
+        let after = row_state(app, seat);
+        if left_the_row {
+            let view = before.view;
+            assert_eq!(RowState { view, ..after }, before, "{what}");
+        } else {
+            assert_eq!(after, before, "{what}");
+        }
         assert!(app.agent_row_card().is_some(), "{what}: the card came down");
     }
 
@@ -1044,13 +1114,7 @@ mod tests {
                             continue;
                         };
                         let what = format!("{state}: {:?} typed at the maximized pane", def.action);
-                        // Leaving the maximized view is this window's own view.
-                        let action = if def.action == Action::ToggleFullscreen {
-                            Action::CloseOverlay
-                        } else {
-                            def.action
-                        };
-                        judge(&mut app, &seat, &what, action, |app| {
+                        judge(&mut app, &seat, &what, def.action, |app| {
                             app.focus = FocusPane::Center;
                             app.fullscreen_overlay = FullscreenOverlay::Agent;
                             app.input_target = InputTarget::Agent;
@@ -1079,12 +1143,7 @@ mod tests {
                             continue;
                         }
                         let what = format!("{state}: {:?} in {scope:?} ({key:?})", def.action);
-                        // On the agent's row in the list these two only show
-                        // its card, which is looking and refused to nobody.
-                        let looks = pane == FocusPane::Left
-                            && matches!(def.action, Action::FocusAgent | Action::ToggleFullscreen);
-                        let action = if looks { Action::MoveDown } else { def.action };
-                        judge(&mut app, &seat, &what, action, |app| {
+                        judge(&mut app, &seat, &what, def.action, |app| {
                             app.focus = pane;
                             app.handle_key(key).unwrap();
                         });
@@ -1305,10 +1364,7 @@ mod tests {
     fn finish(action: Action) -> Finish {
         use dux_core::engine::BranchRename;
         match action {
-            Action::FocusAgent
-            | Action::InteractAgent
-            | Action::ToggleFullscreen
-            | Action::ReconnectAgent
+            Action::ReconnectAgent
             | Action::ForceReconnectAgent
             | Action::RerunStartupCommandOnAgent
             | Action::ToggleAgentAutoReopen
@@ -1587,6 +1643,7 @@ mod tests {
         let (mut app, seat) = driving();
         let divider = app.mouse_layout.dock_divider.expect("the split's divider");
         let stack = app.mouse_layout.center_stack.expect("the stack");
+        let began = app.terminal_dock_pct;
         mouse(
             &mut app,
             MouseEventKind::Down(left),
@@ -1595,7 +1652,10 @@ mod tests {
         );
         assert_eq!(app.mouse_drag, Some(crate::app::DraggedDivider::Dock));
         browser_takes(&seat);
-        let before = row_state(&app, &seat);
+        let before = RowState {
+            pct: began,
+            ..row_state(&app, &seat)
+        };
         let saved = app.engine.config.ui.terminal_dock_pct;
         quiet(&mut app);
         for row in [divider.y - 3, stack.y] {
@@ -1890,5 +1950,262 @@ mod tests {
             crate::app::test_support::test_app(crate::app::test_support::default_bindings());
         let _ = render_rows(&mut app, 160, 40);
         assert!(app.pty_ownership_conn_id().is_none(), "nothing is serving");
+    }
+
+    /// The default key that reaches `action` in `scope`.
+    fn key_for(app: &App, action: Action, scope: BindingScope) -> KeyEvent {
+        BINDING_DEFS
+            .iter()
+            .filter(|def| def.action == action)
+            .flat_map(|def| def.default_keys)
+            .map(|combination| KeyEvent::new(*combination.codes.first(), combination.modifiers))
+            .find(|key| app.bindings.lookup(key, scope) == Some(action))
+            .expect("a default key reaches the action")
+    }
+
+    /// Every way of looking at a covered agent works in each state the card
+    /// can be up in, says nothing about a refusal, and starts, launches,
+    /// reconnects or claims none of the row.
+    #[test]
+    fn looking_at_a_covered_agent_is_never_refused_and_starts_nothing() {
+        type Look = fn(&mut App, &str);
+        let looks: [(&str, Look); 4] = [
+            ("palette show-agent from the list", |app, state| {
+                app.focus = FocusPane::Left;
+                app.execute_command("show-agent").unwrap();
+                assert_eq!(app.focus, FocusPane::Center, "{state}");
+            }),
+            ("the list's interact key", |app, state| {
+                app.focus = FocusPane::Left;
+                let key = key_for(app, Action::InteractAgent, BindingScope::Left);
+                app.handle_key(key).unwrap();
+                assert_eq!(app.focus, FocusPane::Center, "{state}");
+                assert_eq!(app.input_target, InputTarget::None, "{state}: typing");
+                let live = app.engine.providers.contains_key(TabIdRef::new(SLOT));
+                let maximized = app.fullscreen_overlay == FullscreenOverlay::Agent;
+                assert_eq!(maximized, live, "{state}: maximized as on a driven row");
+            }),
+            (
+                "the fullscreen key on the agent pane, twice",
+                |app, state| {
+                    app.focus = FocusPane::Center;
+                    let key = key_for(app, Action::ToggleFullscreen, BindingScope::Center);
+                    app.handle_key(key).unwrap();
+                    assert_ne!(
+                        app.fullscreen_overlay,
+                        FullscreenOverlay::None,
+                        "{state}: not maximized"
+                    );
+                    let rows = render_rows(app, 160, 40);
+                    assert!(rows.iter().any(|row| row.contains("Take over")), "{state}");
+                    app.handle_key(key).unwrap();
+                    assert_eq!(
+                        app.fullscreen_overlay,
+                        FullscreenOverlay::None,
+                        "{state}: still maximized"
+                    );
+                },
+            ),
+            ("a double click on the card", |app, state| {
+                app.focus = FocusPane::Center;
+                let cover = app.mouse_layout.card_cover.expect("the card is drawn");
+                for _ in 0..2 {
+                    for kind in [
+                        MouseEventKind::Down(MouseButton::Left),
+                        MouseEventKind::Up(MouseButton::Left),
+                    ] {
+                        mouse(app, kind, cover.x + 1, cover.y + 1);
+                    }
+                }
+                // The card takes the pointer, so the double click is spent on it.
+                assert_eq!(app.fullscreen_overlay, FullscreenOverlay::None, "{state}");
+            }),
+        ];
+        for (state, mut app, seat) in covered_states() {
+            for (what, look) in looks {
+                let what = format!("{state}: {what}");
+                settle(&mut app);
+                let _ = render_rows(&mut app, 160, 40);
+                let before = row_state(&app, &seat);
+                quiet(&mut app);
+                look(&mut app, &what);
+                let _ = render_rows(&mut app, 160, 40);
+                assert!(
+                    !said(&app).contains("so nothing changed"),
+                    "{what}: refused: {}",
+                    said(&app)
+                );
+                assert!(app.agent_row_card().is_some(), "{what}: the card came down");
+                settle(&mut app);
+                let _ = render_rows(&mut app, 160, 40);
+                assert_eq!(row_state(&app, &seat), before, "{what}");
+            }
+        }
+    }
+
+    /// The serve retiring by itself while the card is up gives back none of a
+    /// view that takes the keyboard: the user lands windowed and not typing.
+    #[test]
+    fn the_serve_retiring_under_the_card_lands_windowed_and_not_typing() {
+        let (mut app, _seat) = covered(Driver::Browser);
+        app.held_row_view = Some((
+            SESSION.to_string(),
+            RowView {
+                input_target: InputTarget::Agent,
+                fullscreen_overlay: FullscreenOverlay::Agent,
+                session_surface: SessionSurface::Agent,
+            },
+        ));
+        let _ = render_rows(&mut app, 160, 40);
+        assert!(app.agent_row_card().is_some());
+        app.companion = None;
+        let _ = render_rows(&mut app, 160, 40);
+        assert_eq!(
+            app.input_target,
+            InputTarget::None,
+            "typing after retirement"
+        );
+        assert_eq!(
+            app.fullscreen_overlay,
+            FullscreenOverlay::None,
+            "maximized after retirement"
+        );
+        assert!(app.held_row_view.is_none());
+    }
+
+    /// A change in the same burst of input as the take-over, before any frame
+    /// has carried the claim, applies on the claim it lands itself.
+    #[test]
+    fn a_row_change_right_after_take_over_applies_once_the_claim_lands() {
+        let (mut app, seat) = covered(Driver::Browser);
+        app.focus = FocusPane::Center;
+        app.take_over_focused_pty();
+        quiet(&mut app);
+        app.execute_command("rename-agent").unwrap();
+        assert!(
+            !said(&app).contains("so nothing changed"),
+            "refused right after take-over: {}",
+            said(&app)
+        );
+        assert!(matches!(app.prompt, PromptState::RenameSession { .. }));
+        assert!(
+            seat.owners
+                .is_owner(SLOT, app.pty_ownership_conn_id().unwrap())
+        );
+        assert!(app.pending_pty_takeover.is_none(), "the arm was spent");
+    }
+
+    /// A divider drag the card cuts off mid-move leaves the split share as it
+    /// was when the drag began, and config.toml as it was.
+    #[test]
+    fn a_divider_drag_cut_off_by_the_card_puts_the_split_share_back() {
+        let left = MouseButton::Left;
+        let (mut app, seat) = driving();
+        let divider = app.mouse_layout.dock_divider.expect("the split's divider");
+        let began = app.terminal_dock_pct;
+        let saved = app.engine.config.ui.terminal_dock_pct;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(left),
+            divider.x + 5,
+            divider.y,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(left),
+            divider.x + 5,
+            divider.y - 3,
+        );
+        assert_ne!(app.terminal_dock_pct, began, "the drag moved the divider");
+        browser_takes(&seat);
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(left),
+            divider.x + 5,
+            divider.y - 4,
+        );
+        assert!(app.mouse_drag.is_none(), "the drag was abandoned");
+        assert_eq!(app.terminal_dock_pct, began);
+        assert_eq!(app.engine.config.ui.terminal_dock_pct, saved);
+    }
+
+    /// Leaving the covered row and coming back resets what a take-over gives
+    /// back to what the same trip gives with this window driving.
+    #[test]
+    fn leaving_a_covered_row_resets_what_take_over_gives_back() {
+        let trip = |app: &mut App| {
+            app.fullscreen_overlay = FullscreenOverlay::None;
+            app.input_target = InputTarget::None;
+            app.focus = FocusPane::Left;
+            app.reselect_left_terminal("solo");
+            app.reconcile_center_target();
+            let _ = render_rows(app, 160, 40);
+            app.reselect_left_session(SESSION);
+            app.reconcile_center_target();
+            let _ = render_rows(app, 160, 40);
+        };
+        let view = |app: &App| (app.input_target, app.fullscreen_overlay, app.focused_part());
+        let mut views = Vec::new();
+        for card_up in [false, true] {
+            let (mut app, seat) = driving();
+            crate::app::test_support::add_terminal(
+                &mut app,
+                "solo",
+                dux_core::model::TerminalOwner::Standalone,
+            );
+            app.rebuild_left_items();
+            app.reselect_left_session(SESSION);
+            app.fullscreen_overlay = FullscreenOverlay::Terminal;
+            app.input_target = InputTarget::Terminal;
+            let _ = render_rows(&mut app, 160, 40);
+            if card_up {
+                browser_takes(&seat);
+                let _ = render_rows(&mut app, 160, 40);
+                assert!(app.agent_row_card().is_some());
+            }
+            trip(&mut app);
+            if card_up {
+                app.focus = FocusPane::Center;
+                app.take_over_focused_pty();
+                let _ = render_rows(&mut app, 160, 40);
+                let _ = render_rows(&mut app, 160, 40);
+                assert!(app.agent_row_card().is_none());
+            }
+            views.push(view(&app));
+        }
+        assert_eq!(views[1], views[0]);
+    }
+
+    /// The footer under the card offers the keys that still work and none
+    /// that would be refused or would not do what it says: the list's focus
+    /// key stays, and the pane's focus key is not offered as typing.
+    #[test]
+    fn the_footer_under_the_card_offers_what_still_works() {
+        let (mut app, _seat) = covered(Driver::Browser);
+        app.focus = FocusPane::Left;
+        let list = app.footer_hints_for(crate::keybindings::HintContext::LeftSession);
+        let words: Vec<&str> = list.iter().map(|(_, word)| *word).collect();
+        assert!(words.contains(&"Focus"), "{words:?}");
+        assert!(
+            !words.contains(&"Rename") && !words.contains(&"Delete"),
+            "{words:?}"
+        );
+        let pane = app.footer_hints_for(crate::keybindings::HintContext::Center);
+        let words: Vec<&str> = pane.iter().map(|(_, word)| *word).collect();
+        assert!(!words.contains(&"Type"), "{words:?}");
+        assert!(words.contains(&"Fullscreen"), "{words:?}");
+    }
+
+    /// The take-over line names what is taken over: the agent over an agent's
+    /// row, whichever part the card covers.
+    #[test]
+    fn taking_over_an_agents_row_says_agent() {
+        for driver in [Driver::Browser, Driver::Nobody] {
+            let (mut app, _seat) = covered(driver);
+            quiet(&mut app);
+            app.take_over_focused_pty();
+            assert!(said(&app).contains("this agent"), "{}", said(&app));
+            assert!(!said(&app).contains("erminal"), "{}", said(&app));
+        }
     }
 }

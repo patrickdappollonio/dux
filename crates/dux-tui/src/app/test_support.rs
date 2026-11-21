@@ -376,6 +376,7 @@ pub(crate) fn test_app(bindings: RuntimeBindings) -> App {
         mouse_layout: MouseLayoutState::default(),
         overlay_layout: OverlayMouseLayoutState::default(),
         mouse_drag: None,
+        dock_drag_began_pct: 0,
         row_drag: None,
         tab_drag: None,
         last_tab_strip: None,
