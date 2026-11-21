@@ -182,7 +182,7 @@ export function useProjectDrivenElsewhere(projectId: string | null): DrivenElsew
 export function drivenElsewhereHint(driven: readonly DrivenElsewhere[]): string | null {
   if (driven.length === 0) return null
   if (driven.length > 1) {
-    return "Other devices are driving agents or terminals of this project. Take them over on this device first."
+    return "Agents or terminals of this project are being driven from another device. Take them over on this device first."
   }
   const [part] = driven
   const who = part.device ?? "Another device"
