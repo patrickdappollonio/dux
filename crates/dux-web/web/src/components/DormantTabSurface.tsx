@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button"
 import { DormantTabCard } from "@/components/DormantTabCard"
 import { Welcome } from "@/components/Welcome"
 import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
+import { StartAgentButton } from "@/components/StartAgentButton"
 import { startDormantTab } from "@/lib/store"
 import type { TabRunVerdict } from "@/lib/types"
 
@@ -53,12 +53,13 @@ export function DormantTabSurface({
             </a>
           </p>
           {/* Same touch floor as the card's own button; see the note there. */}
-          <Button
-            onClick={() => startDormantTab(sessionId, tabId)}
+          <StartAgentButton
+            sessionId={sessionId}
+            onStart={() => startDormantTab(sessionId, tabId)}
             className="max-md:min-h-11 pointer-coarse:min-h-11"
           >
             Start session
-          </Button>
+          </StartAgentButton>
         </div>
       }
     />

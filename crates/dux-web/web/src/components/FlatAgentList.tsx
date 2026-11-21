@@ -978,10 +978,22 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
       terminals,
     )
     if (!plan) return
-    if (!manual) setAgentSort("manual")
-    if (plan.agentOrder) reorderAgents(plan.agentOrder)
-    if (Object.keys(plan.placements).length > 0) placeTerminalsInList(plan.placements)
-    if (plan.terminalOrder) reorderTerminals(plan.terminalOrder)
+    const { agentOrder, placements, terminalOrder } = plan
+    const settle = () => {
+      if (!manual) setAgentSort("manual")
+      if (agentOrder) reorderAgents(agentOrder)
+      if (Object.keys(placements).length > 0) placeTerminalsInList(placements)
+    }
+    // The terminal order is the one part of a drop the server may refuse (it
+    // moves the terminals of an agent another device drives), so the sort mode
+    // and the placements wait for it: a refused drop leaves nothing applied.
+    if (terminalOrder) {
+      void Promise.resolve(reorderTerminals(terminalOrder)).then((took) => {
+        if (took !== false) settle()
+      })
+    } else {
+      settle()
+    }
   }
 
   return (

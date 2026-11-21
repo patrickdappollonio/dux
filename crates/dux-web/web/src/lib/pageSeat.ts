@@ -11,7 +11,9 @@
 // Every request that can change something names it too (`PAGE_HEADER`, set by
 // `apiFetch`), which is how the server knows a change comes from the page that
 // drives the row. An editor tab also names the page that opened it
-// (`openerPage.ts`), so it may write exactly while that page drives.
+// (`openerPage.ts`), so it may write exactly while that page drives. Only an
+// editor tab does: the opener's ids are held while the tab is the standalone
+// editor and dropped the moment it becomes anything else (`setEditorSurface`).
 
 export const PAGE_HEADER = "x-dux-page"
 
@@ -23,6 +25,7 @@ const MAX_PAGES = 4
 
 let seat: string | null = null
 let handed: string[] = []
+let editorSurface = false
 
 function mint(): string {
   // getRandomValues works on the plain-HTTP origins dux is often served on,
@@ -38,9 +41,19 @@ export function pageSeatId(): string {
   return seat
 }
 
+/// Say whether this tab is the standalone editor right now. Leaving it drops
+/// the opener's ids for good: a tab that became the ordinary app, because its
+/// target vanished or its address was edited, acts as itself alone.
+export function setEditorSurface(on: boolean): void {
+  editorSurface = on
+  if (!on) handed = []
+}
+
 /// Take the ids the page that opened this tab acts as. True when they differ
-/// from the ones already held, so a caller knows a new answer is worth asking for.
+/// from the ones already held, so a caller knows a new answer is worth asking
+/// for. Nothing is taken while this tab is not the standalone editor.
 export function adoptOpenerPages(ids: readonly unknown[]): boolean {
+  if (!editorSurface) return false
   const own = pageSeatId()
   const next = ids
     .filter((id): id is string => typeof id === "string" && PAGE_ID.test(id) && id !== own)

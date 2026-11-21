@@ -675,17 +675,32 @@ describe("FlatAgentList drag from any sort mode", () => {
     expect(goneRow?.getAttribute("aria-roledescription")).toBeNull()
   })
 
-  it("a drop from name mode persists the DISPLAYED order with the move, totally, and flips to manual", () => {
+  it("a drop from name mode persists the DISPLAYED order with the move, totally, and flips to manual", async () => {
     render(<FlatAgentList handlers={handlers} />)
     // Displayed (name) = [alpha, t-a, mike, zeta, t-z] with [gone] appended
     // as the tail. Dragging zeta onto alpha's slot within that view keeps the
     // whole screen as the user left it: the agents in that order, and each
     // terminal after the agent it now follows.
+    reorderTerminalsMock.mockResolvedValueOnce(true)
     drop(listDragEnd(), "agent:zeta", "agent:alpha")
-    expect(setAgentSortMock).toHaveBeenCalledWith("manual")
+    expect(reorderTerminalsMock).toHaveBeenCalledWith(["t-a", "t-z"])
+    await vi.waitFor(() => expect(setAgentSortMock).toHaveBeenCalledWith("manual"))
     expect(reorderAgentsMock).toHaveBeenCalledWith(["zeta", "alpha", "mike", "gone"])
     expect(placeTerminalsInListMock).toHaveBeenCalledWith({ "t-a": "alpha", "t-z": "mike" })
-    expect(reorderTerminalsMock).toHaveBeenCalledWith(["t-a", "t-z"])
+  })
+
+  // The terminal order is the part the server may refuse, for an agent another
+  // device drives; nothing else of the drop is written when it does.
+  it("a drop whose terminal order is refused leaves the sort mode and the placements alone", async () => {
+    render(<FlatAgentList handlers={handlers} />)
+    const refused = Promise.resolve(false)
+    reorderTerminalsMock.mockReturnValueOnce(refused)
+    drop(listDragEnd(), "agent:zeta", "agent:alpha")
+    await refused
+    await Promise.resolve()
+    expect(setAgentSortMock).not.toHaveBeenCalled()
+    expect(reorderAgentsMock).not.toHaveBeenCalled()
+    expect(placeTerminalsInListMock).not.toHaveBeenCalled()
   })
 
   it("a drop in manual mode keeps the base-order move semantics and does not re-flip", () => {

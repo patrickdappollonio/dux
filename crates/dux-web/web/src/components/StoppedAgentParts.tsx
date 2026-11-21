@@ -1,3 +1,4 @@
+import { StartAgentButton } from "@/components/StartAgentButton"
 import { Button } from "@/components/ui/button"
 import {
   Popover,
@@ -70,13 +71,15 @@ export function StoppedAgentBand({
         </Popover>
       ) : null}
       {withStart && slotTab ? (
-        <Button
+        <StartAgentButton
+          sessionId={sessionId}
+          reason="hint"
           size="sm"
           className={BAND_BUTTON}
-          onClick={() => startStoppedAgent(sessionId, slotTab.id)}
+          onStart={() => startStoppedAgent(sessionId, slotTab.id)}
         >
           Start
-        </Button>
+        </StartAgentButton>
       ) : null}
     </div>
   )
@@ -116,7 +119,12 @@ export function StoppedAgentShortCard({
           How resume works&nbsp;&rarr;
         </a>
       </p>
-      <Button onClick={() => startStoppedAgent(sessionId, tab.id)}>Start</Button>
+      <StartAgentButton
+        sessionId={sessionId}
+        onStart={() => startStoppedAgent(sessionId, tab.id)}
+      >
+        Start
+      </StartAgentButton>
     </div>
   )
 }

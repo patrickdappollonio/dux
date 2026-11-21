@@ -40,6 +40,10 @@ export type DropOutcome =
   /// Never saved. The reason is the server's own words, not a generic one.
   | { kind: "refused"; requestedName: string; reason: string }
 
+/// Why the files after one refused because another device drives the row were
+/// not sent: each would get the same answer, which the first already carries.
+export const NOT_SENT_SAME_REASON = "not sent, for the same reason"
+
 /// Does the server's own text already advise a retry? Matched within one
 /// sentence so "try ... again" cannot be assembled out of two unrelated ones.
 const ADVISES_RETRY = /\btry\b[^.!?]*\bagain\b/i

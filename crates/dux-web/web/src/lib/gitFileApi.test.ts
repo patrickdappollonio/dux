@@ -348,4 +348,32 @@ describe("discardMany", () => {
       { path: "locked.txt", message: "Unstage the file first." },
     ])
   })
+
+  // Another device drives the agent: every path left would get the same
+  // answer, so the batch ends there and says how many it never sent.
+  it("stops at the refusal that says another device drives the agent", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+      text: async () => "",
+      headers: { get: () => null },
+    } as unknown as Response)
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 423,
+      json: async () => ({}),
+      text: async () => "This agent is being driven from Firefox on Linux right now.",
+      headers: { get: () => null },
+    } as unknown as Response)
+
+    const result = await git.discardMany("s1", ["a.txt", "b.txt", "c.txt"], {})
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result.done).toEqual(["a.txt"])
+    expect(result.failed).toEqual([])
+    expect(result.stopped).toEqual({
+      message: "This agent is being driven from Firefox on Linux right now.",
+      unsent: 2,
+    })
+  })
 })

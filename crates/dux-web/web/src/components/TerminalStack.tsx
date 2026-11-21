@@ -420,6 +420,7 @@ function TerminalPart(props: TerminalPartProps) {
     takeOver,
   } = useTerminalOwnership({
     id,
+    row,
     kind,
     conn,
     // Who the spine says drives this pty: the only thing that can correct a device

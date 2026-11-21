@@ -119,7 +119,7 @@ describe("DeleteProjectDialog", () => {
         device: "the dux TUI",
         address: null,
         verified: true,
-        driving: true,
+        driving: false,
         target: { kind: "terminal", id: "term-9" },
         key: "k1",
       },

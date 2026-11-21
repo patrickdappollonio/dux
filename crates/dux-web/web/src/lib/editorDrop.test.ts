@@ -195,6 +195,23 @@ describe("performTreeDrop", () => {
     expect(finals[0].message).toBe("Saved 2 files to assets.")
   })
 
+  it("sends nothing more once a file is refused because another device drives the row", async () => {
+    const driven = "This agent is being driven from Firefox on Linux right now."
+    const { deps, calls, finals } = harness((file) =>
+      file.name === "a.png" ? ok(file.name) : Promise.reject(new FileDropApiError(driven, 423)),
+    )
+    await performTreeDrop("assets", justFiles(f("a.png"), f("b.png"), f("c.png")), deps)
+
+    expect(calls.filter((call) => call.startsWith("upload:"))).toEqual([
+      "upload:a.png->assets",
+      "upload:b.png->assets",
+    ])
+    // One report, with the server's sentence once.
+    expect(finals).toHaveLength(1)
+    expect(finals[0].message.split(driven.slice(0, -1))).toHaveLength(2)
+    expect(finals[0].message).toContain("c.png (not sent, for the same reason)")
+  })
+
   it("raises a spinner before EACH file, not once for the whole drop", async () => {
     // Two things ride on this, and only one of them is progress. The busy
     // toast's leak guard is armed for 60 seconds and is only re-armed when

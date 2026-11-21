@@ -198,6 +198,8 @@ function discardResultToast(
     // The server's count of what each done folder actually took.
     deleted?: Record<string, number>
     failed: { path: string; message: string }[]
+    // The batch ended early: another device drives the agent.
+    stopped?: { message: string; unsent: number }
   },
   rows: readonly ChangedFileView[],
 ): void {
@@ -215,6 +217,18 @@ function discardResultToast(
         diff_excluded: false,
       },
   )
+  if (result.stopped) {
+    const { message, unsent } = result.stopped
+    notifyError(
+      result.done.length === 0
+        ? prose`Nothing was discarded. ${message}`
+        : prose`${discardOutcome(doneRows, result.deleted)} The other ${formatRegularCount(
+            unsent,
+            "row",
+          )} ${unsent === 1 ? "was" : "were"} not discarded. ${message}`,
+    )
+    return
+  }
   if (result.failed.length === 0) {
     notifySuccess(discardOutcome(doneRows, result.deleted))
     return
@@ -243,13 +257,15 @@ interface BulkTransaction {
   dropActed: (section: "staged" | "unstaged", paths: string[]) => void
 }
 
+/// Whether the request ran. A refused one changed nothing, so nothing that
+/// describes its outcome may follow it.
 async function runBulkTransaction({
   verb,
   sessionId,
   paths,
   rows,
   dropActed,
-}: BulkTransaction): Promise<void> {
+}: BulkTransaction): Promise<boolean> {
   const section = verb === "stage" ? "unstaged" : "staged"
   try {
     const result =
@@ -258,10 +274,12 @@ async function runBulkTransaction({
         : await git.unstageMany(sessionId, paths)
     dropActed(section, paths)
     bulkResultToast(verb, result, rows)
+    return true
   } catch (error) {
     notifyError(
       error instanceof Error ? error.message : `could not ${verb} the files`,
     )
+    return false
   }
 }
 
@@ -280,11 +298,14 @@ async function runDiscardTransaction({
   confirmations,
   rows,
   dropActed,
-}: DiscardTransaction): Promise<void> {
+}: DiscardTransaction): Promise<boolean> {
   // What the user confirmed for each folder travels with its request.
   const result = await git.discardMany(sessionId, paths, confirmations)
-  dropActed("unstaged", paths)
+  // A batch stopped because another device drives the agent keeps the checks
+  // of the rows it never discarded: they are still there to act on.
+  dropActed("unstaged", result.stopped ? result.done : paths)
   discardResultToast(result, rows)
+  return result.stopped === undefined
 }
 
 // Why each selected row a bulk action will leave out is left out, in the
@@ -429,14 +450,14 @@ export function useChangedFilesController(
         : []
     setBusy(verb)
     try {
-      await runBulkTransaction({
+      const ran = await runBulkTransaction({
         verb,
         sessionId,
         paths,
         rows: verb === "stage" ? actionable.unstaged : actionable.staged,
         dropActed,
       })
-      const notice = bulkLeftOutNotice(leftOut)
+      const notice = ran ? bulkLeftOutNotice(leftOut) : null
       if (notice) notifyInfo(notice)
     } finally {
       setBusy(null)
@@ -456,14 +477,14 @@ export function useChangedFilesController(
     )
     setBusy("discard")
     try {
-      await runDiscardTransaction({
+      const ran = await runDiscardTransaction({
         sessionId,
         paths,
         confirmations,
         rows: model.actionable.unstaged,
         dropActed,
       })
-      const notice = bulkLeftOutNotice(leftOut)
+      const notice = ran ? bulkLeftOutNotice(leftOut) : null
       if (notice) notifyInfo(notice)
     } finally {
       setBusy(null)

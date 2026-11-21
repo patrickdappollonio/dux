@@ -396,7 +396,7 @@ describe("TaskManagerDialog", () => {
           device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
           address: "10.0.0.7",
           verified: false,
-          driving: true,
+          driving: false,
           target: { kind: "tab", id: "s1-slot", agent: "s1" },
           key: "k1",
         },

@@ -34,6 +34,7 @@ import {
   runIdentityConfirmedAs,
 } from "@/lib/serverRun"
 import { noteAgentPtyOwnership, useDuxSelector } from "@/lib/store"
+import { beginTakeoverFlight } from "@/lib/takeoverFlight"
 import type { ConnState } from "@/lib/types"
 
 import type {
@@ -49,6 +50,9 @@ type Verdict = "this" | "not" | "pending"
 export type TerminalOwnershipDeps = {
   /// The pty id: the session id for an agent, the terminal id for a companion.
   id: string
+  /// The key of the row this pty belongs to (`paneCover`), which is what a
+  /// take-over pressed here takes.
+  row: string
   kind: "agent" | "terminal"
   /// The EVENTS socket's state, which decides whether the other device's name
   /// can still be trusted.
@@ -125,6 +129,7 @@ export function useTerminalOwnership(
 ): TerminalOwnership {
   const {
     id,
+    row,
     kind,
     conn,
     spineInputOwner,
@@ -214,6 +219,15 @@ export function useTerminalOwnership(
   // flash the card back over a pane the user just took. A press names no
   // expected owner and so cannot be refused, which is why blocking is safe.
   const pressedClaimRef = useRef(false)
+  // What settles the flight a press opened for the row's changes
+  // (`takeoverFlight.ts`): landed once the server names this connection the
+  // driver, failed when it names another or the socket carrying the claim dies.
+  const flightRef = useRef<((landed: boolean) => void) | null>(null)
+  const settleFlight = (landed: boolean) => {
+    flightRef.current?.(landed)
+    flightRef.current = null
+  }
+  useEffect(() => () => settleFlight(false), [])
   // Whether the newest `pty.owner` this mount heard said nobody drives the pty.
   // A handshake superseded by that word is about a row that was let go of
   // between the snapshot and the event.
@@ -326,6 +340,7 @@ export function useTerminalOwnership(
     // The spine naming us is the grant landing, whichever way it reached us.
     if (spineInputOwner !== null && spineInputOwner === myConnId) {
       pressedClaimRef.current = false
+      settleFlight(true)
     }
     const named = takeoverDeviceOwnerRef.current
     if (named !== null && spineInputOwner !== named) setTakeoverDeviceFor(null, null)
@@ -386,6 +401,9 @@ export function useTerminalOwnership(
       }
       if (myConnIdRef.current === null && awaitsHandshake(ownerId, freed)) return
       const mine = isOwnerAfterHandover(ownerId, myConnIdRef.current)
+      // The row let go of by its last driver is still this press's to claim,
+      // so only a named driver is the answer.
+      if (!freed) settleFlight(mine)
       setRowConfirmed(mine)
       setOwnerPresent(!freed)
       // Through the channel, not an inline copy of its body: the verdict has
@@ -446,6 +464,7 @@ export function useTerminalOwnership(
       setOwnerPresent(owner === undefined ? true : owner !== null)
       // An old server that does not answer grants any claim, as it always has.
       setRowConfirmed(owner === undefined || owner === myConnId)
+      if (owner === myConnId) settleFlight(true)
     }
     // Self-succession, the blipped owner's half of "losing ownership is
     // sticky". The server reaps a dead connection by send failure, tens of
@@ -547,11 +566,13 @@ export function useTerminalOwnership(
       // A press whose socket died was never answered and never will be on this
       // connection, so it stops shielding the verdict along with the intent.
       pressedClaimRef.current = false
+      settleFlight(false)
       return
     }
     if (state === "closed") {
       takeoverIntent.clear()
       pressedClaimRef.current = false
+      settleFlight(false)
       return
     }
     if (state === "connecting" || state === "open") setConnectionLost(false)
@@ -566,6 +587,8 @@ export function useTerminalOwnership(
     if (takeoverIntent.read()) return
     takeoverIntent.arm()
     pressedClaimRef.current = true
+    settleFlight(false)
+    flightRef.current = beginTakeoverFlight(row)
     ownership.write(true)
     // Clear the other device's name as ownership is optimistically claimed,
     // honoring the invariant that the name only ever names a device we do NOT

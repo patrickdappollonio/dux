@@ -55,6 +55,8 @@ describe("a page answering the tabs it opened", () => {
 })
 
 describe("a tab asking the page that opened it", () => {
+  beforeEach(() => seat.setEditorSurface(true))
+
   it("is handed nothing when no page opened it", async () => {
     expect(opener.hasOpener()).toBe(false)
     expect(await opener.askOpenerForPages()).toBe(false)

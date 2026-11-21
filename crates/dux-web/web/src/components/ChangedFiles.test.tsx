@@ -2450,6 +2450,36 @@ describe("a folded folder row", () => {
     )
   })
 
+  // A bulk change the server refused changed nothing, so nothing may describe
+  // its outcome: no notice of what it left out, and the checks stay.
+  it("says only the refusal when a bulk stage or discard another device drives is refused", async () => {
+    const driven = "This agent is being driven from Firefox on Linux right now."
+    mockState = withWorktree()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Select node_modules"))
+    fireEvent.click(screen.getByLabelText("Select inner-wt"))
+
+    stageMany.mockRejectedValueOnce(new Error(driven))
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Stage 28,747/ }))
+    await act(() => (stageMany.mock.results[0]!.value as Promise<unknown>).catch(() => {}))
+    expect(notifyError).toHaveBeenCalledWith(driven)
+    expect(notifyInfo).not.toHaveBeenCalled()
+
+    notifyError.mockClear()
+    discardMany.mockResolvedValueOnce({
+      done: [],
+      failed: [],
+      stopped: { message: driven, unsent: 1 },
+    })
+    fireEvent.click(selectionMenu().getByRole("menuitem", { name: /Discard 28,747/ }))
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Discard" }))
+    await act(() => discardMany.mock.results[0]!.value as Promise<unknown>)
+    expect(notifyError).toHaveBeenCalledTimes(1)
+    expect(toastText(notifyError.mock.calls[0]![0])).toBe(`Nothing was discarded. ${driven}`)
+    expect(notifyInfo).not.toHaveBeenCalled()
+    expect(screen.getByLabelText("Select node_modules").getAttribute("aria-checked")).toBe("true")
+  })
+
   it("names the rows a mixed bulk discard left out", async () => {
     mockState = withWorktree()
     render(<ChangedFiles />)

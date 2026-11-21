@@ -646,6 +646,8 @@ describe("the standalone editor tab and who drives the agent", () => {
     const { resetOpenerVerdicts } = await import("@/lib/openerPage")
     const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
     resetOpenerVerdicts()
+    // The store is a double here, so nothing has said this tab is the editor.
+    ;(await import("@/lib/pageSeat")).setEditorSurface(true)
     openedBy("a".repeat(32))
     vi.mocked(fileApi.writable).mockResolvedValue(true)
     await seedState({ ownPtyConnIds: {}, ptyOwnership: {} })

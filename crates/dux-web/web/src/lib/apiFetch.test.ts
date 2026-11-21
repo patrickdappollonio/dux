@@ -62,12 +62,54 @@ describe("apiFetch", () => {
     expect(sent().get("a")).toBe("b")
 
     const opener = "b".repeat(32)
+    seat.setEditorSurface(true)
     expect(seat.adoptOpenerPages([opener, own, "short", 7])).toBe(true)
     await api.apiFetch("/api/v1/x", { method: "post" })
     expect(sent().get(seat.PAGE_HEADER)).toBe(`${own},${opener}`)
 
     await api.apiFetch("/api/v1/x", { method: "GET" })
     expect(sent().has(seat.PAGE_HEADER)).toBe(false)
+  })
+
+  it("holds a change to a row this page is taking over until the claim lands, and never sends it when the claim does not", async () => {
+    const { api, gate } = await load()
+    const flight = await import("./takeoverFlight")
+    await gate.initAuthGate()
+    const stage = () =>
+      api.apiFetch("/api/v1/sessions/s%201/git/stage", { method: "POST", body: "{}" })
+    const sentStages = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/git/stage")).length
+
+    const landed = flight.beginTakeoverFlight("agent:s 1")
+    const held = stage()
+    // Another row's change and a read of this one go straight out.
+    await api.apiFetch("/api/v1/sessions/other/git/stage", { method: "POST" })
+    await api.apiFetch("/api/v1/sessions/s%201/changes")
+    expect(sentStages()).toBe(1)
+    landed(true)
+    expect((await held).status).toBe(200)
+    expect(sentStages()).toBe(2)
+
+    const failed = flight.beginTakeoverFlight("agent:s 1")
+    const refused = stage()
+    failed(false)
+    const answer = await refused
+    expect(answer.status).toBe(423)
+    expect(await answer.text()).toMatch(/take-over .* did not go through.*nothing was changed/i)
+    expect(sentStages()).toBe(2)
+
+    vi.useFakeTimers()
+    try {
+      flight.beginTakeoverFlight("terminal:t1")
+      const late = api.apiFetch("/api/v1/projects/p1/terminals/t1/files/write", { method: "POST" })
+      await vi.advanceTimersByTimeAsync(flight.TAKEOVER_WAIT_MS + 1)
+      const answer = await late
+      expect(answer.status).toBe(423)
+      expect(await answer.text()).toMatch(/still taking .* over.*nothing was changed/i)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/files/write"))).toBe(false)
   })
 
   it("turns a 401 into a sign-out and an interruption the caller can recognise", async () => {

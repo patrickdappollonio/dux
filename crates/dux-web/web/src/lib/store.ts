@@ -119,6 +119,7 @@ import { statusToastAllowed } from "./statusRouting"
 import { resolveInstanceTitle } from "./instanceTitle"
 import { tabPosition, tabTitle } from "./tabTitle"
 import { agentRowKey, rowWatchedFor, subscribePaneCovers } from "./paneCover"
+import { isRowDriven } from "./rowDriven"
 import {
   type RawWorkspace,
   type Spine,
@@ -227,6 +228,7 @@ import type {
 } from "./types"
 import { sessionLabel, supportsBranchGit, workspaceProjectId } from "@/lib/agentWorkspace"
 import { lastPageControl } from "@/lib/pageControl"
+import { setEditorSurface } from "@/lib/pageSeat"
 import {
   renameBlockedReason,
   renamePayload,
@@ -1299,6 +1301,7 @@ let state: DuxState = {
   editorTargetGone: null,
   changes: emptyChanges(),
 }
+setEditorSurface(state.standaloneEditor)
 
 const listeners = new Set<() => void>()
 
@@ -1314,6 +1317,10 @@ function emit(): void {
 // changes screen opens and how a URL naming a deleted agent is recorded.
 function setState(patch: Partial<DuxState>): void {
   const next = { ...state, ...patch }
+  // An editor tab acts as the page that opened it only while it is one.
+  if (next.standaloneEditor !== state.standaloneEditor) {
+    setEditorSurface(next.standaloneEditor)
+  }
   // Arriving at an agent opens it afresh: whatever layout it was left in on
   // this page is forgotten, and the opening rule (memory, the address, a
   // stopped agent's terminal) decides again.
@@ -6897,21 +6904,29 @@ export function toggleSessionAutoReopen(
 
 // Ask the server to reconnect (relaunch) an agent. `force` starts a fresh
 // session with no resume args; the default resumes the prior conversation where
-// the provider supports it. `terminalEpoch` is bumped so the pane remounts and
-// re-subscribes: the reconnect swaps in a new provider and the attached
-// forwarder is dead, so even an already-focused pane must re-issue `subscribe`.
+// the provider supports it. Once the server has gone ahead, `terminalEpoch` is
+// bumped so the pane remounts and re-subscribes: the reconnect swaps in a new
+// provider and the attached forwarder is dead, so even an already-focused pane
+// must re-issue `subscribe`. A reconnect that was refused or failed swapped
+// nothing, so the pane and what it shows stay as they are.
 export function reconnectSession(
   sessionId: string,
   force: boolean,
   accepted: readonly string[] | null = null,
 ): Promise<AttachedBlocker[] | null> {
+  let went = true
   const answer = guardedChange(
     sessionsApi.reconnect(sessionId, force, accepted),
-    (e) =>
+    (e) => {
+      went = false
       notifyError(
         e instanceof Error ? e.message : "Could not reconnect the session.",
-      ),
-  )
+      )
+    },
+  ).then((blockers) => {
+    if (blockers === null && went) setState({ terminalEpoch: state.terminalEpoch + 1 })
+    return blockers
+  })
   // No latch: the reconnect dispatches a launch server-side, and dispatching is
   // what clears the tab's recorded failure, so the card cannot show for the
   // reconnect's own tab.
@@ -6929,7 +6944,6 @@ export function reconnectSession(
       // like every other one. Skipping it left the flag saying whatever the
       // previously focused pane said, and the URL was written from that.
       ...theaterPatch(reconnectTarget),
-      terminalEpoch: state.terminalEpoch + 1,
     }),
   )
   // This focuses an agent like any other selection, so the URL has to say so
@@ -9025,17 +9039,23 @@ export function reorderAgents(orderedIds: string[]): void {
 // Reorder every terminal as one global list, the twin of `reorderAgents`.
 // `orderedIds` must be the complete set of terminal ids of any owner, validated
 // server-side as a strict permutation. Terminal order is runtime-only, so it
-// resets to creation order on restart.
-export function reorderTerminals(orderedIds: string[]): void {
+// resets to creation order on restart. Resolves whether the server took the
+// order: it refuses one that moves the terminals of an agent another device
+// drives, and what a caller does on the strength of the new order waits for that.
+export function reorderTerminals(orderedIds: string[]): Promise<boolean> {
   setState({ pendingTerminalOrder: orderedIds })
-  terminalsApi.reorder(orderedIds).catch((e) => {
-    // A rejected reorder is never reconciled by a spine, so the overlay would
-    // linger forever. Clear it so the UI snaps back to the authoritative order,
-    // then surface the failure. Only this request's own overlay: a later
-    // reorder that replaced it is still waiting on its own answer.
-    if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
-    notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
-  })
+  return terminalsApi.reorder(orderedIds).then(
+    () => true,
+    (e) => {
+      // A rejected reorder is never reconciled by a spine, so the overlay would
+      // linger forever. Clear it so the UI snaps back to the authoritative order,
+      // then surface the failure. Only this request's own overlay: a later
+      // reorder that replaced it is still waiting on its own answer.
+      if (state.pendingTerminalOrder === orderedIds) setState({ pendingTerminalOrder: null })
+      notifyError(e instanceof Error ? e.message : "Could not reorder the terminals.")
+      return false
+    },
+  )
 }
 
 // Place project and standalone terminals' rows in the agents list, each right
@@ -9073,7 +9093,7 @@ export function reorderDock(sessionId: string, dockOrder: string[]): void {
   const next = dockOrder.filter((id) => mine.has(id))
   if (next.length !== mine.size) return
   let i = 0
-  reorderTerminals(base.map((id) => (mine.has(id) ? next[i++] : id)))
+  void reorderTerminals(base.map((id) => (mine.has(id) ? next[i++] : id)))
 }
 
 // One-shot reorder of every agent, distinct from `setAgentSort`, which sets the
@@ -9917,17 +9937,72 @@ export async function stopAllRunning(
   // One flat collection, so every terminal of every owner is reached by one
   // loop and no owner kind can be missed.
   const terminals = only?.terminals ?? (state.spine?.terminals ?? []).map((t) => t.id)
-  const [agentAnswers, terminalAnswers] = await Promise.all([
-    Promise.all(agents.map((id) => killSessionPty(id, true, accepted))),
-    Promise.all(terminals.map((id) => deleteTerminal(id, accepted))),
-  ])
-  const refusedAgents = agents.filter((_, i) => agentAnswers[i] !== null)
-  const refusedTerminals = terminals.filter((_, i) => terminalAnswers[i] !== null)
-  if (refusedAgents.length === 0 && refusedTerminals.length === 0) return null
-  const blockers = new Map<string, AttachedBlocker>()
-  for (const answer of [...agentAnswers, ...terminalAnswers]) {
-    for (const blocker of answer ?? []) blockers.set(blocker.key, blocker)
+  // One row of the agents list at a time: an agent with its own terminals, or
+  // a terminal that is a row of its own. A row another device drives refuses
+  // every stop in it the same way, so its first refusal ends that row's stops
+  // and the rows refused are said once, together, below.
+  const rows = new Map<string, { agent: string | null; terminals: string[] }>()
+  for (const id of agents) rows.set(agentRowKey(id), { agent: id, terminals: [] })
+  for (const id of terminals) {
+    const owner = findTerminalOwner(id)
+    const key =
+      owner?.kind === "session" ? agentRowKey(owner.sessionId) : `terminal:${id}`
+    const row = rows.get(key) ?? { agent: null, terminals: [] }
+    row.terminals.push(id)
+    rows.set(key, row)
   }
+  const refusedAgents: string[] = []
+  const refusedTerminals: string[] = []
+  const blockers = new Map<string, AttachedBlocker>()
+  const driven: string[] = []
+  const stop = async (request: Promise<unknown>, fallback: string): Promise<"went" | "attached" | "driven"> => {
+    try {
+      await request
+      return "went"
+    } catch (e) {
+      if (e instanceof AttachedError) {
+        for (const blocker of e.blockers) blockers.set(blocker.key, blocker)
+        return "attached"
+      }
+      if (isRowDriven(e)) {
+        driven.push(e.message)
+        return "driven"
+      }
+      notifyError(e instanceof Error ? e.message : fallback)
+      return "went"
+    }
+  }
+  await Promise.all(
+    [...rows.values()].map(async (row) => {
+      if (row.agent !== null) {
+        const answer = await stop(
+          sessionsApi.kill(row.agent, true, accepted),
+          "Could not kill the agent.",
+        )
+        if (answer === "attached") refusedAgents.push(row.agent)
+        if (answer === "driven") return
+      }
+      for (const id of row.terminals) {
+        const owner = findTerminalOwner(id)
+        if (owner === undefined) continue
+        const answer = await stop(
+          terminalDeleteRequest(owner, id, accepted),
+          "Could not close the terminal.",
+        )
+        if (answer === "attached") refusedTerminals.push(id)
+        if (answer === "driven") return
+      }
+    }),
+  )
+  if (driven.length > 0) {
+    const others = driven.length - 1
+    notifyError(
+      others === 0
+        ? `One agent or terminal was left running. ${driven[0]}`
+        : `${driven.length} agents or terminals were left running, each driven from another device. The first: ${driven[0]}`,
+    )
+  }
+  if (refusedAgents.length === 0 && refusedTerminals.length === 0) return null
   return {
     agents: refusedAgents,
     terminals: refusedTerminals,

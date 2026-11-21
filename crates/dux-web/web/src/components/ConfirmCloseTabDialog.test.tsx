@@ -262,7 +262,7 @@ describe("ConfirmCloseTabDialog", () => {
               device: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15",
               address: "100.64.0.2",
               verified: true,
-              driving: true,
+              driving: false,
               target: { kind: "tab", id: "s1", agent: "s1" },
               key: "k1",
             },
@@ -301,7 +301,7 @@ describe("ConfirmCloseTabDialog", () => {
       screen.getByRole("button", { name: "Cancel" }),
     )
     expect(screen.getByText("Safari on macOS").tagName).toBe("CODE")
-    expect(screen.getByText(/at 100\.64\.0\.2, typing in tab/)).toBeTruthy()
+    expect(screen.getByText(/at 100\.64\.0\.2, watching tab/)).toBeTruthy()
     expect(closeCloseTab).not.toHaveBeenCalled()
 
     fireEvent.click(override)

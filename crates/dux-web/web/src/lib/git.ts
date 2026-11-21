@@ -9,6 +9,22 @@
 
 import { apiFetch } from "./apiFetch"
 import { getConnectionId } from "./connection"
+import { isRowDriven } from "./rowDriven"
+
+/// A git request the server refused, with its status and its own sentence.
+export class GitRequestError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "GitRequestError"
+    this.status = status
+  }
+}
+
+async function refusal(resp: Response): Promise<GitRequestError> {
+  const detail = (await resp.text().catch(() => "")).trim()
+  return new GitRequestError(detail || `request failed (${resp.status})`, resp.status)
+}
 
 async function postGit(
   path: string,
@@ -30,10 +46,7 @@ async function postGit(
     headers,
     body: JSON.stringify(body),
   })
-  if (!resp.ok) {
-    const detail = (await resp.text().catch(() => "")).trim()
-    throw new Error(detail || `request failed (${resp.status})`)
-  }
+  if (!resp.ok) throw await refusal(resp)
 }
 
 // What a stage left out of the index on purpose: the repositories inside a
@@ -71,10 +84,7 @@ async function postGitJson<T>(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   })
-  if (!resp.ok) {
-    const detail = (await resp.text().catch(() => "")).trim()
-    throw new Error(detail || `request failed (${resp.status})`)
-  }
+  if (!resp.ok) throw await refusal(resp)
   return (await resp.json()) as T
 }
 
@@ -95,7 +105,9 @@ export const git = {
     postGitJson<BatchResult>(gitUrl(sessionId, "unstage-files"), { paths }),
   // Discard has no batch route: a refusal on one file must not block the rest.
   // Sequential because parallel checkouts contend on index.lock, at the accepted cost
-  // of one changed-files refresh and broadcast per file.
+  // of one changed-files refresh and broadcast per file. The one refusal that
+  // does end the batch is another device driving the agent: every path left
+  // would get the same answer, so they are not sent and `stopped` says so once.
   //
   // `kinds` names, for each row, what the user confirmed it was (see
   // `discard`); a row with no entry is sent as a file.
@@ -108,11 +120,12 @@ export const git = {
     // How many files each done path actually took, by the server's count.
     deleted: Record<string, number>
     failed: { path: string; message: string }[]
+    stopped?: { message: string; unsent: number }
   }> => {
     const done: string[] = []
     const deleted: Record<string, number> = {}
     const failed: { path: string; message: string }[] = []
-    for (const path of paths) {
+    for (const [index, path] of paths.entries()) {
       try {
         const answer = await postGitJson<{ files_deleted?: number }>(
           gitUrl(sessionId, "discard"),
@@ -121,6 +134,10 @@ export const git = {
         done.push(path)
         if (typeof answer.files_deleted === "number") deleted[path] = answer.files_deleted
       } catch (err) {
+        if (isRowDriven(err)) {
+          const stopped = { message: err.message, unsent: paths.length - index }
+          return { done, deleted, failed, stopped }
+        }
         failed.push({
           path,
           message: err instanceof Error ? err.message : "discard failed",

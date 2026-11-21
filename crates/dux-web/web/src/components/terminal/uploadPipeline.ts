@@ -24,8 +24,10 @@ import {
   pasteExceedsAttachmentLimit,
   pastePayload,
   tooLongToAttachReason,
+  NOT_SENT_SAME_REASON,
 } from "@/lib/fileDrop"
 import { FileDropApiError, uploadDroppedFile } from "@/lib/fileDropApi"
+import { isRowDriven } from "@/lib/rowDriven"
 import { notify, notifyBusy, notifyError } from "@/lib/notify"
 import { chip, prose } from "@/lib/prose"
 import { registerAttachCapability } from "@/lib/attachRegistry"
@@ -226,6 +228,18 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
               ? dropRefusalReason(e.status, e.message)
               : "the upload failed",
         })
+        // Another device drives the row: the files left would be refused the
+        // same way, so they are not sent and the one report says it once.
+        if (isRowDriven(e)) {
+          for (const unsent of files.slice(i + 1)) {
+            outcomes.push({
+              kind: "refused",
+              requestedName: unsent.name,
+              reason: NOT_SENT_SAME_REASON,
+            })
+          }
+          break
+        }
         continue
       }
       // The folder travels with this file, not with the drop: a terminal's

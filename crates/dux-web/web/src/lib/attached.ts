@@ -127,6 +127,20 @@ export function attachedLeadProse(): Prose {
   return ["Someone else is using this right now. Going ahead cuts them off:"]
 }
 
+/** The line above the blockers that are driving: the dialog offers no way
+ * past them, because only the device driving a row may change it. */
+export function attachedDrivingLeadProse(): Prose {
+  return [
+    "Another device is driving this right now, and only the device driving it can change it. Take it over on this device first, then try again:",
+  ]
+}
+
+/** Whether a blocker is one the dialog may offer to go ahead over: it merely
+ * has the row open. One that is driving is not. */
+export function mayGoAheadOver(blockers: readonly AttachedBlocker[]): boolean {
+  return blockers.every((blocker) => !blocker.driving)
+}
+
 // The terminal UI's fixed device label, for a terminal UI blocker that sent none.
 const TUI_DEVICE_LABEL = "the dux TUI"
 

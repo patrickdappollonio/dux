@@ -9,6 +9,7 @@ import {
   resetPtyOwnerEpochs,
 } from "@/lib/ptyOwnership"
 import { currentRunStamp, noteServerRunProbe } from "@/lib/serverRun"
+import { takeoverRefusalFor } from "@/lib/takeoverFlight"
 import type { PtySocket } from "@/lib/ptySocket"
 
 import { useTerminalOwnership } from "./ownership"
@@ -65,6 +66,7 @@ function setup(
     ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
       useTerminalOwnership({
         id: "p1",
+        row: "agent:p1",
         kind: opts.kind ?? "agent",
         conn: opts.conn ?? "open",
         spineInputOwner,
@@ -312,6 +314,34 @@ describe("seeding the verdict from the connected handshake", () => {
 })
 
 describe("taking over", () => {
+  // The row's controls are live from the press, and the server's claim lands a
+  // reconnect later: a change made in between waits on this.
+  it("holds the row's changes from the press until the server answers it", async () => {
+    const waited = () => takeoverRefusalFor("/api/v1/sessions/p1/git/stage")
+    const { view } = setup()
+    act(() => {
+      view.result.current.connId.write("mine")
+      notifyPtyOwner("p1", "theirs", 1, undefined)
+    })
+    expect(await waited()).toBeNull()
+
+    act(() => view.result.current.takeOver())
+    const landing = waited()
+    // The bounce's handshake still names the old driver and settles nothing.
+    act(() => {
+      view.result.current.connId.write("mine2")
+      view.result.current.seedFromConnected("mine2", "theirs")
+    })
+    act(() => notifyPtyOwner("p1", "mine2", 2, undefined))
+    expect(await landing).toBeNull()
+
+    act(() => notifyPtyOwner("p1", "theirs", 3, undefined))
+    act(() => view.result.current.takeOver())
+    const lost = waited()
+    act(() => view.result.current.notePtyConn("failed"))
+    expect(await lost).toMatch(/did not go through/)
+  })
+
   // FLIPPED. The press used to focus the typing surface at once, which on a
   // phone raises the soft keyboard over a pane that is a whole reconnect and one
   // replay parse away from having anything to type into. Focus is the pane's now,
@@ -637,6 +667,7 @@ describe("the other device's NAME across an events-socket outage", () => {
       ({ conn }: { conn: "open" | "connecting" }) =>
         useTerminalOwnership({
           id: "p1",
+          row: "agent:p1",
           kind: "agent",
           conn,
           ptyRef: { current: pty as unknown as PtySocket },
@@ -665,6 +696,7 @@ describe("the other device's NAME across an events-socket outage", () => {
       }) =>
         useTerminalOwnership({
           id: "p1",
+          row: "agent:p1",
           kind: "agent",
           conn,
           spineInputOwner,
@@ -692,6 +724,7 @@ describe("the other device's NAME across an events-socket outage", () => {
       ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
         useTerminalOwnership({
           id: "p1",
+          row: "agent:p1",
           kind: "agent",
           conn: "open",
           spineInputOwner,
@@ -713,6 +746,7 @@ describe("the other device's NAME across an events-socket outage", () => {
       ({ spineInputOwner }: { spineInputOwner?: string | null }) =>
         useTerminalOwnership({
           id: "p1",
+          row: "agent:p1",
           kind: "agent",
           conn: "open",
           spineInputOwner,

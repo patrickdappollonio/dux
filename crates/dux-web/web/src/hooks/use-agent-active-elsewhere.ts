@@ -167,6 +167,19 @@ export function editorReadOnlyReason(
   }
 }
 
+/// Why this device cannot start the agent right now, short enough for a band.
+export function startAgentBlockHint(block: RowBlock): string {
+  switch (block) {
+    case "reconnecting":
+      return "Reconnecting to this agent"
+    case "pending":
+      return "Still connecting to this agent"
+    case "other":
+    case "nobody":
+      return "Take over to start it"
+  }
+}
+
 /// Why this device cannot add a tab or a terminal to the agent right now.
 export function addToAgentBlockHint(block: RowBlock): string {
   switch (block) {

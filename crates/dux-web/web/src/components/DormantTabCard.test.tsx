@@ -4,7 +4,12 @@ import { act, cleanup, render, screen } from "@testing-library/react"
 
 // The card only calls `startDormantTab` from the store; stub it so we can render
 // in isolation and assert the docs link.
-vi.mock("@/lib/store", () => ({ startDormantTab: vi.fn() }))
+vi.mock("@/lib/store", () => ({
+  startDormantTab: vi.fn(),
+  // Nothing drives the agent in these cases, so its Start is a live button.
+  useDux: () => ({ spine: null }),
+  useDuxSelector: () => false,
+}))
 
 const { DormantTabCard } = await import("./DormantTabCard")
 const { noteServerClock, resetServerClockForTests } = await import("@/lib/serverClock")

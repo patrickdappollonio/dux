@@ -26,6 +26,8 @@ import {
   reportUnrecognizedRefusal,
 } from "./authGate"
 import { PAGE_HEADER, actingPageIds } from "./pageSeat"
+import { ROW_DRIVEN_STATUS } from "./rowDriven"
+import { takeoverRefusalFor } from "./takeoverFlight"
 
 /// A request that did not get to finish because the page is not signed in.
 /// `not_sent`: refused before it left, so nothing happened on the server.
@@ -69,8 +71,7 @@ export function rethrowAuthInterruption(e: unknown): void {
 /// plain read: the server lets a change to a driven row through only for the
 /// page that drives it.
 function namingThisPage(init: RequestInit): RequestInit {
-  const method = (init.method ?? "GET").toUpperCase()
-  if (method === "GET" || method === "HEAD") return init
+  if (isRead(init)) return init
   const pages = actingPageIds().join(",")
   const given = init.headers
   // A plain record stays one: callers and their tests read it by key.
@@ -82,8 +83,24 @@ function namingThisPage(init: RequestInit): RequestInit {
   return { ...init, headers }
 }
 
+/// Whether `init` is a plain read, which changes nothing and names no page.
+function isRead(init: RequestInit | undefined): boolean {
+  const method = (init?.method ?? "GET").toUpperCase()
+  return method === "GET" || method === "HEAD"
+}
+
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (authPaused()) throw new AuthInterruptedError("not_sent")
+  // A change to a row this page is taking over waits for the claim to land:
+  // sent before it, the server would refuse the page that just took over.
+  const held = isRead(init) ? null : takeoverRefusalFor(path)
+  if (held !== null) {
+    const refusal = await held
+    // The server's own status for a change to a driven row, so every caller
+    // reads this as it reads that refusal.
+    if (refusal !== null) return new Response(refusal, { status: ROW_DRIVEN_STATUS })
+    if (authPaused()) throw new AuthInterruptedError("not_sent")
+  }
   const sentIn = authEpoch()
   const resp =
     init === undefined

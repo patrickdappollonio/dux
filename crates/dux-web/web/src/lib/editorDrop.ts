@@ -10,11 +10,13 @@
 
 import {
   MAX_NAMED_FILES,
+  NOT_SENT_SAME_REASON,
   dragCarriesFiles,
   dropRefusalReason,
 } from "./fileDrop"
 import type { DropToast } from "./fileDrop"
 import { FileDropApiError } from "./fileDropApi"
+import { isRowDriven } from "./rowDriven"
 import { chip, endProse, joinProse, type Prose, prose, proseText } from "./prose"
 
 /// What became of one file dropped on the tree. Two endings, not three: there
@@ -219,7 +221,8 @@ export interface TreeDropDeps {
 /// message rather than silence. Uploads are sequential: the route holds one
 /// concurrency permit per in-flight upload and refuses once the wait expires,
 /// and drop order is the order the toast reads. A refusal is per file and never
-/// abandons the rest. The tree's cached listing of `dir` and the flat search
+/// abandons the rest, except the one that says another device drives the row:
+/// every file left would get it too, so they are not sent. The tree's cached listing of `dir` and the flat search
 /// index are refreshed only when something was saved.
 export async function performTreeDrop(
   dir: string,
@@ -282,6 +285,16 @@ export async function performTreeDrop(
               ? e.message
               : "the upload failed",
       })
+      if (isRowDriven(e)) {
+        for (const unsent of files.slice(i + 1)) {
+          outcomes.push({
+            kind: "refused",
+            requestedName: unsent.name,
+            reason: NOT_SENT_SAME_REASON,
+          })
+        }
+        break
+      }
     }
   }
 

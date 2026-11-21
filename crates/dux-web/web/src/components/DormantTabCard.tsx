@@ -1,6 +1,6 @@
-import { Button } from "@/components/ui/button"
 import { useSecondTicks } from "@/hooks/use-second-ticks"
 import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
+import { StartAgentButton } from "@/components/StartAgentButton"
 import { startDormantTab } from "@/lib/store"
 import { genericEndingSentence, verdictSentenceNow } from "@/lib/tabVerdict"
 import type { TabRunVerdict } from "@/lib/types"
@@ -85,12 +85,13 @@ export function DormantTabCard({
       {/* The touch floor, at the take-over card's height idiom: that card is the
         * nearest analogue here, a full-pane card with one primary act, so
         * matching it keeps the two the same size under a finger. */}
-      <Button
-        onClick={() => startDormantTab(sessionId, tabId)}
+      <StartAgentButton
+        sessionId={sessionId}
+        onStart={() => startDormantTab(sessionId, tabId)}
         className="max-md:min-h-11 pointer-coarse:min-h-11"
       >
         Start session
-      </Button>
+      </StartAgentButton>
     </div>
   )
 }
