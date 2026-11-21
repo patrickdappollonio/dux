@@ -5886,11 +5886,12 @@ export function createTerminal(sessionId: string): void {
       const id = created.terminal_id
       // A workspace that landed while the create was in flight and does not
       // list the new terminal may already have seen it end, and nothing would
-      // clear a selection of a terminal that is gone. Ask the server again
-      // before opening it; when it cannot answer, open it as usual.
+      // clear a selection of a terminal that is gone. Ask the server's live
+      // list before opening it, not the workspace document, which can still
+      // predate the create; when it cannot answer, open it as usual.
       if (workspaceApplies !== appliedAtStart && !spineListsTerminal(state.spine?.terminals, id)) {
-        const fresh = await fetchWorkspace().catch(() => null)
-        if (fresh !== null && !spineListsTerminal(fresh.terminals, id)) {
+        const live = await terminalsApi.list().catch(() => null)
+        if (Array.isArray(live) && !live.some((t) => t.id === id)) {
           notifyWarning(
             "The new terminal ended before it opened, so you are still where you were. Its shell may have exited at once; check the agent's environment and try again.",
           )

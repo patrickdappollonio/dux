@@ -60,6 +60,9 @@ let reorderFail = false
 let attachedUrl: string | null = null
 // When set, a terminal create waits for it before answering.
 let createGate: Promise<void> | null = null
+// What the server's live terminal list holds right now. The workspace document
+// is a cache the server rebuilds a moment after a change, so the two can differ.
+let liveTerminals: { id: string }[] = []
 
 const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
   const u = String(url)
@@ -87,6 +90,15 @@ const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       status: 200,
       json: async () => spineBody,
       text: async () => JSON.stringify(spineBody),
+      headers: { get: () => null },
+    } as unknown as Response
+  }
+  if (u === "/api/v1/terminals" && (init?.method ?? "GET") === "GET") {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => liveTerminals,
+      text: async () => JSON.stringify(liveTerminals),
       headers: { get: () => null },
     } as unknown as Response
   }
@@ -158,6 +170,7 @@ class FakeWebSocket {
 beforeEach(() => {
   calls = []
   reorderFail = false
+  liveTerminals = []
   spineBody = {
     projects: [{ id: "p1", name: "Repo" }],
     sessions: [{ id: "s1", project_id: "p1" }],
@@ -225,33 +238,46 @@ describe("store companion-terminal lifecycle", () => {
     expect(mod.getSnapshot().selectedSessionId).toBe("s1")
   })
 
-  it("does not open a new terminal the workspace saw end before the create answered", async () => {
-    const mod = await loadStore()
+  // A workspace document lands while the create is in flight and does not list
+  // the new terminal; the server's cached document still does not when asked
+  // again. Whether the terminal is opened rests on the live list alone.
+  async function createWithStaleWorkspace(mod: Awaited<ReturnType<typeof loadStore>>) {
     let release!: () => void
     createGate = new Promise<void>((r) => {
       release = r
     })
-    const before = mod.getSnapshot().selectedTarget
     try {
       mod.createTerminal("s1")
-      // A workspace lands mid-create without the new terminal, and the server
-      // still does not list it when asked again: its shell has gone.
-      const fetchesBefore = calls.filter(([u]) => u.includes("/api/v1/workspace")).length
+      const workspaceFetches = () => calls.filter(([u]) => u.includes("/api/v1/workspace")).length
+      const fetchesBefore = workspaceFetches()
       mod.eventsSocket.onEvent({ event: "sessions.changed" })
-      await vi.waitFor(() =>
-        expect(calls.filter(([u]) => u.includes("/api/v1/workspace")).length).toBe(fetchesBefore + 1),
-      )
+      await vi.waitFor(() => expect(workspaceFetches()).toBe(fetchesBefore + 1))
       await tick()
       release()
-      await vi.waitFor(() =>
-        expect(calls.filter(([u]) => u.includes("/api/v1/workspace")).length).toBe(fetchesBefore + 2),
-      )
-      await tick()
-      await tick()
-      expect(mod.getSnapshot().selectedTarget).toEqual(before)
+      for (let i = 0; i < 10; i++) await tick()
     } finally {
       createGate = null
     }
+  }
+
+  it("does not open a new terminal the server no longer lists when the create answers", async () => {
+    const mod = await loadStore()
+    const before = mod.getSnapshot().selectedTarget
+    await createWithStaleWorkspace(mod)
+    expect(mod.getSnapshot().selectedTarget).toEqual(before)
+  })
+
+  it("opens a new terminal the server lists live even while its cached workspace does not yet", async () => {
+    liveTerminals = [{ id: "t1" }, { id: "t9" }]
+    const mod = await loadStore()
+    await createWithStaleWorkspace(mod)
+    await vi.waitFor(() =>
+      expect(mod.getSnapshot().selectedTarget).toEqual({
+        kind: "terminal",
+        terminalId: "t9",
+        owner: { kind: "session", sessionId: "s1" },
+      }),
+    )
   })
 
   it("deleteTerminal resolves the owning session and DELETEs the nested endpoint", async () => {

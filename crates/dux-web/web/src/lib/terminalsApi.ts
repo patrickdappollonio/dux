@@ -30,6 +30,10 @@ const request = createJsonRequest(
 )
 
 export const terminalsApi = {
+  // Every terminal running now, read live rather than from the workspace
+  // document, which the server rebuilds a moment after a change and can
+  // therefore still lack a terminal whose create has already answered.
+  list: () => request<{ id: string }[]>("GET", "/api/v1/terminals"),
   create: (sessionId: string) =>
     request<CreatedTerminal>(
       "POST",
