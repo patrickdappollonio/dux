@@ -254,9 +254,9 @@ deleting the agent, or closing the terminal, for that long.
 ![The terminal UI top bar carrying a serving crumb with the port, above the usual workspace with one agent working.](/screens/tui-serving-crumb.png)
 
 **One driver at a time.** The terminal UI is an ordinary participant in the same
-input-ownership model the browsers use. One device drives a terminal and everybody else
-watches, with live output, scrolling and copying. Nothing passive ever takes a terminal
-away, and nothing passive ever gives one back.
+input-ownership model the browsers use. One device drives a terminal, and on every other
+device a card covers it until that device takes it over. Nothing passive ever takes a
+terminal away, and nothing passive ever gives one back.
 
 Whenever the terminal you are looking at is not yours to type into, a card covers it, in
 the terminal UI and in the browser alike.
@@ -274,8 +274,15 @@ the terminal UI and in the browser alike.
 - **An agent's tabs and terminals go together:** taking one over, or starting an agent from
   the terminal UI, takes all of that agent's tabs and terminals at once.
 - **An agent's terminals stay out of sight until you drive it:** under the card you see the
-  agent alone, with no terminal dock, in the terminal UI and in the browser alike. Take it
-  over and its layout comes back just as you left it.
+  agent alone, with no terminal dock, in the terminal UI and in the browser alike, and the
+  terminal UI's count of running terminals in its top bar leaves them out. Take it over and
+  its layout, and the part you were typing into, come back just as you left them.
+- **Nothing changes an agent you do not drive:** while the card is up, starting or
+  restarting it, adding, closing, stopping or reordering its tabs and terminals, renaming,
+  detaching, deleting or recreating it, changing its provider or auto-reopen, and rerunning
+  its startup command are off. The browser disables them; the terminal UI refuses them and
+  says on its status line who is driving and how to take over. Selecting one of its tabs,
+  its info and its logs keep working.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 
