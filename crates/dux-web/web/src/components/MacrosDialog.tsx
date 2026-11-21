@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react"
 
+import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
 import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
@@ -617,8 +618,9 @@ function MacrosEditor({
           return listFocusTarget()
         }}
       />
-      <ConfirmDiscardMacros
+      <ConfirmDiscardEditsDialog
         open={discardOpen}
+        holder="The macros have"
         changes={changes}
         onKeep={() => setDiscardOpen(false)}
         finalFocus={() => {
@@ -1241,49 +1243,6 @@ function ConfirmDeleteMacro({
           </Button>
           <Button variant="destructive" onClick={onConfirm}>
             Delete
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// Closing with unsaved changes asks first: they exist only in this dialog.
-function ConfirmDiscardMacros({
-  open,
-  changes,
-  onKeep,
-  finalFocus,
-  onDiscard,
-}: {
-  open: boolean
-  changes: number
-  onKeep: () => void
-  finalFocus: () => HTMLElement | boolean
-  onDiscard: () => void
-}) {
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) onKeep()
-      }}
-    >
-      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
-        <DialogHeader>
-          <DialogTitle>Discard unsaved changes?</DialogTitle>
-          <DialogDescription>
-            The macros have {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
-            <InlineCode>config.toml</InlineCode> as it was.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onKeep}>
-            Keep editing
-          </Button>
-          <Button variant="destructive" onClick={onDiscard}>
-            Discard changes
           </Button>
         </DialogFooter>
       </DialogContent>

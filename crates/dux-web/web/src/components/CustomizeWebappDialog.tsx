@@ -21,6 +21,7 @@ import {
   notifyWarning,
 } from "@/lib/notify"
 
+import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
 import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
@@ -1585,8 +1586,9 @@ function PreferencesForm({
           return (phone ? backRef.current : navEls.current.get("changed")) ?? true
         }}
       />
-      <ConfirmDiscardPreferences
+      <ConfirmDiscardEditsDialog
         open={discardOpen}
+        holder="Preferences has"
         changes={unsavedCount}
         onKeep={() => setDiscardOpen(false)}
         onDiscard={() => {
@@ -1812,47 +1814,6 @@ function ConfirmResetAll({
           </Button>
           <Button variant="destructive" onClick={onConfirm}>
             {count === 1 ? "Reset 1 setting" : `Reset ${count} settings`}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// Closing with unsaved changes asks first: they exist only in this dialog.
-function ConfirmDiscardPreferences({
-  open,
-  changes,
-  onKeep,
-  onDiscard,
-}: {
-  open: boolean
-  changes: number
-  onKeep: () => void
-  onDiscard: () => void
-}) {
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) onKeep()
-      }}
-    >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Discard unsaved changes?</DialogTitle>
-          <DialogDescription>
-            Preferences has {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
-            <InlineCode>config.toml</InlineCode> as it was.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onKeep}>
-            Keep editing
-          </Button>
-          <Button variant="destructive" onClick={onDiscard}>
-            Discard changes
           </Button>
         </DialogFooter>
       </DialogContent>
