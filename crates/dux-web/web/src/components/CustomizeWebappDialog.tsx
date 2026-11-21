@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { Fragment, useEffect, useRef, useState } from "react"
 import type { KeyboardEvent, ReactNode, RefObject } from "react"
 import {
   Check,
@@ -21,6 +21,8 @@ import {
   notifyWarning,
 } from "@/lib/notify"
 
+import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
+import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import {
   CHANGED_LABEL,
@@ -1012,7 +1014,7 @@ function PreferencesForm({
   setSaving: (v: boolean) => void
   savingRef: RefObject<boolean>
   closeRef: RefObject<CloseHandler | null>
-  confirmsOutlet: RefObject<((confirms: ReactNode) => void) | null>
+  confirmsOutlet: ConfirmsSetterRef
 }) {
   const dux = useDux()
   const { bootstrap } = dux
@@ -1594,10 +1596,7 @@ function PreferencesForm({
       />
     </>
   )
-  useLayoutEffect(() => {
-    confirmsOutlet.current?.(confirms)
-  })
-  useLayoutEffect(() => () => confirmsOutlet.current?.(null), [confirmsOutlet])
+  usePublishConfirms(confirmsOutlet, confirms)
 
   // Stable, so a render while the dialog is open never asks for it again.
   const [desktopInitialFocus] = useState(
@@ -1768,24 +1767,6 @@ function PreferencesForm({
       </DialogFooter>
     </DialogContent>
   )
-}
-
-// Where the form's confirms render: beside the dialog rather than inside it,
-// because base-ui draws no overlay for a dialog nested in another, and a
-// confirm dims what is behind it as the app's other confirms do.
-function ConfirmsOutlet({
-  setterRef,
-}: {
-  setterRef: RefObject<((confirms: ReactNode) => void) | null>
-}) {
-  const [confirms, setConfirms] = useState<ReactNode>(null)
-  useLayoutEffect(() => {
-    setterRef.current = setConfirms
-    return () => {
-      setterRef.current = null
-    }
-  }, [setterRef])
-  return confirms
 }
 
 // "Reset all" puts the listed settings back in the draft only; Save writes it.

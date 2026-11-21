@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
 import { RadioGroup } from "@base-ui/react/radio-group"
@@ -30,6 +30,8 @@ import {
   X,
 } from "lucide-react"
 
+import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
+import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
@@ -198,25 +200,6 @@ export function MacrosDialog() {
   )
 }
 
-// Where the editor's confirms render: beside the dialog rather than inside it,
-// because base-ui draws no overlay for a dialog nested in another, and a
-// confirm dims what is behind it as the app's other confirms do. A sibling, so
-// the editor handing it its confirms on every render re-renders only this.
-function ConfirmsOutlet({
-  setterRef,
-}: {
-  setterRef: RefObject<((confirms: ReactNode) => void) | null>
-}) {
-  const [confirms, setConfirms] = useState<ReactNode>(null)
-  useLayoutEffect(() => {
-    setterRef.current = setConfirms
-    return () => {
-      setterRef.current = null
-    }
-  }, [setterRef])
-  return confirms
-}
-
 // A dialog on a computer, a bottom sheet on a phone, both under the one dialog
 // root, so a rotation swaps the shell without remounting the editor's draft.
 // Closing hands focus where the opener asked, else where the dialog chooses.
@@ -265,7 +248,7 @@ function MacrosEditor({
 }: {
   phone: boolean
   closeRef: RefObject<CloseHandler | null>
-  confirmsOutlet: RefObject<((confirms: ReactNode) => void) | null>
+  confirmsOutlet: ConfirmsSetterRef
 }) {
   const { bootstrap, macrosDraft, macrosConflict } = useDux()
   // Read once: the editing session this mounting opens. The dots and the
@@ -653,10 +636,7 @@ function MacrosEditor({
     </>
   )
 
-  useLayoutEffect(() => {
-    confirmsOutlet.current?.(confirms)
-  })
-  useLayoutEffect(() => () => confirmsOutlet.current?.(null), [confirmsOutlet])
+  usePublishConfirms(confirmsOutlet, confirms)
 
   const initialFocus = () => {
     // The sheet itself on a phone: a control focused by the opening would
