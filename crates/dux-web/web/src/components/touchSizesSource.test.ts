@@ -80,6 +80,7 @@ describe("controls that had no touch size at all", () => {
     ["MacrosDialog.tsx", "onClick={dismissMacrosConflict}", "<Button", BUTTON_FLOOR],
     ["MacrosDialog.tsx", "onClick={() => void reloadMacrosDraft()}", "<Button", BUTTON_FLOOR],
     ["MacrosDialog.tsx", "aria-label={`Actions for ${name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
+    ["MacroPopover.tsx", "aria-label={`Edit ${macro.name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
     ["GlobalEnvDialog.tsx", "onClick={dismissGlobalEnvConflict}", "<Button", BUTTON_FLOOR],
     ["GlobalEnvDialog.tsx", "onClick={() => void reloadGlobalEnvDraft()}", "<Button", BUTTON_FLOOR],
     ["ConfigEditorDialog.tsx", "onClick={dismissConfigEditorConflict}", "<Button", BUTTON_FLOOR],

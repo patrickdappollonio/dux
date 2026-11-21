@@ -43,7 +43,7 @@ vi.mock("@/lib/store", () => ({
   useDux: () => mockState(),
   useDuxSelector: (select: (s: unknown) => unknown) => select(mockState()),
   runMacro: (name: string, target: SelectedTarget) => runMacro(name, target),
-  openMacrosDialog: () => openMacrosDialog(),
+  openMacrosDialog: (select?: string | null) => openMacrosDialog(select),
 }))
 
 const { MacroPopover } = await import("./MacroPopover")
@@ -607,5 +607,18 @@ describe("MacroPopover keyboard walk", () => {
     pressTab(true)
     await settle()
     expect(document.activeElement).toBe(edit)
+  })
+})
+
+describe("MacroPopover edit pencil", () => {
+  it("opens the Macros dialog on that macro, and does not run it", async () => {
+    render(<MacroPopover target={target} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    fireEvent.click(screen.getByRole("button", { name: "Edit Prompt" }))
+    await settle()
+    expect(openMacrosDialog).toHaveBeenCalledWith("Prompt")
+    expect(runMacro).not.toHaveBeenCalled()
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull()
   })
 })

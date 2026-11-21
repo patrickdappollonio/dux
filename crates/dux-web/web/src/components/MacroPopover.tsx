@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import type * as React from "react"
-import { SquarePen, SquareSlash } from "lucide-react"
+import { Pencil, SquarePen, SquareSlash } from "lucide-react"
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 
 import {
@@ -195,7 +195,15 @@ export function MacroPopover({
             No macros for this target kind. Add one via Edit macros below.
           </div>
         ) : (
-          <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
+          <MacroCommand
+            macros={macros}
+            autoFocus={!isMobile}
+            onRun={handleRun}
+            onEdit={(name) => {
+              setOpen(false)
+              openMacrosDialog(name)
+            }}
+          />
         )}
         {/* The picker's Close part: it closes the picker on its way to the
             dialog, so it is the one control that can carry the role. */}
@@ -224,10 +232,12 @@ function MacroCommand({
   macros,
   autoFocus,
   onRun,
+  onEdit,
 }: {
   macros: MacroView[]
   autoFocus: boolean
   onRun: (name: string) => void
+  onEdit: (name: string) => void
 }) {
   const [search, setSearch] = useState("")
   return (
@@ -267,12 +277,28 @@ function MacroCommand({
               className="cursor-pointer"
               onSelect={() => onRun(macro.name)}
             >
-              <span>
+              <span className="min-w-0 flex-1 truncate">
                 <MatchHighlight
                   text={macro.name}
                   ranges={cmdkMatchRanges(macro.name, search)}
                 />
               </span>
+              {/* Its click stops here, so editing a macro never also runs it. */}
+              <SimpleTooltip content="Edit macro">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Edit ${macro.name}`}
+                  className="-my-1 shrink-0 max-md:size-10 pointer-coarse:size-10"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onEdit(macro.name)
+                  }}
+                >
+                  <Pencil />
+                </Button>
+              </SimpleTooltip>
             </CommandItem>
           ))}
         </CommandGroup>
