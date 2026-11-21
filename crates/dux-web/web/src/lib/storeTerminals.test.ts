@@ -719,6 +719,33 @@ describe("store companion-terminal lifecycle", () => {
     )
   })
 
+  it("names the device behind another connection than this page's own", async () => {
+    const firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
+    const chrome =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "agentx",
+          status: "active",
+          tabs: [
+            { id: "a1", input_owner: "conn-mine", input_owner_device: firefox },
+            { id: "a2", input_owner: "conn-other", input_owner_device: chrome },
+          ],
+        },
+      ],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull())
+    const s = { ...mod.getSnapshot(), ownPtyConnIds: { "conn-mine": true as const } }
+    expect(mod.rowDriverLabel(s, { sessionId: "s1" })).toBe("Chrome on macOS")
+  })
+
   // The panic button is the ONE caller that skips the shutdown grace. A polite
   // wait per agent is the opposite of what somebody pressing "Stop everything"
   // is asking for, so the flag has to be on this path and off every other one.

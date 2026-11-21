@@ -139,8 +139,8 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   // one keystroke.
   const forcedTextPasteRef = useRef(false)
   // Aborted when the pane goes, so a batch waiting for the pane to hear its
-  // take-over stops waiting with it.
-  const goneRef = useRef(new AbortController())
+  // take-over stops waiting with it. Null only before the first commit.
+  const goneRef = useRef<AbortController | null>(null)
   useEffect(() => {
     const gone = new AbortController()
     goneRef.current = gone
@@ -234,7 +234,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     // claim, and a pane other than the one pressed may hear that it drives a
     // moment after the claim has landed, which the whole batch waits for once.
     const heard =
-      takingOver && !drivenElsewhere ? untilOwner(ownership, goneRef.current.signal) : null
+      takingOver && !drivenElsewhere
+        ? untilOwner(ownership, (goneRef.current ??= new AbortController()).signal)
+        : null
 
     for (const [i, file] of files.entries()) {
       if (drivenElsewhere) {
