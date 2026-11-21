@@ -344,6 +344,12 @@ function ExpandToggle({
   )
 }
 
+// A row's trailing figure is whole or not on screen. Where the row is too
+// narrow to give it its full width and still leave the name room, it is
+// visually hidden but stays in the accessibility tree, since a clipped
+// "40…" says nothing to a sighted reader and a screen reader still hears it.
+const ROW_FIGURE = "shrink-0 sr-only @[16rem]:not-sr-only"
+
 // What the row's "Excl" marker says on hover. It names the cause (the
 // repository's own .gitattributes) and the consequence (no counts), and says
 // the file is still readable here, because "excluded" on its own reads as
@@ -505,7 +511,7 @@ const FileRow = memo(function FileRow({
         // The left padding is a variable so a nested row's indent adds to it.
         // Touch sits 8px further in, matching the section heading, so the
         // checkbox's halo stops short of the pane divider's grab zone.
-        "group flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
+        "group @container flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
         ROW_FOCUS,
         REVEAL_ROW,
         folderCount === null && "cursor-pointer",
@@ -554,7 +560,7 @@ const FileRow = memo(function FileRow({
         />
 
         {folderCount !== null && (
-          <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
+          <span className={cn("font-mono text-xs text-muted-foreground", ROW_FIGURE)}>
             {folderCount}
           </span>
         )}
@@ -574,7 +580,7 @@ const FileRow = memo(function FileRow({
         {/* Additions and deletions, coloured to match the diff viewer's gutter.
           * Binary files report none. */}
         {!file.binary && !file.diff_excluded && (file.additions > 0 || file.deletions > 0) && (
-          <span className="min-w-0 truncate font-mono text-xs">
+          <span className={cn("font-mono text-xs", ROW_FIGURE)}>
             {file.additions > 0 && (
               <span className="text-dux-added">+{file.additions}</span>
             )}
@@ -1013,8 +1019,8 @@ function ChangesHeader({
         <CardTitle ref={titleRef} className="max-w-full shrink-0 truncate">
           Changes
         </CardTitle>
-        {/* The recap gives way before the title, ellipsizing to nothing while
-          * the aria-label keeps saying it. The group headings need none of
+        {/* The recap gives way before the title and before the buttons,
+          * ellipsizing to nothing while the aria-label keeps saying it. The group headings need none of
           * this, their badge being inside the same shrinking row. */}
         <ChangesRecap
           ref={recapRef}
@@ -1025,9 +1031,10 @@ function ChangesHeader({
       </div>
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
         * the editor button, the terminal button and the `⋯`, adjacent icon
-        * squares of one size. When the title, the recap and all three do not
-        * fit, the editor and terminal buttons fold into the ⋯ as its first
-        * items, and come back once the pane is wide enough again. */}
+        * squares of one size. When the title and all three do not
+        * fit (the recap shrinks first and is not counted), the editor and
+        * terminal buttons fold into the ⋯ as its first items, and come back
+        * once the pane is wide enough again. */}
       <CardAction className="flex shrink-0 items-center gap-2 self-center">
         {folded ? null : (
           <>

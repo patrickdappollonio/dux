@@ -11,11 +11,13 @@ function px(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-// Whether the title, the recap and all three buttons fail to fit side by side.
-// Every width read here is one folding cannot move: the title's and the
-// recap's full text (`scrollWidth`, which ignores their own clipping), and the
-// three buttons counted from the `⋯`, which never leaves. So the answer is the
-// same before and after the fold it causes, and a fold cannot undo itself.
+// Whether the title and all three buttons fail to fit side by side. The recap
+// is not counted: it shrinks to nothing to make room, so only a pane too
+// narrow for the title and the buttons folds them. Every width read here is
+// one folding cannot move: the title's full text (`scrollWidth`, which ignores
+// its own clipping) and the three buttons counted from the `⋯`, which never
+// leaves. So the answer is the same before and after the fold it causes, and a
+// fold cannot undo itself.
 // `null` when the header has no width to judge by (not laid out, or hidden).
 function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
   const { header, title, recap, trigger } = nodes
@@ -23,8 +25,8 @@ function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
   const style = getComputedStyle(header)
   const room = header.clientWidth - px(style.paddingLeft) - px(style.paddingRight)
   if (room <= 0) return null
-  const recapWidth = recap?.scrollWidth ?? 0
-  const titleGap = recapWidth > 0 && title.parentElement
+  // A recap squeezed to nothing still leaves its flex gap beside the title.
+  const titleGap = recap && title.parentElement
     ? px(getComputedStyle(title.parentElement).columnGap)
     : 0
   const buttonGap = trigger.parentElement
@@ -33,7 +35,6 @@ function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
   const needed =
     title.scrollWidth +
     titleGap +
-    recapWidth +
     px(style.columnGap) +
     UNFOLDED_BUTTONS * trigger.offsetWidth +
     (UNFOLDED_BUTTONS - 1) * buttonGap
@@ -45,7 +46,7 @@ function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
 /** Whether the Changes pane header folds its editor and New terminal buttons
  * into its `⋯`, with the refs the header hangs on the parts it measures. It is
  * measured when a part mounts and whenever one of them changes size (a divider
- * drag, the recap's figures changing, a pointer change resizing the buttons),
+ * drag, the recap appearing or going, a pointer change resizing the buttons),
  * and at no other time, so scrolling and typing elsewhere cost nothing. A
  * missing `ResizeObserver` (jsdom) leaves the mount-time answer standing. */
 export function useChangesHeaderFold() {

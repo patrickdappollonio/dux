@@ -1273,13 +1273,16 @@ describe("the changes pane's selection on a touch screen", () => {
   // folder row's "40 files +40" ends before the ⋯ starts, and the section
   // heading's count badge is whole. jsdom has no layout, so this pins the
   // classes that let the counts give way instead of overflowing under the ⋯.
-  it("lets a row's counts and a heading's recap truncate instead of overflowing", () => {
+  it("hides a row's counts whole, never clipped, while a heading's recap truncates", () => {
     render(<ChangedFiles />)
     const row = screen.getByLabelText("Actions for a.ts").closest('[role="row"]')!
     const counts = row.querySelector(".text-dux-added")!.parentElement!
-    expect(counts.className).toContain("truncate")
-    expect(counts.className).toContain("min-w-0")
-    expect(counts.className).not.toContain("shrink-0")
+    expect(counts.className).not.toContain("truncate")
+    expect(counts.className).toContain("shrink-0")
+    expect(counts.className).toContain("sr-only")
+    expect(counts.className).toContain("not-sr-only")
+    expect(row.className).toContain("@container")
+    expect(counts.textContent).toContain("+")
     const heading = screen.getByText("Unstaged").closest("button")!
     const recap = heading.querySelector("[aria-label]")!
     expect(recap.className).toContain("truncate")
@@ -1926,6 +1929,7 @@ function headerWidth(width: number): () => void {
       return this.getAttribute("data-slot") === "card-header" ? width : 0
     }),
     vi.spyOn(Element.prototype, "scrollWidth", "get").mockImplementation(function (this: Element) {
+      if (this.getAttribute("aria-label")?.startsWith("Changes: ")) return 120
       return this.getAttribute("data-slot") === "card-title" ? 67 : 0
     }),
     vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
@@ -1965,6 +1969,26 @@ describe("the Changes pane header in a narrow pane", () => {
     fireEvent.click(screen.getByLabelText("Changes actions"))
     fireEvent.click((await screen.findByRole("menu")).querySelector('[role="menuitem"]')!)
     expect(openEditor).toHaveBeenCalledWith({ kind: "agent", sessionId: "s1" })
+  })
+
+  // The recap's own text is 120px here, so a pane that holds the title and
+  // the three buttons (67 + 3 x 32 = 163px, the button gaps being 0 in jsdom)
+  // but not the recap as well keeps the buttons: the recap is what shrinks.
+  it("keeps the buttons while only the summary has to shrink", () => {
+    restore = headerWidth(200)
+    mockState = {
+      selectedSessionId: "s1",
+      changes: {
+        ...loadedChanges(),
+        unstaged: [
+          { path: "a.ts", status: "M", additions: 7, deletions: 2, binary: false, diff_excluded: false },
+        ],
+      },
+    } as unknown as DuxState
+    render(<ChangedFiles />)
+    expect(screen.getByLabelText("Open editor")).toBeTruthy()
+    expect(screen.getByLabelText("New terminal")).toBeTruthy()
+    expect(screen.getByLabelText(/^Changes: .*added/)).toBeTruthy()
   })
 
   it("hands focus to the ⋯ when the button holding it folds away", () => {
