@@ -1325,11 +1325,6 @@ describe("the changes pane's selection on a touch screen", () => {
         expect.arrayContaining(["flex-wrap", "overflow-hidden", "h-5"]),
       )
     }
-    const heading = screen.getByText("Unstaged").closest("button")!
-    const recap = heading.querySelector("[aria-label]")!
-    expect(recap.className).toContain("truncate")
-    expect(recap.className).toContain("min-w-0")
-    expect(recap.className).not.toContain("shrink-0")
   })
 
   // Tab onto "Actions for <file>" (or onto its row) with the mouse elsewhere
@@ -1747,21 +1742,30 @@ describe("the changes pane's group recaps", () => {
     expect(recap("Unstaged").textContent).toBe("+999 −100")
   })
 
-  // The pane header is a two-cell grid with the ⋯ trigger in the second cell,
-  // so its recap must give way rather than paint over the trigger at the widths
-  // where the two meet. jsdom lays nothing out, so the degradation is pinned by
-  // the classes that produce it.
-  it("lets the pane's recap shrink away rather than reach the ⋯ trigger", () => {
-    mockState = withCounted([], [counted("big.ts", 12345, 9999)])
+  // The pane header's recap gives way before the title and the ⋯ trigger, and a
+  // group heading's before its count badge, a whole figure at a time: one that
+  // does not fit drops to a clipped second line, the first one included, and is
+  // never cut to "+17.9…". jsdom lays nothing out, so the classes that produce
+  // it are what is pinned.
+  it("lets a recap give way a whole figure at a time", () => {
+    mockState = withCounted([], [counted("big.ts", 12345, 9999), counted("logo.png", 0, 0, true)])
     render(<ChangedFiles />)
 
-    const paneRecap = recap("Changes")
-    expect(paneRecap.className).toContain("truncate")
-    expect(paneRecap.className).not.toContain("shrink-0")
-    // A group heading's recap gives way too, so the count badge after it stays
-    // whole in a pane too narrow for both.
-    expect(recap("Unstaged").className).toContain("truncate")
-    expect(recap("Unstaged").className).not.toContain("shrink-0")
+    for (const scope of ["Changes", "Unstaged"]) {
+      const line = recap(scope)
+      expect(line.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["min-w-0", "flex-wrap", "overflow-hidden", "h-4"]),
+      )
+      expect(line.className).not.toMatch(/\b(shrink-0|truncate|text-ellipsis)\b/)
+      expect(line.firstElementChild?.textContent).toBe("")
+      const figures = Array.from(line.children).slice(1)
+      expect(figures.map((figure) => figure.textContent)).toEqual(["+12.3k", " −9.9k", " · 1 bin"])
+      for (const figure of figures) {
+        expect(figure.className.split(/\s+/)).toEqual(
+          expect.arrayContaining(["shrink-0", "whitespace-pre"]),
+        )
+      }
+    }
   })
 
   // Only LINE counts abbreviate: the badge beside the sum counts files, and it

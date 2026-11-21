@@ -754,12 +754,10 @@ function recapLabel(scope: string, recap: ChangedFilesRecap): string {
 function ChangesRecap({
   scope,
   recap,
-  className,
   ref,
 }: {
   scope: string
   recap: ChangedFilesRecap
-  className?: string
   ref?: React.Ref<HTMLSpanElement>
 }) {
   const { additions, deletions, binaryCount, diffExcludedCount } = recap
@@ -769,27 +767,32 @@ function ChangesRecap({
   // No "+0 −0".
   if (!hasLines && binaryCount === 0 && diffExcludedCount === 0) return null
 
+  // One clipped line that wraps, like a row's: a figure that does not fit drops
+  // whole to a second line nobody sees. The empty first item holds the first
+  // line, so even the first figure can leave it rather than be cut.
   return (
     <span
       ref={ref}
-      className={cn("shrink-0 font-mono text-xs", className)}
+      className="flex h-4 min-w-0 shrink flex-wrap items-baseline overflow-hidden font-mono text-xs"
       aria-label={recapLabel(scope, recap)}
     >
+      <span aria-hidden className="w-0 self-stretch" />
       {additions > 0 && (
-        <span className="text-dux-added">+{formatRecapCount(additions)}</span>
+        <span className={cn("text-dux-added", RECAP_FIGURE)}>+{formatRecapCount(additions)}</span>
       )}
-      {additions > 0 && deletions > 0 && " "}
       {deletions > 0 && (
-        <span className="text-dux-deleted">−{formatRecapCount(deletions)}</span>
+        <span className={cn("text-dux-deleted", RECAP_FIGURE)}>
+          {additions > 0 ? " " : ""}−{formatRecapCount(deletions)}
+        </span>
       )}
       {binaryCount > 0 && (
-        <span className="text-muted-foreground">
+        <span className={cn("text-muted-foreground", RECAP_FIGURE)}>
           {hasLines ? " · " : ""}
           {groupDigits(binaryCount)} bin
         </span>
       )}
       {diffExcludedCount > 0 && (
-        <span className="text-dux-diff-excluded">
+        <span className={cn("text-dux-diff-excluded", RECAP_FIGURE)}>
           {hasLines || binaryCount > 0 ? " · " : ""}
           {groupDigits(diffExcludedCount)} excl
         </span>
@@ -797,6 +800,10 @@ function ChangesRecap({
     </span>
   )
 }
+
+// A recap figure with the separator before it: pre, so that leading space is
+// drawn at the start of the figure's own box.
+const RECAP_FIGURE = "shrink-0 whitespace-pre"
 
 // A section's heading, which folds its rows away. The rows are not its
 // children: the list is one flat window over both sections, so the heading is a
@@ -827,7 +834,7 @@ function GroupHeader({
       )}
     >
       <span className="flex-1 text-left">{heading}</span>
-      <ChangesRecap scope={heading} recap={recap} className="min-w-0 shrink truncate" />
+      <ChangesRecap scope={heading} recap={recap} />
       <Badge variant="secondary">
         {filtering ? `${groupDigits(shown)} of ${groupDigits(total)}` : groupDigits(shown)}
       </Badge>
@@ -1027,15 +1034,9 @@ function ChangesHeader({
         <CardTitle ref={titleRef} className="max-w-full shrink-0 truncate">
           Changes
         </CardTitle>
-        {/* The recap gives way before the title and before the buttons,
-          * ellipsizing to nothing while the aria-label keeps saying it. The group headings need none of
-          * this, their badge being inside the same shrinking row. */}
-        <ChangesRecap
-          ref={recapRef}
-          scope="Changes"
-          recap={recap}
-          className="min-w-0 shrink truncate"
-        />
+        {/* The recap gives way before the title and before the buttons, a
+          * whole figure at a time, while the aria-label keeps saying it. */}
+        <ChangesRecap ref={recapRef} scope="Changes" recap={recap} />
       </div>
       {/* The cell is a row of its own: `gap-2` is the misclick spacing between
         * the editor button, the terminal button and the `⋯`, adjacent icon
