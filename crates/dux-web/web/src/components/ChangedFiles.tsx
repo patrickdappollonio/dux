@@ -768,15 +768,18 @@ function ChangesRecap({
   if (!hasLines && binaryCount === 0 && diffExcludedCount === 0) return null
 
   // One clipped line that wraps, like a row's: a figure that does not fit drops
-  // whole to a second line nobody sees. The empty first item holds the first
-  // line, so even the first figure can leave it rather than be cut.
+  // whole to a second line nobody sees. The first item is a zero-width strut a
+  // full line tall, so the first line is always that tall and always holds an
+  // item: a figure wider than the whole recap is then never alone on the first
+  // line, where it would be cut, but drops below it with the rest. The strut
+  // stays out of the baseline, which the figures beside it share.
   return (
     <span
       ref={ref}
       className="flex h-4 min-w-0 shrink flex-wrap items-baseline overflow-hidden font-mono text-xs"
       aria-label={recapLabel(scope, recap)}
     >
-      <span aria-hidden className="w-0 self-stretch" />
+      <span aria-hidden className="h-4 w-0 shrink-0 self-start" />
       {additions > 0 && (
         <span className={cn("text-dux-added", RECAP_FIGURE)}>+{formatRecapCount(additions)}</span>
       )}
