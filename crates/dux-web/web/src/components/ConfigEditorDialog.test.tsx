@@ -85,6 +85,19 @@ describe("ConfigEditorDialog", () => {
     expect(editor.textContent).toContain("[server]")
   })
 
+  it("does not move focus onto Cancel when the config arrives on a computer", async () => {
+    seed({ configEditorOpen: true, configEditorLoading: true })
+    const { rerender } = render(<ConfigEditorDialog />)
+    await new Promise((r) => setTimeout(r, 50))
+    const opened = document.activeElement
+    seed({ configEditorOpen: true, configEditorContent: "[ui]\n" })
+    rerender(<ConfigEditorDialog />)
+    await screen.findByTestId("code-editor")
+    await new Promise((r) => setTimeout(r, 50))
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Cancel" }))
+    expect(document.activeElement).toBe(opened)
+  })
+
   it("shows the load error with a Retry instead of an editable editor", () => {
     seed({ configEditorOpen: true, configEditorError: "boom", configEditorContent: "" })
     render(<ConfigEditorDialog />)
