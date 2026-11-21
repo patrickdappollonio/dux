@@ -833,7 +833,9 @@ function GroupHeader({
         TOUCH_MIN_HEIGHT,
       )}
     >
-      <span className="flex-1 text-left">{heading}</span>
+      {/* Shrinks last and then ellipsizes: the recap gives up its room first,
+          and on the narrowest pane the word, never the count, is what gives. */}
+      <span className="min-w-0 grow shrink-[0.001] truncate text-left">{heading}</span>
       <ChangesRecap scope={heading} recap={recap} />
       <Badge variant="secondary">
         {filtering ? `${groupDigits(shown)} of ${groupDigits(total)}` : groupDigits(shown)}
