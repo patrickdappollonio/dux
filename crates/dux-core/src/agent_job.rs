@@ -6918,8 +6918,8 @@ mod tests {
     #[test]
     fn the_branch_check_before_a_pull_may_be_answered_by_the_users_password_program() {
         use crate::git::askpass_fixtures::{
-            credential_wanting_remote, recording_askpass,
-            runs_here_without_the_developers_prompts, times_asked,
+            credential_wanting_remote, recording_askpass, runs_here_without_the_developers_prompts,
+            times_asked,
         };
         if !runs_here_without_the_developers_prompts(
             "agent_job::tests::the_branch_check_before_a_pull_may_be_answered_by_the_users_password_program",

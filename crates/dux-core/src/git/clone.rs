@@ -91,15 +91,21 @@ fn kill_group(group: i32) {
     }
 }
 
-/// Who started a network git call, which decides whether anything may ask the
-/// user for a credential while it runs.
+/// Who started a network git call, which decides whether a password program
+/// the user configured may run while it does. Every network git call names one:
+///
+/// - [`StartedBy::User`]: a clone, a push, a pull (an agent's, a project's,
+///   and the one before creating an agent, with its "does origin have the
+///   leading branch" check), and the pull request fetches behind a new agent.
+/// - [`StartedBy::Background`]: the base branch list's fetch, and the lookup of
+///   a cloned folder's default branch when the clone did not record it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartedBy {
-    /// The user asked for it and is waiting on it: an askpass they configured
-    /// may answer, or ask them.
+    /// The user pressed something and is waiting on this call, so their
+    /// password program (`GIT_ASKPASS`, `core.askPass`, `SSH_ASKPASS`) may run.
     User,
-    /// dux runs it on its own: no askpass of any kind runs, so only a
-    /// credential helper that answers without asking can sign it in.
+    /// dux runs it unasked, so no password program runs: only an ssh agent, a
+    /// known host and a credential helper that answers by itself sign it in.
     Background,
 }
 
@@ -109,11 +115,12 @@ pub enum StartedBy {
 /// passphrase or a host key. It is a process group of its own too, so a clone
 /// can be stopped at once. Null stdin; the caller sets the rest.
 ///
-/// For [`StartedBy::User`] an askpass configured in `GIT_ASKPASS`,
+/// For [`StartedBy::User`] a password program configured in `GIT_ASKPASS`,
 /// `SSH_ASKPASS` or `core.askPass` still runs; where none is, ssh gets one
 /// that fails at once. For [`StartedBy::Background`] none runs: an empty
-/// `GIT_ASKPASS` outranks `core.askPass` and `SSH_ASKPASS` for git, and
-/// `SSH_ASKPASS_REQUIRE=never` stops ssh's.
+/// `GIT_ASKPASS` outranks `core.askPass` and `SSH_ASKPASS` for git, and ssh
+/// gets the one that fails at once, which OpenSSH before 8.4 runs whatever
+/// `SSH_ASKPASS_REQUIRE` says.
 ///
 /// `env` is extra variables for git's environment, set first (a test hands git
 /// a stand-in transport or askpass this way).
@@ -135,19 +142,17 @@ pub(crate) fn network_git_command(
         Some((_, value)) => !value.is_empty(),
         None => std::env::var_os(key).is_some_and(|value| !value.is_empty()),
     };
-    match started_by {
-        StartedBy::User => {
-            if !configured("SSH_ASKPASS") {
-                command
-                    .env("SSH_ASKPASS", "false")
-                    .env("SSH_ASKPASS_REQUIRE", "never");
-            }
-        }
+    let ssh_may_ask = match started_by {
+        StartedBy::User => configured("SSH_ASKPASS"),
         StartedBy::Background => {
-            command
-                .env("GIT_ASKPASS", "")
-                .env("SSH_ASKPASS_REQUIRE", "never");
+            command.env("GIT_ASKPASS", "");
+            false
         }
+    };
+    if !ssh_may_ask {
+        command
+            .env("SSH_ASKPASS", "false")
+            .env("SSH_ASKPASS_REQUIRE", "never");
     }
     // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
     unsafe {
@@ -159,15 +164,134 @@ pub(crate) fn network_git_command(
     command
 }
 
-/// Whether a failed network git call's stderr says the remote wanted something
-/// only a prompt could give: git's credential prompt (refused with "terminal
-/// prompts disabled"), or ssh's host confirmation or key passphrase, which ssh
-/// reports only as the refusal that followed.
-pub(crate) fn wanted_a_prompt(stderr: &str) -> bool {
-    stderr.contains("terminal prompts disabled")
-        || stderr.contains("Host key verification failed")
-        || stderr.contains("Permission denied (")
+/// How a remote turned away a call that had nobody to ask, read from what git
+/// and ssh printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignInRefusal {
+    /// The host's key is not the one ssh has on record, or was revoked.
+    HostKeyChanged,
+    /// ssh could not check the host's key and could not ask to accept it.
+    HostKeyUnconfirmed,
+    /// The ssh server accepted none of the keys ssh could offer without asking.
+    KeyRefused,
+    /// git needed a username or password and could not ask for one.
+    CredentialWanted,
 }
+
+impl SignInRefusal {
+    fn read(stderr: &str) -> Option<Self> {
+        let said = stderr.to_lowercase();
+        let any = |marks: &[&str]| marks.iter().any(|mark| said.contains(mark));
+        if any(&[
+            "remote host identification has changed",
+            "revoked host key",
+            "possible dns spoofing",
+        ]) {
+            Some(Self::HostKeyChanged)
+        } else if any(&["host key verification failed"]) {
+            Some(Self::HostKeyUnconfirmed)
+        } else if any(&["permission denied ("]) {
+            Some(Self::KeyRefused)
+        } else if any(&["terminal prompts disabled"]) {
+            Some(Self::CredentialWanted)
+        } else {
+            None
+        }
+    }
+
+    /// Whether `line` (lowercased) is one of the lines that give this reason.
+    fn gives_the_reason(self, line: &str) -> bool {
+        let marks: &[&str] = match self {
+            Self::HostKeyChanged => &["has changed", "revoked", "host key verification failed"],
+            Self::HostKeyUnconfirmed => &["host key", "authenticity of host"],
+            Self::KeyRefused => &["permission denied", "passphrase"],
+            Self::CredentialWanted => &["could not read", "terminal prompts disabled"],
+        };
+        marks.iter().any(|mark| line.contains(mark))
+    }
+
+    /// What the refusal means and what lets git sign in without asking.
+    fn meaning(self) -> &'static str {
+        match self {
+            Self::HostKeyChanged => {
+                "The key origin's host presented is not the one ssh has on record for it, \
+                 which can mean someone is intercepting the connection. Do not replace the \
+                 recorded key unless whoever runs the server confirms the change."
+            }
+            Self::HostKeyUnconfirmed => {
+                "ssh could not check origin's host key and nobody was there to accept it. \
+                 Connect to the host once from a terminal and check the fingerprint it shows \
+                 against the one its owner publishes; once ssh knows the host, it does not \
+                 ask again."
+            }
+            Self::KeyRefused => {
+                "The server took none of the keys ssh could offer without asking: it may not \
+                 know them, or the key it knows needs a passphrase. Git signs in without \
+                 asking when an ssh agent holds a key the server accepts (add it with ssh-add)."
+            }
+            Self::CredentialWanted => {
+                "origin wanted a username or password and nobody was there to type one. Git \
+                 signs in without asking when a credential helper stores the credential for \
+                 this host, such as your system keychain, or gh auth setup-git for GitHub."
+            }
+        }
+    }
+
+    fn speaker(self) -> &'static str {
+        match self {
+            Self::CredentialWanted => "Git",
+            Self::HostKeyChanged | Self::HostKeyUnconfirmed | Self::KeyRefused => "ssh",
+        }
+    }
+}
+
+/// A [`StartedBy::Background`] fetch of origin that origin did not let in,
+/// with the lines of git's and ssh's output that say why. It displays as the
+/// whole note a surface shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SignInRefused {
+    pub refusal: SignInRefusal,
+    pub said: String,
+}
+
+impl SignInRefused {
+    /// The refusal `stderr` reports, if it reports one. ssh's banners of `@`
+    /// and git's closing advice are left out of [`Self::said`].
+    pub(crate) fn read(stderr: &str) -> Option<Self> {
+        let refusal = SignInRefusal::read(stderr)?;
+        let lines: Vec<&str> = stderr
+            .lines()
+            .map(|line| line.trim().trim_matches('@').trim())
+            .filter(|line| line.chars().any(char::is_alphanumeric))
+            .collect();
+        let reasons: Vec<&str> = lines
+            .iter()
+            .copied()
+            .filter(|line| refusal.gives_the_reason(&line.to_lowercase()))
+            .collect();
+        let said = if reasons.is_empty() {
+            lines.first().copied().unwrap_or_default().to_string()
+        } else {
+            reasons.join(" ")
+        };
+        Some(Self { refusal, said })
+    }
+}
+
+impl std::fmt::Display for SignInRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dux fetched origin by itself, running no password program and asking you \
+             nothing, and origin did not let it in. {} {} said: {}",
+            self.refusal.meaning(),
+            self.refusal.speaker(),
+            self.said
+        )
+    }
+}
+
+impl std::error::Error for SignInRefused {}
 
 /// The branch the remote `origin` of the repository at `path` calls its
 /// default, asked of the remote itself, for a folder that does not record it.
@@ -775,40 +899,21 @@ mod tests {
         );
     }
 
-    /// The branch listing fetches by itself, so an askpass the repository
-    /// names is not run; the listing says once, without a retry, what origin
-    /// wanted and what to do.
-    #[test]
-    fn a_branch_listing_whose_origin_wants_a_credential_asks_nobody_and_says_so() {
-        if !runs_here_without_the_developers_prompts(
-            "git::clone::tests::a_branch_listing_whose_origin_wants_a_credential_asks_nobody_and_says_so",
-        ) {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let script = recording_askpass(tmp.path(), "stored-secret");
-        let (url, seen) = credential_wanting_remote(None);
-        let repo = tmp.path().join("repo");
-        for args in [
-            vec!["init", "-q", "-b", "main", repo.to_str().unwrap()],
+    /// The sentence every background fetch origin turned away starts with.
+    const NOT_LET_IN: &str = "dux fetched origin by itself, running no password program and \
+                              asking you nothing, and origin did not let it in.";
+
+    /// A repository at `dir/repo` with one commit, whose origin is `url`, with
+    /// `config` set in it.
+    fn repo_with_origin(dir: &Path, url: &str, config: &[(&str, &str)]) -> std::path::PathBuf {
+        let repo = dir.join("repo");
+        let repo_arg = repo.to_str().unwrap();
+        let mut steps = vec![
+            vec!["init", "-q", "-b", "main", repo_arg],
+            vec!["-C", repo_arg, "remote", "add", "origin", url],
             vec![
                 "-C",
-                repo.to_str().unwrap(),
-                "remote",
-                "add",
-                "origin",
-                &url,
-            ],
-            vec![
-                "-C",
-                repo.to_str().unwrap(),
-                "config",
-                "core.askPass",
-                &script,
-            ],
-            vec![
-                "-C",
-                repo.to_str().unwrap(),
+                repo_arg,
                 "-c",
                 "user.name=dux test",
                 "-c",
@@ -819,32 +924,189 @@ mod tests {
                 "-m",
                 "first",
             ],
-        ] {
+        ];
+        for (key, value) in config {
+            steps.push(vec!["-C", repo_arg, "config", key, value]);
+        }
+        for args in steps {
             assert!(
                 git_command().args(&args).status().unwrap().success(),
                 "{args:?}"
             );
         }
+        repo
+    }
+
+    /// The base branch list's note for an ssh origin whose ssh prints `said`
+    /// and fails.
+    fn ssh_refusal_note(said: &str) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh(
+            tmp.path(),
+            &format!("cat >&2 <<'SAID'\n{said}\nSAID\nexit 255"),
+        );
+        let repo = repo_with_origin(
+            tmp.path(),
+            "ssh://git@example.invalid/repo.git",
+            &[("core.sshCommand", &ssh)],
+        );
+        let listing =
+            crate::base_branch::load_branch_listing(&repo, Duration::from_secs(30)).unwrap();
+        listing.fetch_error().unwrap()
+    }
+
+    /// The branch listing fetches by itself, so an askpass the repository
+    /// names is not run; the listing says once, without a retry, that origin
+    /// wanted a credential and what lets git sign in without asking.
+    #[test]
+    fn a_branch_listing_whose_https_origin_wants_a_credential_asks_nobody_and_says_so() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_branch_listing_whose_https_origin_wants_a_credential_asks_nobody_and_says_so",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let script = recording_askpass(tmp.path(), "stored");
+        let (url, seen) = credential_wanting_remote(None);
+        let repo = repo_with_origin(tmp.path(), &url, &[("core.askPass", &script)]);
 
         let listing =
             crate::base_branch::load_branch_listing(&repo, Duration::from_secs(30)).unwrap();
 
-        let note = listing.fetch_error().unwrap();
-        assert!(
-            note.starts_with(
-                "origin wants a password, a key passphrase or a host confirmation, which dux \
-                 does not ask for when it fetches by itself to list branches. Pull the project \
-                 once"
-            ),
-            "{note}"
+        let host = url.trim_end_matches("/repo.git");
+        assert_eq!(
+            listing.fetch_error().unwrap(),
+            format!(
+                "{NOT_LET_IN} origin wanted a username or password and nobody was there to type \
+                 one. Git signs in without asking when a credential helper stores the credential \
+                 for this host, such as your system keychain, or gh auth setup-git for GitHub. \
+                 Git said: fatal: could not read Username for '{host}': terminal prompts disabled"
+            )
         );
-        assert!(note.contains("terminal prompts disabled"), "{note}");
         assert_eq!(
             times_asked(tmp.path()),
             0,
             "the repository's askpass was run"
         );
         assert_eq!(seen.lock().unwrap().len(), 1, "the fetch was tried again");
+    }
+
+    /// `Permission denied (publickey)` is all ssh says both when the server
+    /// knows none of the keys and when the key it knows needs a passphrase, so
+    /// the note names both and the one thing that answers either without
+    /// asking.
+    #[test]
+    fn a_branch_listing_whose_ssh_key_is_not_accepted_says_what_signs_in_without_asking() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_branch_listing_whose_ssh_key_is_not_accepted_says_what_signs_in_without_asking",
+        ) {
+            return;
+        }
+        let note = ssh_refusal_note(
+            "git@example.invalid: Permission denied (publickey).\n\
+             fatal: Could not read from remote repository.\n\
+             \n\
+             Please make sure you have the correct access rights\n\
+             and the repository exists.",
+        );
+
+        assert_eq!(
+            note,
+            format!(
+                "{NOT_LET_IN} The server took none of the keys ssh could offer without asking: it \
+                 may not know them, or the key it knows needs a passphrase. Git signs in without \
+                 asking when an ssh agent holds a key the server accepts (add it with ssh-add). \
+                 ssh said: git@example.invalid: Permission denied (publickey)."
+            )
+        );
+    }
+
+    /// A changed host key may be somebody in the middle, so the note says so,
+    /// carries ssh's warning in words rather than its banner of `@`, and gives
+    /// no advice that would accept the new key.
+    #[test]
+    fn a_branch_listing_whose_ssh_host_key_changed_warns_and_accepts_nothing() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_branch_listing_whose_ssh_host_key_changed_warns_and_accepts_nothing",
+        ) {
+            return;
+        }
+        let note = ssh_refusal_note(
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+             @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\n\
+             Someone could be eavesdropping on you right now (man-in-the-middle attack)!\n\
+             It is also possible that a host key has just been changed.\n\
+             The fingerprint for the ED25519 key sent by the remote host is\n\
+             SHA256:2ZfFh3Vqk6mYv0bq5xV0p7c0m9sQdW0R0b5jS0yQx0E.\n\
+             Please contact your system administrator.\n\
+             Add correct host key in /home/someone/.ssh/known_hosts to get rid of this message.\n\
+             Offending ED25519 key in /home/someone/.ssh/known_hosts:3\n\
+             \x20 remove with:\n\
+             \x20 ssh-keygen -f '/home/someone/.ssh/known_hosts' -R 'example.invalid'\n\
+             Host key for example.invalid has changed and you have requested strict checking.\n\
+             Host key verification failed.\n\
+             fatal: Could not read from remote repository.\n\
+             \n\
+             Please make sure you have the correct access rights\n\
+             and the repository exists.",
+        );
+
+        assert_eq!(
+            note,
+            format!(
+                "{NOT_LET_IN} The key origin's host presented is not the one ssh has on record for \
+                 it, which can mean someone is intercepting the connection. Do not replace the \
+                 recorded key unless whoever runs the server confirms the change. ssh said: \
+                 WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! Host key for example.invalid \
+                 has changed and you have requested strict checking. Host key verification \
+                 failed."
+            )
+        );
+    }
+
+    /// OpenSSH before 8.4 ignores `SSH_ASKPASS_REQUIRE` and runs `SSH_ASKPASS`
+    /// whenever it has a display and no terminal, so a background call must not
+    /// hand it the user's program at all.
+    #[test]
+    fn an_ssh_that_ignores_askpass_require_never_runs_the_users_program_for_background_work() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::an_ssh_that_ignores_askpass_require_never_runs_the_users_program_for_background_work",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let script = recording_askpass(tmp.path(), "stored-secret");
+        let ssh = fake_ssh(
+            tmp.path(),
+            "[ -n \"$SSH_ASKPASS\" ] && \"$SSH_ASKPASS\" 'Enter passphrase' >/dev/null\nexit 255",
+        );
+
+        for (n, started_by) in [StartedBy::User, StartedBy::Background]
+            .into_iter()
+            .enumerate()
+        {
+            let asked = times_asked(tmp.path());
+            let result = clone_repository_with_env(
+                "ssh://example.invalid/repo.git",
+                &tmp.path().join(format!("clone{n}")),
+                Duration::from_secs(30),
+                &CloneProcesses::default(),
+                started_by,
+                &[
+                    ("GIT_SSH_COMMAND", &ssh),
+                    ("SSH_ASKPASS", &script),
+                    ("DISPLAY", ":99"),
+                ],
+            );
+            assert!(matches!(result, Err(CloneError::Failed(_))), "{result:?}");
+            assert_eq!(
+                times_asked(tmp.path()) > asked,
+                started_by == StartedBy::User,
+                "{started_by:?}"
+            );
+        }
     }
 
     #[test]

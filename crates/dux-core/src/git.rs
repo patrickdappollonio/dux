@@ -24,7 +24,9 @@ mod clone;
 mod folding;
 pub(crate) mod listing_child;
 pub use clone::{CloneError, CloneProcesses, StartedBy, clone_repository};
-pub(crate) use clone::{clone_repository_with_env, remote_default_branch_from_remote};
+pub(crate) use clone::{
+    SignInRefused, clone_repository_with_env, remote_default_branch_from_remote,
+};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
     rows_answering, untracked_directory_kind,
@@ -1736,22 +1738,6 @@ pub(crate) fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// The error a [`StartedBy::Background`] [`fetch_origin_bounded`] answers when
-/// origin wanted a credential or confirmation only a prompt could give
-/// ([`clone::wanted_a_prompt`]); it carries what git said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WantedAPrompt {
-    pub git_said: String,
-}
-
-impl std::fmt::Display for WantedAPrompt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "git fetch origin needed a prompt: {}", self.git_said)
-    }
-}
-
-impl std::error::Error for WantedAPrompt {}
-
 /// The error [`fetch_origin_bounded`] answers when the fetch ran into its
 /// bound and was stopped, typed so a caller can tell "out of time" apart from
 /// a reason git gave (`anyhow::Error::downcast_ref`).
@@ -1778,9 +1764,9 @@ impl std::error::Error for FetchTimedOut {}
 /// whole group is killed at the bound, so a transport helper (`ssh`, a
 /// credential helper, a stand-in `upload-pack`) cannot outlive it. It never
 /// prompts on dux's terminal ([`clone::network_git_command`]). A
-/// failure or a timeout is an `Err` naming what happened, a [`WantedAPrompt`]
-/// when a background fetch needed one; callers report it and carry on from
-/// the refs they already have.
+/// failure or a timeout is an `Err` naming what happened, a [`SignInRefused`]
+/// when origin did not let a background fetch in; callers report it and carry
+/// on from the refs they already have.
 pub(crate) fn fetch_origin_bounded(
     repo_path: &Path,
     timeout: std::time::Duration,
@@ -1840,16 +1826,10 @@ pub(crate) fn fetch_origin_bounded(
     };
     let stderr = drain();
     if !status.success() {
-        if started_by == StartedBy::Background && clone::wanted_a_prompt(&stderr) {
-            return Err(WantedAPrompt {
-                git_said: stderr
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .unwrap_or_default()
-                    .to_string(),
-            }
-            .into());
+        if started_by == StartedBy::Background
+            && let Some(refused) = SignInRefused::read(&stderr)
+        {
+            return Err(refused.into());
         }
         return Err(anyhow!(
             "git fetch origin failed in {}: {}",

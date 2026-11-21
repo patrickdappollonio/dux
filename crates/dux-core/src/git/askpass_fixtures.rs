@@ -73,9 +73,7 @@ pub(crate) fn times_asked(dir: &Path) -> usize {
 /// `refs` as a dumb-HTTP ref advertisement when it asks for `info/refs` and
 /// `refs` is given, and a 404 otherwise. The `Authorization` header of each
 /// request, or `none`, is recorded.
-pub(crate) fn credential_wanting_remote(
-    refs: Option<String>,
-) -> (String, Arc<Mutex<Vec<String>>>) {
+pub(crate) fn credential_wanting_remote(refs: Option<String>) -> (String, Arc<Mutex<Vec<String>>>) {
     use std::io::{BufRead as _, Write as _};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
