@@ -193,11 +193,13 @@ export function MacroPopover({
         // LIST scrolls, same as the desktop layout. p-0 eats the sheet's
         // safe-area bottom padding along with the rest (tailwind-merge folds
         // the whole padding group), so the pb is restated: it is what keeps
-        // the Edit-macros footer above a phone's home-indicator strip.
+        // the Edit-macros footer above a phone's home-indicator strip. gap-0:
+        // the panel's own gap would sit as a blank band under the last macro,
+        // the list's padding already spaces it from the footer.
         className={
           isMobile
             ? "flex flex-col overflow-hidden p-0 pb-[max(env(safe-area-inset-bottom),0.25rem)]"
-            : "w-72 p-0"
+            : "w-72 gap-0 p-0"
         }
         finalFocus={resolveFinalFocus}
       >
