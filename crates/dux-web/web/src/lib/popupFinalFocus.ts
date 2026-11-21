@@ -9,17 +9,9 @@ type FinalFocus<C> =
 
 const LAYER = '[role="dialog"], [role="alertdialog"]'
 
-/// A popup's `finalFocus` that yields to a dialog opened after the popup did,
-/// and the callback ref the popup must carry for it.
-///
-/// base-ui returns focus to an explicitly named target (a function or a ref)
-/// even when focus has since moved somewhere else, and it does so only once the
-/// popup's exit is over. So a menu item or a popover button that closes its
-/// popup and opens a dialog had the dialog take focus first and the popup's
-/// target take it back a moment later: a terminal behind the dialog then got
-/// the keystrokes and Escape. Here, while a dialog layer is open that was not
-/// open when the popup opened, the popup leaves focus to it. A boolean
-/// `finalFocus` already behaves much this way inside base-ui.
+/// A popup's `finalFocus`, and the ref its popup must carry, that leaves focus
+/// alone while a dialog opened after the popup is up: base-ui otherwise moves
+/// focus to a named target even once that dialog has taken it.
 export function usePopupFinalFocus<C>(
   finalFocus: FinalFocus<C>,
 ): [(el: HTMLElement | null) => void, FinalFocus<C>] {
@@ -49,9 +41,8 @@ export function usePopupFinalFocus<C>(
   return [attach, explicit ? wrapped : finalFocus]
 }
 
-// A dialog layer is open now that was not when the popup opened. Its presence
-// is enough: the dialog may not have placed its own focus yet when the popup
-// finishes closing in the same moment.
+// Presence, not focus: a dialog opened in the same commit as the popup closed
+// has not placed its focus yet.
 function newerLayerOpen(popup: Element | null, before: ReadonlySet<Element>): boolean {
   for (const layer of document.querySelectorAll(LAYER)) {
     if (layer !== popup && !before.has(layer)) return true

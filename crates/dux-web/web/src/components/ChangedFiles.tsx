@@ -767,12 +767,9 @@ function ChangesRecap({
   // No "+0 −0".
   if (!hasLines && binaryCount === 0 && diffExcludedCount === 0) return null
 
-  // One clipped line that wraps, like a row's: a figure that does not fit drops
-  // whole to a second line nobody sees. The first item is a zero-width strut a
-  // full line tall, so the first line is always that tall and always holds an
-  // item: a figure wider than the whole recap is then never alone on the first
-  // line, where it would be cut, but drops below it with the rest. The strut
-  // stays out of the baseline, which the figures beside it share.
+  // One clipped line that wraps: a figure that does not fit drops whole to a
+  // second line nobody sees. The full-height strut keeps the first line a line
+  // tall and never empty, so even a figure wider than the recap drops below.
   return (
     <span
       ref={ref}

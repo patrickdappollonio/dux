@@ -4511,9 +4511,8 @@ function applyUrlRoute(): void {
   }
 }
 
-// The phone's editor address for the computer's in-page editor address, which
-// a phone cannot show (its overlay does not render there), or null for any
-// other address. The menu's own entry opens the same address on a phone.
+// The phone's editor address for the computer's in-page editor address, whose
+// overlay a phone does not render; null for any other address.
 function phoneEditorAddress(route: Route): string | null {
   if (!isMobileViewport() || route.standalone) return null
   if (route.editor === null || route.target === null) return null
@@ -9129,9 +9128,7 @@ let macrosReturnFocus: (() => HTMLElement | null) | null = null
 // Open the macro-editor dialog, on the edits a Back set aside when there are
 // any, else on the saved list (copied, so edits never touch the bootstrap).
 // Runs in the click/palette handler that opens the dialog, never an effect.
-// `select` names the macro it opens on. `returnFocus` names where focus goes
-// when the dialog closes, for an opener that does not outlive the opening: the
-// picker's pencil leaves with the picker, and its trigger or the pane stays.
+// `select` names the macro it opens on; `returnFocus` where focus goes on close.
 export function openMacrosDialog(
   select: string | null = null,
   returnFocus: (() => HTMLElement | null) | null = null,

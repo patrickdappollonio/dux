@@ -476,9 +476,8 @@ async function armAttention(title = ATTENTION_AGENT, timeoutMs = 40000) {
 // asks for it through `expectStateWord`, which is where every guard lives now.
 const ATTENTION_WORD = "Needs you"
 
-// The sidebar order is posted whole, so the server refuses it while the
-// workspace holds an agent the seed did not make; say so before relighting
-// anything, with the way out.
+// The sidebar order is posted whole, and the server refuses it while the
+// workspace holds an agent the seed did not make.
 async function refuseForeignAgents() {
   const titles = (await get("/api/v1/sessions")).map((s) => s.title)
   const foreign = titles.filter((title) => !SIDEBAR_ORDER.includes(title))

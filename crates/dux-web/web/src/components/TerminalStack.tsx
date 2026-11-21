@@ -436,9 +436,8 @@ function TerminalPart(props: TerminalPartProps) {
   // the compose redirect, the paste listener and the suspended tab stop follow
   // it.
   const composeSurfaceLive = composeBarEnabled && isOwner && isTypingTarget
-  // This page drove the row when its socket lost the server, and the verdict
-  // now waits for the next handshake: the input rows and the draft stay for
-  // the outage, while every write still reads the verdict and sends nothing.
+  // This page drove the row when its socket lost the server: the input rows and
+  // draft stay for the outage, and every write still reads the pending verdict.
   const awaitingServer =
     !connectionLost && !ownershipKnown && handshakeSeen && !hearingServer
   const holdsInput = isOwner || awaitingServer

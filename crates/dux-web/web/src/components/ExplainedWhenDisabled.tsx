@@ -13,10 +13,8 @@ import { cn } from "@/lib/utils"
 // takes no pointer events or focus, so the hint hangs off a wrapper that takes
 // the focus, the ring and, for a finger, a tap. The wrapper is there either way,
 // so flipping `disabled` never remounts the control.
-//
-// A browser takes focus off a button the moment it is disabled and leaves it
-// on the page body, so focus held anywhere in here moves to the wrapper when
-// the control is disabled, and back to the control when it is enabled again.
+// Focus in here moves to the wrapper on disabling, since a browser drops a
+// disabled button's focus to the page body, and back to the control on enabling.
 export function ExplainedWhenDisabled({
   disabled,
   hint,

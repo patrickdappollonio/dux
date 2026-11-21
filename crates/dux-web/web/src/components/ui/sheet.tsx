@@ -50,9 +50,8 @@ function SheetContent({
 }: SheetPrimitive.Popup.Props & {
   side?: "top" | "right" | "bottom" | "left"
   showCloseButton?: boolean
-  // A top or bottom sheet that stands the full screen height but a 2.5rem
-  // strip, whatever its content, so its own header stays on screen and its
-  // body scrolls inside it.
+  // A top or bottom sheet the screen's height less 2.5rem whatever its content,
+  // so its header stays on screen and its body scrolls inside it.
   fullHeight?: boolean
 }) {
   return (

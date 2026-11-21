@@ -65,9 +65,8 @@ fi
 prepare_browser() {
   [ -d "$PREVIEW/node_modules/puppeteer-core" ] || (cd "$PREVIEW" && npm install --silent)
 
-  # Chromium discovery, in shot.sh's preference order: an explicit CHROME=, a
-  # cached Playwright build, then common system binaries; Brave last, which
-  # shot.sh does not look for.
+  # Chromium discovery: an explicit CHROME=, a cached Playwright build, then
+  # common system binaries, in shot.sh's order with Brave added last.
   if [ -z "${CHROME:-}" ]; then
     CHROME="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
   fi

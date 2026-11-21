@@ -125,9 +125,8 @@ const FILTERS: { value: MacroFilter; label: string }[] = [
 // filter, the name field and its `⋯`): 32px for a mouse, 40px under a finger.
 const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
 
-// A match lit inside a line cut by an ellipsis: each mark is one unbreakable
-// box, which the ellipsis hides whole, so no sliver of a hidden match's
-// colour shows beside it.
+// Each mark one unbreakable box, which an ellipsis hides whole, so a hidden
+// match leaves no sliver of its colour beside the ellipsis.
 const WHOLE_MARKS = "[&_mark]:inline-block"
 
 const DESCRIPTION = "Text you send to an agent or a terminal from its Macros… button."
@@ -192,9 +191,7 @@ export function MacrosDialog() {
 
 // A dialog on a computer, a bottom sheet on a phone, both under the one dialog
 // root, so a rotation swaps the shell without remounting the editor's draft.
-//
-// Closing hands focus to where the opener asked, since a picker's pencil does
-// not outlive the opening; with no answer the dialog's own choice stands.
+// Closing hands focus where the opener asked, else where the dialog chooses.
 function Shell({
   phone,
   initialFocus,
@@ -763,10 +760,8 @@ function MacrosEditor({
   )
 }
 
-// The height of the computer's list box: as many whole rows as the room below
-// the filter holds, so at rest the list never ends on a row cut in half. The
-// room is measured, not the list, so the box can grow back when the dialog
-// does; undefined until a row is drawn to measure.
+// The computer's list box height: as many whole rows as the room holds, so at
+// rest no row is cut in half; undefined until a row is drawn to measure.
 function useWholeRowsHeight(
   room: RefObject<HTMLElement | null>,
   rowCount: number,
