@@ -278,7 +278,9 @@ the terminal UI and in the browser alike.
   the terminal UI's count of running terminals in its top bar leaves them out. The terminal
   UI's kill-running list and resource monitor still list every running terminal. Take the
   agent over, from the windowed pane or a maximized one, and its layout and the part you
-  were typing into come back just as they were when the card came up.
+  were typing into come back just as they were when the card came up, unless you moved to
+  another row in the list meanwhile: coming back to the agent starts from the view coming
+  back gives, as it does when nothing is serving.
 - **Nothing changes an agent you do not drive:** while the card is up, starting or
   restarting it, adding, closing, stopping or reordering its tabs and terminals, renaming,
   detaching, deleting or recreating it, changing its provider or auto-reopen, rerunning its
@@ -287,9 +289,17 @@ the terminal UI and in the browser alike.
   driving and how to take over. That holds for something you began before the other device
   took over, too: in the terminal UI an open dialog about the agent closes and a tab or
   divider drag stops, with the same line saying why.
-- **Looking is always allowed:** selecting the agent or one of its tabs, its info and its
-  logs keep working under the card. Git actions in the Changes pane, pull requests, project
-  commands and moving the agent in the list are not held back by the card either.
+- **Looking is always allowed:** selecting the agent or one of its tabs, showing it from
+  the list or the command palette, maximizing it to look at the card and leaving fullscreen
+  again, its info and its logs keep working under the card, and none of it starts the agent,
+  even one that is stopped. Git actions in the Changes pane, pull requests, project commands
+  and moving the agent in the list are not held back by the card either.
+- **Take over, then act:** in the terminal UI a change you ask for right after pressing
+  Take over, before the screen has redrawn, goes ahead once the take-over has landed, and
+  is refused like any other if it has not.
+- **Serving stopping under the card:** whether you stop it or it stops by itself, the
+  terminal UI leaves the agent windowed with nothing typed into, so your next keys do not
+  land in it unannounced.
 - **It is sticky in both directions:** losing a terminal does not silently give it back to
   you.
 
