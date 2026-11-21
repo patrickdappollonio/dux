@@ -431,7 +431,12 @@ only appears for the writer. This applies to the two **pane** drops and to a fil
 from the input or row menus. A drop on the editor's file tree pastes nothing, so it needs no
 input ownership: anybody can do it while nobody is driving the agent or terminal,
 **Upload here…** included. While another device is driving it, the drop is refused with a
-message naming that device, like every other change to what it drives.
+message naming that device, like every other change to what it drives. A drop is judged by
+where the file lands, too: one on a terminal whose shell stands inside the folder of an
+agent another device is driving is refused the same way, and so is one on a folder of the
+editor's tree that is inside such an agent's folder. When several files are dropped
+together and one is refused for this reason, the rest are not sent and the one message says
+so.
 
 A watcher who pastes an image is told rather than ignored: nothing is uploaded, and a toast
 says the image was not saved and that taking over is the way to paste it here.

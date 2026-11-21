@@ -984,9 +984,8 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
       if (agentOrder) reorderAgents(agentOrder)
       if (Object.keys(placements).length > 0) placeTerminalsInList(placements)
     }
-    // The terminal order is the one part of a drop the server may refuse (it
-    // moves the terminals of an agent another device drives), so the sort mode
-    // and the placements wait for it: a refused drop leaves nothing applied.
+    // The server may refuse the terminal order for an agent another device
+    // drives, so the rest of the drop waits for it and a refusal applies nothing.
     if (terminalOrder) {
       void Promise.resolve(reorderTerminals(terminalOrder)).then((took) => {
         if (took !== false) settle()

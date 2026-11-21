@@ -342,6 +342,22 @@ impl Engine {
         self.admit_row_change(&row_change(command))
     }
 
+    /// [`Self::admit_row_change`] for a command a surface sends itself: a
+    /// project removal, which the terminal UI sends with no row gating it.
+    /// Any other command is gated at its gesture or finishes an admitted change.
+    pub(crate) fn admit_command_row_change(
+        &self,
+        command: &super::Command,
+    ) -> Result<(), RowDriven> {
+        match command {
+            super::Command::RemoveProject { project_id, .. }
+            | super::Command::DeleteProject { project_id, .. } => {
+                self.admit_row_change(&RowChange::Project(project_id.clone()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Every row `change` would change, each with how the request reaches it.
     /// The one place a request's effect on rows it does not name is worked out.
     fn rows_changed(&self, change: &RowChange) -> Vec<(RowKey, Reach)> {
@@ -660,6 +676,42 @@ mod tests {
             &RowChange::ProjectCheckout("p1".to_string()),
         )
         .expect("a checkout no agent has as its folder");
+    }
+
+    /// The terminal UI removes a project by a command of its own, which is
+    /// judged like anybody's: refused while a browser drives an agent in it,
+    /// and let through while the terminal UI's own seat does.
+    #[test]
+    fn the_terminal_uis_project_removal_is_judged_for_the_agents_it_ends() {
+        let (mut engine, _tmp, _worktree, owners, _, _) = serving_engine();
+        let seat = owners.take_seat(Some(&page("a")), "s1-slot");
+        owners.may_write("s1-slot", seat.id(), Some(FIREFOX), || {});
+        let remove = || crate::engine::Command::RemoveProject {
+            project_id: "p1".to_string(),
+            project_name: "p1".to_string(),
+        };
+
+        let refused = engine
+            .apply(remove())
+            .expect_err("a browser drives its agent");
+        assert!(refused.downcast_ref::<RowDriven>().is_some(), "{refused}");
+        assert!(engine.sessions.iter().any(|session| session.id == "s1"));
+
+        let terminal_ui = owners.seat_terminal_ui();
+        let taken = owners.claim_for_resize(
+            "s1-slot",
+            terminal_ui,
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            Some(crate::background_serve::TUI_DEVICE_LABEL),
+            |_| {},
+        );
+        assert!(taken.apply);
+        engine
+            .apply(remove())
+            .expect("the terminal UI drives it now");
+        assert!(engine.sessions.iter().all(|session| session.id != "s1"));
     }
 
     /// A write is checked against the folder of every agent another device

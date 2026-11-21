@@ -251,7 +251,10 @@ The command line cannot take over. Add --dangerously-ignore-connected to make th
 ```
 
 That covers `dux agents start`, `stop` and `rm`, `dux agents tabs add`, `start`, `stop`
-and `rm`, and `dux terminals add --agent` and `rm`. The command exits 3. The same flag,
+and `rm`, and `dux terminals add --agent` and `rm`. It also covers a command that would
+reach a driven agent without naming it: `dux projects rm` on the project it is in, and
+`dux agents start` on another agent that runs in the same folder, which would stop it;
+the refusal then names that agent. The command exits 3. The same flag,
 `--dangerously-ignore-connected`, makes the change anyway. While nobody is driving, nothing
 is refused on this account.
 

@@ -284,11 +284,8 @@ fn hold_path_blocking(
 /// whose folder a target lies in (the root itself, with no targets): a write is
 /// judged by where it lands, whatever root it came through.
 ///
-/// The question is answered once, here, and the write that follows runs to
-/// its end: a take-over that lands after the answer does not stop a write
-/// already let through, as it does not stop a git change the terminal UI has
-/// running. Holding the row against a take-over until the write is done would
-/// make a press on the card wait out a pull or a push.
+/// Asked once, here: a take-over landing after the answer does not stop the
+/// write that follows, since holding the row would make it wait out a push.
 pub(crate) async fn hold_targets_for_write(
     state: &AppState,
     row: &RowChange,

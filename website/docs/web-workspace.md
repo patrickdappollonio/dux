@@ -324,27 +324,59 @@ dev server. A terminal you open on an agent somebody else is driving is theirs t
 watch it until you press **Take over**. A project or standalone terminal is driven on its
 own.
 
+When a confirmation tells you who else has something open, it offers to go ahead only over
+devices that are watching. For a device that is driving, it names the device and asks you
+to take over first.
+
 > [!IMPORTANT]
 > **Only the driving device changes what it drives.** While another device is driving an
-> agent, dux itself refuses every change to it from anywhere else, whichever screen or
-> command asked:
+> agent, dux itself refuses these changes to it from every other browser page, from the
+> terminal UI and from the command line, whichever screen or command asked:
 >
 > - its tabs and terminals: adding, closing, stopping, starting, reordering, changing a
 >   tab's provider;
 > - the agent: starting, restarting, stopping, deleting, renaming, recreating its working
 >   copy, changing its provider or auto-reopen, rerunning its startup command;
 > - its files: stage, unstage, discard, commit, push and pull, saving, creating, renaming,
->   moving or deleting a file in the editor, and dropping a file onto it.
+>   moving or deleting a file in the editor, and dropping a file onto it;
+> - anything that would reach it without naming it: removing or deleting its project,
+>   starting another agent that runs in the same folder (which would stop it), pulling or
+>   switching the branch of a project whose own checkout is the agent's folder, and a file
+>   saved, created, renamed, moved, deleted, uploaded or dropped inside its folder from
+>   somewhere else (another agent's or a terminal's editor, a terminal whose shell stands
+>   in that folder, **New folder** in the folder picker).
 >
-> For a project or standalone terminal somebody else is driving, closing it and editing
-> files through its editor are refused the same way. The refusal names the device that is
-> driving and says nothing was changed. Press **Take over** and do it again.
+> For a project or standalone terminal somebody else is driving, closing it, editing files
+> through its editor and removing its project are refused the same way. The refusal names
+> the device that is driving and says nothing was changed. Press **Take over** and do it
+> again.
 >
-> Looking is never refused, and neither are forking the agent, its pull requests, project
-> settings and project git, macros and other settings, or moving the row in the list.
-> While nobody is driving, the server refuses nothing; the browser still asks you to press
-> **Take over** first. The device that is driving is never refused, and an editor in its
-> own browser tab counts as the tab it was opened from.
+> Opening a stopped agent does not start it while another device is driving it: only the
+> driving device's press starts it.
+>
+> What stays open, on purpose:
+>
+> - Looking is never refused.
+> - Forking the agent, its pull requests, project settings, macros and other settings, the
+>   config file and moving the row in the list are open to everybody, and so are a project's
+>   pull and branch switch when no agent somebody is driving has that checkout as its folder.
+> - `--dangerously-ignore-connected` on the command line makes the change over the device
+>   that is driving. It is the one way past, and it says so in its name.
+> - A change dux already let through finishes: a push that was running when another device
+>   took over is not cut short.
+> - dux sees what goes through dux. A program in a terminal, a shell in another row
+>   included, can still change the agent's files.
+> - While nobody is driving, the server refuses nothing; the browser still asks you to press
+>   **Take over** first.
+>
+> The device that is driving is never refused, and an editor in its own browser tab counts
+> as the tab it was opened from. Right after you press **Take over**, a change you make in
+> the moment before dux has recorded the take-over waits for it, and tells you if the
+> take-over did not go through.
+>
+> This keeps your own devices from undoing each other by accident. It does not separate
+> people: everybody who can reach a dux shares its whole workspace (see
+> [Server mode](/docs/server-mode)).
 
 ![A card covering the terminal that says the agent is active on another device, with a Take over button.](/screens/take-over-card.png)
 

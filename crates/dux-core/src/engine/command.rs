@@ -603,6 +603,8 @@ impl Engine {
         // Refused while a change another surface follows holds what this one
         // would change. Checked only: a command has no record to hold with.
         self.check_command(&command)?;
+        // Refused while another device drives a row it would change.
+        self.admit_command_row_change(&command)?;
         // Refused while somebody else is attached to what it would end, and held
         // against new attachments until the change ends.
         let reservation = self.guard_command(&command)?;

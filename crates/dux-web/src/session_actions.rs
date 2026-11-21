@@ -1035,9 +1035,8 @@ async fn patch_session(
     {
         return rejection.into_response();
     }
-    // Asked once for the whole request, before any field is applied: the
-    // fields are separate commands, and a request refused at its second one
-    // would otherwise have applied its first.
+    // Asked once, before any field: each field is a command of its own, and
+    // a request refused at its second would have applied its first.
     if let Err(refused) = state
         .engine
         .admit_row_change(dux_core::engine::RowChange::Agent(id.clone()))
@@ -1045,9 +1044,8 @@ async fn patch_session(
     {
         return refused.into_response();
     }
-    // Each command is still judged as it is applied, so a take-over landing
-    // between two of them refuses the later one. The answer then says which
-    // fields had been changed already.
+    // A take-over landing between two fields still refuses the later one,
+    // and the answer then says which fields had been changed already.
     let asked = [
         (body.title.is_some(), "the name"),
         (

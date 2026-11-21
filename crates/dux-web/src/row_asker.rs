@@ -129,10 +129,8 @@ fn named_pages(headers: &axum::http::HeaderMap) -> Vec<PageId> {
 pub(crate) async fn identify(request: Request, next: Next) -> Response {
     let asker = RowAsker {
         pages: named_pages(request.headers()),
-        // Read here for every route, whether or not the route reads the
-        // parameter itself. On a route that does not, this is the only effect
-        // it has: going ahead over a driver. No route is known where it
-        // changes anything else.
+        // Read for every route, its own reader or not: where the route does
+        // not read it, going ahead over a driver is its only effect.
         force: axum::extract::Query::<ForceConnectedQuery>::try_from_uri(request.uri())
             .is_ok_and(|axum::extract::Query(force)| force.over_everybody()),
         refused: Arc::default(),

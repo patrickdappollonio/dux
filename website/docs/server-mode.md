@@ -298,11 +298,15 @@ the terminal UI and in the browser alike.
   again, its info and its logs keep working under the card, and none of it starts the agent,
   even one that is stopped, and so does reading its Changes pane and its diffs. Pull
   requests, project commands and moving the agent in the list are not held back by the card
-  either.
+  either, with one exception: a project is not removed or deleted while another device is
+  driving one of its agents or terminals.
 - **The server refuses it too:** a change to an agent another device is driving that
   arrives from a browser or from the `dux` command line is refused by dux itself, with a
   sentence naming the driver, whatever the screen that sent it had enabled. That includes
-  git changes in its working copy and file edits through the web editor. See
+  git changes in its working copy, file edits through the web editor, and a change that
+  names something else and would reach the agent: removing its project, starting another
+  agent in its folder, or writing a file inside its folder from another editor or
+  terminal. `--dangerously-ignore-connected` on the command line is the one way past. See
   [Only the driving device changes what it drives](/docs/web-workspace).
 - **Take over, then act:** in the terminal UI a change you ask for right after pressing
   Take over, before the screen has redrawn, goes ahead once the take-over has landed, and

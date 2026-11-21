@@ -292,6 +292,13 @@ disk version, or cancel. Cancelling keeps your text exactly as typed.
 > the agent over and save again. A change that is sent anyway is refused by dux with a
 > message naming the device that is driving. Opening and reading files always works.
 >
+> A change is judged by where the file is as well as by which editor made it. An editor
+> rooted at a terminal can reach folders that belong to agents (a standalone terminal's
+> starts at your home folder), and saving, creating, renaming, moving or deleting inside
+> the folder of an agent another device is driving is refused there too, naming that agent
+> and the device. Deleting or moving a folder that contains such an agent's folder is
+> refused the same way.
+>
 > An editor in its own browser tab edits as the tab it was opened from. Opened from the
 > device that is driving, with **Open editor in new tab** or the phone's **Open editor**,
 > it can save; when another device takes the agent over it turns read-only, and it can
