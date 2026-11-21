@@ -781,3 +781,33 @@ describe("MacrosDialog focus on a phone", () => {
     expect(document.activeElement).toBe(menuButton)
   })
 })
+
+// jsdom lays nothing out, so the room and the row report the sizes a browser
+// measured: a 403px room over 52px rows with a 2px gap holds seven whole rows.
+describe("MacrosDialog list on a computer", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    )
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(403)
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("role") === "option" ? 52 : 0
+    })
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({ rowGap: "2px" } as CSSStyleDeclaration)
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("ends on a whole row", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await settle()
+    const scroller = screen.getByRole("listbox").parentElement!
+    expect(scroller.style.height).toBe(`${7 * 54 - 2}px`)
+  })
+})

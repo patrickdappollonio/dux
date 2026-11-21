@@ -288,8 +288,9 @@ function MacrosEditor({
   // Set by a confirmed delete, for the confirm's close to read.
   const deleted = useRef(false)
 
-  const listRoom = useRef<HTMLDivElement | null>(null)
-  const listHeight = useWholeRowsHeight(listRoom, items.length)
+  // State rather than a ref: the dialog's portal draws the room a commit after
+  // this component, so the measuring effect must run again when it arrives.
+  const [listRoom, setListRoom] = useState<HTMLDivElement | null>(null)
 
   const changes = changeCount(items, baseline)
   const problem = validateMacros(draftToMacros(items))
@@ -337,6 +338,7 @@ function MacrosEditor({
     return list.filter((item) => matchesFilter(item.surface, f) && matchesSearch(item, needle))
   }
   const visible = visibleOf(items, query, filter)
+  const listHeight = useWholeRowsHeight(listRoom, visible.length)
 
   // Only a search or filter moves the selection off a macro it hides; an edit
   // that takes the macro out of the list leaves it selected.
@@ -725,7 +727,7 @@ function MacrosEditor({
             {filterChoice}
             {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
                 into the column gap so the rows still line up with the search. */}
-            <div ref={listRoom} className="flex min-h-0 flex-1 flex-col">
+            <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
               <div
                 className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
                 style={{ height: listHeight }}
@@ -763,12 +765,11 @@ function MacrosEditor({
 // The computer's list box height: as many whole rows as the room holds, so at
 // rest no row is cut in half; undefined until a row is drawn to measure.
 function useWholeRowsHeight(
-  room: RefObject<HTMLElement | null>,
+  el: HTMLElement | null,
   rowCount: number,
 ): number | undefined {
   const [height, setHeight] = useState<number | undefined>(undefined)
   useEffect(() => {
-    const el = room.current
     if (el === null || typeof ResizeObserver === "undefined") return
     const measure = () => {
       const row = el.querySelector<HTMLElement>('[role="option"]')
@@ -787,7 +788,7 @@ function useWholeRowsHeight(
     const observer = new ResizeObserver(measure)
     observer.observe(el)
     return () => observer.disconnect()
-  }, [room, rowCount])
+  }, [el, rowCount])
   return height
 }
 
