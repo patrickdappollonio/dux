@@ -9970,8 +9970,9 @@ export function closeStopAll(): void {
   setState({ stopAllOpen: false })
 }
 
-/** A row "Force stop everything" leaves running because another device drives
- * it: an agent with its own terminals, or a terminal that is a row of its own. */
+/** A row "Force stop everything" leaves running because this page may not
+ * change it: an agent with its own terminals, or a terminal that is a row of
+ * its own. */
 export interface LeftRunning {
   kind: "agent" | "terminal"
   id: string
@@ -9980,11 +9981,13 @@ export interface LeftRunning {
   terminals: number
   /** The driving device's label, when a mounted pane of the row heard it. */
   device: string | null
+  /** Why this page may not change the row. */
+  block: RowBlock
 }
 
 /** What "Force stop everything" stops: every running agent and every terminal,
- * except the rows this page already knows another device drives, which the
- * server would refuse. */
+ * except the rows this page may not change, by the answer a row's own Force
+ * stop gives (`partChangeBlock`). */
 export function stopAllPlan(s: DuxState): {
   agents: string[]
   terminals: string[]
@@ -9992,22 +9995,19 @@ export function stopAllPlan(s: DuxState): {
 } {
   const sessions = s.spine?.sessions ?? []
   const terminals = s.spine?.terminals ?? []
-  const elsewhere = (row: string, spine: () => boolean) => {
-    const block = rowBlockFor(row)
-    return block === undefined ? spine() : block === "other"
+  const blockedAgents = new Map<string, RowBlock>()
+  for (const session of sessions) {
+    const block = partChangeBlock(s, { sessionId: session.id })
+    if (block !== null) blockedAgents.set(session.id, block)
   }
-  const drivenAgents = new Set(
-    sessions
-      .filter((session) => elsewhere(agentRowKey(session.id), () => sessionActiveElsewhere(s, session)))
-      .map((session) => session.id),
-  )
   const left: LeftRunning[] = []
   const agents: string[] = []
   for (const session of sessions) {
     const own = terminals.filter(
       (t) => t.owner.kind === "session" && t.owner.session_id === session.id,
     ).length
-    if (!drivenAgents.has(session.id)) {
+    const block = blockedAgents.get(session.id)
+    if (block === undefined) {
       if (session.status === "active") agents.push(session.id)
     } else if (session.status === "active" || own > 0) {
       left.push({
@@ -10016,45 +10016,81 @@ export function stopAllPlan(s: DuxState): {
         name: sessionLabel(session),
         terminals: own,
         device: rowDriverDevice(agentRowKey(session.id)),
+        block,
       })
     }
   }
   const stopped: string[] = []
   for (const t of terminals) {
     if (t.owner.kind === "session") {
-      if (!drivenAgents.has(t.owner.session_id)) stopped.push(t.id)
+      if (!blockedAgents.has(t.owner.session_id)) stopped.push(t.id)
       continue
     }
-    const row = rowKeyOfPart({ kind: "terminal", id: t.id, owner: t.owner })
-    if (elsewhere(row, () => terminalActiveElsewhere(s, t.id))) {
-      left.push({ kind: "terminal", id: t.id, name: t.label, terminals: 0, device: rowDriverDevice(row) })
-    } else {
+    const block = partChangeBlock(s, { terminalId: t.id })
+    if (block === null) {
       stopped.push(t.id)
+    } else {
+      const row = rowKeyOfPart({ kind: "terminal", id: t.id, owner: t.owner })
+      left.push({ kind: "terminal", id: t.id, name: t.label, terminals: 0, device: rowDriverDevice(row), block })
     }
   }
   return { agents, terminals: stopped, left }
 }
 
-/** What "Force stop everything" leaves running, and why. */
+/** What "Force stop everything" leaves running, and why: one sentence per
+ * reason, in the order the reasons are first met. */
 export function leftRunningProse(left: readonly LeftRunning[]): Prose {
-  const out: ProseSegment[] = [
-    "Left running, because another device drives ",
-    left.length === 1 ? "it: " : "them: ",
-  ]
-  left.forEach((part, index) => {
-    if (index > 0) out.push(index === left.length - 1 ? " and " : ", ")
-    out.push(`${part.kind} `, chip(part.name))
-    if (part.terminals > 0) {
-      out.push(` with its ${formatRegularCount(part.terminals, "terminal")}`)
-    }
-    if (part.device !== null) out.push(" (driven from ", chip(part.device), ")")
-  })
-  out.push(
-    left.length === 1
-      ? ". Take it over on this device first to stop it."
-      : ". Take them over on this device first to stop them.",
-  )
+  const byBlock = new Map<RowBlock, LeftRunning[]>()
+  for (const part of left) byBlock.set(part.block, [...(byBlock.get(part.block) ?? []), part])
+  const out: ProseSegment[] = []
+  for (const [block, parts] of byBlock) {
+    if (out.length > 0) out.push(" ")
+    const one = parts.length === 1
+    out.push(leftRunningLead(block, one))
+    parts.forEach((part, index) => {
+      if (index > 0) out.push(index === parts.length - 1 ? " and " : ", ")
+      out.push(`${part.kind} `, chip(part.name))
+      if (part.terminals > 0) {
+        out.push(` with its ${formatRegularCount(part.terminals, "terminal")}`)
+      }
+      if (part.device !== null) out.push(" (driven from ", chip(part.device), ")")
+    })
+    out.push(leftRunningTail(block, one))
+  }
   return out
+}
+
+function leftRunningLead(block: RowBlock, one: boolean): string {
+  const them = one ? "it" : "them"
+  switch (block) {
+    case "other":
+      return `Left running, because another device drives ${them}: `
+    case "nobody":
+      return `Left running, because nobody drives ${them}, this device included: `
+    case "reconnecting":
+      return `Left running, because this device is reconnecting to ${them}: `
+    case "pending":
+      return `Left running, because this device is still connecting to ${them}: `
+    default:
+      return assertNever(block)
+  }
+}
+
+function leftRunningTail(block: RowBlock, one: boolean): string {
+  switch (block) {
+    case "other":
+    case "nobody":
+      return one
+        ? ". Take it over on this device first to stop it."
+        : ". Take them over on this device first to stop them."
+    case "reconnecting":
+    case "pending":
+      return one
+        ? ". It can be stopped once this device hears who drives it."
+        : ". They can be stopped once this device hears who drives them."
+    default:
+      return assertNever(block)
+  }
 }
 
 function leftRunningNotice(
@@ -10131,12 +10167,13 @@ export async function stopAllRunning(
         name: sessionLabel(session),
         terminals: row.terminals.length,
         device: null,
+        block: "other",
       })
       return
     }
     for (const id of row.terminals.slice(from)) {
       const t = state.spine?.terminals.find((x) => x.id === id)
-      left.push({ kind: "terminal", id, name: t?.label ?? id, terminals: 0, device: null })
+      left.push({ kind: "terminal", id, name: t?.label ?? id, terminals: 0, device: null, block: "other" })
     }
   }
   await Promise.all(

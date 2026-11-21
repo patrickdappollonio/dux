@@ -457,7 +457,7 @@ describe("store companion-terminal lifecycle", () => {
     expect(plan.agents).toEqual(["s2"])
     expect(plan.terminals).toEqual(["pt1"])
     expect(plan.left).toEqual([
-      { kind: "agent", id: "s1", name: "agentx", terminals: 1, device: null },
+      { kind: "agent", id: "s1", name: "agentx", terminals: 1, device: null, block: "other" },
     ])
 
     calls = []
@@ -466,6 +466,53 @@ describe("store companion-terminal lifecycle", () => {
       .filter(([, init]) => init?.method === "DELETE" || init?.method === "POST")
       .map(([u]) => u)
     expect(sent).toEqual(["/api/v1/sessions/s2/kill", "/api/v1/projects/p1/terminals/pt1"])
+  })
+
+  // The bulk stop asks each row the question its per-row Force stop asks, so a
+  // row nobody drives whose card is up here, or one this device is still
+  // connecting to, is left running and named with why.
+  it("stopAllRunning leaves every row this device may not change, saying why", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        { id: "s1", project_id: "p1", title: "agentx", status: "active", tabs: [{ id: "s1" }] },
+      ],
+      terminals: [
+        { id: "pt1", label: "Terminal 2", owner: { kind: "project", project_id: "p1" } },
+        { id: "t9", label: "Terminal 3", owner: { kind: "standalone" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    const { agentRowKey, registerPaneCover } = await import("./paneCover")
+    registerPaneCover("pt1", "card", { row: "terminal:pt1", driver: "nobody" })
+    registerPaneCover("s1", "spinner", { row: agentRowKey("s1"), driver: "pending" })
+    const plan = mod.stopAllPlan(mod.getSnapshot())
+    expect(plan.agents).toEqual([])
+    expect(plan.terminals).toEqual(["t9"])
+    expect(plan.left.map((part) => [part.id, part.block])).toEqual([
+      ["s1", "pending"],
+      ["pt1", "nobody"],
+    ])
+    expect(plan.left.map((part) => mod.partChangeBlock(mod.getSnapshot(),
+      part.kind === "agent" ? { sessionId: part.id } : { terminalId: part.id }))).toEqual([
+      "pending",
+      "nobody",
+    ])
+    const { proseText } = await import("./prose")
+    expect(proseText(mod.leftRunningProse(plan.left))).toBe(
+      "Left running, because this device is still connecting to it: agent agentx. " +
+        "It can be stopped once this device hears who drives it. " +
+        "Left running, because nobody drives it, this device included: terminal Terminal 2. " +
+        "Take it over on this device first to stop it.",
+    )
+
+    calls = []
+    await mod.stopAllRunning()
+    const sent = calls
+      .filter(([, init]) => init?.method === "DELETE" || init?.method === "POST")
+      .map(([u]) => u)
+    expect(sent).toEqual(["/api/v1/terminals/t9"])
   })
 
   // The panic button is the ONE caller that skips the shutdown grace. A polite
