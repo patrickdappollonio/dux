@@ -3,16 +3,11 @@ import { Info, Loader2, TriangleAlert } from "lucide-react"
 import { lazy, Suspense, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { FormDialogContent } from "@/components/FormDialogContent"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
+import { useIsMobile } from "@/hooks/use-mobile"
 import {
   closeConfigEditor,
   dismissConfigEditorConflict,
@@ -31,10 +26,12 @@ const CodeEditor = lazy(() => import("@/components/CodeEditor"))
 // `text` and survive a failed save, whose parse error is shown inline with the
 // modal left open. The save chord inside Monaco saves the current draft too.
 function ConfigEditorForm({
+  phone,
   initial,
   error,
   conflict,
 }: {
+  phone: boolean
   initial: string
   error: string | null
   conflict: string | null
@@ -42,8 +39,18 @@ function ConfigEditorForm({
   const [text, setText] = useState(() => initial)
 
   return (
-    <>
-      <div className="h-[60vh] overflow-hidden rounded-md border border-border">
+    <FormDialogContent
+      {...shellProps(phone)}
+      footer={
+        <>
+          <Button variant="outline" onClick={closeConfigEditor}>
+            Cancel
+          </Button>
+          <Button onClick={() => saveConfigEditor(text)}>Save</Button>
+        </>
+      }
+    >
+      <div className="h-[60vh] shrink-0 overflow-hidden rounded-md border border-border max-md:h-auto max-md:min-h-48 max-md:flex-1">
         {/* ChunkBoundary wraps Suspense (not inside it) so a failed lazy
             import after a redeploy surfaces its reload-needed error instead
             of an eternal spinner (same idiom as EditorBody). */}
@@ -100,14 +107,23 @@ function ConfigEditorForm({
           submenu to apply your changes.
         </span>
       </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={closeConfigEditor}>
-          Cancel
-        </Button>
-        <Button onClick={() => saveConfigEditor(text)}>Save</Button>
-      </DialogFooter>
-    </>
+    </FormDialogContent>
   )
+}
+
+function shellProps(phone: boolean) {
+  return {
+    phone,
+    title: (
+      <>
+        Edit <InlineCode>config.toml</InlineCode>
+      </>
+    ),
+    description:
+      "Edit the dux configuration. It is validated before saving; invalid TOML is rejected with the reason. Saving does not apply the change; run “Reload config” afterwards.",
+    onClose: closeConfigEditor,
+    className: "sm:max-w-4xl",
+  }
 }
 
 // The Monaco config.toml editor. The server validates the TOML before writing,
@@ -121,6 +137,7 @@ export function ConfigEditorDialog() {
     configEditorError,
     configEditorConflict,
   } = useDux()
+  const phone = useIsMobile()
 
   return (
     <Dialog
@@ -129,44 +146,37 @@ export function ConfigEditorDialog() {
         if (!o) closeConfigEditor()
       }}
     >
-      <DialogContent showCloseButton={false} className="sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>
-            Edit <InlineCode>config.toml</InlineCode>
-          </DialogTitle>
-          <DialogDescription>
-            Edit the dux configuration. It is validated before saving; invalid
-            TOML is rejected with the reason. Saving does not apply the change;
-            run “Reload config” afterwards.
-          </DialogDescription>
-        </DialogHeader>
-        {configEditorLoading ? (
+      {configEditorLoading ? (
+        <FormDialogContent {...shellProps(phone)}>
           <p className="py-12 text-center text-sm text-muted-foreground">
             Loading config.toml…
           </p>
-        ) : configEditorError && !configEditorContent ? (
-          // Load failed (no content). Never render an editable, Save-enabled
-          // editor here: saving its blank content would overwrite the real
-          // config.toml. Show the error and a Retry instead.
-          <div className="flex flex-col gap-4 py-8">
-            <p className="text-center text-sm text-destructive">
-              {configEditorError}
-            </p>
-            <DialogFooter>
+        </FormDialogContent>
+      ) : configEditorError && !configEditorContent ? (
+        // Load failed (no content). Never render an editable, Save-enabled
+        // editor here: saving its blank content would overwrite the real
+        // config.toml. Show the error and a Retry instead.
+        <FormDialogContent
+          {...shellProps(phone)}
+          footer={
+            <>
               <Button variant="outline" onClick={closeConfigEditor}>
                 Cancel
               </Button>
               <Button onClick={() => openConfigEditor()}>Retry</Button>
-            </DialogFooter>
-          </div>
-        ) : (
-          <ConfigEditorForm
-            initial={configEditorContent}
-            error={configEditorError}
-            conflict={configEditorConflict ?? null}
-          />
-        )}
-      </DialogContent>
+            </>
+          }
+        >
+          <p className="py-8 text-center text-sm text-destructive">{configEditorError}</p>
+        </FormDialogContent>
+      ) : (
+        <ConfigEditorForm
+          phone={phone}
+          initial={configEditorContent}
+          error={configEditorError}
+          conflict={configEditorConflict ?? null}
+        />
+      )}
     </Dialog>
   )
 }

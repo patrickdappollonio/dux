@@ -1,15 +1,10 @@
 import { useState } from "react"
 import { TriangleAlert } from "lucide-react"
+import { FormDialogContent } from "@/components/FormDialogContent"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { envToText, parseEnv } from "@/lib/env"
 import {
   closeGlobalEnv,
@@ -36,21 +31,29 @@ function GlobalEnvForm({
     closeGlobalEnv()
   }
 
+  // On a phone, focusing the text would raise the keyboard over the dialog.
+  const phone = useIsMobile()
   return (
-    <DialogContent showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>Global environment</DialogTitle>
-        <DialogDescription>
-          KEY=VALUE per line. Applied to new agents and terminals unless a
-          project overrides the same key.
-        </DialogDescription>
-      </DialogHeader>
+    <FormDialogContent
+      phone={phone}
+      title="Global environment"
+      description="KEY=VALUE per line. Applied to new agents and terminals unless a project overrides the same key."
+      onClose={closeGlobalEnv}
+      footer={
+        <>
+          <Button variant="outline" onClick={closeGlobalEnv}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave}>Save</Button>
+        </>
+      }
+    >
       <Textarea
         placeholder="KEY=VALUE"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        className="min-h-48 font-mono"
-        autoFocus={conflict === null}
+        className="min-h-48 font-mono max-md:flex-1"
+        autoFocus={conflict === null && !phone}
       />
       {conflict ? (
         // The table changed after the dialog read it and nothing was saved.
@@ -73,13 +76,7 @@ function GlobalEnvForm({
           </div>
         </div>
       ) : null}
-      <DialogFooter>
-        <Button variant="outline" onClick={closeGlobalEnv}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave}>Save</Button>
-      </DialogFooter>
-    </DialogContent>
+    </FormDialogContent>
   )
 }
 
