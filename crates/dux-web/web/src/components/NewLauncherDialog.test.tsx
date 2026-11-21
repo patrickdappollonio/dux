@@ -256,6 +256,19 @@ describe("NewLauncherDialog agent step", () => {
       expect(agentRow("design-notes").disabled).toBe(true)
     })
 
+    // Its own New terminal stays disabled until Take over, so this one does too.
+    it("cannot be picked while a pane of its row on this page says nobody drives it", () => {
+      retire = registerPaneCover("pty-1", "card", {
+        row: agentRowKey("s3"),
+        driver: "nobody",
+      })
+      render(<NewLauncherDialog />)
+      fireEvent.click(row("New terminal for an agent"))
+      expect(agentRow("design-notes").disabled).toBe(true)
+      expect(agentRow("design-notes").textContent).toContain("Nobody is driving this agent")
+      expect(agentRow("fix-login-redirect").disabled).toBe(false)
+    })
+
     it("still opens the step when no agent can be picked, and says why", () => {
       for (const session of (state.current.spine as { sessions: Record<string, unknown>[] })
         .sessions)

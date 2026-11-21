@@ -293,8 +293,9 @@ function moveFocusAmongRows(event: KeyboardEvent<HTMLElement>) {
 // agent's own menu runs. `onBack` is null when the step is the whole dialog.
 //
 // A terminal joins its agent's row, so an agent this device may not change is
-// listed but cannot be picked. One nobody drives can: the terminal lands in a
-// row no other device is using.
+// listed but cannot be picked, as its own New terminal is disabled. One nobody
+// drives can, unless a pane of its row is on this page: there its card asks
+// for a take-over first.
 function AgentStep({
   phone,
   onBack,
@@ -318,10 +319,7 @@ function AgentStep({
   )
   const sessions = groups.flatMap((group) => group.sessions)
   const blocks = useAgentChangeBlocks(sessions)
-  const pickBlock = (session: SessionView): RowBlock | null => {
-    const block = blocks.get(session.id) ?? null
-    return block === "nobody" ? null : block
-  }
+  const pickBlock = (session: SessionView): RowBlock | null => blocks.get(session.id) ?? null
   const pickable = sessions.filter((session) => pickBlock(session) === null)
   const pickAgent = (session: SessionView) => {
     closeNewLauncher()
