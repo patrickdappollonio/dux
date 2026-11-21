@@ -9104,11 +9104,19 @@ export function runMacro(name: string, target: SelectedTarget): MacroDestination
   return "pty"
 }
 
+let macrosReturnFocus: (() => HTMLElement | null) | null = null
+
 // Open the macro-editor dialog, on the edits a Back set aside when there are
 // any, else on the saved list (copied, so edits never touch the bootstrap).
 // Runs in the click/palette handler that opens the dialog, never an effect.
-// `select` names the macro it opens on.
-export function openMacrosDialog(select: string | null = null): void {
+// `select` names the macro it opens on. `returnFocus` names where focus goes
+// when the dialog closes, for an opener that does not outlive the opening: the
+// picker's pencil leaves with the picker, and its trigger or the pane stays.
+export function openMacrosDialog(
+  select: string | null = null,
+  returnFocus: (() => HTMLElement | null) | null = null,
+): void {
+  macrosReturnFocus = returnFocus
   const setAside = macrosSetAside
   if (setAside !== null) {
     const index = setAside.macros.findIndex((macro) => macro.name === select)
@@ -9149,6 +9157,11 @@ function reopenMacrosDialog(edit: MacrosEdit, conflict: string | null): void {
 
 const MACROS_EDIT_BEHIND =
   "The macros were changed elsewhere after these edits were made, so saving them would be refused. Reload to start again from the saved list, which drops these edits."
+
+/// Where the Macros dialog hands focus when it closes, as its opener named.
+export function macrosDialogReturnFocus(): HTMLElement | null {
+  return macrosReturnFocus?.() ?? null
+}
 
 export function closeMacrosDialog(): void {
   setState({

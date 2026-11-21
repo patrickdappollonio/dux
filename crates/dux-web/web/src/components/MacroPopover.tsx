@@ -27,7 +27,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { macrosForTarget } from "@/lib/macros"
 import { cmdkMatchRanges } from "@/lib/searchMatch"
-import { usePaneMacroTarget } from "@/lib/paneMacroTarget"
+import { paneMacroTargetFor, usePaneMacroTarget } from "@/lib/paneMacroTarget"
 import { cn } from "@/lib/utils"
 import { openMacrosDialog, runMacro, useDux } from "@/lib/store"
 import type { SelectedTarget } from "@/lib/store"
@@ -100,11 +100,25 @@ export function MacroPopover({
   const pickedIntoComposeRef = useRef(false)
   // Set when the LAST pick was written straight to the pty, read the same way.
   const pickedIntoPtyRef = useRef(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
 
   const allMacros = bootstrap?.macros ?? []
   const macros = macrosForTarget(allMacros, target)
   const pane = usePaneMacroTarget(targetPtyId(target))
   const labeled = anchored !== undefined || variant === "labeled"
+
+  // The Macros dialog opens as the picker closes, taking its pencil with it, so
+  // the dialog hands focus back to what stays: the trigger, else the pane.
+  function openDialog(select: string | null) {
+    setOpen(false)
+    const anchor = anchored?.ref ?? triggerRef
+    const ptyId = targetPtyId(target)
+    openMacrosDialog(select, () => {
+      const back = anchor.current
+      if (back?.isConnected) return back
+      return paneMacroTargetFor(ptyId)?.typingSurface() ?? null
+    })
+  }
 
   function handleRun(name: string) {
     // The payload goes to this target's pane, or into its compose draft while
@@ -165,7 +179,7 @@ export function MacroPopover({
           The shape lives here rather than at the call site so the live and the
           disabled trigger cannot drift apart. */}
       {anchored ? null : (
-        <PopoverTrigger render={<TriggerButton shape={variant} />}>
+        <PopoverTrigger ref={triggerRef} render={<TriggerButton shape={variant} />}>
           <TriggerFace variant={variant} />
         </PopoverTrigger>
       )}
@@ -200,10 +214,7 @@ export function MacroPopover({
             macros={macros}
             autoFocus={!isMobile}
             onRun={handleRun}
-            onEdit={(name) => {
-              setOpen(false)
-              openMacrosDialog(name)
-            }}
+            onEdit={(name) => openDialog(name)}
           />
         )}
         {/* The picker's Close part: it closes the picker on its way to the
@@ -212,10 +223,7 @@ export function MacroPopover({
           // shrink-0: the footer never gives up height to the list; when the
           // popup is at its viewport cap it is the list that scrolls.
           className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground max-md:min-h-10 pointer-coarse:min-h-10"
-          onClick={() => {
-            setOpen(false)
-            openMacrosDialog()
-          }}
+          onClick={() => openDialog(null)}
         >
           <SquarePen className="size-3.5 shrink-0" />
           Edit macros…

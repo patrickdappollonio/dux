@@ -100,6 +100,7 @@ import { matchCharRanges } from "@/lib/searchMatch"
 import {
   closeMacrosDialog,
   dismissMacrosConflict,
+  macrosDialogReturnFocus,
   reloadMacrosDraft,
   saveMacros,
   setAsideMacrosDraft,
@@ -123,6 +124,11 @@ const FILTERS: { value: MacroFilter; label: string }[] = [
 // The one height token of the controls that sit together (search, New, the
 // filter, the name field and its `⋯`): 32px for a mouse, 40px under a finger.
 const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
+
+// A match lit inside a line cut by an ellipsis: each mark is one unbreakable
+// box, which the ellipsis hides whole, so no sliver of a hidden match's
+// colour shows beside it.
+const WHOLE_MARKS = "[&_mark]:inline-block"
 
 const DESCRIPTION = "Text you send to an agent or a terminal from its Macros… button."
 
@@ -186,20 +192,25 @@ export function MacrosDialog() {
 
 // A dialog on a computer, a bottom sheet on a phone, both under the one dialog
 // root, so a rotation swaps the shell without remounting the editor's draft.
+//
+// Closing hands focus to where the opener asked, since a picker's pencil does
+// not outlive the opening; with no answer the dialog's own choice stands.
 function Shell({
   phone,
   initialFocus,
-  finalFocus,
+  sheetRef,
   children,
 }: {
   phone: boolean
   initialFocus?: () => HTMLElement | boolean | null
-  finalFocus?: () => HTMLElement | boolean | null
+  sheetRef?: RefObject<HTMLDivElement | null>
   children: ReactNode
 }) {
+  const finalFocus = () => macrosDialogReturnFocus() ?? true
   if (phone) {
     return (
       <SheetContent
+        ref={sheetRef}
         side="bottom"
         showCloseButton={false}
         initialFocus={initialFocus}
@@ -214,6 +225,7 @@ function Shell({
   return (
     <DialogContent
       initialFocus={initialFocus}
+      finalFocus={finalFocus}
       className="flex h-[min(40rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[55rem]"
     >
       {children}
@@ -263,10 +275,14 @@ function MacrosEditor({
   // Bumped to put the caret in the name field of the selected macro.
   const [focusName, setFocusName] = useState(0)
   const nameRef = useRef<HTMLInputElement | null>(null)
-  const newRef = useRef<HTMLButtonElement | null>(null)
   const backRef = useRef<HTMLButtonElement | null>(null)
   const emptyNewRef = useRef<HTMLButtonElement | null>(null)
   const rowEls = useRef(new Map<number, HTMLLIElement>())
+  const sheetRef = useRef<HTMLDivElement | null>(null)
+  // The row a press just selected, which is already where the pointer is.
+  const pressed = useRef<number | null>(null)
+  // The row still to be brought into view, for when it is not drawn yet.
+  const owedScroll = useRef<number | null>(null)
   // The row focus lands on when the list comes back: the one the phone's
   // editor opened from, or the neighbour of a deleted macro.
   const listFocus = useRef<number | null>(null)
@@ -274,6 +290,9 @@ function MacrosEditor({
   const editorFocusesName = useRef(false)
   // Set by a confirmed delete, for the confirm's close to read.
   const deleted = useRef(false)
+
+  const listRoom = useRef<HTMLDivElement | null>(null)
+  const listHeight = useWholeRowsHeight(listRoom, items.length)
 
   const changes = changeCount(items, baseline)
   const problem = validateMacros(draftToMacros(items))
@@ -300,6 +319,22 @@ function MacrosEditor({
     if (focusName > 0) nameRef.current?.focus()
   }, [focusName])
 
+  // A selection made anywhere but on its own row (opening on a macro, Show the
+  // macro, the arrow keys) brings the row into view.
+  useEffect(() => {
+    const byPress = pressed.current === selectedKey
+    pressed.current = null
+    owedScroll.current = byPress ? null : selectedKey
+    const el = selectedKey === null ? undefined : rowEls.current.get(selectedKey)
+    if (el) scrollOwed(selectedKey, el)
+  }, [selectedKey])
+
+  function scrollOwed(key: number | null, el: HTMLElement) {
+    if (key === null || owedScroll.current !== key) return
+    owedScroll.current = null
+    el.scrollIntoView?.({ block: "nearest" })
+  }
+
   function visibleOf(list: DraftMacro[], q: string, f: MacroFilter): DraftMacro[] {
     const needle = searchNeedle(q)
     return list.filter((item) => matchesFilter(item.surface, f) && matchesSearch(item, needle))
@@ -325,6 +360,7 @@ function MacrosEditor({
 
   // A click, a tap, or Enter on a row: on a phone it opens the macro.
   function activate(key: number) {
+    pressed.current = key
     setSelectedKey(key)
     if (phone) openEditor(key)
   }
@@ -373,7 +409,8 @@ function MacrosEditor({
       setFilter("all")
     }
     setSelectedKey(key)
-    if (phone) openEditor(key)
+    if (phone) openEditor(key, true)
+    else setFocusName((n) => n + 1)
   }
 
   // Where focus goes when the list is back on screen: the row it should land
@@ -416,6 +453,7 @@ function MacrosEditor({
       phone={phone}
       emptyText={emptyText}
       rowEls={rowEls}
+      onRowDrawn={scrollOwed}
       onHighlight={setSelectedKey}
       onActivate={activate}
       onMove={(active, over) => setItems(moveItem(items, active, over))}
@@ -425,7 +463,9 @@ function MacrosEditor({
   const search = (
     <div
       className={cn(
-        "flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
+        "flex min-w-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
+        // In the phone's column a flex basis would override the height.
+        phone ? "shrink-0" : "flex-1",
         CONTROL_HEIGHT,
       )}
     >
@@ -460,7 +500,6 @@ function MacrosEditor({
 
   const newButton = (
     <Button
-      ref={phone ? newRef : undefined}
       variant="outline"
       className={cn("shrink-0", CONTROL_HEIGHT)}
       onClick={addNew}
@@ -576,7 +615,9 @@ function MacrosEditor({
   )
 
   const initialFocus = () => {
-    if (phone) return newRef.current ?? true
+    // The sheet itself on a phone: a control focused by the opening would
+    // wear its focus ring for no reason the person gave.
+    if (phone) return sheetRef.current ?? true
     return start.picked ? (nameRef.current ?? true) : true
   }
 
@@ -601,7 +642,7 @@ function MacrosEditor({
     )
     const editing = step === "edit" && selected !== null
     return (
-      <Shell phone initialFocus={initialFocus}>
+      <Shell phone initialFocus={initialFocus} sheetRef={sheetRef}>
         <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
           <SheetTitle className="flex-1">Macros</SheetTitle>
           {items.length > 0 ? newButton : null}
@@ -687,8 +728,13 @@ function MacrosEditor({
             {filterChoice}
             {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
                 into the column gap so the rows still line up with the search. */}
-            <div className="-mr-2 flex min-h-0 flex-1 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]">
-              {list}
+            <div ref={listRoom} className="flex min-h-0 flex-1 flex-col">
+              <div
+                className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
+                style={{ height: listHeight }}
+              >
+                {list}
+              </div>
             </div>
           </div>
           <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
@@ -715,6 +761,39 @@ function MacrosEditor({
       {confirms}
     </Shell>
   )
+}
+
+// The height of the computer's list box: as many whole rows as the room below
+// the filter holds, so at rest the list never ends on a row cut in half. The
+// room is measured, not the list, so the box can grow back when the dialog
+// does; undefined until a row is drawn to measure.
+function useWholeRowsHeight(
+  room: RefObject<HTMLElement | null>,
+  rowCount: number,
+): number | undefined {
+  const [height, setHeight] = useState<number | undefined>(undefined)
+  useEffect(() => {
+    const el = room.current
+    if (el === null || typeof ResizeObserver === "undefined") return
+    const measure = () => {
+      const row = el.querySelector<HTMLElement>('[role="option"]')
+      const list = row?.parentElement
+      if (!row || !list) {
+        setHeight(undefined)
+        return
+      }
+      const gap = parseFloat(getComputedStyle(list).rowGap) || 0
+      const pitch = row.offsetHeight + gap
+      if (pitch <= 0) return
+      const rows = Math.max(1, Math.floor((el.clientHeight + gap) / pitch))
+      setHeight(rows * pitch - gap)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [room, rowCount])
+  return height
 }
 
 // The problem to show under the list: the first one, leaving out a macro
@@ -769,11 +848,15 @@ function SegmentedChoice<T extends string>({
       }}
       className={cn(tabsListVariants(), "flex", CONTROL_HEIGHT, className)}
     >
+      {/* Each choice is the group's height less its 3px padding at both
+          edges, 34px under a finger; its invisible margin there reaches the
+          group's own edges, a 40px tap area. Across, the neighbours are the
+          other choices of this one control, which meet edge to edge. */}
       {options.map((option) => (
         <Radio.Root
           key={option.value}
           value={option.value}
-          className="relative inline-flex h-full flex-1 cursor-default items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 text-sm font-medium whitespace-nowrap text-foreground/60 transition-all outline-none hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring data-checked:bg-background data-checked:text-foreground data-checked:shadow-sm dark:text-muted-foreground dark:hover:text-foreground dark:data-checked:border-input dark:data-checked:bg-input/30 dark:data-checked:text-foreground"
+          className="relative inline-flex after:absolute after:inset-x-0 after:-inset-y-[3px] after:hidden max-md:after:block pointer-coarse:after:block h-full flex-1 cursor-default items-center justify-center gap-1.5 rounded-md border border-transparent px-2.5 text-sm font-medium whitespace-nowrap text-foreground/60 transition-all outline-none hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring data-checked:bg-background data-checked:text-foreground data-checked:shadow-sm dark:text-muted-foreground dark:hover:text-foreground dark:data-checked:border-input dark:data-checked:bg-input/30 dark:data-checked:text-foreground"
         >
           {option.label}
         </Radio.Root>
@@ -793,6 +876,7 @@ function MacroList({
   phone,
   emptyText,
   rowEls,
+  onRowDrawn,
   onHighlight,
   onActivate,
   onMove,
@@ -804,6 +888,7 @@ function MacroList({
   phone: boolean
   emptyText: string
   rowEls: RefObject<Map<number, HTMLLIElement>>
+  onRowDrawn: (key: number, el: HTMLLIElement) => void
   onHighlight: (key: number) => void
   onActivate: (key: number) => void
   onMove: (activeKey: number, overKey: number) => void
@@ -864,8 +949,10 @@ function MacroList({
               tabbable={item.key === tabStop}
               phone={phone}
               rowRef={(el) => {
-                if (el) rowEls.current.set(item.key, el)
-                else rowEls.current.delete(item.key)
+                if (el) {
+                  rowEls.current.set(item.key, el)
+                  onRowDrawn(item.key, el)
+                } else rowEls.current.delete(item.key)
               }}
               onActivate={() => onActivate(item.key)}
             />
@@ -953,12 +1040,12 @@ function MacroRow({
           {item.name.trim() === "" ? (
             <span className="truncate font-medium text-muted-foreground italic">Untitled macro</span>
           ) : (
-            <span className="truncate font-medium">
+            <span className={cn("truncate font-medium", WHOLE_MARKS)}>
               <MatchHighlight text={item.name} ranges={matchCharRanges(item.name, needles)} />
             </span>
           )}
         </div>
-        <span className="truncate font-mono text-xs text-muted-foreground">
+        <span className={cn("truncate font-mono text-xs text-muted-foreground", WHOLE_MARKS)}>
           <MatchHighlight text={preview} ranges={matchCharRanges(preview, needles)} />
         </span>
       </div>

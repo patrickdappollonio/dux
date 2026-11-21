@@ -659,3 +659,83 @@ describe("MacrosDialog stale save", () => {
     expect(screen.getByText("3 unsaved changes")).toBeTruthy()
   })
 })
+
+describe("MacrosDialog brings the selected macro into view", () => {
+  let scrolled: Element[]
+  beforeEach(() => {
+    scrolled = []
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this)
+    }
+  })
+  afterEach(() => {
+    delete (Element.prototype as Partial<Element>).scrollIntoView
+  })
+
+  it("when it opens on a macro the pencil named", () => {
+    seed(seedMacros, { select: 2 })
+    render(<MacrosDialog />)
+    expect(scrolled).toContain(row("Deploy"))
+  })
+
+  it("when Show the macro leads to it, with focus in its name", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await typeInto("Name", "Build")
+    await click(row("Deploy"))
+    scrolled = []
+    await click(screen.getByRole("button", { name: "Show the macro" }))
+    await settle()
+    const shown = screen.getAllByRole("option").find((r) => r.getAttribute("aria-selected") === "true")
+    expect(scrolled).toContain(shown)
+    expect(document.activeElement).toBe(screen.getByLabelText("Name"))
+  })
+
+  it("not when a press on the row selected it", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    scrolled = []
+    await click(row("Deploy"))
+    expect(scrolled).not.toContain(row("Deploy"))
+  })
+})
+
+describe("MacrosDialog focus on a phone", () => {
+  it("opens with focus on the sheet, not on New", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await settle()
+    expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Macros" }))
+  })
+
+  it("hands focus back to the control that opened it after a Save from a macro's editor", async () => {
+    phone = true
+    const { openMacrosDialog } = await import("@/lib/store")
+    const { rerender } = render(<button>Run a macro</button>)
+    const trigger = screen.getByRole("button", { name: "Run a macro" })
+    openMacrosDialog(null, () => trigger)
+    seed(seedMacros)
+    rerender(
+      <>
+        <button>Run a macro</button>
+        <MacrosDialog />
+      </>,
+    )
+    await settle()
+    await click(row("Build"))
+    await typeInto("Text", "cargo build --release")
+    await settle()
+    await click(screen.getByRole("button", { name: "Save 1 change" }))
+    expect(saveMacrosMock).toHaveBeenCalledTimes(1)
+    mockState = { ...mockState, macrosDialogOpen: false }
+    rerender(
+      <>
+        <button>Run a macro</button>
+        <MacrosDialog />
+      </>,
+    )
+    await settle()
+    expect(document.activeElement).toBe(trigger)
+  })
+})
