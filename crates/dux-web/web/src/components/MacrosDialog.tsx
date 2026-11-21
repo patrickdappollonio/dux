@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
 import { RadioGroup } from "@base-ui/react/radio-group"
@@ -153,40 +153,68 @@ export function MacrosDialog() {
   const { macrosDialogOpen, macrosDraftEpoch, bootstrap } = useDux()
   const isMobile = useIsMobile()
   const closeRef = useRef<CloseHandler | null>(null)
+  const confirmsOutlet = useRef<((confirms: ReactNode) => void) | null>(null)
 
   return (
-    <Dialog
-      open={macrosDialogOpen}
-      onOpenChange={(open, details) => {
-        if (open) return
-        const editor = closeRef.current
-        if (editor === null) {
-          closeMacrosDialog()
-          return
-        }
-        // Back is the shared primitive's imperative close; it keeps asking
-        // until the dialog is gone, so it cannot stop at a question.
-        if (details.reason === "imperative-action") {
-          editor.back()
-          return
-        }
-        details.cancel()
-        editor.request()
-      }}
-    >
-      {macrosDialogOpen ? (
-        bootstrap === null ? (
-          <Shell phone={isMobile}>
-            <p className="py-10 text-center text-sm text-muted-foreground">
-              Loading the macros…
-            </p>
-          </Shell>
-        ) : (
-          <MacrosEditor key={macrosDraftEpoch} phone={isMobile} closeRef={closeRef} />
-        )
-      ) : null}
-    </Dialog>
+    <>
+      <ConfirmsOutlet setterRef={confirmsOutlet} />
+      <Dialog
+        open={macrosDialogOpen}
+        onOpenChange={(open, details) => {
+          if (open) return
+          const editor = closeRef.current
+          if (editor === null) {
+            closeMacrosDialog()
+            return
+          }
+          // Back is the shared primitive's imperative close; it keeps asking
+          // until the dialog is gone, so it cannot stop at a question.
+          if (details.reason === "imperative-action") {
+            editor.back()
+            return
+          }
+          details.cancel()
+          editor.request()
+        }}
+      >
+        {macrosDialogOpen ? (
+          bootstrap === null ? (
+            <Shell phone={isMobile}>
+              <p className="py-10 text-center text-sm text-muted-foreground">
+                Loading the macros…
+              </p>
+            </Shell>
+          ) : (
+            <MacrosEditor
+              key={macrosDraftEpoch}
+              phone={isMobile}
+              closeRef={closeRef}
+              confirmsOutlet={confirmsOutlet}
+            />
+          )
+        ) : null}
+      </Dialog>
+    </>
   )
+}
+
+// Where the editor's confirms render: beside the dialog rather than inside it,
+// because base-ui draws no overlay for a dialog nested in another, and a
+// confirm dims what is behind it as the app's other confirms do. A sibling, so
+// the editor handing it its confirms on every render re-renders only this.
+function ConfirmsOutlet({
+  setterRef,
+}: {
+  setterRef: RefObject<((confirms: ReactNode) => void) | null>
+}) {
+  const [confirms, setConfirms] = useState<ReactNode>(null)
+  useLayoutEffect(() => {
+    setterRef.current = setConfirms
+    return () => {
+      setterRef.current = null
+    }
+  }, [setterRef])
+  return confirms
 }
 
 // A dialog on a computer, a bottom sheet on a phone, both under the one dialog
@@ -233,9 +261,11 @@ function Shell({
 function MacrosEditor({
   phone,
   closeRef,
+  confirmsOutlet,
 }: {
   phone: boolean
   closeRef: RefObject<CloseHandler | null>
+  confirmsOutlet: RefObject<((confirms: ReactNode) => void) | null>
 }) {
   const { bootstrap, macrosDraft, macrosConflict } = useDux()
   // Read once: the editing session this mounting opens. The dots and the
@@ -613,6 +643,11 @@ function MacrosEditor({
     </>
   )
 
+  useLayoutEffect(() => {
+    confirmsOutlet.current?.(confirms)
+  })
+  useLayoutEffect(() => () => confirmsOutlet.current?.(null), [confirmsOutlet])
+
   const initialFocus = () => {
     // The sheet itself on a phone: a control focused by the opening would
     // wear its focus ring for no reason the person gave.
@@ -660,7 +695,6 @@ function MacrosEditor({
         )}
         {/* The editor's sheet covers this one and carries its own. */}
         {editing ? null : footer}
-        {editing ? null : confirms}
         <Dialog
           open={editing}
           onOpenChange={(open, details) => {
@@ -702,7 +736,6 @@ function MacrosEditor({
             </div>
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">{editor}</div>
             {footer}
-            {confirms}
           </SheetContent>
         </Dialog>
       </Shell>
@@ -757,7 +790,6 @@ function MacrosEditor({
           </>
         )}
       </DialogFooter>
-      {confirms}
     </Shell>
   )
 }

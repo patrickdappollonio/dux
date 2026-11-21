@@ -811,3 +811,42 @@ describe("MacrosDialog list on a computer", () => {
     expect(scroller.style.height).toBe(`${7 * 54 - 2}px`)
   })
 })
+
+// A confirm dims what is behind it with its own overlay, which base-ui draws
+// only for a dialog that is not nested inside another.
+describe("MacrosDialog confirms", () => {
+  it("draw an overlay of their own over the dialog", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Deploy"))
+    await menuPick("Delete…")
+    await screen.findByRole("dialog", { name: "Delete this macro?" })
+    expect(document.querySelectorAll('[data-slot="dialog-overlay"]')).toHaveLength(2)
+  })
+
+  it("close alone on Escape, leaving the dialog open", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Deploy"))
+    await menuPick("Delete…")
+    const confirm = await screen.findByRole("dialog", { name: "Delete this macro?" })
+    await settle()
+    await press(within(confirm).getByRole("button", { name: "Cancel" }), "Escape")
+    await settle()
+    expect(screen.queryByRole("dialog", { name: "Delete this macro?" })).toBeNull()
+    expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).toBeNull()
+    expect(closeMacrosDialogMock).not.toHaveBeenCalled()
+  })
+
+  it("draw an overlay of their own over the phone's editor", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Deploy"))
+    await settle()
+    await menuPick("Delete…")
+    await screen.findByRole("dialog", { name: "Delete this macro?" })
+    const overlays = document.querySelectorAll('[data-slot="dialog-overlay"], [data-slot="sheet-overlay"]')
+    expect(overlays).toHaveLength(2)
+  })
+})
