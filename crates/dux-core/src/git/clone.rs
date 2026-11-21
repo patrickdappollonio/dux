@@ -340,6 +340,45 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
+    const PROMPTLESS: &str = "DUX_TEST_PROMPTLESS_PROCESS";
+
+    /// Whether the calling test's body runs in this process. The first call
+    /// runs the test `name` again in a test process of its own whose
+    /// environment names no askpass, display or git configuration of the
+    /// developer's, asserts it passed there, and returns false; in that process
+    /// it returns true.
+    ///
+    /// The production git a clone test runs inherits this process's
+    /// environment, and a test can add variables to it but not take any away,
+    /// so a developer's `SSH_ASKPASS` or `GIT_ASKPASS` would otherwise be what
+    /// git and the stand-in ssh ask, in a window on their desktop.
+    fn runs_here_without_the_developers_prompts(name: &str) -> bool {
+        if std::env::var_os(PROMPTLESS).is_some() {
+            return true;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([name, "--exact", "--test-threads=1"])
+            .env(PROMPTLESS, "1")
+            .env_remove("SSH_ASKPASS")
+            .env_remove("SSH_ASKPASS_REQUIRE")
+            .env_remove("GIT_ASKPASS")
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("test result: ok. 1 passed"),
+            "{name} did not pass on its own:\n{said}"
+        );
+        false
+    }
+
     /// A stand-in for `ssh` at `dir/ssh`, running `body`.
     fn fake_ssh(dir: &Path, body: &str) -> String {
         let path = dir.join("ssh");
@@ -382,6 +421,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         true
+    }
+
+    /// The clone tests, run again where the developer's environment names an
+    /// askpass and a display and their git configuration names an askpass and
+    /// a credential helper, each a stand-in that records being run. None may
+    /// be run: on a desktop the real ones open a password window and wait.
+    #[test]
+    fn no_clone_test_runs_a_prompt_the_developer_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ran = tmp.path().join("ran");
+        let stand_in = tmp.path().join("prompt");
+        std::fs::write(
+            &stand_in,
+            format!("#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let global = tmp.path().join("gitconfig");
+        std::fs::write(
+            &global,
+            format!(
+                "[core]\n\taskPass = {0}\n[credential]\n\thelper = {0}\n",
+                stand_in.display()
+            ),
+        )
+        .unwrap();
+
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["git::clone::tests::", "--test-threads=4", "--skip"])
+            .arg("git::clone::tests::no_clone_test_runs_a_prompt_the_developer_configured")
+            .env("SSH_ASKPASS", &stand_in)
+            .env("GIT_ASKPASS", &stand_in)
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .env("DISPLAY", ":99")
+            .env_remove(PROMPTLESS)
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "a clone test failed beside the stand-ins:\n{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(std::fs::read_to_string(&ran).ok(), None, "a prompt was run");
     }
 
     #[test]
@@ -442,6 +525,11 @@ mod tests {
     /// fails at once with its own words, told by the environment never to ask.
     #[test]
     fn a_transport_that_reads_the_terminal_fails_at_once_and_nothing_asks() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_transport_that_reads_the_terminal_fails_at_once_and_nothing_asks",
+        ) {
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let seen = tmp.path().join("seen");
         let ssh = fake_ssh(
@@ -493,6 +581,11 @@ mod tests {
     /// so nothing is waited on and the transport's own words come back.
     #[test]
     fn with_no_askpass_configured_nothing_is_waited_on() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::with_no_askpass_configured_nothing_is_waited_on",
+        ) {
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let ssh = fake_ssh(
             tmp.path(),
@@ -551,6 +644,11 @@ mod tests {
     /// or `core.askPass` names it.
     #[test]
     fn a_configured_askpass_that_answers_is_used() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_configured_askpass_that_answers_is_used",
+        ) {
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("askpass");
         std::fs::write(&script, "#!/bin/sh\necho stored-secret\n").unwrap();
