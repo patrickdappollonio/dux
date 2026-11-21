@@ -142,7 +142,7 @@ function rowId(d: SettingDescriptor): string {
 // A config key wraps after a dot or an underscore, never inside a word.
 function ConfigKey({ text, words }: { text: string; words: string[] }) {
   const ranges = matchCharRanges(text, words)
-  const pieces = text.split(/(?<=[._])/)
+  const pieces = text.match(/[^._]+[._]?|[._]/g) ?? [""]
   let offset = 0
   return pieces.map((piece, i) => {
     const at = offset
