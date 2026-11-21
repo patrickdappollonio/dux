@@ -538,23 +538,46 @@ to start sending. Values below 1 count as 1. It takes effect for the next clone.
 network_timeout_seconds = 600  # 10 minutes
 ```
 
-A push, a pull's fetch, a pull request fetch and an `ls-remote` that dux runs are
-stopped once they have run for `network_timeout_seconds` in all, and the message says
-so. None of them can ask for anything on a terminal, so this catches a remote or a
+A push, a pull's fetch, a pull request fetch and an `ls-remote` that dux runs for you
+are stopped once they have run for `network_timeout_seconds` in all, and the message
+says so. None of them can ask for anything on a terminal, so this catches a remote or a
 credential helper that stopped answering.
-
-> [!IMPORTANT]
-> A password program you configured (`GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`,
-> such as KDE's `ksshaskpass`) only runs for git work you start: a clone, a push, a pull,
-> and the fetches behind a new agent. Git work dux does by itself, like the fetch behind
-> the [base branch list](/docs/creating-agents#how-the-list-works), never opens it. When
-> the remote wanted a password, a key passphrase or a host confirmation there, dux says
-> so instead. Pull the project once, or set up a credential helper or an ssh agent, so git
-> can sign in without asking. A credential helper that answers from a store or a keychain
-> works for both.
 
 - **Set it to `0` for no limit**, for a long pre-push hook or a large Git LFS upload.
 - **It takes effect for the next command.**
+
+## Which git work may open your password program
+
+A password program you configured in `GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`
+(KDE's `ksshaskpass`, for example) may open for git work you start: a clone, a push, a
+pull, and, behind a new agent, the pull before creating it (with its check that `origin`
+has the project's base branch) and the pull request fetches.
+
+dux does not run it for git work it does by itself: the fetch behind the
+[base branch list](/docs/creating-agents#how-the-list-works), and, after a clone, asking
+the remote for its default branch when the clone did not record one. That work signs in
+only through what answers without asking you:
+
+- **Over ssh:** an ssh agent holding a key the server accepts (load it with `ssh-add`),
+  and a host ssh already knows.
+- **Over https:** a credential helper that stores your credential, such as your system
+  keychain, git's `store` helper, or `gh auth setup-git` for GitHub.
+
+When `origin` does not let the base branch list's fetch in, the list says why in git's or
+ssh's own words, and what would let git sign in without asking. Other programs can still
+ask while that work runs: an ssh agent that confirms each use of a key, gpg-agent's
+pinentry, a keyring that needs unlocking, a credential helper that asks by itself, or an
+ssh command of your own.
+
+> [!IMPORTANT]
+> A script you named as your password program that hands git a stored token without
+> asking is not used for the base branch list's fetch. Hand the token to git through a
+> credential helper instead, which every git command dux runs uses.
+
+> [!WARNING]
+> When the list says the key `origin`'s host presented is not the one ssh has on record,
+> someone may be intercepting the connection. Do not replace the recorded key until
+> whoever runs the server confirms the change.
 
 ## How long messages stay (`[ui]`)
 

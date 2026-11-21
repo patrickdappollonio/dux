@@ -1083,6 +1083,18 @@ fn config_schema() -> Vec<ConfigEntry> {
         },
         ConfigEntry::Blank,
         ConfigEntry::Section("git"),
+        ConfigEntry::Comment(
+            "# A password program you set in GIT_ASKPASS, SSH_ASKPASS or core.askPass may\n\
+             # ask you during git work you start: a clone, a push, a pull, and the pull\n\
+             # and pull request fetches behind a new agent. dux does not run it for git\n\
+             # work it does by itself: the fetch behind the base branch list, and the\n\
+             # lookup of a cloned repository's default branch when the clone did not\n\
+             # record one. Those sign in through an ssh agent holding your key or a\n\
+             # credential helper that stores your credential. Something else can still\n\
+             # ask then: an ssh agent that confirms each use, gpg-agent's pinentry, a\n\
+             # keyring that needs unlocking, an interactive credential helper, or an ssh\n\
+             # command of your own.",
+        ),
         ConfigEntry::Field {
             key: "clone_stall_seconds",
             comment: Some(CommentSource::Static(
@@ -1099,13 +1111,9 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "network_timeout_seconds",
             comment: Some(CommentSource::Static(
                 "# How long a push, a pull's fetch, a pull request fetch or an ls-remote that\n\
-                 # dux runs may take, in seconds, before dux stops the whole command and says\n\
-                 # so. None of them can ask anything on a terminal, so this catches a remote\n\
-                 # or a credential helper that stopped answering. A password program you set\n\
-                 # in GIT_ASKPASS, SSH_ASKPASS or core.askPass may still ask you during git\n\
-                 # work you start (a clone, a push, a pull, a new agent's fetch); git work dux\n\
-                 # does by itself, like the fetch behind the base branch list, never runs one\n\
-                 # and says so when the remote wanted a password. Raise it for a long\n\
+                 # dux runs for you may take, in seconds, before dux stops the whole command\n\
+                 # and says so. None of them can ask anything on a terminal, so this catches a\n\
+                 # remote or a credential helper that stopped answering. Raise it for a long\n\
                  # pre-push hook or a large Git LFS upload; 0 means no limit at all. Takes\n\
                  # effect for the next command. Default 600 (10 minutes).",
             )),

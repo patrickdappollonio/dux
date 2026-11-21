@@ -158,13 +158,14 @@ branch…** in the project's `⋯` menu; in the terminal UI it is the
 dux fetches `origin` first, then lists every local branch and every branch that only
 exists on `origin`.
 
-- **The fetch** is tried once more if it fails and there is time left, and dux gives up
-  after 15 seconds in all. When it does, the list shows origin's branches as last fetched
-  and says why.
-- **The fetch never asks for a password.** dux runs it by itself, so a password program
-  you configured is not opened. When origin wanted a password, a key passphrase or a host
-  confirmation, the list says so: pull the project once, or set up a credential helper or
-  an ssh agent so git can sign in without asking.
+- **The fetch** is tried once more if it fails and there is time left, unless origin did
+  not let dux in, and dux gives up after 15 seconds in all. When it does, the list shows
+  origin's branches as last fetched and says why.
+- **The fetch runs no password program.** dux runs it by itself, so a password program
+  you configured is not opened, and it signs in only through an ssh agent or a credential
+  helper that stores your credential. When origin does not let it in, the list says why in
+  git's or ssh's own words and what would let git sign in without asking; see
+  [which git work may open your password program](/docs/configuration#which-git-work-may-open-your-password-program).
 - **The current base** is marked, and the list is searchable.
 - **A branch another worktree has checked out,** usually an agent's own branch, is listed
   but cannot be picked, and the row names who holds it: git will not check out one branch

@@ -697,7 +697,8 @@ pub(crate) struct App {
     pub(crate) pending_pty_takeover: Option<dux_core::pty_owners::RowKey>,
     /// The selected agent row's take-over card, asked once per pass.
     pub(crate) row_card_memo: row_card::RowCardMemo,
-    /// The agent whose row the card covers, and the view a take-over gives back.
+    /// The row the card covers (an agent's id, or `terminal:` and a project or
+    /// standalone terminal's id) and the view held while it does.
     pub(crate) held_row_view: Option<(String, row_card::RowView)>,
     /// The last resize this surface was REFUSED, as (pty id, rows, cols), so the
     /// refusal is logged when it is news rather than on every frame.
