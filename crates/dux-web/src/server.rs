@@ -322,7 +322,7 @@ impl axum::extract::FromRequestParts<AppState> for SocketClient {
 
 impl SocketClient {
     /// What the socket's query and the request's extensions say about its client.
-    fn from_parts(parts: &axum::http::request::Parts) -> Self {
+    pub(crate) fn from_parts(parts: &axum::http::request::Parts) -> Self {
         let query = axum::extract::Query::<SocketLinkQuery>::try_from_uri(&parts.uri)
             .ok()
             .map(|axum::extract::Query(query)| query);
@@ -1028,6 +1028,12 @@ fn gated_routes(state: AppState, extra_gated: Router<AppState>) -> Router {
         .merge(extra_gated)
         .route("/healthz", get(|| async { "ok" }))
         .fallback(crate::control_socket::fallback)
+        // Innermost, so the auth layer's verdict on the client's address is
+        // already on the request when the asker is worked out.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::row_asker::identify,
+        ))
         // REST mutation same-origin check (cross-site request forgery defense).
         // Rejects POST/PATCH/PUT/DELETE when an `Origin` header is present but
         // its `host:port` authority does not match the `Host` header. A missing

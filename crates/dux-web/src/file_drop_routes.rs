@@ -72,6 +72,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rest_common::id_within_bound;
 use crate::server::AppState;
+use dux_core::engine::RowChange;
 
 /// Query parameters of a file-drop upload. The bytes are the raw request body:
 /// one file per request, which is what the paste rule wants anyway (a pasted
@@ -250,7 +251,7 @@ async fn drop_pty(
             .into());
     };
 
-    if let Some(refusal) = held_elsewhere(state, &pty, query) {
+    if let Some(refusal) = refused_drop(state, &pty, query).await {
         return Err(refusal.into());
     }
     Ok(pty)
@@ -280,6 +281,19 @@ fn held_elsewhere(state: &AppState, pty: &str, query: &DropQuery) -> Option<Resp
         );
     }
     None
+}
+
+/// The refusal for a drop that may not land: [`held_elsewhere`]'s for a viewer
+/// who could not paste, then the engine's while another device drives the row.
+async fn refused_drop(state: &AppState, pty: &str, query: &DropQuery) -> Option<Response> {
+    if let Some(refusal) = held_elsewhere(state, pty, query) {
+        return Some(refusal);
+    }
+    let admitted = state
+        .engine
+        .admit_row_change(RowChange::Pty(pty.to_string()))
+        .await;
+    admitted.err().map(IntoResponse::into_response)
 }
 
 /// Read and discard what is left of a refused drop's body, up to `limit` bytes,
@@ -354,7 +368,7 @@ async fn upload_dropped_file(
         Ok(bytes) => bytes,
         Err(rejection) => return body_refusal(&rejection, state.file_drop_max_bytes),
     };
-    if let Some(refusal) = held_elsewhere(&state, &pty, &query) {
+    if let Some(refusal) = refused_drop(&state, &pty, &query).await {
         return refusal;
     }
 
@@ -383,6 +397,7 @@ async fn upload_dropped_file(
     let hold = match &worktree {
         Some(worktree) => match crate::git_routes::hold_root_for_write(
             &state,
+            &RowChange::Pty(pty.clone()),
             worktree,
             dux_core::worktree_ops::WorktreeOpKind::Upload,
             "save the dropped file",

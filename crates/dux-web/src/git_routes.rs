@@ -33,6 +33,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use dux_core::engine::RowChange;
 use dux_core::wire::WireCommand;
 use serde::Deserialize;
 
@@ -242,11 +243,12 @@ pub(crate) async fn resolve_mutation_worktree(
 /// slow or unreachable mount, so it is taken off the async runtime.
 pub(crate) async fn hold_root_for_write(
     state: &AppState,
+    row: &RowChange,
     root: &Path,
     kind: dux_core::worktree_ops::WorktreeOpKind,
     what: &str,
 ) -> Result<dux_core::worktree_ops::WorktreeOpGuard, RouteRejection> {
-    let mut holds = hold_targets_for_write(state, root, &[], kind, what).await?;
+    let mut holds = hold_targets_for_write(state, row, root, &[], kind, what).await?;
     Ok(holds.swap_remove(0))
 }
 
@@ -276,13 +278,18 @@ fn hold_path_blocking(
 /// checks of the operation itself still run after this. The root's hold comes
 /// first in the returned list. Taken off the async runtime, as
 /// [`hold_root_for_write`] is.
+///
+/// `row` is the row of the agents list the write belongs to: the write is
+/// refused first while another device drives that row.
 pub(crate) async fn hold_targets_for_write(
     state: &AppState,
+    row: &RowChange,
     root: &Path,
     targets: &[&str],
     kind: dux_core::worktree_ops::WorktreeOpKind,
     what: &str,
 ) -> Result<Vec<dux_core::worktree_ops::WorktreeOpGuard>, RouteRejection> {
+    state.engine.admit_row_change(row.clone()).await?;
     let ops = state.engine.worktree_ops().clone();
     let mut paths = vec![root.to_path_buf()];
     paths.extend(targets.iter().map(|target| root.join(target)));
@@ -455,9 +462,10 @@ async fn begin_git_change(
     ),
     RouteRejection,
 > {
+    let row = RowChange::Agent(session_id.clone());
     let worktree = resolve_mutation_worktree(state, session_id).await?;
     let turn = lane_turn(&worktree).await?;
-    let hold = hold_root_for_write(state, &worktree, kind, what).await?;
+    let hold = hold_root_for_write(state, &row, &worktree, kind, what).await?;
     Ok((worktree, turn, hold))
 }
 

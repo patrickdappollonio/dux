@@ -478,6 +478,16 @@ impl PtySizeOwners {
         }
     }
 
+    /// Who drives `row` right now, `None` when nobody does. A read that places
+    /// nothing, for a question asked about a row rather than through a pty.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the owners lock is poisoned by an earlier panic while it was held.
+    pub fn driver_of(&self, row: &RowKey) -> Option<OwnerRecord> {
+        self.lock().map.get(row).cloned()
+    }
+
     /// Every pty known to share `pty_id`'s row, `pty_id` included, sorted: the
     /// ptys an ownership change through `pty_id` must be announced for.
     ///

@@ -31,6 +31,8 @@ use dux_core::worker::{AgentLaunchKind, AgentLaunchRequest};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::pty_owners::PtySizeOwners;
+use crate::row_asker::RowAsker;
+use dux_core::engine::RowChange;
 
 /// A PTY subscription: an RAII unsubscribe guard, an initial repaint snapshot,
 /// and the live byte stream the caller forwards. Drop the guard to detach
@@ -161,6 +163,8 @@ pub(crate) enum EngineRequest {
         /// carries the record's id) when the client follows it, otherwise through
         /// [`dux_core::engine::Engine::apply_wire_recorded`] with the plain reply.
         Option<Followed>,
+        /// Who the command is judged as when it would change a driven row.
+        RowAsker,
     ),
     /// Reload `config.toml` after dux wrote it itself, as `ApplyWire` with
     /// `ReloadConfig` does, but as dux's own reload, which is not announced.
@@ -228,6 +232,7 @@ pub(crate) enum EngineRequest {
     CreateTerminal(
         String,
         Option<OperationTicket>,
+        RowAsker,
         oneshot::Sender<Result<(String, String), String>>,
     ),
     /// Create a project terminal for a project (a plain shell at the project's
@@ -266,6 +271,7 @@ pub(crate) enum EngineRequest {
         String,
         Option<String>,
         Option<OperationTicket>,
+        RowAsker,
         oneshot::Sender<Result<(String, String), String>>,
     ),
     /// Start a dormant tab explicitly, the press on its start card. The one launch
@@ -275,8 +281,12 @@ pub(crate) enum EngineRequest {
     StartAgentTab(
         String,
         Option<OperationTicket>,
+        RowAsker,
         oneshot::Sender<Result<(), String>>,
     ),
+    /// Ask whether the asker may make a change the web layer carries out by
+    /// itself (a file write, a git change): `Err` is the refusal's sentence.
+    AdmitRowChange(RowChange, RowAsker, oneshot::Sender<Result<(), String>>),
     /// Resolve the owning session id of an EXTRA tab (instant lookup), or
     /// `None` when the tab id is unknown or names a session's first tab, whose
     /// owner is resolved from that session's slot pointer rather than looked up.
@@ -1411,6 +1421,7 @@ impl EngineHandle {
                     accepted_connected: None,
                     requester: None,
                 }),
+                RowAsker::current(),
             ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
@@ -1447,6 +1458,7 @@ impl EngineHandle {
                     accepted_connected: None,
                     requester: None,
                 }),
+                RowAsker::current(),
             ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
@@ -1471,11 +1483,47 @@ impl EngineHandle {
                 tx,
                 origin,
                 Some(followed),
+                RowAsker::current(),
             ))
             .await
             .map_err(|_| WireError::from("engine thread gone".to_string()))?;
         rx.await
             .map_err(|_| WireError::from("engine reply dropped".to_string()))?
+    }
+
+    /// Whether this request's asker may make `change`, for a change the web
+    /// layer carries out by itself.
+    ///
+    /// # Errors
+    ///
+    /// `423` with the engine's sentence while another device drives the row,
+    /// `503` when the engine is gone.
+    pub(crate) async fn admit_row_change(
+        &self,
+        change: RowChange,
+    ) -> Result<(), crate::rest_common::RouteRejection> {
+        use axum::response::IntoResponse;
+        let unavailable = || {
+            crate::rest_common::RouteRejection::from(
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "the engine is unavailable; retry shortly",
+                )
+                    .into_response(),
+            )
+        };
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(EngineRequest::AdmitRowChange(
+                change,
+                RowAsker::current(),
+                tx,
+            ))
+            .await
+            .map_err(|_| unavailable())?;
+        rx.await
+            .map_err(|_| unavailable())?
+            .map_err(|sentence| crate::row_asker::driven_refusal(&sentence))
     }
 
     /// Who is attached to which agent tab and terminal.
@@ -1499,7 +1547,13 @@ impl EngineHandle {
     ) -> Result<WireCommandOutcome, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::ApplyWire(command, tx, origin, None))
+            .send(EngineRequest::ApplyWire(
+                command,
+                tx,
+                origin,
+                None,
+                RowAsker::current(),
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await
@@ -1623,7 +1677,12 @@ impl EngineHandle {
     ) -> Result<(String, String), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::CreateTerminal(session_id, ticket, tx))
+            .send(EngineRequest::CreateTerminal(
+                session_id,
+                ticket,
+                RowAsker::current(),
+                tx,
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -1671,7 +1730,11 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(EngineRequest::CreateAgentTab(
-                session_id, provider, ticket, tx,
+                session_id,
+                provider,
+                ticket,
+                RowAsker::current(),
+                tx,
             ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
@@ -1688,7 +1751,12 @@ impl EngineHandle {
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
-            .send(EngineRequest::StartAgentTab(tab_id, ticket, tx))
+            .send(EngineRequest::StartAgentTab(
+                tab_id,
+                ticket,
+                RowAsker::current(),
+                tx,
+            ))
             .await
             .map_err(|_| "engine thread gone".to_string())?;
         rx.await.map_err(|_| "engine reply dropped".to_string())?
@@ -2719,6 +2787,8 @@ fn request_mutates_spine(req: &EngineRequest) -> bool {
         | EngineRequest::AdmitManagerRemoval { .. }
         | EngineRequest::AdmitLeftoverRemoval { .. }
         | EngineRequest::DestructiveCheck(..)
+        // Asks who drives a row and changes nothing.
+        | EngineRequest::AdmitRowChange(..)
         | EngineRequest::SessionStartupLogContext(..)
         | EngineRequest::ProjectStartupLogContext(..)
         | EngineRequest::EditorDefault(..)
@@ -3757,8 +3827,10 @@ impl EngineService {
         let mut mutated = false;
         let mut stopped = false;
         loop {
-            let req = match self.req_rx.try_recv() {
-                Ok(req) => req,
+            let admitted = self.req_rx.try_recv().map(|req| admit_request(engine, req));
+            let req = match admitted {
+                Ok(Some(req)) => req,
+                Ok(None) => continue,
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     stopped = true;
@@ -3840,13 +3912,13 @@ impl EngineService {
                 // A config-changing command over a file a raw save left ahead
                 // of memory takes the file on first, as a reload does, or is
                 // refused saying why.
-                EngineRequest::ApplyWire(cmd, reply, origin, operation)
+                EngineRequest::ApplyWire(cmd, reply, origin, operation, asker)
                     if cmd.mutates_config_static() && self.config_disk_ahead =>
                 {
                     match self.adopt_disk_config(engine) {
                         Ok(()) => handle_request(
                             engine,
-                            EngineRequest::ApplyWire(cmd, reply, origin, operation),
+                            EngineRequest::ApplyWire(cmd, reply, origin, operation, asker),
                             &mut self.status,
                             &self.config_reload_tx,
                             &mut self.config_disk_ahead,
@@ -4704,6 +4776,126 @@ fn handle_pty_resize(
 struct WireOrigin {
     scope: StatusScope,
     operation: Option<Followed>,
+    asker: RowAsker,
+}
+
+/// The policy `asker`'s change to a driven row is judged under.
+fn row_policy(asker: &RowAsker) -> dux_core::attachments::Policy {
+    dux_core::attachments::Policy {
+        asker: asker.connection().map(str::to_string),
+        force: asker.forces(),
+        ..dux_core::attachments::Policy::default()
+    }
+}
+
+/// What `req` would change of a row a device may be driving, and who asks. No
+/// wildcard arm, so a new request does not build until it is answered for here.
+fn request_row_change(req: &EngineRequest) -> Option<(RowChange, &RowAsker)> {
+    match req {
+        EngineRequest::CreateTerminal(session_id, _, asker, _)
+        | EngineRequest::CreateAgentTab(session_id, _, _, asker, _) => {
+            Some((RowChange::Agent(session_id.clone()), asker))
+        }
+        EngineRequest::StartAgentTab(tab_id, _, asker, _) => {
+            Some((RowChange::Pty(tab_id.clone()), asker))
+        }
+        EngineRequest::AdmitRowChange(change, asker, _) => Some((change.clone(), asker)),
+
+        // Judged command by command inside `Engine::apply_wire`.
+        EngineRequest::ApplyWire(..)
+        // dux's own reload, and config and project settings.
+        | EngineRequest::ReloadAfterOwnConfigWrite(..)
+        | EngineRequest::SaveProjectSetting(..)
+        | EngineRequest::ReadRawConfig(..)
+        | EngineRequest::WriteRawConfig(..)
+        // New rows, which nobody drives yet.
+        | EngineRequest::CreateProjectTerminal(..)
+        | EngineRequest::CreateStandaloneTerminal(..)
+        // Pull-request bookkeeping.
+        | EngineRequest::AttachPullRequest(..)
+        // A terminal socket's own traffic, gated by the ownership record itself
+        // where it types or resizes.
+        | EngineRequest::SubscribePty(..)
+        | EngineRequest::PtyShown(..)
+        | EngineRequest::WritePty(..)
+        | EngineRequest::ResizePty(..)
+        | EngineRequest::PtyGridSize(..)
+        | EngineRequest::NoteViewed(..)
+        | EngineRequest::SubscribeTerminal(..)
+        // Statuses.
+        | EngineRequest::EmitStatus(..)
+        | EngineRequest::ClearStatus(..)
+        | EngineRequest::TakeLateStatusFinals(..)
+        | EngineRequest::LateStatusFinalsWaiting(..)
+        | EngineRequest::PostStatus(..)
+        // Reads, and bookkeeping no row shows.
+        | EngineRequest::TerminalOwnerOf(..)
+        | EngineRequest::TerminalRoot(..)
+        | EngineRequest::TabSession(..)
+        | EngineRequest::SlotTabId(..)
+        | EngineRequest::CreateAgentBranchPlan(..)
+        | EngineRequest::SessionWorktree(..)
+        | EngineRequest::SessionBranchDeleteInputs(..)
+        | EngineRequest::RenamePushedProbe(..)
+        | EngineRequest::SessionGitAccess(..)
+        | EngineRequest::SessionMissingDirectoryReason(..)
+        | EngineRequest::NoteChangedFilesOutcome(..)
+        | EngineRequest::RecordOfferedBranches(..)
+        | EngineRequest::PtyKeyForPaneId(..)
+        | EngineRequest::FileDropDestination(..)
+        | EngineRequest::FileDropTreeDestination(..)
+        | EngineRequest::FileDropRefreshTarget(..)
+        | EngineRequest::ProjectPath(..)
+        | EngineRequest::ResourceTargets(..)
+        | EngineRequest::Bootstrap(..)
+        | EngineRequest::Spine(..)
+        | EngineRequest::SpineJson(..)
+        | EngineRequest::Session(..)
+        | EngineRequest::CreatedSessionForOp(..)
+        | EngineRequest::PullRequestBranches(..)
+        | EngineRequest::NextChangesRev(..)
+        | EngineRequest::EditorDefault(..)
+        | EngineRequest::BrowseStartDir(..)
+        | EngineRequest::StandaloneShortcutInputs(..)
+        | EngineRequest::RefreshChangedFiles(..)
+        | EngineRequest::ProjectWorktreeInputs(..)
+        | EngineRequest::WireAdmissionRefusal(..)
+        | EngineRequest::AdmitManagerRemoval { .. }
+        | EngineRequest::AdmitLeftoverRemoval { .. }
+        | EngineRequest::DestructiveCheck(..)
+        | EngineRequest::PullRequestResolutionInputs(..)
+        | EngineRequest::SessionStartupLogContext(..)
+        | EngineRequest::ProjectStartupLogContext(..)
+        | EngineRequest::FirstLoadInputs(..)
+        | EngineRequest::MarkVersionSeen(..)
+        | EngineRequest::Shutdown(..) => None,
+    }
+}
+
+/// `req` back when its asker may make the change it asks for, or when it asks
+/// for none; otherwise the refusal is answered here and nothing is handed on.
+fn admit_request(engine: &mut Engine, req: EngineRequest) -> Option<EngineRequest> {
+    let Some((change, asker)) = request_row_change(&req) else {
+        return Some(req);
+    };
+    let asker = asker.clone();
+    engine.dispatch_policy = Some(row_policy(&asker));
+    let verdict = engine.admit_row_change(&change);
+    engine.dispatch_policy = None;
+    let Err(driven) = verdict else {
+        return Some(req);
+    };
+    let sentence = driven.to_string();
+    asker.refuse(sentence.clone());
+    match req {
+        EngineRequest::CreateTerminal(_, _, _, reply)
+        | EngineRequest::CreateAgentTab(_, _, _, _, reply) => answer(reply, Err(sentence)),
+        EngineRequest::StartAgentTab(_, _, _, reply)
+        | EngineRequest::AdmitRowChange(_, _, reply) => answer(reply, Err(sentence)),
+        // Only the requests `request_row_change` names a change for get here.
+        _ => {}
+    }
+    None
 }
 
 fn handle_apply_wire_request(
@@ -4729,14 +4921,16 @@ fn handle_apply_wire_request(
             .operation
             .as_ref()
             .and_then(|followed| followed.requester.clone()),
-        force: origin
-            .operation
-            .as_ref()
-            .is_some_and(|followed| followed.force_connected),
+        force: origin.asker.forces()
+            || origin
+                .operation
+                .as_ref()
+                .is_some_and(|followed| followed.force_connected),
         accepted: origin
             .operation
             .as_ref()
             .and_then(|followed| followed.accepted_connected.clone()),
+        asker: origin.asker.connection().map(str::to_string),
     });
     engine.current_origin = origin.scope;
     let result = match origin.operation {
@@ -4752,11 +4946,16 @@ fn handle_apply_wire_request(
         }) => engine.apply_wire_recorded(cmd, kind),
         Some(Followed { kind: None, .. }) | None => engine.apply_wire(cmd),
     }
-    .map_err(|e| WireError {
-        attached: e
-            .downcast_ref::<dux_core::engine::Attached>()
-            .map(|attached| attached.blockers.clone()),
-        message: e.to_string(),
+    .map_err(|e| {
+        if e.downcast_ref::<dux_core::engine::RowDriven>().is_some() {
+            origin.asker.refuse(e.to_string());
+        }
+        WireError {
+            attached: e
+                .downcast_ref::<dux_core::engine::Attached>()
+                .map(|attached| attached.blockers.clone()),
+            message: e.to_string(),
+        }
     });
     engine.current_origin = StatusScope::All;
     engine.dispatch_policy = None;
@@ -4926,7 +5125,7 @@ fn handle_request(
     input_owners: &PtySizeOwners,
 ) {
     match req {
-        EngineRequest::ApplyWire(cmd, reply, origin, operation) => {
+        EngineRequest::ApplyWire(cmd, reply, origin, operation, asker) => {
             handle_apply_wire_request(
                 engine,
                 cmd,
@@ -4934,6 +5133,7 @@ fn handle_request(
                 WireOrigin {
                     scope: origin,
                     operation,
+                    asker,
                 },
                 status_tx,
                 config_reload_tx,
@@ -4949,6 +5149,7 @@ fn handle_request(
                     WireOrigin {
                         scope: StatusScope::All,
                         operation: None,
+                        asker: RowAsker::default(),
                     },
                     status_tx,
                     config_reload_tx,
@@ -4996,7 +5197,7 @@ fn handle_request(
         EngineRequest::SubscribeTerminal(id, reply) => {
             answer(reply, subscribe_terminal(engine, &id));
         }
-        EngineRequest::CreateTerminal(session_id, ticket, reply) => {
+        EngineRequest::CreateTerminal(session_id, ticket, _, reply) => {
             let owner = dux_core::model::TerminalOwner::Session(session_id);
             answer(
                 reply,
@@ -5019,18 +5220,20 @@ fn handle_request(
         }
         EngineRequest::TerminalOwnerOf(id, reply) => answer(reply, terminal_owner_of(engine, &id)),
         EngineRequest::TerminalRoot(id, reply) => answer(reply, terminal_root(engine, &id)),
-        EngineRequest::CreateAgentTab(session_id, provider, ticket, reply) => {
+        EngineRequest::CreateAgentTab(session_id, provider, ticket, _, reply) => {
             answer(
                 reply,
                 create_agent_tab_request(engine, &session_id, provider, ticket.as_ref()),
             );
         }
-        EngineRequest::StartAgentTab(tab_id, ticket, reply) => {
+        EngineRequest::StartAgentTab(tab_id, ticket, _, reply) => {
             answer(
                 reply,
                 start_agent_tab_request(engine, &tab_id, ticket.as_ref()),
             );
         }
+        // Refused ones never get here: `admit_request` answers them.
+        EngineRequest::AdmitRowChange(_, _, reply) => answer(reply, Ok(())),
         EngineRequest::SlotTabId(session_id, reply) => {
             answer(reply, slot_tab_id(engine, &session_id));
         }
@@ -10096,6 +10299,7 @@ mod tests {
                     dead_reply(),
                     StatusScope::All,
                     None,
+                    RowAsker::default(),
                 ),
                 true,
             ),
@@ -10138,7 +10342,7 @@ mod tests {
             ),
             (
                 "CreateTerminal",
-                EngineRequest::CreateTerminal("s1".into(), None, dead_reply()),
+                EngineRequest::CreateTerminal("s1".into(), None, RowAsker::default(), dead_reply()),
                 true,
             ),
             (
@@ -10173,7 +10377,13 @@ mod tests {
             ),
             (
                 "CreateAgentTab",
-                EngineRequest::CreateAgentTab("s1".into(), None, None, dead_reply()),
+                EngineRequest::CreateAgentTab(
+                    "s1".into(),
+                    None,
+                    None,
+                    RowAsker::default(),
+                    dead_reply(),
+                ),
                 true,
             ),
             (

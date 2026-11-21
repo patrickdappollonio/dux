@@ -39,6 +39,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use dux_core::engine::RowChange;
 use dux_core::model::TerminalRoute;
 
 use crate::git_routes::resolve_editor_worktree;
@@ -263,6 +264,9 @@ trait EditorRoot: Send + 'static {
     /// remaining two triggers, window focus and tab activation.
     fn changes_session(&self) -> Option<String>;
 
+    /// The row of the agents list a write under this root belongs to.
+    fn row(&self) -> RowChange;
+
     /// The flat walk backing the "Search files…" box. A worktree walks its own
     /// dot directories (the editor opens `.git/config` through it); a terminal
     /// root prunes them, for the reasons on [`dux_core::git::rooted_files`].
@@ -284,6 +288,9 @@ impl EditorRoot for SessionRoot {
     }
     fn changes_session(&self) -> Option<String> {
         Some(self.session_id.clone())
+    }
+    fn row(&self) -> RowChange {
+        RowChange::Agent(self.session_id.clone())
     }
     fn search_walk(
         root: &StdPath,
@@ -316,11 +323,17 @@ impl FromRequestParts<AppState> for SessionRoot {
 
 /// A standalone terminal's pinned spawn directory, from
 /// `/api/v1/terminals/{tid}/files/*`.
-struct StandaloneTerminalRoot(PathBuf);
+struct StandaloneTerminalRoot(TerminalDir);
 
 /// A project terminal's pinned spawn directory, from
 /// `/api/v1/projects/{pid}/terminals/{tid}/files/*`.
-struct ProjectTerminalRoot(PathBuf);
+struct ProjectTerminalRoot(TerminalDir);
+
+/// A terminal and the directory it was spawned in.
+struct TerminalDir {
+    terminal_id: String,
+    path: PathBuf,
+}
 
 /// The shared body of both terminal roots. Only the extractors differ, because
 /// only the address differs.
@@ -328,10 +341,13 @@ macro_rules! terminal_root {
     ($ty:ident) => {
         impl EditorRoot for $ty {
             fn path(&self) -> &StdPath {
-                &self.0
+                &self.0.path
             }
             fn changes_session(&self) -> Option<String> {
                 None
+            }
+            fn row(&self) -> RowChange {
+                RowChange::Pty(self.0.terminal_id.clone())
             }
             fn search_walk(
                 root: &StdPath,
@@ -390,12 +406,15 @@ async fn resolve_terminal_root(
     state: &AppState,
     route: TerminalRoute<'_>,
     tid: &str,
-) -> Result<PathBuf, RouteRejection> {
+) -> Result<TerminalDir, RouteRejection> {
     if !id_within_bound(tid) {
         return Err(unknown_terminal().into());
     }
     match state.engine.terminal_root(tid.to_string()).await {
-        Some((owner, root)) if owner.is_at_route(route) => Ok(root),
+        Some((owner, path)) if owner.is_at_route(route) => Ok(TerminalDir {
+            terminal_id: tid.to_string(),
+            path,
+        }),
         _ => Err(unknown_terminal().into()),
     }
 }
@@ -881,6 +900,7 @@ async fn write_file<R: EditorRoot>(
     // (overwrite, reload, cancel) without another round trip.
     let hold = match crate::git_routes::hold_targets_for_write(
         &state,
+        &root.row(),
         root.path(),
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
@@ -1012,6 +1032,7 @@ async fn create_file<R: EditorRoot>(
     let path = op.path;
     let hold = match crate::git_routes::hold_targets_for_write(
         &state,
+        &root.row(),
         root.path(),
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
@@ -1054,6 +1075,7 @@ async fn create_dir<R: EditorRoot>(
     let path = op.path;
     let hold = match crate::git_routes::hold_targets_for_write(
         &state,
+        &root.row(),
         root.path(),
         &[&path],
         dux_core::worktree_ops::WorktreeOpKind::EditorWrite,
@@ -1098,6 +1120,7 @@ async fn rename_entry<R: EditorRoot>(
     let targets = [from.clone(), to.clone()];
     let outcome = destructive_editor_op(
         &state,
+        &root.row(),
         root.path(),
         &[&targets[0], &targets[1]],
         "move",
@@ -1122,9 +1145,14 @@ async fn delete_entry<R: EditorRoot>(
     let wt = worktree.clone();
     let path = op.path;
     let target = path.clone();
-    let outcome = destructive_editor_op(&state, root.path(), &[&target], "delete", move |clear| {
-        dux_core::worktree_file::delete_entry(&wt, &path, clear)
-    })
+    let outcome = destructive_editor_op(
+        &state,
+        &root.row(),
+        root.path(),
+        &[&target],
+        "delete",
+        move |clear| dux_core::worktree_file::delete_entry(&wt, &path, clear),
+    )
     .await;
     if let Err(rejection) = outcome {
         return rejection.into_response();
@@ -1134,7 +1162,8 @@ async fn delete_entry<R: EditorRoot>(
 }
 
 /// Run an editor delete or move of `targets` (relative to `root`) behind the
-/// one gate every destructive file operation passes. Removing or moving a
+/// one gate every destructive file operation passes, refused first while
+/// another device drives `row`. Removing or moving a
 /// folder removes or moves everything under it (an agent's worktree inside a
 /// terminal's root, a standalone agent's folder, a project's repository,
 /// something dux started there), so:
@@ -1148,6 +1177,7 @@ async fn delete_entry<R: EditorRoot>(
 ///    the sentence, a request the operation itself rejects a 400.
 async fn destructive_editor_op(
     state: &AppState,
+    row: &RowChange,
     root: &std::path::Path,
     targets: &[&String],
     what: &'static str,
@@ -1158,6 +1188,7 @@ async fn destructive_editor_op(
     + Send
     + 'static,
 ) -> Result<(), crate::rest_common::RouteRejection> {
+    state.engine.admit_row_change(row.clone()).await?;
     // Off the async runtime: a claim may wait (bounded) for a removal
     // running inside the folder.
     let guard = {

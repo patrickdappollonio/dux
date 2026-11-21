@@ -53,6 +53,7 @@ pub(crate) mod pty_sizes;
 pub(crate) mod reload_signal;
 pub mod resource_routes;
 pub mod rest_common;
+pub(crate) mod row_asker;
 pub mod serve_legs;
 pub mod server;
 pub mod server_inspect_routes;

@@ -132,6 +132,7 @@ impl App {
             requester: Some(TERMINAL_UI_CONNECTION.to_string()),
             force: true,
             accepted: Some(shown.iter().map(Blocker::key).collect()),
+            asker: Some(TERMINAL_UI_CONNECTION.to_string()),
         };
         let previous = self.engine.dispatch_policy.replace(forced);
         let result = act(self);

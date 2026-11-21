@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::operations::RecordWatch;
-use crate::pty_owners::PtySizeOwners;
+use crate::pty_owners::{PtySizeOwners, RowKey};
 
 /// How long a peer may send nothing, not even a pong, before its connection
 /// stops counting: two missed 30-second pings and some slack.
@@ -237,6 +237,24 @@ pub struct Policy {
     /// With `force`: go ahead only over these blockers ([`Blocker::key`]); anybody
     /// else in the way refuses the change. `None` goes ahead over everybody.
     pub accepted: Option<BTreeSet<String>>,
+    /// The connection [`Attachments::row_driver`] is asked for: who a change to
+    /// a driven row is judged as. `None` for a client with no connection here.
+    pub asker: Option<String>,
+}
+
+/// Who drives a row, as seen by one asking connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowDriver {
+    /// Nobody drives the row, or no ownership record is in use.
+    Nobody,
+    /// The asking connection drives it.
+    Asker,
+    /// Somebody else drives it.
+    Another {
+        /// What the driver said it is: a browser's raw `User-Agent`, or the
+        /// terminal UI's fixed label. `None` when it sent none.
+        device: Option<String>,
+    },
 }
 
 /// How long a reservation lasts.
@@ -641,6 +659,32 @@ impl Attachments {
                 );
             }
         });
+    }
+
+    /// Who drives `row`, judged for `asker`: the asker drives it when one of
+    /// its attachments holds the seat the ownership record names as the driver.
+    pub fn row_driver(&self, row: &RowKey, asker: Option<&str>) -> RowDriver {
+        self.with(|state| {
+            let Some(owner) = state
+                .owners
+                .as_ref()
+                .and_then(|owners| owners.driver_of(row))
+            else {
+                return RowDriver::Nobody;
+            };
+            let drives = asker.is_some_and(|asker| {
+                state.attachments.values().any(|attachment| {
+                    attachment.connection == asker && attachment.pty_conn == Some(owner.conn_id)
+                })
+            });
+            if drives {
+                RowDriver::Asker
+            } else {
+                RowDriver::Another {
+                    device: owner.device,
+                }
+            }
+        })
     }
 
     /// The connections that are up, oldest first, with what each is attached to;
@@ -1093,6 +1137,7 @@ mod tests {
             requester: None,
             force: true,
             accepted: Some(shown),
+            asker: None,
         };
         let again = attachments
             .reserve(agent_scope("s1"), &over_shown, Life::Released, now)
@@ -1100,6 +1145,7 @@ mod tests {
         assert_eq!(again.len(), 2, "{again:?}");
         let over_both = Policy {
             accepted: Some(again.iter().map(Blocker::key).collect()),
+            asker: None,
             ..over_shown
         };
         let id = attachments
@@ -1111,6 +1157,7 @@ mod tests {
             requester: None,
             force: true,
             accepted: None,
+            asker: None,
         };
         let id = attachments
             .reserve(agent_scope("s1"), &forced, Life::Released, now)
@@ -1194,6 +1241,7 @@ mod tests {
             requester: Some("e1".to_string()),
             force: false,
             accepted: None,
+            asker: None,
         };
         let refused = attachments
             .reserve(agent_scope("s1"), &own, Life::Released, now)
@@ -1314,6 +1362,7 @@ mod tests {
                         requester: None,
                         force: true,
                         accepted: None,
+                        asker: None,
                     };
                     let id = a
                         .reserve(agent_scope("s1"), &forced, Life::Released, at)

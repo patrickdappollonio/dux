@@ -2307,8 +2307,8 @@ impl Engine {
     ///
     /// # Errors
     ///
-    /// Fails when the command is refused, in the way of a running operation, would end somebody
-    /// else's terminal, or fails to apply.
+    /// Fails when the command is refused, would change a row another device drives, is in the
+    /// way of a running operation, would end somebody else's terminal, or fails to apply.
     pub fn apply_wire(&mut self, command: WireCommand) -> anyhow::Result<WireCommandOutcome> {
         // Stamp the synchronous command-result status with the current command
         // origin. Deferred busies and finals capture `current_origin` at their
@@ -2316,6 +2316,7 @@ impl Engine {
         // Clear the create-op correlation slot before dispatch, so the value read
         // back reflects only THIS command's create.
         self.last_created_op_id = None;
+        self.admit_wire_row_change(&command)?;
         self.admit_wire(&command)?;
         // The changes this dispatches to an engine method directly; the ones
         // it turns into a `Command` are guarded in `Engine::apply`.

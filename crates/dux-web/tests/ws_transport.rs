@@ -2191,11 +2191,14 @@ async fn boot_two_sessions() -> (SocketAddr, dux_core::test_scratch::ScratchDir)
 
 /// Create a companion terminal on `session_id` over REST and return its id.
 async fn create_terminal_via_rest(addr: SocketAddr, session_id: &str) -> String {
+    create_terminal_at(addr, &format!("/api/v1/sessions/{session_id}/terminals")).await
+}
+
+/// POST `path`, a terminal-create route, and return the new terminal's id.
+async fn create_terminal_at(addr: SocketAddr, path: &str) -> String {
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!(
-            "http://{addr}/api/v1/sessions/{session_id}/terminals"
-        ))
+        .post(format!("http://{addr}{path}"))
         .send()
         .await
         .expect("send the request");
@@ -2986,9 +2989,10 @@ async fn the_connected_handshake_names_the_ptys_current_owner() {
 }
 
 /// A device drives a whole ROW. A terminal opened in an agent another
-/// connection drives is that connection's from its first handshake, so its
-/// creator watches it; one opened in an agent nobody drives is claimed with
-/// the agent by its creator's first resize.
+/// connection drives, which only a request told to go ahead over the driver
+/// may do, is that connection's from its first handshake, so its creator
+/// watches it; one opened in an agent nobody drives is claimed with the agent
+/// by its creator's first resize.
 #[tokio::test]
 async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     async fn owner_on_open(addr: SocketAddr, path: &str) -> (ClientWs, serde_json::Value) {
@@ -3015,7 +3019,8 @@ async fn a_terminal_belongs_to_whoever_drives_its_agents_row() {
     let (mut agent, hello) = owner_on_open(addr, "/ws/sessions/s1/pty").await;
     let driver = hello["id"].as_str().expect("an id").to_string();
     claim(&mut agent, "dux-row-driven-marker").await;
-    let terminal = create_terminal_via_rest(addr, "s1").await;
+    let terminal =
+        create_terminal_at(addr, "/api/v1/sessions/s1/terminals?force_connected=true").await;
     let path = format!("/ws/sessions/s1/terminals/{terminal}/pty");
     let (_creator, hello) = owner_on_open(addr, &path).await;
     assert_eq!(

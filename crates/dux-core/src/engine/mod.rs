@@ -24,6 +24,7 @@ mod reload_origin;
 pub(crate) mod removal;
 mod rename;
 mod resume_fallback;
+pub mod row_guard;
 mod spawn_worker;
 pub use clone::CloneAskedBy;
 pub use reload_origin::{ReloadOrigin, ReloadSlot};
@@ -125,6 +126,7 @@ pub use removal::{
 };
 pub use rename::{BranchPushed, BranchRename, branch_rename_refusal, rename_branch_note_prose};
 pub use resume_fallback::ResumeFallbackOutcome;
+pub use row_guard::{RowChange, RowDriven, row_change};
 pub use spawn_worker::{
     BackgroundSpawn, BackgroundWorkerSpec, CommandWorkerSpec, LoopControl, LoopWorkerSpec,
     format_panic_payload,

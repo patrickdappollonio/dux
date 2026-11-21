@@ -418,6 +418,12 @@ pub(crate) struct ForceConnectedQuery {
 }
 
 impl ForceConnectedQuery {
+    /// Whether it says to go ahead over everybody (`true`), which is also what
+    /// goes ahead over a device driving the row; a list of blockers does not.
+    pub(crate) fn over_everybody(&self) -> bool {
+        self.decision() == (true, None)
+    }
+
     /// Whether to go ahead over somebody attached, and over whom (`None` for
     /// everybody).
     fn decision(&self) -> (bool, Option<std::collections::BTreeSet<String>>) {
