@@ -31,18 +31,25 @@ export function ExplainedWhenDisabled({
 }) {
   const [hovered, setHovered] = useState(false)
   const [tapped, setTapped] = useState(false)
-  // A tap's hint belongs to the state that was tapped: once the control changes
-  // state, nobody asked about the new one.
+  // A hint belongs to the state it was opened for: once the control changes
+  // state, nobody asked about the new one, so the tooltip closes.
   const [tappedWhile, setTappedWhile] = useState(disabled)
-  if (tappedWhile !== disabled) {
+  const stateChanged = tappedWhile !== disabled
+  if (stateChanged) {
     setTappedWhile(disabled)
     setTapped(false)
+    setHovered(false)
   }
+  const open = !stateChanged && (hovered || tapped)
+  // The text stops following the hint once the tooltip closes, so its fade
+  // still says what it said while open.
+  const [shown, setShown] = useState(hint)
+  if (open && shown !== hint) setShown(hint)
   return (
     <TooltipProvider delay={300}>
       <Tooltip
         disabled={hint === null}
-        open={hovered || tapped}
+        open={open}
         onOpenChange={(next) => {
           setHovered(next)
           if (!next) setTapped(false)
@@ -64,7 +71,7 @@ export function ExplainedWhenDisabled({
         >
           {children}
         </TooltipTrigger>
-        <TooltipContent side="top">{hint}</TooltipContent>
+        <TooltipContent side="top">{open ? hint : shown}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   )
