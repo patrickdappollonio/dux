@@ -45,6 +45,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
     "MoveEntryDialog.tsx",
     "ChangeBaseBranchDialog.tsx",
     "FolderBrowseList.tsx",
+    "MacrosDialog.tsx",
   ]
   for (const file of files) {
     it(`${file} gives a finger what a phone gets`, () => {
@@ -78,11 +79,7 @@ describe("controls that had no touch size at all", () => {
   const cases: [string, string, string, string[]][] = [
     ["MacrosDialog.tsx", "onClick={dismissMacrosConflict}", "<Button", BUTTON_FLOOR],
     ["MacrosDialog.tsx", "onClick={() => void reloadMacrosDraft()}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "onClick={onCancelDelete}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "onClick={onConfirmDelete}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "<ListPlus />", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "aria-label={`Edit ${macro.name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
-    ["MacrosDialog.tsx", "aria-label={`Delete ${macro.name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
+    ["MacrosDialog.tsx", "aria-label={`Actions for ${name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
     ["GlobalEnvDialog.tsx", "onClick={dismissGlobalEnvConflict}", "<Button", BUTTON_FLOOR],
     ["GlobalEnvDialog.tsx", "onClick={() => void reloadGlobalEnvDraft()}", "<Button", BUTTON_FLOOR],
     ["ConfigEditorDialog.tsx", "onClick={dismissConfigEditorConflict}", "<Button", BUTTON_FLOOR],
@@ -102,12 +99,4 @@ describe("controls that had no touch size at all", () => {
       for (const cls of classes) expect(el, `missing ${cls}`).toContain(cls)
     })
   }
-
-  it("gives Edit and Delete 8px between them under a finger", () => {
-    const src = read("MacrosDialog.tsx")
-    const at = src.indexOf("aria-label={`Edit ${macro.name}`}")
-    const row = src.slice(src.lastIndexOf('<div className="ml-auto flex', at), at)
-    expect(row).toContain("pointer-coarse:gap-2")
-    expect(row).toContain("max-md:gap-2")
-  })
 })

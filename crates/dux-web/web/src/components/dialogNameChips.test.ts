@@ -102,6 +102,11 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "A branch row that is only its branch: a list row, out of the chip rule's scope.",
   },
   {
+    file: "components/MacrosDialog.tsx",
+    line: '<span className="truncate font-mono text-xs text-muted-foreground">',
+    reason: "A macro row's preview of its text: a list row, out of the chip rule's scope.",
+  },
+  {
     file: "components/TaskManagerDialog.tsx",
     line: '<span className="whitespace-nowrap font-mono text-xs text-muted-foreground">',
     reason: "A process row's command detail: a table cell, out of the chip rule's scope.",

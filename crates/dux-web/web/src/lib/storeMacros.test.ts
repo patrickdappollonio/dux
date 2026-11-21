@@ -12,6 +12,7 @@ import "./store"
 vi.mock("sonner", () => {
   const toast = Object.assign(vi.fn(), {
     success: vi.fn(),
+    info: vi.fn(),
     error: vi.fn(),
     warning: vi.fn(),
     loading: vi.fn(),
@@ -221,7 +222,7 @@ describe("store macros dialog", () => {
     expect(snap.macrosDraft).toEqual(seed)
     // The draft is a copy, not the same array/objects as the bootstrap slice.
     expect(snap.macrosDraft).not.toBe(snap.bootstrap?.macros)
-    expect(snap.macrosDraft[0]).not.toBe(seed[0])
+    expect(snap.macrosDraft?.[0]).not.toBe(seed[0])
   })
 
   it("openMacrosDialog seeds an empty draft when there are no macros", async () => {
@@ -238,7 +239,22 @@ describe("store macros dialog", () => {
     mod.closeMacrosDialog()
     const snap = mod.getSnapshot()
     expect(snap.macrosDialogOpen).toBe(false)
-    expect(snap.macrosDraft).toEqual([])
+    expect(snap.macrosDraft).toBeNull()
+  })
+
+  it("openMacrosDialog names the macro to open on", async () => {
+    bootstrapMacros = seed
+    const mod = await loadStore()
+    mod.openMacrosDialog("Build")
+    expect(mod.getSnapshot().macrosDialogSelect).toBe("Build")
+  })
+
+  it("openMacrosDialog before the bootstrap loads leaves the draft to the bootstrap", async () => {
+    failBootstrap = true
+    const mod = await loadStoreNoBootstrap()
+    mod.openMacrosDialog()
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+    expect(mod.getSnapshot().macrosDraft).toBeNull()
   })
 })
 
@@ -390,7 +406,7 @@ describe("store macros commands", () => {
       { name: "Review", text: "review this", surface: "agent" },
       { name: "New", text: "added", surface: "both" },
     ]
-    mod.saveMacros(edited)
+    mod.saveMacros(edited, "v1")
 
     expect(fetchMock).toHaveBeenLastCalledWith(
       "/api/v1/macros",
@@ -414,7 +430,7 @@ describe("store macros commands", () => {
     // the edits and the server's sentence, and nothing typed is lost.
     staleMacrosPut = true
     mod.openMacrosDialog()
-    mod.saveMacros(edited)
+    mod.saveMacros(edited, "v1")
     await vi.waitFor(() => {
       expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
     })
@@ -443,7 +459,7 @@ describe("store macros commands", () => {
     })
     mod.openMacrosDialog()
     const refused: MacroView[] = [{ name: "Old", text: "earlier", surface: "both" }]
-    mod.saveMacros(refused)
+    mod.saveMacros(refused, mod.getSnapshot().macrosDraftVersion)
     mod.openMacrosDialog()
     const current = mod.getSnapshot().macrosDraft
     const epoch = mod.getSnapshot().macrosDraftEpoch
@@ -457,67 +473,53 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosRejected).toEqual(refused)
   })
 
-  it("persistMacroOrder PUTs the reordered entries, keeps the dialog open, resolves true", async () => {
-    savedMacrosVersion = "v3"
-    bootstrapMacros = [
-      { name: "Review", text: "review this", surface: "agent" },
-      { name: "Build", text: "cargo build", surface: "terminal" },
-    ]
-    const mod = await loadStore()
-    mod.openMacrosDialog()
-    fetchMock.mockClear()
-
-    const reordered: MacroView[] = [
-      { name: "Build", text: "cargo build", surface: "terminal" },
-      { name: "Review", text: "review this", surface: "agent" },
-    ]
-    await expect(mod.persistMacroOrder(reordered)).resolves.toBe(true)
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/macros",
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify({ entries: reordered }),
-      }),
-    )
-    // Unlike saveMacros, a reorder save must NOT close the dialog: the user is
-    // still arranging the list.
-    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
-    // The dialog's next save is based on the list this one left.
-    expect(mod.getSnapshot().macrosDraftVersion).toBe("v3")
-  })
-
-  it("persistMacroOrder resolves false and toasts when the PUT is rejected", async () => {
+  it("saveMacros reopens the dialog with the edits when the server refuses them", async () => {
+    bootstrapMacrosVersion = "v1"
     bootstrapMacros = [{ name: "Review", text: "review this", surface: "agent" }]
     failMacrosPut = true
     const mod = await loadStore()
     const { toast } = await import("sonner")
     mod.openMacrosDialog()
 
-    await expect(
-      mod.persistMacroOrder([
-        { name: "Review", text: "review this", surface: "agent" },
-      ]),
-    ).resolves.toBe(false)
-    // The caller rolls the visual order back on false; the toast names why.
+    const edited: MacroView[] = [{ name: "Review", text: "edited", surface: "agent" }]
+    mod.saveMacros(edited, "v1")
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
+
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+    })
+    expect(mod.getSnapshot().macrosDraft).toEqual(edited)
+    expect(mod.getSnapshot().macrosDraftVersion).toBe("v1")
+    expect(mod.getSnapshot().macrosConflict).toBeNull()
     expect(toast.error).toHaveBeenCalled()
-    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
   })
 
-  it("persistMacroOrder refuses (no PUT, resolves false) when bootstrap is null", async () => {
-    failBootstrap = true
-    const mod = await loadStoreNoBootstrap()
+  it("edits set aside by Back come back with Restore, and a fresh opening retires them", async () => {
+    bootstrapMacrosVersion = "v1"
+    bootstrapMacros = [{ name: "Review", text: "review this", surface: "agent" }]
+    const mod = await loadStore()
     const { toast } = await import("sonner")
-    fetchMock.mockClear()
+    mod.openMacrosDialog()
 
-    await expect(
-      mod.persistMacroOrder([{ name: "X", text: "y", surface: "both" }]),
-    ).resolves.toBe(false)
-    const putCall = fetchMock.mock.calls.find(
-      (c) => String(c[0]) === "/api/v1/macros",
+    const edited: MacroView[] = [{ name: "Review", text: "edited", surface: "agent" }]
+    mod.setAsideMacrosDraft(edited, "v1", 1)
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
+    expect(toast.info).toHaveBeenCalledWith(
+      "The Macros dialog closed with 1 unsaved change, and nothing was saved. Restore reopens it with them.",
+      expect.objectContaining({ id: "macros-set-aside", duration: Infinity }),
     )
-    expect(putCall).toBeUndefined()
-    expect(toast.error).toHaveBeenCalled()
+
+    mod.restoreSetAsideMacros()
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
+    expect(mod.getSnapshot().macrosDraft).toEqual(edited)
+    expect(mod.getSnapshot().macrosDraftVersion).toBe("v1")
+
+    mod.setAsideMacrosDraft(edited, "v1", 1)
+    mod.openMacrosDialog()
+    expect(mod.getSnapshot().macrosDraft).toEqual(bootstrapMacros)
+    mod.closeMacrosDialog()
+    mod.restoreSetAsideMacros()
+    expect(mod.getSnapshot().macrosDialogOpen).toBe(false)
   })
 
   it("saveMacros refuses (no PUT, error toast, dialog stays open) when bootstrap is null", async () => {
@@ -532,7 +534,7 @@ describe("store macros commands", () => {
 
     // A wholesale update_macros from an empty/unknown base would destroy the
     // server's macros, so the save must be refused while bootstrap is unloaded.
-    mod.saveMacros([{ name: "X", text: "y", surface: "both" }])
+    mod.saveMacros([{ name: "X", text: "y", surface: "both" }], null)
 
     const putCall = fetchMock.mock.calls.find(
       (c) => String(c[0]) === "/api/v1/macros",

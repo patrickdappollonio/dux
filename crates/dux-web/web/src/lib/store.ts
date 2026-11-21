@@ -774,13 +774,13 @@ export interface DuxState {
   // pending screen cannot pop it straight back up. Purely a re-open guard: the
   // durable record is the server's SQLite row.
   firstLoadDismissed: boolean
-  // The macro-editor dialog. `macrosDialogOpen` gates the modal; `macrosDraft`
-  // is the working copy of the whole macro list the user edits before saving
-  // (the save is wholesale: `update_macros` replaces the entire `[macros]`
-  // map, mirroring the TUI editor). Seeded from `bootstrap.macros` on open so
-  // there is no set-state-in-effect. Empty draft when closed.
+  // The list the macro dialog opens on, copied from `bootstrap.macros`; null
+  // while closed or before the bootstrap loads, when the editor waits for it.
   macrosDialogOpen: boolean
-  macrosDraft: MacroView[]
+  macrosDraft: MacroView[] | null
+  // The macro the dialog opens on, by name (the picker's pencil); null opens
+  // on the first.
+  macrosDialogSelect: string | null
   // The `macros_version` the draft was read at, sent with every save so a list that
   // changed since is refused; moves on with each save this dialog makes.
   macrosDraftVersion: string | null
@@ -1251,7 +1251,8 @@ let state: DuxState = {
   firstLoad: null,
   firstLoadDismissed: false,
   macrosDialogOpen: false,
-  macrosDraft: [],
+  macrosDraft: null,
+  macrosDialogSelect: null,
   macrosDraftVersion: null,
   macrosConflict: null,
   macrosDraftEpoch: 0,
@@ -9114,13 +9115,19 @@ export function runMacro(name: string, target: SelectedTarget): MacroDestination
 
 // Open the macro-editor dialog, seeding the draft from the current bootstrap
 // macros (a fresh copy so edits don't mutate the shared model). Runs in the
-// click/palette handler that opens the dialog, never an effect.
-export function openMacrosDialog(): void {
-  const macros = state.bootstrap?.macros ?? []
+// click/palette handler that opens the dialog, never an effect. `select` names
+// the macro it opens on.
+export function openMacrosDialog(select: string | null = null): void {
+  const bootstrap = state.bootstrap
+  // A fresh opening is a fresh start: edits set aside by an earlier Back are
+  // no longer offered back.
+  macrosSetAside = null
+  dismissNotification(MACROS_SET_ASIDE_ID)
   setState({
     macrosDialogOpen: true,
-    macrosDraft: macros.map((m) => ({ ...m })),
-    macrosDraftVersion: state.bootstrap?.macros_version ?? null,
+    macrosDraft: bootstrap ? bootstrap.macros.map((m) => ({ ...m })) : null,
+    macrosDialogSelect: select,
+    macrosDraftVersion: bootstrap?.macros_version ?? null,
     macrosConflict: null,
     macrosRejected: null,
     macrosEditSession: state.macrosEditSession + 1,
@@ -9128,7 +9135,53 @@ export function openMacrosDialog(): void {
 }
 
 export function closeMacrosDialog(): void {
-  setState({ macrosDialogOpen: false, macrosDraft: [], macrosConflict: null })
+  setState({
+    macrosDialogOpen: false,
+    macrosDraft: null,
+    macrosDialogSelect: null,
+    macrosConflict: null,
+  })
+}
+
+// The edits a Back closed the dialog on, held so the toast's Restore can bring
+// them back: Back cannot stop to ask, so it sets the edits aside instead.
+let macrosSetAside: { draft: MacroView[]; version: string | null } | null = null
+const MACROS_SET_ASIDE_ID = "macros-set-aside"
+
+export function setAsideMacrosDraft(
+  draft: MacroView[],
+  version: string | null,
+  changes: number,
+): void {
+  macrosSetAside = { draft: draft.map((m) => ({ ...m })), version }
+  closeMacrosDialog()
+  const what = changes === 1 ? "1 unsaved change" : `${changes} unsaved changes`
+  // Sticky: the edits exist nowhere else, and they are gone once this toast is.
+  notifyInfo(
+    `The Macros dialog closed with ${what}, and nothing was saved. Restore reopens it with them.`,
+    {
+      id: MACROS_SET_ASIDE_ID,
+      sticky: true,
+      action: { label: "Restore", onClick: restoreSetAsideMacros },
+    },
+  )
+}
+
+export function restoreSetAsideMacros(): void {
+  dismissNotification(MACROS_SET_ASIDE_ID)
+  const setAside = macrosSetAside
+  macrosSetAside = null
+  if (setAside === null) return
+  setState({
+    macrosDialogOpen: true,
+    macrosDraft: setAside.draft,
+    macrosDialogSelect: null,
+    macrosDraftVersion: setAside.version,
+    macrosConflict: null,
+    macrosRejected: null,
+    macrosDraftEpoch: state.macrosDraftEpoch + 1,
+    macrosEditSession: state.macrosEditSession + 1,
+  })
 }
 
 /// The notice for a whole-set save refused after its dialog was opened again.
@@ -9158,78 +9211,44 @@ export function dismissMacrosConflict(): void {
   setState({ macrosConflict: null })
 }
 
-// Persist the draft wholesale; the server validates and reports on the status lane. The
-// dialog closes optimistically, and a save refused because the list changed reopens it.
-export function saveMacros(macros: MacroView[]): void {
-  // `update_macros` is a WHOLESALE replace of the entire `[macros]` map. Before
-  // the bootstrap document has loaded, `openMacrosDialog` seeded an EMPTY draft,
-  // so saving would wipe the server's macros. Refuse until we hold the
-  // authoritative list (the Save button is also disabled in this window).
+// Writes the whole list in one request, all or nothing, as of `version`. The
+// dialog closes at once and comes back with the edits if nothing was written.
+export function saveMacros(macros: MacroView[], version: string | null): void {
+  // The save replaces the whole list, so one made before the server's list
+  // was read would wipe it.
   if (state.bootstrap === null) {
     notifyError("Macros aren't loaded yet. Try again in a moment.")
     return
   }
-  const version = state.macrosDraftVersion
   const session = state.macrosEditSession
   configApi.updateMacros(macros, version ?? undefined).catch((e) => {
-    if (e instanceof SetChangedError) {
-      if (state.macrosDialogOpen && state.macrosEditSession !== session) {
-        // The editor was opened again since: leave that edit as it is.
+    const stale = e instanceof SetChangedError
+    if (!stale) {
+      notifyError(e instanceof Error ? e.message : "Could not save the macros.")
+    }
+    if (state.macrosDialogOpen && state.macrosEditSession !== session) {
+      // The editor was opened again since: leave that edit as it is.
+      if (stale) {
         setState({
           macrosRejected: macros.map((m) => ({ ...m })),
           macrosConflict: earlierSaveRefused("macro list"),
         })
-        return
       }
-      setState({
-        macrosDialogOpen: true,
-        macrosDraft: macros.map((m) => ({ ...m })),
-        macrosDraftVersion: version,
-        macrosConflict: e.message,
-        macrosDraftEpoch: state.macrosDraftEpoch + 1,
-        macrosEditSession: state.macrosEditSession + 1,
-      })
       return
     }
-    notifyError(e instanceof Error ? e.message : "Could not save the macros.")
+    // Nothing was written, so the dialog comes back with the edits rather
+    // than leaving them only in a toast.
+    setState({
+      macrosDialogOpen: true,
+      macrosDraft: macros.map((m) => ({ ...m })),
+      macrosDialogSelect: null,
+      macrosDraftVersion: version,
+      macrosConflict: stale ? e.message : null,
+      macrosDraftEpoch: state.macrosDraftEpoch + 1,
+      macrosEditSession: state.macrosEditSession + 1,
+    })
   })
   closeMacrosDialog()
-}
-
-// Persist a drag-reorder of the macro editor's list through the same wholesale
-// PUT as `saveMacros`, without closing the dialog. Resolves false on any
-// refusal or failure so the dialog can snap its optimistic order back; the
-// overlay lives in the dialog's own draft, which no spine reconciles.
-export function persistMacroOrder(macros: MacroView[]): Promise<boolean> {
-  // Same guard as saveMacros: before bootstrap loads the draft was seeded
-  // empty, and a wholesale PUT from that base would wipe the server's macros.
-  if (state.bootstrap === null) {
-    notifyError("Macros aren't loaded yet. Try again in a moment.")
-    return Promise.resolve(false)
-  }
-  const session = state.macrosEditSession
-  return configApi
-    .updateMacros(macros, state.macrosDraftVersion ?? undefined)
-    .then((version) => {
-      // This dialog's own save moved the list on; its next save is based on
-      // it, unless the editor has been opened again since.
-      if (state.macrosEditSession === session) {
-        setState({ macrosDraftVersion: version ?? null })
-      }
-      return true
-    })
-    .catch((e) => {
-      if (e instanceof SetChangedError) {
-        if (state.macrosEditSession === session) {
-          setState({ macrosConflict: e.message })
-        }
-        return false
-      }
-      notifyError(
-        e instanceof Error ? e.message : "Could not reorder the macros.",
-      )
-      return false
-    })
 }
 
 // --- Theater mode ----------------------------------------------------------

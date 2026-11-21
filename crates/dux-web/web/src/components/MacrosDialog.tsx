@@ -1,5 +1,5 @@
-import { useState } from "react"
-import type { CSSProperties } from "react"
+import { useEffect, useRef, useState } from "react"
+import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
 import {
   DndContext,
   MouseSensor,
@@ -14,10 +14,41 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable"
-import { ListPlus, Pencil, Trash2, TriangleAlert } from "lucide-react"
+import {
+  ArrowUpToLine,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Ellipsis,
+  Plus,
+  Search,
+  SquareSlash,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react"
 
-import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { Badge } from "@/components/ui/badge"
+import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { MatchHighlight } from "@/components/MatchHighlight"
+import {
+  addItem,
+  changeCount,
+  draftToMacros,
+  duplicateItem,
+  filterCounts,
+  isModified,
+  matchesFilter,
+  matchesSearch,
+  moveItem,
+  moveToTop,
+  nextKey,
+  removeItem,
+  searchNeedle,
+  seedDraft,
+  updateItem,
+  type DraftMacro,
+  type MacroFilter,
+} from "@/components/macrosDraft"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -27,43 +58,51 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import { InlineCode } from "@/components/ui/inline-code"
+import { Input } from "@/components/ui/input"
+import { SheetContent, SheetTitle } from "@/components/ui/sheet"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
+import { FOCUS_RING } from "@/lib/focusRing"
 import {
   MACRO_SURFACE_OPTIONS,
-  commitMacro,
   isMacroSurface,
-  macroDragIds,
   macroTextPreview,
-  reorderMacrosByDrag,
   validateMacros,
 } from "@/lib/macros"
+import { matchCharRanges } from "@/lib/searchMatch"
 import {
   closeMacrosDialog,
   dismissMacrosConflict,
-  persistMacroOrder,
   reloadMacrosDraft,
   saveMacros,
+  setAsideMacrosDraft,
   useDux,
 } from "@/lib/store"
 import type { MacroSurface, MacroView } from "@/lib/types"
 import { cn } from "@/lib/utils"
-
-// The dialog's two internal modes: the LIST (rows + Add) or the per-row EDIT/ADD
-// form. `editing` is the draft index being edited, "new" while adding, or null
-// while on the list.
-type EditorMode = { kind: "list" } | { kind: "form"; index: number | "new" }
 
 const SURFACE_LABEL: Record<MacroSurface, string> = {
   agent: "Agent",
@@ -71,155 +110,929 @@ const SURFACE_LABEL: Record<MacroSurface, string> = {
   both: "Both",
 }
 
-// The form body mounts only while the dialog is open and seeds its working copy
-// from the store draft via a lazy initializer, so no set-state-in-effect. The
-// whole list is edited locally; Save sends it wholesale via `update_macros`.
-function MacrosEditor({ initial }: { initial: MacroView[] }) {
-  // The bootstrap document holds the authoritative macro list. Until it loads,
-  // the draft was seeded empty, so a wholesale save would wipe the server's
-  // macros: disable Save in that window (the store also refuses it defensively).
-  const { bootstrap, macrosConflict } = useDux()
-  const [macros, setMacros] = useState<MacroView[]>(() =>
-    initial.map((m) => ({ ...m })),
-  )
-  const [mode, setMode] = useState<EditorMode>({ kind: "list" })
-  // The draft index pending delete confirmation, or null. Inline confirm row
-  // (the dialog's established confirm style) rather than a nested modal.
-  const [deleteIndex, setDeleteIndex] = useState<number | null>(null)
+const FILTERS: { value: MacroFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "agent", label: "Agent" },
+  { value: "terminal", label: "Terminal" },
+]
 
-  // Reorder by drag, the agents-pane idiom: a mouse drags on a short pull so a
-  // click on the row's buttons stays a click, and a touch drags on a hold so the
-  // gesture coexists with the list's scroll. Values live in lib/dragActivation.ts.
+// The one height token of the controls that sit together (search, New, the
+// filter, the name field and its `⋯`): 32px for a mouse, 40px under a finger.
+const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
+
+const DESCRIPTION = "Text you send to an agent or a terminal from its Macros… button."
+
+function changesLabel(count: number): string {
+  return count === 1 ? "1 unsaved change" : `${count} unsaved changes`
+}
+
+// How the dialog answers a request to close: the root hands every dismissal to
+// the editor, which alone knows whether there is anything to lose.
+interface CloseHandler {
+  // Cancel, Escape, the close button, a press outside: asks first when there
+  // are unsaved changes.
+  request: () => void
+  // The browser's Back, which closes the dialog and cannot be asked to wait.
+  back: () => void
+}
+
+// The macro editor: list and editor side by side on a computer, two steps of
+// one sheet on a phone. Nothing is written until Save sends the whole list.
+export function MacrosDialog() {
+  const { macrosDialogOpen, macrosDraftEpoch, bootstrap } = useDux()
+  const isMobile = useIsMobile()
+  const closeRef = useRef<CloseHandler | null>(null)
+
+  return (
+    <Dialog
+      open={macrosDialogOpen}
+      onOpenChange={(open, details) => {
+        if (open) return
+        const editor = closeRef.current
+        if (editor === null) {
+          closeMacrosDialog()
+          return
+        }
+        // Back is the shared primitive's imperative close; it keeps asking
+        // until the dialog is gone, so it cannot stop at a question.
+        if (details.reason === "imperative-action") {
+          editor.back()
+          return
+        }
+        details.cancel()
+        editor.request()
+      }}
+    >
+      {macrosDialogOpen ? (
+        bootstrap === null ? (
+          <Shell phone={isMobile}>
+            <p className="py-10 text-center text-sm text-muted-foreground">
+              Loading the macros…
+            </p>
+          </Shell>
+        ) : (
+          <MacrosEditor key={macrosDraftEpoch} phone={isMobile} closeRef={closeRef} />
+        )
+      ) : null}
+    </Dialog>
+  )
+}
+
+// A dialog on a computer, a bottom sheet on a phone, both under the one dialog
+// root, so a rotation swaps the shell without remounting the editor's draft.
+function Shell({
+  phone,
+  initialFocus,
+  children,
+}: {
+  phone: boolean
+  initialFocus?: () => HTMLElement | boolean | null
+  children: ReactNode
+}) {
+  if (phone) {
+    return (
+      <SheetContent
+        side="bottom"
+        showCloseButton={false}
+        initialFocus={initialFocus}
+        className="h-[calc(100dvh-2.5rem)] gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
+      >
+        {children}
+      </SheetContent>
+    )
+  }
+  return (
+    <DialogContent
+      initialFocus={initialFocus}
+      className="flex h-[min(40rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[55rem]"
+    >
+      {children}
+    </DialogContent>
+  )
+}
+
+function MacrosEditor({
+  phone,
+  closeRef,
+}: {
+  phone: boolean
+  closeRef: RefObject<CloseHandler | null>
+}) {
+  const { bootstrap, macrosDraft, macrosDraftVersion, macrosDialogSelect, macrosConflict } =
+    useDux()
+  // Read once: the list and version this editing session started from. The
+  // dots and the change count compare against it, and Save sends the version.
+  const [start] = useState(() => {
+    const baseline = (bootstrap?.macros ?? []).map((m) => ({ ...m }))
+    const items = seedDraft(macrosDraft ?? baseline, baseline)
+    const picked = items.find((item) => item.name === macrosDialogSelect)
+    return {
+      baseline,
+      version:
+        macrosDraft === null ? (bootstrap?.macros_version ?? null) : macrosDraftVersion,
+      items,
+      selected: picked?.key ?? items[0]?.key ?? null,
+      step: picked && phone ? ("edit" as const) : ("list" as const),
+    }
+  })
+  const { baseline, version } = start
+  const [items, setItems] = useState<DraftMacro[]>(start.items)
+  const [selectedKey, setSelectedKey] = useState<number | null>(start.selected)
+  const [query, setQuery] = useState("")
+  const [filter, setFilter] = useState<MacroFilter>("all")
+  const [step, setStep] = useState<"list" | "edit">(start.step)
+  const [deleteKey, setDeleteKey] = useState<number | null>(null)
+  const [discardOpen, setDiscardOpen] = useState(false)
+  // Bumped to put the caret in the name field of the selected macro.
+  const [focusName, setFocusName] = useState(0)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+  const headerRef = useRef<HTMLButtonElement | null>(null)
+
+  const changes = changeCount(items, baseline)
+  const validation = validateMacros(draftToMacros(items))
+  const selected = items.find((item) => item.key === selectedKey) ?? null
+
+  useEffect(() => {
+    closeRef.current = {
+      request: () => (changes > 0 ? setDiscardOpen(true) : closeMacrosDialog()),
+      back: () =>
+        changes > 0
+          ? setAsideMacrosDraft(draftToMacros(items), version, changes)
+          : closeMacrosDialog(),
+    }
+    return () => {
+      closeRef.current = null
+    }
+  })
+
+  useEffect(() => {
+    if (focusName > 0) nameRef.current?.focus()
+  }, [focusName])
+
+  function visibleOf(list: DraftMacro[], q: string, f: MacroFilter): DraftMacro[] {
+    const needle = searchNeedle(q)
+    return list.filter((item) => matchesFilter(item.surface, f) && matchesSearch(item, needle))
+  }
+  const visible = visibleOf(items, query, filter)
+
+  // Only a search or filter moves the selection off a macro it hides; an edit
+  // that takes the macro out of the list leaves it selected.
+  function narrow(q: string, f: MacroFilter) {
+    setQuery(q)
+    setFilter(f)
+    const shown = visibleOf(items, q, f)
+    if (!shown.some((item) => item.key === selectedKey)) {
+      setSelectedKey(shown[0]?.key ?? null)
+    }
+  }
+
+  function select(key: number) {
+    setSelectedKey(key)
+    if (phone) setStep("edit")
+  }
+
+  function addNew() {
+    const surface = filter === "terminal" ? "terminal" : "agent"
+    const key = nextKey(items)
+    setItems(addItem(items, surface))
+    setQuery("")
+    setSelectedKey(key)
+    setStep("edit")
+    setFocusName((n) => n + 1)
+  }
+
+  function duplicate(key: number) {
+    setItems(duplicateItem(items, key))
+    setSelectedKey(nextKey(items))
+    setFocusName((n) => n + 1)
+  }
+
+  function confirmDelete() {
+    if (deleteKey === null) return
+    const at = visible.findIndex((item) => item.key === deleteKey)
+    const rest = visible.filter((item) => item.key !== deleteKey)
+    const next = rest[Math.min(Math.max(at, 0), rest.length - 1)]
+    setItems(removeItem(items, deleteKey))
+    if (selectedKey === deleteKey) setSelectedKey(next?.key ?? null)
+    setDeleteKey(null)
+    if (phone) setStep("list")
+  }
+
+  function save() {
+    saveMacros(draftToMacros(items), version)
+  }
+
+  const deleting = items.find((item) => item.key === deleteKey) ?? null
+
+  const editor = selected ? (
+    <MacroFields
+      key={selected.key}
+      macro={selected}
+      phone={phone}
+      first={items[0]?.key === selected.key}
+      nameRef={nameRef}
+      onChange={(patch) => setItems(updateItem(items, selected.key, patch))}
+      onDuplicate={() => duplicate(selected.key)}
+      onMoveToTop={() => setItems(moveToTop(items, selected.key))}
+      onDelete={() => setDeleteKey(selected.key)}
+    />
+  ) : (
+    <p className="m-auto text-center text-sm text-muted-foreground">
+      No macro matches the search.
+    </p>
+  )
+
+  const list = (
+    <MacroList
+      items={visible}
+      baseline={baseline}
+      needle={searchNeedle(query)}
+      selectedKey={selectedKey}
+      phone={phone}
+      onSelect={select}
+      onMove={(active, over) => setItems(moveItem(items, active, over))}
+    />
+  )
+
+  const search = (
+    <div
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
+        CONTROL_HEIGHT,
+      )}
+    >
+      <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <input
+        value={query}
+        onChange={(event) => narrow(event.target.value, filter)}
+        placeholder="Search macros"
+        aria-label="Search macros"
+        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+      />
+    </div>
+  )
+
+  const filterTabs = (
+    <FilterTabs
+      value={filter}
+      counts={filterCounts(items)}
+      onChange={(f) => narrow(query, f)}
+    />
+  )
+
+  const newButton = (
+    <Button
+      ref={phone && step === "list" ? headerRef : undefined}
+      variant="outline"
+      className={cn("shrink-0", CONTROL_HEIGHT)}
+      onClick={addNew}
+    >
+      <Plus />
+      New
+    </Button>
+  )
+
+  const empty = (
+    <Empty className={cn(!phone && "border")}>
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <SquareSlash />
+        </EmptyMedia>
+        <EmptyTitle>No macros yet</EmptyTitle>
+        <EmptyDescription>
+          A macro is text you send with one {phone ? "tap" : "click"}, such as a
+          review request you type ten times a day, or a test command for a
+          terminal.
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button className="max-md:min-h-10 pointer-coarse:min-h-10" onClick={addNew}>
+          <Plus />
+          New macro
+        </Button>
+      </EmptyContent>
+    </Empty>
+  )
+
+  const notices = (
+    <>
+      {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
+      {validation && items.length > 0 ? (
+        <p className="text-xs text-destructive">{validation}</p>
+      ) : null}
+    </>
+  )
+
+  const saveHint =
+    validation ?? (changes === 0 ? "Nothing has changed since the macros were saved." : null)
+  const saveDisabled = saveHint !== null
+  const saveLabel =
+    phone && changes > 0 ? `Save ${changes} ${changes === 1 ? "change" : "changes"}` : "Save"
+  const saveButton = (
+    <ExplainedWhenDisabled
+      disabled={saveDisabled}
+      hint={saveHint}
+      className={cn("rounded-lg", phone && "w-full")}
+    >
+      <Button disabled={saveDisabled} className={cn(phone && "h-11 w-full")} onClick={save}>
+        {saveLabel}
+      </Button>
+    </ExplainedWhenDisabled>
+  )
+  const cancelButton = (
+    <Button
+      variant="outline"
+      className={cn(phone && "h-11 w-full")}
+      onClick={() => closeRef.current?.request()}
+    >
+      Cancel
+    </Button>
+  )
+  // With nothing to keep or lose, the one way out is Close.
+  const quiet = items.length === 0 && changes === 0
+
+  const confirms = (
+    <>
+      <ConfirmDeleteMacro
+        macro={deleting}
+        saved={deleting !== null && deleting.origin !== null}
+        onCancel={() => setDeleteKey(null)}
+        onConfirm={confirmDelete}
+      />
+      <ConfirmDiscardMacros
+        open={discardOpen}
+        changes={changes}
+        onKeep={() => setDiscardOpen(false)}
+        onDiscard={() => {
+          setDiscardOpen(false)
+          closeMacrosDialog()
+        }}
+      />
+    </>
+  )
+
+  const initialFocus = () => {
+    if (phone) return headerRef.current ?? true
+    return macrosDialogSelect !== null ? (nameRef.current ?? true) : true
+  }
+
+  if (phone) {
+    const closeButton = (
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-10 shrink-0"
+        aria-label="Close"
+        onClick={() => closeRef.current?.request()}
+      >
+        <X />
+      </Button>
+    )
+    return (
+      <Shell phone initialFocus={initialFocus}>
+        <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
+          {step === "edit" && items.length > 0 ? (
+            <>
+              <SheetTitle className="sr-only">Macros</SheetTitle>
+              <Button
+                ref={headerRef}
+                variant="ghost"
+                className="h-10 pl-1"
+                aria-label="Back to all macros"
+                onClick={() => setStep("list")}
+              >
+                <ChevronLeft />
+                Macros
+              </Button>
+              <div className="flex-1" />
+            </>
+          ) : (
+            <>
+              <SheetTitle className="flex-1">Macros</SheetTitle>
+              {items.length > 0 ? newButton : null}
+            </>
+          )}
+          {closeButton}
+        </div>
+        {items.length === 0 ? (
+          <div className="flex min-h-0 flex-1 flex-col p-4">{empty}</div>
+        ) : step === "edit" ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">{editor}</div>
+        ) : (
+          <>
+            <div className="flex shrink-0 flex-col gap-2 px-4 pt-3 pb-1">
+              {search}
+              {filterTabs}
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-1">{list}</div>
+          </>
+        )}
+        {quiet ? null : (
+          <div className="flex shrink-0 flex-col gap-2 border-t bg-muted/50 px-4 pt-3 pb-4">
+            {notices}
+            {saveButton}
+            {cancelButton}
+          </div>
+        )}
+        {confirms}
+      </Shell>
+    )
+  }
+
+  return (
+    <Shell phone={false} initialFocus={initialFocus}>
+      <DialogHeader className="shrink-0 pr-8">
+        <DialogTitle>Macros</DialogTitle>
+        <DialogDescription>{DESCRIPTION}</DialogDescription>
+      </DialogHeader>
+      {items.length === 0 ? (
+        <div className="flex min-h-0 flex-1 flex-col">{empty}</div>
+      ) : (
+        <div className="grid min-h-0 flex-1 grid-cols-[18rem_minmax(0,1fr)] gap-4">
+          <div className="flex min-h-0 flex-col gap-2">
+            <div className="flex items-center gap-2">
+              {search}
+              {newButton}
+            </div>
+            {filterTabs}
+            {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
+                into the column gap so the rows still line up with the search. */}
+            <div className="-mr-2 flex min-h-0 flex-1 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]">
+              {list}
+            </div>
+          </div>
+          <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
+            {editor}
+          </div>
+        </div>
+      )}
+      {notices}
+      <DialogFooter className="shrink-0 sm:items-center">
+        {quiet ? (
+          <Button variant="outline" onClick={() => closeRef.current?.request()}>
+            Close
+          </Button>
+        ) : (
+          <>
+            <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
+              {changes > 0 ? changesLabel(changes) : null}
+            </span>
+            {cancelButton}
+            {saveButton}
+          </>
+        )}
+      </DialogFooter>
+      {confirms}
+    </Shell>
+  )
+}
+
+// All / Agent / Terminal, each with how many macros it lists. A macro shown on
+// both counts under both, as each kind of pane's picker would list it.
+function FilterTabs({
+  value,
+  counts,
+  onChange,
+}: {
+  value: MacroFilter
+  counts: Record<MacroFilter, number>
+  onChange: (filter: MacroFilter) => void
+}) {
+  return (
+    <Tabs
+      value={value}
+      onValueChange={(v) => {
+        const found = FILTERS.find((f) => f.value === v)
+        if (found) onChange(found.value)
+      }}
+    >
+      <TabsList
+        aria-label="Show macros for"
+        className="w-full shrink-0 group-data-horizontal/tabs:h-8 max-md:group-data-horizontal/tabs:h-10 pointer-coarse:group-data-horizontal/tabs:h-10"
+      >
+        {FILTERS.map((f) => (
+          <TabsTrigger key={f.value} value={f.value}>
+            {f.label}
+            <span className="tabular-nums">{counts[f.value]}</span>
+          </TabsTrigger>
+        ))}
+      </TabsList>
+    </Tabs>
+  )
+}
+
+// A listbox: the arrow keys, Home and End move the selection; on a phone Enter
+// or a tap opens the editor. A drag reorders the draft only.
+function MacroList({
+  items,
+  baseline,
+  needle,
+  selectedKey,
+  phone,
+  onSelect,
+  onMove,
+}: {
+  items: DraftMacro[]
+  baseline: MacroView[]
+  needle: string
+  selectedKey: number | null
+  phone: boolean
+  onSelect: (key: number) => void
+  onMove: (activeKey: number, overKey: number) => void
+}) {
+  // A mouse drags on a short pull so a click stays a click, and a touch on a
+  // hold so the gesture coexists with the list's scroll (lib/dragActivation.ts).
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: MOUSE_DRAG_ACTIVATION }),
     useSensor(TouchSensor, { activationConstraint: TOUCH_DRAG_ACTIVATION }),
   )
+  const rows = useRef(new Map<number, HTMLLIElement>())
 
   function handleDragEnd(event: DragEndEvent) {
-    const { active, over } = event
-    if (!over) return
-    const prev = macros
-    const next = reorderMacrosByDrag(prev, String(active.id), String(over.id))
-    if (next === prev) return
-    // Rows are about to shift index; a pending delete-confirm would point at
-    // the wrong row afterwards, so retire it with the drop.
-    setDeleteIndex(null)
-    // Optimistic apply, then persist through the same wholesale save the Save
-    // button uses. When the draft cannot be saved yet, the order stays in the
-    // draft and the eventual Save carries it.
-    setMacros(next)
-    if (bootstrap === null || validateMacros(next) !== null) return
-    void persistMacroOrder(next).then((ok) => {
-      if (ok) return
-      // Snap back, but only if nothing else edited the draft while the save
-      // was in flight; a functional update makes the check race-free.
-      setMacros((current) => (current === next ? prev : current))
-    })
+    if (!event.over) return
+    onMove(keyOf(String(event.active.id)), keyOf(String(event.over.id)))
   }
 
-  if (mode.kind === "form") {
+  function handleKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    const at = items.findIndex((item) => item.key === selectedKey)
+    const target =
+      event.key === "ArrowDown"
+        ? items[Math.min(at + 1, items.length - 1)]
+        : event.key === "ArrowUp"
+          ? items[Math.max(at - 1, 0)]
+          : event.key === "Home"
+            ? items[0]
+            : event.key === "End"
+              ? items[items.length - 1]
+              : undefined
+    if (target === undefined) return
+    event.preventDefault()
+    // Moving the selection on a phone stays on the list; Enter opens it.
+    if (phone) {
+      rows.current.get(target.key)?.focus()
+      return
+    }
+    onSelect(target.key)
+    rows.current.get(target.key)?.focus()
+  }
+
+  if (items.length === 0) {
     return (
-      <MacroForm
-        macro={mode.index === "new" ? null : macros[mode.index]}
-        onCancel={() => setMode({ kind: "list" })}
-        onCommit={(macro) => {
-          setMacros((prev) => commitMacro(prev, mode.index, macro))
-          setMode({ kind: "list" })
-        }}
-      />
+      <p className="py-6 text-center text-sm text-muted-foreground">
+        No macros match.
+      </p>
     )
   }
 
-  const validationError = validateMacros(macros)
+  // The one row in the tab order: the selected one when it is listed.
+  const tabStop = items.some((item) => item.key === selectedKey) ? selectedKey : items[0].key
 
   return (
-    <DialogContent showCloseButton={false} className="sm:max-w-lg">
-      <DialogHeader>
-        <DialogTitle>Edit macros</DialogTitle>
-        <DialogDescription>
-          Text macros you can send to an agent or a terminal from the macro
-          button on the terminal pane.
-        </DialogDescription>
-      </DialogHeader>
-
-      {macros.length === 0 ? (
-        <p className="py-6 text-center text-sm text-muted-foreground">
-          No macros yet. Add one to get started.
-        </p>
-      ) : (
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+      <SortableContext items={items.map((item) => dragId(item.key))} strategy={verticalListSortingStrategy}>
+        <ul
+          role="listbox"
+          aria-label="Macros"
+          className="flex flex-col gap-0.5"
+          onKeyDown={handleKeyDown}
         >
-          <SortableContext
-            items={macroDragIds(macros)}
-            strategy={verticalListSortingStrategy}
-          >
-            {/* The scrollbar keeps clear of the rows' Edit and Delete
-                buttons: a stable gutter plus right padding, pulled into the
-                dialog's own padding so a row's border still ends where the
-                Add macro button does wherever the scrollbar overlays. */}
-            <ul
-              data-testid="macros-scroll"
-              className="-mr-2 flex max-h-72 flex-col gap-1 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
-            >
-              {macros.map((macro, index) => (
-                <SortableMacroRow
-                  key={index}
-                  macro={macro}
-                  index={index}
-                  deleteOpen={deleteIndex === index}
-                  onEdit={() => {
-                    setDeleteIndex(null)
-                    setMode({ kind: "form", index })
-                  }}
-                  onAskDelete={() => setDeleteIndex(index)}
-                  onCancelDelete={() => setDeleteIndex(null)}
-                  onConfirmDelete={() => {
-                    setMacros((prev) => prev.filter((_, i) => i !== index))
-                    setDeleteIndex(null)
-                  }}
-                />
-              ))}
-            </ul>
-          </SortableContext>
-        </DndContext>
+          {items.map((item) => (
+            <MacroRow
+              key={item.key}
+              item={item}
+              modified={isModified(item, baseline)}
+              needle={needle}
+              selected={!phone && item.key === selectedKey}
+              tabbable={item.key === tabStop}
+              phone={phone}
+              rowRef={(el) => {
+                if (el) rows.current.set(item.key, el)
+                else rows.current.delete(item.key)
+              }}
+              onSelect={() => onSelect(item.key)}
+            />
+          ))}
+        </ul>
+      </SortableContext>
+    </DndContext>
+  )
+}
+
+function dragId(key: number): string {
+  return `macro-${key}`
+}
+
+function keyOf(id: string): number {
+  return Number(id.slice("macro-".length))
+}
+
+function MacroRow({
+  item,
+  modified,
+  needle,
+  selected,
+  tabbable,
+  phone,
+  rowRef,
+  onSelect,
+}: {
+  item: DraftMacro
+  modified: boolean
+  needle: string
+  selected: boolean
+  tabbable: boolean
+  phone: boolean
+  rowRef: (el: HTMLLIElement | null) => void
+  onSelect: () => void
+}) {
+  // The sortable's own attributes are left off: they would make the option a
+  // button and describe a keyboard drag this list does not offer.
+  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: dragId(item.key),
+  })
+  const style: CSSProperties = {
+    // A vertical list: the drag is locked to the Y axis (see AgentFlatRow).
+    transform: transform ? `translate3d(0, ${Math.round(transform.y)}px, 0)` : undefined,
+    transition,
+  }
+  const preview = macroTextPreview(item.text)
+  const needles = needle === "" ? [] : [needle]
+
+  return (
+    <li
+      ref={(el) => {
+        setNodeRef(el)
+        rowRef(el)
+      }}
+      style={style}
+      {...listeners}
+      role="option"
+      aria-selected={selected}
+      tabIndex={tabbable ? 0 : -1}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (phone && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault()
+          onSelect()
+        }
+      }}
+      className={cn(
+        "flex cursor-default touch-manipulation items-center gap-2 rounded-md border border-transparent px-2 py-1.5 hover:bg-muted/60",
+        phone ? "min-h-14" : "min-h-12",
+        FOCUS_RING,
+        selected && "bg-muted hover:bg-muted",
+        isDragging && "relative z-10 bg-muted opacity-80 shadow-lg",
       )}
+    >
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {modified ? (
+            <>
+              <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
+              <span className="sr-only">Unsaved changes:</span>
+            </>
+          ) : null}
+          {item.name.trim() === "" ? (
+            <span className="truncate font-medium text-muted-foreground italic">Untitled macro</span>
+          ) : (
+            <span className="truncate font-medium">
+              <MatchHighlight text={item.name} ranges={matchCharRanges(item.name, needles)} />
+            </span>
+          )}
+        </div>
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          <MatchHighlight text={preview} ranges={matchCharRanges(preview, needles)} />
+        </span>
+      </div>
+      <span className="shrink-0 text-xs text-muted-foreground">{SURFACE_LABEL[item.surface]}</span>
+      {phone ? <ChevronRight aria-hidden className="size-4 shrink-0 text-muted-foreground" /> : null}
+    </li>
+  )
+}
 
-      <Button
-        variant="outline"
-        size="sm"
-        className="w-full max-md:min-h-10 pointer-coarse:min-h-10"
-        onClick={() => {
-          setDeleteIndex(null)
-          setMode({ kind: "form", index: "new" })
-        }}
-      >
-        <ListPlus />
-        Add macro
-      </Button>
+// The selected macro's editor: its name with the `⋯` of its actions, where it
+// is shown, and its text. Every keystroke changes only the draft.
+function MacroFields({
+  macro,
+  phone,
+  first,
+  nameRef,
+  onChange,
+  onDuplicate,
+  onMoveToTop,
+  onDelete,
+}: {
+  macro: DraftMacro
+  phone: boolean
+  first: boolean
+  nameRef: RefObject<HTMLInputElement | null>
+  onChange: (patch: Partial<Pick<DraftMacro, "name" | "text" | "surface">>) => void
+  onDuplicate: () => void
+  onMoveToTop: () => void
+  onDelete: () => void
+}) {
+  const name = macro.name.trim() === "" ? "this macro" : macro.name
+  // Delete… opens its confirm as this menu closes; handing focus back to the
+  // trigger then would take it from the confirm's Cancel.
+  const confirming = useRef(false)
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="macro-name" className="text-sm font-medium text-muted-foreground">
+          Name
+        </label>
+        <div className="flex items-center gap-2">
+          <Input
+            id="macro-name"
+            ref={nameRef}
+            value={macro.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+            placeholder="Review"
+            className={CONTROL_HEIGHT}
+          />
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="outline"
+                  size="icon"
+                  aria-label={`Actions for ${name}`}
+                  className="shrink-0 max-md:size-10 pointer-coarse:size-10"
+                />
+              }
+            >
+              <Ellipsis />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              finalFocus={() => {
+                const keep = confirming.current
+                confirming.current = false
+                return !keep
+              }}
+            >
+              {phone ? (
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel>{macro.name.trim() === "" ? "Untitled macro" : macro.name}</DropdownMenuLabel>
+                </DropdownMenuGroup>
+              ) : null}
+              <DropdownMenuItem onClick={onDuplicate}>
+                <Copy />
+                Duplicate
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={first} onClick={onMoveToTop}>
+                <ArrowUpToLine />
+                Move to top
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => {
+                  confirming.current = true
+                  onDelete()
+                }}
+              >
+                <Trash2 />
+                Delete…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
 
-      {validationError ? (
-        <p className="text-xs text-destructive">{validationError}</p>
-      ) : null}
-
-      {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
-
-      {/* Misclick-safe spacing between the list/add controls and the footer. */}
-      <div className="h-1" />
-      <DialogFooter>
-        <Button variant="outline" onClick={closeMacrosDialog}>
-          Cancel
-        </Button>
-        <Button
-          onClick={() => saveMacros(macros)}
-          disabled={validationError !== null || bootstrap === null}
+      <div className="flex flex-col gap-1.5">
+        <span id="macro-surface" className="text-sm font-medium text-muted-foreground">
+          Shown on
+        </span>
+        <Tabs
+          value={macro.surface}
+          onValueChange={(v) => {
+            if (typeof v === "string" && isMacroSurface(v)) onChange({ surface: v })
+          }}
         >
-          Save
-        </Button>
-      </DialogFooter>
-    </DialogContent>
+          <TabsList
+            aria-labelledby="macro-surface"
+            className={cn(
+              "group-data-horizontal/tabs:h-8 max-md:group-data-horizontal/tabs:h-10 pointer-coarse:group-data-horizontal/tabs:h-10",
+              phone && "w-full",
+            )}
+          >
+            {MACRO_SURFACE_OPTIONS.map((option) => (
+              <TabsTrigger key={option.value} value={option.value} className="px-2.5">
+                {option.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+        <label htmlFor="macro-text" className="text-sm font-medium text-muted-foreground">
+          Text
+        </label>
+        <Textarea
+          id="macro-text"
+          value={macro.text}
+          onChange={(e) => onChange({ text: e.target.value })}
+          placeholder="review this code for bugs"
+          className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
+        />
+        <p className="text-xs text-muted-foreground">
+          Each new line is sent as Alt+Enter, so the macro arrives as one
+          prompt; you press Enter to send it.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+// Delete only takes the macro out of the draft; Save is what writes it.
+function ConfirmDeleteMacro({
+  macro,
+  saved,
+  onCancel,
+  onConfirm,
+}: {
+  macro: DraftMacro | null
+  saved: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const named = macro !== null && macro.name.trim() !== ""
+  return (
+    <Dialog
+      open={macro !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel()
+      }}
+    >
+      <DialogContent showCloseButton={false} destructive>
+        <DialogHeader>
+          <DialogTitle>Delete this macro?</DialogTitle>
+          <DialogDescription>
+            {named ? <InlineCode>{macro.name.trim()}</InlineCode> : "This untitled macro"}{" "}
+            {saved ? (
+              <>
+                leaves the list now and from <InlineCode>config.toml</InlineCode> when
+                you save.
+              </>
+            ) : (
+              "leaves the list now. It was never saved, so nothing else changes."
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        {/* Misclick-safe spacing between the body and the buttons. */}
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm}>
+            Delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Closing with unsaved changes asks first: they exist only in this dialog.
+function ConfirmDiscardMacros({
+  open,
+  changes,
+  onKeep,
+  onDiscard,
+}: {
+  open: boolean
+  changes: number
+  onKeep: () => void
+  onDiscard: () => void
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onKeep()
+      }}
+    >
+      <DialogContent showCloseButton={false} destructive>
+        <DialogHeader>
+          <DialogTitle>Discard unsaved changes?</DialogTitle>
+          <DialogDescription>
+            The macros have {changesLabel(changes)}. Discarding them leaves{" "}
+            <InlineCode>config.toml</InlineCode> as it was.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="h-2" />
+        <DialogFooter>
+          <Button variant="outline" autoFocus onClick={onKeep}>
+            Keep editing
+          </Button>
+          <Button variant="destructive" onClick={onDiscard}>
+            Discard changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -229,7 +1042,7 @@ function StaleSaveNotice({ message }: { message: string }) {
   return (
     <div
       role="alert"
-      className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
+      className="flex shrink-0 flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
     >
       <div className="flex items-start gap-2">
         <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
@@ -244,230 +1057,5 @@ function StaleSaveNotice({ message }: { message: string }) {
         </Button>
       </div>
     </div>
-  )
-}
-
-// One draggable macro row, whole-row like the agents-pane rows: `useSortable`
-// supplies the drag props with no separate handle, the sensors' activation gates
-// are what keep the row's own buttons working, and the wrapper carries the
-// Y-locked transform so the row cannot slide out of the dialog column.
-function SortableMacroRow({
-  macro,
-  index,
-  deleteOpen,
-  onEdit,
-  onAskDelete,
-  onCancelDelete,
-  onConfirmDelete,
-}: {
-  macro: MacroView
-  index: number
-  deleteOpen: boolean
-  onEdit: () => void
-  onAskDelete: () => void
-  onCancelDelete: () => void
-  onConfirmDelete: () => void
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: `macro-${index}` })
-  const style: CSSProperties = {
-    // Vertical reorder list: lock the drag to the Y axis (see AgentFlatRow).
-    transform: transform
-      ? `translate3d(0, ${Math.round(transform.y)}px, 0)`
-      : undefined,
-    transition,
-    opacity: isDragging ? 0.6 : undefined,
-  }
-
-  return (
-    // The row lifts while dragging, so a touch hold that armed the drag reads as
-    // grabbed before the finger moves. The `li` carries the ref, transform and
-    // lift and keeps its list semantics, while the drag props go on the row body,
-    // because dnd-kit's attributes set a button role that belongs on the
-    // activator. The delete-confirm strip stays outside the activator so its
-    // buttons are never contended by a drag.
-    <li
-      ref={setNodeRef}
-      style={style}
-      className={cn(
-        "flex flex-col gap-1.5 rounded-lg border bg-background p-2.5",
-        isDragging && "z-10 shadow-lg",
-      )}
-    >
-      <div
-        {...attributes}
-        {...listeners}
-        className="flex touch-manipulation flex-col gap-1.5"
-      >
-        <div className="flex items-center gap-2">
-          <span className="truncate font-medium">{macro.name}</span>
-          <Badge variant="secondary" className="shrink-0">
-            {SURFACE_LABEL[macro.surface] ?? macro.surface}
-          </Badge>
-          {/* gap-2 under a finger: Delete is the one a stray tap on Edit's
-              neighbour would hit, and it only asks for confirmation. */}
-          <div className="ml-auto flex gap-1 max-md:gap-2 pointer-coarse:gap-2">
-            <SimpleTooltip content="Edit">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="max-md:size-10 pointer-coarse:size-10"
-                aria-label={`Edit ${macro.name}`}
-                onClick={onEdit}
-              >
-                <Pencil />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip content="Delete">
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="max-md:size-10 pointer-coarse:size-10"
-                aria-label={`Delete ${macro.name}`}
-                onClick={onAskDelete}
-              >
-                <Trash2 />
-              </Button>
-            </SimpleTooltip>
-          </div>
-        </div>
-        <p className="truncate font-mono text-xs text-muted-foreground">
-          {macroTextPreview(macro.text)}
-        </p>
-      </div>
-      {deleteOpen ? (
-        <div className="flex items-center gap-2 border-t pt-2">
-          <span className="text-xs text-destructive">Delete this macro?</span>
-          <div className="ml-auto flex gap-2">
-            <Button variant="outline" size="sm" autoFocus onClick={onCancelDelete} className="max-md:min-h-10 pointer-coarse:min-h-10">
-              Cancel
-            </Button>
-            <Button variant="destructive" size="sm" onClick={onConfirmDelete} className="max-md:min-h-10 pointer-coarse:min-h-10">
-              Delete
-            </Button>
-          </div>
-        </div>
-      ) : null}
-    </li>
-  )
-}
-
-// The add/edit form for a single macro. Local draft state seeded from the macro
-// being edited (or blank for a new one) via lazy initializers; commits the row
-// back to the list, which owns the wholesale set.
-function MacroForm({
-  macro,
-  onCancel,
-  onCommit,
-}: {
-  macro: MacroView | null
-  onCancel: () => void
-  onCommit: (macro: MacroView) => void
-}) {
-  const [name, setName] = useState(() => macro?.name ?? "")
-  const [text, setText] = useState(() => macro?.text ?? "")
-  const [surface, setSurface] = useState<MacroSurface>(
-    () => macro?.surface ?? "agent",
-  )
-
-  const canSave = name.trim() !== "" && text !== ""
-
-  function handleCommit() {
-    if (!canSave) return
-    onCommit({ name: name.trim(), text, surface })
-  }
-
-  return (
-    <DialogContent showCloseButton={false} className="sm:max-w-lg">
-      <DialogHeader>
-        <DialogTitle>{macro ? "Edit macro" : "Add macro"}</DialogTitle>
-      </DialogHeader>
-
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium text-muted-foreground">
-            Name
-          </label>
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Review"
-            autoFocus
-          />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium text-muted-foreground">
-            Text
-          </label>
-          <Textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="review this code for bugs"
-            rows={6}
-            className="font-mono"
-          />
-          <p className="text-xs text-muted-foreground">
-            Newlines are sent as Alt+Enter, so the whole macro is one prompt.
-          </p>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium text-muted-foreground">
-            Surface
-          </label>
-          <Select
-            value={surface}
-            onValueChange={(v) => {
-              if (typeof v === "string" && isMacroSurface(v)) setSurface(v)
-            }}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {MACRO_SURFACE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  <div className="flex flex-col">
-                    <span>{option.label}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {option.description}
-                    </span>
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {/* Misclick-safe spacing between the fields and the footer. */}
-      <div className="h-1" />
-      <DialogFooter>
-        <Button variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button onClick={handleCommit} disabled={!canSave}>
-          {macro ? "Save macro" : "Add macro"}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  )
-}
-
-export function MacrosDialog() {
-  const { macrosDialogOpen, macrosDraft, macrosDraftEpoch } = useDux()
-
-  return (
-    <Dialog
-      open={macrosDialogOpen}
-      onOpenChange={(o) => {
-        if (!o) closeMacrosDialog()
-      }}
-    >
-      {macrosDialogOpen && (
-        <MacrosEditor key={macrosDraftEpoch} initial={macrosDraft} />
-      )}
-    </Dialog>
   )
 }
