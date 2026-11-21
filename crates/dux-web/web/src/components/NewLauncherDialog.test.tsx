@@ -19,6 +19,7 @@ vi.mock("@/lib/store", async (importOriginal) => ({
     .sessionActiveElsewhere,
   rowDriverLabel: (await importOriginal<typeof import("@/lib/store")>()).rowDriverLabel,
   useDux: () => state.current,
+  useDuxSelector: <T,>(select: (s: unknown) => T): T => select(state.current),
   closeNewLauncher: spy("closeNewLauncher"),
   createTerminal: spy("createTerminal"),
   createStandaloneTerminal: spy("createStandaloneTerminal"),

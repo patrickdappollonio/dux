@@ -11,6 +11,7 @@ import {
   within,
 } from "@testing-library/react"
 
+import { Profiler } from "react"
 import type * as React from "react"
 
 import type { ChangesSlice, DuxState } from "@/lib/store"
@@ -51,7 +52,9 @@ vi.mock("@/lib/store", async (importOriginal) => {
   }
   return {
     ...actual,
-    useDux: () => mockState,
+    // Both subscribe the way the real store's do, so a component reading the
+    // whole state re-renders on a change it does not read, as it would live.
+    useDux: () => useSyncExternalStore(subscribe, () => mockState),
     useDuxSelector: <T,>(select: (state: DuxState) => T): T =>
       useSyncExternalStore(subscribe, () => select(mockState)),
     forceRefreshChanges: () => forceRefreshChanges(),
@@ -2705,5 +2708,23 @@ describe("the Changes pane while this page does not drive the agent", () => {
       ),
     )
     expect(notifySuccess).not.toHaveBeenCalled()
+  })
+})
+
+describe("the Changes pane's subscription to the store", () => {
+  it("does not re-render for a store change that moves nothing it shows", () => {
+    mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"]])
+    let commits = 0
+    render(
+      <Profiler id="changes" onRender={() => void (commits += 1)}>
+        <ChangedFiles />
+      </Profiler>,
+    )
+    const before = commits
+
+    mockState = { ...mockState }
+    publishMockState()
+
+    expect(commits).toBe(before)
   })
 })

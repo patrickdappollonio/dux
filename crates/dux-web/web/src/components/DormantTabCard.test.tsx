@@ -9,7 +9,6 @@ vi.mock("@/lib/store", () => ({
   // Nothing drives the agent in these cases, so its Start is a live button.
   useDux: () => ({ spine: null }),
   useDuxSelector: () => false,
-  rowDriverLabel: () => null,
 }))
 
 const { DormantTabCard } = await import("./DormantTabCard")

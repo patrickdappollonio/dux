@@ -196,13 +196,20 @@ export function agentChangeBlockReason(block: RowBlock, device: string | null = 
 }
 
 /// The label of the device driving a part's row, as `rowDriverLabel` says it,
-/// re-read when a pane of any row hears a new driver.
+/// re-read when a pane of any row hears a new driver. Selective, so the
+/// memoized Changes pane re-renders when the label moves and not on every
+/// store change.
 export function useRowDriverLabel(
   part: { sessionId: string } | { terminalId: string } | null,
 ): string | null {
-  const state = useDux()
   useRowWatch(null)
-  return part === null ? null : rowDriverLabel(state, part)
+  const sessionId = part !== null && "sessionId" in part ? part.sessionId : null
+  const terminalId = part !== null && "terminalId" in part ? part.terminalId : null
+  return useDuxSelector((state) => {
+    if (sessionId !== null) return rowDriverLabel(state, { sessionId })
+    if (terminalId !== null) return rowDriverLabel(state, { terminalId })
+    return null
+  })
 }
 
 /// Why controls that change an agent's or a terminal's row are disabled,
