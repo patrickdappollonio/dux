@@ -14,7 +14,7 @@
 //! attachment guard; with none it is the terminal UI.
 
 use super::Engine;
-use crate::attachments::{RowDriver, TERMINAL_UI_CONNECTION};
+use crate::attachments::{Asker, RowDriver, TERMINAL_UI_CONNECTION};
 use crate::model::TerminalOwner;
 use crate::pty_owners::RowKey;
 use crate::wire::WireCommand;
@@ -165,13 +165,11 @@ impl Engine {
     ///
     /// [`RowDriven`] naming the device that drives a row the change touches.
     pub fn admit_row_change(&self, change: &RowChange) -> Result<(), RowDriven> {
+        let terminal_ui = Asker::Connection(TERMINAL_UI_CONNECTION.to_string());
         let (asker, forced) = match &self.dispatch_policy {
             // Going ahead over named blockers accepts those attachments only.
-            Some(policy) => (
-                policy.asker.as_deref(),
-                policy.force && policy.accepted.is_none(),
-            ),
-            None => (Some(TERMINAL_UI_CONNECTION), false),
+            Some(policy) => (&policy.asker, policy.force && policy.accepted.is_none()),
+            None => (&terminal_ui, false),
         };
         if forced {
             return Ok(());
@@ -314,7 +312,7 @@ mod tests {
         change: &RowChange,
     ) -> Result<(), String> {
         engine.dispatch_policy = Some(Policy {
-            asker: asker.map(str::to_string),
+            asker: asker.map_or(Asker::Nobody, |asker| Asker::Connection(asker.to_string())),
             ..Policy::default()
         });
         let answer = engine.admit_row_change(change).map_err(|e| e.to_string());
@@ -369,6 +367,50 @@ mod tests {
         asked_by(&mut engine, Some("e1"), &agent).expect("nobody drives once the driver has gone");
     }
 
+    /// A page drives the row while the driver is the seat its own sockets
+    /// share there: not before it claims, and not after it loses the row.
+    #[test]
+    fn a_page_is_the_driver_while_its_seat_holds_the_row() {
+        use crate::pty_owners::PageId;
+        let (mut engine, _tmp, _worktree, owners, _, _) = serving_engine();
+        let agent = RowChange::Agent("s1".to_string());
+        let page = |raw: &str| PageId::parse(&raw.repeat(32)).expect("a page id");
+        let mut asked = |pages: Vec<PageId>| {
+            engine.dispatch_policy = Some(Policy {
+                asker: Asker::Pages(pages),
+                ..Policy::default()
+            });
+            let answer = engine.admit_row_change(&agent).map_err(|e| e.to_string());
+            engine.dispatch_policy = None;
+            answer
+        };
+
+        let first = owners.take_seat(Some(&page("a")), "s1-slot");
+        let second = owners.take_seat(Some(&page("b")), "s1-slot");
+        owners.may_write("s1-slot", first.id(), Some(FIREFOX), || {});
+        asked(vec![page("a")]).expect("the driving page");
+        asked(vec![page("c"), page("a")]).expect("an editor tab the driving page opened");
+        asked(vec![page("b")]).expect_err("a page that only watches");
+        asked(vec![page("c")]).expect_err("a page with no socket on the row");
+        asked(Vec::new()).expect_err("no page at all");
+
+        let taken = owners.claim_for_resize(
+            "s1-slot",
+            second.id(),
+            ResizeIntent::TakeOver {
+                expected_owner: None,
+            },
+            Some(FIREFOX),
+            |_| {},
+        );
+        assert!(taken.apply);
+        asked(vec![page("b")]).expect("the driver right after taking over");
+        asked(vec![page("a")]).expect_err("the page that lost the row");
+
+        owners.leave_seat(&second);
+        asked(vec![page("a")]).expect("nobody drives once the driver's sockets have gone");
+    }
+
     /// Going ahead over everybody gets past a driver; going ahead over named
     /// attachments does not.
     #[test]
@@ -416,7 +458,7 @@ mod tests {
         assert_eq!(engine.sessions[0].auto_reopen_enabled, before);
 
         engine.dispatch_policy = Some(Policy {
-            asker: Some("e1".to_string()),
+            asker: Asker::Connection("e1".to_string()),
             ..Policy::default()
         });
         engine

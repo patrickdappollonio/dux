@@ -454,6 +454,7 @@ where
             // read cap.
             post(write_file::<R>).layer(DefaultBodyLimit::max(MAX_EDIT_WRITE_BYTES)),
         )
+        .route(&format!("{prefix}/writable"), post(writable::<R>))
         .route(&format!("{prefix}/info"), post(entry_info::<R>))
         .route(&format!("{prefix}/create-file"), post(create_file::<R>))
         .route(&format!("{prefix}/create-dir"), post(create_dir::<R>))
@@ -463,6 +464,17 @@ where
             &format!("{prefix}/open-in-editor"),
             post(open_in_editor::<R>),
         )
+}
+
+/// Whether a write under this root would be let through for whoever asks:
+/// `204`, or the same `423` and sentence the write itself would get while
+/// another device drives the root's row.
+async fn writable<R: EditorRoot>(
+    State(state): State<AppState>,
+    root: R,
+) -> Result<StatusCode, RouteRejection> {
+    state.engine.admit_row_change(root.row()).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The editor file routes. These are path-keyed: the id is a path segment,

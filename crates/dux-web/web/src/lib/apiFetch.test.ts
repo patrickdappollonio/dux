@@ -44,6 +44,32 @@ describe("apiFetch", () => {
     })
   })
 
+  it("names this page, and the page that opened it, on every request that is not a plain read", async () => {
+    const { api, gate } = await load()
+    const seat = await import("./pageSeat")
+    await gate.initAuthGate()
+    const sent = (): Headers =>
+      new Headers((fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit])[1].headers)
+    const own = seat.pageSeatId()
+
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      await api.apiFetch("/api/v1/x", { method, headers: { "content-type": "text/plain" } })
+      expect(sent().get(seat.PAGE_HEADER)).toBe(own)
+      expect(sent().get("content-type")).toBe("text/plain")
+    }
+    await api.apiFetch("/api/v1/x", { method: "POST", headers: new Headers({ a: "b" }) })
+    expect(sent().get(seat.PAGE_HEADER)).toBe(own)
+    expect(sent().get("a")).toBe("b")
+
+    const opener = "b".repeat(32)
+    expect(seat.adoptOpenerPages([opener, own, "short", 7])).toBe(true)
+    await api.apiFetch("/api/v1/x", { method: "post" })
+    expect(sent().get(seat.PAGE_HEADER)).toBe(`${own},${opener}`)
+
+    await api.apiFetch("/api/v1/x", { method: "GET" })
+    expect(sent().has(seat.PAGE_HEADER)).toBe(false)
+  })
+
   it("turns a 401 into a sign-out and an interruption the caller can recognise", async () => {
     const { api, gate } = await load()
     await gate.initAuthGate()

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { setConnectionId } from "./connection"
+import { PAGE_HEADER, pageSeatId } from "./pageSeat"
 import { ProjectsApiError, projectsApi } from "./projectsApi"
 import { SessionsApiError, sessionsApi } from "./sessionsApi"
 import { TabsApiError, tabsApi } from "./tabsApi"
@@ -85,7 +86,11 @@ describe.each(clients)("$name JSON transport", (client) => {
     const { init } = lastRequest(fetchMock)
     expect(init.credentials).toBe("same-origin")
     expect(init.body).toBeUndefined()
-    expect(init.headers).toEqual({ "x-connection-id": "connection-1" })
+    const read = init.method === undefined || init.method === "GET"
+    expect(init.headers).toEqual({
+      "x-connection-id": "connection-1",
+      ...(read ? {} : { [PAGE_HEADER]: pageSeatId() }),
+    })
   })
 
   it("serializes a body and labels it as JSON", async () => {

@@ -1,7 +1,9 @@
 //! The server refuses a request that would change a row of the agents list
 //! another device drives, whoever sends it: `423 Locked` naming the driver.
 //! The driver itself, anybody while nobody drives, and a request that says to
-//! go ahead over everybody (`force_connected=true`) are let through.
+//! go ahead over everybody (`force_connected=true`) are let through. A request
+//! is the driver's when it names the page id the driving terminal sockets
+//! opened with, whatever that page's events socket is doing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -152,11 +154,22 @@ async fn connect(addr: SocketAddr, path: &str, user_agent: &str) -> (ClientWs, s
     panic!("{path} never sent its connected frame");
 }
 
-/// One browser page: its events socket and the terminal sockets it has open.
+/// A page id no other page of this test run has.
+fn mint_page_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "{:032x}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// One browser page: the id its terminal sockets name, its events socket and
+/// the terminal sockets it has open.
 struct Page {
+    id: String,
     events: String,
     user_agent: &'static str,
-    _events_socket: ClientWs,
+    events_socket: Option<ClientWs>,
     sockets: Vec<ClientWs>,
 }
 
@@ -164,9 +177,10 @@ impl Page {
     async fn open(addr: SocketAddr, user_agent: &'static str) -> Self {
         let (socket, hello) = connect(addr, "/ws/events", user_agent).await;
         Self {
+            id: mint_page_id(),
             events: hello["id"].as_str().expect("an events id").to_string(),
             user_agent,
-            _events_socket: socket,
+            events_socket: Some(socket),
             sockets: Vec::new(),
         }
     }
@@ -175,10 +189,18 @@ impl Page {
     async fn show(&mut self, addr: SocketAddr, path: &str) -> usize {
         let (socket, _) = connect(
             addr,
-            &format!("{path}?events={}", self.events),
+            &format!("{path}?events={}&page={}", self.events, self.id),
             self.user_agent,
         )
         .await;
+        self.sockets.push(socket);
+        self.sockets.len() - 1
+    }
+
+    /// Open the terminal socket at `path` before this page's events socket has
+    /// told it its id, so the socket names the page alone.
+    async fn show_before_its_events_id(&mut self, addr: SocketAddr, path: &str) -> usize {
+        let (socket, _) = connect(addr, &format!("{path}?page={}", self.id), self.user_agent).await;
         self.sockets.push(socket);
         self.sockets.len() - 1
     }
@@ -237,8 +259,10 @@ async fn wait_until_driving(addr: SocketAddr, events: &str, count: usize) {
 enum As<'a> {
     /// A client with no connection: the command line, a direct call.
     Nobody,
-    /// The browser tab with this events id.
-    Tab(&'a str),
+    /// A browser page naming this page id, or these, comma separated.
+    Page(&'a str),
+    /// A request naming this events id and no page.
+    Events(&'a str),
     /// A client with no connection saying to go ahead over everybody.
     Forcing,
 }
@@ -257,8 +281,10 @@ async fn send(
     };
     let mut request =
         reqwest::Client::new().request(method.clone(), format!("http://{addr}{path}{force}"));
-    if let As::Tab(events) = sender {
-        request = request.header("x-connection-id", events);
+    match sender {
+        As::Page(page) => request = request.header("x-dux-page", page),
+        As::Events(events) => request = request.header("x-connection-id", events),
+        As::Nobody | As::Forcing => {}
     }
     if let Some(body) = body {
         request = request.json(body);
@@ -343,6 +369,7 @@ const DECISIONS: &[(&str, Decision)] = &[
     ("read_file", READ),
     ("diff_contents", READ),
     ("entry_info", READ),
+    ("writable", READ),
     ("refresh_changes", READ),
     ("resolve_pull_request_reference", READ),
     ("check_pull_request_clone_destination", READ),
@@ -738,7 +765,7 @@ async fn every_gated_route_refuses_whoever_does_not_drive_the_row() {
     {
         for (sender, who) in [
             (As::Nobody, "a client with no connection"),
-            (As::Tab(&watcher.events), "a page that only watches"),
+            (As::Page(&watcher.id), "a page that only watches"),
         ] {
             let answer = send(addr, method, path, body.as_ref(), sender).await;
             assert_refused(&format!("{handler} ({method} {path}) from {who}"), &answer);
@@ -772,7 +799,9 @@ async fn the_driver_and_a_forced_request_are_let_through() {
 
     let agent = "/api/v1/sessions/s1";
     let reopen = |enabled: bool| Some(json!({ "auto_reopen": enabled }));
-    let as_driver = As::Tab(&driver.events);
+    // The page's events socket is away, as it is while it reconnects.
+    drop(driver.events_socket.take());
+    let as_driver = As::Page(&driver.id);
 
     // A wire command.
     let refused = send(
@@ -846,19 +875,23 @@ async fn the_refusal_follows_who_drives_the_row() {
     first.type_into(socket).await;
     wait_until_driving(addr, &first.events, 1).await;
     let watching = second.show(addr, "/ws/sessions/s1/pty").await;
-    let (first_tab, second_tab) = (first.events.clone(), second.events.clone());
+    let (first_page, second_page) = (first.id.clone(), second.id.clone());
+    let second_events = second.events.clone();
     assert_refused(
         "the page that only watches",
-        &ask(As::Tab(&second_tab)).await,
+        &ask(As::Page(&second_page)).await,
     );
 
     second.take_over(watching).await;
-    wait_until_driving(addr, &second_tab, 1).await;
-    let (status, body) = ask(As::Tab(&second_tab)).await;
+    wait_until_driving(addr, &second_events, 1).await;
+    let (status, body) = ask(As::Page(&second_page)).await;
     assert_eq!(status, 200, "the driver right after taking over: {body}");
-    let (status, body) = ask(As::Tab(&first_tab)).await;
+    let (status, body) = ask(As::Page(&first_page)).await;
     assert_eq!(status, 423, "the page that lost the row: {body}");
     assert!(body.contains("Safari on iOS"), "{body}");
+    // An events id is told to nobody else but proves nothing about driving.
+    let (status, body) = ask(As::Events(&second_events)).await;
+    assert_eq!(status, 423, "the driver's events id with no page: {body}");
 
     drop(second);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
@@ -873,4 +906,62 @@ async fn the_refusal_follows_who_drives_the_row() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Whether a write under the agent's editor root would be let through.
+async fn writable(addr: SocketAddr, sender: As<'_>) -> u16 {
+    let path = "/api/v1/sessions/s1/files/writable";
+    send(addr, &Method::POST, path, None, sender).await.0
+}
+
+/// A page whose terminal socket opened before its events socket said its id
+/// drives all the same: every way a change reaches the engine goes through for
+/// it, and for an editor tab that names it beside a page of its own.
+#[tokio::test]
+async fn the_driving_page_needs_no_events_connection() {
+    let (addr, tmp) = boot().await;
+    let mut driver = Page::open(addr, FIREFOX).await;
+    let socket = driver
+        .show_before_its_events_id(addr, "/ws/sessions/s1/pty")
+        .await;
+    driver.type_into(socket).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while writable(addr, As::Nobody).await != 423 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the row was never driven"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(writable(addr, As::Page(&driver.id)).await, 204);
+    assert_eq!(writable(addr, As::Page(&mint_page_id())).await, 423);
+
+    let agent = "/api/v1/sessions/s1";
+    let file = json!({ "path": "f.txt" });
+    let editor_tab = format!("{},{}", mint_page_id(), driver.id);
+    for (what, sender) in [
+        ("the driver", As::Page(&driver.id)),
+        ("an editor tab the driver opened", As::Page(&editor_tab)),
+    ] {
+        let reopen = json!({ "auto_reopen": true });
+        let (status, body) = send(addr, &Method::PATCH, agent, Some(&reopen), sender).await;
+        assert_eq!(status, 200, "a setting from {what}: {body}");
+        let terminals = format!("{agent}/terminals");
+        let (status, body) = send(addr, &Method::POST, &terminals, None, sender).await;
+        assert_eq!(status, 201, "a new terminal from {what}: {body}");
+        let stage = format!("{agent}/git/stage");
+        let (status, body) = send(addr, &Method::POST, &stage, Some(&file), sender).await;
+        assert_eq!(status, 200, "a stage from {what}: {body}");
+        let write = format!("{agent}/files/write");
+        let text = json!({ "path": "f.txt", "content": "three\n" });
+        let (status, body) = send(addr, &Method::POST, &write, Some(&text), sender).await;
+        assert_eq!(status, 200, "an editor save from {what}: {body}");
+        let dropped = "/api/v1/file-drop?pty=s1&filename=dropped.txt";
+        let (status, body) = send(addr, &Method::POST, dropped, Some(&json!("x")), sender).await;
+        assert_eq!(status, 200, "a dropped file from {what}: {body}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("f.txt")).expect("the saved file"),
+        "three\n"
+    );
 }

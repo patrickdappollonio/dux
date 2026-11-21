@@ -478,14 +478,23 @@ impl PtySizeOwners {
         }
     }
 
-    /// Who drives `row` right now, `None` when nobody does. A read that places
-    /// nothing, for a question asked about a row rather than through a pty.
+    /// Who drives `row` right now, `None` when nobody does, and whether that
+    /// driver is the seat one of `pages` has open sockets at. A read that
+    /// places nothing, for a question asked about a row rather than through a pty.
     ///
     /// # Panics
     ///
     /// Panics when the owners lock is poisoned by an earlier panic while it was held.
-    pub fn driver_of(&self, row: &RowKey) -> Option<OwnerRecord> {
-        self.lock().map.get(row).cloned()
+    pub fn driver_of(&self, row: &RowKey, pages: &[PageId]) -> Option<(OwnerRecord, bool)> {
+        let owners = self.lock();
+        let owner = owners.map.get(row)?.clone();
+        let seated = pages.iter().any(|page| {
+            owners
+                .seats
+                .get(&(page.clone(), row.clone()))
+                .is_some_and(|seat| seat.id == owner.conn_id)
+        });
+        Some((owner, seated))
     }
 
     /// Every pty known to share `pty_id`'s row, `pty_id` included, sorted: the

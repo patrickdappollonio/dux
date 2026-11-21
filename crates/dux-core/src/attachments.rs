@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::operations::RecordWatch;
-use crate::pty_owners::{PtySizeOwners, RowKey};
+use crate::pty_owners::{PageId, PtySizeOwners, RowKey};
 
 /// How long a peer may send nothing, not even a pong, before its connection
 /// stops counting: two missed 30-second pings and some slack.
@@ -237,17 +237,29 @@ pub struct Policy {
     /// With `force`: go ahead only over these blockers ([`Blocker::key`]); anybody
     /// else in the way refuses the change. `None` goes ahead over everybody.
     pub accepted: Option<BTreeSet<String>>,
-    /// The connection [`Attachments::row_driver`] is asked for: who a change to
-    /// a driven row is judged as. `None` for a client with no connection here.
-    pub asker: Option<String>,
+    /// Who a change to a driven row is judged as ([`Attachments::row_driver`]).
+    pub asker: Asker,
 }
 
-/// Who drives a row, as seen by one asking connection.
+/// Who asks to change a row a device may be driving.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Asker {
+    /// A client that proves nothing about itself: the command line, a direct call.
+    #[default]
+    Nobody,
+    /// The terminal UI, by its connection.
+    Connection(String),
+    /// A browser request naming these pages: its own, and the page that opened
+    /// it when it is an editor tab.
+    Pages(Vec<PageId>),
+}
+
+/// Who drives a row, as seen by one asker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowDriver {
     /// Nobody drives the row, or no ownership record is in use.
     Nobody,
-    /// The asking connection drives it.
+    /// The asker drives it.
     Asker,
     /// Somebody else drives it.
     Another {
@@ -661,22 +673,29 @@ impl Attachments {
         });
     }
 
-    /// Who drives `row`, judged for `asker`: the asker drives it when one of
-    /// its attachments holds the seat the ownership record names as the driver.
-    pub fn row_driver(&self, row: &RowKey, asker: Option<&str>) -> RowDriver {
+    /// Who drives `row`, judged for `asker`. A page drives it when the driver
+    /// is the seat its own terminal sockets share on the row; a connection,
+    /// when one of its attachments holds that seat.
+    pub fn row_driver(&self, row: &RowKey, asker: &Asker) -> RowDriver {
         self.with(|state| {
-            let Some(owner) = state
+            let pages: &[PageId] = match asker {
+                Asker::Pages(pages) => pages,
+                Asker::Nobody | Asker::Connection(_) => &[],
+            };
+            let Some((owner, seated)) = state
                 .owners
                 .as_ref()
-                .and_then(|owners| owners.driver_of(row))
+                .and_then(|owners| owners.driver_of(row, pages))
             else {
                 return RowDriver::Nobody;
             };
-            let drives = asker.is_some_and(|asker| {
-                state.attachments.values().any(|attachment| {
-                    attachment.connection == asker && attachment.pty_conn == Some(owner.conn_id)
-                })
-            });
+            let drives = match asker {
+                Asker::Nobody => false,
+                Asker::Pages(_) => seated,
+                Asker::Connection(asker) => state.attachments.values().any(|attachment| {
+                    attachment.connection == *asker && attachment.pty_conn == Some(owner.conn_id)
+                }),
+            };
             if drives {
                 RowDriver::Asker
             } else {
@@ -1137,7 +1156,7 @@ mod tests {
             requester: None,
             force: true,
             accepted: Some(shown),
-            asker: None,
+            asker: Asker::Nobody,
         };
         let again = attachments
             .reserve(agent_scope("s1"), &over_shown, Life::Released, now)
@@ -1145,7 +1164,7 @@ mod tests {
         assert_eq!(again.len(), 2, "{again:?}");
         let over_both = Policy {
             accepted: Some(again.iter().map(Blocker::key).collect()),
-            asker: None,
+            asker: Asker::Nobody,
             ..over_shown
         };
         let id = attachments
@@ -1157,7 +1176,7 @@ mod tests {
             requester: None,
             force: true,
             accepted: None,
-            asker: None,
+            asker: Asker::Nobody,
         };
         let id = attachments
             .reserve(agent_scope("s1"), &forced, Life::Released, now)
@@ -1241,7 +1260,7 @@ mod tests {
             requester: Some("e1".to_string()),
             force: false,
             accepted: None,
-            asker: None,
+            asker: Asker::Nobody,
         };
         let refused = attachments
             .reserve(agent_scope("s1"), &own, Life::Released, now)
@@ -1362,7 +1381,7 @@ mod tests {
                         requester: None,
                         force: true,
                         accepted: None,
-                        asker: None,
+                        asker: Asker::Nobody,
                     };
                     let id = a
                         .reserve(agent_scope("s1"), &forced, Life::Released, at)

@@ -25,6 +25,7 @@ import {
   reportUnauthorized,
   reportUnrecognizedRefusal,
 } from "./authGate"
+import { PAGE_HEADER, actingPageIds } from "./pageSeat"
 
 /// A request that did not get to finish because the page is not signed in.
 /// `not_sent`: refused before it left, so nothing happened on the server.
@@ -64,11 +65,30 @@ export function rethrowAuthInterruption(e: unknown): void {
   if (isAuthInterruption(e)) throw e
 }
 
+/// `init` naming the pages this tab acts as, on every request that is not a
+/// plain read: the server lets a change to a driven row through only for the
+/// page that drives it.
+function namingThisPage(init: RequestInit): RequestInit {
+  const method = (init.method ?? "GET").toUpperCase()
+  if (method === "GET" || method === "HEAD") return init
+  const pages = actingPageIds().join(",")
+  const given = init.headers
+  // A plain record stays one: callers and their tests read it by key.
+  if (given === undefined || !(given instanceof Headers || Array.isArray(given))) {
+    return { ...init, headers: { ...given, [PAGE_HEADER]: pages } }
+  }
+  const headers = new Headers(given)
+  headers.set(PAGE_HEADER, pages)
+  return { ...init, headers }
+}
+
 export async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (authPaused()) throw new AuthInterruptedError("not_sent")
   const sentIn = authEpoch()
   const resp =
-    init === undefined ? await fetch(apiUrl(path)) : await fetch(apiUrl(path), init)
+    init === undefined
+      ? await fetch(apiUrl(path))
+      : await fetch(apiUrl(path), namingThisPage(init))
   const current = authEpoch() === sentIn
   if (resp.ok) return resp
   if (resp.status !== 401 && resp.status !== 403 && resp.status !== 503) return resp

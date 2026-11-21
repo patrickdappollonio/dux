@@ -4782,7 +4782,7 @@ struct WireOrigin {
 /// The policy `asker`'s change to a driven row is judged under.
 fn row_policy(asker: &RowAsker) -> dux_core::attachments::Policy {
     dux_core::attachments::Policy {
-        asker: asker.connection().map(str::to_string),
+        asker: asker.asker(),
         force: asker.forces(),
         ..dux_core::attachments::Policy::default()
     }
@@ -4930,7 +4930,7 @@ fn handle_apply_wire_request(
             .operation
             .as_ref()
             .and_then(|followed| followed.accepted_connected.clone()),
-        asker: origin.asker.connection().map(str::to_string),
+        asker: origin.asker.asker(),
     });
     engine.current_origin = origin.scope;
     let result = match origin.operation {

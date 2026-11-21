@@ -205,7 +205,9 @@ impl Engine {
             requester: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
             force: false,
             accepted: None,
-            asker: Some(crate::attachments::TERMINAL_UI_CONNECTION.to_string()),
+            asker: crate::attachments::Asker::Connection(
+                crate::attachments::TERMINAL_UI_CONNECTION.to_string(),
+            ),
         });
         let watch = self
             .operation_in_dispatch
@@ -594,7 +596,7 @@ mod tests {
             requester: Some("e1".to_string()),
             force: false,
             accepted: None,
-            asker: None,
+            asker: crate::attachments::Asker::Nobody,
         };
         close_terminal(&mut engine, &companion, Some(asking)).expect("the asker is exempt");
         assert!(!engine.companion_terminals.contains_key(&companion));
@@ -606,7 +608,7 @@ mod tests {
             requester: None,
             force: true,
             accepted: None,
-            asker: None,
+            asker: crate::attachments::Asker::Nobody,
         };
         close_terminal(&mut engine, &companion, Some(forced)).expect("forced");
         assert!(!engine.companion_terminals.contains_key(&companion));
@@ -674,7 +676,7 @@ mod tests {
                 requester: None,
                 force: true,
                 accepted: None,
-                asker: None,
+                asker: crate::attachments::Asker::Nobody,
             });
             let held = engine.guard_wire(&command).expect("forced");
             let tab = Target {
@@ -704,7 +706,7 @@ mod tests {
             requester: Some("e1".to_string()),
             force: false,
             accepted: None,
-            asker: None,
+            asker: crate::attachments::Asker::Nobody,
         });
         let refused = engine
             .guard_wire(&WireCommand::StopAgentTab {
@@ -760,7 +762,7 @@ mod tests {
             requester: Some("e2".to_string()),
             force: true,
             accepted: None,
-            asker: None,
+            asker: crate::attachments::Asker::Nobody,
         };
         let reservation = engine
             .attachments
