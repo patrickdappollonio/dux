@@ -755,10 +755,12 @@ function ChangesRecap({
   scope,
   recap,
   ref,
+  className,
 }: {
   scope: string
   recap: ChangedFilesRecap
   ref?: React.Ref<HTMLSpanElement>
+  className?: string
 }) {
   const { additions, deletions, binaryCount, diffExcludedCount } = recap
   const hasLines = additions > 0 || deletions > 0
@@ -773,7 +775,10 @@ function ChangesRecap({
   return (
     <span
       ref={ref}
-      className="flex h-4 min-w-0 shrink flex-wrap items-baseline overflow-hidden font-mono text-xs"
+      className={cn(
+        "flex h-4 min-w-0 shrink flex-wrap items-baseline overflow-hidden font-mono text-xs",
+        className,
+      )}
       aria-label={recapLabel(scope, recap)}
     >
       <span aria-hidden className="h-4 w-0 shrink-0 self-start" />
@@ -833,10 +838,12 @@ function GroupHeader({
         TOUCH_MIN_HEIGHT,
       )}
     >
-      {/* Shrinks last and then ellipsizes: the recap gives up its room first,
-          and on the narrowest pane the word, never the count, is what gives. */}
-      <span className="min-w-0 grow shrink-[0.001] truncate text-left">{heading}</span>
-      <ChangesRecap scope={heading} recap={recap} />
+      {/* The recap shrinks a thousand times faster, so it gives up its room
+          first; once it is gone the word takes the rest and ellipsizes, never
+          the count. The word's factor stays 1: factors that sum below 1 absorb
+          only that fraction of the overflow. */}
+      <span className="min-w-0 grow truncate text-left">{heading}</span>
+      <ChangesRecap scope={heading} recap={recap} className="shrink-[1000]" />
       <Badge variant="secondary">
         {filtering ? `${groupDigits(shown)} of ${groupDigits(total)}` : groupDigits(shown)}
       </Badge>
