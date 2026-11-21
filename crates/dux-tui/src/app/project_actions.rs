@@ -1168,6 +1168,48 @@ mod tests {
         }
     }
 
+    /// Why origin was not fetched and what to do about it is read whole at an
+    /// ordinary terminal width, git's words included.
+    #[test]
+    fn the_fetch_note_is_shown_whole_at_an_ordinary_width() {
+        let note = "dux fetched origin by itself, running no password program and asking you \
+                    nothing, and origin did not let it in. The server took none of the keys ssh \
+                    could offer without asking: it may not know them, or the key it knows needs \
+                    a passphrase. Git signs in without asking when an ssh agent holds a key the \
+                    server accepts (add it with ssh-add). ssh said: git@example.invalid: \
+                    Permission denied (publickey).";
+        let mut app = test_app(default_bindings());
+        app.prompt = picker(
+            &app,
+            Listing::Loaded,
+            vec![branch("develop"), branch("main")],
+        );
+        if let PromptState::ChangeBaseBranch(prompt) = &mut app.prompt {
+            prompt.fetch_note = Some(note.to_string());
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.render(frame)).expect("render");
+        let buffer = terminal.backend().buffer().clone();
+        let shown = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .replace('│', " ")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            shown.contains(&format!("Not fetched from origin just now: {note}")),
+            "{shown}"
+        );
+        assert!(shown.contains(" main "), "the branches still show: {shown}");
+    }
+
     /// A held row's holder, agent and folder, are names, so both are chips.
     #[test]
     fn a_held_branch_row_chips_its_agent_and_folder() {

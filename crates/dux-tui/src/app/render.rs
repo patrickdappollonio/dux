@@ -9253,16 +9253,21 @@ impl App {
         self.render_dim_overlay(frame);
         let area = self.centered_modal(76, 70, frame.area());
         self.clear_overlay_area(frame, area);
+        let details_block = self.themed_overlay_block("Change Base Branch");
+        let details = self.change_base_branch_details(&prompt, details_block.inner(area).width);
+        // A wrapped fetch note takes rows from the list, which keeps a few.
+        let details_height = usize_to_u16_wrapping(details.len())
+            .saturating_add(2)
+            .min(area.height.saturating_sub(6))
+            .max(4);
         let [details_area, list_area] = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(3)])
+            .constraints([Constraint::Length(details_height), Constraint::Min(3)])
             .areas(area);
-        let details_block = self.themed_overlay_block("Change Base Branch");
         let details_inner = details_block.inner(details_area);
 
         let text_style = Style::default().fg(self.theme.text_fg);
         let dim = Style::default().fg(self.theme.hint_dim_desc_fg);
-        let details = self.change_base_branch_details(&prompt, details_inner.width);
 
         let hint_line = self.change_base_branch_hints(&prompt, area.width.saturating_sub(2));
 
@@ -9352,7 +9357,7 @@ impl App {
     }
 
     /// The base branch picker's header: the project and its base, then the
-    /// search field, a fetch warning, or what picking does.
+    /// search field, a fetch warning wrapped to `width`, or what picking does.
     fn change_base_branch_details(
         &self,
         prompt: &crate::app::ChangeBaseBranchPrompt,
@@ -9367,8 +9372,9 @@ impl App {
             Some(base) => first.push(name_chip(base, &self.theme)),
             None => first.push(Span::styled("no base recorded yet", text_style)),
         }
-        let second = if prompt.list.is_filtering() {
-            render_single_line_field(
+        let mut lines = vec![Line::from(first)];
+        if prompt.list.is_filtering() {
+            lines.push(render_single_line_field(
                 "/ ",
                 &prompt.list.filter.text,
                 prompt.list.filter.cursor,
@@ -9376,21 +9382,23 @@ impl App {
                 self.theme.input_cursor_bg,
                 FocusState::Focused,
                 width,
-            )
+            ));
         } else if let Some(note) = &prompt.fetch_note {
-            Line::from(Span::styled(
+            let note = Line::from(Span::styled(
                 format!(
-                    " Could not fetch origin ({note}); its branches are listed as last fetched."
+                    " Not fetched from origin just now: {}.",
+                    note.trim_end_matches('.')
                 ),
                 Style::default().fg(self.theme.warning_fg),
-            ))
+            ));
+            lines.extend(wrap_styled_lines(&[note], usize::from(width)));
         } else {
-            Line::from(Span::styled(
+            lines.push(Line::from(Span::styled(
                 " Pick the branch new agents start from. The folder switches to it.",
                 label_style,
-            ))
-        };
-        vec![Line::from(first), second]
+            )));
+        }
+        lines
     }
 
     /// What a branch row of the base branch picker says after the name: why it
