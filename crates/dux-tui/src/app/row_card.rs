@@ -182,6 +182,15 @@ pub(crate) fn changes_agent_row(action: Action) -> bool {
     }
 }
 
+/// The agent whose dock holds `terminal`; `None` for a project or standalone
+/// terminal, which is a row of its own.
+pub(crate) fn docking_agent(terminal: &CompanionTerminal) -> Option<String> {
+    match terminal.owner.as_ref() {
+        TerminalOwnerRef::Session(session_id) => Some(session_id.to_string()),
+        TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => None,
+    }
+}
+
 /// A row's card and the pty it was read from; `None` when there is no card.
 type RowAnswer = Option<(PtyTakeoverCard, String)>;
 
@@ -425,12 +434,8 @@ impl App {
     /// row of the list, and an agent's only while this surface drives its row.
     pub(crate) fn shown_terminal_count(&self) -> usize {
         let terminals = &self.engine.companion_terminals;
-        let docked = |terminal: &CompanionTerminal| match terminal.owner.as_ref() {
-            TerminalOwnerRef::Session(session_id) => Some(session_id.to_string()),
-            TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => None,
-        };
         if self.pty_ownership_conn_id().is_none()
-            || !terminals.values().any(|t| docked(t).is_some())
+            || !terminals.values().any(|t| docking_agent(t).is_some())
         {
             return terminals.len();
         }
@@ -439,7 +444,7 @@ impl App {
         terminals
             .values()
             .filter(|terminal| {
-                docked(terminal).is_none_or(|session_id| {
+                docking_agent(terminal).is_none_or(|session_id| {
                     agents.is_some_and(|agents| agents.contains(&session_id))
                 })
             })
@@ -464,10 +469,7 @@ impl App {
                 .engine
                 .companion_terminals
                 .get(terminal_id)
-                .and_then(|terminal| match terminal.owner.as_ref() {
-                    TerminalOwnerRef::Session(session_id) => Some(session_id.to_string()),
-                    TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => None,
-                }),
+                .and_then(docking_agent),
             PromptState::None
             | PromptState::Command { .. }
             | PromptState::BrowseProjects { .. }

@@ -31,7 +31,7 @@ use dux_core::wire::{WireCommand, WireCommandOutcome};
 use dux_core::worker::{AgentLaunchRequest, PullTarget};
 use dux_core::worktree_ops::WorktreeOpGuard;
 
-use super::{App, DockLayout, TerminalOwnerRef};
+use super::{App, DockLayout};
 
 impl App {
     /// `session_id` when this surface may change its row; `None`, with the
@@ -229,10 +229,7 @@ impl App {
             .engine
             .companion_terminals
             .get(terminal_id)
-            .and_then(|terminal| match terminal.owner.as_ref() {
-                TerminalOwnerRef::Session(session_id) => Some(session_id.to_string()),
-                TerminalOwnerRef::Project(_) | TerminalOwnerRef::Standalone => None,
-            });
+            .and_then(super::row_card::docking_agent);
         if let Some(session_id) = agent {
             self.permitted_row(&session_id)?;
         }
