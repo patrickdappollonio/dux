@@ -494,7 +494,15 @@ describe("store companion-terminal lifecycle", () => {
     expect(plan.agents).toEqual(["s2"])
     expect(plan.terminals).toEqual(["pt1"])
     expect(plan.left).toEqual([
-      { kind: "agent", id: "s1", name: "agentx", terminals: 1, device: null, block: "other" },
+      {
+        kind: "agent",
+        id: "s1",
+        name: "agentx",
+        terminals: 1,
+        terminalsOnly: false,
+        device: null,
+        block: "other",
+      },
     ])
 
     calls = []
@@ -613,7 +621,51 @@ describe("store companion-terminal lifecycle", () => {
     drivenUrls.set("/api/v1/sessions/s1/terminals/t1", DRIVEN)
     const mod = await loadStore()
     expect(await stopAllSaid(mod)).toBe(
-      `Nothing was stopped. Left running: agent agentx with its 1 terminal. ${DRIVEN}`,
+      `Nothing was stopped. Left running: 1 terminal of agent agentx. ${DRIVEN}`,
+    )
+  })
+
+  it("stopAllPlan words an idle agent another device drives by its running terminals", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        {
+          id: "s1",
+          project_id: "p1",
+          title: "agentx",
+          status: "detached",
+          tabs: [{ id: "a1", input_owner: "conn-other" }],
+        },
+      ],
+      terminals: [
+        { id: "t1", label: "Terminal 1", owner: { kind: "session", session_id: "s1" } },
+      ],
+      sidebar: { groups: [] },
+    }
+    const mod = await loadStore()
+    await vi.waitFor(() => expect(mod.getSnapshot().spine).not.toBeNull())
+    const { proseText } = await import("./prose")
+    expect(proseText(mod.leftRunningProse(mod.stopAllPlan(mod.getSnapshot()).left))).toBe(
+      "Left running, because another device drives it: 1 terminal of agent agentx. " +
+        "Take it over on this device first to stop it.",
+    )
+  })
+
+  it("stopAllRunning says a sentence the server gave several rows once, naming them all", async () => {
+    spineBody = {
+      projects: [{ id: "p1", name: "Repo" }],
+      sessions: [
+        { id: "s1", project_id: "p1", title: "agentx", status: "active", tabs: [{ id: "a1" }] },
+        { id: "s2", project_id: "p1", title: "agenty", status: "active", tabs: [{ id: "a2" }] },
+      ],
+      terminals: [],
+      sidebar: { groups: [] },
+    }
+    drivenUrls.set("/api/v1/sessions/s1/kill", DRIVEN)
+    drivenUrls.set("/api/v1/sessions/s2/kill", DRIVEN)
+    const mod = await loadStore()
+    expect(await stopAllSaid(mod)).toBe(
+      `Nothing was stopped. Left running: agent agentx and agent agenty. ${DRIVEN}`,
     )
   })
 

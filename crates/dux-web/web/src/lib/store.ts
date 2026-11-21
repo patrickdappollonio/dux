@@ -10014,8 +10014,9 @@ export interface LeftRunning {
   name: string
   /** An agent's own running terminals, left with it. */
   terminals: number
-  /** An agent that was stopped, so only its terminals were left. */
-  agentStopped?: boolean
+  /** An agent that is not running, stopped now or before, so only its
+   * terminals were left. */
+  terminalsOnly?: boolean
   /** The driving device's label, when this page knows it. */
   device: string | null
   /** Why this page may not change the row. */
@@ -10055,6 +10056,7 @@ export function stopAllPlan(s: DuxState): {
         id: session.id,
         name: sessionLabel(session),
         terminals: own,
+        terminalsOnly: session.status !== "active",
         device: block === "other" ? rowDriverLabel(s, { sessionId: session.id }) : null,
         block,
       })
@@ -10087,14 +10089,23 @@ export function stopAllPlan(s: DuxState): {
  * reason, in the order the reasons are first met. */
 export function leftRunningProse(left: readonly LeftRunning[]): Prose {
   const byBlock = new Map<RowBlock, LeftRunning[]>()
+  const bySaid = new Map<string, LeftRunning[]>()
   const out: ProseSegment[] = []
   for (const part of left) {
     if (part.said === undefined) {
       byBlock.set(part.block, [...(byBlock.get(part.block) ?? []), part])
-      continue
+    } else {
+      bySaid.set(part.said, [...(bySaid.get(part.said) ?? []), part])
     }
+  }
+  for (const [said, parts] of bySaid) {
     if (out.length > 0) out.push(" ")
-    out.push("Left running: ", ...leftPartProse(part), `. ${part.said}`)
+    out.push("Left running: ")
+    parts.forEach((part, index) => {
+      if (index > 0) out.push(index === parts.length - 1 ? " and " : ", ")
+      out.push(...leftPartProse(part))
+    })
+    out.push(`. ${said}`)
   }
   for (const [block, parts] of byBlock) {
     if (out.length > 0) out.push(" ")
@@ -10119,7 +10130,7 @@ export function stopAllNothingReason(plan: ReturnType<typeof stopAllPlan>): stri
 }
 
 function leftPartProse(part: LeftRunning): ProseSegment[] {
-  if (part.agentStopped === true) {
+  if (part.terminalsOnly === true) {
     return [`${formatRegularCount(part.terminals, "terminal")} of agent `, chip(part.name)]
   }
   if (part.terminals === 0) return [`${part.kind} `, chip(part.name)]
@@ -10232,7 +10243,7 @@ export async function stopAllRunning(
   }
   // A row the server refused at its terminal `from` on (0 for the agent itself),
   // though this page did not know: everything of it from there is left.
-  const refusedRow = (row: StopRow, from: number, agentStopped: boolean, said: string) => {
+  const refusedRow = (row: StopRow, from: number, terminalsOnly: boolean, said: string) => {
     const session =
       row.session === null ? undefined : state.spine?.sessions.find((s) => s.id === row.session)
     const rest = row.terminals.slice(from)
@@ -10242,7 +10253,7 @@ export async function stopAllRunning(
         id: session.id,
         name: sessionLabel(session),
         terminals: rest.length,
-        agentStopped,
+        terminalsOnly,
         device: null,
         block: "other",
         said,
@@ -10264,7 +10275,9 @@ export async function stopAllRunning(
   }
   await Promise.all(
     [...rows.values()].map(async (row) => {
-      let agentStopped = false
+      // An agent this stop does not reach was not running, so only its
+      // terminals can be left.
+      let terminalsOnly = row.agent === null
       if (row.agent !== null) {
         const answer = await stop(
           "agents",
@@ -10276,7 +10289,7 @@ export async function stopAllRunning(
           refusedRow(row, 0, false, answer.said)
           return
         }
-        agentStopped = answer === "stopped"
+        terminalsOnly = answer === "stopped"
       }
       for (const [index, id] of row.terminals.entries()) {
         const owner = findTerminalOwner(id)
@@ -10288,7 +10301,7 @@ export async function stopAllRunning(
         )
         if (answer === "attached") refusedTerminals.push(id)
         if (typeof answer === "object") {
-          refusedRow(row, index, agentStopped, answer.said)
+          refusedRow(row, index, terminalsOnly, answer.said)
           return
         }
       }
