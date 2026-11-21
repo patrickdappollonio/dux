@@ -31,6 +31,7 @@ import {
 } from "lucide-react"
 
 import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
+import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { MatchHighlight } from "@/components/MatchHighlight"
@@ -132,10 +133,6 @@ const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
 const WHOLE_MARKS = "[&_mark]:inline-block"
 
 const DESCRIPTION = "Text you send to an agent or a terminal from its Macros… button."
-
-function changesLabel(count: number): string {
-  return count === 1 ? "1 unsaved change" : `${count} unsaved changes`
-}
 
 // How the dialog answers a request to close: the root hands every dismissal to
 // the editor, which alone knows whether there is anything to lose.
@@ -773,7 +770,7 @@ function MacrosEditor({
         ) : (
           <>
             <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
-              {changes > 0 ? changesLabel(changes) : null}
+              {changes > 0 ? unsavedChangesLabel(changes) : null}
             </span>
             {cancelButton}
             {saveButton}
@@ -1276,7 +1273,7 @@ function ConfirmDiscardMacros({
         <DialogHeader>
           <DialogTitle>Discard unsaved changes?</DialogTitle>
           <DialogDescription>
-            The macros have {changesLabel(changes)}. Discarding them leaves{" "}
+            The macros have {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
             <InlineCode>config.toml</InlineCode> as it was.
           </DialogDescription>
         </DialogHeader>

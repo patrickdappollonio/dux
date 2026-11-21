@@ -22,13 +22,13 @@ import {
 } from "@/lib/notify"
 
 import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
+import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import {
   CHANGED_LABEL,
   TOPIC_ICON,
   buildWrites,
-  changesLabel,
   defaultValueText,
   listNames,
   resetValue,
@@ -1752,7 +1752,7 @@ function PreferencesForm({
       {partialNotice}
       <DialogFooter className="shrink-0 sm:items-center">
         <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
-          {unsavedCount > 0 ? changesLabel(unsavedCount) : null}
+          {unsavedCount > 0 ? unsavedChangesLabel(unsavedCount) : null}
         </span>
         {/* Cancel is disabled too while a write is in flight: closing the
             dialog mid-persist would let the pending success close a freshly
@@ -1842,7 +1842,7 @@ function ConfirmDiscardPreferences({
         <DialogHeader>
           <DialogTitle>Discard unsaved changes?</DialogTitle>
           <DialogDescription>
-            Preferences has {changesLabel(changes)}. Discarding them leaves{" "}
+            Preferences has {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
             <InlineCode>config.toml</InlineCode> as it was.
           </DialogDescription>
         </DialogHeader>

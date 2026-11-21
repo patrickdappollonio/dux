@@ -48,6 +48,7 @@ import type { SettingTopic, SettingValue } from "./settingsDescriptors"
 import { paneMacroTargetFor } from "./paneMacroTarget"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "./ptyOwnership"
 import { macroPayloadBytes, savedMacrosEdit, type MacrosEdit } from "./macros"
+import { unsavedChangesLabel } from "./unsavedChanges"
 import { normalizeLeftover } from "./leftoverFolder"
 import { reuseUnchangedFiles } from "./changedFiles"
 import { discardConfirmation, discardOutcome } from "./discardOutcome"
@@ -9239,7 +9240,7 @@ const MACROS_SET_ASIDE_ID = "macros-set-aside"
 export function setAsideMacrosDraft(edit: MacrosEdit, changes: number): void {
   macrosSetAside = edit
   closeMacrosDialog()
-  const what = changes === 1 ? "1 unsaved change" : `${changes} unsaved changes`
+  const what = unsavedChangesLabel(changes)
   // Sticky: the edits are on no screen while the dialog is closed.
   notifyInfo(
     `The Macros dialog closed with ${what}, and nothing was saved. Restore reopens it with them.`,
@@ -10069,7 +10070,7 @@ export function setAsidePreferencesDraft(
     return
   }
   preferencesSetAside = draft
-  const what = changes === 1 ? "1 unsaved change" : `${changes} unsaved changes`
+  const what = unsavedChangesLabel(changes)
   // Sticky: the edits are on no screen while the dialog is closed.
   notifyInfo(
     `Preferences closed with ${what}, and nothing was saved. Restore reopens it with them.${password}`,

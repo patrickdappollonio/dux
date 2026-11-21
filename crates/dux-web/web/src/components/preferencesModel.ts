@@ -100,10 +100,6 @@ export function rowMeta(
   return parts
 }
 
-export function changesLabel(count: number): string {
-  return count === 1 ? "1 unsaved change" : `${count} unsaved changes`
-}
-
 export function settingsLabel(count: number): string {
   return count === 1 ? "1 setting" : `${count} settings`
 }
