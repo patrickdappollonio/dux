@@ -1,27 +1,40 @@
 // The Macros dialog's working copy: every edit, addition, delete and reorder
 // lands here, and only Save sends the list on.
 
-import { macroMatchesSurface } from "@/lib/macros"
+import { macroMatchesSurface, type EditedMacro, type MacrosEdit } from "@/lib/macros"
 import type { MacroSurface, MacroView } from "@/lib/types"
 
-// `key` is stable for the dialog's life; `origin` is the index of the saved
-// macro the row started as, null for one added here.
-export interface DraftMacro extends MacroView {
+// `key` is stable for the dialog's life.
+export interface DraftMacro extends EditedMacro {
   key: number
-  origin: number | null
 }
 
 export type MacroFilter = "all" | "agent" | "terminal"
 
-// Rows match saved macros by name, so a dialog reopened on edits that were not
-// written still shows them as changes.
-export function seedDraft(draft: MacroView[], baseline: MacroView[]): DraftMacro[] {
-  const used = new Set<number>()
-  return draft.map((macro, key) => {
-    const found = baseline.findIndex((b, i) => !used.has(i) && b.name === macro.name)
-    if (found !== -1) used.add(found)
-    return { ...macro, key, origin: found === -1 ? null : found }
-  })
+export function seedDraft(edit: MacrosEdit): DraftMacro[] {
+  return edit.macros.map((macro, key) => ({ ...macro, key }))
+}
+
+// The editing session as it stands, to save or to set aside: names trimmed,
+// as Save writes them, and the macro with `selectedKey` as the one on screen.
+export function draftToEdit(
+  items: DraftMacro[],
+  baseline: MacroView[],
+  version: string | null,
+  selectedKey: number | null,
+): MacrosEdit {
+  const selected = items.findIndex((item) => item.key === selectedKey)
+  return {
+    macros: items.map(({ name, text, surface, origin }) => ({
+      name: name.trim(),
+      text,
+      surface,
+      origin,
+    })),
+    baseline,
+    version,
+    selected: selected === -1 ? null : selected,
+  }
 }
 
 // Whether this row differs from what is saved: new, or any field changed. A

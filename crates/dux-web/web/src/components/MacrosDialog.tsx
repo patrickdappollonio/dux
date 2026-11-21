@@ -33,6 +33,7 @@ import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   addItem,
   changeCount,
+  draftToEdit,
   draftToMacros,
   duplicateItem,
   filterCounts,
@@ -90,6 +91,7 @@ import {
   MACRO_SURFACE_OPTIONS,
   isMacroSurface,
   macroTextPreview,
+  savedMacrosEdit,
   validateMacros,
 } from "@/lib/macros"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -218,19 +220,21 @@ function MacrosEditor({
   phone: boolean
   closeRef: RefObject<CloseHandler | null>
 }) {
-  const { bootstrap, macrosDraft, macrosDraftVersion, macrosDialogSelect, macrosConflict } =
-    useDux()
-  // Read once: the list and version this editing session started from. The
-  // dots and the change count compare against it, and Save sends the version.
+  const { bootstrap, macrosDraft, macrosConflict } = useDux()
+  // Read once: the editing session this mounting opens. The dots and the
+  // change count compare against the list its edits were made against, and
+  // Save sends that list's version.
   const [start] = useState(() => {
-    const baseline = (bootstrap?.macros ?? []).map((m) => ({ ...m }))
-    const items = seedDraft(macrosDraft ?? baseline, baseline)
-    const picked = items.find((item) => item.name === macrosDialogSelect)
+    const edit =
+      macrosDraft ??
+      savedMacrosEdit(bootstrap?.macros ?? [], bootstrap?.macros_version ?? null)
+    const items = seedDraft(edit)
+    const picked = edit.selected === null ? undefined : items[edit.selected]
     return {
-      baseline,
-      version:
-        macrosDraft === null ? (bootstrap?.macros_version ?? null) : macrosDraftVersion,
+      baseline: edit.baseline,
+      version: edit.version,
       items,
+      picked: picked !== undefined,
       selected: picked?.key ?? items[0]?.key ?? null,
       step: picked && phone ? ("edit" as const) : ("list" as const),
     }
@@ -252,13 +256,16 @@ function MacrosEditor({
   const validation = validateMacros(draftToMacros(items))
   const selected = items.find((item) => item.key === selectedKey) ?? null
 
+  // The session as it stands. On a phone's list no macro is on screen, so
+  // the dialog comes back on the list.
+  function currentEdit() {
+    return draftToEdit(items, baseline, version, phone && step === "list" ? null : selectedKey)
+  }
+
   useEffect(() => {
     closeRef.current = {
       request: () => (changes > 0 ? setDiscardOpen(true) : closeMacrosDialog()),
-      back: () =>
-        changes > 0
-          ? setAsideMacrosDraft(draftToMacros(items), version, changes)
-          : closeMacrosDialog(),
+      back: () => (changes > 0 ? setAsideMacrosDraft(currentEdit(), changes) : closeMacrosDialog()),
     }
     return () => {
       closeRef.current = null
@@ -319,7 +326,7 @@ function MacrosEditor({
   }
 
   function save() {
-    saveMacros(draftToMacros(items), version)
+    saveMacros(currentEdit())
   }
 
   const deleting = items.find((item) => item.key === deleteKey) ?? null
@@ -473,7 +480,7 @@ function MacrosEditor({
 
   const initialFocus = () => {
     if (phone) return headerRef.current ?? true
-    return macrosDialogSelect !== null ? (nameRef.current ?? true) : true
+    return start.picked ? (nameRef.current ?? true) : true
   }
 
   if (phone) {

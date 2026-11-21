@@ -143,6 +143,38 @@ export function reorderMacrosByDrag(
   return next
 }
 
+// A macro as the Macros dialog edits it: `origin` is the index in the saved
+// list of the macro it started as, null for one added in the dialog. Matching
+// by that index rather than by name keeps a renamed macro one change.
+export interface EditedMacro extends MacroView {
+  origin: number | null
+}
+
+// An editing session of the Macros dialog, whole: the macros as edited, the
+// saved list their origins index (the list the edits were made against) and
+// its version, and the index in `macros` of the macro on screen.
+export interface MacrosEdit {
+  macros: EditedMacro[]
+  baseline: MacroView[]
+  version: string | null
+  selected: number | null
+}
+
+// A session with nothing edited yet, opened on the macro named `select`.
+export function savedMacrosEdit(
+  saved: MacroView[],
+  version: string | null,
+  select: string | null = null,
+): MacrosEdit {
+  const index = saved.findIndex((macro) => macro.name === select)
+  return {
+    macros: saved.map((macro, origin) => ({ ...macro, origin })),
+    baseline: saved.map((macro) => ({ ...macro })),
+    version,
+    selected: index === -1 ? null : index,
+  }
+}
+
 // Single-line preview of a macro's text: newlines collapse to a visible glyph, and
 // truncation counts characters rather than bytes so a multi-byte glyph never splits.
 export function macroTextPreview(text: string, maxChars = 80): string {

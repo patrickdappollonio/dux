@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 
 import type { DragEndEvent } from "@dnd-kit/core"
 import type { DuxState } from "@/lib/store"
+import type { EditedMacro, MacrosEdit } from "@/lib/macros"
 import type { MacroView } from "@/lib/types"
 
 // dnd-kit cannot run a real drag under jsdom (it measures rects), so
@@ -47,9 +48,9 @@ vi.mock("@/hooks/use-mobile", () => ({
   useIsMobile: () => phone,
 }))
 
-const saveMacrosMock = vi.fn<(macros: MacroView[], version: string | null) => void>()
+const saveMacrosMock = vi.fn<(edit: MacrosEdit) => void>()
 const closeMacrosDialogMock = vi.fn<() => void>()
-const setAsideMock = vi.fn<(draft: MacroView[], version: string | null, changes: number) => void>()
+const setAsideMock = vi.fn<(edit: MacrosEdit, changes: number) => void>()
 const reloadMacrosDraftMock = vi.fn<() => Promise<void>>()
 const dismissMacrosConflictMock = vi.fn<() => void>()
 let mockState: DuxState
@@ -59,9 +60,8 @@ vi.mock("@/lib/store", async (importOriginal) => {
     ...actual,
     useDux: () => mockState,
     closeMacrosDialog: () => closeMacrosDialogMock(),
-    saveMacros: (macros: MacroView[], version: string | null) => saveMacrosMock(macros, version),
-    setAsideMacrosDraft: (draft: MacroView[], version: string | null, changes: number) =>
-      setAsideMock(draft, version, changes),
+    saveMacros: (edit: MacrosEdit) => saveMacrosMock(edit),
+    setAsideMacrosDraft: (edit: MacrosEdit, changes: number) => setAsideMock(edit, changes),
     reloadMacrosDraft: () => reloadMacrosDraftMock(),
     dismissMacrosConflict: () => dismissMacrosConflictMock(),
   }
@@ -105,19 +105,21 @@ const seedMacros: MacroView[] = [
   { name: "Deploy", text: "deploy it", surface: "both" },
 ]
 
+// The dialog's state in the store: `macros` saved at "v1", and `draft` the
+// edits it opens on, each naming the saved macro it started as (`origin`),
+// by default the saved list unchanged.
 function seed(
   macros: MacroView[],
   {
     conflict = null,
-    draft = macros,
+    draft = macros.map((m, origin) => ({ ...m, origin })),
     select = null,
-  }: { conflict?: string | null; draft?: MacroView[] | null; select?: string | null } = {},
+  }: { conflict?: string | null; draft?: EditedMacro[] | null; select?: number | null } = {},
 ) {
   mockState = {
     macrosDialogOpen: true,
-    macrosDraft: draft,
-    macrosDraftVersion: "v1",
-    macrosDialogSelect: select,
+    macrosDraft:
+      draft === null ? null : { macros: draft, baseline: macros, version: "v1", selected: select },
     macrosConflict: conflict,
     macrosDraftEpoch: 0,
     bootstrap: { macros, macros_version: "v1" },
@@ -235,14 +237,13 @@ describe("MacrosDialog writes nothing before Save", () => {
     await click(save())
 
     expect(saveMacrosMock).toHaveBeenCalledTimes(1)
-    expect(saveMacrosMock).toHaveBeenCalledWith(
-      [
-        { name: "Deploy", text: "deploy it", surface: "both" },
-        { name: "Review", text: "review this twice", surface: "agent" },
-        { name: "Ship", text: "ship it", surface: "agent" },
-      ],
-      "v1",
-    )
+    const sent = saveMacrosMock.mock.calls[0][0]
+    expect(sent.macros.map(({ name, text, surface }) => ({ name, text, surface }))).toEqual([
+      { name: "Deploy", text: "deploy it", surface: "both" },
+      { name: "Review", text: "review this twice", surface: "agent" },
+      { name: "Ship", text: "ship it", surface: "agent" },
+    ])
+    expect(sent.version).toBe("v1")
   })
 
   it("counts the unsaved changes and marks each changed macro", async () => {
@@ -265,6 +266,21 @@ describe("MacrosDialog writes nothing before Save", () => {
     // Undoing the edit by hand takes its change away again.
     await typeInto("Name", "Build")
     expect(screen.getByText("1 unsaved change")).toBeTruthy()
+  })
+})
+
+describe("MacrosDialog reopened on edits it did not save", () => {
+  it("counts a renamed macro as one change, with its dot", () => {
+    seed(seedMacros, {
+      draft: [
+        { name: "Review2", text: "review this", surface: "agent", origin: 0 },
+        { name: "Build", text: "cargo build", surface: "terminal", origin: 1 },
+        { name: "Deploy", text: "deploy it", surface: "both", origin: 2 },
+      ],
+    })
+    render(<MacrosDialog />)
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
+    expect(within(row("Review2")).getByText("Unsaved changes:")).toBeTruthy()
   })
 })
 
@@ -319,12 +335,16 @@ describe("MacrosDialog closing", () => {
       openModals().at(-1)!.close()
     })
     expect(setAsideMock).toHaveBeenCalledWith(
-      [
-        { name: "Review", text: "changed", surface: "agent" },
-        { name: "Build", text: "cargo build", surface: "terminal" },
-        { name: "Deploy", text: "deploy it", surface: "both" },
-      ],
-      "v1",
+      {
+        macros: [
+          { name: "Review", text: "changed", surface: "agent", origin: 0 },
+          { name: "Build", text: "cargo build", surface: "terminal", origin: 1 },
+          { name: "Deploy", text: "deploy it", surface: "both", origin: 2 },
+        ],
+        baseline: seedMacros,
+        version: "v1",
+        selected: 0,
+      },
       1,
     )
     expect(closeMacrosDialogMock).not.toHaveBeenCalled()
@@ -333,7 +353,7 @@ describe("MacrosDialog closing", () => {
 
 describe("MacrosDialog editor", () => {
   it("opens on the macro the picker's pencil named", () => {
-    seed(seedMacros, { select: "Deploy" })
+    seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
     expect(row("Deploy").getAttribute("aria-selected")).toBe("true")
@@ -455,7 +475,7 @@ describe("MacrosDialog on a phone", () => {
 
   it("opens straight on the macro the pencil named", () => {
     phone = true
-    seed(seedMacros, { select: "Deploy" })
+    seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
   })
@@ -485,7 +505,7 @@ describe("MacrosDialog stale save", () => {
   it("shows the refused edits as unsaved changes", () => {
     seed(seedMacros, {
       conflict: stale,
-      draft: [{ name: "Review", text: "edited", surface: "agent" }],
+      draft: [{ name: "Review", text: "edited", surface: "agent", origin: 0 }],
     })
     render(<MacrosDialog />)
     expect(screen.getByText("3 unsaved changes")).toBeTruthy()
