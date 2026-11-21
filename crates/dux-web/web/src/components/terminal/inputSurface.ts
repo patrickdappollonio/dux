@@ -154,6 +154,10 @@ export function nextTypingFocus(ctx: {
 export type InputSurfaceDeps = TypingSurfaceRefs & {
   ptyRef: { current: PtySocket | null }
   ownership: OwnershipVerdict
+  /// This page drove the pty when its socket lost the server, and has not
+  /// heard the server since: a refused send says it is not connected rather
+  /// than that another device drives.
+  awaitingServer: boolean
   /// The pane target this draft belongs to: an agent tab id or a terminal id.
   /// Drafts are keyed by it, so switching agents keeps each pane's own text.
   targetId: string
@@ -184,7 +188,7 @@ export type InputSurface = {
 }
 
 export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
-  const { live, composeInputRef, termRef, ptyRef, ownership, targetId } = deps
+  const { live, composeInputRef, termRef, ptyRef, ownership, awaitingServer, targetId } = deps
   const refs: TypingSurfaceRefs = { live, composeInputRef, termRef }
   const focusTypingSurface = () => focusTypingSurfaceIn(refs)
   const typingSurfaceHasFocus = () => typingSurfaceHasFocusIn(refs)
@@ -281,13 +285,13 @@ export function useInputSurface(deps: InputSurfaceDeps): InputSurface {
   // against a dead socket raises one toast and a changed reason replaces the
   // old one. The cost, accepted: each attempt restarts the error's countdown.
   function sendCompose(text: string): boolean {
-    if (!ownership.read()) {
+    if (!ownership.read() && !awaitingServer) {
       notifyError("Another device is driving this terminal. Take over to send.", {
         id: "compose-send",
       })
       return false
     }
-    if (!(ptyRef.current?.isOpen ?? false)) {
+    if (!ownership.read() || !(ptyRef.current?.isOpen ?? false)) {
       notifyError("Not connected right now. Your message was kept.", {
         id: "compose-send",
       })

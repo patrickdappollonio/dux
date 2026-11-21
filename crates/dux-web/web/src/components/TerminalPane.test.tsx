@@ -6368,6 +6368,27 @@ describe("TerminalPane knows whether it drives before it acts on it", () => {
     expect(takeOver()).toBeNull()
   })
 
+  // The verdict waits for the next handshake, but this page drove the row when
+  // it was cut off: its message box and draft stay, and nothing is sent.
+  it("keeps the message box and its draft for the whole outage, after the server frees the row too, and sends nothing", () => {
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pty = last()
+    fireEvent.change(message()!, { target: { value: "half a thought" } })
+    act(() => pty.onReconnecting())
+    pty.isOpen = false
+    act(() => notifyPtyOwner("s1", undefined, 7))
+    expect(rowBlockFor(row)).toBe("reconnecting")
+    expect(message()).not.toBeNull()
+    expect((message() as HTMLTextAreaElement).value).toBe("half a thought")
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Send" }))
+    expect(pty.sendInput).not.toHaveBeenCalled()
+    expect((message() as HTMLTextAreaElement).value).toBe("half a thought")
+    expect(toastError).toHaveBeenCalledWith(
+      "Not connected right now. Your message was kept.",
+      expect.anything(),
+    )
+  })
+
   it("is still connecting, not reconnecting, before it has ever heard who drives", () => {
     FakePtySocket.autoHandshake = false
     render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)

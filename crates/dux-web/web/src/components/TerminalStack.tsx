@@ -436,6 +436,12 @@ function TerminalPart(props: TerminalPartProps) {
   // the compose redirect, the paste listener and the suspended tab stop follow
   // it.
   const composeSurfaceLive = composeBarEnabled && isOwner && isTypingTarget
+  // This page drove the row when its socket lost the server, and the verdict
+  // now waits for the next handshake: the input rows and the draft stay for
+  // the outage, while every write still reads the verdict and sends nothing.
+  const awaitingServer =
+    !connectionLost && !ownershipKnown && handshakeSeen && !hearingServer
+  const holdsInput = isOwner || awaitingServer
   const live = useTerminalLiveSettings(
     liveSettingsFor(composeSurfaceLive, onScreen),
   )
@@ -492,6 +498,7 @@ function TerminalPart(props: TerminalPartProps) {
     termRef,
     ptyRef,
     ownership,
+    awaitingServer,
     // The pane's own target id keys the draft in the store, so each agent tab
     // and each terminal keeps its own unsent message across a remount.
     targetId: props.id,
@@ -585,12 +592,15 @@ function TerminalPart(props: TerminalPartProps) {
     }
   }, [])
 
-  const {
-    accessoryBarShown,
-    composeBarShown: composeBarShownHere,
-    topInputGates,
-  } = terminalInputLayout({
+  const { topInputGates } = terminalInputLayout({
     isOwner,
+    composeMode,
+    keysApply,
+    accessoryBarVisible,
+    composeBarEnabled,
+  })
+  const { accessoryBarShown, composeBarShown: composeBarShownHere } = terminalInputLayout({
+    isOwner: holdsInput,
     composeMode,
     keysApply,
     accessoryBarVisible,
@@ -881,10 +891,10 @@ function TerminalPart(props: TerminalPartProps) {
   )
 
   // The typing target's rows go in the stack's one input area, for the input
-  // owner alone and never under the row's card; every other part publishes
-  // nothing there.
+  // owner alone (also while it waits to hear the server again) and never under
+  // the row's card; every other part publishes nothing there.
   const rows =
-    isTypingTarget && isOwner && !rowWatched ? (
+    isTypingTarget && holdsInput && !rowWatched ? (
       <TerminalInputRows
         accessoryBarShown={accessoryBarShown}
         composeBarShown={composeBarShownHere}
