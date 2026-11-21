@@ -195,6 +195,8 @@ export function PaneMenuBody({
         <TerminalActionsMenu
           terminalId={pane.terminalId}
           owner={pane.owner}
+          // The agent's own group above already opens this same editor.
+          editorEntries={false}
         />
       </>
     ) : null

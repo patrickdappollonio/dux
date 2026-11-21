@@ -25,9 +25,13 @@ import type { TerminalOwnerRef } from "@/lib/store"
 export function TerminalActionsMenu({
   terminalId,
   owner,
+  editorEntries = true,
 }: {
   terminalId: string
   owner: TerminalOwnerRef
+  /** False where the menu already carries the editor entries for the same root,
+   * so none is listed twice: an agent's menu over its own companion terminal. */
+  editorEntries?: boolean
 }) {
   // The editor's root is the directory this terminal was SPAWNED in, and a
   // terminal owned by an agent is sent to that agent's editor instead: same
@@ -45,28 +49,32 @@ export function TerminalActionsMenu({
           unlabelled Close… reads as closing the agent, and a terminal's own menu
           carries the same heading so the two cannot say different things. */}
       <DropdownMenuLabel>{MENU_GROUP_LABELS.terminal}</DropdownMenuLabel>
-      {/* The in-app overlay is desktop-only, so on a phone its item would be a
-          dead no-op and the row is hidden rather than offered. */}
-      <DropdownMenuItem
-        className="max-md:hidden"
-        onClick={() => openEditor(editorRoot)}
-      >
-        <FileCode2 />
-        Open editor here
-      </DropdownMenuItem>
-      {/* A real anchor, so a long-press keeps its native open-in-new-tab. */}
-      <DropdownMenuItem
-        render={
-          <a
-            href={standaloneEditorHash(editorRoot)}
-            target="_blank"
-            rel="noopener"
-          />
-        }
-      >
-        <ExternalLink />
-        Open editor in new tab
-      </DropdownMenuItem>
+      {editorEntries ? (
+        <>
+          {/* The in-app overlay is desktop-only, so on a phone its item would be a
+              dead no-op and the row is hidden rather than offered. */}
+          <DropdownMenuItem
+            className="max-md:hidden"
+            onClick={() => openEditor(editorRoot)}
+          >
+            <FileCode2 />
+            Open editor here
+          </DropdownMenuItem>
+          {/* A real anchor, so a long-press keeps its native open-in-new-tab. */}
+          <DropdownMenuItem
+            render={
+              <a
+                href={standaloneEditorHash(editorRoot)}
+                target="_blank"
+                rel="noopener"
+              />
+            }
+          >
+            <ExternalLink />
+            Open editor in new tab
+          </DropdownMenuItem>
+        </>
+      ) : null}
       {/* Neutral color per the destructive convention: the `…` plus
           ConfirmDeleteTerminalDialog are the danger signal. */}
       {listed ? (

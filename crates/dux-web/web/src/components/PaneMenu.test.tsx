@@ -271,7 +271,11 @@ describe("an agent's menu over one of its companion terminals", () => {
     expect(items.some((t) => t?.includes("Delete agent…"))).toBe(true)
     // And the terminal's, which had nowhere else to be reached from.
     expect(items.some((t) => t?.includes("Close…"))).toBe(true)
-    expect(items.some((t) => t?.includes("Open editor in new tab"))).toBe(true)
+    // Its editor entries are the agent's own: a session-owned terminal's editor
+    // is its agent's, so listing both would show every editor entry twice.
+    for (const entry of ["Open editor here", "Open editor in new tab"]) {
+      expect(items.filter((t) => t?.includes(entry))).toHaveLength(1)
+    }
     // Labelled, so Close… cannot read as one more agent action.
     const heading = screen.getByText("Terminal")
     const remove = screen
