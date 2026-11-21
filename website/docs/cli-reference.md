@@ -36,7 +36,7 @@ commands fit together, and examples, see [The command line](/docs/command-line).
 | `0` | success |
 | `1` | the change failed, or what was named does not exist |
 | `2` | the command line is wrong |
-| `3` | refused: someone is attached, another change is in the way, or the change was not confirmed |
+| `3` | refused: someone is attached, another device is driving it, another change is in the way, or the change was not confirmed |
 | `4` | dux isn't running, or does not answer |
 | `5` | the remote asks for its password; sign in with `dux remote login` |
 | `6` | the outcome is unknown: the wait ran out, and the change keeps running |
@@ -315,7 +315,7 @@ dux projects rm [OPTIONS] <PROJECT>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux projects worktrees`
 
@@ -441,7 +441,7 @@ dux agents rm [OPTIONS] <AGENT>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents stop`
 
@@ -460,7 +460,7 @@ dux agents stop [OPTIONS] <AGENT>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents start`
 
@@ -479,6 +479,7 @@ dux agents start [OPTIONS] <AGENT>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents tabs`
 
@@ -531,6 +532,7 @@ dux agents tabs add [OPTIONS] <AGENT>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents tabs rm`
 
@@ -552,7 +554,7 @@ dux agents tabs rm [OPTIONS] <AGENT> <TAB>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents tabs start`
 
@@ -572,6 +574,7 @@ dux agents tabs start [OPTIONS] <AGENT> <TAB>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents tabs stop`
 
@@ -591,7 +594,7 @@ dux agents tabs stop [OPTIONS] <AGENT> <TAB>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux agents prs`
 
@@ -803,6 +806,7 @@ dux terminals add [OPTIONS]
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ### `dux terminals rm`
 
@@ -823,7 +827,7 @@ dux terminals rm [OPTIONS] <TERMINAL>
 | `--yes` |  | Do not ask for confirmation (required without a terminal). |
 | `--no-wait` |  | Print the operation id and return without waiting for the change. |
 | `--wait-timeout` | `<SECONDS>` | Wait at most this many seconds for the change to finish (at most a day). Not with `--no-wait`. |
-| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached. |
+| `--dangerously-ignore-connected` |  | Go ahead even though someone is attached, or another device is driving the agent or terminal. |
 
 ## `dux macros`
 

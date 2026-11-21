@@ -692,6 +692,10 @@ mod tests {
         let socket = dir.path().join("dux.sock");
         let _fake = FakeDux::unix(&socket, |seen| match seen.path.as_str() {
             "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/sessions/a3/reconnect?operation=1" => Reply::json(
+                423,
+                "This agent is being driven from Firefox on Linux right now.",
+            ),
             "/api/v1/sessions/a2?operation=1" => Reply::json(
                 409,
                 r#"{"error":"attached","blockers":[{"surface":"browser","device":null,"address":"192.168.1.5","verified":true,"driving":true,"target":{"kind":"tab","id":"t9","agent":"a2"}}]}"#,
@@ -737,6 +741,22 @@ mod tests {
             error.message
         );
         assert!(!error.message.contains('{'), "{}", error.message);
+
+        // Another device drives it: the dux's sentence, and how to go ahead anyway.
+        let error = client
+            .change(Method::Post, "/api/v1/sessions/a3/reconnect", None)
+            .unwrap_err();
+        assert_eq!(error.exit, Exit::Refused);
+        assert!(
+            error.message.contains("driven from Firefox on Linux"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("--dangerously-ignore-connected"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

@@ -684,8 +684,8 @@ fn change_on_dux(
     workspace::perform(&client, &planned, wait)
 }
 
-/// A guarded change: the same, going ahead over whoever is attached only
-/// when asked to in so many words.
+/// A guarded change: the same, going ahead over whoever is attached, or over
+/// the device driving what it changes, only when asked to in so many words.
 fn guarded_on_dux(
     selection: &Selection,
     err: &mut impl Write,
@@ -807,9 +807,9 @@ pub(crate) fn agents(
                 workspace::agents_stop(client, &agent, force)
             })
         }
-        AgentsSub::Start { agent, change } => {
-            change_on_dux(selection, err, &change, |client, _| {
-                workspace::agents_start(client, &agent)
+        AgentsSub::Start { agent, guarded } => {
+            guarded_on_dux(selection, err, &guarded, |client, force| {
+                workspace::agents_start(client, &agent, force)
             })
         }
         AgentsSub::Tabs { command } => tabs(command, selection, err),
@@ -926,9 +926,9 @@ fn tabs(command: TabsSub, selection: &Selection, err: &mut impl Write) -> Result
         TabsSub::Add {
             agent,
             provider,
-            change,
-        } => change_on_dux(selection, err, &change, |client, _| {
-            workspace::tabs_add(client, &agent, provider.as_deref())
+            guarded,
+        } => guarded_on_dux(selection, err, &guarded, |client, force| {
+            workspace::tabs_add(client, &agent, provider.as_deref(), force)
         }),
         TabsSub::Rm {
             agent,
@@ -937,11 +937,13 @@ fn tabs(command: TabsSub, selection: &Selection, err: &mut impl Write) -> Result
         } => guarded_on_dux(selection, err, &guarded, |client, force| {
             workspace::tabs_rm(client, &agent, &tab, force)
         }),
-        TabsSub::Start { agent, tab, change } => {
-            change_on_dux(selection, err, &change, |client, _| {
-                workspace::tabs_start(client, &agent, &tab)
-            })
-        }
+        TabsSub::Start {
+            agent,
+            tab,
+            guarded,
+        } => guarded_on_dux(selection, err, &guarded, |client, force| {
+            workspace::tabs_start(client, &agent, &tab, force)
+        }),
         TabsSub::Stop {
             agent,
             tab,
@@ -967,8 +969,8 @@ pub(crate) fn terminals(
                 (_, Some(project)) => workspace::TerminalFor::Project(project.clone()),
                 (None, None) => workspace::TerminalFor::Standalone,
             };
-            change_on_dux(selection, err, &args.change, |client, _| {
-                workspace::terminals_add(client, owner)
+            guarded_on_dux(selection, err, &args.guarded, |client, force| {
+                workspace::terminals_add(client, owner, force)
             })
         }
         TerminalsSub::Rm { terminal, guarded } => {

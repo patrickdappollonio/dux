@@ -387,12 +387,14 @@ impl ChangeFlags {
     }
 }
 
-/// A change that can cut off whoever is attached to what it touches.
+/// A change that can cut off whoever is attached to what it touches, or that
+/// changes an agent or terminal another device may be driving.
 #[derive(Args, Debug)]
 pub(crate) struct GuardedChangeFlags {
     #[command(flatten)]
     pub change: ChangeFlags,
-    /// Go ahead even though someone is attached.
+    /// Go ahead even though someone is attached, or another device is driving
+    /// the agent or terminal.
     #[arg(long)]
     pub dangerously_ignore_connected: bool,
 }
@@ -482,7 +484,7 @@ pub(crate) struct AddTerminalArgs {
     #[arg(long, value_name = "PROJECT")]
     pub project: Option<String>,
     #[command(flatten)]
-    pub change: ChangeFlags,
+    pub guarded: GuardedChangeFlags,
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +632,7 @@ pub(crate) enum AgentsSub {
         /// An agent's id or name; a name two agents share is refused with both ids.
         agent: String,
         #[command(flatten)]
-        change: ChangeFlags,
+        guarded: GuardedChangeFlags,
     },
     /// An agent's provider tabs.
     Tabs {
@@ -805,7 +807,7 @@ pub(crate) enum TabsSub {
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
         #[command(flatten)]
-        change: ChangeFlags,
+        guarded: GuardedChangeFlags,
     },
     /// Close a tab.
     #[command(visible_alias = "remove")]
@@ -824,7 +826,7 @@ pub(crate) enum TabsSub {
         /// A tab's id or the label the tab strip shows it under.
         tab: String,
         #[command(flatten)]
-        change: ChangeFlags,
+        guarded: GuardedChangeFlags,
     },
     /// Stop a tab.
     Stop {
@@ -1191,8 +1193,8 @@ codes:
   0  success
   1  the change failed, or what was named does not exist
   2  the command line is wrong
-  3  refused: someone is attached, another change is in the way, or the
-     change was not confirmed
+  3  refused: someone is attached, another device is driving it, another
+     change is in the way, or the change was not confirmed
   4  dux isn't running, or does not answer
   5  the remote asks for its password; sign in with `dux remote login`
   6  the outcome is unknown: the wait ran out, and the change keeps running"

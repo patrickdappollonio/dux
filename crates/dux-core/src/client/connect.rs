@@ -418,6 +418,9 @@ impl Client {
         {
             return attached(&blockers);
         }
+        if reply.status == 423 {
+            return driven(&reply_sentence(reply));
+        }
         let exit = match reply.status {
             409 => Exit::Refused,
             503 => Exit::NotRunning,
@@ -515,6 +518,18 @@ fn attached(blockers: &[crate::attachments::Blocker]) -> CliError {
          --dangerously-ignore-connected to go ahead and cut them off.",
     );
     CliError::new(Exit::Refused, message)
+}
+
+/// A change refused because another device drives the agent or terminal it
+/// would change: the dux's sentence, then the way past it from here.
+fn driven(sentence: &str) -> CliError {
+    CliError::new(
+        Exit::Refused,
+        format!(
+            "{sentence}\nThe command line cannot take over. Add --dangerously-ignore-connected \
+             to make the change anyway."
+        ),
+    )
 }
 
 fn login_needed(name: &str) -> CliError {

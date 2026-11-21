@@ -239,6 +239,22 @@ by default), so the agent you are working on from the couch stays protected.
 > terminal UI is showing the agent you are deleting from a shell, the terminal UI is in the
 > way, and the command is refused until you add the flag.
 
+### An agent another device is driving
+
+One device at a time drives an agent together with its tabs and terminals, or a project or
+standalone terminal (see [The workspace in the browser](/docs/web-workspace)). While one
+does, a change to it from the command line is refused, naming the device:
+
+```text
+This agent is being driven from Chrome on macOS right now, and only the device driving it can change it, so dux did not make the change. Take it over on this device first, then try again.
+The command line cannot take over. Add --dangerously-ignore-connected to make the change anyway.
+```
+
+That covers `dux agents start`, `stop` and `rm`, `dux agents tabs add`, `start`, `stop`
+and `rm`, and `dux terminals add --agent` and `rm`. The command exits 3. The same flag,
+`--dangerously-ignore-connected`, makes the change anyway. While nobody is driving, nothing
+is refused on this account.
+
 ## Resources kept in config.toml
 
 Macros, providers, keys, themes and the global environment live in `config.toml`, so on
@@ -400,7 +416,7 @@ Scripts can rely on these:
 | `0` | It worked. |
 | `1` | The change failed or partly failed, or what you named does not exist. |
 | `2` | The command line is wrong: a bad flag, a name two things share, an unknown remote. |
-| `3` | Refused: somebody is connected, another change is in the way, or the change was not confirmed. |
+| `3` | Refused: somebody is connected, another device is driving it, another change is in the way, or the change was not confirmed. |
 | `4` | dux isn't running, or does not answer. |
 | `5` | The remote asks for its password and this machine needs a sign-in there (none saved, or the saved one ended). |
 | `6` | The outcome is unknown: the wait ran out and the change keeps running, or the change was sent and its answer was lost or was a server error. |

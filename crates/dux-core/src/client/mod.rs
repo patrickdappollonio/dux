@@ -29,8 +29,8 @@ pub enum Exit {
     Failed,
     /// The command line itself is wrong.
     Usage,
-    /// Refused: someone is attached, another change is in the way, or a
-    /// confirmation was declined or could not be asked.
+    /// Refused: someone is attached, another device is driving it, another
+    /// change is in the way, or a confirmation was declined or could not be asked.
     Refused,
     /// No dux is running, or it does not answer.
     NotRunning,
@@ -58,8 +58,8 @@ impl Exit {
             Exit::Failed => "the change failed, or what was named does not exist",
             Exit::Usage => "the command line is wrong",
             Exit::Refused => {
-                "refused: someone is attached, another change is in the way, or the change was \
-                 not confirmed"
+                "refused: someone is attached, another device is driving it, another change is \
+                 in the way, or the change was not confirmed"
             }
             Exit::NotRunning => "dux isn't running, or does not answer",
             Exit::PasswordNeeded => {

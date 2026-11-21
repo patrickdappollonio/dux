@@ -989,7 +989,8 @@ pub fn terminals_ls(client: &Client, shape: Shape) -> Result<String, CliError> {
 // Changes
 // ---------------------------------------------------------------------------
 
-/// What a change does when somebody else is attached to what it would end.
+/// What a change does when somebody else is attached to what it would end,
+/// or another device drives what it would change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IfAttached {
     /// Refuse, naming who.
@@ -1063,8 +1064,8 @@ impl Planned {
         }
     }
 
-    /// Go ahead even though somebody else is attached to what this ends,
-    /// when `if_attached` says so.
+    /// Go ahead even though somebody else is attached to what this ends, or
+    /// another device drives what it changes, when `if_attached` says so.
     fn forced(mut self, if_attached: IfAttached) -> Self {
         if if_attached == IfAttached::GoAhead {
             let separator = if self.path.contains('?') { '&' } else { '?' };
@@ -2417,14 +2418,19 @@ pub fn agents_stop(
 /// # Errors
 ///
 /// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
-pub fn agents_start(client: &Client, query: &str) -> Result<Planned, CliError> {
+pub fn agents_start(
+    client: &Client,
+    query: &str,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let agent = find_agent(client, query)?;
     Ok(Planned::new(
         format!("Start agent {}", agent.name()),
         Method::Post,
         format!("/api/v1/sessions/{}/reconnect", segment(&agent.id)),
         Some(json!({ "force": false })),
-    ))
+    )
+    .forced(if_attached))
 }
 
 /// `dux agents tabs add <a>`.
@@ -2432,7 +2438,12 @@ pub fn agents_start(client: &Client, query: &str) -> Result<Planned, CliError> {
 /// # Errors
 ///
 /// Fails when the dux cannot be reached or refuses, or `query` names no single agent.
-pub fn tabs_add(client: &Client, query: &str, provider: Option<&str>) -> Result<Planned, CliError> {
+pub fn tabs_add(
+    client: &Client,
+    query: &str,
+    provider: Option<&str>,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let agent = find_agent(client, query)?;
     let what = provider.map_or("a tab".to_string(), |p| format!("a {p} tab"));
     Ok(Planned::new(
@@ -2440,7 +2451,8 @@ pub fn tabs_add(client: &Client, query: &str, provider: Option<&str>) -> Result<
         Method::Post,
         format!("/api/v1/sessions/{}/tabs", segment(&agent.id)),
         Some(json!({ "provider": provider })),
-    ))
+    )
+    .forced(if_attached))
 }
 
 /// What a tab verb acts on: the question's words and the tab's address.
@@ -2490,14 +2502,20 @@ pub fn tabs_rm(
 ///
 /// Fails when the dux cannot be reached or refuses, or the agent or tab is not named by exactly
 /// one.
-pub fn tabs_start(client: &Client, agent: &str, tab: &str) -> Result<Planned, CliError> {
+pub fn tabs_start(
+    client: &Client,
+    agent: &str,
+    tab: &str,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let (agent, label, path) = tab_address(client, agent, tab)?;
     Ok(Planned::new(
         format!("Start the {label} tab of agent {agent}"),
         Method::Post,
         format!("{path}/start"),
         None,
-    ))
+    )
+    .forced(if_attached))
 }
 
 /// `dux agents tabs stop <a> <tab>`.
@@ -2733,7 +2751,11 @@ pub enum TerminalFor {
 ///
 /// Fails when the dux cannot be reached or refuses, or the owner named names no single agent or
 /// project.
-pub fn terminals_add(client: &Client, owner: TerminalFor) -> Result<Planned, CliError> {
+pub fn terminals_add(
+    client: &Client,
+    owner: TerminalFor,
+    if_attached: IfAttached,
+) -> Result<Planned, CliError> {
     let (question, path) = match owner {
         TerminalFor::Agent(query) => {
             let agent = find_agent(client, &query)?;
@@ -2755,7 +2777,7 @@ pub fn terminals_add(client: &Client, owner: TerminalFor) -> Result<Planned, Cli
             "/api/v1/terminals".to_string(),
         ),
     };
-    Ok(Planned::new(question, Method::Post, path, None))
+    Ok(Planned::new(question, Method::Post, path, None).forced(if_attached))
 }
 
 /// `dux terminals rm <t>`.
@@ -3431,6 +3453,39 @@ mod agents_rm_tests {
 
     const BUILD: &str = r#"{"version":"v1","process":"p","api":1}"#;
     const AGENTS: &str = r#"[{"id":"a1","title":"feat","provider":"claude","status":"detached","workspace":{"kind":"managed","project_id":"p1","branch_name":"main","worktree_path":"/wt/feat"}}]"#;
+
+    /// A start is refused while another device drives the agent, so the flag
+    /// that goes ahead anyway has to reach the dux on it.
+    #[test]
+    fn a_start_told_to_go_ahead_over_whoever_is_connected_says_so_to_the_dux() {
+        let dir = private_dir();
+        let socket = dir.path().join("dux.sock");
+        let _fake = FakeDux::unix(&socket, |seen| match seen.path.as_str() {
+            "/api/v1/build" => Reply::json(200, BUILD),
+            "/api/v1/sessions" => Reply::json(200, AGENTS),
+            _ => Reply::json(404, "{}"),
+        });
+        let lock_path = dir.path().join("dux.lock");
+        let _lock = crate::lockfile::SingleInstanceLock::acquire(&lock_path).unwrap();
+        std::fs::write(
+            &lock_path,
+            format!(
+                "{}\ncontrol-socket={}\n",
+                std::process::id(),
+                socket.display()
+            ),
+        )
+        .unwrap();
+        let client = connect(&Target::Local, &lock_path).unwrap();
+
+        let plain = agents_start(&client, "feat", IfAttached::Refuse).unwrap();
+        assert_eq!(plain.path, "/api/v1/sessions/a1/reconnect");
+        let forced = agents_start(&client, "feat", IfAttached::GoAhead).unwrap();
+        assert_eq!(
+            forced.path,
+            "/api/v1/sessions/a1/reconnect?force_connected=true"
+        );
+    }
 
     /// `dux agents rm` against a dux whose branch offer answers `offer`.
     fn plan(offer: &'static str, delete: Option<bool>, others: Option<bool>) -> Planned {
