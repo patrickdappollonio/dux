@@ -1384,7 +1384,7 @@ impl Engine {
         let timeout = self.config.git.network_timeout();
         self.spawn_status_op(op, move || {
             let _hold = hold;
-            crate::git::push(&wt, timeout)
+            crate::git::push(&wt, timeout, crate::git::StartedBy::User)
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"))
         })
@@ -1785,14 +1785,17 @@ impl Engine {
                     PullTarget::Project { leading_branch, .. } => {
                         run_project_refresh(&repo_path, leading_branch.clone(), &guard, timeout)
                     }
-                    PullTarget::Session => {
-                        crate::git::pull_current_branch(&repo_path, &guard, timeout)
-                            .map(|()| PullOutcome::Pulled {
-                                current_branch: None,
-                                default_warning: None,
-                            })
-                            .map_err(|error| format!("{error:#}"))
-                    }
+                    PullTarget::Session => crate::git::pull_current_branch(
+                        &repo_path,
+                        &guard,
+                        timeout,
+                        crate::git::StartedBy::User,
+                    )
+                    .map(|()| PullOutcome::Pulled {
+                        current_branch: None,
+                        default_warning: None,
+                    })
+                    .map_err(|error| format!("{error:#}")),
                 };
                 let status = op.resolve(&result).with_scope(origin.clone());
                 let _ = tx.send(WorkerEvent::PullCompleted {
@@ -2310,8 +2313,14 @@ fn run_project_refresh(
             current_branch,
         });
     }
-    crate::git::pull_branch(repo_path, &leading_branch, guard, timeout)
-        .map_err(|e| format!("{e:#}"))?;
+    crate::git::pull_branch(
+        repo_path,
+        &leading_branch,
+        guard,
+        timeout,
+        crate::git::StartedBy::User,
+    )
+    .map_err(|e| format!("{e:#}"))?;
     let current_branch = crate::git::current_branch(repo_path).ok();
     Ok(PullOutcome::Pulled {
         default_warning: default_warning_for(repo_path, current_branch.as_deref()),

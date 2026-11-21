@@ -81,16 +81,33 @@ pub fn load_branch_listing(repo: &Path, fetch_timeout: Duration) -> anyhow::Resu
                 fetch_timeout,
                 BASE_BRANCH_FETCH_RETRY_PAUSE,
                 BASE_BRANCH_FETCH_RETRY_MIN,
-                |bound| git::fetch_origin_bounded(repo, bound),
+                |bound| git::fetch_origin_bounded(repo, bound, git::StartedBy::Background),
             ) {
                 Ok(()) => OriginFetch::Fetched,
-                Err(error) => OriginFetch::Failed(format!("{error:#}")),
+                Err(error) => {
+                    OriginFetch::Failed(match error.downcast_ref::<git::WantedAPrompt>() {
+                        Some(wanted) => wanted_a_prompt_note(wanted),
+                        None => format!("{error:#}"),
+                    })
+                }
             }
         }
         Err(error) => OriginFetch::Failed(format!("{error:#}")),
     };
     let branches = git::list_branches(repo)?;
     Ok(BranchListing { branches, fetch })
+}
+
+/// Why the listing's fetch stopped when origin wanted something only a prompt
+/// could give, worded to sit inside each surface's "not fetched" sentence.
+fn wanted_a_prompt_note(wanted: &git::WantedAPrompt) -> String {
+    format!(
+        "origin wants a password, a key passphrase or a host confirmation, which dux does \
+         not ask for when it fetches by itself to list branches. Pull the project once so \
+         your credential helper or ssh agent keeps the answer, or set one up so git can \
+         sign in without asking. Git said: {}",
+        wanted.git_said
+    )
 }
 
 /// The least a retry is given: with less of the budget left after the pause,
@@ -120,6 +137,10 @@ fn fetch_with_one_retry(
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
+    // Asked again, origin wants the same answer.
+    if first.downcast_ref::<git::WantedAPrompt>().is_some() {
+        return Err(first);
+    }
     let remaining = budget.saturating_sub(started.elapsed());
     let Some(retry_budget) = remaining
         .checked_sub(pause)

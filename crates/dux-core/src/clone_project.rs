@@ -1168,6 +1168,16 @@ fn keep_env_config(dest: &Path, env: &[(String, String)]) {
     }
 }
 
+impl CloneJob {
+    /// The job's extra git environment, as git commands take it.
+    fn git_env_pairs(&self) -> Vec<(&str, &str)> {
+        self.git_env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect()
+    }
+}
+
 fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
     let address = redact_remote_userinfo(&job.url);
     let dest = &job.destination;
@@ -1193,14 +1203,15 @@ fn clone_and_inspect(job: &CloneJob) -> Result<ClonedRepository, CloneOutcome> {
     }
     let claim = claim_destination(dest).map_err(CloneOutcome::Refused)?;
     crate::logger::info(&format!("cloning {address} into {}", dest.display()));
-    let env: Vec<(&str, &str)> = job
-        .git_env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
-    if let Err(error) =
-        crate::git::clone_repository_with_env(&job.url, dest, job.stall, &job.processes, &env)
-    {
+    let env = job.git_env_pairs();
+    if let Err(error) = crate::git::clone_repository_with_env(
+        &job.url,
+        dest,
+        job.stall,
+        &job.processes,
+        crate::git::StartedBy::User,
+        &env,
+    ) {
         crate::logger::error(&format!(
             "clone of {address} into {} failed: {error:?}",
             dest.display()
@@ -1400,13 +1411,15 @@ fn leading_branch_of_checkout(
     refuse: impl Fn(StatusText) -> CloneOutcome,
 ) -> Result<(String, Option<LeadingBranchGuess>), CloneOutcome> {
     let dest = &job.destination;
-    let env: Vec<(&str, &str)> = job
-        .git_env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
-    let remote_default = crate::git::remote_default_branch(dest)
-        .or_else(|| crate::git::remote_default_branch_from_remote(dest, &env));
+    let env = job.git_env_pairs();
+    let remote_default = crate::git::remote_default_branch(dest).or_else(|| {
+        crate::git::remote_default_branch_from_remote(
+            dest,
+            // A fallback question after the clone, not a second sign-in.
+            crate::git::StartedBy::Background,
+            &env,
+        )
+    });
     // The remote's default leads only when the folder has a branch of that
     // name: every later plain agent branches from the leading branch and is
     // refused when it does not exist locally.

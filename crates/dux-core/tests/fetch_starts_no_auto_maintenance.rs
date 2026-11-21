@@ -71,6 +71,7 @@ fn a_pull_request_fetch_starts_no_auto_maintenance_even_where_the_repository_wan
         7,
         "pr-7",
         Some(std::time::Duration::from_secs(60)),
+        dux_core::git::StartedBy::User,
     )
     .unwrap();
 

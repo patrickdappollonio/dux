@@ -1099,9 +1099,13 @@ fn config_schema() -> Vec<ConfigEntry> {
             key: "network_timeout_seconds",
             comment: Some(CommentSource::Static(
                 "# How long a push, a pull's fetch, a pull request fetch or an ls-remote that\n\
-                 # dux runs for you may take, in seconds, before dux stops the whole command\n\
-                 # and says so. None of them can ask anything on a terminal, so this catches a\n\
-                 # remote or a credential helper that stopped answering. Raise it for a long\n\
+                 # dux runs may take, in seconds, before dux stops the whole command and says\n\
+                 # so. None of them can ask anything on a terminal, so this catches a remote\n\
+                 # or a credential helper that stopped answering. A password program you set\n\
+                 # in GIT_ASKPASS, SSH_ASKPASS or core.askPass may still ask you during git\n\
+                 # work you start (a clone, a push, a pull, a new agent's fetch); git work dux\n\
+                 # does by itself, like the fetch behind the base branch list, never runs one\n\
+                 # and says so when the remote wanted a password. Raise it for a long\n\
                  # pre-push hook or a large Git LFS upload; 0 means no limit at all. Takes\n\
                  # effect for the next command. Default 600 (10 minutes).",
             )),

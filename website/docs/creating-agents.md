@@ -161,6 +161,10 @@ exists on `origin`.
 - **The fetch** is tried once more if it fails and there is time left, and dux gives up
   after 15 seconds in all. When it does, the list shows origin's branches as last fetched
   and says why.
+- **The fetch never asks for a password.** dux runs it by itself, so a password program
+  you configured is not opened. When origin wanted a password, a key passphrase or a host
+  confirmation, the list says so: pull the project once, or set up a credential helper or
+  an ssh agent so git can sign in without asking.
 - **The current base** is marked, and the list is searchable.
 - **A branch another worktree has checked out,** usually an agent's own branch, is listed
   but cannot be picked, and the row names who holds it: git will not check out one branch
@@ -325,12 +329,14 @@ ends with one outcome: the agent is running, or what stopped it and how far it g
   fix rather than the whole form.
 
 > [!IMPORTANT]
-> **dux never asks for anything while it clones.** It uses your own git setup, and nothing
-> that would ask is ever waited on, a password pop-up included: it fails straight away with
-> git's or ssh's own message instead.
+> **dux never asks for anything on a terminal while it clones.** It uses your own git
+> setup. With no password program configured, a clone that would have to ask fails
+> straight away with git's or ssh's own message instead.
 >
-> - **Works as in your shell:** your ssh agent and keys, URL rewrites, and credential
->   helpers that answer without asking (a stored token, a keychain).
+> - **Works as in your shell:** your ssh agent and keys, URL rewrites, credential helpers
+>   that answer without asking (a stored token, a keychain), and a password program you
+>   configured (`GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`), which may open its window
+>   because you started the clone.
 > - **Do first, once:** connect to a host you have never used from a shell (or clone
 >   anything from it) so it is trusted, and load an ssh key with a passphrase into your
 >   agent.
@@ -479,7 +485,7 @@ every project you have.
 
 > [!IMPORTANT]
 > The clone is the same one [Cloning a repository](#cloning-a-repository) does. It uses
-> `gh`'s git protocol setting for that host and never prompts for anything. Over SSH,
+> `gh`'s git protocol setting for that host and never prompts on a terminal. Over SSH,
 > connect once in a terminal first with `ssh -T git@<host>`, so the host is known; over
 > HTTPS, a private repository needs git credentials set up outside dux, for example with
 > `gh auth setup-git`.

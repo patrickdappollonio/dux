@@ -1297,7 +1297,13 @@ impl CreatePlanContext<'_> {
             // runs and reports the failure itself.
             Ok(true)
                 if matches!(
-                    git::origin_has_branch(repo_path, leading_branch, self.network_timeout),
+                    git::origin_has_branch(
+                        repo_path,
+                        leading_branch,
+                        self.network_timeout,
+                        // A question ahead of the pull: the pull asks, once.
+                        git::StartedBy::Background,
+                    ),
                     Ok(false)
                 ) =>
             {
@@ -1307,9 +1313,13 @@ impl CreatePlanContext<'_> {
                 ));
             }
             Ok(true) => {
-                if let Err(err) =
-                    git::pull_branch(repo_path, leading_branch, self.moves, self.network_timeout)
-                {
+                if let Err(err) = git::pull_branch(
+                    repo_path,
+                    leading_branch,
+                    self.moves,
+                    self.network_timeout,
+                    git::StartedBy::User,
+                ) {
                     logger::error(&format!(
                         "pre-create pull failed for {}: {err}",
                         project.path
@@ -1878,10 +1888,15 @@ impl CreatePlanContext<'_> {
         }
         let commit = match head_commit {
             Some(commit) => commit.to_string(),
-            None => git::fetch_pull_request_head_commit(repo_path, number, network_timeout)
-                .map_err(|err| {
-                    crate::status_text!["Failed to fetch PR ", n(pr.clone()), format!(": {err}")]
-                })?,
+            None => git::fetch_pull_request_head_commit(
+                repo_path,
+                number,
+                network_timeout,
+                git::StartedBy::User,
+            )
+            .map_err(|err| {
+                crate::status_text!["Failed to fetch PR ", n(pr.clone()), format!(": {err}")]
+            })?,
         };
         match git::worktree_head_contains(worktree, &commit) {
             Ok(true) => Ok(None),
@@ -2115,23 +2130,27 @@ impl CreatePlanContext<'_> {
             owner_repo,
             number,
         } = fetch;
-        let commit =
-            match git::fetch_pull_request_head_commit(repo_path, number, self.network_timeout) {
-                Ok(commit) => commit,
-                Err(err) => {
-                    logger::error(&format!(
-                        "PR head fetch failed for {owner_repo} #{number}: {err}"
-                    ));
-                    self.send_failure(crate::status_text![
-                        "Failed to fetch PR ",
-                        n(format!("#{}", number)),
-                        " from ",
-                        n(owner_repo),
-                        format!(": {}", err)
-                    ]);
-                    return None;
-                }
-            };
+        let commit = match git::fetch_pull_request_head_commit(
+            repo_path,
+            number,
+            self.network_timeout,
+            git::StartedBy::User,
+        ) {
+            Ok(commit) => commit,
+            Err(err) => {
+                logger::error(&format!(
+                    "PR head fetch failed for {owner_repo} #{number}: {err}"
+                ));
+                self.send_failure(crate::status_text![
+                    "Failed to fetch PR ",
+                    n(format!("#{}", number)),
+                    " from ",
+                    n(owner_repo),
+                    format!(": {}", err)
+                ]);
+                return None;
+            }
+        };
         let Some(resolved_name) = local_name else {
             return Some((commit, HeadContainment::NotLocal));
         };
@@ -2191,9 +2210,13 @@ impl CreatePlanContext<'_> {
                 "..."
             ],
         });
-        if let Err(err) =
-            git::fetch_pull_request_head(repo_path, number, resolved_name, self.network_timeout)
-        {
+        if let Err(err) = git::fetch_pull_request_head(
+            repo_path,
+            number,
+            resolved_name,
+            self.network_timeout,
+            git::StartedBy::User,
+        ) {
             logger::error(&format!(
                 "PR worktree fetch failed for {owner_repo} #{number}: {err}"
             ));

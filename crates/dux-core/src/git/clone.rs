@@ -1,5 +1,5 @@
-//! `git clone`, run so that it can never ask for anything and never hangs
-//! unnoticed.
+//! `git clone`, and the command every network git call starts from: neither
+//! ever asks on dux's terminal or hangs unnoticed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -91,23 +91,36 @@ fn kill_group(group: i32) {
     }
 }
 
+/// Who started a network git call, which decides whether anything may ask the
+/// user for a credential while it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartedBy {
+    /// The user asked for it and is waiting on it: an askpass they configured
+    /// may answer, or ask them.
+    User,
+    /// dux runs it on its own: no askpass of any kind runs, so only a
+    /// credential helper that answers without asking can sign it in.
+    Background,
+}
+
 /// A `git` command that can never ask for an answer on dux's terminal: no
 /// terminal prompt, no interactive Git Credential Manager, and a session of its
 /// own, so with no controlling terminal ssh cannot open `/dev/tty` to ask for a
 /// passphrase or a host key. It is a process group of its own too, so a clone
 /// can be stopped at once. Null stdin; the caller sets the rest.
 ///
-/// An askpass the user configured (`GIT_ASKPASS` or `SSH_ASKPASS` in the
-/// environment, or `core.askPass`) is theirs and is left alone: it is how a
-/// stored token reaches git without anyone being asked. Only where none is
-/// configured does git get an askpass that fails at once. That one rides on
-/// `SSH_ASKPASS`, the last place git looks, so `core.askPass` still wins over
-/// it without dux having to read the user's git configuration.
+/// For [`StartedBy::User`] an askpass configured in `GIT_ASKPASS`,
+/// `SSH_ASKPASS` or `core.askPass` still runs; where none is, ssh gets one
+/// that fails at once. For [`StartedBy::Background`] none runs: an empty
+/// `GIT_ASKPASS` outranks `core.askPass` and `SSH_ASKPASS` for git, and
+/// `SSH_ASKPASS_REQUIRE=never` stops ssh's.
 ///
 /// `env` is extra variables for git's environment, set first (a test hands git
-/// a stand-in transport or askpass this way); an askpass named there counts as
-/// configured.
-pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Command {
+/// a stand-in transport or askpass this way).
+pub(crate) fn network_git_command(
+    started_by: StartedBy,
+    env: &[(&str, &str)],
+) -> std::process::Command {
     use std::os::unix::process::CommandExt as _;
 
     let mut command = std::process::Command::new("git");
@@ -122,10 +135,19 @@ pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Comma
         Some((_, value)) => !value.is_empty(),
         None => std::env::var_os(key).is_some_and(|value| !value.is_empty()),
     };
-    if !configured("SSH_ASKPASS") {
-        command
-            .env("SSH_ASKPASS", "false")
-            .env("SSH_ASKPASS_REQUIRE", "never");
+    match started_by {
+        StartedBy::User => {
+            if !configured("SSH_ASKPASS") {
+                command
+                    .env("SSH_ASKPASS", "false")
+                    .env("SSH_ASKPASS_REQUIRE", "never");
+            }
+        }
+        StartedBy::Background => {
+            command
+                .env("GIT_ASKPASS", "")
+                .env("SSH_ASKPASS_REQUIRE", "never");
+        }
     }
     // SAFETY: `setsid` is async-signal-safe and touches no Rust state.
     unsafe {
@@ -137,16 +159,27 @@ pub(crate) fn no_prompt_git_command(env: &[(&str, &str)]) -> std::process::Comma
     command
 }
 
+/// Whether a failed network git call's stderr says the remote wanted something
+/// only a prompt could give: git's credential prompt (refused with "terminal
+/// prompts disabled"), or ssh's host confirmation or key passphrase, which ssh
+/// reports only as the refusal that followed.
+pub(crate) fn wanted_a_prompt(stderr: &str) -> bool {
+    stderr.contains("terminal prompts disabled")
+        || stderr.contains("Host key verification failed")
+        || stderr.contains("Permission denied (")
+}
+
 /// The branch the remote `origin` of the repository at `path` calls its
 /// default, asked of the remote itself, for a folder that does not record it.
 /// `None` when the remote cannot say: unreachable, slow past the bound, or an
-/// answer that names no branch. Never prompts. `env` is extra variables for
-/// git's environment, so a test can hand git a stand-in transport.
+/// answer that names no branch. `env` is extra variables for git's
+/// environment, so a test can hand git a stand-in transport.
 pub(crate) fn remote_default_branch_from_remote(
     path: &Path,
+    started_by: StartedBy,
     env: &[(&str, &str)],
 ) -> Option<String> {
-    let mut command = no_prompt_git_command(env);
+    let mut command = network_git_command(started_by, env);
     command
         .arg("-C")
         .arg(path)
@@ -178,9 +211,8 @@ pub(crate) fn remote_default_branch_from_remote(
 
 /// Clone `url` into `dest` with the user's own git configuration and
 /// credentials, never asking on dux's terminal: git runs in a session of its
-/// own with no terminal, so neither git nor ssh has anywhere to prompt, and
-/// unless the user configured an askpass, one that would have to prompt fails
-/// at once with its own message. There is no
+/// own with no terminal, and only an askpass the user configured can ask for
+/// a credential ([`StartedBy::User`]). There is no
 /// time limit, because a big repository is slow rather than stuck; a clone
 /// that prints nothing for `stall` (its progress keeps stderr moving) is
 /// stopped. `processes` records it, so quitting dux stops it too.
@@ -194,8 +226,9 @@ pub fn clone_repository(
     dest: &Path,
     stall: Duration,
     processes: &CloneProcesses,
+    started_by: StartedBy,
 ) -> Result<(), CloneError> {
-    clone_repository_with_env(url, dest, stall, processes, &[])
+    clone_repository_with_env(url, dest, stall, processes, started_by, &[])
 }
 
 /// [`clone_repository`] with extra variables in git's environment, so a test
@@ -205,12 +238,13 @@ pub(crate) fn clone_repository_with_env(
     dest: &Path,
     stall: Duration,
     processes: &CloneProcesses,
+    started_by: StartedBy,
     env: &[(&str, &str)],
 ) -> Result<(), CloneError> {
     use std::io::Read as _;
     use std::sync::mpsc::RecvTimeoutError;
 
-    let mut command = no_prompt_git_command(env);
+    let mut command = network_git_command(started_by, env);
     // `--origin origin` pins the remote's name against a user's
     // `clone.defaultRemoteName`, and `--progress` keeps stderr moving while
     // the clone works, which is what the stall clock watches.
@@ -478,6 +512,7 @@ mod tests {
             &dest,
             Duration::from_secs(60),
             &CloneProcesses::default(),
+            StartedBy::User,
         );
 
         assert_eq!(result, Ok(()));
@@ -515,6 +550,7 @@ mod tests {
             &dest,
             Duration::from_secs(60),
             &CloneProcesses::default(),
+            StartedBy::User,
         );
 
         assert!(matches!(result, Err(CloneError::Failed(_))), "{result:?}");
@@ -550,6 +586,7 @@ mod tests {
             &tmp.path().join("clone"),
             Duration::from_secs(60),
             &CloneProcesses::default(),
+            StartedBy::User,
             &[("GIT_SSH_COMMAND", &ssh)],
         );
 
@@ -602,6 +639,7 @@ mod tests {
             &tmp.path().join("clone"),
             Duration::from_secs(30),
             &CloneProcesses::default(),
+            StartedBy::User,
             &[("GIT_SSH_COMMAND", &ssh)],
         );
 
@@ -618,10 +656,10 @@ mod tests {
     /// Ask the no-prompt command for a credential, the way a push or a fetch
     /// asks when the remote wants one. `config` is git configuration for the
     /// call; no credential helper answers, so only an askpass can.
-    fn credential_answer(env: &[(&str, &str)], config: &[&str]) -> String {
+    fn credential_answer(started_by: StartedBy, env: &[(&str, &str)], config: &[&str]) -> String {
         use std::io::Write as _;
 
-        let mut command = no_prompt_git_command(env);
+        let mut command = network_git_command(started_by, env);
         command
             .args(["-c", "credential.helper="])
             .args(config)
@@ -639,31 +677,264 @@ mod tests {
         String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned()
     }
 
-    /// An askpass that answers from a store without asking is the user's own
-    /// way of handing git a credential, so it is used, whether the environment
-    /// or `core.askPass` names it.
+    /// A stand-in askpass at `dir/askpass` that records each run in
+    /// `dir/asked` and answers `stored-secret`.
+    fn recording_askpass(dir: &Path) -> String {
+        let script = dir.join("askpass");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\necho stored-secret\n",
+                dir.join("asked").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.to_string_lossy().into_owned()
+    }
+
+    fn times_asked(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("asked")).map_or(0, |text| text.lines().count())
+    }
+
+    /// An askpass the user configured answers a call they started, wherever
+    /// it is named, and is never run for one dux started by itself.
     #[test]
-    fn a_configured_askpass_that_answers_is_used() {
+    fn a_configured_askpass_answers_a_user_started_call_and_never_a_background_one() {
         if !runs_here_without_the_developers_prompts(
-            "git::clone::tests::a_configured_askpass_that_answers_is_used",
+            "git::clone::tests::a_configured_askpass_answers_a_user_started_call_and_never_a_background_one",
         ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let script = tmp.path().join("askpass");
-        std::fs::write(&script, "#!/bin/sh\necho stored-secret\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let script = script.to_string_lossy().into_owned();
-
-        let from_env = credential_answer(&[("GIT_ASKPASS", &script)], &[]);
-        assert!(from_env.contains("password=stored-secret"), "{from_env}");
-
+        let script = recording_askpass(tmp.path());
         let core_askpass = format!("core.askPass={script}");
-        let from_config = credential_answer(&[], &["-c", &core_askpass]);
-        assert!(
-            from_config.contains("password=stored-secret"),
-            "{from_config}"
+        let sources = [
+            (
+                "GIT_ASKPASS",
+                vec![("GIT_ASKPASS", script.as_str())],
+                vec![],
+            ),
+            (
+                "SSH_ASKPASS",
+                vec![("SSH_ASKPASS", script.as_str())],
+                vec![],
+            ),
+            ("core.askPass", vec![], vec!["-c", core_askpass.as_str()]),
+        ];
+
+        for (source, env, config) in &sources {
+            let (env, config) = (env.as_slice(), config.as_slice());
+            let answer = credential_answer(StartedBy::User, env, config);
+            assert!(
+                answer.contains("password=stored-secret"),
+                "{source}: {answer}"
+            );
+            let asked = times_asked(tmp.path());
+            assert!(asked > 0, "{source}: a user-started call never ran it");
+
+            let answer = credential_answer(StartedBy::Background, env, config);
+            assert!(!answer.contains("password="), "{source}: {answer}");
+            assert_eq!(
+                times_asked(tmp.path()),
+                asked,
+                "{source}: a background call ran it"
+            );
+        }
+    }
+
+    /// ssh runs `SSH_ASKPASS` with no terminal unless `SSH_ASKPASS_REQUIRE` is
+    /// `never` (measured on OpenSSH 10.2 for a host confirmation, a password and
+    /// a key passphrase), so that is what tells it.
+    #[test]
+    fn ssh_may_run_a_configured_askpass_only_for_a_user_started_call() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::ssh_may_run_a_configured_askpass_only_for_a_user_started_call",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let script = recording_askpass(tmp.path());
+        let seen = tmp.path().join("seen");
+        let ssh = fake_ssh(
+            tmp.path(),
+            &format!(
+                "echo \"require=$SSH_ASKPASS_REQUIRE\" >> '{}'\nexit 255",
+                seen.display()
+            ),
         );
+
+        for (n, started_by) in [StartedBy::User, StartedBy::Background]
+            .into_iter()
+            .enumerate()
+        {
+            let result = clone_repository_with_env(
+                "ssh://example.invalid/repo.git",
+                &tmp.path().join(format!("clone{n}")),
+                Duration::from_secs(30),
+                &CloneProcesses::default(),
+                started_by,
+                &[("GIT_SSH_COMMAND", &ssh), ("SSH_ASKPASS", &script)],
+            );
+            assert!(matches!(result, Err(CloneError::Failed(_))), "{result:?}");
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "require=\nrequire=never\n"
+        );
+    }
+
+    /// A remote at `127.0.0.1` that answers every request with a 401 asking
+    /// for Basic credentials, except one carrying `user:stored`, which gets a
+    /// 404. The `Authorization` header of each request, or `none`, is recorded.
+    fn credential_wanting_remote() -> (String, Arc<Mutex<Vec<String>>>) {
+        use std::io::{BufRead as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut auth = "none".to_string();
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                    if let Some(value) = line.strip_prefix("Authorization: ") {
+                        auth = value.trim().to_string();
+                    }
+                    line.clear();
+                }
+                let stored = auth == "Basic dXNlcjpzdG9yZWQ=";
+                record.lock().unwrap().push(auth);
+                let reply = if stored {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (url, seen)
+    }
+
+    /// A credential helper that answers from its store signs a call in
+    /// whoever started it, and no askpass is run beside it.
+    #[test]
+    fn a_stored_credential_signs_in_a_call_whoever_started_it() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_stored_credential_signs_in_a_call_whoever_started_it",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let script = recording_askpass(tmp.path());
+        let (url, seen) = credential_wanting_remote();
+        let store = tmp.path().join("credentials");
+        let host = url
+            .trim_start_matches("http://")
+            .trim_end_matches("/repo.git");
+        std::fs::write(
+            &store,
+            format!("http://user:stored@{}\n", host.replace(':', "%3a")),
+        )
+        .unwrap();
+        let helper = format!("credential.helper=store --file={}", store.display());
+
+        for started_by in [StartedBy::User, StartedBy::Background] {
+            seen.lock().unwrap().clear();
+            let out = network_git_command(started_by, &[("GIT_ASKPASS", &script)])
+                .args(["-c", &helper, "ls-remote", &url])
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&out.stderr);
+            assert!(said.contains("not found"), "{started_by:?}: {said}");
+            assert!(
+                seen.lock()
+                    .unwrap()
+                    .contains(&"Basic dXNlcjpzdG9yZWQ=".to_string()),
+                "{started_by:?}: the stored credential never reached the remote"
+            );
+        }
+        assert_eq!(
+            times_asked(tmp.path()),
+            0,
+            "an askpass ran beside the store"
+        );
+    }
+
+    /// The branch listing fetches by itself, so an askpass the repository
+    /// names is not run; the listing says once, without a retry, what origin
+    /// wanted and what to do.
+    #[test]
+    fn a_branch_listing_whose_origin_wants_a_credential_asks_nobody_and_says_so() {
+        if !runs_here_without_the_developers_prompts(
+            "git::clone::tests::a_branch_listing_whose_origin_wants_a_credential_asks_nobody_and_says_so",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let script = recording_askpass(tmp.path());
+        let (url, seen) = credential_wanting_remote();
+        let repo = tmp.path().join("repo");
+        for args in [
+            vec!["init", "-q", "-b", "main", repo.to_str().unwrap()],
+            vec![
+                "-C",
+                repo.to_str().unwrap(),
+                "remote",
+                "add",
+                "origin",
+                &url,
+            ],
+            vec![
+                "-C",
+                repo.to_str().unwrap(),
+                "config",
+                "core.askPass",
+                &script,
+            ],
+            vec![
+                "-C",
+                repo.to_str().unwrap(),
+                "-c",
+                "user.name=dux test",
+                "-c",
+                "user.email=dux-test@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        ] {
+            assert!(
+                git_command().args(&args).status().unwrap().success(),
+                "{args:?}"
+            );
+        }
+
+        let listing =
+            crate::base_branch::load_branch_listing(&repo, Duration::from_secs(30)).unwrap();
+
+        let note = listing.fetch_error().unwrap();
+        assert!(
+            note.starts_with(
+                "origin wants a password, a key passphrase or a host confirmation, which dux \
+                 does not ask for when it fetches by itself to list branches. Pull the project \
+                 once"
+            ),
+            "{note}"
+        );
+        assert!(note.contains("terminal prompts disabled"), "{note}");
+        assert_eq!(
+            times_asked(tmp.path()),
+            0,
+            "the repository's askpass was run"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1, "the fetch was tried again");
     }
 
     #[test]
@@ -681,6 +952,7 @@ mod tests {
             &tmp.path().join("clone"),
             Duration::from_secs(1),
             &CloneProcesses::default(),
+            StartedBy::User,
             &[("GIT_SSH_COMMAND", &ssh)],
         );
 
@@ -756,6 +1028,7 @@ mod tests {
             &tmp.path().join("clone"),
             Duration::from_secs(1),
             &CloneProcesses::default(),
+            StartedBy::User,
             &[("GIT_SSH_COMMAND", &ssh)],
         );
 
@@ -786,6 +1059,7 @@ mod tests {
                     &dest,
                     Duration::from_secs(120),
                     &running,
+                    StartedBy::User,
                     &[("GIT_SSH_COMMAND", &ssh)],
                 )
             })
@@ -801,6 +1075,7 @@ mod tests {
             &tmp.path().join("late"),
             Duration::from_secs(120),
             &engine.clones.processes,
+            StartedBy::User,
             &[("GIT_SSH_COMMAND", &ssh)],
         );
         assert_eq!(late, Err(CloneError::Stopped));

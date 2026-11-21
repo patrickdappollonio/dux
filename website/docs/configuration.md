@@ -538,11 +538,20 @@ to start sending. Values below 1 count as 1. It takes effect for the next clone.
 network_timeout_seconds = 600  # 10 minutes
 ```
 
-A push, a pull's fetch, a pull request fetch and an `ls-remote` that dux runs for you
-are stopped once they have run for `network_timeout_seconds` in all, and the message
-says so. None of them can ask for anything on a terminal, so this catches a remote or a
-credential helper that stopped answering. An askpass program you configured
-(`GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`) still answers for them.
+A push, a pull's fetch, a pull request fetch and an `ls-remote` that dux runs are
+stopped once they have run for `network_timeout_seconds` in all, and the message says
+so. None of them can ask for anything on a terminal, so this catches a remote or a
+credential helper that stopped answering.
+
+> [!IMPORTANT]
+> A password program you configured (`GIT_ASKPASS`, `SSH_ASKPASS` or `core.askPass`,
+> such as KDE's `ksshaskpass`) only runs for git work you start: a clone, a push, a pull,
+> and the fetches behind a new agent. Git work dux does by itself, like the fetch behind
+> the [base branch list](/docs/creating-agents#how-the-list-works), never opens it. When
+> the remote wanted a password, a key passphrase or a host confirmation there, dux says
+> so instead. Pull the project once, or set up a credential helper or an ssh agent, so git
+> can sign in without asking. A credential helper that answers from a store or a keychain
+> works for both.
 
 - **Set it to `0` for no limit**, for a long pre-push hook or a large Git LFS upload.
 - **It takes effect for the next command.**

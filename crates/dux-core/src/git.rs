@@ -21,7 +21,7 @@ use crate::worker::BranchWarningKind;
 mod clone;
 mod folding;
 pub(crate) mod listing_child;
-pub use clone::{CloneError, CloneProcesses, clone_repository};
+pub use clone::{CloneError, CloneProcesses, StartedBy, clone_repository};
 pub(crate) use clone::{clone_repository_with_env, remote_default_branch_from_remote};
 pub use folding::{
     ChangesSide, FolderAction, UntrackedDirectoryKind, changed_dir_children, nothing_in_folder,
@@ -1043,13 +1043,14 @@ pub(crate) fn pull_current_branch(
     repo_path: &Path,
     guard: &crate::checkout_move::CheckoutMoveGuard,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<()> {
     let Some(branch) = current_branch_opt(repo_path)? else {
         return Err(anyhow!(
             "HEAD is detached; check out a branch before pulling"
         ));
     };
-    pull_origin_branch(repo_path, &branch, guard, timeout)
+    pull_origin_branch(repo_path, &branch, guard, timeout, started_by)
 }
 
 /// Switches to `branch` and fast-forwards it from `origin`, the fetch stopped
@@ -1059,9 +1060,10 @@ pub(crate) fn pull_branch(
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<()> {
     switch_branch_if_needed(repo_path, branch, guard)?;
-    pull_origin_branch(repo_path, branch, guard, timeout)
+    pull_origin_branch(repo_path, branch, guard, timeout, started_by)
 }
 
 pub(crate) fn switch_branch_if_needed(
@@ -1131,19 +1133,20 @@ fn git_without_auto_maintenance() -> Command {
     command
 }
 
-/// Run `git <args>` in `repo` against a remote: it has no terminal to ask on
-/// and only an askpass the user configured can answer for it
-/// ([`clone::no_prompt_git_command`]),
-/// it starts no auto-maintenance, and it is stopped, its process group with
-/// it, at `timeout` (`[git] network_timeout_seconds`), or never when that is
-/// `None`. `label` names the command in failure text.
+/// Run `git <args>` in `repo` against a remote: it has no terminal to ask on,
+/// `started_by` decides whether an askpass may
+/// ([`clone::network_git_command`]), it starts no auto-maintenance, and it is
+/// stopped, its process group with it, at `timeout` (`[git]
+/// network_timeout_seconds`), or never when that is `None`. `label` names the
+/// command in failure text.
 fn network_git(
     repo: &Path,
     args: &[&str],
     label: &str,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<std::process::Output> {
-    let mut command = clone::no_prompt_git_command(&[]);
+    let mut command = clone::network_git_command(started_by, &[]);
     command
         .args(["-c", "maintenance.auto=false", "-C"])
         .arg(repo)
@@ -1216,6 +1219,7 @@ fn pull_origin_branch(
     branch: &str,
     guard: &crate::checkout_move::CheckoutMoveGuard,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<()> {
     let refspec = format!("refs/heads/{branch}");
     let output = network_git(
@@ -1223,6 +1227,7 @@ fn pull_origin_branch(
         &["fetch", "origin", "--", &refspec],
         "git fetch",
         timeout,
+        started_by,
     )?;
     if !output.status.success() {
         return Err(git_failure("git fetch", repo_path, &output));
@@ -1580,14 +1585,15 @@ pub(crate) fn origin_has_branch(
     repo_path: &Path,
     name: &str,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<bool> {
     let full_ref = format!("refs/heads/{name}");
-    // Never stop to ask for credentials: this is a question, not a login.
     let output = network_git(
         repo_path,
         &["ls-remote", "--exit-code", "origin", "--", &full_ref],
         "git ls-remote",
         timeout,
+        started_by,
     )?;
     match output.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
@@ -1728,6 +1734,22 @@ pub(crate) fn is_valid_branch_name(repo_path: &Path, name: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// The error a [`StartedBy::Background`] [`fetch_origin_bounded`] answers when
+/// origin wanted a credential or confirmation only a prompt could give
+/// ([`clone::wanted_a_prompt`]); it carries what git said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WantedAPrompt {
+    pub git_said: String,
+}
+
+impl std::fmt::Display for WantedAPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "git fetch origin needed a prompt: {}", self.git_said)
+    }
+}
+
+impl std::error::Error for WantedAPrompt {}
+
 /// The error [`fetch_origin_bounded`] answers when the fetch ran into its
 /// bound and was stopped, typed so a caller can tell "out of time" apart from
 /// a reason git gave (`anyhow::Error::downcast_ref`).
@@ -1753,13 +1775,18 @@ impl std::error::Error for FetchTimedOut {}
 /// The fetch runs in a session (and so a process group) of its own and the
 /// whole group is killed at the bound, so a transport helper (`ssh`, a
 /// credential helper, a stand-in `upload-pack`) cannot outlive it. It never
-/// prompts on dux's terminal ([`clone::no_prompt_git_command`]). A
-/// failure or a timeout is an `Err` naming what happened; callers report it
-/// and carry on from the refs they already have.
-pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duration) -> Result<()> {
+/// prompts on dux's terminal ([`clone::network_git_command`]). A
+/// failure or a timeout is an `Err` naming what happened, a [`WantedAPrompt`]
+/// when a background fetch needed one; callers report it and carry on from
+/// the refs they already have.
+pub(crate) fn fetch_origin_bounded(
+    repo_path: &Path,
+    timeout: std::time::Duration,
+    started_by: StartedBy,
+) -> Result<()> {
     use std::io::Read as _;
 
-    let mut child = clone::no_prompt_git_command(&[])
+    let mut child = clone::network_git_command(started_by, &[])
         .args([
             "-c",
             "maintenance.auto=false",
@@ -1811,6 +1838,17 @@ pub(crate) fn fetch_origin_bounded(repo_path: &Path, timeout: std::time::Duratio
     };
     let stderr = drain();
     if !status.success() {
+        if started_by == StartedBy::Background && clone::wanted_a_prompt(&stderr) {
+            return Err(WantedAPrompt {
+                git_said: stderr
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+            .into());
+        }
         return Err(anyhow!(
             "git fetch origin failed in {}: {}",
             repo_path.display(),
@@ -2780,6 +2818,7 @@ pub fn fetch_pull_request_head(
     pr_number: u64,
     branch_name: &str,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<()> {
     let refspec = format!("pull/{pr_number}/head:refs/heads/{branch_name}");
     let output = network_git(
@@ -2787,6 +2826,7 @@ pub fn fetch_pull_request_head(
         &["fetch", "origin", &refspec],
         "git fetch",
         timeout,
+        started_by,
     )?;
     if !output.status.success() {
         return Err(anyhow!(
@@ -2810,6 +2850,7 @@ pub(crate) fn fetch_pull_request_head_commit(
     repo_path: &Path,
     pr_number: u64,
     timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
 ) -> Result<String> {
     let repo = repo_path.to_string_lossy();
     let check_ref = format!("refs/dux/pull-request-check/{pr_number}");
@@ -2819,6 +2860,7 @@ pub(crate) fn fetch_pull_request_head_commit(
         &["fetch", "origin", &refspec],
         "git fetch",
         timeout,
+        started_by,
     );
     let commit = match fetched {
         Err(err) => Err(err),
@@ -7363,7 +7405,11 @@ pub fn commit(worktree_path: &Path, message: &str) -> Result<String> {
 ///
 /// Fails when HEAD is detached, git cannot be run, the push fails (with git's own reason), or it
 /// does not finish within `timeout` (`[git] network_timeout_seconds`; `None` is no limit).
-pub fn push(worktree_path: &Path, timeout: Option<std::time::Duration>) -> Result<String> {
+pub fn push(
+    worktree_path: &Path,
+    timeout: Option<std::time::Duration>,
+    started_by: StartedBy,
+) -> Result<String> {
     let Some(branch) = current_branch_opt(worktree_path)? else {
         return Err(anyhow!(
             "HEAD is detached; check out a branch before pushing"
@@ -7380,6 +7426,7 @@ pub fn push(worktree_path: &Path, timeout: Option<std::time::Duration>) -> Resul
         &["push", "-u", "origin", "--", &refspec],
         "git push",
         timeout,
+        started_by,
     )?;
     if !output.status.success() {
         return Err(git_failure("git push", worktree_path, &output));
@@ -9686,11 +9733,17 @@ mod tests {
         run_git(repo.path(), &["branch", "feature"]);
 
         assert!(
-            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT).unwrap(),
+            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT, StartedBy::User).unwrap(),
             "exit 0: origin has it, fetched or not"
         );
         assert!(
-            !origin_has_branch(repo.path(), "feature", TEST_NETWORK_TIMEOUT).unwrap(),
+            !origin_has_branch(
+                repo.path(),
+                "feature",
+                TEST_NETWORK_TIMEOUT,
+                StartedBy::User
+            )
+            .unwrap(),
             "exit 2: origin answered and has no such branch"
         );
 
@@ -9699,7 +9752,7 @@ mod tests {
             &["remote", "set-url", "origin", "/nonexistent/dux-origin.git"],
         );
         assert!(
-            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT).is_err(),
+            origin_has_branch(repo.path(), "main", TEST_NETWORK_TIMEOUT, StartedBy::User).is_err(),
             "an origin that cannot be asked is not a no"
         );
     }
@@ -11809,7 +11862,12 @@ mod tests {
         run_git(origin.path(), &["branch", "develop"]);
         run_git(origin.path(), &["update-ref", "refs/heads/--prune", "HEAD"]);
 
-        fetch_origin_bounded(repo.path(), std::time::Duration::from_secs(30)).unwrap();
+        fetch_origin_bounded(
+            repo.path(),
+            std::time::Duration::from_secs(30),
+            StartedBy::User,
+        )
+        .unwrap();
 
         assert!(ref_exists(repo.path(), "refs/remotes/origin/develop"));
         assert!(ref_exists(repo.path(), "refs/remotes/origin/--prune"));
@@ -11825,8 +11883,12 @@ mod tests {
             &["remote", "add", "origin", gone.to_string_lossy().as_ref()],
         );
 
-        let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_secs(30))
-            .expect_err("a missing origin cannot be fetched");
+        let error = fetch_origin_bounded(
+            repo.path(),
+            std::time::Duration::from_secs(30),
+            StartedBy::User,
+        )
+        .expect_err("a missing origin cannot be fetched");
         assert!(error.to_string().contains("git fetch origin"), "{error}");
     }
 
@@ -11846,8 +11908,12 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
-        let error = fetch_origin_bounded(repo.path(), std::time::Duration::from_millis(300))
-            .expect_err("the fetch outlives its bound");
+        let error = fetch_origin_bounded(
+            repo.path(),
+            std::time::Duration::from_millis(300),
+            StartedBy::User,
+        )
+        .expect_err("the fetch outlives its bound");
         assert_eq!(
             error.to_string(),
             "git fetch origin timed out after 1s and was stopped",
@@ -11904,7 +11970,7 @@ mod tests {
             ],
         );
 
-        push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap();
+        push(repo.path(), TEST_NETWORK_TIMEOUT, StartedBy::User).unwrap();
 
         let seen = std::fs::read_to_string(&seen).unwrap();
         let mut fields = seen.split_whitespace();
@@ -11935,8 +12001,12 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
-        let error = push(repo.path(), Some(std::time::Duration::from_millis(300)))
-            .expect_err("the push outlives its bound");
+        let error = push(
+            repo.path(),
+            Some(std::time::Duration::from_millis(300)),
+            StartedBy::User,
+        )
+        .expect_err("the push outlives its bound");
         assert!(error.to_string().contains("timed out"), "{error}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
@@ -11960,7 +12030,7 @@ mod tests {
             ],
         );
 
-        push(repo.path(), None).unwrap();
+        push(repo.path(), None, StartedBy::User).unwrap();
 
         assert!(ref_exists(repo.path(), "refs/remotes/origin/feature"));
     }
@@ -11983,7 +12053,14 @@ mod tests {
             ],
         );
 
-        fetch_pull_request_head(repo.path(), 7, "pr-7", TEST_NETWORK_TIMEOUT).unwrap();
+        fetch_pull_request_head(
+            repo.path(),
+            7,
+            "pr-7",
+            TEST_NETWORK_TIMEOUT,
+            StartedBy::User,
+        )
+        .unwrap();
 
         assert_eq!(std::fs::read_to_string(&seen).unwrap().trim(), "0");
     }
@@ -13839,6 +13916,7 @@ mod tests {
                 name,
                 &crate::checkout_move::CheckoutMoveGuard::default(),
                 TEST_NETWORK_TIMEOUT,
+                StartedBy::User,
             );
 
             assert!(
@@ -13881,6 +13959,7 @@ mod tests {
             "main",
             &crate::checkout_move::CheckoutMoveGuard::default(),
             TEST_NETWORK_TIMEOUT,
+            StartedBy::User,
         )
         .unwrap();
         assert_eq!(head_commit(repo.path()).unwrap(), ahead);
@@ -13904,7 +13983,7 @@ mod tests {
         run_git(repo.path(), &["update-ref", "refs/heads/--all", "HEAD"]);
         run_git(repo.path(), &["symbolic-ref", "HEAD", "refs/heads/--all"]);
 
-        let _ = push(repo.path(), TEST_NETWORK_TIMEOUT);
+        let _ = push(repo.path(), TEST_NETWORK_TIMEOUT, StartedBy::User);
 
         let heads = std::process::Command::new("git")
             .args([
@@ -13954,7 +14033,7 @@ mod tests {
         );
         let mine = head_commit(repo.path()).unwrap();
 
-        push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap();
+        push(repo.path(), TEST_NETWORK_TIMEOUT, StartedBy::User).unwrap();
 
         let remote_tip = |name: &str| {
             let out = test_support::git_command()
@@ -17223,6 +17302,7 @@ mod tests {
             "main",
             &crate::checkout_move::CheckoutMoveGuard::default(),
             TEST_NETWORK_TIMEOUT,
+            StartedBy::User,
         )
         .unwrap();
 
@@ -17242,6 +17322,7 @@ mod tests {
             repo.path(),
             &crate::checkout_move::CheckoutMoveGuard::default(),
             TEST_NETWORK_TIMEOUT,
+            StartedBy::User,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -17264,7 +17345,7 @@ mod tests {
         run_git(repo.path(), &["commit", "-m", "second commit"]);
         run_git(repo.path(), &["checkout", "--detach", "HEAD~1"]);
 
-        let err = push(repo.path(), TEST_NETWORK_TIMEOUT).unwrap_err();
+        let err = push(repo.path(), TEST_NETWORK_TIMEOUT, StartedBy::User).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("detached"),
