@@ -99,15 +99,19 @@ export function moveToTop(items: DraftMacro[], key: number): DraftMacro[] {
 }
 
 // A copy placed right after the original, under the first free "<name> copy",
-// "<name> copy 2", … so the draft stays valid.
+// "<name> copy 2", … so the draft stays valid. The copy of an untitled macro
+// is untitled too.
 export function duplicateItem(items: DraftMacro[], key: number): DraftMacro[] {
   const index = items.findIndex((item) => item.key === key)
   if (index === -1) return items
   const source = items[index]
-  const names = new Set(items.map((item) => item.name.trim()))
-  const base = `${source.name.trim()} copy`
-  let name = base
-  for (let n = 2; names.has(name); n++) name = `${base} ${n}`
+  let name = ""
+  if (source.name.trim() !== "") {
+    const names = new Set(items.map((item) => item.name.trim()))
+    const base = `${source.name.trim()} copy`
+    name = base
+    for (let n = 2; names.has(name); n++) name = `${base} ${n}`
+  }
   const copy: DraftMacro = { ...source, name, key: nextKey(items), origin: null }
   return [...items.slice(0, index + 1), copy, ...items.slice(index + 1)]
 }

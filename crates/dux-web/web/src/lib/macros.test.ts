@@ -12,6 +12,7 @@ import {
   reorderMacrosByDrag,
   validateMacros,
 } from "./macros"
+import { proseText } from "./prose"
 import type { SelectedTarget } from "./store"
 import type { MacroView } from "./types"
 
@@ -80,30 +81,34 @@ describe("macrosForTarget", () => {
 })
 
 describe("validateMacros", () => {
+  // The plain-text spelling of the problem, quotes around the name included.
+  function problem(macros: MacroView[]): string | null {
+    const found = validateMacros(macros)
+    return found === null ? null : proseText(found.message)
+  }
+
   it("accepts a valid set", () => {
-    expect(
-      validateMacros([macro("a", "agent"), macro("b", "both")]),
-    ).toBeNull()
+    expect(problem([macro("a", "agent"), macro("b", "both")])).toBeNull()
   })
 
   it("rejects an empty name", () => {
-    expect(validateMacros([macro("", "agent")])).toMatch(/needs a name/)
-    expect(validateMacros([macro("   ", "agent")])).toMatch(/needs a name/)
+    expect(problem([macro("", "agent")])).toMatch(/needs a name/)
+    expect(problem([macro("   ", "agent")])).toMatch(/needs a name/)
   })
 
-  it("rejects duplicate names (after trim)", () => {
-    expect(
-      validateMacros([macro("dup", "agent"), macro(" dup ", "both")]),
-    ).toMatch(/Duplicate macro name/)
+  it("rejects duplicate names (after trim), naming the second one as at fault", () => {
+    const macros = [macro("dup", "agent"), macro(" dup ", "both")]
+    expect(problem(macros)).toBe('Duplicate macro name: "dup".')
+    expect(validateMacros(macros)?.index).toBe(1)
   })
 
   it("rejects empty text", () => {
-    expect(validateMacros([macro("a", "agent", "")])).toMatch(/needs some text/)
+    expect(problem([macro("a", "agent", "")])).toMatch(/needs some text/)
   })
 
   it("rejects an unknown surface", () => {
     const bad = { name: "a", text: "x", surface: "bogus" } as unknown as MacroView
-    expect(validateMacros([bad])).toMatch(/unknown surface/)
+    expect(problem([bad])).toMatch(/unknown surface/)
   })
 })
 

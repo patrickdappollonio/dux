@@ -2,6 +2,7 @@
 // to the focused PTY socket rather than through a server command, so both the byte
 // transform and the surface gate are mirrored from `dux_core::macros`.
 
+import { prose, quotedChip, type Prose } from "@/lib/prose"
 import type { MacroSurface, MacroView } from "@/lib/types"
 import type { SelectedTarget } from "@/lib/store"
 
@@ -81,20 +82,31 @@ export const MACRO_SURFACE_OPTIONS: {
   },
 ]
 
+// Why the macro editor's list cannot be saved: the sentence, naming the macro
+// as a chip, and the index of the macro at fault.
+export interface MacroProblem {
+  message: Prose
+  index: number
+}
+
 // A client-side validation error for the macro editor, or null when the set is
 // valid: a fast-feedback mirror of rules the server re-runs on every Save, and
 // deliberately not pinned to it by a test. Drift fails safe, since a lenient client
 // only earns a server refusal and a strict one only over-blocks.
-export function validateMacros(macros: MacroView[]): string | null {
+export function validateMacros(macros: MacroView[]): MacroProblem | null {
   const seen = new Set<string>()
-  for (const macro of macros) {
+  for (const [index, macro] of macros.entries()) {
     const name = macro.name.trim()
-    if (name === "") return "Every macro needs a name."
-    if (seen.has(name)) return `Duplicate macro name: "${name}".`
+    if (name === "") return { message: prose`Every macro needs a name.`, index }
+    if (seen.has(name)) {
+      return { message: prose`Duplicate macro name: ${quotedChip(name)}.`, index }
+    }
     seen.add(name)
-    if (macro.text === "") return `Macro "${name}" needs some text.`
+    if (macro.text === "") {
+      return { message: prose`Macro ${quotedChip(name)} needs some text.`, index }
+    }
     if (!isMacroSurface(macro.surface)) {
-      return `Macro "${name}" has an unknown surface.`
+      return { message: prose`Macro ${quotedChip(name)} has an unknown surface.`, index }
     }
   }
   return null

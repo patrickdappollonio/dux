@@ -176,6 +176,25 @@ async function deleteSelected() {
   await click(within(confirm).getByRole("button", { name: "Delete" }))
 }
 
+// The browser's Back: the store closes the newest modal holding an entry.
+async function back() {
+  await act(async () => {
+    openModals().at(-1)!.close()
+  })
+  await settle()
+}
+
+// Lets base-ui's focus moves and close transitions land.
+async function settle() {
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)))
+}
+
+async function press(el: HTMLElement, key: string) {
+  await act(async () => {
+    fireEvent.keyDown(el, { key })
+  })
+}
+
 function save(): HTMLElement {
   return screen.getByRole("button", { name: /^Save/ })
 }
@@ -359,13 +378,15 @@ describe("MacrosDialog editor", () => {
     expect(row("Deploy").getAttribute("aria-selected")).toBe("true")
   })
 
-  it("shows the surface as its word, and a press changes it", async () => {
+  it("offers where a macro is shown as one choice of three, says what it means, and a press changes it", async () => {
     seed(seedMacros)
     render(<MacrosDialog />)
-    const shownOn = screen.getByRole("tablist", { name: "Shown on" })
-    expect(within(shownOn).getByRole("tab", { selected: true }).textContent).toBe("Agent")
-    await click(within(shownOn).getByRole("tab", { name: "Both" }))
+    const shownOn = screen.getByRole("radiogroup", { name: "Shown on" })
+    expect(within(shownOn).getByRole("radio", { checked: true }).textContent).toBe("Agent")
+    expect(screen.getByText("Only shown when the agent pane is focused.")).toBeTruthy()
+    await click(within(shownOn).getByRole("radio", { name: "Both" }))
     expect(within(row("Review")).getByText("Both")).toBeTruthy()
+    expect(screen.getByText("Shown on both surfaces.")).toBeTruthy()
   })
 
   it("Delete asks in its own dialog with Cancel focused and the name as a chip", async () => {
@@ -379,6 +400,22 @@ describe("MacrosDialog editor", () => {
 
     await click(cancel)
     expect(listedNames()).toEqual(["Review", "Build", "Deploy"])
+  })
+
+  it("puts focus on the neighbouring macro after a delete, and on New macro after the last one", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Build"))
+    await deleteSelected()
+    await settle()
+    expect(document.activeElement).toBe(row("Deploy"))
+
+    seed([{ name: "Review", text: "review this", surface: "agent" }])
+    cleanup()
+    render(<MacrosDialog />)
+    await deleteSelected()
+    await settle()
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "New macro" }))
   })
 
   it("Duplicate adds an unsaved copy after the macro, and Move to top moves it", async () => {
@@ -396,11 +433,11 @@ describe("MacrosDialog editor", () => {
   it("counts each filter, a macro on both under both, and lists what it counts", async () => {
     seed(seedMacros)
     render(<MacrosDialog />)
-    const filter = screen.getByRole("tablist", { name: "Show macros for" })
-    const tabs = within(filter).getAllByRole("tab").map((t) => t.textContent)
-    expect(tabs).toEqual(["All3", "Agent2", "Terminal2"])
+    const filter = screen.getByRole("radiogroup", { name: "Show macros for" })
+    const choices = within(filter).getAllByRole("radio").map((t) => t.textContent)
+    expect(choices).toEqual(["All3", "Agent2", "Terminal2"])
 
-    await click(within(filter).getByRole("tab", { name: /Terminal/ }))
+    await click(within(filter).getByRole("radio", { name: /Terminal/ }))
     expect(listedNames()).toEqual(["Build", "Deploy"])
     // The selected macro was filtered out, so the first one listed is selected.
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Build")
@@ -429,12 +466,50 @@ describe("MacrosDialog editor", () => {
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
   })
 
-  it("refuses to save an invalid list and says why", async () => {
+  it("refuses to save an invalid list, says why with the name as a chip, and leads to the macro at fault", async () => {
     seed(seedMacros)
     render(<MacrosDialog />)
     await typeInto("Name", "Build")
-    expect(screen.getByText('Duplicate macro name: "Build".')).toBeTruthy()
+    const problem = screen.getByText(/Duplicate macro name/)
+    expect(problem.textContent).toBe("Duplicate macro name: Build.")
+    expect(within(problem).getByText("Build").getAttribute("data-slot")).toBe("inline-code")
     expect(save()).toHaveProperty("disabled", true)
+
+    // The second of the two is the one at fault.
+    await click(row("Deploy"))
+    await click(screen.getByRole("button", { name: "Show the macro" }))
+    const selected = screen.getAllByRole("option").map((r) => r.getAttribute("aria-selected"))
+    expect(selected).toEqual(["false", "true", "false"])
+    expect(screen.getByLabelText("Name")).toHaveProperty("value", "Build")
+  })
+
+  it("does not call a new macro nameless before anything was typed into it", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(screen.getByRole("button", { name: "New" }))
+    expect(screen.queryByText(/needs a name/)).toBeNull()
+    expect(save()).toHaveProperty("disabled", true)
+
+    await typeInto("Text", "ship it")
+    expect(screen.getByText("Every macro needs a name.")).toBeTruthy()
+  })
+
+  it("says a filter is empty without speaking of a search nobody typed", async () => {
+    seed([{ name: "Review", text: "review this", surface: "agent" }])
+    render(<MacrosDialog />)
+    const filter = screen.getByRole("radiogroup", { name: "Show macros for" })
+    await click(within(filter).getByRole("radio", { name: /Terminal/ }))
+    expect(screen.queryByText(/search/)).toBeNull()
+    expect(screen.getAllByText("No macro is shown on terminals.").length).toBeGreaterThan(0)
+  })
+
+  it("duplicates an untitled macro without a leading space in the copy's name", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(screen.getByRole("button", { name: "New" }))
+    await menuPick("Duplicate")
+    const name = (screen.getByLabelText("Name") as HTMLInputElement).value
+    expect(name).toBe(name.trimStart())
   })
 
   it("with no macros offers a New macro, which opens an empty editor", async () => {
@@ -478,6 +553,79 @@ describe("MacrosDialog on a phone", () => {
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
+  })
+
+  it("Back from a macro's editor returns to the list, and from the list closes", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Build"))
+    await typeInto("Text", "cargo build --release")
+
+    await back()
+    expect(screen.queryByLabelText("Name")).toBeNull()
+    expect(screen.getByRole("listbox")).toBeTruthy()
+    expect(setAsideMock).not.toHaveBeenCalled()
+    expect(closeMacrosDialogMock).not.toHaveBeenCalled()
+
+    await back()
+    expect(setAsideMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("Back goes to the list first when it opened straight on a macro", async () => {
+    phone = true
+    seed(seedMacros, { select: 2 })
+    render(<MacrosDialog />)
+    await settle()
+    await back()
+    expect(screen.getByRole("listbox")).toBeTruthy()
+    expect(closeMacrosDialogMock).not.toHaveBeenCalled()
+  })
+
+  it("puts focus in the editor it opens, and back on the row it came from", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await settle()
+    await press(row("Build"), "Enter")
+    await settle()
+    const editor = screen.getByRole("dialog", { name: "Edit macro" })
+    expect(editor.contains(document.activeElement)).toBe(true)
+
+    await click(screen.getByRole("button", { name: "Back to all macros" }))
+    await settle()
+    expect(document.activeElement).toBe(row("Build"))
+
+    await press(row("Build"), "Enter")
+    await settle()
+    await back()
+    expect(document.activeElement).toBe(row("Build"))
+  })
+
+  it("lands on the neighbouring row after a delete from the editor", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await click(row("Build"))
+    await deleteSelected()
+    await settle()
+    expect(screen.queryByLabelText("Name")).toBeNull()
+    expect(document.activeElement).toBe(row("Deploy"))
+  })
+
+  it("moves the selection with the arrow keys, so focus, the selected row and the tab stop agree", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await settle()
+    await press(row("Review"), "ArrowDown")
+    expect(document.activeElement).toBe(row("Build"))
+    expect(row("Build").getAttribute("aria-selected")).toBe("true")
+    expect(row("Review").getAttribute("aria-selected")).toBe("false")
+    expect(row("Build").tabIndex).toBe(0)
+    expect(row("Review").tabIndex).toBe(-1)
+    // Moving does not open it.
+    expect(screen.queryByLabelText("Name")).toBeNull()
   })
 })
 
