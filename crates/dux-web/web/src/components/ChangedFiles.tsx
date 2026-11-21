@@ -345,11 +345,14 @@ function ExpandToggle({
   )
 }
 
-// A row's trailing figure is whole or not on screen. Where the row is too
-// narrow to give it its full width and still leave the name room, it is
-// visually hidden but stays in the accessibility tree, since a clipped
-// "40…" says nothing to a sighted reader and a screen reader still hears it.
-const ROW_FIGURE = "shrink-0 sr-only @[16rem]:not-sr-only"
+// A row's name and trailing figures share one clipped line that wraps: a
+// figure that does not fit beside the name drops to a second line nobody sees,
+// whole and still in the accessibility tree, rather than being cut to "40…".
+const ROW_LINE = "flex h-5 min-w-0 flex-1 flex-wrap items-baseline gap-x-2 overflow-hidden"
+// The name keeps at least its own width, up to 8rem, before a figure joins it:
+// its automatic minimum is the smaller of that width and its text.
+const ROW_NAME = "flex w-[min(8rem,100%)] grow basis-0"
+const ROW_FIGURE = "shrink-0 whitespace-nowrap"
 
 // What the row's "Excl" marker says on hover. It names the cause (the
 // repository's own .gitattributes) and the consequence (no counts), and says
@@ -512,7 +515,7 @@ const FileRow = memo(function FileRow({
         // The left padding is a variable so a nested row's indent adds to it.
         // Touch sits 8px further in, matching the section heading, so the
         // checkbox's halo stops short of the pane divider's grab zone.
-        "group @container flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
+        "group flex items-center gap-2 rounded pr-1 pl-(--row-pad) py-1 hover:bg-muted max-md:min-h-11 [--row-pad:--spacing(1)] pointer-coarse:[--row-pad:--spacing(3)]",
         ROW_FOCUS,
         REVEAL_ROW,
         folderCount === null && "cursor-pointer",
@@ -554,43 +557,47 @@ const FileRow = memo(function FileRow({
         {/* Long paths ellipsize at the start so the filename stays visible. A
           * row inside an expanded folder names only itself: the folder it
           * hangs from is the row above it. */}
-        <StartTruncatedText
-          text={depth > 0 ? leafName(displayPath) : displayPath}
-          className="flex-1 font-mono text-sm text-foreground"
-          matches={depth > 0 ? undefined : matchCharRanges(file.path, [needle])}
-        />
-
-        {folderCount !== null && (
-          <span className={cn("font-mono text-xs text-muted-foreground", ROW_FIGURE)}>
-            {folderCount}
+        <span className={ROW_LINE}>
+          <span className={ROW_NAME}>
+            <StartTruncatedText
+              text={depth > 0 ? leafName(displayPath) : displayPath}
+              className="flex-1 font-mono text-sm text-foreground"
+              matches={depth > 0 ? undefined : matchCharRanges(file.path, [needle])}
+            />
           </span>
-        )}
 
-        {/* A file the repository excludes from diffs has no counts to show,
-          * and saying nothing there would read as "changed nothing". It is not
-          * binary: the diff viewer opens it, so it gets its own quiet marker
-          * in the counts slot rather than the binary treatment. */}
-        {file.diff_excluded && (
-          <SimpleTooltip content={DIFF_EXCLUDED_HINT}>
-            <span className="shrink-0 font-mono text-xs text-dux-diff-excluded">
-              Excl
+          {folderCount !== null && (
+            <span className={cn("font-mono text-xs text-muted-foreground", ROW_FIGURE)}>
+              {folderCount}
             </span>
-          </SimpleTooltip>
-        )}
+          )}
 
-        {/* Additions and deletions, coloured to match the diff viewer's gutter.
-          * Binary files report none. */}
-        {!file.binary && !file.diff_excluded && (file.additions > 0 || file.deletions > 0) && (
-          <span className={cn("font-mono text-xs", ROW_FIGURE)}>
-            {file.additions > 0 && (
-              <span className="text-dux-added">+{file.additions}</span>
-            )}
-            {file.additions > 0 && file.deletions > 0 && " "}
-            {file.deletions > 0 && (
-              <span className="text-dux-deleted">−{file.deletions}</span>
-            )}
-          </span>
-        )}
+          {/* A file the repository excludes from diffs has no counts to show,
+            * and saying nothing there would read as "changed nothing". It is not
+            * binary: the diff viewer opens it, so it gets its own quiet marker
+            * in the counts slot rather than the binary treatment. */}
+          {file.diff_excluded && (
+            <SimpleTooltip content={DIFF_EXCLUDED_HINT}>
+              <span className={cn("font-mono text-xs text-dux-diff-excluded", ROW_FIGURE)}>
+                Excl
+              </span>
+            </SimpleTooltip>
+          )}
+
+          {/* Additions and deletions, coloured to match the diff viewer's gutter.
+            * Binary files report none. */}
+          {!file.binary && !file.diff_excluded && (file.additions > 0 || file.deletions > 0) && (
+            <span className={cn("font-mono text-xs", ROW_FIGURE)}>
+              {file.additions > 0 && (
+                <span className="text-dux-added">+{file.additions}</span>
+              )}
+              {file.additions > 0 && file.deletions > 0 && " "}
+              {file.deletions > 0 && (
+                <span className="text-dux-deleted">−{file.deletions}</span>
+              )}
+            </span>
+          )}
+        </span>
       </ExpandToggle>
 
       {/* A quiet refresh of this expanded folder failed: its rows are the ones

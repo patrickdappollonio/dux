@@ -1268,20 +1268,63 @@ describe("the changes pane's selection on a touch screen", () => {
     expect(wrapper.className).toContain("has-[[aria-busy=true]]:max-w-(--reveal-cap)")
   })
 
-  // A browser check must confirm at a 191px pane under a coarse pointer: a
-  // folder row's "40 files +40" ends before the ⋯ starts, and the section
-  // heading's count badge is whole. jsdom has no layout, so this pins the
-  // classes that let the counts give way instead of overflowing under the ⋯.
-  it("hides a row's counts whole, never clipped, while a heading's recap truncates", () => {
+  // jsdom has no layout, so it cannot show which figures fit. A browser check
+  // must confirm, at any pane width and row depth under both pointers, that
+  // each figure is either whole beside its name or gone from the row, never
+  // cut short or running under the ⋯, the Retry control or past the row; and
+  // that the heading's count badge is whole. What jsdom can pin is that each
+  // figure is one unbroken piece a screen reader hears whole, that nothing
+  // between it and the row ellipsizes it, and that the line it shares with
+  // the name wraps and clips instead of overflowing.
+  it("keeps a row's figures whole or off the line, never clipped, while a heading's recap truncates", () => {
+    const label =
+      "12 files, 2 nested repositories and 1 worktree of this repository · 1 nested repository not staged"
+    mockState = {
+      selectedSessionId: "s1",
+      changes: {
+        ...loadedChanges(),
+        staged: [
+          {
+            path: "vendor",
+            status: "A",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            kind: "directory",
+            file_count: 12,
+            nested_repositories: 2,
+            linked_worktrees: 1,
+            nested_repositories_not_staged: 1,
+          },
+        ],
+        unstaged: [
+          { path: "a.ts", status: "M", additions: 40, deletions: 3, binary: false },
+        ],
+      },
+    } as unknown as DuxState
     render(<ChangedFiles />)
-    const row = screen.getByLabelText("Actions for a.ts").closest('[role="row"]')!
-    const counts = row.querySelector(".text-dux-added")!.parentElement!
-    expect(counts.className).not.toContain("truncate")
-    expect(counts.className).toContain("shrink-0")
-    expect(counts.className).toContain("sr-only")
-    expect(counts.className).toContain("not-sr-only")
-    expect(row.className).toContain("@container")
-    expect(counts.textContent).toContain("+")
+    const folderFigure = screen.getByText(label)
+    const fileRow = screen.getByLabelText("Actions for a.ts").closest('[role="row"]') as HTMLElement
+    const countsFigure = within(fileRow).getByText("+40").parentElement!
+    expect(countsFigure.textContent).toBe("+40 −3")
+    for (const [figure, name] of [
+      [folderFigure, "vendor/"],
+      [countsFigure, "a.ts"],
+    ] as const) {
+      const row = figure.closest('[role="row"]')!
+      for (let el: Element | null = figure; el && el !== row; el = el.parentElement) {
+        expect(el.className).not.toMatch(/\b(truncate|text-ellipsis|sr-only)\b/)
+        expect(el.getAttribute("aria-hidden")).toBeNull()
+      }
+      expect(figure.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["shrink-0", "whitespace-nowrap"]),
+      )
+      const line = figure.parentElement!
+      expect(line.textContent).toContain(name)
+      expect(line.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["flex-wrap", "overflow-hidden", "h-5"]),
+      )
+    }
     const heading = screen.getByText("Unstaged").closest("button")!
     const recap = heading.querySelector("[aria-label]")!
     expect(recap.className).toContain("truncate")
