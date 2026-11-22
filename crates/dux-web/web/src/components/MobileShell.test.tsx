@@ -2125,7 +2125,10 @@ describe("MobileShell flap show/hide", () => {
     const header = screen.getByLabelText("Back").closest("header")!
     const toggle = screen.getByRole("button", { name: "Hide actions" })
     expect(header.lastElementChild?.contains(toggle)).toBe(true)
-    expect(toggle.getAttribute("aria-expanded")).toBe("true")
+    // Its name is what a press does, so it carries no expanded state as well:
+    // a screen reader would announce the one fact twice.
+    expect(toggle.hasAttribute("aria-expanded")).toBe(false)
+    expect(toggle.hasAttribute("aria-controls")).toBe(false)
     expect(toggle.className).toMatch(/(?:^|\s)size-10(?:\s|$)/)
   })
 
@@ -2137,7 +2140,7 @@ describe("MobileShell flap show/hide", () => {
     expect(flap().getAttribute("aria-hidden")).toBe("true")
     expect(screen.queryByRole("button", { name: "Theater mode" })).toBeNull()
     const show = screen.getByRole("button", { name: "Show actions" })
-    expect(show.getAttribute("aria-expanded")).toBe("false")
+    expect(show.hasAttribute("aria-expanded")).toBe(false)
     fireEvent.click(show)
     expect(flap().hasAttribute("inert")).toBe(false)
     expect(screen.getByRole("button", { name: "Theater mode" })).toBeTruthy()

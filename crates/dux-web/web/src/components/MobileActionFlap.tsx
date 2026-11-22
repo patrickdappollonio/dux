@@ -83,7 +83,6 @@ export function MobileActionFlap({
     >
       <div
         ref={ref}
-        id={FLAP_ID}
         data-testid="mobile-action-flap"
         // One pixel above the pane (the clip's top plus the bleed) is the one
         // pixel that makes it a flap rather than a box: the body starts ON the
@@ -176,17 +175,15 @@ export function MobileActionFlap({
   )
 }
 
-/// The flap's element id, for the header button's `aria-controls`. A phone
-/// shows one pane screen, so one flap, at a time.
-const FLAP_ID = "phone-action-flap"
-
 /**
  * The phone header's one show/hide for the whole flap: the flap covers the
  * terminal's first lines, and this takes it off them and brings it back,
  * remembered on this device for every pane.
  *
  * Ghost like Back beside it: it changes what the header's own chrome shows
- * rather than acting on the session, so it stays quieter than the cluster.
+ * rather than acting on the session, so it stays quieter than the cluster. Its
+ * name, like its tooltip, says what a press does, which also says which way it
+ * is set, so it carries no expanded state.
  */
 export function FlapToggle() {
   const folded = useFlapHidden()
@@ -203,13 +200,8 @@ export function FlapToggle() {
         ref={ref}
         variant="ghost"
         size="icon"
-        // No ghost fill while expanded: the flap is shown most of the time, and
-        // a header square filled for that long reads as pressed. The icon and
-        // the name already say which way it is set.
-        className="size-10 shrink-0 aria-expanded:bg-transparent"
+        className="size-10 shrink-0"
         aria-label={label}
-        aria-expanded={!folded}
-        aria-controls={FLAP_ID}
         onClick={() => setFlapHidden(!folded)}
       >
         {folded ? <PanelTopOpen /> : <PanelTopClose />}
