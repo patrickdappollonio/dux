@@ -21,7 +21,7 @@ import {
   type NewLauncherRow,
 } from "@/lib/creationMenus"
 import { stateWord } from "@/lib/flatList"
-import { FOCUS_RING, ACTIVE_ROW_RING } from "@/lib/focusRing"
+import { FOCUS_RING, PICK_ROW } from "@/lib/focusRing"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { closeNewLauncher, createTerminal, useDux } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
@@ -348,7 +348,7 @@ function AgentRows({ agents }: { agents: ReturnType<typeof useAgentPick> }) {
                   key={session.id}
                   session={session}
                   id={pick.rowId(session.id)}
-                  active={pick.activeKey === session.id}
+                  active={pick.shownKey === session.id}
                   needle={needle}
                   block={blocks.get(session.id) ?? null}
                   onPick={() => pickAgent(session)}
@@ -393,12 +393,13 @@ function AgentPickRow({
       type="button"
       id={id}
       data-launcher-row=""
+      data-active={active ? "" : undefined}
       disabled={block !== null}
       onClick={onPick}
       className={cn(
         "group flex min-h-13 w-full items-center gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none motion-reduce:transition-none",
         FOCUS_RING,
-        active && ACTIVE_ROW_RING,
+        active && PICK_ROW,
       )}
     >
       <Bot

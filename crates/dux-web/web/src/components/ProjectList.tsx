@@ -29,7 +29,7 @@ import {
 } from "@/components/projectSearch"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { openAddProject } from "@/lib/store"
-import { ACTIVE_ROW_RING, FOCUS_RING } from "@/lib/focusRing"
+import { FOCUS_RING, PICK_ROW } from "@/lib/focusRing"
 import {
   ALWAYS_REVEALED_ON_PHONE,
   HOVER_REVEAL,
@@ -73,7 +73,7 @@ export function ProjectRows({
             row={row}
             onPick={onPick}
             pickId={pick.rowId(row.id)}
-            active={pick.activeKey === row.id}
+            active={pick.shownKey === row.id}
             menuOpen={menuOpenId === row.id}
             setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
             menu={menu}
@@ -172,7 +172,7 @@ function ProjectRow({
   row: ProjectListRow
   onPick?: (id: string) => void
   pickId: string
-  // The row Enter in the search field would pick, ringed as if focused.
+  // The row Enter in the search field would pick, while the field has focus.
   active: boolean
   menuOpen: boolean
   setMenuOpen: (open: boolean) => void
@@ -199,11 +199,12 @@ function ProjectRow({
     <div
       data-testid="project-row"
       data-name={row.name}
+      data-active={active ? "" : undefined}
       className={cn(
         "flex items-center gap-2 rounded-md px-2 transition-colors max-md:min-h-10 pointer-coarse:min-h-10",
         REVEAL_ROW,
         "hover:bg-accent/60 has-[[data-popup-open]]:bg-accent/60",
-        active && ACTIVE_ROW_RING,
+        active && PICK_ROW,
       )}
     >
       <button

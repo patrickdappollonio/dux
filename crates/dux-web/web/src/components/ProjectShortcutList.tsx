@@ -2,6 +2,7 @@ import { FolderGit2 } from "lucide-react"
 
 import { ModalGroupHeading } from "@/components/modal"
 import { useScrollEdges } from "@/hooks/use-scroll-edges"
+import { INSET_FOCUS_RING } from "@/lib/focusRing"
 import type {
   ProjectShortcutListView,
   ProjectShortcutView,
@@ -64,7 +65,7 @@ export function ProjectShortcutList({
               onClick={() => onPick(row)}
               // The touch floor on a phone's width and on any coarse pointer; a
               // fine pointer at desktop width keeps the compact py-2 density.
-              className={`flex shrink-0 items-center gap-2 px-3 py-2 text-left text-sm enabled:hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 max-md:min-h-11 pointer-coarse:min-h-11 ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-2 text-left text-sm enabled:hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 max-md:min-h-11 pointer-coarse:min-h-11 ${INSET_FOCUS_RING} ${
                 pickedProjectId === row.project_id ? "bg-accent" : ""
               }`}
             >

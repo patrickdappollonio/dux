@@ -34,6 +34,7 @@ export function useSearchPick<T>({
   onPick: (item: T) => void
 }) {
   const baseId = React.useId()
+  const [fieldFocused, setFieldFocused] = React.useState(false)
   // `key` is the row the user moved to, or null for "the first". `scroll`
   // counts the moves and query changes that should bring the active row into
   // view; a list merely changing under the user is not one of them.
@@ -109,9 +110,14 @@ export function useSearchPick<T>({
 
   return {
     activeKey,
+    /** `activeKey` while the field has focus, the only time Enter picks it;
+     * null otherwise, for a list that marks the row only then. */
+    shownKey: fieldFocused ? activeKey : null,
     rowId,
     fieldProps: {
       onKeyDown,
+      onFocus: () => setFieldFocused(true),
+      onBlur: () => setFieldFocused(false),
       "aria-activedescendant": activeKey === null ? undefined : rowId(activeKey),
     },
   }

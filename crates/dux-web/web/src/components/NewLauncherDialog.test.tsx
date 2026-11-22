@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 // Every store action a row can reach, as spies: the rows must run the shared
 // creation lists' own actions, never a copy of them.
@@ -180,6 +180,20 @@ describe("NewLauncherDialog agent step", () => {
     ).toEqual(["demo-api"])
     // The match is lit in the name it matched.
     expect(screen.getByText("login").tagName).toBe("MARK")
+  })
+
+  // Enter picks the marked row only from the search field, so with focus
+  // anywhere else no row is marked.
+  it("marks the row Enter would pick only while the search field has focus", () => {
+    render(<NewLauncherDialog />)
+    fireEvent.click(row("New terminal for an agent"))
+    const search = screen.getByLabelText("Search agents")
+    act(() => search.focus())
+    fireEvent.change(search, { target: { value: "login" } })
+    const marked = () => document.querySelectorAll("[data-active]").length
+    expect(marked()).toBe(1)
+    act(() => screen.getByRole("button", { name: "Back to New…" }).focus())
+    expect(marked()).toBe(0)
   })
 
   // The busy word is the working cue wherever it is shown, not a static label.
