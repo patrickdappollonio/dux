@@ -96,3 +96,12 @@ describe("ProjectList search focus ring", () => {
     expect(frame.className).toContain("has-[input:focus-visible]:ring-3")
   })
 })
+
+// "Choose a project" is the New agent picker's question; the Projects list
+// asks nothing of the kind.
+describe("the Projects list's heading", () => {
+  it("does not ask the person to choose a project", () => {
+    renderList()
+    expect(screen.queryByText("Choose a project")).toBeNull()
+  })
+})

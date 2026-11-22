@@ -42,10 +42,13 @@ import { cn } from "@/lib/utils"
  * hands the rows over already in order and puts this in the part that scrolls. */
 export function ProjectRows({
   search,
+  heading,
   onPick,
   menu,
 }: {
   search: ProjectSearch
+  /** The heading over the rows, where the list asks the person something. */
+  heading?: string
   onPick?: (id: string) => void
   menu: (id: string) => ReactNode
 }) {
@@ -55,7 +58,7 @@ export function ProjectRows({
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   return (
     <>
-      <ModalGroupHeading>Choose a project</ModalGroupHeading>
+      {heading ? <ModalGroupHeading>{heading}</ModalGroupHeading> : null}
       {filtered.length === 0 ? (
         <p className="px-2 py-4 text-sm text-muted-foreground">
           {query.trim() === "" ? (

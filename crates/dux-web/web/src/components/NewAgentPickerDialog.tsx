@@ -174,6 +174,7 @@ function Picker({ open, onClosed }: { open: boolean; onClosed: () => void }) {
     >
       <ProjectRows
         search={search}
+        heading="Choose a project"
         onPick={onProjectRow}
         // New agent… and New terminal take the user somewhere else, so the
         // picker closes first rather than staying open over where they land.
