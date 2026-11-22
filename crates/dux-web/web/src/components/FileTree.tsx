@@ -159,6 +159,7 @@ export function FileTree({
   // fresh listing against the one it is replacing, and it resolves long after
   // the render that armed it.
   const dirsRef = useRef<Map<string, DirState>>(new Map())
+  const onEntriesGoneRef = useRef(onEntriesGone)
 
   // The refresh batch this tree has taken on and not yet reported back, so an
   // unmount can report it rather than leaving a caller gating the next one on
@@ -318,7 +319,6 @@ export function FileTree({
   // cannot re-fire these effects on every render of the editor.
   const onLoadedDirsChangeRef = useRef(onLoadedDirsChange)
   const onRefreshSettledRef = useRef(onRefreshSettled)
-  const onEntriesGoneRef = useRef(onEntriesGone)
   useLayoutEffect(() => {
     onEntriesGoneRef.current = onEntriesGone
     onLoadedDirsChangeRef.current = onLoadedDirsChange
