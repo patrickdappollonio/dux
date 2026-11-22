@@ -581,7 +581,7 @@ Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one t
 ![The dux home screen on a phone, listing agents with their state: one waiting on you, the rest working.](/screens/phone-hub.png)
 
 - **Home** is the hub: your projects and sessions with the same `⋯` menus as desktop, the same **New agent…** launcher along the bottom, and a **cog** button that opens the app menu as a bottom sheet (submenus drill down in place, with a back arrow). The launcher's **▾** opens its list as a bottom sheet too. Tap a session to jump into its terminal.
-- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, and an optional PR chip), with the strip of the part on screen under it when the agent has two or more tabs or two or more terminals: the tab strip over the agent, the dock strip over a terminal.
+- **The terminal screen** is a full-screen terminal with a slim bar on top (Back, the agent's name over its assistant, branch and project, an optional PR chip, and the button that hides and shows the action flap), with the strip of the part on screen under it when the agent has two or more tabs or two or more terminals: the tab strip over the agent, the dock strip over a terminal.
 - **An agent's own terminals** are on the same screen, one part at a time: the agent/terminals switch in the flap shows them in place of the agent, with the dock strip when there are two or more. The header, the menu and the count stay the agent's, and the menu adds a **Terminal** group for the terminal in front of you: **Open editor in new tab** and **Close…**. The message box says what it is talking to: "Write a message to the agent…" over the agent, "Type a command…" over a terminal.
 - **A project or standalone terminal** gets the same screen and the same flap, minus the two things a terminal does not have: there is no changed-file count and no PR chip. Its `⋯` opens the terminal's own menu, with the **Input** group, then a **Terminal** group holding **Open editor in new tab** and **Close…**, then the same **Settings** drill.
 - **The changes screen** is the full Changes pane. Tapping a file opens its diff in the standalone editor in the same browser tab, and Back comes back to the Changes screen.
@@ -602,6 +602,8 @@ It holds:
 - the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
+
+The flap does sit over the first lines of the terminal, though. The button at the right end of the top bar folds it up into the band so those lines are readable, and brings it back on the next tap. The phone remembers the choice for every agent and terminal, and keeps it across reloads. While the flap is folded, the agent/terminals switch is folded with it, so its working and needs-you colors are out of sight until you show the flap again. Entering theater still needs the flap (its first button), and leaving theater with the flap folded lands with the flap still folded.
 
 ### Typing on a phone
 

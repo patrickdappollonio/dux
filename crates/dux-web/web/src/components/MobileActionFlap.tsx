@@ -201,7 +201,10 @@ export function FlapToggle() {
         ref={ref}
         variant="ghost"
         size="icon"
-        className="size-10 shrink-0"
+        // No ghost fill while expanded: the flap is shown most of the time, and
+        // a header square filled for that long reads as pressed. The icon and
+        // the name already say which way it is set.
+        className="size-10 shrink-0 aria-expanded:bg-transparent"
         aria-label={label}
         aria-expanded={!folded}
         aria-controls={FLAP_ID}
