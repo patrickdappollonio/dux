@@ -213,7 +213,6 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
   "components/FirstLoadDialog.tsx": { ...ROOT },
   "components/MacrosDialog.tsx": { ...ROOTS(3) },
-  "components/MoveEntryDialog.tsx": { ...ROOT },
   "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
   "components/TaskManagerDialog.tsx": { ...ROOTS(2) },
   "components/WorktreesDialog.tsx": { ...ROOTS(3) },

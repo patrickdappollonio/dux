@@ -2,14 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
 
 import { FileTreeIcon } from "@/components/FileTreeIcon"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { dirIconKind } from "@/lib/fileIcons"
@@ -29,6 +22,8 @@ interface MoveEntryDialogProps {
   // True when `target`, or a descendant of it, has unsaved changes. A move is a
   // rename on disk: the tab would be retargeted and reloaded, dropping the draft.
   isDirty: boolean
+  /** The entry has left the tree: the dialog closes itself. */
+  vanished?: boolean
   onClose: () => void
   onSubmit: (destDir: string) => Promise<void>
 }
@@ -37,36 +32,13 @@ interface MoveEntryDialogProps {
 // cut and paste, which would need somewhere to hold a pending entry. The
 // destination is BROWSED, one directory per request through the explorer's own
 // lazy `tree` endpoint, so an empty directory is still reachable.
-export function MoveEntryDialog({
-  root,
-  target,
-  isDirty,
-  onClose,
-  onSubmit,
-}: MoveEntryDialogProps) {
-  return (
-    <Dialog
-      open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
-    >
-      <DialogContent showCloseButton={false} className="sm:max-w-lg">
-        {target && (
-          // Keyed by path, so opening on a different entry starts a fresh browse at
-          // that entry's own folder rather than where the last move left off.
-          <MoveEntryDialogBody
-            key={target.path}
-            root={root}
-            target={target}
-            isDirty={isDirty}
-            onClose={onClose}
-            onSubmit={onSubmit}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
-  )
+export function MoveEntryDialog(props: MoveEntryDialogProps) {
+  const life = useModalLifetime(props.target !== null)
+  // Keyed by the open, so each one starts its browse at the entry's own folder
+  // rather than where the last move left off.
+  return life.mounted ? (
+    <MoveEntryDialogBody key={life.epoch} {...props} onClosed={life.onClosed} />
+  ) : null
 }
 
 type BrowseState =
@@ -121,17 +93,19 @@ function useDirListing(
 
 function MoveEntryDialogBody({
   root,
-  target,
-  isDirty,
+  target: liveTarget,
+  isDirty: liveDirty,
+  vanished = false,
   onClose,
+  onClosed,
   onSubmit,
-}: {
-  root: EditorRoot
-  target: MoveEntryTarget
-  isDirty: boolean
-  onClose: () => void
-  onSubmit: (destDir: string) => Promise<void>
-}) {
+}: MoveEntryDialogProps & { onClosed: () => void }) {
+  const open = liveTarget !== null
+  // The entry this open is about; the last one is kept while the close animates.
+  const [last, setLast] = useState(liveTarget)
+  if (liveTarget !== null && liveTarget !== last) setLast(liveTarget)
+  const target = liveTarget ?? last ?? { path: "", isDir: false }
+  const isDirty = useHeldWhileClosed(open, liveDirty)
   // Start where the entry already is: the common move is a short hop, and
   // starting at the root would make every move begin by re-walking there.
   const [dir, setDir] = useState(() => parentDir(target.path))
@@ -140,8 +114,8 @@ function MoveEntryDialogBody({
   const state = useDirListing(root, dir, reloadNonce)
 
   // Stepping into a folder unmounts the clicked button and focus falls to the
-  // dialog, so it is put back on the new list's first control. Skipped on the
-  // initial listing, where the dialog's own autofocus decides.
+  // dialog, so it is put back on the new list's first control once that list
+  // has loaded.
   const listRef = useRef<HTMLDivElement | null>(null)
   const navigatedRef = useRef(false)
   function navigateTo(next: string): void {
@@ -156,6 +130,7 @@ function MoveEntryDialogBody({
   }, [state.status, dir])
 
   const validation = validateMove(target.path, dir)
+  const dirtyRefusal = "Save or discard changes in this file before moving it."
   const canSubmit = !isDirty && validation.ok && !submitting
   const destination = moveTarget(target.path, dir)
 
@@ -171,13 +146,29 @@ function MoveEntryDialogBody({
     state.status === "loaded" ? state.entries.filter((e) => e.is_dir) : []
 
   return (
-    <>
-      <DialogHeader>
-        <DialogTitle>
+    <Modal
+      kind="form"
+      open={open}
+      vanished={open && vanished}
+      onClose={() => onClose()}
+      onClosed={onClosed}
+      size="lg"
+      title={
+        <>
           Move <InlineCode>{basename(target.path)}</InlineCode>
-        </DialogTitle>
-      </DialogHeader>
-
+        </>
+      }
+      // The list's first row, as a keyboard walk starts there; with none on
+      // screen yet the form's own choice stands.
+      initialFocus={() => listRef.current?.querySelector("button") ?? null}
+      submit={{
+        label: "Move here",
+        tone: "primary",
+        onSelect: submit,
+        busy: submitting,
+        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
+      }}
+    >
       {/* Where the browse currently sits, and where the entry would land. */}
       <div className="flex flex-col gap-1">
         <p className="text-sm text-muted-foreground">
@@ -191,10 +182,10 @@ function MoveEntryDialogBody({
             <InlineCode className="text-foreground">{dir}</InlineCode>
           )}
         </p>
-        <p className="truncate font-mono text-sm">{destination}</p>
+        <p className="font-mono text-sm break-all">{destination}</p>
       </div>
 
-      <ScrollArea className="h-56 rounded-md border">
+      <ScrollArea className="h-56 shrink-0 rounded-md border max-md:h-auto max-md:min-h-40 max-md:flex-1">
         <div ref={listRef} className="flex flex-col p-1">
           {dir !== "" && (
             <button
@@ -246,9 +237,7 @@ function MoveEntryDialogBody({
       </ScrollArea>
 
       {isDirty ? (
-        <p className="text-sm text-destructive">
-          Save or discard changes in this file before moving it.
-        </p>
+        <p className="text-sm text-destructive">{dirtyRefusal}</p>
       ) : (
         !validation.ok && (
           // "It is already here" is the state every move dialog OPENS in, so it
@@ -264,17 +253,6 @@ function MoveEntryDialogBody({
           </p>
         )
       )}
-      {/* Misclick-safe spacing between the browse list and the buttons. */}
-      <div className="h-2" />
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button disabled={!canSubmit} aria-busy={submitting} onClick={submit}>
-          {submitting ? <Loader2 className="motion-safe:animate-spin" /> : null}
-          Move here
-        </Button>
-      </DialogFooter>
-    </>
+    </Modal>
   )
 }

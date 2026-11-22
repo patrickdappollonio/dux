@@ -74,6 +74,7 @@ import {
 import { hasDirtyUnderPath, shouldPromoteOnEdit } from "@/lib/editorTabs"
 import type { EditorTab } from "@/lib/editorTabs"
 import {
+  isAtOrUnder,
   joinName,
   parentDir,
   renameTarget as computeRenameTarget,
@@ -410,11 +411,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   // initializer (not a ref) so it's safe to read during render.
   const [initialPath] = useState(() => editorTarget?.initialPath ?? null)
 
-  // New File…/New Folder…/Rename…/Delete… dialog targets. Local EditorBody
-  // state, not store targets: the file tree is a client-owned lazy cache, not
-  // a server-broadcast ViewModel slice, so there is nothing for
-  // useVanishedTargetGuard to key against (matches the New-file dialog's
-  // existing precedent, see the plan's stop-condition note).
+  // New File…/New Folder…/Rename…/Move…/Delete… dialog targets. Local
+  // EditorBody state, not store targets: the file tree is a client-owned lazy
+  // cache, not a server-broadcast ViewModel slice. Each closes itself when a
+  // refetch of the tree finds its entry gone (`handleEntriesGone`).
   const [newEntryTarget, setNewEntryTarget] = useState<NewEntryTarget | null>(
     null,
   )
@@ -424,6 +424,24 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     useState<DeleteEntryTarget | null>(null)
   const [moveEntryTarget, setMoveEntryTarget] =
     useState<MoveEntryTarget | null>(null)
+  // The one of those four targets whose entry a tree refetch found gone, by
+  // identity, so a dialog opened later on the same path is not caught by it.
+  const [goneEntryTarget, setGoneEntryTarget] = useState<object | null>(null)
+  const entryTargetsRef = useRef<readonly { target: object; path: string }[]>([])
+  useEffect(() => {
+    entryTargetsRef.current = [
+      newEntryTarget && { target: newEntryTarget, path: newEntryTarget.dir },
+      renameEntryTarget && { target: renameEntryTarget, path: renameEntryTarget.path },
+      moveEntryTarget && { target: moveEntryTarget, path: moveEntryTarget.path },
+      deleteEntryTarget && { target: deleteEntryTarget, path: deleteEntryTarget.path },
+    ].filter((entry) => entry !== null)
+  })
+  function handleEntriesGone(gone: string[]): void {
+    const hit = entryTargetsRef.current.find(({ path }) =>
+      gone.some((left) => isAtOrUnder(path, left)),
+    )
+    if (hit) setGoneEntryTarget(hit.target)
+  }
   // The info panel is the one editor dialog with a live server-side truth to
   // key on, so unlike the four above it DOES close itself when its entry
   // vanishes; the guard lives inside the dialog, next to the fetch that
@@ -2250,6 +2268,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   revalidate={treeRevalidate}
                   refresh={treeRefresh}
                   onRefreshSettled={treeRefreshSettled}
+                  onEntriesGone={handleEntriesGone}
                   onLoadedDirsChange={(dirs) => {
                     loadedTreeDirsRef.current = dirs
                   }}
@@ -2389,10 +2408,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           tree's right-click context menu (and the header FilePlus button,
           which targets the root). Local EditorBody state, not store targets
           (see the newEntryTarget/renameEntryTarget/deleteEntryTarget
-          declarations above for why useVanishedTargetGuard doesn't apply
-          here). */}
+          declarations above). */}
       <NewEntryDialog
         target={newEntryTarget}
+        vanished={newEntryTarget === goneEntryTarget}
         onClose={() => setNewEntryTarget(null)}
         onSubmit={handleNewEntrySubmit}
       />
@@ -2405,6 +2424,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             renameEntryTarget.path,
           )
         }
+        vanished={renameEntryTarget === goneEntryTarget}
         onClose={() => setRenameEntryTarget(null)}
         onSubmit={handleRenameSubmit}
       />
@@ -2418,6 +2438,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             moveEntryTarget.path,
           )
         }
+        vanished={moveEntryTarget === goneEntryTarget}
         onClose={() => setMoveEntryTarget(null)}
         onSubmit={handleMoveSubmit}
       />
@@ -2492,6 +2513,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         blockedBySave={
           deleteEntryTarget !== null && savingPaths.has(deleteEntryTarget.path)
         }
+        vanished={deleteEntryTarget === goneEntryTarget}
         onClose={() => setDeleteEntryTarget(null)}
         onConfirm={handleDeleteConfirm}
       />

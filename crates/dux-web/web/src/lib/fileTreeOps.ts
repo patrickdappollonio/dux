@@ -42,6 +42,11 @@ export function moveTarget(from: string, destDir: string): string {
 }
 
 // "a/b/c.ts" -> "c.ts"; "x" -> "x".
+/** Whether `path` is `ancestor` or lies inside it. */
+export function isAtOrUnder(path: string, ancestor: string): boolean {
+  return path === ancestor || path.startsWith(`${ancestor}/`)
+}
+
 export function basename(path: string): string {
   const idx = path.lastIndexOf("/")
   return idx === -1 ? path : path.slice(idx + 1)

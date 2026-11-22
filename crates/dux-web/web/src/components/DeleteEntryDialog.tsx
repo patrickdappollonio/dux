@@ -15,6 +15,8 @@ interface DeleteEntryDialogProps {
   // resolved yet would let that in-flight write silently recreate the file
   // right after the delete lands.
   blockedBySave?: boolean
+  /** The entry has left the tree: the dialog closes itself. */
+  vanished?: boolean
   onClose: () => void
   onConfirm: () => void
 }
@@ -24,6 +26,7 @@ interface DeleteEntryDialogProps {
 export function DeleteEntryDialog({
   target,
   blockedBySave = false,
+  vanished = false,
   onClose,
   onConfirm,
 }: DeleteEntryDialogProps) {
@@ -34,6 +37,7 @@ export function DeleteEntryDialog({
     <Modal
       kind="confirm"
       open={target !== null}
+      vanished={target !== null && vanished}
       onClose={onClose}
       title={
         <>

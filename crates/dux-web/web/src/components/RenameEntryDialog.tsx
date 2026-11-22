@@ -15,6 +15,8 @@ interface RenameEntryDialogProps {
   // True when `target`, or a descendant of it, has unsaved changes. It disables
   // Confirm: renaming a dirty open file reloads it from disk and drops the draft.
   isDirty: boolean
+  /** The entry has left the tree: the dialog closes itself. */
+  vanished?: boolean
   onClose: () => void
   onSubmit: (newName: string) => Promise<void>
 }
@@ -31,6 +33,7 @@ function finalSegment(path: string): string {
 export function RenameEntryDialog({
   target,
   isDirty,
+  vanished,
   onClose,
   onSubmit,
 }: RenameEntryDialogProps) {
@@ -41,6 +44,7 @@ export function RenameEntryDialog({
       key={life.epoch}
       target={target}
       isDirty={isDirty}
+      vanished={vanished}
       onClose={onClose}
       onClosed={life.onClosed}
       onSubmit={onSubmit}
@@ -51,6 +55,7 @@ export function RenameEntryDialog({
 function RenameEntryDialogBody({
   target,
   isDirty: liveDirty,
+  vanished = false,
   onClose,
   onClosed,
   onSubmit,
@@ -78,6 +83,7 @@ function RenameEntryDialogBody({
     <Modal
       kind="form"
       open={target !== null}
+      vanished={target !== null && vanished}
       onClose={() => onClose()}
       onClosed={onClosed}
       size="md"

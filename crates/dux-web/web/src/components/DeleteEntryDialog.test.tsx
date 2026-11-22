@@ -72,6 +72,15 @@ describe("DeleteEntryDialog", () => {
 
   // An in-flight save must block deleting the same path, the same
   // way RenameEntryDialog's `isDirty` gate blocks a dirty rename.
+  it("closes itself once its entry has left the tree", async () => {
+    const onClose = vi.fn()
+    const props = { target: { path: "a.ts", isDir: false }, onClose, onConfirm: vi.fn() }
+    const { rerender } = render(<DeleteEntryDialog {...props} />)
+    expect(onClose).not.toHaveBeenCalled()
+    rerender(<DeleteEntryDialog {...props} vanished />)
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith("vanished"))
+  })
+
   describe("blockedBySave", () => {
     it("disables Delete and does not fire onConfirm when clicked", () => {
       const onConfirm = vi.fn()

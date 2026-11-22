@@ -12,6 +12,8 @@ export interface NewEntryTarget {
 
 interface NewEntryDialogProps {
   target: NewEntryTarget | null
+  /** The folder to create in has left the tree: the dialog closes itself. */
+  vanished?: boolean
   onClose: () => void
   // Resolves (or rejects, e.g. server 400) once the create request settles.
   onSubmit: (name: string) => Promise<void>
@@ -22,6 +24,7 @@ interface NewEntryDialogProps {
 // local `name` state resets on every one.
 export function NewEntryDialog({
   target,
+  vanished,
   onClose,
   onSubmit,
 }: NewEntryDialogProps) {
@@ -30,6 +33,7 @@ export function NewEntryDialog({
     <NewEntryDialogBody
       key={life.epoch}
       target={target}
+      vanished={vanished}
       onClose={onClose}
       onClosed={life.onClosed}
       onSubmit={onSubmit}
@@ -39,6 +43,7 @@ export function NewEntryDialog({
 
 function NewEntryDialogBody({
   target,
+  vanished = false,
   onClose,
   onClosed,
   onSubmit,
@@ -68,6 +73,7 @@ function NewEntryDialogBody({
     <Modal
       kind="form"
       open={target !== null}
+      vanished={target !== null && vanished}
       onClose={() => onClose()}
       onClosed={onClosed}
       size="md"

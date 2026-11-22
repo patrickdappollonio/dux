@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DirEntry } from "@/lib/fileTree"
 import type { DroppedItems } from "@/lib/editorDrop"
@@ -1143,6 +1143,7 @@ describe("FileTree", () => {
         refresh: { dirs: readonly string[]; nonce: number } | null
         onRefreshSettled: (nonce: number) => void
         onLoadedDirsChange: (dirs: string[]) => void
+        onEntriesGone: (paths: string[]) => void
       }> = {},
     ) {
       return render(
@@ -1191,6 +1192,30 @@ describe("FileTree", () => {
       expect(
         screen.getByText("newdir").closest("button")?.getAttribute("aria-expanded"),
       ).toBe("false")
+    })
+
+    it("reports the entries a refetch found gone, a folder included", async () => {
+      let rootEntries = [dir("src"), file("keep.ts"), file("gone.ts")]
+      treeMock.mockImplementation((_sid, d) =>
+        Promise.resolve({ dir: d, entries: d === "" ? rootEntries : [] }),
+      )
+      const onEntriesGone = vi.fn()
+      const { rerender } = renderTree({ onEntriesGone })
+      await screen.findByText("gone.ts")
+
+      rootEntries = [file("keep.ts")]
+      rerender(
+        <FileTree
+          root={agentRoot("s1")}
+          openPath={null}
+          changed={new Map()}
+          initialPath={null}
+          onOpen={() => {}}
+          onEntriesGone={onEntriesGone}
+          refresh={{ dirs: [""], nonce: 1 }}
+        />,
+      )
+      await waitFor(() => expect(onEntriesGone).toHaveBeenCalledWith(["src", "gone.ts"]))
     })
 
     it("keeps the old listing when the refetch fails, and says nothing", async () => {

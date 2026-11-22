@@ -80,6 +80,9 @@ interface FileTreeProps {
   // decide WHICH of them to refresh without owning the cache itself. One still
   // loading, or errored, has no listing a background refetch could keep.
   onLoadedDirsChange?: (dirs: string[]) => void
+  // The entries a background refetch found gone from a listing it replaced:
+  // what was on screen a moment ago and is no longer on disk.
+  onEntriesGone?: (paths: string[]) => void
   // Whether the server accepts uploads at all (`file_drop_max_bytes > 0`). With
   // it off the tree does not highlight, accept a drop, or pretend it would work.
   fileDropEnabled?: boolean
@@ -117,6 +120,7 @@ export function FileTree({
   refresh = null,
   onRefreshSettled,
   onLoadedDirsChange,
+  onEntriesGone,
   fileDropEnabled = false,
   onFilesDropped,
   writeBlocked = null,
@@ -244,6 +248,13 @@ export function FileTree({
             before.status === "loaded"
               ? vanishedDirPaths(before.entries, result.entries)
               : []
+          if (before.status === "loaded") {
+            const kept = new Set(result.entries.map((entry) => entry.path))
+            const left = before.entries
+              .filter((entry) => !kept.has(entry.path))
+              .map((entry) => entry.path)
+            if (left.length > 0) onEntriesGoneRef.current?.(left)
+          }
           const evict = gone.flatMap((d) => [
             d,
             ...descendantDirPaths(dirsRef.current, d),
@@ -307,7 +318,9 @@ export function FileTree({
   // cannot re-fire these effects on every render of the editor.
   const onLoadedDirsChangeRef = useRef(onLoadedDirsChange)
   const onRefreshSettledRef = useRef(onRefreshSettled)
+  const onEntriesGoneRef = useRef(onEntriesGone)
   useLayoutEffect(() => {
+    onEntriesGoneRef.current = onEntriesGone
     onLoadedDirsChangeRef.current = onLoadedDirsChange
     onRefreshSettledRef.current = onRefreshSettled
   })
