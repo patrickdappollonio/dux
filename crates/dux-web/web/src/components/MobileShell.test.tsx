@@ -2153,7 +2153,7 @@ describe("MobileShell flap show/hide", () => {
     expect(flap().hasAttribute("inert")).toBe(true)
   })
 
-  it("remembers the choice across a remount, for every pane", () => {
+  it("carries the choice to every pane screen", () => {
     mockState = agentState()
     const view = render(<MobileShell />)
     fireEvent.click(screen.getByRole("button", { name: "Hide actions" }))
