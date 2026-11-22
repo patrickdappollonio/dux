@@ -15,8 +15,10 @@ import {
   changesPaneMountPercent,
   collapseChangesPaneFromDrag,
   persistChangesPanePercent,
+  resetNarrowChangesPane,
   setChangesPanePercent,
 } from "@/lib/store"
+import { useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 
 // How many animation frames a re-shown Changes pane may wait for the panel
 // library to publish its layout. In 4.11.2 the normal answer arrives on the
@@ -298,4 +300,14 @@ export function useChangesPaneController(showChanges: boolean) {
   }
 
   return { mountPercent, panelRef, onLayoutChange, onResize }
+}
+
+// Close the pane a narrow window opened whenever the layout is anything else,
+// the phone's included. Called above the shell switch: `DesktopShell` is not
+// mounted while the phone layout shows, and coming back from it starts closed.
+export function useNarrowChangesPaneReset(): void {
+  const narrow = useIsNarrowComputerLayout()
+  useEffect(() => {
+    if (!narrow) resetNarrowChangesPane()
+  }, [narrow])
 }

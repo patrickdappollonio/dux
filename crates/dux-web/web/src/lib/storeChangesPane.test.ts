@@ -496,4 +496,31 @@ describe("Changes pane in a narrow computer layout", () => {
     expect(writes()).toBe(before)
     expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
   })
+
+  it("opens and closes without a write when the preference hides the pane", async () => {
+    bootstrapBody = makeBootstrap(false)
+    const mod = await loadStore()
+    const writes = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/v1/ui/changes-pane"))
+        .length
+    const before = writes()
+    mod.showChangesPane()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(true)
+    expect(mod.changesPaneEffectivelyHidden(mod.getSnapshot(), true)).toBe(false)
+    mod.toggleChangesPane()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(false)
+    mod.showChangesPane()
+    mod.collapseChangesPaneFromDrag()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(false)
+    expect(writes()).toBe(before)
+    expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(false)
+  })
+
+  it("opens the pane from the theater pill's changed-file count", async () => {
+    const mod = await loadStore()
+    mod.enterTheater()
+    mod.openChangedFiles()
+    expect(mod.getSnapshot().theater).toBe(false)
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(true)
+  })
 })

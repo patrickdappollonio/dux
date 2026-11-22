@@ -9575,7 +9575,7 @@ export function openChangedFiles(): void {
     return
   }
   exitTheater()
-  if (changesPaneEffectivelyHidden(state)) showChangesPane()
+  if (changesPaneEffectivelyHidden(state, isNarrowComputerLayout())) showChangesPane()
 }
 
 // Navigate to the parent route rather than stepping browser history. Real route
@@ -9734,11 +9734,13 @@ export function changesSpacerPercent(s: DuxState, narrow = false): number {
   return changesPaneShown(s, narrow) ? s.changesPanePercent : 0
 }
 
-// Whether the computer layout lays the Changes pane out: the preference, not in
-// theater, and, on a window narrower than the breakpoint (`narrow`), only once
-// the person opened it there, because at that width it would be a sliver.
+// Whether the computer layout lays the Changes pane out: never in theater; on a
+// window narrower than the breakpoint (`narrow`) only once the person opened it
+// there, whatever the preference says, because at that width it would be a
+// sliver; elsewhere the preference.
 export function changesPaneShown(s: DuxState, narrow: boolean): boolean {
-  return changesPaneVisible(s) && !s.theater && (!narrow || s.changesPaneNarrowShown)
+  if (s.theater) return false
+  return narrow ? s.changesPaneNarrowShown : changesPaneVisible(s)
 }
 
 // Close the pane a narrow window opened, as leaving that width does.
@@ -9819,8 +9821,7 @@ export function changesPaneCollapseStep(args: {
 // `changesPanePercent` raw, because `changesSpacerPercent` is defined as zero
 // while the preference is off and cannot tell the two hidden states apart.
 export function changesPaneEffectivelyHidden(s: DuxState, narrow = false): boolean {
-  if (!changesPaneVisible(s)) return true
-  if (narrow && !s.changesPaneNarrowShown) return true
+  if (narrow ? !s.changesPaneNarrowShown : !changesPaneVisible(s)) return true
   return s.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON
 }
 
@@ -9831,11 +9832,11 @@ export function changesPaneEffectivelyHidden(s: DuxState, narrow = false): boole
 // write that preference for every connected client.
 export function collapseChangesPaneFromDrag(): void {
   if (state.theater) return
-  if (!changesPaneVisible(state)) return
   if (isNarrowComputerLayout()) {
     resetNarrowChangesPane()
     return
   }
+  if (!changesPaneVisible(state)) return
   setChangesPaneVisibility(false)
 }
 
@@ -9847,10 +9848,10 @@ export function showChangesPane(): void {
   if (state.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON) {
     setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
   }
+  // At this width the pane is the page's own and the preference is not asked.
   if (isNarrowComputerLayout()) {
     setState({ changesPaneNarrowShown: true })
-    // Already on by preference: opening it at this width writes nothing.
-    if (changesPaneVisible(state)) return
+    return
   }
   setChangesPaneVisibility(true)
 }
@@ -9879,7 +9880,7 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
 // Toggle the Changes pane's visibility. Called by the Changes actions menu; the
 // saved preference itself is the `ui.show_changes_pane` Preferences row.
 export function toggleChangesPane(): void {
-  if (isNarrowComputerLayout() && changesPaneVisible(state)) {
+  if (isNarrowComputerLayout()) {
     setState({ changesPaneNarrowShown: !state.changesPaneNarrowShown })
     return
   }

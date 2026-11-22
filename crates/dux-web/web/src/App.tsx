@@ -1,5 +1,4 @@
 import type * as React from "react"
-import { useEffect } from "react"
 
 import { AddProjectDialog } from "@/components/AddProjectDialog"
 import { CloneProjectDialog } from "@/components/CloneProjectDialog"
@@ -70,11 +69,13 @@ import {
   useTheaterGesture,
 } from "@/hooks/use-theater"
 import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
-import { useChangesPaneController } from "@/hooks/use-changes-pane-controller"
+import {
+  useChangesPaneController,
+  useNarrowChangesPaneReset,
+} from "@/hooks/use-changes-pane-controller"
 import {
   CHANGES_PANE_MIN_PERCENT,
   changesPaneShown,
-  resetNarrowChangesPane,
   setSidebarOpen,
   TERMINAL_PANE_MIN_PERCENT,
   useDux,
@@ -177,9 +178,6 @@ export function DesktopShell() {
   // A window narrower than the breakpoint leaves the pane a sliver, so it
   // starts closed there, behind its usual reopen control.
   const showChanges = changesPaneShown(dux, narrow)
-  useEffect(() => {
-    if (!narrow) resetNarrowChangesPane()
-  }, [narrow])
 
   const { mountPercent, panelRef, onLayoutChange, onResize } =
     useChangesPaneController(showChanges)
@@ -333,6 +331,7 @@ function MobileApp() {
 function App() {
   const { standaloneEditor } = useDux()
   const isMobile = useIsMobile()
+  useNarrowChangesPaneReset()
   // Above the shell switch, so a rotation that swaps shells neither restarts the
   // gesture nor leaves two Escape listeners exiting twice.
   useTheaterGesture()

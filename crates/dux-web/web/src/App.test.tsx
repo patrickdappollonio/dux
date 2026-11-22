@@ -96,6 +96,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { DesktopShell, CHANGES_PANE_HEAL_FRAMES } = await import("./App")
+const { useNarrowChangesPaneReset } = await import("@/hooks/use-changes-pane-controller")
 const { CHANGES_PANE_DEFAULT_PERCENT } = await import("@/lib/store")
 
 function stateWith(showChanges: boolean, percent = 26): DuxState {
@@ -712,5 +713,30 @@ describe("DesktopShell remembered split", () => {
     // The collapse rides the visibility preference, not the remembered split:
     // a stored zero would reopen the pane at nothing.
     expect(localStorage.getItem(SPLIT_KEY)).toBeNull()
+  })
+})
+
+describe("the Changes pane a narrow window opened", () => {
+  const width = window.innerWidth
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
+  })
+
+  it("is closed again after a stint in the phone layout", async () => {
+    const store = await import("@/lib/store")
+    const layout = await import("@/lib/shellLayout")
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 600 })
+    layout.setLayoutChoice("computer")
+    function Root() {
+      useNarrowChangesPaneReset()
+      return null
+    }
+    render(<Root />)
+    store.showChangesPane()
+    expect(store.getSnapshot().changesPaneNarrowShown).toBe(true)
+    act(() => layout.setLayoutChoice("phone"))
+    act(() => layout.setLayoutChoice("computer"))
+    expect(store.getSnapshot().changesPaneNarrowShown).toBe(false)
+    layout.setLayoutChoice(null)
   })
 })
