@@ -402,7 +402,8 @@ describe("a card that changes step", () => {
       })
     render(<Steps />)
     fireEvent.click(screen.getByText("next"))
-    expect(popup().style.minHeight).toContain("600px")
+    // Held exactly, so a taller step scrolls inside it rather than growing it.
+    expect(popup().style.height).toContain("600px")
     height.mockRestore()
   })
 })

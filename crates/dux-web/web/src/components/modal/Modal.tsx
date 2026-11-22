@@ -214,10 +214,12 @@ function ModalParts(
     const stepChanged = was !== null && was.open && was.step !== step
     // On open the popup places focus itself, unless a control inside already
     // took it; that case and a change of step are placed here.
-    // A card keeps the height it had across a change of step, so the list or
-    // the button under the pointer does not jump; it never shrinks back.
+    // A card keeps the height it had across a change of step, in both
+    // directions, so the list or the button under the pointer does not jump; a
+    // step with more to show scrolls inside it. The card's max-height still
+    // caps it to the window.
     if (stepChanged && !cover && popup instanceof HTMLElement && shownHeight.current > 0) {
-      popup.style.minHeight = `min(${shownHeight.current}px, calc(100dvh - 2rem))`
+      popup.style.height = `${shownHeight.current}px`
     }
     if (!stepChanged && !popup?.contains(document.activeElement)) return
     target()?.focus({ preventScroll: true })
@@ -226,7 +228,7 @@ function ModalParts(
   useLayoutEffect(() => {
     const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
     if (!popup) return
-    if (cover) popup.style.minHeight = ""
+    if (cover) popup.style.height = ""
     shownHeight.current = cover ? 0 : popup.offsetHeight
   })
 
