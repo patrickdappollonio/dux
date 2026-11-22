@@ -118,7 +118,7 @@ export function TheaterPill({
     flight,
     position: drag.position,
     dragging: drag.dragging,
-    justDropped: drag.justDropped,
+    snapOnce: drag.snapOnce,
     reducedMotion,
     gripless,
   })
@@ -1007,9 +1007,11 @@ interface PillDrag {
   carryRef: React.RefObject<CarryControl | null>
   /// Whether a drag is live, which suppresses the settle animation.
   dragging: boolean
-  /// True for the single commit that lands a drop, suppressing the settle: the
-  /// pill is already where the pointer left it.
-  justDropped: boolean
+  /// True for the single commit whose move must not ease, suppressing the
+  /// settle: a drop, where the pill is already where the pointer left it, and a
+  /// re-clamp that only follows the surface moving under a corner that stayed
+  /// put on screen, which an ease would slide off that spot and back.
+  snapOnce: boolean
   onPointerDown: (ev: React.PointerEvent<HTMLElement>) => void
   onPointerMove: (ev: React.PointerEvent<HTMLElement>) => void
   onPointerUp: (ev: React.PointerEvent<HTMLElement>) => void
@@ -1048,7 +1050,7 @@ interface DragGesture {
 function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
   const [position, setPosition] = useState<PillPosition | null>(null)
   const [dragging, setDragging] = useState(false)
-  const [justDropped, setJustDropped] = useState(false)
+  const [snapOnce, setSnapOnce] = useState(false)
   const posRef = useRef<PillPosition | null>(null)
   // Where the user asked for it, which is not where it fits today: every clamp
   // is against the surface and pill of the moment, and clamping an already
@@ -1134,6 +1136,10 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     if (was && (onScreen.x !== was.x || onScreen.y !== was.y)) {
       restMovedRef.current?.({ x: onScreen.x - was.x, y: onScreen.y - was.y })
     }
+    const stayedOnScreen =
+      was !== null &&
+      Math.abs(onScreen.x - was.x) < 0.5 &&
+      Math.abs(onScreen.y - was.y) < 0.5
     const current = posRef.current
     // Every surface change re-clamps, mid-flight included: a pill hanging
     // outside the surface is off screen. The flight stages change only whether
@@ -1142,8 +1148,12 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     // Nothing here writes to storage. The user did not move the pill, a window
     // did, and the position they chose has to survive the window changing back.
     posRef.current = next
-    if (sync) flushSync(() => setPosition(next))
-    else setPosition(next)
+    const commit = () => {
+      if (stayedOnScreen) setSnapOnce(true)
+      setPosition(next)
+    }
+    if (sync) flushSync(commit)
+    else commit()
   }, [boxRef])
 
 
@@ -1166,7 +1176,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
       // The drop is not a settle: one commit swaps the transform for real
       // coordinates and re-enables the animation, which would then ease the pill
       // from the corner it was dragged out of. Suppressed for this commit only.
-      setJustDropped(true)
+      setSnapOnce(true)
       place(g.last, true)
     },
     [boxRef, place],
@@ -1197,13 +1207,13 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     return () => ro.disconnect()
   }, [boxRef, measure, endGesture])
 
-  // One painted frame: long enough for the drop's coordinates to land without
+  // One painted frame: long enough for snapped coordinates to land without
   // easing, short enough that the next nudge or re-clamp still settles.
   useEffect(() => {
-    if (!justDropped) return
-    const frame = requestAnimationFrame(() => setJustDropped(false))
+    if (!snapOnce) return
+    const frame = requestAnimationFrame(() => setSnapOnce(false))
     return () => cancelAnimationFrame(frame)
-  }, [justDropped])
+  }, [snapOnce])
 
   const lift = useCallback(() => {
     const g = gestureRef.current
@@ -1389,7 +1399,7 @@ function usePillDrag(boxRef: React.RefObject<HTMLDivElement | null>): PillDrag {
     restMovedRef,
     carryRef,
     dragging,
-    justDropped,
+    snapOnce,
     onPointerDown,
     onPointerMove,
     onPointerUp,

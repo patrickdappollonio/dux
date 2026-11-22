@@ -939,6 +939,22 @@ describe("moving the theater pill", () => {
     expect(pill().className).toContain("transition-[left,top]")
   })
 
+  // The top chrome collapsing over a pill already at rest (theater entered
+  // with no flight) grows the surface upward under its bottom corner: the pill
+  // stays where it is on screen, so its new coordinates must not ease, or it
+  // slides up with the surface and back down.
+  it("holds still while the surface grows under the corner it rests in", async () => {
+    render(<TheaterPill target={terminalTarget} session={undefined} />)
+    surfaceBox = { ...surfaceBox, top: -44, height: 644 }
+    act(() => playResize())
+    expect(pill().style.top).toBe("582px")
+    expect(pill().className).not.toContain("transition-[left,top]")
+    await act(
+      () => new Promise<void>((done) => requestAnimationFrame(() => done())),
+    )
+    expect(pill().className).toContain("transition-[left,top]")
+  })
+
   it("settles with an animation for everybody else", () => {
     render(<TheaterPill target={terminalTarget} session={undefined} />)
     expect(pill().className).toContain("transition-[left,top]")

@@ -12,7 +12,7 @@ export function theaterPillBox(ctx: {
   flight: FlightPhase | null
   position: PillPosition | null
   dragging: boolean
-  justDropped: boolean
+  snapOnce: boolean
   reducedMotion: boolean
   gripless: boolean
 }): { className: string; style: React.CSSProperties | undefined } {
@@ -40,7 +40,7 @@ export function theaterPillBox(ctx: {
       // (easing toward the finger lags it) and under reduced motion.
       !ctx.reducedMotion &&
         !ctx.dragging &&
-        !ctx.justDropped &&
+        !ctx.snapOnce &&
         !positionSnaps &&
         "transition-[left,top] duration-150 ease-out",
       ctx.gripless && PILL_GRIPLESS_CLASS,

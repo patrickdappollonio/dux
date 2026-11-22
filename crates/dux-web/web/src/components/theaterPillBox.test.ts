@@ -9,7 +9,7 @@ const box = (over: Partial<Parameters<typeof theaterPillBox>[0]> = {}) =>
     flight: null,
     position: { x: 12, y: 34 },
     dragging: false,
-    justDropped: false,
+    snapOnce: false,
     reducedMotion: false,
     gripless: false,
     ...over,
@@ -40,7 +40,7 @@ describe("theaterPillBox", () => {
       box(over).className.includes("transition-[left,top]")
     expect(settles({})).toBe(true)
     expect(settles({ dragging: true })).toBe(false)
-    expect(settles({ justDropped: true })).toBe(false)
+    expect(settles({ snapOnce: true })).toBe(false)
     expect(settles({ reducedMotion: true })).toBe(false)
     // The re-clamp under returning chrome snaps rather than crawling upward.
     expect(settles({ flight: "expanding" })).toBe(false)
