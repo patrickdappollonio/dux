@@ -7,6 +7,7 @@ import type { AttachedBlocker } from "@/lib/attached"
 vi.mock("@/lib/store", () => ({ useDux: () => ({ spine: null }) }))
 
 const { AttachedSection, GuardedConfirmButton } = await import("./AttachedSection")
+const { guardedConfirmAction } = await import("./guardedConfirmAction")
 
 function blocker(key: string, driving: boolean): AttachedBlocker {
   return {
@@ -54,5 +55,28 @@ describe("a guarded dialog told who is in the way", () => {
     expect(screen.queryByText(/Take it over/)).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Remove anyway" }))
     expect(confirm).toHaveBeenCalledOnce()
+  })
+
+  // A confirm built with `Modal` disables a footer button only with a reason,
+  // so the driving case carries one, and a known driver's hint wins over it.
+  it("as a modal action, gives the driving case a reason and the pending case a spinner", () => {
+    const base = { verb: "Remove", pending: false, onConfirm: () => {} }
+    expect(guardedConfirmAction({ ...base, blockers: null })).toMatchObject({
+      label: "Remove",
+      tone: "destructive",
+      disabledReason: null,
+    })
+    expect(
+      guardedConfirmAction({ ...base, blockers: [blocker("a", true)] }).disabledReason,
+    ).toMatch(/Take it over/)
+    expect(guardedConfirmAction({ ...base, blockers: [blocker("b", false)] })).toMatchObject({
+      label: "Remove anyway",
+      disabledReason: null,
+    })
+    expect(
+      guardedConfirmAction({ ...base, blockers: null, drivenHint: "Laptop is driving." })
+        .disabledReason,
+    ).toBe("Laptop is driving.")
+    expect(guardedConfirmAction({ ...base, blockers: null, pending: true }).busy).toBe(true)
   })
 })

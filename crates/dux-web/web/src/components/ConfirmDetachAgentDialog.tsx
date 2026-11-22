@@ -1,18 +1,7 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { detachConfirmProse, shutdownGraceSeconds } from "@/lib/detachAgent"
 import { renderProse } from "@/lib/prose"
@@ -42,11 +31,7 @@ export function ConfirmDetachAgentDialog() {
 
   // Closes itself when the agent leaves the live view model, like every other
   // target-keyed dialog.
-  const isOpen = useVanishedTargetGuard(
-    stopAgentTarget !== null,
-    session !== undefined,
-    closeStopAgent,
-  )
+  const isOpen = stopAgentTarget !== null && session !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     stopAgentTarget,
@@ -61,41 +46,26 @@ export function ConfirmDetachAgentDialog() {
     if (done) closeStopAgent()
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) closeStopAgent()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Detach agent?</DialogTitle>
-          <DialogDescription>
-            {renderProse(
-              detachConfirmProse(label, shutdownGraceSeconds(bootstrap), liveTabs),
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeStopAgent}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Detach"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={stopAgentTarget !== null}
+      vanished={session === undefined}
+      onClose={closeStopAgent}
+      title="Detach agent?"
+      description={renderProse(
+        detachConfirmProse(label, shutdownGraceSeconds(bootstrap), liveTabs),
+      )}
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Detach",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }

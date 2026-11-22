@@ -1,22 +1,14 @@
 import {
   AttachedSection,
   DrivenElsewhereSection,
-  GuardedConfirmButton,
 } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
 import {
   drivenElsewhereHint,
   useProjectDrivenElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { removeProjectProse } from "@/lib/projectConfirm"
 import { renderProse } from "@/lib/prose"
 import { closeRemoveProject, removeProject, useDux } from "@/lib/store"
@@ -25,15 +17,6 @@ import { workspaceProjectId } from "@/lib/agentWorkspace"
 export function RemoveProjectDialog() {
   const { removeProjectTarget, spine } = useDux()
 
-  // Deliberately skips useVanishedTargetGuard: this dialog opens for ghost
-  // projects with no live project record, so a vanish guard would dismiss the
-  // exact case it exists for.
-  const isOpen = removeProjectTarget !== null
-  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
-    isOpen,
-    removeProjectTarget,
-  )
-  const driven = useProjectDrivenElsewhere(removeProjectTarget)
   const project = spine?.projects.find((p) => p.id === removeProjectTarget)
   // For an orphaned ("ghost") project there is no project record, so fall back
   // to the short-id name the sidebar shows for its group.
@@ -45,6 +28,15 @@ export function RemoveProjectDialog() {
     spine?.sessions.filter(
       (s) => workspaceProjectId(s.workspace) === removeProjectTarget,
     ).length ?? 0
+  // A ghost project has no record, only its group and its agents, so it is
+  // gone once none of the three is left.
+  const present = project !== undefined || orphanName !== undefined || agentCount > 0
+  const isOpen = removeProjectTarget !== null && present
+  const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
+    isOpen,
+    removeProjectTarget,
+  )
+  const driven = useProjectDrivenElsewhere(removeProjectTarget)
 
   async function handleConfirm() {
     if (!removeProjectTarget) return
@@ -53,41 +45,30 @@ export function RemoveProjectDialog() {
     if (done) closeRemoveProject()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeRemoveProject()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Remove project?</DialogTitle>
-          <DialogDescription>
-            {renderProse(removeProjectProse(name, agentCount))}
-          </DialogDescription>
-        </DialogHeader>
-        <DrivenElsewhereSection driven={driven} />
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeRemoveProject}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Remove"
-            drivenHint={drivenElsewhereHint(driven)}
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={removeProjectTarget !== null}
+      vanished={!present}
+      onClose={closeRemoveProject}
+      title="Remove project?"
+      description={renderProse(removeProjectProse(name, agentCount))}
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Remove",
+        drivenHint: drivenElsewhereHint(driven),
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {driven.length > 0 || blockers?.length ? (
+        <>
+          <DrivenElsewhereSection driven={driven} />
+          <AttachedSection blockers={blockers} />
+        </>
+      ) : null}
+    </Modal>
   )
 }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { RecreateWire } from "@/lib/agentWorkspace"
@@ -234,11 +234,11 @@ describe("ConfirmRecreateWorkingCopyDialog", () => {
     await vi.waitFor(() => expect(closeRecreateWorkingCopy).toHaveBeenCalled())
   })
 
-  it("cancels without acting, and Cancel is the default focus", () => {
+  it("cancels without acting, and Cancel is the default focus", async () => {
     seed("s1", [session(true)])
     render(<ConfirmRecreateWorkingCopyDialog />)
 
-    expect(document.activeElement?.textContent).toBe("Cancel")
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("Cancel"))
     fireEvent.click(screen.getByText("Cancel"))
     expect(recreateWorkingCopy).not.toHaveBeenCalled()
     expect(closeRecreateWorkingCopy).toHaveBeenCalled()

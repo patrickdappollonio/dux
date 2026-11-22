@@ -1,19 +1,8 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDetachesAgent, tabProseLabel } from "@/lib/agentTabs"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { closeStopTab, stopTab, useDux } from "@/lib/store"
@@ -36,11 +25,7 @@ export function ConfirmStopTabDialog() {
   const agentLabel = session ? sessionLabel(session) : ""
   const willDetach = closeDetachesAgent(session, tab)
 
-  const isOpen = useVanishedTargetGuard(
-    stopTabTarget !== null,
-    tab !== undefined,
-    closeStopTab,
-  )
+  const isOpen = stopTabTarget !== null && tab !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     stopTabTarget && `${stopTabTarget.sessionId}/${stopTabTarget.tabId}`,
@@ -53,45 +38,34 @@ export function ConfirmStopTabDialog() {
     if (done) closeStopTab()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeStopTab()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Stop tab?</DialogTitle>
-          <DialogDescription>
-            Stop the <InlineCode>{tabLabel}</InlineCode> tab on{" "}
-            <InlineCode>{agentLabel}</InlineCode>? This ends its session,
-            interrupting whatever it is doing. The tab stays in the strip,
-            ready to start again.
-            {willDetach
-              ? " It's this agent's last running tab, so the agent detaches and stays in Projects, reopenable."
-              : ""}
-          </DialogDescription>
-        </DialogHeader>
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeStopTab}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Stop tab"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={stopTabTarget !== null}
+      vanished={tab === undefined}
+      onClose={closeStopTab}
+      title="Stop tab?"
+      description={
+        <>
+          Stop the <InlineCode>{tabLabel}</InlineCode> tab on{" "}
+          <InlineCode>{agentLabel}</InlineCode>? This ends its session,
+          interrupting whatever it is doing. The tab stays in the strip,
+          ready to start again.
+          {willDetach
+            ? " It's this agent's last running tab, so the agent detaches and stays in Projects, reopenable."
+            : ""}
+        </>
+      }
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Stop tab",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }

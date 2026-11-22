@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
 import { Button } from "@/components/ui/button"
 import type { DrivenElsewhere } from "@/hooks/use-agent-active-elsewhere"
 import {
@@ -9,7 +10,6 @@ import {
   attachedEntries,
   attachedEntryProse,
   attachedLeadProse,
-  mayGoAheadOver,
 } from "@/lib/attached"
 import { chip, renderProse, type Prose } from "@/lib/prose"
 import { useDux } from "@/lib/store"
@@ -26,7 +26,7 @@ export function AttachedSection({
   if (blockers === null || blockers.length === 0) return null
   const entries = attachedEntries(blockers, spine)
   // A device that is driving is named apart: the confirm button is withheld
-  // for it (`GuardedConfirmButton`), so the list says what to do instead.
+  // for it (`guardedConfirmAction`), so the list says what to do instead.
   const groups = [
     { lead: attachedDrivingLeadProse(), entries: entries.filter((entry) => entry.driving) },
     { lead: attachedLeadProse(), entries: entries.filter((entry) => !entry.driving) },
@@ -75,10 +75,10 @@ function drivenElsewhereProse(part: DrivenElsewhere): Prose {
   ]
 }
 
-/** A guarded dialog's destructive confirm. A double click's second click never
- * reaches the override that replaced the button under it. While a blocker is
- * driving there is no going ahead from here, so the button is disabled and the
- * section above it says to take over first. */
+/** Why a guarded confirm cannot go ahead while a blocker is driving. */
+/** `guardedConfirmAction` as a button, for a dialog not built with `Modal`.
+ * A double click's second click never reaches the override that replaced the
+ * button under it. */
 export function GuardedConfirmButton({
   verb,
   blockers,
@@ -90,23 +90,21 @@ export function GuardedConfirmButton({
   blockers: readonly AttachedBlocker[] | null
   pending: boolean
   onConfirm: () => void
-  /** For a dialog that knows before sending what another device drives: why
-   * the button is disabled, or null while nothing is. */
   drivenHint?: string | null
 }): ReactNode {
-  const driven = blockers !== null && !mayGoAheadOver(blockers)
+  const action = guardedConfirmAction({ verb, blockers, pending, onConfirm, drivenHint })
   const knownDriven = drivenHint !== undefined && drivenHint !== null
   const button = (
     <Button
       variant="destructive"
-      disabled={pending || driven || knownDriven}
+      disabled={pending || action.disabledReason !== null}
       className={drivenHint === undefined ? undefined : "w-full"}
       onClick={(event) => {
         if (blockers !== null && event.detail > 1) return
         onConfirm()
       }}
     >
-      {blockers === null || driven ? verb : `${verb} anyway`}
+      {action.label}
     </Button>
   )
   if (drivenHint === undefined) return button

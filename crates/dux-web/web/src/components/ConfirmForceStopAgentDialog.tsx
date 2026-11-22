@@ -1,18 +1,7 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { forceStopConfirmProse } from "@/lib/detachAgent"
 import { renderProse } from "@/lib/prose"
@@ -37,11 +26,7 @@ export function ConfirmForceStopAgentDialog() {
 
   // Closes itself when the agent leaves the live view model, like every other
   // target-keyed dialog.
-  const isOpen = useVanishedTargetGuard(
-    forceStopAgentTarget !== null,
-    session !== undefined,
-    closeForceStopAgent,
-  )
+  const isOpen = forceStopAgentTarget !== null && session !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     forceStopAgentTarget,
@@ -56,39 +41,24 @@ export function ConfirmForceStopAgentDialog() {
     if (done) closeForceStopAgent()
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) closeForceStopAgent()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Force stop agent?</DialogTitle>
-          <DialogDescription>
-            {renderProse(forceStopConfirmProse(label))}
-          </DialogDescription>
-        </DialogHeader>
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeForceStopAgent}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Force stop"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={forceStopAgentTarget !== null}
+      vanished={session === undefined}
+      onClose={closeForceStopAgent}
+      title="Force stop agent?"
+      description={renderProse(forceStopConfirmProse(label))}
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Force stop",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }

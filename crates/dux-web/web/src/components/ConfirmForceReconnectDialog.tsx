@@ -1,19 +1,8 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeForceReconnect,
   reconnectSession,
@@ -32,12 +21,7 @@ export function ConfirmForceReconnectDialog() {
   const session = forceReconnectTarget
     ? spine?.sessions.find((s) => s.id === forceReconnectTarget)
     : undefined
-  // Closes the dialog when the agent vanishes from the ViewModel; see the hook.
-  const isOpen = useVanishedTargetGuard(
-    forceReconnectTarget !== null,
-    session !== undefined,
-    closeForceReconnect,
-  )
+  const isOpen = forceReconnectTarget !== null && session !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     forceReconnectTarget,
@@ -51,45 +35,28 @@ export function ConfirmForceReconnectDialog() {
     if (done) closeForceReconnect()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeForceReconnect()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            Force recreate{" "}
-            {name ? <InlineCode>{name}</InlineCode> : "agent"}?
-          </DialogTitle>
-          <DialogDescription>
-            Do you want to force reconnect the agent? This will start a fresh
-            session instead of continuing the existing session.
-          </DialogDescription>
-        </DialogHeader>
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          {/* Cancel is the default focus, matching the TUI. shadcn/base-ui
-              buttons activate on Space/Enter natively. */}
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeForceReconnect}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Force recreate"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={forceReconnectTarget !== null}
+      vanished={session === undefined}
+      onClose={closeForceReconnect}
+      title={
+        <>
+          Force recreate {name ? <InlineCode>{name}</InlineCode> : "agent"}?
+        </>
+      }
+      description="Do you want to force reconnect the agent? This will start a fresh session instead of continuing the existing session."
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Force recreate",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }

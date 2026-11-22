@@ -1,19 +1,8 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeTabConsequences, sessionAsShown } from "@/lib/agentTabs"
 import { DOCS_AGENT_TABS_CLOSING } from "@/lib/docs"
 import { renderProse } from "@/lib/prose"
@@ -60,12 +49,8 @@ export function ConfirmCloseTabDialog() {
   )
 
   // Closes the dialog when the tab (or its whole session) vanishes from the
-  // ViewModel; see the hook.
-  const isOpen = useVanishedTargetGuard(
-    closeTabTarget !== null,
-    tab !== undefined,
-    closeCloseTab,
-  )
+  // ViewModel.
+  const isOpen = closeTabTarget !== null && tab !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     closeTabTarget && `${closeTabTarget.sessionId}/${closeTabTarget.tabId}`,
@@ -80,62 +65,49 @@ export function ConfirmCloseTabDialog() {
     if (done) closeCloseTab()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeCloseTab()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Close tab?</DialogTitle>
-          <DialogDescription>
-            This ends {renderProse(sessionLabel)} in this tab and deletes the
-            tab for good. A new tab always starts fresh, so use your
-            provider&rsquo;s own history command to get back to this
-            conversation.
-            {willDetach
-              ? " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
-              : ""}
-            {successorLabel ? (
-              <>
-                {" "}
-                <InlineCode>{successorLabel}</InlineCode> takes its place as the
-                agent&rsquo;s first tab.
-              </>
-            ) : null}{" "}
-            <a
-              href={DOCS_AGENT_TABS_CLOSING}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline underline-offset-2"
-            >
-              How closing a tab works →
-            </a>
-          </DialogDescription>
-        </DialogHeader>
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          {/* Cancel is the default focus, matching the TUI. shadcn/radix buttons
-              activate on Space/Enter natively. */}
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeCloseTab}
+    <Modal
+      kind="confirm"
+      open={closeTabTarget !== null}
+      vanished={tab === undefined}
+      onClose={closeCloseTab}
+      title="Close tab?"
+      description={
+        <>
+          This ends {renderProse(sessionLabel)} in this tab and deletes the
+          tab for good. A new tab always starts fresh, so use your
+          provider&rsquo;s own history command to get back to this
+          conversation.
+          {willDetach
+            ? " It's this agent's last live tab, so the agent detaches and stays in Projects, reopenable."
+            : ""}
+          {successorLabel ? (
+            <>
+              {" "}
+              <InlineCode>{successorLabel}</InlineCode> takes its place as the
+              agent&rsquo;s first tab.
+            </>
+          ) : null}{" "}
+          <a
+            href={DOCS_AGENT_TABS_CLOSING}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary underline underline-offset-2"
           >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Close tab"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            How closing a tab works →
+          </a>
+        </>
+      }
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Close tab",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }

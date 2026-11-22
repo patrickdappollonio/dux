@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -164,7 +165,7 @@ describe("ConfirmForceStopAgentDialog", () => {
     render(<ConfirmForceStopAgentDialog />)
 
     const cancel = await screen.findByText("Cancel")
-    expect(document.activeElement).toBe(cancel.closest("button"))
+    await waitFor(() => expect(document.activeElement).toBe(cancel.closest("button")))
     fireEvent.click(cancel)
     expect(killSessionPty).not.toHaveBeenCalled()
     expect(closeForceStopAgent).toHaveBeenCalled()

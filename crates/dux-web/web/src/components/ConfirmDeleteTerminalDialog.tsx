@@ -1,19 +1,9 @@
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   closeDeleteTerminal,
   deleteTerminal,
@@ -38,12 +28,8 @@ export function ConfirmDeleteTerminalDialog() {
       : undefined
 
   // Closes the dialog when the terminal vanishes from the ViewModel (its
-  // process exited); see the hook.
-  const isOpen = useVanishedTargetGuard(
-    deleteTerminalTarget !== null,
-    terminal !== undefined,
-    closeDeleteTerminal,
-  )
+  // process exited).
+  const isOpen = deleteTerminalTarget !== null && terminal !== undefined
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     deleteTerminalTarget,
@@ -69,50 +55,41 @@ export function ConfirmDeleteTerminalDialog() {
     if (done) closeDeleteTerminal()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeDeleteTerminal()
-  }
-
+  // Only an app running in the foreground is worth warning about: an idle
+  // shell confirms with just the title.
+  const body = (
+    <>
+      {foreground ? (
+        <p className="text-sm text-destructive">
+          <InlineCode>{foreground}</InlineCode> is running in this
+          terminal and will be killed.
+        </p>
+      ) : null}
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </>
+  )
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            Close <InlineCode>{title}</InlineCode>?
-          </DialogTitle>
-        </DialogHeader>
-        {/* Only warn about killing a process when an actual app is running in
-            the foreground. The bare shell (no foreground command) is not worth
-            warning about, so an idle terminal confirms with just the title. */}
-        {foreground ? (
-          <p className="text-sm text-destructive">
-            <InlineCode>{foreground}</InlineCode> is running in this
-            terminal and will be killed.
-          </p>
-        ) : null}
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          {/* Cancel is the default focus, matching the TUI (Cancel highlighted).
-              shadcn/radix buttons already activate on Space/Enter natively. */}
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeDeleteTerminal}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Close terminal"
-            blockers={blockers}
-            pending={pending}
-            drivenHint={drivenHint}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={deleteTerminalTarget !== null}
+      vanished={terminal === undefined}
+      onClose={closeDeleteTerminal}
+      title={
+        <>
+          Close <InlineCode>{title}</InlineCode>?
+        </>
+      }
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Close terminal",
+        blockers,
+        pending,
+        drivenHint,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {foreground || blockers?.length ? body : null}
+    </Modal>
   )
 }

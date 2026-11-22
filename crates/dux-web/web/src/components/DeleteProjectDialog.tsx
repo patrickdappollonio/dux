@@ -1,25 +1,16 @@
 import {
   AttachedSection,
   DrivenElsewhereSection,
-  GuardedConfirmButton,
 } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
 import {
   drivenElsewhereHint,
   useProjectDrivenElsewhere,
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { useEffect, useRef, useState } from "react"
 import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeDeleteProject, deleteProject, useDux } from "@/lib/store"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 import {
@@ -96,11 +87,8 @@ export function DeleteProjectDialog() {
   const { deleteProjectTarget, spine } = useDux()
 
   const project = spine?.projects.find((p) => p.id === deleteProjectTarget)
-  const isOpen = useVanishedTargetGuard(
-    deleteProjectTarget !== null,
-    project !== undefined,
-    closeDeleteProject,
-  )
+  const present = project !== undefined
+  const isOpen = deleteProjectTarget !== null && present
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     deleteProjectTarget,
@@ -125,42 +113,31 @@ export function DeleteProjectDialog() {
     if (done) closeDeleteProject()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeDeleteProject()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Delete project?</DialogTitle>
-          <DialogDescription>
-            {renderProse(deleteProjectProse(name, agentCount))}
-          </DialogDescription>
-        </DialogHeader>
-        {isOpen && <ProjectWorktreeFiles agents={worktrees} />}
-        <DrivenElsewhereSection driven={driven} />
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeDeleteProject}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Delete"
-            drivenHint={drivenElsewhereHint(driven)}
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={deleteProjectTarget !== null}
+      vanished={!present}
+      onClose={closeDeleteProject}
+      title="Delete project?"
+      description={renderProse(deleteProjectProse(name, agentCount))}
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Delete",
+        drivenHint: drivenElsewhereHint(driven),
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {worktrees.length > 0 || driven.length > 0 || blockers?.length ? (
+        <>
+          {isOpen && <ProjectWorktreeFiles agents={worktrees} />}
+          <DrivenElsewhereSection driven={driven} />
+          <AttachedSection blockers={blockers} />
+        </>
+      ) : null}
+    </Modal>
   )
 }

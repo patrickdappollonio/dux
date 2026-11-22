@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { AgentTabView } from "@/lib/types"
@@ -125,7 +125,7 @@ describe("ConfirmStopTabDialog", () => {
     expect(screen.getByText(/last running tab, so the agent detaches/)).toBeTruthy()
   })
 
-  it("closes itself when the tab is gone, and Cancel has focus and stops nothing", () => {
+  it("closes itself when the tab is gone, and Cancel has focus and stops nothing", async () => {
     seed("gone", [tab({ id: "s1" })])
     render(<ConfirmStopTabDialog />)
     expect(closeStopTab).toHaveBeenCalled()
@@ -134,7 +134,7 @@ describe("ConfirmStopTabDialog", () => {
     seed("s1", [tab({ id: "s1" })])
     render(<ConfirmStopTabDialog />)
     const cancel = screen.getByRole("button", { name: "Cancel" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
     fireEvent.click(cancel)
     expect(closeStopTab).toHaveBeenCalled()
     expect(stopTab).not.toHaveBeenCalled()

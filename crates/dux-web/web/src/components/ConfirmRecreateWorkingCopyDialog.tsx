@@ -1,21 +1,10 @@
 import { useState } from "react"
 
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
-import { Button } from "@/components/ui/button"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { managedWorkspace } from "@/lib/agentWorkspace"
 import { renderProse } from "@/lib/prose"
 import {
@@ -52,11 +41,8 @@ export function ConfirmRecreateWorkingCopyDialog() {
   // Closes itself when the agent leaves the live view model, like every other
   // target-keyed dialog. A working copy that came back on its own counts: the
   // menu entry is gone by then and the dialog behind it has nothing to do.
-  const isOpen = useVanishedTargetGuard(
-    recreateWorkingCopyTarget !== null,
-    session !== undefined && managed?.worktree_missing === true,
-    closeRecreateWorkingCopy,
-  )
+  const present = session !== undefined && managed?.worktree_missing === true
+  const isOpen = recreateWorkingCopyTarget !== null && present
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
     recreateWorkingCopyTarget,
@@ -84,60 +70,53 @@ export function ConfirmRecreateWorkingCopyDialog() {
     if (done) closeRecreateWorkingCopy()
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) closeRecreateWorkingCopy()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Recreate working copy?</DialogTitle>
-          <DialogDescription className="whitespace-pre-line">
-            {managed && view
-              ? renderProse(
-                  recreateConfirmProse(
-                    managed.worktree_label ?? managed.worktree_path,
-                    managed.branch_name,
-                    managed.source_branch,
-                    managed.conversation_resumes === true,
-                    view.running,
-                  ),
-                )
-              : ""}
-          </DialogDescription>
-        </DialogHeader>
-        {offer.length > 0 && (
-          <CheckboxRow
-            id="recreate-restart-tabs"
-            checked={restart.ticked}
-            onCheckedChange={(ticked) =>
-              setRestart({ target: recreateWorkingCopyTarget, ticked })
-            }
-          >
-            {renderProse(recreateRestartCheckboxProse(offer))}
-          </CheckboxRow>
-        )}
-        <AttachedSection blockers={shownBlockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeRecreateWorkingCopy}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Recreate"
-            blockers={shownBlockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={recreateWorkingCopyTarget !== null}
+      vanished={!present}
+      onClose={closeRecreateWorkingCopy}
+      title="Recreate working copy?"
+      description={
+        managed && view ? (
+          <span className="whitespace-pre-line">
+            {renderProse(
+              recreateConfirmProse(
+                managed.worktree_label ?? managed.worktree_path,
+                managed.branch_name,
+                managed.source_branch,
+                managed.conversation_resumes === true,
+                view.running,
+              ),
+            )}
+          </span>
+        ) : null
+      }
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Recreate",
+        blockers: shownBlockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      {offer.length > 0 || shownBlockers?.length ? (
+        <>
+          {offer.length > 0 && (
+            <CheckboxRow
+              id="recreate-restart-tabs"
+              checked={restart.ticked}
+              onCheckedChange={(ticked) =>
+                setRestart({ target: recreateWorkingCopyTarget, ticked })
+              }
+            >
+              {renderProse(recreateRestartCheckboxProse(offer))}
+            </CheckboxRow>
+          )}
+          <AttachedSection blockers={shownBlockers} />
+        </>
+      ) : null}
+    </Modal>
   )
 }
