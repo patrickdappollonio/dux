@@ -12,8 +12,6 @@ import {
 } from "@/test/matchMedia"
 
 // The width query `useIsMobile` subscribes to.
-const MOBILE_QUERY = "(max-width: 767px)"
-
 // FileTree talks to the server exclusively through `fileApi.tree`, so mocking
 // that one function is enough to drive every scenario below without a real
 // server. Follows TerminalArea.test.tsx's style of mocking only what's needed.
@@ -610,7 +608,7 @@ describe("FileTree", () => {
 
       act(() => {
         setWidth(390)
-        stub!.set(MOBILE_QUERY, true)
+        window.dispatchEvent(new Event("resize"))
       })
       expectRowHeight(container, 32)
     })

@@ -152,7 +152,7 @@ export function DesktopShell() {
   const dux = useDux()
   const { sidebarWidth, sidebarOpen, theater, selectedTarget } = dux
   // Theater's cover exception, on this layout too. A tablet with no keyboard
-  // reaches the computer layout by width alone and has no Escape, so a
+  // reaches the computer layout by itself and has no Escape, so a
   // full-pane cover brings the top bar back with the Theater button in it. The
   // side panels stay where the mode put them: the cover is about the pane. The
   // row's card counts too, over a tab with no pane of its own.
@@ -182,7 +182,17 @@ export function DesktopShell() {
       // different on the way out.
       open={sidebarOpen}
       onOpenChange={setSidebarOpen}
-      style={{ "--sidebar-width": sidebarWidth } as React.CSSProperties}
+      // The side safe-area insets, as the phone shell has them: a phone held
+      // sideways in this layout has its notch or camera cutout at one side,
+      // and the header's Settings button sat under it. The sidebar's fixed
+      // container starts after the left inset for the same reason.
+      style={
+        {
+          "--sidebar-width": sidebarWidth,
+          paddingLeft: "env(safe-area-inset-left)",
+          paddingRight: "env(safe-area-inset-right)",
+        } as React.CSSProperties
+      }
     >
       {/* Unmounted rather than collapsed: collapsed is the icon rail, which is
           chrome too. The swap is instant while the header stack below animates,

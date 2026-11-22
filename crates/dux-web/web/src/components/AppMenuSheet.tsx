@@ -12,6 +12,7 @@ import {
 import { appMenuModel, findSubmenu, type AppMenuEntry } from "@/lib/appMenu"
 import { hasSessionToEnd, useAuthPhase } from "@/lib/authGate"
 import { useDux } from "@/lib/store"
+import { useIsMobile, useLayoutChoice } from "@/hooks/use-mobile"
 
 // The mobile app menu: the same `appMenuModel()` the desktop flyout renders,
 // presented as a bottom sheet with drill-down, because a hover flyout cannot
@@ -98,8 +99,12 @@ export function AppMenuSheet({
   const githubIntegrationEnabled = bootstrap?.github_integration ?? false
   // Sign out exists only where this page holds a session to end.
   const canSignOut = hasSessionToEnd(useAuthPhase())
+  const layout = {
+    shown: useIsMobile() ? ("phone" as const) : ("computer" as const),
+    choice: useLayoutChoice(),
+  }
 
-  const model = appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut })
+  const model = appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut, layout })
   const submenu = drilled ? findSubmenu(model, drilled) : null
   // Fall back to the root if a drilled id ever goes missing, so the sheet can
   // never strand the user on an empty list with no way back.

@@ -6,11 +6,15 @@ import { AuthGate } from './components/AuthGate.tsx'
 import { RootErrorBoundary } from './components/RootErrorBoundary.tsx'
 import { watchComposition } from './lib/clipboard.ts'
 import { answerOpenedTabs } from './lib/openerPage.ts'
+import { installShellLayoutAttribute } from './lib/shellLayout.ts'
 import { registerServiceWorker } from './lib/sw.ts'
 
 // dux's web UI is a dark, desktop-style app; opt into the `.dark` token set.
 document.documentElement.classList.add('dark')
 document.documentElement.style.colorScheme = 'dark'
+
+// The `md:`/`max-md:` classes style for the layout this marks (lib/shellLayout.ts).
+installShellLayoutAttribute(document)
 
 // A copy must never take focus from a half-typed IME composition.
 watchComposition(document)

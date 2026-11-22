@@ -1,7 +1,7 @@
 import * as React from "react"
 
 // Is touch the primary way this person points at the screen? Deliberately not
-// `useIsMobile`, a viewport width query: rotating a tablet crosses the width breakpoint
+// `useIsMobile`, the layout question: rotating a tablet crosses the width breakpoint
 // and would swap the typing surface mid-session, while `pointer: coarse` does not change
 // with orientation.
 //

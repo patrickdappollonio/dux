@@ -574,7 +574,9 @@ do not submit line by line. Full details in [Managing Macros](/docs/macros).
 
 ## On your phone
 
-Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb.
+Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb. A phone turned sideways keeps it: a touch screen as short as a phone's gets the phone layout however wide it is.
+
+dux picks the layout for you, and you can pick the other one from the app menu: **Use the computer layout** on the phone layout, **Use the phone layout** on the computer layout. A phone with a keyboard attached may have room for the computer layout, and a small window may read better as a phone. Your choice is kept in that browser on that device only, and survives rotating and reloading. While it is in force, **Choose the layout automatically** in the same menu hands the decision back to dux.
 
 ### The screens
 
@@ -635,9 +637,9 @@ Whether the compose bar appears is the `ui.compose_bar` setting, a Preferences r
 - **Never** restores typing straight into the terminal. On a touch device it keeps the terminal keys, since a finger still cannot produce Esc or a Ctrl chord and there is no switch under **Never** to bring them back with. Only the message box goes.
 
 > [!IMPORTANT]
-> **Width decides the layout; your pointer decides which typing surface you start with.**
+> **The screen's size decides the layout; your pointer decides which typing surface you start with.**
 >
-> A tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing surface out from under you.
+> A tablet in landscape gets the desktop panes *and* the accessory keys and compose box. A phone in landscape gets the phone layout, because it is too short for the desktop panes. A mouse on a narrow window starts with neither. Rotating a tablet never swaps your typing surface out from under you, and the keyboard coming up on a tablet never swaps its layout.
 
 ### The typing-surface switch
 

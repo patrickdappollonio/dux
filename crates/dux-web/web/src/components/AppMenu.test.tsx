@@ -115,6 +115,7 @@ describe("AppMenu", () => {
       ghAvailable: true,
       githubIntegrationEnabled: true,
       canSignOut: false,
+      layout: { shown: "computer", choice: null },
     }).filter((e) => e.kind !== "separator")
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     expect(rendered).toHaveLength(topLevel.length)
@@ -147,6 +148,7 @@ describe("AppMenu", () => {
       ghAvailable: true,
       githubIntegrationEnabled: true,
       canSignOut: false,
+      layout: { shown: "computer", choice: null },
     }).filter((e) => e.kind === "submenu")
     expect(subTriggers).toHaveLength(submenus.length)
     for (const t of subTriggers) {
@@ -285,6 +287,7 @@ describe("AppMenu", () => {
       ghAvailable: true,
       githubIntegrationEnabled: true,
       canSignOut: false,
+      layout: { shown: "computer", choice: null },
     })
     expect(walk(model).length).toBeGreaterThan(model.length)
   })

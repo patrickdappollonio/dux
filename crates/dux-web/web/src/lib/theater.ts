@@ -218,7 +218,7 @@ export interface TopChromeInputs {
  * and the pill that would carry the way out is withheld under such a cover, so
  * the top bar is the only route left.
  *
- * Both surfaces ask it. A computer is reached by width alone, so a tablet with
+ * Both surfaces ask it. The computer layout is what a tablet gets by itself, so one with
  * no keyboard lands there with no Escape either; only its TOP bar comes back,
  * since its side panels are not a way out of anything.
  *

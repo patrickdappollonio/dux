@@ -25,10 +25,13 @@ import {
   GitPullRequestArrow,
   Globe,
   LogOut,
+  Monitor,
+  MonitorSmartphone,
   Plus,
   RefreshCw,
   Rocket,
   SlidersHorizontal,
+  Smartphone,
   SquarePen,
   Wrench,
   type LucideIcon,
@@ -37,6 +40,11 @@ import { notifyError, notifyInfo } from "@/lib/notify"
 
 import { signOut } from "@/lib/authGate"
 import { configApi } from "@/lib/configApi"
+import {
+  currentShellLayout,
+  setLayoutChoice,
+  type ShellLayout,
+} from "@/lib/shellLayout"
 import { addProjectMenuItems, newMenuItems } from "@/lib/creationMenus"
 import {
   openConfigEditor,
@@ -91,6 +99,9 @@ export interface AppMenuContext {
    *  out of and an entry that did nothing would be a lie. Required, so a new
    *  anchor cannot silently leave Sign out off by saying nothing. */
   canSignOut: boolean
+  /** The layout on screen and the person's choice on this device (null while
+   *  automatic), which decide the layout entries. */
+  layout: { shown: ShellLayout; choice: ShellLayout | null }
 }
 
 /** The config editor's entry, which the Settings dialog names as the way to
@@ -149,6 +160,9 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
       icon: SlidersHorizontal,
       run: () => openCustomizeWebapp(),
     },
+    // An action rather than a Preferences row: the layout is this device's
+    // view state, kept in this browser, and Preferences are config.
+    ...layoutEntries(ctx.layout),
     { kind: "separator", id: "sep-preferences" },
     {
       kind: "submenu",
@@ -317,6 +331,48 @@ export function appMenuModel(ctx: AppMenuContext): AppMenuEntry[] {
         ] as AppMenuEntry[])
       : []),
   ]
+}
+
+/**
+ * The entry that switches to the layout not on screen, and, while a choice is
+ * in force, the one that hands the decision back. No trailing "…": each acts
+ * at once. The whole screen changing confirms a switch; handing the decision
+ * back can leave the layout as it was, so that one says what it chose.
+ */
+function layoutEntries(layout: AppMenuContext["layout"]): AppMenuEntry[] {
+  const other: ShellLayout = layout.shown === "phone" ? "computer" : "phone"
+  const entries: AppMenuEntry[] = [
+    other === "computer"
+      ? {
+          kind: "item",
+          id: "layout-computer",
+          title: "Use the computer layout",
+          icon: Monitor,
+          run: () => setLayoutChoice("computer"),
+        }
+      : {
+          kind: "item",
+          id: "layout-phone",
+          title: "Use the phone layout",
+          icon: Smartphone,
+          run: () => setLayoutChoice("phone"),
+        },
+  ]
+  if (layout.choice !== null) {
+    entries.push({
+      kind: "item",
+      id: "layout-automatic",
+      title: "Choose the layout automatically",
+      icon: MonitorSmartphone,
+      run: () => {
+        setLayoutChoice(null)
+        notifyInfo(
+          `dux chooses the layout for this screen again, and it chose the ${currentShellLayout()} layout.`,
+        )
+      },
+    })
+  }
+  return entries
 }
 
 /** Depth-first lookup of a submenu by id, for tests and the mobile drill-down. */

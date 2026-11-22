@@ -72,7 +72,7 @@ describe("AppMenuSheet", () => {
   // sheet's root list must match the desktop menu's top level exactly.
   it("renders the same top-level titles as the desktop menu", () => {
     render(<Harness />)
-    const expected = appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false })
+    const expected = appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false, layout: { shown: "computer", choice: null } })
       .filter((e) => e.kind !== "separator")
       .map((e) => (e.kind === "separator" ? "" : e.title))
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
@@ -90,6 +90,34 @@ describe("AppMenuSheet", () => {
     const rendered = screen.getAllByRole("menuitem").map((e) => e.textContent)
     expect(rendered.some((t) => t?.includes("Welcome screen"))).toBe(true)
     expect(rendered.some((t) => t?.includes("What's new"))).toBe(true)
+  })
+
+  it("offers the computer layout on a phone, and the way back once chosen", () => {
+    const wide = window.innerWidth
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 })
+    try {
+      render(<Harness />)
+      const titles = () => screen.getAllByRole("menuitem").map((e) => e.textContent)
+      expect(titles()).toContain("Use the computer layout")
+      expect(titles()).not.toContain("Choose the layout automatically")
+      act(() => fireEvent.click(screen.getByRole("menuitem", { name: "Use the computer layout" })))
+      expect(localStorage.getItem("dux:layout")).toBe("computer")
+    } finally {
+      localStorage.removeItem("dux:layout")
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: wide })
+    }
+  })
+
+  it("offers the phone layout and the way back while the computer layout is chosen", () => {
+    localStorage.setItem("dux:layout", "computer")
+    try {
+      render(<Harness />)
+      const titles = screen.getAllByRole("menuitem").map((e) => e.textContent)
+      expect(titles).toContain("Use the phone layout")
+      expect(titles).toContain("Choose the layout automatically")
+    } finally {
+      localStorage.removeItem("dux:layout")
+    }
   })
 
   it("shows the root title and no back arrow at the root", () => {
@@ -121,7 +149,7 @@ describe("AppMenuSheet", () => {
     render(<Harness />)
     fireEvent.click(screen.getByText("Sort agents by"))
     await settle()
-    const sub = findSubmenu(appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false }), "sort-agents")!
+    const sub = findSubmenu(appMenuModel({ ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false, layout: { shown: "computer", choice: null } }), "sort-agents")!
     expect(screen.getAllByText(sub.title).length).toBeGreaterThan(0)
     expect(screen.getByText("Recently updated")).toBeTruthy()
   })

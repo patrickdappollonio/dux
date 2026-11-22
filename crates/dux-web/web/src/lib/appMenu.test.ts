@@ -48,7 +48,20 @@ vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
 }))
 
-import { FolderKanban, LogOut, SquarePen } from "lucide-react"
+const setLayoutChoice = vi.fn()
+vi.mock("@/lib/shellLayout", () => ({
+  setLayoutChoice: (next: unknown) => setLayoutChoice(next),
+  currentShellLayout: () => "phone",
+}))
+
+import {
+  FolderKanban,
+  LogOut,
+  Monitor,
+  MonitorSmartphone,
+  Smartphone,
+  SquarePen,
+} from "lucide-react"
 
 import {
   appMenuModel,
@@ -66,7 +79,7 @@ function walk(entries: AppMenuEntry[]): AppMenuEntry[] {
 }
 
 // Most tests build the fullest menu: gh available, so the from-PR entry exists.
-const ctx = { ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false }
+const ctx = { ghAvailable: true, githubIntegrationEnabled: true, canSignOut: false, layout: { shown: "computer", choice: null } }
 
 describe("appMenuModel", () => {
   beforeEach(() => vi.clearAllMocks())
@@ -82,6 +95,8 @@ describe("appMenuModel", () => {
       ["item", "projects"],
       ["separator", "sep-create"],
       ["item", "preferences"],
+      // The layout switch, an action on this device's view state.
+      ["item", "layout-phone"],
       ["separator", "sep-preferences"],
       ["submenu", "sort-agents"],
       ["submenu", "configuration"],
@@ -126,7 +141,7 @@ describe("appMenuModel", () => {
           : { kind: e.kind, id: e.id },
       )
     for (const ghAvailable of [true, false]) {
-      const model = appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false })
+      const model = appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false, layout: { shown: "computer", choice: null } })
       const agentSub = findSubmenu(model, "new-agent")
       expect(agentSub?.title).toBe("New")
       expect(shape(agentSub?.entries)).toEqual(
@@ -168,7 +183,7 @@ describe("appMenuModel", () => {
   // stale answer too, and would take every running agent with it.
   it("offers the GitHub re-check while the integration is on, whatever gh says", () => {
     const ids = (githubIntegrationEnabled: boolean, ghAvailable: boolean) =>
-      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut: false })).map(
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled, canSignOut: false, layout: { shown: "computer", choice: null } })).map(
         (e) => e.id,
       )
     expect(ids(true, false)).toContain("recheck-github")
@@ -187,7 +202,7 @@ describe("appMenuModel", () => {
 
   it("hides the from-PR agent variant when gh is unavailable", () => {
     const ids = (ghAvailable: boolean) =>
-      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false })).map((e) => e.id)
+      walk(appMenuModel({ ghAvailable, githubIntegrationEnabled: true, canSignOut: false, layout: { shown: "computer", choice: null } })).map((e) => e.id)
     expect(ids(true)).toContain("new-agent-from-pr")
     expect(ids(false)).not.toContain("new-agent-from-pr")
   })
@@ -385,7 +400,7 @@ describe("Sign out", () => {
   it("is absent where there is no session to end", () => {
     expect(walk(appMenuModel(ctx)).some((e) => e.id === "sign-out")).toBe(false)
     expect(
-      walk(appMenuModel({ ...ctx, canSignOut: false })).some((e) => e.id === "sign-out"),
+      walk(appMenuModel({ ...ctx, canSignOut: false, layout: { shown: "computer", choice: null } })).some((e) => e.id === "sign-out"),
     ).toBe(false)
   })
 
@@ -432,5 +447,58 @@ describe("Sign out", () => {
     const item = appMenuModel({ ...ctx, canSignOut: true }).at(-1) as AppMenuItem
     item.run()
     await vi.waitFor(() => expect(notifyError).toHaveBeenCalledWith("no"))
+  })
+})
+
+describe("the layout entries", () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const layoutItems = (
+    shown: "phone" | "computer",
+    choice: "phone" | "computer" | null,
+  ) =>
+    appMenuModel({ ...ctx, layout: { shown, choice } }).filter(
+      (e): e is AppMenuItem => e.kind === "item" && e.id.startsWith("layout-"),
+    )
+
+  it.each([
+    ["the computer layout, chosen automatically", "computer", null, [["Use the phone layout", Smartphone]]],
+    ["the phone layout, chosen automatically", "phone", null, [["Use the computer layout", Monitor]]],
+    [
+      "the computer layout, chosen by hand",
+      "computer",
+      "computer",
+      [
+        ["Use the phone layout", Smartphone],
+        ["Choose the layout automatically", MonitorSmartphone],
+      ],
+    ],
+    [
+      "the phone layout, chosen by hand",
+      "phone",
+      "phone",
+      [
+        ["Use the computer layout", Monitor],
+        ["Choose the layout automatically", MonitorSmartphone],
+      ],
+    ],
+  ] as const)("offers what a press would change on %s", (_name, shown, choice, expected) => {
+    expect(layoutItems(shown, choice).map((e) => [e.title, e.icon])).toEqual(expected)
+  })
+
+  it("stores the layout a press asks for, and hands the decision back", () => {
+    layoutItems("phone", null)[0].run()
+    expect(setLayoutChoice).toHaveBeenLastCalledWith("computer")
+    layoutItems("computer", null)[0].run()
+    expect(setLayoutChoice).toHaveBeenLastCalledWith("phone")
+    layoutItems("computer", "computer")[1].run()
+    expect(setLayoutChoice).toHaveBeenLastCalledWith(null)
+  })
+
+  it("says which layout the automatic choice landed on", () => {
+    layoutItems("computer", "computer")[1].run()
+    expect(notifyInfo).toHaveBeenCalledWith(
+      "dux chooses the layout for this screen again, and it chose the phone layout.",
+    )
   })
 })

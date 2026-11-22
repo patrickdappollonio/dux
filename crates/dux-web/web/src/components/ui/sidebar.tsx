@@ -266,7 +266,7 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          "fixed top-[var(--dux-app-top,0px)] bottom-0 z-10 hidden w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          "fixed top-[var(--dux-app-top,0px)] bottom-0 z-10 hidden w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear data-[side=left]:left-[env(safe-area-inset-left,0px)] data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           SIDEBAR_RESIZING_NO_TRANSITION,
           // Floating over the page: above its content and its dividers (z-30),
           // below menus, dialogs and toasts (z-50), and lifted by a shadow. It
