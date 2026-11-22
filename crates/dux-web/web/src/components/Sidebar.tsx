@@ -21,6 +21,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarTrigger,
+  isSidebarShortcut,
 } from "@/components/ui/sidebar"
 import { useSidebar } from "@/components/ui/sidebar"
 import { changesCountFor } from "@/lib/agentVitals"
@@ -271,8 +272,15 @@ function CollapsedAgentRail({
 // Edge affordance on the sidebar's right edge: drag-to-resize when expanded,
 // click-to-expand when collapsed, desktop only. The gesture is the Changes
 // divider's shared one; only the band and the collapse target differ.
-// `expand` stands in for expanding where the sidebar must stay at its rail.
-function SidebarResizeHandle({ expand }: { expand?: () => void }) {
+// `expand` stands in for expanding where the sidebar must stay at its rail, and
+// `closes` says that a press on the strip closes the sidebar floated there.
+function SidebarResizeHandle({
+  expand,
+  closes = false,
+}: {
+  expand?: () => void
+  closes?: boolean
+}) {
   const { state, isMobile } = useSidebar()
   // A collapse unmounts the control the keyboard was standing on, so this carries
   // the focus intent across the swap. State, because the claim crosses components.
@@ -287,6 +295,7 @@ function SidebarResizeHandle({ expand }: { expand?: () => void }) {
         onFocusClaimed={releaseFocusClaim}
         claimFocus={claimFocus}
         expand={expand}
+        closes={closes}
       />
     )
   }
@@ -323,7 +332,8 @@ function SidebarExpandStrip({
   onFocusClaimed,
   claimFocus,
   expand,
-}: SidebarEdgeProps & { expand?: () => void }) {
+  closes,
+}: SidebarEdgeProps & { expand?: () => void; closes: boolean }) {
   const { setOpen } = useSidebar()
   const ref = useRef<HTMLButtonElement | null>(null)
   useFocusHandoff(focusOnMount, onFocusClaimed, ref)
@@ -332,7 +342,7 @@ function SidebarExpandStrip({
       ref={ref}
       type="button"
       data-sidebar="expand-handle"
-      aria-label="Expand sidebar"
+      aria-label={closes ? "Close sidebar" : "Expand sidebar"}
       // `detail` is 0 only for a keyboard-synthesised click. A keyboard expand
       // hands focus to the drag edge; a mouse click leaves focus where it is.
       onClick={(event) => {
@@ -346,7 +356,8 @@ function SidebarExpandStrip({
       className={cn(
         DIVIDER_CHROME,
         // Stacking comes from the shared chrome, which both dividers wear.
-        "absolute inset-y-0 -right-px cursor-e-resize",
+        "absolute inset-y-0 -right-px",
+        closes ? "cursor-w-resize" : "cursor-e-resize",
       )}
     />
   )
@@ -561,6 +572,8 @@ export function AppSidebar() {
   // DesktopShell), so its expand and collapse buttons open and close this
   // floating sidebar instead.
   const narrow = useIsNarrowComputerLayout()
+  const { railExpand, collapse, showFromKeyboard, closeFromKeyboard } =
+    useNarrowFloatKeyboard(narrow, floatOpen, showFloat, closeFloat)
   const onSelectSession = (sessionId: string | null) => {
     selectSession(sessionId)
     closeFloat()
@@ -615,7 +628,12 @@ export function AppSidebar() {
                 hides (the row is too narrow) and the rail trigger below takes
                 over so the sidebar can still be reopened without the edge handle. */}
             <SidebarTrigger
-              onClick={narrow ? closeFloat : undefined}
+              ref={collapse}
+              onClick={
+                narrow
+                  ? (event) => (event.detail === 0 ? closeFromKeyboard() : closeFloat())
+                  : undefined
+              }
               className="shrink-0 group-data-[collapsible=icon]:hidden"
             />
           </SidebarMenuItem>
@@ -624,8 +642,13 @@ export function AppSidebar() {
               sidebar (the edge handle alone was too easy to miss). */}
           <SidebarMenuItem className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:justify-center">
             <SidebarTrigger
+              ref={railExpand}
               aria-label="Expand sidebar"
-              onClick={narrow ? showFloat : undefined}
+              onClick={
+                narrow
+                  ? (event) => (event.detail === 0 ? showFromKeyboard() : showFloat())
+                  : undefined
+              }
               className="size-8"
             />
           </SidebarMenuItem>
@@ -667,7 +690,81 @@ export function AppSidebar() {
       </SidebarFooter>
       <SidebarResizeHandle
         expand={narrow ? (floatOpen ? closeFloat : showFloat) : undefined}
+        closes={narrow && floatOpen}
       />
     </Sidebar>
   )
+}
+
+// How many frames a focus move waits for the button it is aimed at to be laid
+// out; the fold that swaps the rail and the full sidebar runs well inside it.
+const FOCUS_WAIT_FRAMES = 60
+
+// Focus `target` once it is in the layout `floating` names: the collapse button
+// shows only while the sidebar floats, the rail's expand button only once the
+// fold back to the rail is over.
+function focusWhenShown(
+  target: React.RefObject<HTMLElement | null>,
+  floating: boolean,
+): () => void {
+  let frame = 0
+  let left = FOCUS_WAIT_FRAMES
+  const attempt = () => {
+    const el = target.current
+    if (el && (el.closest("[data-floating]") !== null) === floating) {
+      el.focus({ preventScroll: true })
+      return
+    }
+    if (--left > 0) frame = requestAnimationFrame(attempt)
+  }
+  frame = requestAnimationFrame(attempt)
+  return () => cancelAnimationFrame(frame)
+}
+
+// The keyboard's way into and out of the sidebar the narrow computer layout
+// floats: the sidebar shortcut floats and closes it as its buttons do, a float
+// the keyboard opened takes focus to its collapse button, and closing one hands
+// focus back to the rail's expand button rather than leaving it on the page,
+// since the button that held it is hidden by the press.
+function useNarrowFloatKeyboard(
+  narrow: boolean,
+  floatOpen: boolean,
+  showFloat: () => void,
+  closeFloat: () => void,
+) {
+  const railExpand = useRef<HTMLButtonElement | null>(null)
+  const collapse = useRef<HTMLButtonElement | null>(null)
+  const fromKeyboard = useRef(false)
+  const showFromKeyboard = useCallback(() => {
+    fromKeyboard.current = true
+    showFloat()
+  }, [showFloat])
+  const closeFromKeyboard = useCallback(() => {
+    fromKeyboard.current = true
+    closeFloat()
+  }, [closeFloat])
+
+  useEffect(() => {
+    if (!narrow) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!isSidebarShortcut(event)) return
+      if (floatOpen) closeFromKeyboard()
+      else showFromKeyboard()
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [narrow, floatOpen, showFromKeyboard, closeFromKeyboard])
+
+  useEffect(() => {
+    if (!fromKeyboard.current) return
+    if (floatOpen) return focusWhenShown(collapse, true)
+    fromKeyboard.current = false
+    // A press elsewhere that closed it put focus where it meant to.
+    const active = document.activeElement
+    const panel = railExpand.current?.closest('[data-slot="sidebar"]')
+    if (active && active !== document.body && !panel?.contains(active)) return
+    return focusWhenShown(railExpand, false)
+  }, [floatOpen])
+
+  return { railExpand, collapse, showFromKeyboard, closeFromKeyboard }
 }

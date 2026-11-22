@@ -355,6 +355,51 @@ describe("AppSidebar in the computer layout on a phone-narrow window", () => {
     expect(floating()).toBe(false)
   })
 
+  it("floats and closes from the keyboard shortcut, taking focus in and bringing it back", () => {
+    vi.stubGlobal("innerWidth", 390)
+    setLayoutChoice("computer")
+    render(controlled(() => {}))
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true })
+    advance(1000)
+    expect(floating()).toBe(true)
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Toggle Sidebar" }),
+    )
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true })
+    advance(1000)
+    expect(floating()).toBe(false)
+    expect(document.activeElement).toBe(railExpand())
+  })
+
+  it("takes focus into the sidebar a keyboard press of the rail's button floated", () => {
+    vi.stubGlobal("innerWidth", 390)
+    setLayoutChoice("computer")
+    render(controlled(() => {}))
+    act(() => railExpand().focus())
+    fireEvent.click(railExpand(), { detail: 0 })
+    advance(1000)
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Toggle Sidebar" }),
+    )
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" })
+    advance(1000)
+    expect(floating()).toBe(false)
+    expect(document.activeElement).toBe(railExpand())
+  })
+
+  it("names the edge strip for what a press on it does", () => {
+    vi.stubGlobal("innerWidth", 390)
+    setLayoutChoice("computer")
+    render(controlled(() => {}))
+    const strip = () =>
+      document.querySelector('[data-sidebar="expand-handle"]') as HTMLElement
+    expect(strip().getAttribute("aria-label")).toBe("Expand sidebar")
+    fireEvent.click(strip())
+    expect(floating()).toBe(true)
+    expect(strip().getAttribute("aria-label")).toBe("Close sidebar")
+    expect(strip().className).not.toContain("cursor-e-resize")
+  })
+
   it("expands as ever on a window wide enough for it", () => {
     vi.stubGlobal("innerWidth", 1024)
     setLayoutChoice("computer")
