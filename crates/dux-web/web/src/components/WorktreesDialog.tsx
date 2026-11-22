@@ -101,8 +101,10 @@ function WorktreeRowBody({
       {entry.dirty ? (
         <SimpleTooltip content="This worktree has changes that are not committed anywhere.">
           {/* The warning tone the toast layer also uses, paired
-             with an icon so colour is never the only signal. */}
-          <span className="flex shrink-0 items-center gap-1 text-xs text-dux-warning">
+             with an icon so colour is never the only signal. On a phone it
+             takes a line of its own under the path, in line with the text,
+             and leaves the row's width to the path. */}
+          <span className="flex shrink-0 items-center gap-1 text-xs text-dux-warning max-md:basis-full max-md:pl-[26px]">
             <FileWarning className="size-3.5" />
             Uncommitted changes
           </span>
@@ -603,7 +605,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     <button
                       type="button"
                       onClick={() => handleSelect(entry)}
-                      className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
+                      className="flex min-h-11 min-w-0 flex-1 items-center gap-x-2.5 px-3 py-2 text-left max-md:flex-wrap md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
                     >
                       <WorktreeRowBody entry={entry} />
                     </button>
@@ -651,7 +653,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     key={entry.worktree_path}
                     content={rowTooltip(entry)}
                   >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
                       <WorktreeRowBody
                         entry={entry}
                         heldBy={agentName(entry)}
@@ -676,7 +678,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     key={entry.worktree_path}
                     content={rowTooltip(entry)}
                   >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
                       <WorktreeRowBody entry={entry} inUse={entry.reason} />
                     </div>
                   </SimpleTooltip>
@@ -697,7 +699,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     key={entry.worktree_path}
                     content={rowTooltip(entry)}
                   >
-                    <div className="flex min-h-11 cursor-not-allowed items-center gap-2.5 px-3 py-2 text-left opacity-70 md:min-h-0">
+                    <div className="flex min-h-11 cursor-not-allowed items-center gap-x-2.5 px-3 py-2 text-left opacity-70 max-md:flex-wrap md:min-h-0">
                       <WorktreeRowBody entry={entry} />
                     </div>
                   </SimpleTooltip>
