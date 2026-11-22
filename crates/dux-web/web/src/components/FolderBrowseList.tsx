@@ -3,6 +3,7 @@ import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { ModalGroupHeading } from "@/components/modal"
 import { Badge } from "@/components/ui/badge"
+import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { INSET_FOCUS_RING } from "@/lib/focusRing"
 import { baseName } from "@/lib/paths"
@@ -85,8 +86,11 @@ export function FolderBrowseList({
             }`}
           >
             <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-            <span className="shrink-0">{commitLabel}</span>
-            <FolderPill name={baseName(path)} />
+            {/* A verb and the folder it acts on: the folder is a name in a
+                modal, so it is the name chip. */}
+            <span className="min-w-0 truncate">
+              {commitLabel} <InlineCode>{baseName(path)}</InlineCode>
+            </span>
           </button>
           {/* Non-interactive divider separating the commit action from the
               navigation list below. */}

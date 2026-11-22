@@ -109,9 +109,9 @@ describe("AddProjectDialog picker", () => {
     expect(field.readOnly).toBe(true)
   })
 
-  it("renders the target folder name pill on the pinned row", () => {
-    // The commit action rides the current folder's basename in a monospace
-    // pill, not the full path.
+  it("names the target folder on the pinned row as the name chip", () => {
+    // The commit action is a verb and the current folder's basename, a name
+    // in a modal and so the shared chip, not the full path.
     seed()
     render(<AddProjectDialog />)
     const pinned = screen.getByText("Use this folder").closest("button")!
@@ -120,7 +120,7 @@ describe("AddProjectDialog picker", () => {
     // substring of the whole row) is what proves baseName ran: were it to
     // return the full path, this exact-text lookup would miss and the
     // full-path guard below would trip.
-    expect(within(pinned).getByText("notes")).toBeTruthy()
+    expect(within(pinned).getByText("notes").tagName).toBe("CODE")
     expect(pinned.textContent).not.toContain("/home/u")
   })
 
