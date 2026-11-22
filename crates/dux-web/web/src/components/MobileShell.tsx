@@ -168,7 +168,7 @@ function AgentlessTerminalScreen({
   const target: SelectedTarget = { kind: "terminal", terminalId, owner }
   const subject: PaneMenuSubject = { kind: "terminal", terminalId, owner }
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div data-debug-box="pane-screen" className="flex h-full min-h-0 flex-col overflow-hidden">
       <TheaterChrome hidden={chromeHidden}>
         <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
           {/* Up to the hub, by name: a relative history step walks out of the
@@ -538,7 +538,7 @@ function AgentTerminalScreen({
   )
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div data-debug-box="pane-screen" className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* The phone shell's chrome stack: the header and the shown part's strip,
         * which leave together on the one flag. The actions beside them are in
         * the flap below, which detaches into the floating pill rather than

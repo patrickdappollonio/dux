@@ -126,7 +126,10 @@ export function AccessoryBar({
   // Two stacked rows, gapped so a fat-finger tap on one does not catch the other.
   // Safe-area insets are NOT applied here: the mobile root pads its own bottom.
   return (
-    <div className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1">
+    <div
+      data-debug-box="key-rows"
+      className="flex shrink-0 flex-col gap-1.5 border-t bg-background px-1 py-1"
+    >
       {/* Row one: modifier / special keys sent to the program. */}
       <div className="flex items-center gap-1">
         <KeyButton label="Esc" onActivate={onEsc} />

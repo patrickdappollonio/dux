@@ -41,6 +41,7 @@ import { DeleteSessionDialog } from "@/components/DeleteSessionDialog"
 import { GlobalEnvDialog } from "@/components/GlobalEnvDialog"
 import { MacrosDialog } from "@/components/MacrosDialog"
 import { MobileShell } from "@/components/MobileShell"
+import { ViewportDebug } from "@/components/ViewportDebug"
 import { OfflineOverlay } from "@/components/OfflineOverlay"
 import { StandaloneEditorShell } from "@/components/StandaloneEditor"
 import { ProjectInfoDialog } from "@/components/ProjectInfoDialog"
@@ -83,6 +84,7 @@ import {
 import { rowKeyOfTarget, usePaneCoverKnown, usePaneCoverOwned } from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
 import { keyboardLikelyOpen } from "@/lib/viewport"
+import { viewportDebugEnabled } from "@/lib/viewportDebug"
 
 // Every dialog, rendered once above whichever shell is active. The toaster is
 // not here: it lives at the page root (`AuthGate`), so toasts outlive the gate.
@@ -290,7 +292,7 @@ export function DesktopShell() {
 // The hub-and-spoke phone shell, which has no SidebarProvider (desktop-only
 // chrome). Split out of `App` so its store and viewport subscriptions never run
 // on the desktop path.
-function MobileApp() {
+export function MobileApp() {
   const { mobileScreen } = useDux()
   // h-svh does not shrink for the soft keyboard but the visual viewport does,
   // so the terminal screen, the one with a focused text input, is pinned to the
@@ -305,11 +307,13 @@ function MobileApp() {
     constrainToKeyboard &&
     viewportHeight !== null &&
     keyboardLikelyOpen(viewportHeight, window.innerHeight)
+  const viewportDebug = viewportDebugEnabled(window.location.search)
 
   return (
     // Safe-area padding lives on this one mobile root so every screen clears the
     // notch, home indicator and rounded corners.
     <div
+      data-debug-box="shell"
       className="flex min-h-0 flex-col overflow-hidden"
       style={{
         height: shellHeight(
@@ -321,9 +325,16 @@ function MobileApp() {
         paddingRight: "env(safe-area-inset-right)",
       }}
     >
-      <div className="min-h-0 flex-1">
+      <div data-debug-box="shell-inner" className="min-h-0 flex-1">
         <MobileShell />
       </div>
+      {viewportDebug ? (
+        <ViewportDebug
+          hookHeight={viewportHeight}
+          constrained={constrainToKeyboard}
+          keyboardOpen={dropBottomInset}
+        />
+      ) : null}
     </div>
   )
 }

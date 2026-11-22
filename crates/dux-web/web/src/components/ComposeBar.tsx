@@ -178,7 +178,10 @@ export function ComposeBar({
   }
 
   return (
-    <div className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1">
+    <div
+      data-debug-box="compose-row"
+      className="flex shrink-0 items-end gap-1.5 border-t bg-background px-1 py-1"
+    >
       {/* The frame around the box, carrying the border, the rounding, the
           height floor and the focus ring. It also carries the VERTICAL
           padding, which cannot live on the textarea: a textarea scrolls its
@@ -192,6 +195,7 @@ export function ComposeBar({
       >
         <textarea
           ref={taRef}
+          data-debug-box="compose-textarea"
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
@@ -223,6 +227,7 @@ export function ComposeBar({
       <Button
         variant="secondary"
         aria-label="Send"
+        data-debug-box="send-button"
         onPointerDown={onSendPointerDown}
         onClick={onSendClick}
         className="size-10 shrink-0"

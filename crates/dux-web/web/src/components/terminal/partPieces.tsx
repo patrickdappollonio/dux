@@ -129,6 +129,7 @@ export function TerminalPaneSurface({
         {dragActive ? <FileDropOverlay kind={kind} /> : null}
         <div
           ref={hostRef}
+          data-debug-box="xterm-host"
           inert={underCard}
           className={
             viewerOverflow ? "h-full w-full overflow-auto p-2" : "h-full w-full p-2"

@@ -224,8 +224,12 @@ export function TerminalStack({
   })
   return (
     <StackContext.Provider value={context}>
-      <div className="flex h-full w-full flex-col bg-background">
-        <div ref={boxRef} className="relative flex min-h-0 w-full flex-1 flex-col">
+      <div data-debug-box="stack" className="flex h-full w-full flex-col bg-background">
+        <div
+          ref={boxRef}
+          data-debug-box="stack-terminal-area"
+          className="relative flex min-h-0 w-full flex-1 flex-col"
+        >
           {arrange ? arrange(rendered, typingTarget) : Object.values(rendered)}
           {/* A row is driven or watched whole, so a take-over card is one card
             * over every part with one button, painted here by one part. Above
