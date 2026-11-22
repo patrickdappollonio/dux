@@ -348,7 +348,15 @@ describe("CloneProjectDialog for a pull request", () => {
     expect(screen.getByText("New agent from PR")).toBeTruthy()
     const chips = [...document.querySelectorAll("code")].map((c) => c.textContent)
     expect(chips).toEqual(["github.com/acme/widget", "#3", "Fix the thing", "fix-thing"])
-    expect(screen.getByText(/Fix the thing/)).toBeTruthy()
+    // The pull request's title and branch are part of the form, not what the
+    // dialog is described as.
+    const line = screen.getByText(/from branch/)
+    expect(line.closest('[data-slot="modal-body"]')).not.toBeNull()
+    expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBeTruthy()
+    const description = document.getElementById(
+      screen.getByRole("dialog").getAttribute("aria-describedby")!,
+    )!
+    expect(description.textContent).not.toContain("Fix the thing")
     expect((screen.getByLabelText("Repository address") as HTMLInputElement).value).toBe(
       "https://github.com/acme/widget.git",
     )
@@ -564,7 +572,6 @@ describe("CloneProjectDialog for a pull request", () => {
     type(destination(), "/home/u/elsewhere")
     expect(primary("Clone and create").getAttribute("aria-busy")).toBe("true")
     expect(primary("Clone and create").getAttribute("aria-disabled")).toBe("true")
-    fireEvent.click(primary("Clone and create"))
     sent.release(reply(202, JSON.stringify({ op_id: "op-1" })))
     await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
     expect(posted).toHaveLength(1)

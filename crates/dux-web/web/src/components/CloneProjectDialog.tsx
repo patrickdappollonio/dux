@@ -77,11 +77,6 @@ export function CloneProjectDialog() {
           {pr
             ? renderProse(offerBody(pr, form.path.trim()))
             : "Paste the address of a git remote, a GitHub page from your browser, or just owner/repo. dux clones its default branch, adds it as a project and starts an agent there. It never asks for a password: the credentials and ssh keys you already use in a shell are the ones it uses."}
-          {pr && (
-            <span className="mt-2 block">
-              {renderProse(prose`${chip(pr.offer.title)} from branch ${chip(pr.offer.head_branch)}`)}
-            </span>
-          )}
         </>
       }
       // The address is the pull request's and read-only in a pull request's
@@ -99,6 +94,11 @@ export function CloneProjectDialog() {
         disabledReason: refusal,
       }}
     >
+      {pr && (
+        <p className="text-sm text-muted-foreground">
+          {renderProse(prose`${chip(pr.offer.title)} from branch ${chip(pr.offer.head_branch)}`)}
+        </p>
+      )}
       <div className="flex flex-col gap-1.5">
         <label htmlFor="clone-address" className="text-sm font-medium">
           Repository address
