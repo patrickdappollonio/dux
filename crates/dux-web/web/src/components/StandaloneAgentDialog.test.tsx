@@ -53,8 +53,9 @@ const SHORTCUTS: ProjectShortcutListView = {
   ],
 }
 
-function seed(shortcuts: ProjectShortcutListView | null) {
+function seed(shortcuts: ProjectShortcutListView | null, projects = 2) {
   mockState = {
+    spine: { projects: Array.from({ length: projects }, (_, i) => ({ id: `p-${i}` })) },
     standaloneAgentPickerOpen: true,
     standaloneProjectShortcuts: shortcuts,
     browsePath: "/home/u",
@@ -231,6 +232,15 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     view.rerender(<StandaloneAgentDialog />)
     expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()
     expect(shortcutRows()).toHaveLength(2)
+  })
+
+  // The app already knows there are none, so nothing is held for a list that
+  // will never come and the card does not shrink once the answer arrives.
+  it("holds no room while the list is on its way when there are no projects", () => {
+    seed(null, 0)
+    render(<StandaloneAgentDialog />)
+    expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()
+    expect(screen.queryByText("Your projects")).toBeNull()
   })
 
   it("draws no list when there are no projects", () => {

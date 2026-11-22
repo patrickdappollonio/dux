@@ -43,8 +43,11 @@ const INVALID_NAME = "That name is not one git accepts for a branch."
  * UI so the two surfaces cannot answer the same question differently.
  */
 function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: () => void }) {
-  const { browsePath, browseEntries, browseLoading, standaloneProjectShortcuts } =
+  const { browsePath, browseEntries, browseLoading, standaloneProjectShortcuts, spine } =
     useDux()
+  // One shortcut row per project, so the projects the app already holds say
+  // how much room the list will take before the shortcuts answer.
+  const knownProjects = spine?.projects.length ?? null
   const [selected, setSelected] = useState<string | null>(null)
   // The project whose shortcut put the explorer where it is, so its row paints
   // as chosen. Tracked by id rather than by comparing paths: the explorer's
@@ -129,7 +132,14 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
       }}
     >
       {standaloneProjectShortcuts === null ? (
-        <ProjectShortcutList list={null} pickedProjectId={null} onPick={handlePick} />
+        knownProjects === 0 ? null : (
+          <ProjectShortcutList
+            list={null}
+            expectedRows={knownProjects}
+            pickedProjectId={null}
+            onPick={handlePick}
+          />
+        )
       ) : shortcutsShown ? (
         <ProjectShortcutList
           list={standaloneProjectShortcuts}
