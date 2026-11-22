@@ -97,13 +97,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
 
 @custom-variant dark (&:is(.dark *));
 
-/* `md:` means the computer layout and `max-md:` the phone layout, not a width:
-   a landscape phone is wide and still gets the phone layout, and a person can
-   choose either layout by hand. lib/shellLayout.ts decides and writes
-   `data-layout` on <html>. `:where` adds no specificity, as the media queries
-   these replace added none. */
-@custom-variant md (&:where(:root[data-layout="computer"] *));
-@custom-variant max-md (&:where(:root[data-layout="phone"] *));
+/* `md:` and `max-md:` follow the layout, not the width: see layoutVariants.ts. */
+@plugin "./layoutVariants.ts";
 
 @theme inline {
     --font-heading: var(--font-sans);
