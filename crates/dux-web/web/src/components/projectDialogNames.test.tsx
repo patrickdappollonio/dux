@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -82,7 +82,7 @@ describe("project confirmations name the project as a chip", () => {
     expect(body.textContent).toContain("This removes duck-pond from dux.")
   })
 
-  it("Remove project names its agents and focuses Cancel, the safe answer", () => {
+  it("Remove project names its agents and focuses Cancel, the safe answer", async () => {
     seed({
       removeProjectTarget: "p1",
       spine: {
@@ -96,7 +96,7 @@ describe("project confirmations name the project as a chip", () => {
     expect(body.textContent).toBe(
       "This removes duck-pond and deletes its 1 agent from dux. Worktrees on disk are kept.",
     )
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" })))
   })
 
   it("Remove project names who is attached as chips and removes over them only through Remove anyway", async () => {
