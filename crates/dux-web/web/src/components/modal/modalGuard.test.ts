@@ -202,14 +202,10 @@ interface Entry extends ModalMarks {
 
 const NONE = { roots: 0, roles: 0, layers: 0 } as const
 const ROOT = { roots: 1, roles: 0, layers: 0 } as const
-const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 
-// The files that still build a modal another way. Each pins its marks of each
-// kind, so a modal added to a listed file fails as one added to a new file
-// does, and so does trading one kind of mark for another; an entry whose file
-// has moved or changed fails until the entry follows it.
-const STILL_TO_MOVE: Record<string, Entry> = {
-}
+// The files that still build a modal another way: none, and a test below holds
+// the list empty. A file that builds one is therefore unlisted, and fails.
+const STILL_TO_MOVE: Record<string, Entry> = {}
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One
 // the detector cannot see names what to find in its file instead.
@@ -387,7 +383,11 @@ describe("a modal is built with the Modal component", () => {
     ).toEqual([])
   })
 
-  it("keeps no entry for a file that no longer needs one", () => {
+  it("has no file left to move, and keeps no entry for one that no longer needs it", () => {
+    expect(
+      Object.keys(STILL_TO_MOVE),
+      "Every modal is built with the Modal component: build this one with it too.",
+    ).toEqual([])
     const stale = Object.keys(STILL_TO_MOVE).filter((name) => !found.has(name))
     expect(stale, "Moved or gone: delete the entry.").toEqual([])
     for (const [name, entry] of Object.entries(NOT_MODALS)) {
