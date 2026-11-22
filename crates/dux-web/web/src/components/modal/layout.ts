@@ -43,3 +43,9 @@ export const COVER_BOTTOM_INSET = "pb-[max(env(safe-area-inset-bottom),1rem)]"
 
 /** How a button that stays focusable while it takes no press looks. */
 export const INERT_BUTTON = "aria-disabled:pointer-events-none aria-disabled:opacity-50"
+
+/** Under a finger, text in any field of a modal is at least 16px, below which
+ * iOS zooms the page to the field it focuses. The fields keep their own size
+ * under a mouse. */
+export const FIELD_TEXT_SIZE =
+  "pointer-coarse:[&_input]:text-base pointer-coarse:[&_textarea]:text-base pointer-coarse:[&_select]:text-base"

@@ -344,6 +344,99 @@ describe("what has focus when a modal opens", () => {
     fireEvent.click(screen.getByText("next"))
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Search things")))
   })
+
+  // Cancel is on screen from the first frame and loses nothing, where the
+  // body's first control may be a row still loading.
+  it("is a form's Cancel on a computer when it has no field", async () => {
+    render(<Sample kind="form" />)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" })))
+  })
+
+  it("is a picker's corner close on a computer when it has nothing else", async () => {
+    render(<Sample kind="picker" />)
+    await waitFor(() => expect(document.activeElement).toBe(closeButtons()[0]))
+  })
+})
+
+describe("a picker's description", () => {
+  it.each([PHONE, COMPUTER])("comes before its search at width %d", (width) => {
+    at(width)
+    render(
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        description="What this is for"
+        historyEntry={false}
+        search={{ value: "", onChange: () => {}, label: "Search things" }}
+      />,
+    )
+    const order = screen
+      .getByText("What this is for")
+      .compareDocumentPosition(screen.getByLabelText("Search things"))
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+describe("a card that changes step", () => {
+  it("keeps the height it had", () => {
+    function Steps() {
+      const [step, setStep] = useState("long")
+      return (
+        <Modal kind="picker" open onClose={() => {}} title="Sample" historyEntry={false} step={step}>
+          <button type="button" onClick={() => setStep("short")}>
+            next
+          </button>
+        </Modal>
+      )
+    }
+    const height = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.dataset.slot === "dialog-content" ? 600 : 0
+      })
+    render(<Steps />)
+    fireEvent.click(screen.getByText("next"))
+    expect(popup().style.minHeight).toContain("600px")
+    height.mockRestore()
+  })
+})
+
+// A field a finger focuses in a cover can sit below what the soft keyboard
+// leaves of the body.
+describe("a field focused in a cover", () => {
+  let resized: (() => void) | null = null
+  beforeEach(() => {
+    resized = null
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          resized = callback
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+  })
+
+  it("is brought into view when it takes focus, and again when the body shrinks", () => {
+    at(PHONE)
+    pointer("coarse")
+    render(
+      <Sample kind="form">
+        <input aria-label="name" />
+      </Sample>,
+    )
+    const field = screen.getByLabelText("name")
+    const scroll = vi.fn()
+    field.scrollIntoView = scroll
+    act(() => field.focus())
+    expect(scroll).toHaveBeenCalledTimes(1)
+    act(() => resized?.())
+    expect(scroll).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe("the footer", () => {

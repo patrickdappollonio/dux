@@ -14,12 +14,13 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
-import { focusTarget } from "./focus"
+import { focusTarget, isTextEntry } from "./focus"
 import {
   CARD_ANCHOR,
   CARD_HEIGHT,
   CARD_WIDTH,
   COVER_BOTTOM_INSET,
+  FIELD_TEXT_SIZE,
   INERT_BUTTON,
   modalPresentation,
 } from "./layout"
@@ -108,6 +109,7 @@ export function Modal(props: ModalProps) {
           // first control. Only a popup whose parts have not mounted gets that.
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
           className={cn(
+            FIELD_TEXT_SIZE,
             presentation === "card" &&
               cn(
                 "flex flex-col gap-0 p-0",
@@ -195,12 +197,15 @@ function ModalParts(
       named: (typeof named === "function" ? named() : named?.current) ?? null,
       safeButton: popup.querySelector<HTMLElement>("[data-modal-safe]"),
       search: searchRef.current,
+      closeControl: popup.querySelector<HTMLElement>("[data-modal-close]"),
     })
   }
   useLayoutEffect(() => {
     onFocusTarget(target)
   })
   const last = useRef<{ open: boolean; step: string | undefined } | null>(null)
+  // The card's height as last painted, read when the step changes.
+  const shownHeight = useRef(0)
   useLayoutEffect(() => {
     const was = last.current
     last.current = { open, step }
@@ -209,10 +214,43 @@ function ModalParts(
     const stepChanged = was !== null && was.open && was.step !== step
     // On open the popup places focus itself, unless a control inside already
     // took it; that case and a change of step are placed here.
+    // A card keeps the height it had across a change of step, so the list or
+    // the button under the pointer does not jump; it never shrinks back.
+    if (stepChanged && !cover && popup instanceof HTMLElement && shownHeight.current > 0) {
+      popup.style.minHeight = `min(${shownHeight.current}px, calc(100dvh - 2rem))`
+    }
     if (!stepChanged && !popup?.contains(document.activeElement)) return
     target()?.focus({ preventScroll: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, step])
+  useLayoutEffect(() => {
+    const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
+    if (!popup) return
+    if (cover) popup.style.minHeight = ""
+    shownHeight.current = cover ? 0 : popup.offsetHeight
+  })
+
+  // In a cover, a field that takes focus is brought into the part of the body
+  // on screen, and brought back whenever the cover shrinks under it: the soft
+  // keyboard arrives after the focus, and the cover is what it shrinks.
+  useEffect(() => {
+    const scroller = body.current
+    const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
+    if (!open || !cover || scroller === null || !popup) return
+    const reveal = () => {
+      const field = document.activeElement
+      if (field instanceof HTMLElement && scroller.contains(field) && isTextEntry(field)) {
+        field.scrollIntoView?.({ block: "nearest" })
+      }
+    }
+    scroller.addEventListener("focusin", reveal)
+    const shrunk = typeof ResizeObserver === "function" ? new ResizeObserver(reveal) : null
+    shrunk?.observe(popup)
+    return () => {
+      scroller.removeEventListener("focusin", reveal)
+      shrunk?.disconnect()
+    }
+  }, [open, cover])
 
   // A report's Close is drawn on a card only, since a cover's title row closes
   // it; a form keeps Cancel on both, because Cancel abandons what was typed.
@@ -239,8 +277,11 @@ function ModalParts(
   const description = props.description ? (
     <DialogDescription className="text-pretty">{props.description}</DialogDescription>
   ) : null
-  // A cover's description scrolls with the body, under the title row.
-  const bodyDescription = !cover ? null : kind === "picker" && description ? (
+  // The description says what the modal is for, so it comes before a search or
+  // a toolbar on both presentations. A cover with neither lets it scroll with
+  // the body, under the title row; with one, it stays above it.
+  const coverAbove = cover && (hasSearch || Boolean(frame?.toolbar))
+  const bodyDescription = !cover || coverAbove ? null : kind === "picker" && description ? (
     <div className="px-2 pt-1 pb-2">{description}</div>
   ) : (
     description
@@ -296,6 +337,7 @@ function ModalParts(
             aria-label="Close"
             disabled={busy}
             focusableWhenDisabled
+            data-modal-close=""
             onClick={() => leave("close-control")}
             className={cn(
               INERT_BUTTON,
@@ -309,8 +351,15 @@ function ModalParts(
         ) : null}
         {cover ? null : description}
       </div>
+      {coverAbove && description ? <div className="shrink-0 px-4 pt-3">{description}</div> : null}
       {hasSearch ? (
-        <div className={cover ? "shrink-0 border-b px-4 py-3" : "shrink-0 px-4 pt-4 pb-3"}>
+        <div
+          className={
+            cover
+              ? cn("shrink-0 border-b px-4 pb-3", description ? "pt-2" : "pt-3")
+              : "shrink-0 px-4 pt-4 pb-3"
+          }
+        >
           <SearchField search={props.search!} inputRef={searchRef} />
         </div>
       ) : null}
@@ -335,7 +384,9 @@ function ModalParts(
           data-slot="modal-body"
           className={cn(
             "min-h-0 overflow-y-auto",
-            cover ? "flex-1 overscroll-contain" : fixedHeight ? "flex-1" : "shrink",
+            // `grow` fills a height kept from an earlier step; with none kept
+            // there is nothing to grow into.
+            cover ? "flex-1 overscroll-contain" : fixedHeight ? "flex-1" : "shrink grow",
             // -mt-1 with the padding's pt-1: room for a focus ring on the
             // body's first control, which the scroller would otherwise cut.
             !cover && kind !== "picker" && "-mt-1",
@@ -374,7 +425,8 @@ function SearchField({
   inputRef: Ref<HTMLInputElement>
 }): ReactNode {
   return (
-    <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
+    // A label, so a press anywhere in the 40px box lands in the field.
+    <label className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
       <Search className="size-4 shrink-0 text-muted-foreground" />
       <input
         ref={inputRef}
@@ -383,8 +435,9 @@ function SearchField({
         placeholder={search.label}
         aria-label={search.label}
         {...search.fieldProps}
-        className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
+        data-modal-search=""
+        className="min-w-0 flex-1 self-stretch bg-transparent py-2 text-base outline-none placeholder:text-muted-foreground md:text-sm"
       />
-    </div>
+    </label>
   )
 }
