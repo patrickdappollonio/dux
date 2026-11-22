@@ -1,6 +1,6 @@
 // Test helper: a jsdom `window.matchMedia` stub.
 //
-// jsdom ships no matchMedia at all, which is why `use-mobile.ts` and
+// jsdom ships no matchMedia at all, which is why `lib/shellLayout.ts` and
 // `use-coarse-pointer.ts` both guard for it. `useIsCoarsePointer` has no
 // non-matchMedia fallback (there is no other way to ask the question), so any
 // test that needs the compose bar UP has to install this.

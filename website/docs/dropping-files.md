@@ -449,8 +449,8 @@ says the image was not saved and that taking over is the way to paste it here.
 > Take over input and paste it yourself. That message waits for you instead of clearing
 > itself, because it holds the only copy of that path on screen.
 
-The same applies on a phone: if the compose box goes away mid-upload (you rotated to a wide
-layout, or switched the box off), dux reports the file as saved-but-not-added with its full
+The same applies on a phone: if the compose box goes away mid-upload (the layout changed, or
+you switched the box off), dux reports the file as saved-but-not-added with its full
 path rather than claiming it joined a message you can no longer see.
 
 ## Limits, and switching it off

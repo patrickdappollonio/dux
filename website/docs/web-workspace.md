@@ -52,6 +52,7 @@ A slim header shows breadcrumbs (agent, provider, project, branch) and a **cog**
 - the configuration dialogs
 - the actions that apply to the whole workspace
 - **Projects…**, the list of every project (see [Managing projects](#managing-projects))
+- **Use the phone layout**, and **Choose the layout automatically** once you have picked one (see [On your phone](#on-your-phone))
 
 Anything that acts on a *specific* agent, project, or file lives in the `⋯` menu on that row instead. The cog menu has no keyboard shortcut: Tab reaches it, Enter opens it, the arrow keys move through it, and Escape closes it.
 
@@ -305,7 +306,7 @@ One thing does bring the top bar back on either surface without asking you to le
 
 The pill goes with the terminal underneath it, so the header returns with **Back** and the agent's name and you are never stuck staring at a card you cannot walk away from.
 
-On a computer the top bar comes back the same way, with the **Theater** button in it, since a tablet gets that layout on width alone and has no Escape key to leave with; the side panels stay away. The moment the card goes, theater picks up where it left off. A brief spinner during a quick reconnect is not a card and changes nothing.
+On a computer the top bar comes back the same way, with the **Theater** button in it, since a tablet without a keyboard gets that layout too and has no Escape key to leave with; the side panels stay away. The moment the card goes, theater picks up where it left off. A brief spinner during a quick reconnect is not a card and changes nothing.
 
 > [!TIP]
 > Theater is remembered per row of the agents list, in that browser, so the agent you like watching full-screen comes back full-screen and the others do not. Switching between an agent's tabs or terminals never takes you in or out of it; a project or standalone terminal keeps its own. If another device takes over the terminal, theater ends and the memory goes with it, so you always come back to the full layout to decide what to do next.
@@ -576,7 +577,9 @@ do not submit line by line. Full details in [Managing Macros](/docs/macros).
 
 Below tablet width, the web UI becomes a **hub-and-spoke** shell built for one thumb. A phone turned sideways keeps it: a touch screen as short as a phone's gets the phone layout however wide it is.
 
-dux picks the layout for you, and you can pick the other one from the app menu: **Use the computer layout** on the phone layout, **Use the phone layout** on the computer layout. A phone with a keyboard attached may have room for the computer layout, and a small window may read better as a phone. Your choice is kept in that browser on that device only, and survives rotating and reloading. While it is in force, **Choose the layout automatically** in the same menu hands the decision back to dux.
+dux picks the layout for you, and you can pick the other one from the app menu: **Use the computer layout** on the phone layout, **Use the phone layout** on the computer layout. A phone with a keyboard attached may have room for the computer layout, and a small window may read better as a phone. Your choice belongs to that browser at that dux address: every tab and window of it follows the choice at once, and nothing else does (not another browser, not another device). It survives rotating and reloading. While it is in force, **Choose the layout automatically** in the same menu hands the decision back to dux.
+
+On a screen narrower than a tablet, the computer layout keeps the sidebar at its icon rail so the page keeps its room and the cog stays on screen. Its expand button slides the whole sidebar out over the page instead, and picking something tucks it away again.
 
 ### The screens
 

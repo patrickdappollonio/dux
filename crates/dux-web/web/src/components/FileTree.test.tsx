@@ -11,7 +11,6 @@ import {
   type MatchMediaStub,
 } from "@/test/matchMedia"
 
-// The width query `useIsMobile` subscribes to.
 // FileTree talks to the server exclusively through `fileApi.tree`, so mocking
 // that one function is enough to drive every scenario below without a real
 // server. Follows TerminalArea.test.tsx's style of mocking only what's needed.
