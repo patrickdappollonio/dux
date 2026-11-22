@@ -605,7 +605,7 @@ It holds:
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
 
-The flap does sit over the first lines of the terminal, though. The button at the right end of the top bar folds it up into the band so those lines are readable, and brings it back on the next tap. The phone remembers the choice for every agent and terminal, and keeps it across reloads. While the flap is folded, the agent/terminals switch is folded with it, so its working and needs-you colors are out of sight until you show the flap again. Entering theater still needs the flap (its first button), and leaving theater with the flap folded lands with the flap still folded.
+The flap does sit over the first lines of the terminal, though. The button at the right end of the top bar folds it up into the band so those lines are readable, and brings it back on the next tap. The phone remembers the choice for every agent and terminal, and keeps it across reloads. While the flap is folded, everything on it is folded with it, the `⋯` menu included, so the agent/terminals switch's working and needs-you colors are out of sight until you show the flap again. Folding hides the flap only: the top bar stays, because hiding it is theater's job. Entering theater still needs the flap (its first button), and leaving theater with the flap folded lands with the flap still folded.
 
 ### Typing on a phone
 
@@ -660,7 +660,7 @@ While the message box is up it really is the typing surface. Clicking into the t
 
 The message box and the terminal keys are two separate switches, so all four combinations are yours to pick: both, the box alone, the keys alone, or neither.
 
-Terminal rows are precious on a phone, so the terminal keys are hideable. On a phone, a keys button in the action cluster, between the changed-file count and the `⋯`, hides and shows them, in the flap and in the theater pill alike. On a computer the same toggle is a row, **Hide terminal keys** or **Show terminal keys**, in the **Input** group of the pane's own `⋯`. Either way it stays on offer while the keys are hidden, so hiding them never takes away the way to bring them back. It is backed by a preference that is also a row in Preferences.
+Terminal rows are precious on a phone, so the terminal keys are hideable. On a phone, a keys button in the action cluster, between the changed-file count and the `⋯`, hides and shows them, in the flap and in the theater pill alike. On a computer the same toggle is a row, **Hide terminal keys** or **Show terminal keys**, in the **Input** group of the pane's own `⋯`. Either way it stays on offer while the keys are hidden, so hiding them never takes away the way to bring them back. On a phone, folding the flap away takes the keys button with it until you show the flap again. It is backed by a preference that is also a row in Preferences.
 
 The terminal-keys preference lives on the server, so it follows you to every device, and the keys travel with your pointer: hiding them from your phone also hides them on the tablet you pick up next.
 
@@ -668,7 +668,7 @@ For the top bar the answer is [theater mode](#theater-mode-one-pane-no-chrome), 
 
 ### The Input group
 
-The input has no menu of its own under the terminal: nothing hangs off the message box or the key row but the box, its send button and the keys. Its controls live in the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the pane header's on a computer, the floating pill's in theater. It is on screen whatever the pane is doing, so you can always reach it:
+The input has no menu of its own under the terminal: nothing hangs off the message box or the key row but the box, its send button and the keys. Its controls live in the **Input** group at the top of the pane's own `⋯` menu: the flap's on a phone, the pane header's on a computer, the floating pill's in theater. It is on screen whatever the pane is doing (on a phone, unless you have folded the flap away, which one tap on the top bar's button undoes), so you can always reach it:
 
 - **Attach a file…** (see [Dropping and pasting files](/docs/dropping-files)).
 - **Type directly in the terminal** or **Use virtual input**, whichever way the switch would take you, wherever the preference is **Automatic**.

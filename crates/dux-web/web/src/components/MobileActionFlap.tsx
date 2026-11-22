@@ -163,9 +163,8 @@ export function MobileActionFlap({
               subject={subject}
               pane={target}
               side="bottom"
-              // A phone pane screen's header is Back and identity only, and the
-              // cog stayed behind on the hub, so the drill is the way to the
-              // app's own actions from here.
+              // A phone pane screen's header carries no cog (it stayed behind
+              // on the hub), so the drill is the way to the app's own actions.
               settingsDrill
             />
           }
