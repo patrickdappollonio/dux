@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react"
+import { useLayoutEffect, useRef, useState, type Ref } from "react"
 import {
   AlertTriangle,
   Ban,
@@ -8,15 +8,9 @@ import { notifyError } from "@/lib/notify"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import {
@@ -48,11 +42,17 @@ import {
 import type { DuxState } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
 
-// The inline "New folder" affordance in the dialog header: a ghost button that
+// The inline "New folder" affordance beside the current path: a ghost button that
 // swaps for an input + Create/Cancel. On success it navigates INTO the new
 // folder, where the pinned "Use this folder" row makes it the init target in
 // one more tap. Errors surface the server's message as a toast.
-function NewFolderControl({ browsePath }: { browsePath: string }) {
+function NewFolderControl({
+  browsePath,
+  buttonRef,
+}: {
+  browsePath: string
+  buttonRef: Ref<HTMLButtonElement>
+}) {
   const [editing, setEditing] = useState(false)
   const [name, setName] = useState("")
   const [creating, setCreating] = useState(false)
@@ -84,6 +84,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
   if (!editing) {
     return (
       <Button
+        ref={buttonRef}
         variant="ghost"
         size="sm"
         className="max-md:min-h-10 pointer-coarse:min-h-10 shrink-0"
@@ -116,7 +117,7 @@ function NewFolderControl({ browsePath }: { browsePath: string }) {
           }
         }}
         placeholder="Folder name"
-        className="h-8 w-40"
+        className="h-8 w-40 min-w-0 flex-1 max-md:h-10 pointer-coarse:h-10"
       />
       <Button
         variant="outline"
@@ -162,7 +163,7 @@ function PathField({ value }: { value: string }) {
       tabIndex={-1}
       value={value}
       aria-label="Path"
-      className="w-full min-w-0 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+      className="w-full min-w-0 flex-1 basis-56 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
     />
   )
 }
@@ -276,7 +277,7 @@ function SelectionDetails({
   ...messages
 }: SelectionDetailsProps) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex shrink-0 flex-col gap-2">
       <Input
         value={name}
         onChange={(event) => setName(event.target.value)}
@@ -291,41 +292,6 @@ function SelectionDetails({
       ) : null}
       <InspectionMessages {...messages} />
     </div>
-  )
-}
-
-interface AddProjectFooterProps {
-  selected: string | null
-  inspecting: boolean
-  inspected: boolean
-  primary: AddProjectPrimaryAction
-  hasBranchWarning: boolean
-  onAdd: () => void
-}
-
-function AddProjectFooter({
-  selected,
-  inspecting,
-  inspected,
-  primary,
-  hasBranchWarning,
-  onAdd,
-}: AddProjectFooterProps) {
-  return (
-    <DialogFooter>
-      <Button variant="outline" onClick={closeAddProject}>
-        Cancel
-      </Button>
-      <Button
-        disabled={
-          !selected || inspecting || !inspected || primary.action === "blocked"
-        }
-        variant={hasBranchWarning ? "destructive" : "default"}
-        onClick={onAdd}
-      >
-        {primary.label}
-      </Button>
-    </DialogFooter>
   )
 }
 
@@ -429,25 +395,33 @@ function inspectionState(
   }
 }
 
-// A monospace name chip with a leading folder glyph. Shared by the pinned
-// "Use this folder" row and the "Up to <folder>" parent row so the two folder
-// names render identically and cannot drift.
-// The browser body is mounted only while the dialog is open so its local
-// `selected`/`name` state resets on each open, so no set-state-in-effect is needed.
-function AddProjectBrowser() {
-  const {
-    browsePath,
-    browseEntries,
-    browseLoading,
-    projectPathInspection,
-    addProjectIntent,
-  } = useDux()
+// Why the primary button takes no press, or null when it may be pressed.
+function addRefusal(
+  selected: string | null,
+  inspecting: boolean,
+  inspected: boolean,
+  action: AddProjectPrimaryAction["action"],
+): string | null {
+  if (!selected) return "Choose a folder with Use this folder first."
+  if (inspecting || !inspected) return "dux is still checking the folder."
+  if (action === "blocked") return "This folder is inside a git repository. Add that repository instead."
+  return null
+}
+
+function AddProjectBrowser({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const state = useDux()
+  const { browsePath, browseEntries, browseLoading } = state
+  // Closing clears both in the store; held, the hint and the folder's verdict
+  // stay as they were while the close animates.
+  const projectPathInspection = useHeldWhileClosed(open, state.projectPathInspection)
+  const addProjectIntent = useHeldWhileClosed(open, state.addProjectIntent)
   const [selected, setSelected] = useState<string | null>(null)
   const [name, setName] = useState("")
   // Whether to check out the default branch before adding, mirroring the TUI's
   // "Check Out & Add" checkbox. Defaulted ON when a Known warning is shown (the
   // TUI defaults it on too); ignored on the heuristic path (no checkbox there).
   const [checkoutDefault, setCheckoutDefault] = useState(true)
+  const newFolderRef = useRef<HTMLButtonElement | null>(null)
 
   const {
     inspection,
@@ -481,6 +455,8 @@ function AddProjectBrowser() {
   function handleAdd() {
     if (!selected) return
     if (primary.action === "blocked") return
+    // The selection and the name stay as they are, so the closing dialog
+    // shows what was added; the next open starts empty.
     if (primary.action === "init-repo") {
       initProject(selected, name)
     } else if (primary.action === "initial-commit") {
@@ -490,35 +466,46 @@ function AddProjectBrowser() {
     } else {
       addProject(selected, name)
     }
-    setSelected(null)
-    setName("")
     closeAddProject()
   }
 
-  const usingThisFolder = selected === browsePath
-
   return (
-    <DialogContent className="sm:max-w-xl" showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>Add a project</DialogTitle>
-        {addProjectIntent === "init" ? (
-          <span className="text-xs text-muted-foreground">
-            Pick or create a folder, then choose Use this folder; dux will
-            initialize a git repository in it.
-          </span>
-        ) : null}
-        <div className="flex items-center justify-between gap-2">
+    <Modal
+      kind="form"
+      open={open}
+      onClose={closeAddProject}
+      onClosed={onClosed}
+      size="xl"
+      title="Add a project"
+      description={
+        addProjectIntent === "init"
+          ? "Pick or create a folder, then choose Use this folder; dux will initialize a git repository in it."
+          : undefined
+      }
+      // The first control, as before the folder list has anything to offer.
+      initialFocus={newFolderRef}
+      // Where the browse stands, and the way to make a folder there. The two
+      // share a row while both fit and stack when they do not.
+      toolbar={
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <PathField value={browsePath} />
-          <NewFolderControl browsePath={browsePath} />
+          <NewFolderControl browsePath={browsePath} buttonRef={newFolderRef} />
         </div>
-      </DialogHeader>
-
+      }
+      submit={{
+        label: primary.label,
+        tone: branch ? "destructive" : "primary",
+        onSelect: handleAdd,
+        disabledReason: addRefusal(selected, inspecting, !!inspection, primary.action),
+      }}
+    >
       <FolderBrowseList
+        shrinkable
         path={browsePath}
         entries={browseEntries}
         loading={browseLoading}
         commitLabel="Use this folder"
-        committed={usingThisFolder}
+        committed={selected === browsePath}
         onCommit={selectTarget}
         onOpen={handleEntryClick}
       />
@@ -537,30 +524,15 @@ function AddProjectBrowser() {
           setCheckoutDefault={setCheckoutDefault}
         />
       ) : null}
-
-      <AddProjectFooter
-        selected={selected}
-        inspecting={inspecting}
-        inspected={!!inspection}
-        primary={primary}
-        hasBranchWarning={!!branch}
-        onAdd={handleAdd}
-      />
-    </DialogContent>
+    </Modal>
   )
 }
 
 export function AddProjectDialog() {
   const { addProjectOpen } = useDux()
-
-  return (
-    <Dialog
-      open={addProjectOpen}
-      onOpenChange={(o) => {
-        if (!o) closeAddProject()
-      }}
-    >
-      {addProjectOpen && <AddProjectBrowser />}
-    </Dialog>
-  )
+  const life = useModalLifetime(addProjectOpen)
+  // Keyed by the open, so the selection and the name start empty on every one.
+  return life.mounted ? (
+    <AddProjectBrowser key={life.epoch} open={addProjectOpen} onClosed={life.onClosed} />
+  ) : null
 }

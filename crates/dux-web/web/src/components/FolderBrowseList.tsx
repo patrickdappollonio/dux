@@ -56,7 +56,7 @@ export function FolderBrowseList({
 }) {
   return (
     <ScrollArea
-      className={`h-[50vh] rounded-md border md:h-80 ${
+      className={`h-[50dvh] rounded-md border md:h-80 ${
         shrinkable ? "min-h-32 shrink" : ""
       }`}
     >
@@ -66,7 +66,7 @@ export function FolderBrowseList({
             // The spinner fills the fixed list; in a shrinkable one it fills
             // whatever height the list was left with, never less than its
             // floor.
-            shrinkable ? "h-full min-h-32" : "h-[50vh] md:h-80"
+            shrinkable ? "h-full min-h-32" : "h-[50dvh] md:h-80"
           }`}
         >
           <GlyphSpinner className="text-lg text-muted-foreground" />
