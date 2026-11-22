@@ -17,11 +17,15 @@ import { XIcon } from "lucide-react"
 //
 // A dialog whose opener has gone when it closes hands focus to the page
 // control that opened the menu it came from (`useFocusFallback`).
+//
+// `onBack` answers Back itself, for a dialog that may stay open and keep its
+// entry (`useBackDismiss`).
 function Dialog({
   historyEntry = true,
+  onBack,
   ...props
-}: DialogPrimitive.Root.Props & { historyEntry?: boolean }) {
-  const back = useBackDismiss(props, historyEntry)
+}: DialogPrimitive.Root.Props & { historyEntry?: boolean; onBack?: () => boolean }) {
+  const back = useBackDismiss(props, historyEntry, onBack)
   const onOpenChangeComplete = useFocusFallback(props.open, props.onOpenChangeComplete)
   return (
     <DialogPrimitive.Root
