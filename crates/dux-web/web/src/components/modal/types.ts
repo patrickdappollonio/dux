@@ -26,7 +26,7 @@ export interface ModalDoor {
   disabledReason?: string | null
 }
 
-/** A picker's search field: the modal draws it and focuses it on a computer. */
+/** A picker's search field: the modal draws it and, under a fine pointer, focuses it. */
 export interface ModalSearch {
   value: string
   onChange: (value: string) => void
@@ -63,8 +63,8 @@ interface ModalSteps {
   back?: { label: string; onSelect: () => void }
   /** Names the step on screen; a change of step is focused as an open is. */
   step?: string
-  /** What takes focus on open in place of the kind's own choice. On a phone a
-   * text field named here is still not focused. */
+  /** What takes focus on open in place of the kind's own choice. Under a
+   * coarse pointer a field text is typed into is still not focused. */
   initialFocus?: RefObject<HTMLElement | null>
 }
 

@@ -453,6 +453,11 @@ describe("NewAgentPickerDialog", () => {
   // keyboard its own search field had raised.
   it("covers a phone's screen and leaves the keyboard down", async () => {
     vi.stubGlobal("innerWidth", 390)
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(pointer: coarse)",
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
     seed("new")
     render(<NewAgentPickerDialog />)
     const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!

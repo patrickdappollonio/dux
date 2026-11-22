@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
@@ -59,7 +60,9 @@ export function Modal(props: ModalProps) {
           showCloseButton={!phone && kind === "picker"}
           destructive={kind === "confirm" && props.confirm.tone === "destructive"}
           finalFocus={props.finalFocus}
-          initialFocus={() => placeFocus.current?.() ?? true}
+          // False leaves focus where it is; true would move it to the popup's
+          // first control. Only a popup whose parts have not mounted gets that.
+          initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
           className={cn(
             modalPresentation(kind, phone) === "card" &&
               cn("flex flex-col gap-0 p-0", CARD_WIDTH[props.size ?? "sm"]),
@@ -116,6 +119,7 @@ function ModalParts(
 ) {
   const { kind, phone, leave, open, onFocusTarget } = props
   const cover = modalPresentation(kind, phone) === "cover"
+  const coarse = useIsCoarsePointer()
   const header = useRef<HTMLDivElement | null>(null)
   const body = useRef<HTMLDivElement | null>(null)
   const safeRef = useRef<HTMLButtonElement | null>(null)
@@ -129,7 +133,7 @@ function ModalParts(
     if (!popup) return null
     return focusTarget({
       kind,
-      phone,
+      coarse,
       popup,
       body: body.current,
       named: named?.current ?? null,

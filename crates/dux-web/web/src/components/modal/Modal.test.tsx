@@ -55,7 +55,20 @@ function at(width: number) {
   vi.stubGlobal("innerWidth", width)
 }
 
-beforeEach(() => at(COMPUTER))
+// The pointer is asked through `matchMedia`, which jsdom lacks.
+function pointer(kind: "fine" | "coarse") {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: kind === "coarse" && query === "(pointer: coarse)",
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
+beforeEach(() => {
+  at(COMPUTER)
+  pointer("fine")
+})
 afterEach(() => {
   cleanup()
   void browser
@@ -195,10 +208,22 @@ describe("what has focus when a modal opens", () => {
     await waitFor(() => expect(document.activeElement).toBe(closeButtons()[0]))
   })
 
-  // The soft keyboard comes up for a focused text field, so on a phone none
-  // has focus on open, not even one that asks for it.
-  it("is never a text field on a phone", async () => {
-    at(PHONE)
+  const searchable = (
+    <Modal
+      kind="picker"
+      open
+      onClose={() => {}}
+      title="Sample"
+      historyEntry={false}
+      search={{ value: "", onChange: () => {}, label: "Search things" }}
+    />
+  )
+
+  // The soft keyboard comes up for a focused text field, so under a finger
+  // none has focus on open, not even one that asks for it, at any width.
+  it.each([PHONE, COMPUTER])("is never a text field under a coarse pointer at width %d", async (width) => {
+    at(width)
+    pointer("coarse")
     render(
       <Sample kind="form">
         <textarea aria-label="notes" autoFocus />
@@ -206,17 +231,30 @@ describe("what has focus when a modal opens", () => {
     )
     await waitFor(() => expect(document.activeElement).toBe(popup()))
     cleanup()
-    render(
-      <Modal
-        kind="picker"
-        open
-        onClose={() => {}}
-        title="Sample"
-        historyEntry={false}
-        search={{ value: "", onChange: () => {}, label: "Search things" }}
-      />,
-    )
+    render(searchable)
     await waitFor(() => expect(document.activeElement).toBe(popup()))
+  })
+
+  it("is still the search field in a narrow window with a mouse", async () => {
+    at(PHONE)
+    render(searchable)
+    expect(popup().dataset.presentation).toBe("cover")
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Search things")))
+  })
+
+  // Nothing is typed into a read-only field, so no keyboard comes up for it.
+  it("is a read-only text area a report names, under a coarse pointer too", async () => {
+    pointer("coarse")
+    function Copied() {
+      const text = useRef<HTMLTextAreaElement | null>(null)
+      return (
+        <Modal kind="report" open onClose={() => {}} title="Sample" historyEntry={false} initialFocus={text}>
+          <textarea aria-label="copied" readOnly ref={text} defaultValue="abc" />
+        </Modal>
+      )
+    }
+    render(<Copied />)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("copied")))
   })
 
   it("is placed again when the step changes", async () => {
