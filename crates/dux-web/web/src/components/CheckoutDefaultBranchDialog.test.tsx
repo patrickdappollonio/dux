@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import {
   checkoutDefaultBranch,
@@ -66,9 +66,11 @@ describe("CheckoutDefaultBranchDialog", () => {
       expect(closeCheckoutDefaultBranch).toHaveBeenCalled()
     })
 
-    it("closes on Cancel and checks nothing out", () => {
+    it("opens on Cancel, closes on it and checks nothing out", async () => {
       openFor("p1")
-      fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+      const cancel = screen.getByRole("button", { name: "Cancel" })
+      await waitFor(() => expect(document.activeElement).toBe(cancel))
+      fireEvent.click(cancel)
       expect(closeCheckoutDefaultBranch).toHaveBeenCalled()
       expect(checkoutDefaultBranch).not.toHaveBeenCalled()
     })

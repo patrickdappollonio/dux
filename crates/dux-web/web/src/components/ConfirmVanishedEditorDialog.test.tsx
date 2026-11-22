@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -53,7 +53,7 @@ describe("the vanished-root confirm", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("says a terminal closed and offers keeping the text on screen", () => {
+  it("says a terminal closed and offers keeping the text on screen", async () => {
     seed({
       kind: "terminal",
       terminalId: "t1",
@@ -66,7 +66,7 @@ describe("the vanished-root confirm", () => {
     // The safe half is the default focus, and it is the one that keeps the
     // words where they can be copied out.
     const keep = screen.getByRole("button", { name: "Keep it open" })
-    expect(document.activeElement).toBe(keep)
+    await waitFor(() => expect(document.activeElement).toBe(keep))
     fireEvent.click(keep)
     expect(keepMock).toHaveBeenCalledTimes(1)
     expect(discardMock).not.toHaveBeenCalled()

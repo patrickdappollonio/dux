@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import { DeleteEntryDialog } from "./DeleteEntryDialog"
 
@@ -9,7 +9,7 @@ afterEach(() => {
 })
 
 describe("DeleteEntryDialog", () => {
-  it("Cancel has autoFocus", () => {
+  it("Cancel has autoFocus", async () => {
     render(
       <DeleteEntryDialog
         target={{ path: "a.ts", isDir: false }}
@@ -18,7 +18,7 @@ describe("DeleteEntryDialog", () => {
       />,
     )
     const cancel = screen.getByRole("button", { name: "Cancel" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
   })
 
   it("the confirm button is styled destructive", () => {

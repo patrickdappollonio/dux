@@ -1,11 +1,4 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import type { SaveEncoding } from "@/lib/editorEncoding"
 
@@ -52,54 +45,53 @@ export function SaveConflictDialog({
   const path = target?.path ?? ""
   const deleted = target?.deleted ?? false
 
+  // Both offers would start a second operation on the file, so they wait.
+  const busyReason = busy
+    ? "Another save or reload of this file is still running. Wait for it to finish."
+    : null
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
+      onClose={onClose}
       // Raised by the server refusing a save, not by a click, so it takes no
       // history entry for the browser's Back.
       historyEntry={false}
+      title={deleted ? "That file is gone" : "The file changed on disk"}
+      cancelLabel="Cancel"
+      alternative={
+        deleted
+          ? undefined
+          : {
+              label: "Reload from disk",
+              tone: "plain",
+              disabledReason: busyReason,
+              onSelect: onReload,
+            }
+      }
+      confirm={{
+        label: deleted ? "Write it back" : "Overwrite",
+        tone: "destructive",
+        disabledReason: busyReason,
+        onSelect: onOverwrite,
+      }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            {deleted ? "That file is gone" : "The file changed on disk"}
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          {deleted ? (
-            <>
-              <InlineCode>{path}</InlineCode> was deleted
-              after you opened it, so nothing was saved. You can write your
-              version back as a new file at the same path, or cancel and keep
-              the text here.
-            </>
-          ) : (
-            <>
-              <InlineCode>{path}</InlineCode> changed after
-              you opened it, so nothing was saved. Saving anyway replaces
-              whatever is on disk now; reloading replaces what you typed.
-            </>
-          )}
-        </p>
-        {/* Misclick-safe spacing: every button below destroys something. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onClose}>
-            Cancel
-          </Button>
-          {!deleted && (
-            <Button variant="outline" disabled={busy} onClick={onReload}>
-              Reload from disk
-            </Button>
-          )}
-          <Button variant="destructive" disabled={busy} onClick={onOverwrite}>
-            {deleted ? "Write it back" : "Overwrite"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <p className="text-sm text-destructive">
+        {deleted ? (
+          <>
+            <InlineCode>{path}</InlineCode> was deleted
+            after you opened it, so nothing was saved. You can write your
+            version back as a new file at the same path, or cancel and keep
+            the text here.
+          </>
+        ) : (
+          <>
+            <InlineCode>{path}</InlineCode> changed after
+            you opened it, so nothing was saved. Saving anyway replaces
+            whatever is on disk now; reloading replaces what you typed.
+          </>
+        )}
+      </p>
+    </Modal>
   )
 }

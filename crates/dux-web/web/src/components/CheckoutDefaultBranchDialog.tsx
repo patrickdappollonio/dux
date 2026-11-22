@@ -1,13 +1,4 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { Modal } from "@/components/modal"
 import { checkoutDefaultBranchProse } from "@/lib/checkoutDefaultBranch"
 import { renderProse } from "@/lib/prose"
 import {
@@ -25,13 +16,6 @@ export function CheckoutDefaultBranchDialog() {
   const project = spine?.projects.find(
     (p) => p.id === checkoutDefaultBranchTarget,
   )
-  // Closes the dialog when the project vanishes from the ViewModel: checking
-  // out a branch of a project that no longer exists is moot. See the hook.
-  const isOpen = useVanishedTargetGuard(
-    checkoutDefaultBranchTarget !== null,
-    project !== undefined,
-    closeCheckoutDefaultBranch,
-  )
   const name = project?.name ?? "this project"
 
   function handleConfirm() {
@@ -40,29 +24,20 @@ export function CheckoutDefaultBranchDialog() {
     closeCheckoutDefaultBranch()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeCheckoutDefaultBranch()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>Check out default branch?</DialogTitle>
-          <DialogDescription>
-            {renderProse(
-              checkoutDefaultBranchProse(name, project?.leading_branch ?? null),
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={closeCheckoutDefaultBranch}>
-            Cancel
-          </Button>
-          {/* The terminal UI's confirm button reads the same. */}
-          <Button onClick={handleConfirm}>Check out default branch</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={checkoutDefaultBranchTarget !== null}
+      // Checking out a branch of a project that no longer exists is moot.
+      vanished={project === undefined}
+      onClose={closeCheckoutDefaultBranch}
+      title="Check out default branch?"
+      description={renderProse(
+        checkoutDefaultBranchProse(name, project?.leading_branch ?? null),
+      )}
+      cancelLabel="Cancel"
+      // The terminal UI's confirm button reads the same.
+      confirm={{ label: "Check out default branch", tone: "primary", onSelect: handleConfirm }}
+    />
   )
 }

@@ -1,13 +1,5 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 
 export interface ReloadFileTarget {
   tabId: string
@@ -32,36 +24,23 @@ export function ConfirmReloadFileDialog({
   onClose,
   onConfirm,
 }: ConfirmReloadFileDialogProps) {
-  const isOpen = useVanishedTargetGuard(target !== null, present, onClose)
   const path = target?.path ?? ""
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
+    <Modal
+      kind="confirm"
+      open={target !== null}
+      vanished={!present}
+      onClose={onClose}
+      title="Discard your edits and reload?"
+      cancelLabel="Keep my edits"
+      confirm={{ label: "Discard & reload", tone: "destructive", onSelect: onConfirm }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Discard your edits and reload?</DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          <InlineCode>{path}</InlineCode> changed on disk.
-          Reloading replaces everything you have typed here with the file as it
-          is now. Your edits are not saved anywhere and cannot be recovered.
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onClose}>
-            Keep my edits
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            Discard & reload
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <p className="text-sm text-destructive">
+        <InlineCode>{path}</InlineCode> changed on disk.
+        Reloading replaces everything you have typed here with the file as it
+        is now. Your edits are not saved anywhere and cannot be recovered.
+      </p>
+    </Modal>
   )
 }

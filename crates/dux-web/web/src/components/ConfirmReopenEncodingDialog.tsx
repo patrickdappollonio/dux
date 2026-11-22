@@ -1,13 +1,5 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 
 export interface ReopenEncodingTarget {
   tabId: string
@@ -36,37 +28,24 @@ export function ConfirmReopenEncodingDialog({
   onClose,
   onConfirm,
 }: ConfirmReopenEncodingDialogProps) {
-  const isOpen = useVanishedTargetGuard(target !== null, present, onClose)
   const path = target?.path ?? ""
   const label = target?.label ?? ""
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
+    <Modal
+      kind="confirm"
+      open={target !== null}
+      vanished={!present}
+      onClose={onClose}
+      title="Discard your edits and reopen?"
+      cancelLabel="Keep my edits"
+      confirm={{ label: "Discard & reopen", tone: "destructive", onSelect: onConfirm }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Discard your edits and reopen?</DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          Reopening <InlineCode>{path}</InlineCode> as {label} reads it again
-          from disk and replaces everything you have typed here. Your edits are
-          not saved anywhere and cannot be recovered.
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onClose}>
-            Keep my edits
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            Discard & reopen
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <p className="text-sm text-destructive">
+        Reopening <InlineCode>{path}</InlineCode> as {label} reads it again
+        from disk and replaces everything you have typed here. Your edits are
+        not saved anywhere and cannot be recovered.
+      </p>
+    </Modal>
   )
 }

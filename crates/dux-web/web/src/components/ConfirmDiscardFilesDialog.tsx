@@ -1,14 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { Modal } from "@/components/modal"
 import {
   changedFileCount,
   countWords,
@@ -161,11 +153,6 @@ export function ConfirmDiscardFilesDialog({
     nestedInside,
     worktreesInside,
   } = summary
-  // Closes itself once every checked path has left the unstaged list, rather
-  // than lingering with copy about files that are no longer there.
-  const isOpen =
-    useVanishedTargetGuard(open, targets.length + leftOut.length > 0, onCancel) &&
-    changed === null
 
   const deleted = `${countWords(untracked, "untracked file", "untracked files")} will be permanently DELETED from disk`
   const restored = `${countWords(tracked, "tracked file", "tracked files")} will be restored to ${
@@ -215,46 +202,39 @@ export function ConfirmDiscardFilesDialog({
   const body = sentences.join(" ")
 
   return (
-    <Dialog open={isOpen} onOpenChange={(next) => !next && onCancel()}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            Discard changes to{" "}
-            {formatRegularCount(
-              targets.reduce((sum, f) => sum + changedFileCount(f), 0),
-              "file",
-            )}
-            ?
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          {body}
-          {bareKept && <> {renderProse(bareKept)}</>}
-          {leftOutSentence && <> {renderProse(leftOutSentence)}</>} {closing}
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            // Nothing left to delete once every selected row is left out.
-            disabled={targets.length === 0}
-            onClick={() =>
-              onConfirm(
-                targets.map((f) => f.path),
-                Object.fromEntries(
-                  targets.flatMap((f) => (f.kind ? [[f.path, discardConfirmation(f)]] : [])),
-                ),
-              )
-            }
-          >
-            Discard
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={open && changed === null}
+      // Closes itself once every checked path has left the unstaged list, rather
+      // than lingering with copy about files that are no longer there.
+      vanished={targets.length + leftOut.length === 0}
+      onClose={onCancel}
+      title={`Discard changes to ${formatRegularCount(
+        targets.reduce((sum, f) => sum + changedFileCount(f), 0),
+        "file",
+      )}?`}
+      cancelLabel="Cancel"
+      confirm={{
+        label: "Discard",
+        tone: "destructive",
+        disabledReason:
+          targets.length === 0
+            ? "Every selected row is left out, so there is nothing to discard."
+            : null,
+        onSelect: () =>
+          onConfirm(
+            targets.map((f) => f.path),
+            Object.fromEntries(
+              targets.flatMap((f) => (f.kind ? [[f.path, discardConfirmation(f)]] : [])),
+            ),
+          ),
+      }}
+    >
+      <p className="text-sm text-destructive">
+        {body}
+        {bareKept && <> {renderProse(bareKept)}</>}
+        {leftOutSentence && <> {renderProse(leftOutSentence)}</>} {closing}
+      </p>
+    </Modal>
   )
 }

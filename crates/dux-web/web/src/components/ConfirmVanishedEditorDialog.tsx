@@ -1,11 +1,4 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import {
   discardVanishedEditor,
   keepVanishedEditor,
@@ -28,45 +21,30 @@ export function ConfirmVanishedEditorDialog() {
   const { editorTargetGone } = useDux()
   const isTerminal = editorTargetGone?.kind === "terminal"
 
-  function handleOpenChange(open: boolean) {
-    // Dismissing is the SAFE half here, unlike the per-tab close confirm: the
-    // text stays on screen either way, and nothing has been discarded.
-    if (!open) keepVanishedEditor()
-  }
-
   return (
-    // Raised by the target vanishing, never by a click, so it takes no history
-    // entry for the browser's Back.
-    <Dialog
+    <Modal
+      kind="confirm"
       open={editorTargetGone !== null}
-      onOpenChange={handleOpenChange}
+      // Every way out but the destructive button is the safe half here, unlike
+      // the per-tab close confirm: the text stays on screen and nothing is lost.
+      onClose={keepVanishedEditor}
+      // Raised by the target vanishing, never by a click, so it takes no history
+      // entry for the browser's Back.
       historyEntry={false}
+      title={
+        isTerminal
+          ? "That terminal closed while you were editing"
+          : "That agent is gone while you were editing"
+      }
+      cancelLabel="Keep it open"
+      confirm={{ label: "Discard & leave", tone: "destructive", onSelect: discardVanishedEditor }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            {isTerminal
-              ? "That terminal closed while you were editing"
-              : "That agent is gone while you were editing"}
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          {isTerminal
-            ? "The editor was rooted at the directory that terminal started in, and that root went with it, so your unsaved edits can no longer be saved from here."
-            : "The editor was rooted at that agent's worktree, and it went with it, so your unsaved edits can no longer be saved from here."}{" "}
-          Keep this open if you want to copy the text out first.
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={keepVanishedEditor}>
-            Keep it open
-          </Button>
-          <Button variant="destructive" onClick={discardVanishedEditor}>
-            Discard & leave
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <p className="text-sm text-destructive">
+        {isTerminal
+          ? "The editor was rooted at the directory that terminal started in, and that root went with it, so your unsaved edits can no longer be saved from here."
+          : "The editor was rooted at that agent's worktree, and it went with it, so your unsaved edits can no longer be saved from here."}{" "}
+        Keep this open if you want to copy the text out first.
+      </p>
+    </Modal>
   )
 }

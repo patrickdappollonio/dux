@@ -1,13 +1,5 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { closeEditorCloseTab, editorCloseTab, useDux } from "@/lib/store"
 import { rootKey } from "@/lib/editorRoot"
 
@@ -25,11 +17,6 @@ export function ConfirmCloseEditorTabDialog() {
   // rather than lingering on a discard prompt with nothing left to discard.
   const present = tab !== undefined && tab.dirty
 
-  const isOpen = useVanishedTargetGuard(
-    editorCloseTabTarget !== null,
-    present,
-    closeEditorCloseTab,
-  )
   const path = tab?.path ?? ""
 
   function handleConfirm() {
@@ -38,34 +25,20 @@ export function ConfirmCloseEditorTabDialog() {
     closeEditorCloseTab()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeEditorCloseTab()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Discard unsaved changes?</DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          Your edits to <InlineCode>{path}</InlineCode> haven&rsquo;t
-          been saved. They will be lost.
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          {/* Cancel is the default focus, matching the discard-file dialog.
-              shadcn/base-ui buttons already activate on Space/Enter
-              natively. */}
-          <Button variant="outline" autoFocus onClick={closeEditorCloseTab}>
-            Keep editing
-          </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Discard & close
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={editorCloseTabTarget !== null}
+      vanished={!present}
+      onClose={closeEditorCloseTab}
+      title="Discard unsaved changes?"
+      cancelLabel="Keep editing"
+      confirm={{ label: "Discard & close", tone: "destructive", onSelect: handleConfirm }}
+    >
+      <p className="text-sm text-destructive">
+        Your edits to <InlineCode>{path}</InlineCode> haven&rsquo;t
+        been saved. They will be lost.
+      </p>
+    </Modal>
   )
 }

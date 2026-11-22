@@ -1,15 +1,7 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { useEffect } from "react"
 
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { countWords, deletableFileCount } from "@/lib/changedFiles"
 import {
   bareRepositoriesKept,
@@ -41,11 +33,6 @@ export function ConfirmDiscardFileDialog() {
     notifyWarning(changedWhileOpen(discardTarget.row, live))
     closeDiscard()
   }, [changedKind, discardTarget, live])
-  // Closes when the file leaves the unstaged list, rather than lingering on a
-  // stale path whose restore-versus-DELETE copy may now be wrong.
-  const isOpen =
-    useVanishedTargetGuard(discardTarget !== null, live !== undefined, closeDiscard) &&
-    !changedKind
   const path = discardTarget?.path ?? ""
   const untracked = discardTarget?.untracked ?? false
   // A folded folder is deleted whole and a repository of its own with its
@@ -64,94 +51,83 @@ export function ConfirmDiscardFileDialog() {
     closeDiscard()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeDiscard()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            {kind === "directory" ? (
+    <Modal
+      kind="confirm"
+      open={discardTarget !== null && !changedKind}
+      // Closes when the file leaves the unstaged list, rather than lingering on
+      // a stale path whose restore-versus-DELETE copy may now be wrong.
+      vanished={live === undefined}
+      onClose={closeDiscard}
+      title={
+        kind === "directory" ? (
+          <>
+            Delete the untracked folder <InlineCode>{`${path}/`}</InlineCode>?
+          </>
+        ) : kind === "nested_repository" ? (
+          <>
+            Delete <InlineCode>{`${path}/`}</InlineCode>?
+          </>
+        ) : (
+          <>
+            Discard changes to <InlineCode>{path}</InlineCode>?
+          </>
+        )
+      }
+      cancelLabel="Cancel"
+      confirm={{ label: kind ? "Delete" : "Discard", tone: "destructive", onSelect: handleConfirm }}
+    >
+      <p className="text-sm text-destructive">
+        {kind === "directory" ? (
+          <>
+            The {countWords(row ? deletableFileCount(row) : 0, "file", "files")} inside{" "}
+            <InlineCode>{`${path}/`}</InlineCode> will be permanently DELETED from disk.
+            Files the repository ignores inside it are kept.
+            {bareKept && <> {renderProse(bareKept)}</>}
+            {(row?.nested_repositories ?? 0) > 0 && (
               <>
-                Delete the untracked folder <InlineCode>{`${path}/`}</InlineCode>?
-              </>
-            ) : kind === "nested_repository" ? (
-              <>
-                Delete <InlineCode>{`${path}/`}</InlineCode>?
-              </>
-            ) : (
-              <>
-                Discard changes to <InlineCode>{path}</InlineCode>?
+                {" "}
+                The{" "}
+                {countWords(
+                  row?.nested_repositories ?? 0,
+                  "nested repository",
+                  "nested repositories",
+                )}{" "}
+                inside it {row?.nested_repositories === 1 ? "is" : "are"} kept.
               </>
             )}
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-sm text-destructive">
-          {kind === "directory" ? (
-            <>
-              The {countWords(row ? deletableFileCount(row) : 0, "file", "files")} inside{" "}
-              <InlineCode>{`${path}/`}</InlineCode> will be permanently DELETED from disk.
-              Files the repository ignores inside it are kept.
-              {bareKept && <> {renderProse(bareKept)}</>}
-              {(row?.nested_repositories ?? 0) > 0 && (
-                <>
-                  {" "}
-                  The{" "}
-                  {countWords(
-                    row?.nested_repositories ?? 0,
-                    "nested repository",
-                    "nested repositories",
-                  )}{" "}
-                  inside it {row?.nested_repositories === 1 ? "is" : "are"} kept.
-                </>
-              )}
-              {(row?.linked_worktrees ?? 0) > 0 && (
-                <>
-                  {" "}
-                  The{" "}
-                  {countWords(
-                    row?.linked_worktrees ?? 0,
-                    "worktree of this repository",
-                    "worktrees of this repository",
-                  )}{" "}
-                  inside it {row?.linked_worktrees === 1 ? "is" : "are"} kept.
-                </>
-              )}{" "}
-              This action cannot be undone.
-            </>
-          ) : kind === "nested_repository" ? (
-            <>
-              <InlineCode>{`${path}/`}</InlineCode> is a repository of its own. Deleting
-              it removes the whole repository, including its history and any commits not
-              pushed anywhere else. This action cannot be undone.
-            </>
-          ) : untracked ? (
-            <>
-              <InlineCode>{path}</InlineCode> is untracked and will be{" "}
-              permanently DELETED from disk. This action cannot be undone.
-            </>
-          ) : (
-            <>
-              All changes to <InlineCode>{path}</InlineCode> will be{" "}
-              restored to its last committed state. This action cannot be undone.
-            </>
-          )}
-        </p>
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          {/* Cancel is the default focus, matching the TUI (Cancel highlighted).
-              shadcn/radix buttons already activate on Space/Enter natively. */}
-          <Button variant="outline" autoFocus onClick={closeDiscard}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            {kind ? "Delete" : "Discard"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            {(row?.linked_worktrees ?? 0) > 0 && (
+              <>
+                {" "}
+                The{" "}
+                {countWords(
+                  row?.linked_worktrees ?? 0,
+                  "worktree of this repository",
+                  "worktrees of this repository",
+                )}{" "}
+                inside it {row?.linked_worktrees === 1 ? "is" : "are"} kept.
+              </>
+            )}{" "}
+            This action cannot be undone.
+          </>
+        ) : kind === "nested_repository" ? (
+          <>
+            <InlineCode>{`${path}/`}</InlineCode> is a repository of its own. Deleting
+            it removes the whole repository, including its history and any commits not
+            pushed anywhere else. This action cannot be undone.
+          </>
+        ) : untracked ? (
+          <>
+            <InlineCode>{path}</InlineCode> is untracked and will be{" "}
+            permanently DELETED from disk. This action cannot be undone.
+          </>
+        ) : (
+          <>
+            All changes to <InlineCode>{path}</InlineCode> will be{" "}
+            restored to its last committed state. This action cannot be undone.
+          </>
+        )}
+      </p>
+    </Modal>
   )
 }

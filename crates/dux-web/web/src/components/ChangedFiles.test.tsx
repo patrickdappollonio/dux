@@ -1496,7 +1496,7 @@ describe("the multi-file discard confirm", () => {
     mockState = withFiles([], [["a.ts", "M"], ["gone.ts", "??"]])
   })
 
-  it("names the count and both outcomes, and defaults to Cancel", () => {
+  it("names the count and both outcomes, and defaults to Cancel", async () => {
     render(<ChangedFiles />)
     check("a.ts")
     check("gone.ts")
@@ -1508,7 +1508,7 @@ describe("the multi-file discard confirm", () => {
     expect(dialog.getByText(/1 untracked/)).toBeTruthy()
     expect(dialog.getByText(/1 .*restored/)).toBeTruthy()
     const cancel = dialog.getByRole("button", { name: "Cancel" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
   })
 
   it("discards the live intersection and reports it once", async () => {

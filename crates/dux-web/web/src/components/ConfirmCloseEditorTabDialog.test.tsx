@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { EditorTab, EditorTabsState } from "@/lib/editorTabs"
@@ -78,11 +78,11 @@ describe("ConfirmCloseEditorTabDialog", () => {
     expect(screen.getByText("src/a.ts")).toBeTruthy()
   })
 
-  it("Cancel / Keep editing is autoFocused and closes without closing the tab", () => {
+  it("Cancel / Keep editing is autoFocused and closes without closing the tab", async () => {
     seed({ root: agentRoot("s1"), tabId: "t1" }, [tab({ dirty: true })])
     render(<ConfirmCloseEditorTabDialog />)
     const cancel = screen.getByRole("button", { name: "Keep editing" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
     fireEvent.click(cancel)
     expect(closeEditorCloseTabMock).toHaveBeenCalled()
     expect(editorCloseTabMock).not.toHaveBeenCalled()

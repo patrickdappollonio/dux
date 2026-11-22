@@ -1,11 +1,4 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 
 export interface DeleteEntryTarget {
@@ -26,10 +19,8 @@ interface DeleteEntryDialogProps {
   onConfirm: () => void
 }
 
-// Destructive confirm dialog for deleting a file or folder, mirroring
-// ConfirmDiscardFileDialog's structure exactly (DialogContent destructive,
-// text-destructive body, h-2 misclick spacer, Cancel autoFocus + destructive
-// confirm). Deletion is permanent: there is no trash on the server.
+// Destructive confirm for deleting a file or folder. Deletion is permanent:
+// there is no trash on the server.
 export function DeleteEntryDialog({
   target,
   blockedBySave = false,
@@ -40,55 +31,47 @@ export function DeleteEntryDialog({
   const isDir = target?.isDir ?? false
 
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose()
+      onClose={onClose}
+      title={
+        <>
+          Delete <InlineCode>{path}</InlineCode>?
+        </>
+      }
+      cancelLabel="Cancel"
+      confirm={{
+        label: "Delete",
+        tone: "destructive",
+        disabledReason: blockedBySave
+          ? "Wait for the save to finish before deleting it."
+          : null,
+        onSelect: onConfirm,
       }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            Delete <InlineCode>{path}</InlineCode>?
-          </DialogTitle>
-        </DialogHeader>
-        {blockedBySave ? (
-          <p className="text-sm text-destructive">
-            <InlineCode>{path}</InlineCode> is currently being
-            saved. Wait for the save to finish before deleting it.
-          </p>
-        ) : (
-          <p className="text-sm text-destructive">
-            {isDir ? (
-              <>
-                <InlineCode>{path}</InlineCode> and everything
-                inside it will be permanently deleted from disk (recursive).
-                This cannot be undone.
-              </>
-            ) : (
-              <>
-                <InlineCode>{path}</InlineCode> will be permanently
-                deleted from disk. This cannot be undone.
-              </>
-            )}{" "}
-            There is no trash on the server.
-          </p>
-        )}
-        {/* Misclick-safe spacing between the warning and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onClose}>
-            Cancel
-          </Button>
-          <Button
-            variant="destructive"
-            disabled={blockedBySave}
-            onClick={onConfirm}
-          >
-            Delete
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      {blockedBySave ? (
+        <p className="text-sm text-destructive">
+          <InlineCode>{path}</InlineCode> is currently being
+          saved. Wait for the save to finish before deleting it.
+        </p>
+      ) : (
+        <p className="text-sm text-destructive">
+          {isDir ? (
+            <>
+              <InlineCode>{path}</InlineCode> and everything
+              inside it will be permanently deleted from disk (recursive).
+              This cannot be undone.
+            </>
+          ) : (
+            <>
+              <InlineCode>{path}</InlineCode> will be permanently
+              deleted from disk. This cannot be undone.
+            </>
+          )}{" "}
+          There is no trash on the server.
+        </p>
+      )}
+    </Modal>
   )
 }
