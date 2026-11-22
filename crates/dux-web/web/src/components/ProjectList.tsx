@@ -234,9 +234,10 @@ function ProjectRow({
         }}
         // The shared Button's focus ring, so a keyboard user can see which
         // project Enter would pick. The row's own px-2 and the list's p-2 leave
-        // the ring room on every side.
+        // the ring room on every side. It stretches to the row's height, so a
+        // finger's 40px row is a 40px target and rows meet with no gap.
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-2.5 rounded-md border border-transparent py-2 text-left",
+          "flex min-w-0 flex-1 items-center gap-2.5 self-stretch rounded-md border border-transparent py-2 text-left",
           FOCUS_RING,
         )}
       >
