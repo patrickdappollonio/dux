@@ -46,7 +46,13 @@ function ActionButton({
       {action.label}
     </>
   )
-  const className = cn(stacked ? STACKED_BUTTON : ROW_BUTTON, INERT_BUTTON)
+  const className = cn(
+    stacked ? STACKED_BUTTON : ROW_BUTTON,
+    INERT_BUTTON,
+    // A filled button's fill stops inside its transparent border, so it paints
+    // 2px shorter than the outlined Cancel beside it unless it fills the border.
+    action.tone !== "plain" && "bg-clip-border",
+  )
   return (
     <ExplainedWhenDisabled
       disabled={reason !== null}
