@@ -463,3 +463,37 @@ describe("Changes-pane width", () => {
     expect(mod.getSnapshot().changesPanePercent).toBe(44)
   })
 })
+
+// The computer layout chosen on a window narrower than the breakpoint has no
+// room for the pane: it starts closed there, and opening or closing it writes
+// nothing to the stored preference.
+describe("Changes pane in a narrow computer layout", () => {
+  beforeEach(() => {
+    vi.stubGlobal("window", { addEventListener: () => {}, innerWidth: 390 })
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => (key === "dux:layout" ? "computer" : null),
+      setItem: () => {},
+      removeItem: () => {},
+    })
+  })
+
+  it("starts closed, with its reopen control, and opens and closes without a write", async () => {
+    const mod = await loadStore()
+    const writes = () =>
+      fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/v1/ui/changes-pane"))
+        .length
+    const before = writes()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(false)
+    expect(mod.changesPaneEffectivelyHidden(mod.getSnapshot(), true)).toBe(true)
+    mod.showChangesPane()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(true)
+    expect(mod.changesPaneEffectivelyHidden(mod.getSnapshot(), true)).toBe(false)
+    mod.toggleChangesPane()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(false)
+    mod.showChangesPane()
+    mod.collapseChangesPaneFromDrag()
+    expect(mod.changesPaneShown(mod.getSnapshot(), true)).toBe(false)
+    expect(writes()).toBe(before)
+    expect(mod.changesPaneVisible(mod.getSnapshot())).toBe(true)
+  })
+})

@@ -24,6 +24,7 @@ import {
 } from "@/hooks/use-agent-active-elsewhere"
 import { useAgentRowWatch } from "@/lib/paneCover"
 import { useIsTruncated } from "@/hooks/use-truncated"
+import { useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { headerChipTooltip, type HeaderChip } from "@/lib/headerSubject"
 import type { SessionView } from "@/lib/types"
 import { changesSummary } from "@/lib/changesSummary"
@@ -111,7 +112,9 @@ export function InsetHeader() {
   // measured, nothing has to know the pane's size, and it stays correct at any
   // zoom. Zero while the Changes pane is hidden, so the button slides right with
   // the terminal pane that just grew under it.
-  const spacer = changesSpacerPercent(dux)
+  const narrow = useIsNarrowComputerLayout()
+  const spacer = changesSpacerPercent(dux, narrow)
+  const paneHidden = changesPaneEffectivelyHidden(dux, narrow)
 
   // What the reopen control says about the pane it brings back. Null while no
   // agent is in view, which is also the state in which the phone draws no ±N
@@ -131,7 +134,9 @@ export function InsetHeader() {
           out as terminal, a 1px handle, changes, so a pure percentage of the
           full width lands spacer/100 px left of the real divider, which is a
           visible one-pixel step under browser zoom. */}
-      {!changesPaneEffectivelyHidden(dux) && (
+      {/* Not on a narrow window, where the cluster is wider than the pane and
+          the line would cross the app menu's button. */}
+      {!paneHidden && !narrow && (
         <span
           aria-hidden="true"
           data-testid="changes-divider-continuation"
@@ -225,7 +230,7 @@ export function InsetHeader() {
             dragged off the edge leaves the pane at 0% with the preference still
             reading "visible", and its own hide item is inside that zero.
             `showChangesPane` restores a width as well as the preference. */}
-        {changesPaneEffectivelyHidden(dux) && (
+        {paneHidden && (
           <SimpleTooltip content="Show Changes pane">
             <Button
               variant="outline"

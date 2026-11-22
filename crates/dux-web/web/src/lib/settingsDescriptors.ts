@@ -163,7 +163,7 @@ export const SETTINGS: SettingDescriptor[] = [
     key: "ui.show_changes_pane",
     label: "Show the Changes pane",
     description:
-      "Shows the right-hand Changes pane (the changed-files list). Hiding it from the Changes menu or showing it from the header button saves this same preference, so this row and those controls always agree.",
+      "Shows the right-hand Changes pane (the changed-files list). Hiding it from the Changes menu or showing it from the header button saves this same preference, so this row and those controls always agree. The one exception is the computer layout on a window too narrow for the pane, where it starts closed and opening or closing it saves nothing.",
     surface: "web",
     topic: "look",
     control: { kind: "bool" },

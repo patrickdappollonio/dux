@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react"
+import { isNarrowComputerLayout } from "./shellLayout"
 import { wsUrl } from "./apiBase"
 import { isAuthInterruption } from "./apiFetch"
 import {
@@ -939,6 +940,10 @@ export interface DuxState {
   // toggle persists to config via the server; this clears once the broadcast
   // confirms (or on command error / disconnect, which roll it back).
   changesPaneOverride: boolean | null
+  // Whether the person opened the Changes pane while the computer layout is
+  // shown on a window narrower than the breakpoint, where it starts closed.
+  // Page memory only: it never touches the stored preference.
+  changesPaneNarrowShown: boolean
   // The Changes panel's current width as a percentage of the desktop panel
   // group (0..100), lifted out by its onLayoutChange so the header above can
   // mirror it as a right-hand spacer. Mirroring the percentage rather than
@@ -1309,6 +1314,7 @@ let state: DuxState = {
   sidebarWidth: SIDEBAR_INITIAL_WIDTH,
   theaterLayout: null,
   changesPaneOverride: null,
+  changesPaneNarrowShown: false,
   changesPanePercent: changesPaneMountPercent(),
   mobileAccessoryBarOverride: null,
   ptyOwnership: {},
@@ -9724,8 +9730,20 @@ export function persistChangesPanePercent(percent: number): void {
 // (`changesPaneVisible(dux) && !theater`): the mode suppresses the pane without
 // touching the preference, so the preference alone would reserve a strip of
 // nothing.
-export function changesSpacerPercent(s: DuxState): number {
-  return changesPaneVisible(s) && !s.theater ? s.changesPanePercent : 0
+export function changesSpacerPercent(s: DuxState, narrow = false): number {
+  return changesPaneShown(s, narrow) ? s.changesPanePercent : 0
+}
+
+// Whether the computer layout lays the Changes pane out: the preference, not in
+// theater, and, on a window narrower than the breakpoint (`narrow`), only once
+// the person opened it there, because at that width it would be a sliver.
+export function changesPaneShown(s: DuxState, narrow: boolean): boolean {
+  return changesPaneVisible(s) && !s.theater && (!narrow || s.changesPaneNarrowShown)
+}
+
+// Close the pane a narrow window opened, as leaving that width does.
+export function resetNarrowChangesPane(): void {
+  if (state.changesPaneNarrowShown) setState({ changesPaneNarrowShown: false })
 }
 
 // A collapsed collapsible panel snaps to its collapsedSize, which defaults to
@@ -9800,8 +9818,9 @@ export function changesPaneCollapseStep(args: {
 // preference alone, so a zero-width pane still has a way back. It reads
 // `changesPanePercent` raw, because `changesSpacerPercent` is defined as zero
 // while the preference is off and cannot tell the two hidden states apart.
-export function changesPaneEffectivelyHidden(s: DuxState): boolean {
+export function changesPaneEffectivelyHidden(s: DuxState, narrow = false): boolean {
   if (!changesPaneVisible(s)) return true
+  if (narrow && !s.changesPaneNarrowShown) return true
   return s.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON
 }
 
@@ -9813,6 +9832,10 @@ export function changesPaneEffectivelyHidden(s: DuxState): boolean {
 export function collapseChangesPaneFromDrag(): void {
   if (state.theater) return
   if (!changesPaneVisible(state)) return
+  if (isNarrowComputerLayout()) {
+    resetNarrowChangesPane()
+    return
+  }
   setChangesPaneVisibility(false)
 }
 
@@ -9823,6 +9846,11 @@ export function collapseChangesPaneFromDrag(): void {
 export function showChangesPane(): void {
   if (state.changesPanePercent < CHANGES_PANE_COLLAPSE_EPSILON) {
     setChangesPanePercent(CHANGES_PANE_DEFAULT_PERCENT)
+  }
+  if (isNarrowComputerLayout()) {
+    setState({ changesPaneNarrowShown: true })
+    // Already on by preference: opening it at this width writes nothing.
+    if (changesPaneVisible(state)) return
   }
   setChangesPaneVisibility(true)
 }
@@ -9851,6 +9879,10 @@ export function setChangesPaneVisibility(next: boolean): Promise<boolean> {
 // Toggle the Changes pane's visibility. Called by the Changes actions menu; the
 // saved preference itself is the `ui.show_changes_pane` Preferences row.
 export function toggleChangesPane(): void {
+  if (isNarrowComputerLayout() && changesPaneVisible(state)) {
+    setState({ changesPaneNarrowShown: !state.changesPaneNarrowShown })
+    return
+  }
   setChangesPaneVisibility(!changesPaneVisible(state))
 }
 
