@@ -53,8 +53,12 @@ const popup = () => document.querySelector<HTMLElement>('[data-slot="dialog-cont
 const footer = () => document.querySelector<HTMLElement>('[data-slot="modal-footer"]')
 const closeButtons = () => screen.queryAllByRole("button", { name: "Close" })
 
+// As a browser does: the width changes, then `resize` says so.
 function at(width: number) {
   vi.stubGlobal("innerWidth", width)
+  act(() => {
+    window.dispatchEvent(new Event("resize"))
+  })
 }
 
 // The pointer is asked through `matchMedia`, which jsdom lacks.
