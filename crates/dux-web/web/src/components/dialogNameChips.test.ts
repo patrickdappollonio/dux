@@ -89,12 +89,6 @@ function lineAround(source: string, index: number): string {
 // that no longer matches anything fails the suite, so the list cannot rot.
 const ALLOWED: { file: string; line: string; reason: string }[] = [
   {
-    file: "components/StandaloneAgentDialog.tsx",
-    line: 'placeholder={`Agent name (optional, defaults to "${standaloneAgentDefaultName(selected)}")`}',
-    reason:
-      "A placeholder is an attribute and can hold no markup, so the quotes are the only delimiter available.",
-  },
-  {
     file: "components/FolderBrowseList.tsx",
     line: '<span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">',
     reason: "A folder row's pill naming the folder the row acts on: a list row, out of the chip rule's scope.",

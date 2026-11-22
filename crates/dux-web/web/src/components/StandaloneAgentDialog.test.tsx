@@ -221,11 +221,59 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     expect(createButton().disabled).toBe(true)
   })
 
+  // The space the list will take is kept from the first frame, so the card
+  // does not grow under the pointer when the list arrives.
+  it("keeps the project list's space while the list is on its way", () => {
+    seed(null)
+    const view = render(<StandaloneAgentDialog />)
+    expect(document.querySelector("[data-project-shortcuts-pending]")).not.toBeNull()
+    seed(SHORTCUTS)
+    view.rerender(<StandaloneAgentDialog />)
+    expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()
+    expect(shortcutRows()).toHaveLength(2)
+  })
+
   it("draws no list when there are no projects", () => {
     seed({ caption: "Caption from the server.", rows: [] })
     render(<StandaloneAgentDialog />)
     expect(shortcutRows()).toEqual([])
     expect(screen.queryByText("Your projects")).toBeNull()
     expect(screen.queryByText("Caption from the server.")).toBeNull()
+  })
+})
+
+describe("StandaloneAgentDialog name field", () => {
+  async function chooseFolder() {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await pick(shortcutRows()[0])
+    return screen.getByRole<HTMLInputElement>("textbox")
+  }
+  const description = (field: HTMLElement) =>
+    (field.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ")
+
+  // The default can be long, and a placeholder cut off at a phone's width
+  // hides it, so the line under the field says it.
+  it("says the name it falls back to under the field, not in its placeholder", async () => {
+    const field = await chooseFolder()
+    expect(field.placeholder).not.toContain("site")
+    expect(description(field)).toContain("site")
+  })
+
+  it("says why a name is refused at the field, and to a screen reader", async () => {
+    const field = await chooseFolder()
+    fireEvent.change(field, { target: { value: "a..b" } })
+    expect(field.getAttribute("aria-invalid")).toBe("true")
+    expect(description(field)).toContain("That name is not one git accepts for a branch.")
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("names the folder the agent runs in", async () => {
+    await chooseFolder()
+    const chip = screen.getByText("/home/u/code/site")
+    expect(chip.parentElement!.textContent).toMatch(/runs in/i)
   })
 })

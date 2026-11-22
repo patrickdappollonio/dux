@@ -624,8 +624,8 @@ export interface DuxState {
    * happens to the folder you choose. */
   standaloneAgentPickerOpen: boolean
   /** The projects offered as folder shortcuts in the standalone-agent picker,
-   * as the server built them; null until they arrive (and when they could not
-   * be listed), which draws no list. */
+   * as the server built them; null until they arrive, which holds the list's
+   * room, and an empty list when they could not be listed, which draws none. */
   standaloneProjectShortcuts: ProjectShortcutListView | null
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
@@ -7336,7 +7336,9 @@ export function openStandaloneAgentPicker(): void {
     .catch((e) => {
       if (!current()) return
       // The explorer still works without them, so the picker stays open and
-      // says what is missing.
+      // says what is missing. An empty list, not null: null is "on its way",
+      // which the picker holds room for.
+      setState({ standaloneProjectShortcuts: { caption: "", rows: [] } })
       notifyError(
         e instanceof Error
           ? `Could not list your projects as shortcuts: ${e.message}`

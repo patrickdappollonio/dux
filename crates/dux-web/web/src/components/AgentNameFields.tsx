@@ -21,6 +21,8 @@ interface AgentNameInputProps {
   generating: boolean
   autoFocus: boolean
   ariaLabel?: string
+  /** The id of the line under the field that says what it takes, or why not. */
+  describedBy?: string
 }
 
 export function AgentNameInput({
@@ -32,6 +34,7 @@ export function AgentNameInput({
   generating,
   autoFocus,
   ariaLabel,
+  describedBy,
 }: AgentNameInputProps) {
   function handleChange(event: ChangeEvent<HTMLInputElement>): void {
     const input = event.target
@@ -60,6 +63,7 @@ export function AgentNameInput({
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
         aria-label={ariaLabel}
+        aria-describedby={describedBy}
         aria-invalid={invalid}
         disabled={generating}
         autoFocus={autoFocus}

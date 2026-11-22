@@ -1,5 +1,6 @@
 import { FolderGit2 } from "lucide-react"
 
+import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { ModalGroupHeading } from "@/components/modal"
 import { useScrollEdges } from "@/hooks/use-scroll-edges"
 import { INSET_FOCUS_RING } from "@/lib/focusRing"
@@ -25,19 +26,43 @@ import type {
  * The rows scroll under their heading once there are more than fit, and the
  * edge with rows hidden past it fades out (`.dux-list-fade`, the agents list's
  * own cue), so a list cut at a row boundary still says there is more.
+ *
+ * Until the server answers (`list` null) it holds the room a full list takes,
+ * so the dialog does not grow under the pointer when the rows arrive. A user
+ * with fewer projects than fill it sees it shrink once, to what they have.
  */
+// The rows' cap, and the room they are given while they load.
+const ROWS_MAX_HEIGHT = "max-h-[8.75rem] max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]"
+const ROWS_HEIGHT = "h-[8.75rem] max-md:h-[9.625rem] pointer-coarse:h-[9.625rem]"
+
 export function ProjectShortcutList({
   list,
   pickedProjectId,
   onPick,
 }: {
-  list: ProjectShortcutListView
+  list: ProjectShortcutListView | null
   /** The project whose folder the picker currently targets, so its row paints
    * as chosen; null when the target is not a project pick. */
   pickedProjectId: string | null
   onPick: (row: ProjectShortcutView) => void
 }) {
   const { ref, moreAbove, moreBelow } = useScrollEdges<HTMLDivElement>()
+  if (list === null) {
+    return (
+      <div data-project-shortcuts-pending="" className="flex shrink-0 flex-col gap-1.5">
+        <div className="flex flex-col overflow-hidden rounded-md border">
+          <ModalGroupHeading inset>Your projects</ModalGroupHeading>
+          <div className={`flex items-center justify-center ${ROWS_HEIGHT}`}>
+            <GlyphSpinner className="text-muted-foreground" />
+          </div>
+        </div>
+        {/* The caption's line, kept until the server's words arrive. */}
+        <p aria-hidden="true" className="text-xs">
+          &nbsp;
+        </p>
+      </div>
+    )
+  }
   return (
     <div className="flex shrink-0 flex-col gap-1.5">
       <div className="flex flex-col overflow-hidden rounded-md border">
@@ -53,7 +78,7 @@ export function ProjectShortcutList({
           data-project-shortcut-rows
           data-more-above={moreAbove ? "" : undefined}
           data-more-below={moreBelow ? "" : undefined}
-          className="dux-list-fade flex max-h-[8.75rem] flex-col overflow-y-auto max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]"
+          className={`dux-list-fade flex flex-col overflow-y-auto ${ROWS_MAX_HEIGHT}`}
         >
           {list.rows.map((row) => (
             <button

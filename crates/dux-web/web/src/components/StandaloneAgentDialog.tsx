@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
@@ -15,6 +15,8 @@ import {
   createStandaloneAgent,
   useDux,
 } from "@/lib/store"
+
+const INVALID_NAME = "That name is not one git accepts for a branch."
 
 /**
  * Pick a folder you already have and run an agent in it.
@@ -80,6 +82,7 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
     return () => resized.disconnect()
   }, [selected, shortcutsShown, reducedMotion])
   const invalidName = name !== "" && !isValidAgentName(name)
+  const nameHelpId = useId()
 
   function handleCreate() {
     if (!selected || invalidName) return
@@ -121,11 +124,13 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
         disabledReason: !selected
           ? "Choose a folder for the agent to run in first."
           : invalidName
-            ? "That name is not one git accepts for a branch."
+            ? INVALID_NAME
             : null,
       }}
     >
-      {standaloneProjectShortcuts && shortcutsShown ? (
+      {standaloneProjectShortcuts === null ? (
+        <ProjectShortcutList list={null} pickedProjectId={null} onPick={handlePick} />
+      ) : shortcutsShown ? (
         <ProjectShortcutList
           list={standaloneProjectShortcuts}
           pickedProjectId={selected === null ? null : pickedProject}
@@ -163,23 +168,36 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
           {/* Empty is the ordinary case: the server names the agent after the
             * folder. No branch is created, but the name follows the same rules
             * as every other agent's, so the field is the New agent dialog's.
-            * The placeholder is derived through the twin of the server's
-            * folder conversion, so it cannot promise another name. */}
+            * The default is derived through the twin of the server's folder
+            * conversion, so it cannot promise another name, and it is said
+            * under the field, where a long one is not cut off. */}
           <AgentNameInput
             value={name}
             onChange={(raw) => setName(sanitizeAgentName(raw))}
             onSubmit={handleCreate}
-            placeholder={`Agent name (optional, defaults to "${standaloneAgentDefaultName(selected)}")`}
+            placeholder="Agent name (optional)"
             invalid={invalidName}
+            describedBy={nameHelpId}
             generating={false}
             autoFocus={false}
           />
-          <p className="text-xs text-muted-foreground">
-            Any name git accepts for a branch.
+          <p
+            id={nameHelpId}
+            className={invalidName ? "text-xs text-destructive" : "text-xs text-muted-foreground"}
+          >
+            {invalidName ? (
+              INVALID_NAME
+            ) : (
+              <>
+                Left empty, the agent is called{" "}
+                <InlineCode>{standaloneAgentDefaultName(selected)}</InlineCode>. Any name git
+                accepts for a branch works.
+              </>
+            )}
           </p>
-          <span className="text-xs text-muted-foreground">
-            <InlineCode>{selected}</InlineCode>
-          </span>
+          <p className="text-xs text-muted-foreground">
+            The agent runs in <InlineCode>{selected}</InlineCode>.
+          </p>
         </div>
       ) : null}
     </Modal>
