@@ -346,6 +346,11 @@ describe("AppSidebar in the computer layout on a phone-narrow window", () => {
     fireEvent.click(railExpand())
     expect(floating()).toBe(true)
     expect(sidebar().getAttribute("data-state")).toBe("collapsed")
+    // The press hid the button it landed on, and focus left with it: a float
+    // a press opened stays until something closes it.
+    fireEvent.focusOut(railExpand())
+    advance(1000)
+    expect(floating()).toBe(true)
     fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }))
     expect(floating()).toBe(false)
   })

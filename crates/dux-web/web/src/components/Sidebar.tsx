@@ -577,7 +577,7 @@ export function AppSidebar() {
       ref={attachPanel}
       collapsible="icon"
       floatOpen={floatOpen}
-      className="pb-[env(safe-area-inset-bottom)] group-data-[side=left]:border-r-0"
+      className="pt-[var(--dux-app-safe-top,env(safe-area-inset-top))] pb-[env(safe-area-inset-bottom)] group-data-[side=left]:border-r-0"
     >
       <SidebarHeader>
         <SidebarMenu>

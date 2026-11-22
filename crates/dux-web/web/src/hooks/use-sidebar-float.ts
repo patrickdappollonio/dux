@@ -47,8 +47,13 @@ export function useSidebarFloat(enabled: boolean) {
   const [open, setOpen] = useState(false)
   if (!enabled && open) setOpen(false)
   const openNow = useRef(open)
+  // Opened by a press (`show`): it stays open until a press outside, Escape or
+  // a choice closes it, never because a pointer or focus left it, since the
+  // press that opened it hides the button it landed on.
+  const pinned = useRef(false)
   useEffect(() => {
     openNow.current = open
+    if (!open) pinned.current = false
   }, [open])
 
   // The panel element, as state: the listeners below attach to it once it exists.
@@ -79,17 +84,18 @@ export function useSidebarFloat(enabled: boolean) {
     setOpen(false)
   }, [clearTimers])
 
-  // Opened by a press rather than a hover: no delay, and nothing suppressed.
+  // Opened by a press rather than a hover.
   const show = useCallback(() => {
     clearTimers()
     suppressed.current = false
+    pinned.current = true
     setOpen(true)
   }, [clearTimers])
 
   const scheduleClose = useCallback(() => {
     window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => {
-      if (inside.current || panelInUse(panel)) return
+      if (pinned.current || inside.current || panelInUse(panel)) return
       setOpen(false)
     }, CLOSE_DELAY_MS)
   }, [panel])

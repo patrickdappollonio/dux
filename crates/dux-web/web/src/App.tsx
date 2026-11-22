@@ -195,7 +195,8 @@ export function DesktopShell() {
       // sideways in this layout has its notch or camera cutout at one side,
       // and the header's Settings button sat under it. The sidebar's fixed
       // container starts after the left inset for the same reason, and it and
-      // the page below keep clear of the bottom inset (the home indicator).
+      // the page keep clear of the top and bottom insets (the status bar of an
+      // installed app, the home indicator).
       style={
         {
           "--sidebar-width": sidebarWidth,
@@ -214,7 +215,7 @@ export function DesktopShell() {
       {theater ? null : <AppSidebar />}
       <SidebarInset
         className={`flex ${SHELL_HEIGHT_CLASS} min-h-0 flex-col overflow-hidden`}
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        style={{ paddingTop: SHELL_SAFE_TOP, paddingBottom: "env(safe-area-inset-bottom)" }}
       >
         {/* Theater takes this stack and the band-plus-strip inside TerminalArea
             on the same flag, so the gesture above pays for one refit between
