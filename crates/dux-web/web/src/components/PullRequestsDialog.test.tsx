@@ -379,11 +379,14 @@ describe("PullRequestsDialog footer", () => {
     expect(store.openAttachPullRequest).toHaveBeenCalledWith("s1")
   })
 
-  it("says attaching needs a signed-in gh instead of offering it", () => {
+  it("takes no press on attaching without a signed-in gh, and says why", async () => {
     seed(session(), false)
     render(<PullRequestsDialog />)
-    expect(screen.queryByRole("button", { name: "Attach pull request…" })).toBeNull()
-    expect(screen.getByText("Attaching needs a signed-in gh.")).toBeTruthy()
+    const attach = screen.getByRole("button", { name: "Attach pull request…" }) as HTMLButtonElement
+    expect(attach.disabled).toBe(true)
+    fireEvent.click(attach.parentElement!)
+    expect(await screen.findByText("Attaching needs a signed-in gh.")).toBeTruthy()
+    expect(store.openAttachPullRequest).not.toHaveBeenCalled()
   })
 })
 
@@ -480,22 +483,21 @@ describe("PullRequestsDialog branches view", () => {
 })
 
 describe("PullRequestsDialog scrolling", () => {
-  function expectGutter(scroller: HTMLElement, control: HTMLElement) {
-    expect(scroller.className).toContain("overflow-y-auto")
-    expect(scroller.className).toContain("[scrollbar-gutter:stable]")
-    expect(scroller.className).toMatch(/(^|\s)pr-\d/)
-    expect(scroller.contains(control)).toBe(true)
-  }
-
-  // The scrollbar must keep clear of each row's trailing controls, in both views.
-  it("keeps a gutter between the scrollbar and the rows' trailing controls", async () => {
+  // One scroller, the modal's body, whose padding keeps the scrollbar clear of
+  // each row's trailing controls in both views; the tabs and Sort stay put.
+  it("scrolls both lists in the modal's body, under a toolbar that does not scroll", async () => {
     seed(session())
     render(<PullRequestsDialog />)
-    expectGutter(screen.getByTestId("pull-requests-scroll"), screen.getByLabelText("Actions for #418"))
+    const body = document.querySelector<HTMLElement>("[data-slot='modal-body']")!
+    const toolbar = document.querySelector<HTMLElement>("[data-slot='modal-toolbar']")!
+    expect(body.contains(toolbar)).toBe(false)
+    expect(toolbar.contains(screen.getByRole("tab", { name: /Branches/ }))).toBe(true)
+    expect(body.contains(screen.getByLabelText("Actions for #418"))).toBe(true)
+    expect(screen.getByTestId("pull-requests-list").className).not.toContain("overflow")
     await act(async () => {
       fireEvent.click(screen.getByRole("tab", { name: /Branches/ }))
     })
     await screen.findByText("spike-tab-ids")
-    expectGutter(screen.getByTestId("branches-scroll"), screen.getByText("No pull request"))
+    expect(screen.getByTestId("branches-list").className).not.toContain("overflow")
   })
 })

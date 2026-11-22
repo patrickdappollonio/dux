@@ -211,7 +211,6 @@ const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 const STILL_TO_MOVE: Record<string, Entry> = {
   "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
   "components/MacrosDialog.tsx": { ...ROOTS(3) },
-  "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One

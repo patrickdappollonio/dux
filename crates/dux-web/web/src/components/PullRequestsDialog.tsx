@@ -32,18 +32,13 @@ import {
   Unlink,
 } from "lucide-react"
 
+import { Modal, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,16 +47,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { InlineCode } from "@/components/ui/inline-code"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetTitle,
-} from "@/components/ui/sheet"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "@/lib/dragActivation"
 import {
@@ -92,7 +80,7 @@ import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
 import type { PrBranchesView, PrKeyView, PrView, SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
-// The header's one height token: the view switch and the Sort control sit
+// The toolbar's one height token: the view switch and the Sort control sit
 // side by side at it, lifted to the touch floor on a coarse pointer.
 const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
 // A row's own controls (the grip, the `⋯`, Show again): compact beside a
@@ -100,8 +88,8 @@ const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
 const ROW_CONTROL = "size-8 pointer-coarse:size-10"
 // The grip and the `⋯` on a phone under a finger: narrower, keeping the floor
 // in height, so a phone-width row leaves its title a readable width. Narrowing
-// is safe on that axis because the grip sits between the sheet's edge and the
-// row's text, and the `⋯` between the text and the sheet's edge, none of which
+// is safe on that axis because the grip sits between the screen's edge and the
+// row's text, and the `⋯` between the text and the screen's edge, none of which
 // takes a tap; above and below they are the rows' own full-height controls.
 const ROW_CONTROL_NARROW = "max-md:pointer-coarse:w-7"
 // A view tab fills its list beside a mouse and takes the 40px floor under a
@@ -114,80 +102,52 @@ type View = "prs" | "branches"
 
 // Every pull request an agent has, in two views: the list in the agent's order
 // with a way to hide, detach, reorder and show again, and the branch log that
-// says which branch each was found on. A dialog on a computer and a bottom
-// sheet on a phone, around one body. Keyed to its agent, so it closes itself
+// says which branch each was found on. Keyed to its agent, so it closes itself
 // when the agent leaves the spine.
 export function PullRequestsDialog() {
-  const { pullRequestsTarget, spine, bootstrap } = useDux()
-  const isMobile = useIsMobile()
-  const session = spine?.sessions.find((s) => s.id === pullRequestsTarget)
-  const open = useVanishedTargetGuard(
-    pullRequestsTarget !== null,
-    session !== undefined,
-    closePullRequests,
-  )
-  const onOpenChange = (o: boolean) => {
-    if (!o) closePullRequests()
-  }
-  const body =
-    open && session ? (
-      <PullRequestsBody
-        session={session}
-        phone={isMobile}
-        canAttach={bootstrap?.gh_available ?? false}
-      />
-    ) : null
-  if (isMobile) {
-    return (
-      <Sheet open={open} onOpenChange={onOpenChange}>
-        <SheetContent
-          side="bottom"
-          className="max-h-[85dvh] gap-0 overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(env(safe-area-inset-bottom),0.75rem)]"
-        >
-          {body}
-        </SheetContent>
-      </Sheet>
-    )
-  }
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* Anchored by its top, so a view whose list is shorter or longer
-        * grows the dialog downward instead of moving its header. */}
-      <DialogContent
-        showCloseButton={false}
-        className="top-[max(1rem,10dvh)] translate-y-0 gap-3 sm:max-w-[640px]"
-      >
-        {body}
-      </DialogContent>
-    </Dialog>
-  )
+  const open = useDux().pullRequestsTarget !== null
+  const life = useModalLifetime(open)
+  // Keyed by the open, so each one starts on the pull requests view.
+  return life.mounted ? (
+    <PullRequests key={life.epoch} open={open} onClosed={life.onClosed} />
+  ) : null
 }
 
-function PullRequestsBody({
-  session,
-  phone,
-  canAttach,
-}: {
-  session: SessionView
-  phone: boolean
-  canAttach: boolean
-}) {
+function PullRequests({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const { pullRequestsTarget, spine, bootstrap } = useDux()
+  const phone = useIsMobile()
+  // The agent this open is about, as last seen: kept while the close animates
+  // and once the agent has left the spine.
+  const [targetId] = useState(pullRequestsTarget)
+  const live = spine?.sessions.find((s) => s.id === targetId)
+  const [last, setLast] = useState(live)
+  if (live !== undefined && live !== last) setLast(live)
+  const session = live ?? last
   const [view, setView] = useState<View>("prs")
+  const branches = useBranches(targetId, session?.pr_revision ?? 0)
+  if (session === undefined) return null
   const name = sessionLabel(session)
   const visible = sessionPrs(session)
   const hidden = session.prs_hidden ?? []
   const manual = session.pr_sort === "manual"
-  const branches = useBranches(session.id, session.pr_revision ?? 0)
-  const Title = phone ? SheetTitle : DialogTitle
-  const Description = phone ? SheetDescription : DialogDescription
+  const canAttach = bootstrap?.gh_available ?? false
 
   return (
-    <div className={cn("flex min-h-0 flex-col gap-3", phone && "p-4")}>
-      <div className={cn("flex flex-col gap-1", phone && "pr-10")}>
-        <Title>Pull requests</Title>
-        {/* Both views' sentences share one cell, the other one unseen, so
-          * switching views never changes the header's height. */}
-        <Description className="grid">
+    <Modal
+      kind="report"
+      open={open}
+      vanished={open && live === undefined}
+      onClose={closePullRequests}
+      onClosed={onClosed}
+      size="w640"
+      // Hung from its top, so a view whose list is shorter or longer grows the
+      // card downward instead of moving its header.
+      anchor="top"
+      title="Pull requests"
+      description={
+        // Both views' sentences share one cell, the other one unseen, so
+        // switching views never changes the header's height.
+        <span className="grid">
           <span
             className={cn("col-start-1 row-start-1", view !== "prs" && "invisible")}
             aria-hidden={view !== "prs" || undefined}
@@ -206,40 +166,50 @@ function PullRequestsBody({
             in its worktree, the current one first and then the newest, with
             the pull requests found for each.
           </span>
-        </Description>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Tabs
-          value={view}
-          onValueChange={(v) => setView(v as View)}
-          className="min-w-0 flex-1"
-        >
-          {/* Under a finger the list drops its inset so each trigger reaches
-              the 40px floor while the list stays at Sort's height. */}
-          <TabsList className="w-full group-data-horizontal/tabs:h-9 pointer-coarse:p-0 pointer-coarse:group-data-horizontal/tabs:h-10">
-            <TabsTrigger value="prs" className={VIEW_TRIGGER}>
-              <GitPullRequest />
-              Pull requests
-              <span className="tabular-nums opacity-70">{visible.length}</span>
-            </TabsTrigger>
-            <TabsTrigger value="branches" className={VIEW_TRIGGER}>
-              <GitBranch />
-              Branches
-              {branches.data ? (
-                <span className="tabular-nums opacity-70">
-                  {branches.data.branches.length}
-                </span>
-              ) : null}
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-        {/* Sort orders the pull requests view and nothing in the other. */}
-        {view === "prs" ? (
-          <SortControl sessionId={session.id} manual={manual} phone={phone} />
-        ) : null}
-      </div>
-
+        </span>
+      }
+      toolbar={
+        <div className="flex items-center gap-2">
+          <Tabs
+            value={view}
+            onValueChange={(v) => setView(v as View)}
+            className="min-w-0 flex-1"
+          >
+            {/* Under a finger the list drops its inset so each trigger reaches
+                the 40px floor while the list stays at Sort's height. */}
+            <TabsList className="w-full group-data-horizontal/tabs:h-9 pointer-coarse:p-0 pointer-coarse:group-data-horizontal/tabs:h-10">
+              <TabsTrigger value="prs" className={VIEW_TRIGGER}>
+                <GitPullRequest />
+                Pull requests
+                <span className="tabular-nums opacity-70">{visible.length}</span>
+              </TabsTrigger>
+              <TabsTrigger value="branches" className={VIEW_TRIGGER}>
+                <GitBranch />
+                Branches
+                {branches.data ? (
+                  <span className="tabular-nums opacity-70">
+                    {branches.data.branches.length}
+                  </span>
+                ) : null}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {/* Sort orders the pull requests view and nothing in the other. */}
+          {view === "prs" ? (
+            <SortControl sessionId={session.id} manual={manual} phone={phone} />
+          ) : null}
+        </div>
+      }
+      actions={[
+        {
+          label: "Attach pull request…",
+          tone: "plain",
+          icon: Plus,
+          onSelect: () => openAttachPullRequest(session.id),
+          disabledReason: canAttach ? null : "Attaching needs a signed-in gh.",
+        },
+      ]}
+    >
       {view === "prs" ? (
         <PullRequestsView
           session={session}
@@ -254,44 +224,13 @@ function PullRequestsBody({
           branches={branches}
         />
       )}
-
-      <div
-        className={cn(
-          "-mx-4 -mb-4 flex items-center gap-2 border-t bg-muted/50 p-4",
-          phone && "mx-0 mb-0 rounded-none bg-transparent px-0 pb-0",
-        )}
-      >
-        {canAttach ? (
-          <Button
-            variant="outline"
-            className={cn(HEADER_HEIGHT, phone && "flex-1")}
-            onClick={() => openAttachPullRequest(session.id)}
-          >
-            <Plus />
-            Attach pull request…
-          </Button>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            Attaching needs a signed-in gh.
-          </p>
-        )}
-        {phone ? null : (
-          <Button
-            variant="outline"
-            className={cn("ml-auto", HEADER_HEIGHT)}
-            onClick={closePullRequests}
-          >
-            Close
-          </Button>
-        )}
-      </div>
-    </div>
+    </Modal>
   )
 }
 
 // The order control, modelled on the agents pane's Sort: a static trigger,
 // with the active mode marked in its menu.
-// On a phone the word goes, so the row fits the narrowest sheet beside the two
+// On a phone the word goes, so the row fits the narrowest screen beside the two
 // view tabs, whose counts are data and stay.
 function SortControl({
   sessionId,
@@ -397,8 +336,7 @@ function PullRequestsView({
   }
 
   return (
-    // The scrollbar keeps clear of each row's trailing `⋯`: see SCROLL_LIST.
-    <div data-testid="pull-requests-scroll" className={SCROLL_LIST}>
+    <div data-testid="pull-requests-list" className={LIST}>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -427,12 +365,9 @@ function PullRequestsView({
   )
 }
 
-// Both views' scrolling lists. A stable gutter plus right padding keeps the
-// scrollbar off the rows' trailing controls, and the negative margin pulls that
-// padding into the dialog's own, so the rows still end where the header and
-// footer controls do wherever the scrollbar overlays the content.
-const SCROLL_LIST =
-  "-mr-2 flex max-h-[50dvh] flex-col gap-1 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
+// Both views' lists. The modal's body is what scrolls, with its own padding
+// between the scrollbar and the rows' trailing controls.
+const LIST = "flex flex-col gap-1"
 
 // A small, muted label beside a name (Attached, Current, a count): it says
 // something about the row without competing with the title for attention.
@@ -711,9 +646,10 @@ type BranchesState = { data: PrBranchesView | null; error: string | null }
 // The branch log, read while the dialog is open and read again whenever the
 // agent's pull requests, their order or its branch list move, which is what
 // `pr_revision` counts.
-function useBranches(sessionId: string, revision: number): BranchesState {
+function useBranches(sessionId: string | null, revision: number): BranchesState {
   const [state, setState] = useState<BranchesState>({ data: null, error: null })
   useEffect(() => {
+    if (sessionId === null) return
     let live = true
     sessionsApi.pullRequestBranches(sessionId).then(
       (data) => {
@@ -775,8 +711,7 @@ function BranchesView({
   // lives in another repository, not because the branch is missing.
   const listed = new Set(rows.flatMap((branch) => [branch.name, ...branch.former_names]))
   return (
-    // The scrollbar keeps clear of each branch's pull-request chips: see SCROLL_LIST.
-    <div data-testid="branches-scroll" className={SCROLL_LIST}>
+    <div data-testid="branches-list" className={LIST}>
       {branches.error ? (
         <p className="text-xs text-destructive">{branches.error}</p>
       ) : null}
