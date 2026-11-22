@@ -232,6 +232,37 @@ function ModalParts(
     shownHeight.current = cover ? 0 : popup.offsetHeight
   })
 
+  // The body's scroll position, kept across a switch between card and cover.
+  // The browser clamps it wherever the other presentation has less to scroll
+  // (a tall cover often has nothing to), and the switch back would otherwise
+  // start at the top. The scroll events that clamping fires are not the
+  // person's, so the ones in the frames right after a switch are not kept.
+  const keptScroll = useRef(0)
+  const switching = useRef(false)
+  const wasCover = useRef(cover)
+  useEffect(() => {
+    const scroller = scrollerOf(body.current)
+    if (!open || scroller === null) return
+    const onScroll = () => {
+      if (!switching.current) keptScroll.current = scroller.scrollTop
+    }
+    scroller.addEventListener("scroll", onScroll)
+    return () => scroller.removeEventListener("scroll", onScroll)
+  }, [open, cover])
+  useLayoutEffect(() => {
+    if (wasCover.current === cover) return
+    wasCover.current = cover
+    const scroller = scrollerOf(body.current)
+    if (scroller === null) return
+    switching.current = true
+    scroller.scrollTop = keptScroll.current
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        switching.current = false
+      }),
+    )
+  }, [cover])
+
   // In a cover, a field that takes focus is brought into the part of the body
   // on screen, and brought back whenever the cover shrinks under it: the soft
   // keyboard arrives after the focus, and the cover is what it shrinks.
@@ -417,6 +448,12 @@ function ModalParts(
       )}
     </>
   )
+}
+
+// What scrolls a modal's body: the list's scroll area where it has one.
+function scrollerOf(body: HTMLElement | null): HTMLElement | null {
+  if (body === null) return null
+  return body.closest<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? body
 }
 
 function SearchField({
