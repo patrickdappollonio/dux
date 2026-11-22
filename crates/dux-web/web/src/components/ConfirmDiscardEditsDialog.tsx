@@ -1,12 +1,4 @@
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal/Modal"
 import { renderProse, type Prose } from "@/lib/prose"
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 
@@ -31,30 +23,20 @@ export function ConfirmDiscardEditsDialog({
   onDiscard: () => void
 }) {
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={open}
-      onOpenChange={(next) => {
-        if (!next) onKeep()
-      }}
-    >
-      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
-        <DialogHeader>
-          <DialogTitle>Discard unsaved changes?</DialogTitle>
-          <DialogDescription>
-            {holder} {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
-            {renderProse(leaves)} as it was.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onKeep}>
-            Keep editing
-          </Button>
-          <Button variant="destructive" onClick={onDiscard}>
-            Discard changes
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      onClose={onKeep}
+      title="Discard unsaved changes?"
+      description={
+        <>
+          {holder} {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
+          {renderProse(leaves)} as it was.
+        </>
+      }
+      cancelLabel="Keep editing"
+      confirm={{ label: "Discard changes", tone: "destructive", onSelect: onDiscard }}
+      finalFocus={finalFocus}
+    />
   )
 }

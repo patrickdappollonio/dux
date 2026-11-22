@@ -172,7 +172,6 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/ConfirmCloseTabDialog.tsx": { marks: 1 },
   "components/ConfirmDeleteTerminalDialog.tsx": { marks: 1 },
   "components/ConfirmDetachAgentDialog.tsx": { marks: 1 },
-  "components/ConfirmDiscardEditsDialog.tsx": { marks: 1, why: "The discard confirm Modal itself raises for a form with unsaved edits." },
   "components/ConfirmDiscardFileDialog.tsx": { marks: 1 },
   "components/ConfirmDiscardFilesDialog.tsx": { marks: 1 },
   "components/ConfirmForceReconnectDialog.tsx": { marks: 1 },
@@ -215,7 +214,7 @@ const STILL_TO_MOVE: Record<string, Entry> = {
 // The size of the list above. THESE NUMBERS ONLY GO DOWN: a modal is moved
 // onto `Modal` and its entry and marks leave. Raising one is adding a modal
 // built another way, which is what this guard exists to stop.
-const STILL_TO_MOVE_SIZE = { files: 53, marks: 61 }
+const STILL_TO_MOVE_SIZE = { files: 52, marks: 60 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One
 // the detector cannot see names what to find in its file instead.

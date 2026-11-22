@@ -1326,7 +1326,9 @@ describe("CustomizeWebappDialog closing", () => {
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     })
     const confirm = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
-    expect(document.activeElement).toBe(within(confirm).getByRole("button", { name: "Keep editing" }))
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(confirm).getByRole("button", { name: "Keep editing" })),
+    )
     expect(confirm.textContent).toContain("1 unsaved change")
     expect(closeCustomizeWebapp).not.toHaveBeenCalled()
 

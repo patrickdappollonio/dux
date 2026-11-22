@@ -866,6 +866,17 @@ describe("a form with unsaved edits", () => {
     expect(screen.getByText("notes.md", { selector: "code" })).toBeTruthy()
   })
 
+  it("asks as a confirm, its two buttons sharing one row on a phone", async () => {
+    at(PHONE)
+    render(<Editing changes={2} onClose={() => {}} />)
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    const keep = await screen.findByRole("button", { name: "Keep editing" })
+    const question = keep.closest<HTMLElement>('[data-slot="dialog-content"]')!
+    expect(question.dataset.kind).toBe("confirm")
+    expect(question.querySelector(".grid-cols-2")).not.toBeNull()
+    await waitFor(() => expect(document.activeElement).toBe(keep))
+  })
+
   it("closes at once when nothing was changed", () => {
     const onClose = vi.fn()
     render(<Editing changes={0} onClose={onClose} />)
