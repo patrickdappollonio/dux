@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 // Every store action a row can reach, as spies: the rows must run the shared
 // creation lists' own actions, never a copy of them.
@@ -172,7 +172,7 @@ describe("NewLauncherDialog agent step", () => {
       ["demo-api", ["polish-onboarding", "fix-login-redirect"]],
       ["Standalone", ["design-notes"]],
     ])
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search agents" }), {
+    fireEvent.change(screen.getByLabelText("Search agents"), {
       target: { value: "LOGIN" },
     })
     expect(
@@ -180,6 +180,20 @@ describe("NewLauncherDialog agent step", () => {
     ).toEqual(["demo-api"])
     // The match is lit in the name it matched.
     expect(screen.getByText("login").tagName).toBe("MARK")
+  })
+
+  // Enter picks the marked row only from the search field, so with focus
+  // anywhere else no row is marked.
+  it("marks the row Enter would pick only while the search field has focus", () => {
+    render(<NewLauncherDialog />)
+    fireEvent.click(row("New terminal for an agent"))
+    const search = screen.getByLabelText("Search agents")
+    act(() => search.focus())
+    fireEvent.change(search, { target: { value: "login" } })
+    const marked = () => document.querySelectorAll("[data-active]").length
+    expect(marked()).toBe(1)
+    act(() => screen.getByRole("button", { name: "Back to New…" }).focus())
+    expect(marked()).toBe(0)
   })
 
   // The busy word is the working cue wherever it is shown, not a static label.
@@ -198,11 +212,27 @@ describe("NewLauncherDialog agent step", () => {
   it("opens the terminal for the picked agent, and Back returns to the list", () => {
     render(<NewLauncherDialog />)
     fireEvent.click(row("New terminal for an agent"))
-    fireEvent.click(screen.getByRole("button", { name: "New…" }))
+    fireEvent.click(screen.getByRole("button", { name: "Back to New…" }))
     expect(screen.getByText("Start something new")).toBeTruthy()
     fireEvent.click(row("New terminal for an agent"))
     fireEvent.click(screen.getByText("design-notes").closest("button")!)
     expect(calls).toEqual(["closeNewLauncher", "createTerminal(s3)"])
+  })
+
+  it("covers a phone's screen, and its Back says so and returns focus to the row it left", () => {
+    vi.stubGlobal("innerWidth", 390)
+    try {
+      render(<NewLauncherDialog />)
+      const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+      expect(popup.dataset.presentation).toBe("cover")
+      fireEvent.click(row("New terminal for an agent"))
+      const back = screen.getByRole("button", { name: "Back to New…" })
+      expect(back.closest('[data-slot="modal-header"]')).not.toBeNull()
+      fireEvent.click(back)
+      expect(document.activeElement).toBe(row("New terminal for an agent"))
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   // The launcher corner's menu opens this step as a dialog of its own.
@@ -211,7 +241,7 @@ describe("NewLauncherDialog agent step", () => {
     render(<NewLauncherDialog />)
     expect(screen.getByText("New terminal for an agent")).toBeTruthy()
     expect(screen.queryByText("Start something new")).toBeNull()
-    expect(screen.queryByRole("button", { name: "New…" })).toBeNull()
+    expect(screen.queryByRole("button", { name: /Back/ })).toBeNull()
     fireEvent.click(screen.getByText("design-notes").closest("button")!)
     expect(calls).toEqual(["closeNewLauncher", "createTerminal(s3)"])
   })
@@ -241,7 +271,7 @@ describe("NewLauncherDialog agent step", () => {
       expect(agentRow("fix-login-redirect").disabled).toBe(false)
       expect(agentRow("design-notes").disabled).toBe(false)
       // Enter on a search that leaves only the driven agent picks nothing.
-      const search = screen.getByRole("searchbox", { name: "Search agents" })
+      const search = screen.getByLabelText("Search agents")
       fireEvent.change(search, { target: { value: "polish" } })
       fireEvent.keyDown(search, { key: "Enter" })
       expect(calls).toEqual([])

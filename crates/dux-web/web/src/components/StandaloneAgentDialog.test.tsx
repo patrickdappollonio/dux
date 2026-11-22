@@ -188,10 +188,27 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   it("keeps the footer outside the part that scrolls", () => {
     seed(SHORTCUTS)
     render(<StandaloneAgentDialog />)
-    const body = document.querySelector("[data-standalone-picker-body]")!
+    const body = document.querySelector('[data-slot="modal-body"]')!
     expect(body.className).toContain("overflow-y-auto")
     expect(body.contains(createButton())).toBe(false)
     expect(body.contains(shortcutRows()[0])).toBe(true)
+  })
+
+  // The phone report this pins: Cancel and Create agent stacked as two
+  // full-width rows, taking as much of the screen as the folder list.
+  it("covers a phone's screen with Cancel and Create agent on one row", () => {
+    vi.stubGlobal("innerWidth", 390)
+    try {
+      seed(SHORTCUTS)
+      render(<StandaloneAgentDialog />)
+      const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+      expect(popup.dataset.presentation).toBe("cover")
+      const row = createButton().closest(".grid-cols-2")!
+      expect(row.contains(screen.getByRole("button", { name: "Cancel" }))).toBe(true)
+      expect(row.querySelector(".col-span-2")).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it("does not let a greyed-out row be picked", () => {
@@ -204,11 +221,59 @@ describe("StandaloneAgentDialog project shortcuts", () => {
     expect(createButton().disabled).toBe(true)
   })
 
+  // The space the list will take is kept from the first frame, so the card
+  // does not grow under the pointer when the list arrives.
+  it("keeps the project list's space while the list is on its way", () => {
+    seed(null)
+    const view = render(<StandaloneAgentDialog />)
+    expect(document.querySelector("[data-project-shortcuts-pending]")).not.toBeNull()
+    seed(SHORTCUTS)
+    view.rerender(<StandaloneAgentDialog />)
+    expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()
+    expect(shortcutRows()).toHaveLength(2)
+  })
+
   it("draws no list when there are no projects", () => {
     seed({ caption: "Caption from the server.", rows: [] })
     render(<StandaloneAgentDialog />)
     expect(shortcutRows()).toEqual([])
     expect(screen.queryByText("Your projects")).toBeNull()
     expect(screen.queryByText("Caption from the server.")).toBeNull()
+  })
+})
+
+describe("StandaloneAgentDialog name field", () => {
+  async function chooseFolder() {
+    seed(SHORTCUTS)
+    render(<StandaloneAgentDialog />)
+    await pick(shortcutRows()[0])
+    return screen.getByRole<HTMLInputElement>("textbox")
+  }
+  const description = (field: HTMLElement) =>
+    (field.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ")
+
+  // The default can be long, and a placeholder cut off at a phone's width
+  // hides it, so the line under the field says it.
+  it("says the name it falls back to under the field, not in its placeholder", async () => {
+    const field = await chooseFolder()
+    expect(field.placeholder).not.toContain("site")
+    expect(description(field)).toContain("site")
+  })
+
+  it("says why a name is refused at the field, and to a screen reader", async () => {
+    const field = await chooseFolder()
+    fireEvent.change(field, { target: { value: "a..b" } })
+    expect(field.getAttribute("aria-invalid")).toBe("true")
+    expect(description(field)).toContain("That name is not one git accepts for a branch.")
+    expect(createButton().disabled).toBe(true)
+  })
+
+  it("names the folder the agent runs in", async () => {
+    await chooseFolder()
+    const chip = screen.getByText("/home/u/code/site")
+    expect(chip.parentElement!.textContent).toMatch(/runs in/i)
   })
 })

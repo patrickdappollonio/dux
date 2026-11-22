@@ -1,16 +1,9 @@
-import { Bot, ChevronLeft, ChevronRight, Search } from "lucide-react"
+import { Bot, ChevronRight } from "lucide-react"
 import { Fragment, useMemo, useState, type KeyboardEvent } from "react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
+import { Modal, ModalGroupHeading, useModalLifetime } from "@/components/modal"
 import { RowStateWord } from "@/components/RowStateWord"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   agentChangeBlockReason,
@@ -28,7 +21,7 @@ import {
   type NewLauncherRow,
 } from "@/lib/creationMenus"
 import { stateWord } from "@/lib/flatList"
-import { FOCUS_RING, ACTIVE_ROW_RING } from "@/lib/focusRing"
+import { FOCUS_RING, PICK_ROW } from "@/lib/focusRing"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { closeNewLauncher, createTerminal, useDux } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
@@ -36,74 +29,89 @@ import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // The launcher's New dialog: every way to create something, under three
-// captioned groups, each row saying in a sentence what it makes. A dialog on a
-// computer and a bottom sheet on a phone, around one body, so the two lists
-// cannot drift. The rows are `newLauncherModel`, which reads the shared
-// creation lists, so a row runs exactly what the cog menu's copy of it runs.
+// captioned groups, each row saying in a sentence what it makes. The rows are
+// `newLauncherModel`, which reads the shared creation lists, so a row runs
+// exactly what the cog menu's copy of it runs.
 //
 // The launcher corner's menu opens the agent-picking step on its own; it then
 // has no list behind it to go back to.
 export function NewLauncherDialog() {
   const { newLauncherOpen, newLauncherStep } = useDux()
-  const isMobile = useIsMobile()
-  const onOpenChange = (open: boolean) => {
-    if (!open) closeNewLauncher()
-  }
-  // The body mounts only while open, so every open starts on the list with an
-  // empty search rather than wherever the last one was left.
-  const body = newLauncherOpen ? (
-    <LauncherBody phone={isMobile} entry={newLauncherStep} />
+  const life = useModalLifetime(newLauncherOpen)
+  // Keyed by the open, so each one starts on its entry step with an empty search.
+  return life.mounted ? (
+    <Launcher
+      key={life.epoch}
+      open={newLauncherOpen}
+      entry={newLauncherStep}
+      onClosed={life.onClosed}
+    />
   ) : null
-  if (isMobile) {
-    return (
-      <Sheet open={newLauncherOpen} onOpenChange={onOpenChange}>
-        <SheetContent
-          side="bottom"
-          className="max-h-[85dvh] gap-0 overflow-y-auto overscroll-contain rounded-t-2xl pb-[max(env(safe-area-inset-bottom),0.75rem)]"
-        >
-          {body}
-        </SheetContent>
-      </Sheet>
-    )
-  }
-  return (
-    <Dialog open={newLauncherOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-3 p-5 sm:max-w-[600px]">{body}</DialogContent>
-    </Dialog>
-  )
 }
 
-function LauncherBody({
-  phone,
+function Launcher({
+  open,
   entry,
+  onClosed,
 }: {
-  phone: boolean
+  open: boolean
   entry: "list" | "pick-agent"
+  onClosed: () => void
 }) {
+  const phone = useIsMobile()
   const [step, setStep] = useState(entry)
   // Coming back from the agent step puts focus back on the row that went there.
   const [returned, setReturned] = useState(false)
+  const agents = useAgentPick(step === "pick-agent")
+  const common = { open, onClose: closeNewLauncher, onClosed, size: "w600", step } as const
   if (step === "pick-agent") {
     return (
-      <AgentStep
-        phone={phone}
-        onBack={
+      <Modal
+        kind="picker"
+        {...common}
+        title="New terminal for an agent"
+        description="Which agent's copy of the code should the command line open in?"
+        // Named after the dialog it returns to; absent when this step is the
+        // whole dialog.
+        back={
           entry === "list"
-            ? () => {
-                setReturned(true)
-                setStep("list")
+            ? {
+                label: "New…",
+                onSelect: () => {
+                  setReturned(true)
+                  setStep("list")
+                },
               }
-            : null
+            : undefined
         }
-      />
+        search={{
+          value: agents.query,
+          onChange: agents.setQuery,
+          label: "Search agents",
+          fieldProps: { ...agents.pick.fieldProps, type: "search" },
+        }}
+      >
+        <AgentRows agents={agents} />
+      </Modal>
     )
   }
   return (
-    <LauncherList
-      phone={phone}
-      focusAgentTerminal={returned}
-      onPickAgent={() => setStep("pick-agent")}
-    />
+    <Modal
+      kind="picker"
+      {...common}
+      title="Start something new"
+      description={
+        phone
+          ? "Pick what you want to create."
+          : "Pick what you want to create. Each one opens its own short setup."
+      }
+    >
+      <LauncherList
+        phone={phone}
+        focusAgentTerminal={returned}
+        onPickAgent={() => setStep("pick-agent")}
+      />
+    </Modal>
   )
 }
 
@@ -124,36 +132,21 @@ function LauncherList({
     row.action.run()
   }
   return (
-    <>
-      <div className={cn("flex flex-col gap-1", phone ? "px-5 pt-5 pr-14" : "px-1 pr-10")}>
-        <DialogTitle className="text-lg font-semibold">
-          Start something new
-        </DialogTitle>
-        <DialogDescription>
-          {phone
-            ? "Pick what you want to create."
-            : "Pick what you want to create. Each one opens its own short setup."}
-        </DialogDescription>
-      </div>
-      <div
-        className={cn("flex flex-col", phone ? "px-3 pt-1" : "gap-1")}
-        onKeyDown={moveFocusAmongRows}
-      >
-        {groups.map((group, index) => (
-          <Fragment key={group.id}>
-            {index > 0 && !phone ? (
-              <div aria-hidden="true" className="mx-1 my-1 h-px bg-border" />
-            ) : null}
-            <LauncherGroup
-              group={group}
-              phone={phone}
-              focusId={focusAgentTerminal ? "new-terminal-for-agent" : null}
-              onActivate={activate}
-            />
-          </Fragment>
-        ))}
-      </div>
-    </>
+    <div className={cn("flex flex-col", !phone && "gap-1")} onKeyDown={moveFocusAmongRows}>
+      {groups.map((group, index) => (
+        <Fragment key={group.id}>
+          {index > 0 && !phone ? (
+            <div aria-hidden="true" className="mx-2 my-1 h-px bg-border" />
+          ) : null}
+          <LauncherGroup
+            group={group}
+            phone={phone}
+            focusId={focusAgentTerminal ? "new-terminal-for-agent" : null}
+            onActivate={activate}
+          />
+        </Fragment>
+      ))}
+    </div>
   )
 }
 
@@ -170,23 +163,16 @@ function LauncherGroup({
 }) {
   const headingId = `new-launcher-${group.id}`
   return (
-    <div role="group" aria-labelledby={headingId} className="flex flex-col gap-0.5">
-      <div
-        className={cn(
-          "flex gap-x-2 gap-y-0.5 px-1",
-          phone ? "flex-col px-2 pt-3 pb-1" : "flex-wrap items-baseline pt-1.5 pb-1",
-        )}
-      >
-        <span
-          id={headingId}
-          className="text-xs font-semibold tracking-wide text-foreground/85 uppercase"
-        >
-          {group.title}
-        </span>
-        <span className="text-xs text-muted-foreground">{group.caption}</span>
-      </div>
+    <div
+      role="group"
+      aria-labelledby={headingId}
+      className={cn("flex flex-col gap-0.5", phone && "pt-1.5")}
+    >
+      <ModalGroupHeading id={headingId} caption={group.caption}>
+        {group.title}
+      </ModalGroupHeading>
       {group.lead ? (
-        <p className={cn("text-sm text-foreground", phone ? "px-2 pb-1" : "px-1 pb-1")}>
+        <p className="px-2 pb-1 text-sm text-foreground">
           {group.lead}
         </p>
       ) : null}
@@ -291,37 +277,34 @@ function moveFocusAmongRows(event: KeyboardEvent<HTMLElement>) {
 
 // The second step behind "New terminal for an agent": which agent's directory
 // the terminal opens in. Picking one opens it through the same action the
-// agent's own menu runs. `onBack` is null when the step is the whole dialog.
+// agent's own menu runs.
 //
 // A terminal joins its agent's row, so an agent this device may not change is
 // listed but cannot be picked, as its own New terminal is disabled. One nobody
 // drives can, unless a pane of its row is on this page: there its card asks
 // for a take-over first.
-function AgentStep({
-  phone,
-  onBack,
-}: {
-  phone: boolean
-  onBack: (() => void) | null
-}) {
+//
+// `active` is false while the list step is on screen, and the agents are then not read.
+function useAgentPick(active: boolean) {
   const { spine } = useDux()
   const [query, setQuery] = useState("")
   const groups = useMemo(
     () =>
-      agentTerminalGroups(
-        {
-          sidebar: spine?.sidebar,
-          projects: spine?.projects ?? [],
-          sessions: spine?.sessions ?? [],
-        },
-        query,
-      ),
-    [spine, query],
+      active
+        ? agentTerminalGroups(
+            {
+              sidebar: spine?.sidebar,
+              projects: spine?.projects ?? [],
+              sessions: spine?.sessions ?? [],
+            },
+            query,
+          )
+        : [],
+    [active, spine, query],
   )
   const sessions = groups.flatMap((group) => group.sessions)
   const blocks = useAgentChangeBlocks(sessions)
-  const pickBlock = (session: SessionView): RowBlock | null => blocks.get(session.id) ?? null
-  const pickable = sessions.filter((session) => pickBlock(session) === null)
+  const pickable = sessions.filter((session) => (blocks.get(session.id) ?? null) === null)
   const pickAgent = (session: SessionView) => {
     closeNewLauncher()
     createTerminal(session.id)
@@ -332,94 +315,48 @@ function AgentStep({
     keyOf: (session) => session.id,
     onPick: pickAgent,
   })
+  return { query, setQuery, groups, sessions, blocks, pickable, pickAgent, pick }
+}
+
+function AgentRows({ agents }: { agents: ReturnType<typeof useAgentPick> }) {
+  const { query, groups, sessions, blocks, pickable, pickAgent, pick } = agents
   const needle = query.trim().toLowerCase()
   return (
     <>
-      <div
-        className={cn(
-          "flex flex-col gap-1",
-          phone ? "px-3 pr-14" : "pr-10",
-          phone ? (onBack ? "pt-3" : "pt-5") : onBack ? "-mt-1" : null,
-        )}
-      >
-        {/* Back to the list, named after the dialog it returns to. Ghost and
-            quieter than the rows: it navigates rather than creates. 32px tall
-            on a computer, where its only neighbour is the close button across
-            the header; the floor returns where a finger is the pointer. */}
-        {onBack ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onBack}
-            className="h-8 self-start px-1.5 text-muted-foreground max-md:min-h-10 pointer-coarse:min-h-10"
-          >
-            <ChevronLeft />
-            New…
-          </Button>
-        ) : null}
-        <div className={cn("flex flex-col gap-1", phone ? "px-2" : "px-1")}>
-          <DialogTitle className="text-lg font-semibold">
-            New terminal for an agent
-          </DialogTitle>
-          <DialogDescription>
-            Which agent's copy of the code should the command line open in?
-          </DialogDescription>
-        </div>
-      </div>
-      <div className={cn("flex flex-col gap-2", phone ? "px-3 pt-2" : "")}>
-        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 max-md:min-h-10 pointer-coarse:min-h-10">
-          <Search className="size-4 shrink-0 text-muted-foreground" />
-          <input
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search agents"
-            aria-label="Search agents"
-            {...pick.fieldProps}
-            className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-            autoFocus
-          />
-        </div>
-        {sessions.length > 0 && pickable.length === 0 ? (
-          <p className="px-2 pt-1 text-sm text-foreground">
-            None of these agents can get a terminal from this device right now;
-            each one says why.
+      {sessions.length > 0 && pickable.length === 0 ? (
+        <p className="px-2 pt-1 text-sm text-foreground">
+          None of these agents can get a terminal from this device right now;
+          each one says why.
+        </p>
+      ) : null}
+      <div className="flex flex-col gap-0.5" onKeyDown={moveFocusAmongRows}>
+        {sessions.length === 0 ? (
+          <p className="px-2 py-4 text-sm text-muted-foreground">
+            {needle === "" ? "No agents yet." : "No agents match that search."}
           </p>
-        ) : null}
-        <div className="flex flex-col gap-0.5" onKeyDown={moveFocusAmongRows}>
-          {sessions.length === 0 ? (
-            <p className="px-2 py-4 text-sm text-muted-foreground">
-              {needle === "" ? "No agents yet." : "No agents match that search."}
-            </p>
-          ) : (
-            groups.map((group) => (
-              <div
-                key={group.id}
-                role="group"
-                aria-label={group.title}
-                className="flex flex-col gap-0.5"
-              >
-                <span
-                  aria-hidden="true"
-                  className="px-2 pt-2 pb-0.5 text-xs font-semibold tracking-wide text-foreground/85 uppercase"
-                >
-                  {group.title}
-                </span>
-                {group.sessions.map((session) => (
-                  <AgentPickRow
-                    key={session.id}
-                    session={session}
-                    id={pick.rowId(session.id)}
-                    active={pick.activeKey === session.id}
-                    needle={needle}
-                    block={pickBlock(session)}
-                    onPick={() => pickAgent(session)}
-                  />
-                ))}
-              </div>
-            ))
-          )}
-        </div>
+        ) : (
+          groups.map((group) => (
+            <div
+              key={group.id}
+              role="group"
+              aria-label={group.title}
+              className="flex flex-col gap-0.5"
+            >
+              <ModalGroupHeading hidden>{group.title}</ModalGroupHeading>
+              {group.sessions.map((session) => (
+                <AgentPickRow
+                  key={session.id}
+                  session={session}
+                  id={pick.rowId(session.id)}
+                  active={pick.shownKey === session.id}
+                  needle={needle}
+                  block={blocks.get(session.id) ?? null}
+                  onPick={() => pickAgent(session)}
+                />
+              ))}
+            </div>
+          ))
+        )}
       </div>
     </>
   )
@@ -456,12 +393,13 @@ function AgentPickRow({
       type="button"
       id={id}
       data-launcher-row=""
+      data-active={active ? "" : undefined}
       disabled={block !== null}
       onClick={onPick}
       className={cn(
         "group flex min-h-13 w-full items-center gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:bg-accent focus-visible:bg-accent disabled:pointer-events-none motion-reduce:transition-none",
         FOCUS_RING,
-        active && ACTIVE_ROW_RING,
+        active && PICK_ROW,
       )}
     >
       <Bot

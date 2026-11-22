@@ -1,11 +1,14 @@
+import { FolderPlus } from "lucide-react"
 import { useMemo, useState } from "react"
 
-import { ProjectList, type ProjectListRow } from "@/components/ProjectList"
+import { Modal, useModalLifetime, type ModalDoor } from "@/components/modal"
+import { ProjectRows } from "@/components/ProjectList"
+import { useProjectSearch, type ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
-import { Dialog, DialogContent } from "@/components/ui/dialog"
 import {
   closeNewAgentPicker,
   dismissNewAgentPicker,
+  openAddProject,
   openAttachWorktree,
   openCreateAgent,
   openCreateAgentFromPr,
@@ -28,26 +31,11 @@ import { formatRegularCount } from "@/lib/formatRegularCount"
 // project's default_provider and is retargeted from the agent menu.
 export function NewAgentPickerDialog() {
   const { newAgentPickerOpen } = useDux()
-  return (
-    <Dialog
-      open={newAgentPickerOpen}
-      onOpenChange={(open) => {
-        if (!open) dismissNewAgentPicker()
-      }}
-    >
-      {/* Flex column, deliberately not overflow-hidden: the popup's base max-h
-          caps it to the dynamic viewport, and when the soft keyboard shrinks
-          100dvh the list shrinks with it as a min-h-0 flex child rather than
-          the popup clipping with nothing left to scroll. The base
-          overflow-y-auto stays as the last-resort scroll. */}
-      <DialogContent className="flex flex-col gap-0 p-0 sm:max-w-lg">
-        {/* Mount the stateful body only while open so its useState initializers
-            re-run on each open (a fresh search / selection / provider) without a
-            reset effect. */}
-        {newAgentPickerOpen ? <PickerBody /> : null}
-      </DialogContent>
-    </Dialog>
-  )
+  const life = useModalLifetime(newAgentPickerOpen)
+  // Keyed by the open, so each one starts with a fresh search and order.
+  return life.mounted ? (
+    <Picker key={life.epoch} open={newAgentPickerOpen} onClosed={life.onClosed} />
+  ) : null
 }
 
 // Per-intent copy + the action a project row fires. "new" keeps the pick-provider-
@@ -70,7 +58,7 @@ const INTENT_COPY = {
   },
 } as const
 
-function PickerBody() {
+function Picker({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const {
     spine,
     newAgentPickerIntent,
@@ -92,9 +80,9 @@ function PickerBody() {
   }, [spine, newAgentPickerOnlyIds])
   // The recency order is snapshotted at open, the way the terminal UI snapshots
   // its chooser: a list that re-sorts under the pointer lands a click on the
-  // wrong project. This body mounts only while the dialog is open, so a mount is
-  // an open, and the narrowed set is read once here too, since a pull-request
-  // reference is not expected to change while its picker is up.
+  // wrong project. This component is keyed by the open, so a mount is an open,
+  // and the narrowed set is read once here too, since a pull-request reference
+  // is not expected to change while its picker is up.
   const [frozenIds] = useState(() =>
     orderProjectsByRecency(candidates, sessions).map((project) => project.id),
   )
@@ -150,31 +138,47 @@ function PickerBody() {
     return { id: project.id, name: project.name, label }
   })
 
+  const search = useProjectSearch(rows, onProjectRow)
+  // A standalone agent needs no project, so only the plain intent offers it.
+  // It opens a different dialog, so the picker closes first.
+  const addProject: ModalDoor = {
+    label: "Add a new project…",
+    icon: FolderPlus,
+    onSelect: openAddProject,
+  }
+  const addStandalone: ModalDoor = {
+    label: "Add standalone agent…",
+    icon: STANDALONE_AGENT_CREATION.icon,
+    onSelect: () => {
+      closeNewAgentPicker()
+      STANDALONE_AGENT_CREATION.run()
+    },
+  }
   return (
-    <ProjectList
+    <Modal
+      kind="picker"
+      open={open}
+      onClose={dismissNewAgentPicker}
+      onClosed={onClosed}
+      size="lg"
       title={INTENT_COPY[intent].title}
       description={INTENT_COPY[intent].description}
-      rows={rows}
-      onPick={onProjectRow}
-      // New agent… and New terminal take the user somewhere else, so the
-      // picker closes first rather than staying open over where they land.
-      menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
-      // A standalone agent needs no project, so the plain intent offers it as
-      // the other way out of "which project?". The from-PR and from-worktree
-      // intents are about a project's own branches and do not. It opens a
-      // different dialog, so the picker closes first.
-      footerAction={
-        intent === "new"
-          ? {
-              title: "Add standalone agent…",
-              icon: STANDALONE_AGENT_CREATION.icon,
-              onSelect: () => {
-                closeNewAgentPicker()
-                STANDALONE_AGENT_CREATION.run()
-              },
-            }
-          : undefined
-      }
-    />
+      search={{
+        value: search.query,
+        onChange: search.setQuery,
+        label: "Search projects",
+        fieldProps: search.pick.fieldProps,
+      }}
+      steadyHeight
+      doors={intent === "new" ? [addProject, addStandalone] : [addProject]}
+    >
+      <ProjectRows
+        search={search}
+        onPick={onProjectRow}
+        // New agent… and New terminal take the user somewhere else, so the
+        // picker closes first rather than staying open over where they land.
+        menu={(id) => <ProjectMenuItems id={id} onLeave={closeNewAgentPicker} />}
+      />
+    </Modal>
   )
 }

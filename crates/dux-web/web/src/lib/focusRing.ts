@@ -18,3 +18,17 @@ export const FOCUS_RING =
  */
 export const ACTIVE_ROW_RING =
   "inset-ring-3 inset-ring-ring/50 outline-1 -outline-offset-1 outline-ring"
+
+/**
+ * The row a search field's Enter would pick, in a list inside a modal: the
+ * command lists' own marked row, a fill and no ring, so it never reads as a
+ * second focused control beside the field that has focus.
+ */
+export const PICK_ROW = "bg-muted text-foreground"
+
+/**
+ * The keyboard focus ring for a row in a list that clips its overflow: the
+ * same ring, drawn inside the row as `ACTIVE_ROW_RING` is.
+ */
+export const INSET_FOCUS_RING =
+  "outline-none focus-visible:rounded-md focus-visible:inset-ring-3 focus-visible:inset-ring-ring/50 focus-visible:outline-1 focus-visible:-outline-offset-1 focus-visible:outline-ring"

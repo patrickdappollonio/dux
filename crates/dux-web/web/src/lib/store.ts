@@ -624,8 +624,8 @@ export interface DuxState {
    * happens to the folder you choose. */
   standaloneAgentPickerOpen: boolean
   /** The projects offered as folder shortcuts in the standalone-agent picker,
-   * as the server built them; null until they arrive (and when they could not
-   * be listed), which draws no list. */
+   * as the server built them; null until they arrive, which holds the list's
+   * room, and an empty list when they could not be listed, which draws none. */
   standaloneProjectShortcuts: ProjectShortcutListView | null
   // Why the picker was opened: "add" (the default) or "init" (the split
   // button's "Initialize a repository…" entry). The intent's ONLY effect is a
@@ -4296,7 +4296,8 @@ function reconcileModalEntries(): void {
 // A popstate while modal entries are up. The modals whose entries the browser
 // left are closed, top first, exactly as their own Cancel would close them.
 // Returns true when the browser is still on the page those modals were opened
-// over (one of their entries, or the page's own), so the page must not move.
+// over (one of their entries, or the page's own) or is on its way back to one
+// that stayed open, so the page must not move.
 function leaveModalEntries(): boolean {
   if (modalEntries.length === 0) return false
   const here = navigationApi()?.currentEntry?.key
@@ -4305,9 +4306,36 @@ function leaveModalEntries(): boolean {
   const left = modalEntries.slice(at + 1)
   const stayed = at >= 0 || here === modalEntries[0].behindNavKey
   modalEntries = modalEntries.slice(0, at + 1)
-  retireModalEntries(left)
-  closeModals(left.map((entry) => entry.modalId))
-  return stayed
+  const held = closeModals(left.map((entry) => entry.modalId))
+  // An entry above one whose modal closed went with it, so only the oldest
+  // unbroken run of modals that stayed open can have theirs back.
+  let keep = 0
+  while (keep < left.length && held.includes(left[keep].modalId)) keep += 1
+  const kept = left.slice(0, keep)
+  retireModalEntries(left.slice(keep))
+  spendModals(left.slice(keep).map((entry) => entry.modalId))
+  if (kept.length === 0) return stayed
+  return returnToModalEntries(kept) || stayed
+}
+
+// Back left the entries of modals that stayed open on purpose. The browser goes
+// forward onto the top one again, by its key, so the next Back is theirs too.
+function returnToModalEntries(kept: readonly ModalEntry[]): boolean {
+  const nav = navigationApi()
+  const top = kept[kept.length - 1]
+  const without = modalEntries
+  const giveUp = () => {
+    modalEntries = without
+    retireModalEntries(kept)
+    spendModals(kept.map((entry) => entry.modalId))
+  }
+  modalEntries = [...without, ...kept]
+  const listed = nav?.entries().some((entry) => entry.key === top.navKey) ?? false
+  if (nav !== null && !nav.transition && listed) {
+    if (traverseExactly(nav, top.navKey, { newerIntent: false }, giveUp)) return true
+  }
+  giveUp()
+  return false
 }
 
 // Whether the page holds a user activation now. A browser that cannot say is
@@ -7308,7 +7336,9 @@ export function openStandaloneAgentPicker(): void {
     .catch((e) => {
       if (!current()) return
       // The explorer still works without them, so the picker stays open and
-      // says what is missing.
+      // says what is missing. An empty list, not null: null is "on its way",
+      // which the picker holds room for.
+      setState({ standaloneProjectShortcuts: { caption: "", rows: [] } })
       notifyError(
         e instanceof Error
           ? `Could not list your projects as shortcuts: ${e.message}`

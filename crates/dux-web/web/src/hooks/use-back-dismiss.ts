@@ -27,12 +27,17 @@ interface RootOpenProps<Details extends { isCanceled: boolean }, Actions extends
 // hears `false` exactly as it does for Cancel or Escape and abandons whatever
 // the modal was offering. Returns the two props to pass on to the Root in place
 // of the caller's. With `enabled` false the Root is never registered.
+//
+// `onBack`, when given, answers Back in place of the imperative close: true
+// says the Root stays open on purpose and keeps its history entry, false that
+// the caller is closing it.
 export function useBackDismiss<
   Details extends { isCanceled: boolean },
   Actions extends Closable,
 >(
   props: RootOpenProps<Details, Actions>,
   enabled = true,
+  onBack?: () => boolean,
 ): {
   actionsRef: RefObject<Actions | null>
   onOpenChange: (open: boolean, details: Details) => void
@@ -45,11 +50,17 @@ export function useBackDismiss<
   // mirrored here from the changes base-ui reports and does not cancel.
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen ?? false)
   const isOpen = open ?? uncontrolledOpen
+  // Read when Back arrives, so a new function each render registers nothing anew.
+  const answer = useRef(onBack)
+  useEffect(() => {
+    answer.current = onBack
+  })
 
   useEffect(() => {
     if (!isOpen || !enabled) return
     let retry: ReturnType<typeof setInterval> | null = null
     const unregister = registerModal(() => {
+      if (answer.current) return answer.current()
       actionsRef.current?.close()
       // A busy modal refuses to close (Settings while a write is in flight).
       // The Back still counts, so the close is asked again until it lands; the

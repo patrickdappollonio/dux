@@ -17,11 +17,15 @@ import { XIcon } from "lucide-react"
 //
 // A dialog whose opener has gone when it closes hands focus to the page
 // control that opened the menu it came from (`useFocusFallback`).
+//
+// `onBack` answers Back itself, for a dialog that may stay open and keep its
+// entry (`useBackDismiss`).
 function Dialog({
   historyEntry = true,
+  onBack,
   ...props
-}: DialogPrimitive.Root.Props & { historyEntry?: boolean }) {
-  const back = useBackDismiss(props, historyEntry)
+}: DialogPrimitive.Root.Props & { historyEntry?: boolean; onBack?: () => boolean }) {
+  const back = useBackDismiss(props, historyEntry, onBack)
   const onOpenChangeComplete = useFocusFallback(props.open, props.onOpenChangeComplete)
   return (
     <DialogPrimitive.Root
@@ -61,14 +65,28 @@ function DialogOverlay({
   )
 }
 
+// max-h caps the card to the dynamic viewport, which the soft keyboard shrinks,
+// and the card scrolls inside it. grid-cols-[minmax(0,1fr)] caps the column at
+// the card's width, so a long unbreakable name cannot widen it and truncation
+// inside engages.
+const CARD_POPUP =
+  "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 grid-cols-[minmax(0,1fr)] gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95"
+
+const COVER_POPUP =
+  "fixed inset-0 z-50 flex flex-col bg-popover pt-[env(safe-area-inset-top)] text-sm text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0"
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
   destructive = false,
+  cover = false,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
+  // The popup fills the screen edge to edge, as a column, rather than floating
+  // as a card: nothing of the page shows around it.
+  cover?: boolean
   // When true, the shared backdrop also desaturates the app behind it
   // (black-and-white) as an extra danger cue for consequential confirm dialogs.
   // Blur stays on the base overlay for every dialog regardless.
@@ -81,20 +99,8 @@ function DialogContent({
       />
       <DialogPrimitive.Popup
         data-slot="dialog-content"
-        // max-h caps the popup to the dynamic viewport (dvh tracks the soft
-        // keyboard on mobile) with internal scroll, so a focused input and the
-        // footer buttons stay reachable when the keyboard opens. The popup
-        // portals to document.body (outside the keyboard-pinned mobile root), so
-        // this cap is what keeps tall dialogs usable on phones.
-        //
-        // grid-cols-[minmax(0,1fr)]: without it the grid's implicit column is
-        // min-content sized, so one child with a long unbreakable string (a
-        // branch name, a path) widens the column past max-w, every sibling
-        // stretches with it, and the popup grows a horizontal scrollbar. Capping
-        // the column at the popup's width is what makes children's
-        // min-w-0/truncate chains engage.
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 grid-cols-[minmax(0,1fr)] gap-4 overflow-y-auto rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          cover ? COVER_POPUP : CARD_POPUP,
           className
         )}
         {...props}

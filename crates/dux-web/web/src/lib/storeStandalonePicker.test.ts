@@ -150,6 +150,16 @@ describe("standalone picker reads", () => {
     expect(notifyErrorMock).not.toHaveBeenCalled()
   })
 
+  it("leaves an empty list, not one still on its way, when the shortcuts fail", async () => {
+    const store = await loadStore()
+    store.openStandaloneAgentPicker()
+    await vi.waitFor(() => expect(pendingShortcuts).toHaveLength(1))
+    expect(store.getSnapshot().standaloneProjectShortcuts).toBeNull()
+    pendingShortcuts[0].reject(new Error("boom"))
+    await vi.waitFor(() => expect(notifyErrorMock).toHaveBeenCalled())
+    expect(store.getSnapshot().standaloneProjectShortcuts?.rows).toEqual([])
+  })
+
   it("lands only the latest browse and tells each caller whether its own landed", async () => {
     const store = await loadStore()
     store.openStandaloneAgentPicker()

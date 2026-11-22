@@ -23,9 +23,11 @@ function walk(dir: string): string[] {
 // builder is recognised, so a new one is scanned the day it is written.
 const PROSE_IMPORT = /from\s+["'](?:\.\/prose|@\/lib\/prose)["']/
 
-// A file that renders a modal imports one of the two dialog primitives, which
-// finds a modal whose file is not named like one.
-const DIALOG_IMPORT = /from\s+["']@\/components\/ui\/(?:alert-)?dialog["']/
+// A file that renders a modal imports the `Modal` component or, until it is
+// moved onto it, one of the two dialog primitives, which finds a modal whose
+// file is not named like one.
+const DIALOG_IMPORT =
+  /from\s+["']@\/components\/(?:modal|ui\/(?:alert-)?dialog)["']/
 
 // Which files the guard reads, by rule rather than by list: every dialog under
 // components/ (subdirectories included), found by its name or by the dialog
@@ -87,10 +89,14 @@ function lineAround(source: string, index: number): string {
 // that no longer matches anything fails the suite, so the list cannot rot.
 const ALLOWED: { file: string; line: string; reason: string }[] = [
   {
-    file: "components/StandaloneAgentDialog.tsx",
-    line: 'placeholder={`Agent name (optional, defaults to "${standaloneAgentDefaultName(selected)}")`}',
-    reason:
-      "A placeholder is an attribute and can hold no markup, so the quotes are the only delimiter available.",
+    file: "components/FolderBrowseList.tsx",
+    line: '<span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">',
+    reason: "A folder row's pill naming the folder the row acts on: a list row, out of the chip rule's scope.",
+  },
+  {
+    file: "components/ProjectShortcutList.tsx",
+    line: '<span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">',
+    reason: "A project row's folder beside its name: a list row, out of the chip rule's scope.",
   },
   {
     file: "components/FirstLoadDialog.tsx",
@@ -297,7 +303,16 @@ describe("every name a modal shows is the shared chip", () => {
       ),
     ).toBe(true)
     expect(
+      isScanned(
+        "components/terminal/Chooser.tsx",
+        'import { Modal, useModalLifetime } from "@/components/modal"',
+      ),
+    ).toBe(true)
+    expect(
       isScanned("components/Other.tsx", 'import { x } from "@/components/ui/dialog-ish"'),
+    ).toBe(false)
+    expect(
+      isScanned("components/Other.tsx", 'import { x } from "@/components/modal-ish"'),
     ).toBe(false)
     expect(isScanned("components/SomeDialog.test.tsx", "")).toBe(false)
     expect(isScanned("lib/prose.tsx", "")).toBe(false)

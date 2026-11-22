@@ -1,8 +1,10 @@
 import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { ModalGroupHeading } from "@/components/modal"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { INSET_FOCUS_RING } from "@/lib/focusRing"
 import { baseName } from "@/lib/paths"
 import type { DirEntryView } from "@/lib/types"
 
@@ -78,7 +80,7 @@ export function FolderBrowseList({
           <button
             type="button"
             onClick={() => onCommit(path)}
-            className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${
+            className={`flex min-h-11 items-center gap-2 border-l-2 border-primary/60 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${INSET_FOCUS_RING} ${
               committed ? "bg-accent" : "bg-muted/40"
             }`}
           >
@@ -88,9 +90,7 @@ export function FolderBrowseList({
           </button>
           {/* Non-interactive divider separating the commit action from the
               navigation list below. */}
-          <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Browse
-          </div>
+          <ModalGroupHeading inset>Browse</ModalGroupHeading>
           {entries.map((entry) => {
             // The synthetic parent row reads as an "up" action rather than a
             // folder: a distinct glyph and the parent's basename, no path
@@ -105,7 +105,7 @@ export function FolderBrowseList({
                   // min-h-11 on phones gives each row a ≥44px touch target, 40px
                   // on a touch tablet; only a mouse at desktop width keeps the
                   // compact py-2 density.
-                  className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
+                  className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${INSET_FOCUS_RING}`}
                 >
                   <CornerLeftUp className="size-4 shrink-0 text-muted-foreground" />
                   <span className="shrink-0">Up to</span>
@@ -123,7 +123,7 @@ export function FolderBrowseList({
                 key={entry.path}
                 type="button"
                 onClick={() => onOpen(entry)}
-                className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0"
+                className={`flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent md:pointer-coarse:min-h-10 md:not-pointer-coarse:min-h-0 ${INSET_FOCUS_RING}`}
               >
                 <Icon className="size-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate">{entry.label}</span>

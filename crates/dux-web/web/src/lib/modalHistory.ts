@@ -9,8 +9,9 @@
 export interface OpenModal {
   id: number
   // Closes the modal the way its own Cancel or Escape does: the action it was
-  // offering is abandoned, nothing is saved, confirmed or submitted.
-  close: () => void
+  // offering is abandoned, nothing is saved, confirmed or submitted. True when
+  // the modal answered some other way and stays open, keeping its entry.
+  close: () => boolean | void
   // Set once the modal has lost its entry for good: Back closed it, or the page
   // moved under it. A spent modal that is still open is never given a new one.
   // One still open after Back is busy, and keeps being asked to close until it
@@ -24,7 +25,7 @@ let listener: (() => void) | null = null
 
 // Register an open modal. Returns the call that unregisters it, to be made
 // whenever it closes, however it closes.
-export function registerModal(close: () => void): () => void {
+export function registerModal(close: () => boolean | void): () => void {
   const modal: OpenModal = { id: nextId++, close, spent: false }
   modals = [...modals, modal]
   listener?.()
@@ -40,14 +41,17 @@ export function openModals(): readonly OpenModal[] {
   return modals
 }
 
-// Close these modals, newest first, marking each spent so it never gets an
-// entry again.
-export function closeModals(ids: readonly number[]): void {
+// Close these modals, newest first. One that closes, or that merely refuses,
+// is spent and never gets an entry again; the ids returned are of those that
+// stayed open on purpose.
+export function closeModals(ids: readonly number[]): number[] {
   const closing = modals.filter((m) => ids.includes(m.id)).reverse()
+  const held: number[] = []
   for (const modal of closing) {
-    modal.spent = true
-    modal.close()
+    if (modal.close() === true) held.push(modal.id)
+    else modal.spent = true
   }
+  return held
 }
 
 // Mark these modals spent without closing them: the page moved while they were

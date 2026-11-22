@@ -102,6 +102,14 @@ describe("NewAgentPickerDialog", () => {
     expect(screen.getByText("zzz", { selector: "code" })).toBeTruthy()
   })
 
+  // A search-type field clears itself on Escape, which here also closes the
+  // dialog, and Chromium draws a clear button of its own in it.
+  it("searches in a plain text field", () => {
+    seed("new")
+    render(<NewAgentPickerDialog />)
+    expect((screen.getByLabelText("Search projects") as HTMLInputElement).type).toBe("text")
+  })
+
   // New agent… and New terminal from a row's menu take the user somewhere
   // else, so the picker must not stay open over where they land.
   it("closes the picker before a row menu item that leaves it", async () => {
@@ -444,22 +452,34 @@ describe("NewAgentPickerDialog", () => {
     expect(list!.classList.contains("min-h-0")).toBe(true)
     // The list must be the ONLY child that gives way: header and footer pin
     // their height so shrinking cannot crush the controls themselves.
-    const header = doc.querySelector('[data-slot="dialog-header"]')
+    const header = doc.querySelector('[data-slot="modal-header"]')
     expect(header!.className).toContain("shrink-0")
-    const footerButton = [...doc.querySelectorAll("button")].find((b) =>
-      b.textContent!.includes("Add a new project"),
-    )
-    expect(footerButton!.parentElement!.className).toContain("shrink-0")
+    expect(doc.querySelector('[data-slot="modal-footer"]')!.className).toContain("shrink-0")
+  })
+
+  // The phone report this pins: the picker opened as a card squeezed above a
+  // keyboard its own search field had raised.
+  it("covers a phone's screen and leaves the keyboard down", async () => {
+    vi.stubGlobal("innerWidth", 390)
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(pointer: coarse)",
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    seed("new")
+    render(<NewAgentPickerDialog />)
+    const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+    expect(popup.dataset.presentation).toBe("cover")
+    await waitFor(() => expect(document.activeElement).toBe(popup))
+    expect(screen.getByRole("button", { name: "Close" })).toBeTruthy()
   })
 
   // The footer's second door: a standalone agent needs no project, so the
   // plain new-agent picker offers it beside Add a new project. The flows that
   // are about a project (from a PR, from a worktree) do not.
   describe("the footer", () => {
-    function footerButtons(): HTMLButtonElement[] {
-      const add = screen.getByRole("button", { name: "Add a new project…" })
-      return [...add.parentElement!.querySelectorAll("button")]
-    }
+    const footer = () => document.querySelector<HTMLElement>('[data-slot="modal-footer"]')!
+    const footerButtons = () => [...footer().querySelectorAll("button")]
 
     it("offers Add a new project and Add standalone agent in the new intent", () => {
       seed("new")
@@ -518,44 +538,38 @@ describe("NewAgentPickerDialog", () => {
       )
       expect(heights[0]).not.toBe("")
       expect(heights[1]).toBe(heights[0])
-      // 40px on a phone and on any coarse pointer.
-      expect(heights[0]).toContain("max-md:h-10")
       expect(heights[0]).toContain("pointer-coarse:h-10")
     })
 
-    it("stacks the actions on a narrow screen and sets them side by side above it", () => {
+    // A phone's footer does not spend a row on each action: the two share one,
+    // each at least 44px tall, and a label that does not fit its half wraps.
+    it("sets the actions side by side on a phone too, each a finger tall", () => {
+      vi.stubGlobal("innerWidth", 390)
       seed("new")
       render(<NewAgentPickerDialog />)
-      const row = footerButtons()[0].parentElement!
-      expect(row.className).toContain("grid-cols-1")
-      // Side by side: two equal columns with the divider's own column between.
-      expect(row.className).toContain("sm:grid-cols-[1fr_auto_1fr]")
+      expect(footer().className).toContain("grid-cols-[1fr_auto_1fr]")
+      for (const button of footerButtons()) {
+        expect(button.className).toContain("min-h-11")
+        // The label wraps in its half of the row rather than truncating.
+        expect(button.querySelector("span")!.className).not.toContain("truncate")
+      }
     })
 
-    // jsdom cannot lay out, so the two layouts are pinned by their responsive
-    // classes: the divider takes no box while stacked and appears from sm up.
-    it("divides the actions with a thin rule side by side and none when stacked", () => {
+    it("divides the two actions with a thin rule that is no click target", () => {
       seed("new")
       render(<NewAgentPickerDialog />)
-      const row = footerButtons()[0].parentElement!
-      const dividers = row.querySelectorAll('[data-slot="footer-divider"]')
+      const dividers = footer().querySelectorAll('[data-slot="footer-divider"]')
       expect(dividers).toHaveLength(1)
       const divider = dividers[0] as HTMLElement
-      // Between the two actions, decorative, and never a click target.
-      expect(divider.previousElementSibling).toBe(footerButtons()[0])
-      expect(divider.nextElementSibling).toBe(footerButtons()[1])
+      // Between the two doors. Each door sits in its disabled-hint wrapper.
+      expect(divider.previousElementSibling).toBe(footerButtons()[0].parentElement)
+      expect(divider.nextElementSibling).toBe(footerButtons()[1].parentElement)
       expect(divider.getAttribute("aria-hidden")).toBe("true")
       expect(divider.tagName.toLowerCase()).not.toBe("button")
-      // Stacked: display none, so no horizontal rule and no extra row gap.
-      expect(divider.classList.contains("hidden")).toBe(true)
-      // Side by side: a 1px vertical rule in the theme's border token.
-      expect(divider.classList.contains("sm:block")).toBe(true)
       expect(divider.classList.contains("w-px")).toBe(true)
-      expect(divider.classList.contains("self-stretch")).toBe(true)
       expect(divider.classList.contains("bg-border")).toBe(true)
-      expect(divider.className).not.toMatch(/(^|\s)(h-px|border-t|border-b)(\s|$)/)
       // The row's gap sits on both sides of the rule.
-      expect(row.classList.contains("gap-3")).toBe(true)
+      expect(footer().classList.contains("gap-3")).toBe(true)
     })
 
     // jsdom cannot paint a focus ring, so the shared Button's ring classes are
