@@ -23,9 +23,11 @@ function walk(dir: string): string[] {
 // builder is recognised, so a new one is scanned the day it is written.
 const PROSE_IMPORT = /from\s+["'](?:\.\/prose|@\/lib\/prose)["']/
 
-// A file that renders a modal imports one of the two dialog primitives, which
-// finds a modal whose file is not named like one.
-const DIALOG_IMPORT = /from\s+["']@\/components\/ui\/(?:alert-)?dialog["']/
+// A file that renders a modal imports the `Modal` component or, until it is
+// moved onto it, one of the two dialog primitives, which finds a modal whose
+// file is not named like one.
+const DIALOG_IMPORT =
+  /from\s+["']@\/components\/(?:modal|ui\/(?:alert-)?dialog)["']/
 
 // Which files the guard reads, by rule rather than by list: every dialog under
 // components/ (subdirectories included), found by its name or by the dialog
@@ -297,7 +299,16 @@ describe("every name a modal shows is the shared chip", () => {
       ),
     ).toBe(true)
     expect(
+      isScanned(
+        "components/terminal/Chooser.tsx",
+        'import { Modal, useOpenEpoch } from "@/components/modal"',
+      ),
+    ).toBe(true)
+    expect(
       isScanned("components/Other.tsx", 'import { x } from "@/components/ui/dialog-ish"'),
+    ).toBe(false)
+    expect(
+      isScanned("components/Other.tsx", 'import { x } from "@/components/modal-ish"'),
     ).toBe(false)
     expect(isScanned("components/SomeDialog.test.tsx", "")).toBe(false)
     expect(isScanned("lib/prose.tsx", "")).toBe(false)

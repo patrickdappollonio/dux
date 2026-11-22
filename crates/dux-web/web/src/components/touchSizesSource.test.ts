@@ -40,6 +40,8 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
     "CloneProjectDialog.tsx",
     "NewLauncherDialog.tsx",
     "ProjectList.tsx",
+    "modal/Modal.tsx",
+    "modal/ModalFooter.tsx",
     "CustomizeWebappDialog.tsx",
     "WorktreesDialog.tsx",
     "MoveEntryDialog.tsx",
