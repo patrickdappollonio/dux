@@ -213,7 +213,6 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/MacrosDialog.tsx": { ...ROOTS(3) },
   "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
   "components/TaskManagerDialog.tsx": { ...ROOTS(2) },
-  "components/WorktreesDialog.tsx": { ...ROOTS(3) },
 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One

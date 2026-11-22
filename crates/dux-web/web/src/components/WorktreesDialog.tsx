@@ -3,16 +3,14 @@ import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import {
+  Modal,
+  ModalGroupHeading,
+  useHeldWhileClosed,
+  useModalLifetime,
+} from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   DropdownMenu,
@@ -22,8 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { branchCheckboxLabel, predatesSentence } from "@/lib/branchWarning"
 import { clipboardWorktree } from "@/lib/flatClipboard"
 import {
@@ -55,9 +52,8 @@ function pathTail(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path
 }
 
-// The row body truncates both the branch and the path, so the hover tooltip
-// surfaces the full values (plus any disabled reason for attached rows) to keep
-// the clipped text recoverable.
+// The row truncates its branch, so the hover tooltip gives the full name beside
+// the path (plus any disabled reason for attached rows).
 function rowTooltip(entry: ProjectWorktreeEntryView): ReactNode {
   return (
     <span className="flex flex-col gap-0.5">
@@ -85,12 +81,12 @@ function WorktreeRowBody({
   return (
     <>
       <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-      {/* Stack the branch over the path so neither competes for the row's
-         horizontal room; min-w-0 lets both truncate with an ellipsis instead of
-         overflowing the fixed-width dialog and forcing a horizontal scrollbar. */}
+      {/* The branch over the path, so neither competes for the row's width.
+         The branch truncates; the path is what tells two worktrees apart, so
+         it wraps and is always read in full. */}
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate font-mono text-sm">{entry.branch_name}</span>
-        <span className="truncate text-xs text-muted-foreground">
+        <span className="text-xs break-all text-muted-foreground">
           {entry.worktree_path}
         </span>
         {heldBy ? (
@@ -127,8 +123,12 @@ function WorktreeRowBody({
 // says nothing never deletes a branch.
 function ConfirmDeleteWorktree() {
   const { deleteWorktreeTarget, attachWorktreeEntries } = useDux()
-  // The component stays mounted across opens, so every close path resets this
-  // to its default, or the next confirmation opens carrying the last answer.
+  const open = deleteWorktreeTarget !== null
+  // The worktree this was opened on, kept while the close animates.
+  const target = useHeldWhileClosed(open, deleteWorktreeTarget)
+  // The component stays mounted across opens, so the answer goes back to its
+  // default once a close has finished, or the next confirmation would open
+  // carrying the last one.
   const [deleteBranch, setDeleteBranch] = useState(true)
   // The listing is refetched after every delete, so it is a live truth this
   // dialog can close itself on: a worktree that left the list (removed from
@@ -140,23 +140,10 @@ function ConfirmDeleteWorktree() {
         e.worktree_path === deleteWorktreeTarget.entry.worktree_path &&
         e.adoptable,
     )
-  const open = useVanishedTargetGuard(
-    deleteWorktreeTarget !== null,
-    stillListed,
-    () => {
-      setDeleteBranch(true)
-      closeDeleteWorktree()
-    },
-  )
-  const entry = deleteWorktreeTarget?.entry
+  const entry = target?.entry
   // A detached worktree has no branch, so there is no choice to offer and the
   // request must not ask for one.
   const branch = entry?.branch ?? null
-
-  function handleCancel() {
-    setDeleteBranch(true)
-    closeDeleteWorktree()
-  }
 
   function handleConfirm() {
     if (!deleteWorktreeTarget) return
@@ -165,78 +152,68 @@ function ConfirmDeleteWorktree() {
       deleteWorktreeTarget.entry.worktree_path,
       branch !== null && deleteBranch,
     )
-    handleCancel()
+    closeDeleteWorktree()
   }
 
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={open}
-      onOpenChange={(o) => {
-        if (!o) handleCancel()
-      }}
+      vanished={open && !stillListed}
+      onClose={closeDeleteWorktree}
+      onClosed={() => setDeleteBranch(true)}
+      title={
+        <>
+          Delete the worktree for <InlineCode>{entry?.branch_name}</InlineCode>?
+        </>
+      }
+      cancelLabel="Cancel"
+      confirm={{ label: "Delete worktree", tone: "destructive", onSelect: handleConfirm }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            Delete the worktree for <InlineCode>{entry?.branch_name}</InlineCode>?
-          </DialogTitle>
-        </DialogHeader>
-        <div
-          data-testid="delete-worktree-confirm"
-          className="grid gap-2 text-sm text-destructive"
-        >
+      <div
+        data-testid="delete-worktree-confirm"
+        className="grid gap-2 text-sm text-destructive"
+      >
+        <p>
+          <InlineCode>{entry?.worktree_path}</InlineCode> will be
+          removed from disk. This action cannot be undone: dux has no trash and
+          removes the directory forcibly.
+        </p>
+        {entry?.dirty ? (
           <p>
-            <InlineCode>{entry?.worktree_path}</InlineCode> will be
-            removed from disk. This action cannot be undone: dux has no trash and
-            removes the directory forcibly.
+            This worktree has uncommitted changes, and they go with it. Nothing
+            in there that is not committed exists anywhere else.
           </p>
-          {entry?.dirty ? (
-            <p>
-              This worktree has uncommitted changes, and they go with it. Nothing
-              in there that is not committed exists anywhere else.
-            </p>
-          ) : null}
-          {branch === null ? (
-            <p className="text-muted-foreground">
-              This worktree is not on a branch, so there is no branch to keep or
-              delete. Only the working directory is removed.
-            </p>
-          ) : deleteBranch ? (
-            <p>
-              The branch <InlineCode>{branch}</InlineCode> will be
-              deleted with it, forcibly. Any commits on it that are not merged
-              anywhere else go too.
-            </p>
-          ) : (
-            <p className="text-muted-foreground">
-              The branch <InlineCode>{branch}</InlineCode> is kept.
-              Only the working directory is removed.
-            </p>
-          )}
-        </div>
-        {branch !== null ? (
-          <CheckboxRow
-            id="delete-worktree-branch"
-            checked={deleteBranch}
-            onCheckedChange={setDeleteBranch}
-          >
-            Also delete the branch{" "}
-            <InlineCode>{branch}</InlineCode>
-          </CheckboxRow>
         ) : null}
-        {/* Misclick-safe spacing between the warning (and the checkbox, which
-           must not sit flush against the buttons) and the footer. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={handleCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            Delete worktree
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        {branch === null ? (
+          <p className="text-muted-foreground">
+            This worktree is not on a branch, so there is no branch to keep or
+            delete. Only the working directory is removed.
+          </p>
+        ) : deleteBranch ? (
+          <p>
+            The branch <InlineCode>{branch}</InlineCode> will be
+            deleted with it, forcibly. Any commits on it that are not merged
+            anywhere else go too.
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            The branch <InlineCode>{branch}</InlineCode> is kept.
+            Only the working directory is removed.
+          </p>
+        )}
+      </div>
+      {branch !== null ? (
+        <CheckboxRow
+          id="delete-worktree-branch"
+          checked={deleteBranch}
+          onCheckedChange={setDeleteBranch}
+        >
+          Also delete the branch{" "}
+          <InlineCode>{branch}</InlineCode>
+        </CheckboxRow>
+      ) : null}
+    </Modal>
   )
 }
 
@@ -294,7 +271,7 @@ function LeftoverRow({
         <FolderX className="size-4 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="truncate font-mono text-sm">{pathTail(folder.path)}</span>
-          <span className="truncate text-xs text-muted-foreground">
+          <span className="text-xs break-all text-muted-foreground">
             {folder.path}
           </span>
           {folder.folder_present ? null : (
@@ -383,11 +360,13 @@ function LeftoverRow({
 // unticked and carries the agent-delete dialog's warning for its provenance.
 function ConfirmDeleteLeftoverFolder() {
   const { deleteLeftoverTarget, attachWorktreeLeftovers } = useDux()
-  const folder = deleteLeftoverTarget?.folder
+  const open = deleteLeftoverTarget !== null
+  // The folder this was opened on, kept while the close animates.
+  const folder = useHeldWhileClosed(open, deleteLeftoverTarget)?.folder
   const provenance = folder?.branch_provenance ?? null
   const tickedByDefault = provenance === null || provenance === "created"
   // `null` until the user touches the box, so each open starts at the
-  // default for its own folder.
+  // default for its own folder; it goes back to null once a close has finished.
   const [choice, setChoice] = useState<boolean | null>(null)
   const folderPresent = folder?.folder_present ?? true
   const deleteBranches = !folderPresent || (choice ?? tickedByDefault)
@@ -396,25 +375,12 @@ function ConfirmDeleteLeftoverFolder() {
     attachWorktreeLeftovers.some((f) =>
       sameLeftover(f, deleteLeftoverTarget.folder),
     )
-  const open = useVanishedTargetGuard(
-    deleteLeftoverTarget !== null,
-    stillListed,
-    () => {
-      setChoice(null)
-      closeDeleteLeftover()
-    },
-  )
   const branches = folder?.branches ?? []
   const undeletable = folder?.undeletable ?? []
   const warning =
     branches.length > 0 && provenance !== null
       ? predatesSentence(provenance, branches)
       : null
-
-  function handleCancel() {
-    setChoice(null)
-    closeDeleteLeftover()
-  }
 
   function handleConfirm() {
     if (!deleteLeftoverTarget) return
@@ -423,112 +389,106 @@ function ConfirmDeleteLeftoverFolder() {
       deleteLeftoverTarget.folder.path,
       deleteBranches ? branches : [],
     )
-    handleCancel()
+    closeDeleteLeftover()
   }
 
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={open}
-      onOpenChange={(o) => {
-        if (!o) handleCancel()
+      vanished={open && !stillListed}
+      onClose={closeDeleteLeftover}
+      onClosed={() => setChoice(null)}
+      title={leftoverDeleteTitle(folderPresent, branches.length)}
+      cancelLabel="Cancel"
+      confirm={{
+        label: folderPresent
+          ? "Delete folder"
+          : branches.length === 1
+            ? "Delete branch"
+            : "Delete branches",
+        tone: "destructive",
+        onSelect: handleConfirm,
       }}
     >
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>
-            {leftoverDeleteTitle(folderPresent, branches.length)}
-          </DialogTitle>
-        </DialogHeader>
-        <div
-          data-testid="delete-leftover-confirm"
-          className="grid gap-2 text-sm text-destructive"
-        >
-          <p>
+      <div
+        data-testid="delete-leftover-confirm"
+        className="grid gap-2 text-sm text-destructive"
+      >
+        <p>
+          {renderProse(
+            leftoverDeleteBodyProse(
+              folder?.path ?? "",
+              folderPresent,
+              folder?.left_by !== "manager",
+            ),
+          )}
+        </p>
+        {branches.length > 0 ? (
+          <p
+            data-testid="delete-leftover-branch-fate"
+            className={deleteBranches ? undefined : "text-muted-foreground"}
+          >
             {renderProse(
-              leftoverDeleteBodyProse(
-                folder?.path ?? "",
-                folderPresent,
-                folder?.left_by !== "manager",
-              ),
+              leftoverBranchFateProse(branches, deleteBranches, folderPresent),
             )}
           </p>
-          {branches.length > 0 ? (
-            <p
-              data-testid="delete-leftover-branch-fate"
-              className={deleteBranches ? undefined : "text-muted-foreground"}
+        ) : null}
+        {undeletable.map((branch) => (
+          <p
+            key={branch.name}
+            data-testid="delete-leftover-kept-branch"
+            className="text-muted-foreground"
+          >
+            {renderProse(leftoverKeptBranchProse(branch))}
+          </p>
+        ))}
+      </div>
+      {branches.length > 0 ? (
+        <div className="grid gap-2">
+          {folderPresent ? (
+            <CheckboxRow
+              id="delete-leftover-branches"
+              checked={deleteBranches}
+              onCheckedChange={setChoice}
             >
-              {renderProse(
-                leftoverBranchFateProse(branches, deleteBranches, folderPresent),
-              )}
+              {renderProse(branchCheckboxLabel(branches))}
+            </CheckboxRow>
+          ) : null}
+          {/* The danger sits in the sentence, never in a red checkbox, as in
+             the agent-delete dialog. */}
+          {warning !== null ? (
+            <p
+              data-testid="delete-leftover-branch-warning"
+              className="text-sm text-destructive"
+            >
+              {renderProse(warning)}
             </p>
           ) : null}
-          {undeletable.map((branch) => (
-            <p
-              key={branch.name}
-              data-testid="delete-leftover-kept-branch"
-              className="text-muted-foreground"
-            >
-              {renderProse(leftoverKeptBranchProse(branch))}
-            </p>
-          ))}
         </div>
-        {branches.length > 0 ? (
-          <div className="grid gap-2">
-            {folderPresent ? (
-              <CheckboxRow
-                id="delete-leftover-branches"
-                checked={deleteBranches}
-                onCheckedChange={setChoice}
-              >
-                {renderProse(branchCheckboxLabel(branches))}
-              </CheckboxRow>
-            ) : null}
-            {/* The danger sits in the sentence, never in a red checkbox, as in
-               the agent-delete dialog. */}
-            {warning !== null ? (
-              <p
-                data-testid="delete-leftover-branch-warning"
-                className="text-sm text-destructive"
-              >
-                {renderProse(warning)}
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-        {/* Misclick-safe spacing between the checkbox and the footer. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={handleCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={handleConfirm}>
-            {folderPresent
-              ? "Delete folder"
-              : branches.length === 1
-                ? "Delete branch"
-                : "Delete branches"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      ) : null}
+    </Modal>
   )
 }
 
-// Mounted only while the dialog is open so its local select/name state resets on
-// each open, with no set-state-in-effect needed (matching AddProjectDialog).
-function WorktreesBody({ projectId }: { projectId: string }) {
-  const {
-    attachWorktreeEntries,
-    attachWorktreeLeftovers,
-    attachWorktreeLoading,
-    attachWorktreeFromPicker,
-    spine,
-  } = useDux()
+// Keyed by the open, so its selection and its name start empty on each one.
+function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const state = useDux()
+  const { spine } = state
+  // The project this open is about, and the listing as it was when the close
+  // began: closing empties the store's copy.
+  const [projectId] = useState(state.attachWorktreeTarget ?? "")
+  const attachWorktreeEntries = useHeldWhileClosed(open, state.attachWorktreeEntries)
+  const attachWorktreeLeftovers = useHeldWhileClosed(open, state.attachWorktreeLeftovers)
+  const attachWorktreeLoading = useHeldWhileClosed(open, state.attachWorktreeLoading)
+  const attachWorktreeFromPicker = useHeldWhileClosed(open, state.attachWorktreeFromPicker)
   const [selected, setSelected] = useState<string | null>(null)
   const [name, setName] = useState("")
 
   const project = spine?.projects.find((p) => p.id === projectId)
-  const projectName = project?.name ?? "project"
+  // The name it had, kept once the project is gone and the dialog is closing.
+  const [projectName, setProjectName] = useState(project?.name ?? "project")
+  if (project && project.name !== projectName) setProjectName(project.name)
   const adoptable = attachWorktreeEntries.filter((e) => e.adoptable)
   const attached = attachWorktreeEntries.filter(
     (e) => !e.adoptable && !e.being_removed && e.agent_id !== null,
@@ -559,6 +519,13 @@ function WorktreesBody({ projectId }: { projectId: string }) {
   const empty = name.trim() === ""
   const invalidNonEmpty = !empty && !isValidAgentName(name)
   const disabled = !selected || empty || invalidNonEmpty
+  const refusal = !selected
+    ? "Pick an unused worktree first."
+    : empty
+      ? "Type a display name for the agent first."
+      : invalidNonEmpty
+        ? INVALID_AGENT_NAME
+        : null
 
   function handleSelect(entry: ProjectWorktreeEntryView) {
     setSelected(entry.worktree_path)
@@ -581,20 +548,33 @@ function WorktreesBody({ projectId }: { projectId: string }) {
   }
 
   return (
-    <DialogContent className="sm:max-w-xl" showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>
+    <Modal
+      kind="form"
+      open={open}
+      // Managing the worktrees of a deleted project is moot.
+      vanished={open && project === undefined}
+      onClose={closeAttachWorktree}
+      onClosed={onClosed}
+      size="xl"
+      title={
+        <>
           Worktrees in <InlineCode>{projectName}</InlineCode>
-        </DialogTitle>
-        <DialogDescription>
-          Every worktree dux manages for this project. Pick an unused one to
-          start an agent on its existing branch, or remove one you are done with.
-        </DialogDescription>
-      </DialogHeader>
-
-      <ScrollArea className="h-[40vh] rounded-md border md:h-64">
+        </>
+      }
+      description="Every worktree dux manages for this project. Pick an unused one to start an agent on its existing branch, or remove one you are done with."
+      // Up to the project list, offered only when the user came down from
+      // there. Cancel still closes the whole flow.
+      back={attachWorktreeFromPicker ? { label: "Projects", onSelect: handleBack } : undefined}
+      submit={{
+        label: "Create agent",
+        tone: "primary",
+        onSelect: handleAttach,
+        disabledReason: refusal,
+      }}
+    >
+      <ScrollArea className="h-64 shrink-0 rounded-md border max-md:h-auto max-md:min-h-40 max-md:flex-1">
         {attachWorktreeLoading ? (
-          <div className="flex h-[40vh] items-center justify-center md:h-64">
+          <div className="flex h-64 items-center justify-center max-md:h-40">
             <GlyphSpinner className="text-lg text-muted-foreground" />
           </div>
         ) : adoptable.length === 0 &&
@@ -602,7 +582,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
           inUse.length === 0 &&
           beingRemoved.length === 0 &&
           attachWorktreeLeftovers.length === 0 ? (
-          <div className="flex h-[40vh] items-center justify-center px-6 text-center text-sm text-muted-foreground md:h-64">
+          <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground max-md:h-40">
             This project has no worktrees dux manages yet. Create an agent and
             one appears here.
           </div>
@@ -658,11 +638,10 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             })}
             {attached.length > 0 ? (
               <>
-                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
-                  Already has an agent
-                  <span className="block text-xs font-normal">
-                    To remove one of these, delete the agent holding it.
-                  </span>
+                <div className="pt-2">
+                  <ModalGroupHeading inset caption="To remove one of these, delete the agent holding it.">
+                    Already has an agent
+                  </ModalGroupHeading>
                 </div>
                 {/* Deliberately no delete action: removing a worktree from under
                   * a live agent breaks the session, and deleting the agent is
@@ -685,12 +664,10 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             ) : null}
             {inUse.length > 0 ? (
               <>
-                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
-                  In use
-                  <span className="block text-xs font-normal">
-                    Something is still using these. Each row says what; remove
-                    one once that has finished.
-                  </span>
+                <div className="pt-2">
+                  <ModalGroupHeading inset caption="Something is still using these. Each row says what; remove one once that has finished.">
+                    In use
+                  </ModalGroupHeading>
                 </div>
                 {/* No actions: the server refuses a removal while the folder is
                   * in use, so offering one would only end in that refusal. */}
@@ -708,12 +685,10 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             ) : null}
             {beingRemoved.length > 0 ? (
               <>
-                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
-                  Being removed
-                  <span className="block text-xs font-normal">
-                    Their agents were just deleted. dux removes each one once
-                    that agent has stopped.
-                  </span>
+                <div className="pt-2">
+                  <ModalGroupHeading inset caption="Their agents were just deleted. dux removes each one once that agent has stopped.">
+                    Being removed
+                  </ModalGroupHeading>
                 </div>
                 {/* No actions: the removal is already running, and a second
                   * one would only race it. */}
@@ -731,12 +706,10 @@ function WorktreesBody({ projectId }: { projectId: string }) {
             ) : null}
             {attachWorktreeLeftovers.length > 0 ? (
               <>
-                <div className="px-3 pt-3 pb-1 text-sm font-medium text-muted-foreground">
-                  Left over after a delete
-                  <span className="block text-xs font-normal">
-                    git let go of these folders, but something was still
-                    writing into them when dux deleted them.
-                  </span>
+                <div className="pt-2">
+                  <ModalGroupHeading inset caption="git let go of these folders, but something was still writing into them when dux deleted them.">
+                    Left over after a delete
+                  </ModalGroupHeading>
                 </div>
                 {attachWorktreeLeftovers.map((folder) => (
                   <LeftoverRow
@@ -752,7 +725,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
       </ScrollArea>
 
       {selected ? (
-        <div className="grid gap-1">
+        <div className="grid shrink-0 gap-1">
           <Input
             value={name}
             onChange={(e) => {
@@ -785,20 +758,7 @@ function WorktreesBody({ projectId }: { projectId: string }) {
         </div>
       ) : null}
 
-      <DialogFooter>
-        {attachWorktreeFromPicker ? (
-          <Button variant="outline" onClick={handleBack}>
-            Back
-          </Button>
-        ) : null}
-        <Button variant="outline" onClick={closeAttachWorktree}>
-          Cancel
-        </Button>
-        <Button disabled={disabled} onClick={handleAttach}>
-          Create agent
-        </Button>
-      </DialogFooter>
-    </DialogContent>
+    </Modal>
   )
 }
 
@@ -806,29 +766,14 @@ function WorktreesBody({ projectId }: { projectId: string }) {
 // project, adopts an unused one as an agent, and removes one no longer wanted.
 // Its store surface is named `attachWorktree` rather than after these labels.
 export function WorktreesDialog() {
-  const { attachWorktreeTarget, spine } = useDux()
-  const project = spine?.projects.find((p) => p.id === attachWorktreeTarget)
-  // Closes the dialog when the project vanishes from the ViewModel: managing
-  // the worktrees of a deleted project is moot. See the hook.
-  const open = useVanishedTargetGuard(
-    attachWorktreeTarget !== null,
-    project !== undefined,
-    closeAttachWorktree,
-  )
-
+  const open = useDux().attachWorktreeTarget !== null
+  const life = useModalLifetime(open)
   return (
     <>
-      <Dialog
-        open={open}
-        onOpenChange={(o) => {
-          if (!o) closeAttachWorktree()
-        }}
-      >
-        {open && attachWorktreeTarget !== null && (
-          <WorktreesBody projectId={attachWorktreeTarget} />
-        )}
-      </Dialog>
-      {/* A sibling, not a child: the manager stays open behind the
+      {life.mounted ? (
+        <WorktreesBody key={life.epoch} open={open} onClosed={life.onClosed} />
+      ) : null}
+      {/* Siblings, not children: the manager stays open behind a
          confirmation, so cancelling lands the user back on the list. */}
       <ConfirmDeleteWorktree />
       <ConfirmDeleteLeftoverFolder />

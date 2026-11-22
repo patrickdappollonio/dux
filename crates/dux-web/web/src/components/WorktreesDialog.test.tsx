@@ -132,15 +132,16 @@ describe("WorktreesDialog", () => {
     expect(screen.getByRole("button", { name: "Create agent" })).toBeTruthy()
   })
 
-  it("shows each row's branch and path, and truncates both", () => {
+  it("truncates each row's branch and shows its path in full, wrapped", () => {
     seed([entry()])
     render(<WorktreesDialog />)
     // The stubbed tooltip renders its content inline too, so both strings
-    // appear twice; the ROW's copy is the one carrying `truncate`.
-    const truncated = (text: string) =>
-      screen.getAllByText(text).some((el) => el.className.includes("truncate"))
-    expect(truncated(LONG_BRANCH)).toBe(true)
-    expect(truncated(LONG_PATH)).toBe(true)
+    // appear twice; the ROW's copy is the one carrying the class.
+    const classed = (text: string, cls: string) =>
+      screen.getAllByText(text).some((el) => el.className.split(" ").includes(cls))
+    expect(classed(LONG_BRANCH, "truncate")).toBe(true)
+    expect(classed(LONG_PATH, "break-all")).toBe(true)
+    expect(classed(LONG_PATH, "truncate")).toBe(false)
   })
 
   it("marks a worktree with uncommitted changes and leaves a clean one unmarked", () => {
@@ -421,12 +422,12 @@ describe("WorktreesDialog", () => {
   it("offers Back only when the user drilled in from the project picker", () => {
     seed([entry()])
     render(<WorktreesDialog />)
-    expect(screen.queryByRole("button", { name: "Back" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Back to Projects" })).toBeNull()
     cleanup()
 
     seed([entry()], { attachWorktreeFromPicker: true } as Partial<DuxState>)
     render(<WorktreesDialog />)
-    fireEvent.click(screen.getByRole("button", { name: "Back" }))
+    fireEvent.click(screen.getByRole("button", { name: "Back to Projects" }))
     // Back returns to the project list; Cancel (still present) closes the lot.
     expect(openNewAgentPicker).toHaveBeenCalledWith("from_worktree")
     expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy()
