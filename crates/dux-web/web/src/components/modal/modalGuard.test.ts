@@ -72,7 +72,6 @@ const ALLOWED: Record<string, string> = {
   "components/FirstLoadDialog.tsx": NOT_MOVED,
   "components/PullRequestsDialog.tsx": NOT_MOVED,
   // Pickers.
-  "components/NewLauncherDialog.tsx": NOT_MOVED,
   "components/ProjectsDialog.tsx": NOT_MOVED,
   "components/ProjectList.tsx":
     "The Projects list's header, which goes when ProjectsDialog moves; the New agent picker takes only its rows.",
