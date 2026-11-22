@@ -208,10 +208,10 @@ has:
 
 ![The Pull requests dialog: three pull requests with their states and branches, a grip on each row for dragging, the Sort control beside the Pull requests and Branches tabs, and Attach pull request… at the bottom.](/screens/pull-requests-dialog.png)
 
-On a phone the dialog is a sheet, and the second line of each row keeps the state and the
-branch so the title has the room.
+On a phone the dialog covers the screen, and the second line of each row keeps the state and
+the branch so the title has the room.
 
-![The Pull requests sheet on a phone, listing the same three pull requests with a grip and a ⋯ on each row.](/screens/phone-pull-requests-sheet.png)
+![The Pull requests dialog on a phone, listing the same three pull requests with a grip and a ⋯ on each row.](/screens/phone-pull-requests-sheet.png)
 
 In the terminal UI the same list is the `pull-requests` palette command. It opens a picker
 where Enter opens the selected pull request, and the picker names the keys for everything

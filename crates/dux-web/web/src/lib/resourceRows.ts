@@ -27,7 +27,8 @@ export interface TaskRow {
   /** Stable React key and test handle: `dux`, `total`, `tab:<id>`, `term:<id>`. */
   key: string
   kind: TaskRowKind
-  /** The primary display name. Never truncated to nothing by the renderer. */
+  /** The primary display name. The list shortens one too long for its row and
+   * keeps the whole of it in a hint. */
   name: string
   /** Secondary text (provider, foreground command), or null. */
   detail: string | null

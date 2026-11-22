@@ -367,7 +367,8 @@ detached, reopenable state. **Delete** removes the agent from dux entirely.
 The **Task Manager**, in the app menu behind the cog button, lists every running agent tab
 and every terminal (companion, project and standalone), with its CPU, memory, and process
 count. Expand any row to see the child processes underneath. It also shows a row for dux
-itself and a total.
+itself and a total. A name too long for its row is shortened with an ellipsis: hover it,
+move keyboard focus onto it, or tap it to read the whole name.
 
 - It stops rows one by one, or all at once. Every stop confirms first.
 - Everything it stops, it stops **immediately**, with no shutdown wait, and each
