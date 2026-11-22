@@ -3,11 +3,9 @@ import { Info, Loader2, TriangleAlert } from "lucide-react"
 import { lazy, Suspense, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
-import { FormDialogContent } from "@/components/FormDialogContent"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
-import { Dialog } from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useIsMobile } from "@/hooks/use-mobile"
 import {
   closeConfigEditor,
   dismissConfigEditorConflict,
@@ -38,7 +36,7 @@ function ConfigEditorForm({
 }) {
   return (
     <>
-      <div className="h-[60vh] shrink-0 overflow-hidden rounded-md border border-border max-md:h-auto max-md:min-h-48 max-md:flex-1">
+      <div className="h-[60dvh] shrink-0 overflow-hidden rounded-md border border-border max-md:h-auto max-md:min-h-48 max-md:flex-1">
         {/* ChunkBoundary wraps Suspense (not inside it) so a failed lazy
             import after a redeploy surfaces its reload-needed error instead
             of an eternal spinner (same idiom as EditorBody). */}
@@ -103,75 +101,69 @@ function ConfigEditorForm({
 // and saving persists the file without applying it: the running config is
 // unchanged until a reload. A callout in the form says so.
 export function ConfigEditorDialog() {
-  const {
-    configEditorOpen,
-    configEditorContent,
-    configEditorLoading,
-    configEditorError,
-    configEditorConflict,
-  } = useDux()
-  const phone = useIsMobile()
+  const { configEditorOpen } = useDux()
+  const life = useModalLifetime(configEditorOpen)
+  // Keyed by the open, so each one starts from the file as it is read then.
+  return life.mounted ? (
+    <ConfigEditor key={life.epoch} open={configEditorOpen} onClosed={life.onClosed} />
+  ) : null
+}
+
+function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const state = useDux()
+  // Closing clears the store's copy. Held, a failed read stays a failed read
+  // while it fades, never an empty editor with a Save under the pointer.
+  const content = useHeldWhileClosed(open, state.configEditorContent)
+  const loading = useHeldWhileClosed(open, state.configEditorLoading)
+  const error = useHeldWhileClosed(open, state.configEditorError)
+  const conflict = useHeldWhileClosed(open, state.configEditorConflict ?? null)
   // The draft lives here rather than in the form, so loading, a failed read and
   // the form are one popup: remounting it once the file arrives would move
-  // focus onto its first button. Each read that lands seeds the draft afresh.
-  const [text, setText] = useState(configEditorContent)
-  const [seenLoading, setSeenLoading] = useState(configEditorLoading)
-  if (seenLoading !== configEditorLoading) {
-    setSeenLoading(configEditorLoading)
-    if (!configEditorLoading) setText(configEditorContent)
+  // focus. Each read that lands seeds the draft afresh.
+  const [text, setText] = useState(content)
+  const [seenLoading, setSeenLoading] = useState(loading)
+  if (seenLoading !== loading) {
+    setSeenLoading(loading)
+    if (!loading) setText(content)
   }
-  const loadFailed = !configEditorLoading && configEditorError !== null && !configEditorContent
+  const loadFailed = !loading && error !== null && !content
 
   return (
-    <Dialog
-      open={configEditorOpen}
-      onOpenChange={(o) => {
-        if (!o) closeConfigEditor()
-      }}
+    <Modal
+      kind="form"
+      open={open}
+      onClose={closeConfigEditor}
+      onClosed={onClosed}
+      size="4xl"
+      title={
+        <>
+          Edit <InlineCode>config.toml</InlineCode>
+        </>
+      }
+      description="Edit the dux configuration. It is validated before saving; invalid TOML is rejected with the reason. Saving does not apply the change; run “Reload config” afterwards."
+      submit={
+        loadFailed
+          ? { label: "Retry", tone: "primary", onSelect: () => openConfigEditor() }
+          : {
+              label: "Save",
+              tone: "primary",
+              onSelect: () => saveConfigEditor(text),
+              disabledReason: loading ? "The file is still loading." : null,
+            }
+      }
     >
-      <FormDialogContent
-        phone={phone}
-        title={
-          <>
-            Edit <InlineCode>config.toml</InlineCode>
-          </>
-        }
-        description="Edit the dux configuration. It is validated before saving; invalid TOML is rejected with the reason. Saving does not apply the change; run “Reload config” afterwards."
-        onClose={closeConfigEditor}
-        className="sm:max-w-4xl"
-        footer={
-          configEditorLoading ? undefined : (
-            <>
-              <Button variant="outline" onClick={closeConfigEditor}>
-                Cancel
-              </Button>
-              {loadFailed ? (
-                <Button onClick={() => openConfigEditor()}>Retry</Button>
-              ) : (
-                <Button onClick={() => saveConfigEditor(text)}>Save</Button>
-              )}
-            </>
-          )
-        }
-      >
-        {configEditorLoading ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">
-            Loading config.toml…
-          </p>
-        ) : loadFailed ? (
-          // Load failed (no content). Never render an editable, Save-enabled
-          // editor here: saving its blank content would overwrite the real
-          // config.toml. Show the error and a Retry instead.
-          <p className="py-8 text-center text-sm text-destructive">{configEditorError}</p>
-        ) : (
-          <ConfigEditorForm
-            text={text}
-            setText={setText}
-            error={configEditorError}
-            conflict={configEditorConflict ?? null}
-          />
-        )}
-      </FormDialogContent>
-    </Dialog>
+      {loading ? (
+        <p className="py-12 text-center text-sm text-muted-foreground">
+          Loading config.toml…
+        </p>
+      ) : loadFailed ? (
+        // Load failed (no content). Never render an editable, Save-enabled
+        // editor here: saving its blank content would overwrite the real
+        // config.toml. Show the error and a Retry instead.
+        <p className="py-8 text-center text-sm text-destructive">{error}</p>
+      ) : (
+        <ConfigEditorForm text={text} setText={setText} error={error} conflict={conflict} />
+      )}
+    </Modal>
   )
 }

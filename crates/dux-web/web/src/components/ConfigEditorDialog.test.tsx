@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -85,19 +85,34 @@ describe("ConfigEditorDialog", () => {
     expect(editor.textContent).toContain("[server]")
   })
 
-  it("does not move focus onto Cancel when the config arrives on a computer", async () => {
+  it("leaves focus where the open put it when the config arrives", async () => {
     seed({ configEditorOpen: true, configEditorLoading: true })
     const { rerender } = render(<ConfigEditorDialog />)
-    await new Promise((r) => setTimeout(r, 50))
-    const opened = document.activeElement
-    // Opening put focus inside the popup, so the comparison below is about it.
-    expect(screen.getByRole("dialog").contains(opened)).toBe(true)
+    const cancel = await screen.findByRole("button", { name: "Cancel" })
+    // A form with no field to type in yet opens on its Cancel.
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
     seed({ configEditorOpen: true, configEditorContent: "[ui]\n" })
     rerender(<ConfigEditorDialog />)
     await screen.findByTestId("code-editor")
     await new Promise((r) => setTimeout(r, 50))
-    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Cancel" }))
-    expect(document.activeElement).toBe(opened)
+    expect(document.activeElement).toBe(cancel)
+  })
+
+  it("takes no Save while the file is loading", () => {
+    seed({ configEditorOpen: true, configEditorLoading: true })
+    render(<ConfigEditorDialog />)
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+  })
+
+  it("keeps a failed read a failed read while it closes", () => {
+    seed({ configEditorOpen: true, configEditorError: "boom", configEditorContent: "" })
+    const { rerender } = render(<ConfigEditorDialog />)
+    // What closing leaves in the store: no error and no content.
+    seed({ configEditorOpen: false })
+    rerender(<ConfigEditorDialog />)
+    expect(screen.queryByTestId("code-editor")).toBeNull()
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull()
   })
 
   it("shows the load error with a Retry instead of an editable editor", () => {
