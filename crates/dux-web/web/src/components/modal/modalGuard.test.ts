@@ -2,6 +2,18 @@
 // makes its rules (how it is presented, how it closes, what has focus when it
 // opens, where its buttons go) impossible for a caller to forget. This guard
 // reads the source and fails on one built any other way.
+//
+// It reads text, not the program, so it cannot see:
+//   - a root reached through anything but an import, a `const`/`let`/`var`
+//     alias of an imported name or `createElement` (a property of an object,
+//     a function's argument, a re-export of a re-export it does not follow);
+//   - a role written through anything but a literal or a constant holding one;
+//   - a full-screen layer whose classes are not literals in one string or one
+//     run of comma-separated strings (a conditional part, a variable, a
+//     computed style);
+//   - anything in a test file.
+// And it cannot hold a number to "only goes down": the counts live in this
+// file, so raising one is allowed, as a one-line change a reviewer sees.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { dirname, join, normalize, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -24,7 +36,8 @@ const MODAL_MODULES: Record<string, readonly string[] | "*"> = {
   "components/ui/command.tsx": ["CommandDialog"],
   "@base-ui/react/dialog": "*",
   "@base-ui/react/alert-dialog": "*",
-  "@base-ui/react": ["Dialog", "AlertDialog"],
+  "@base-ui/react/drawer": "*",
+  "@base-ui/react": ["Dialog", "AlertDialog", "Drawer"],
 }
 
 const EXTENSION = /\.(?:[cm]?[jt]sx?)$/
@@ -57,9 +70,24 @@ const escape = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const count = (source: string, pattern: RegExp) => [...source.matchAll(pattern)].length
 
 // How many times a file opens a dialog or sheet root it imported, under
-// whatever local name. An import whose names cannot be read counts once.
+// whatever local name, a `const` alias of it or `createElement`. An import
+// whose names cannot be read counts once.
 function rootsOpened(srcDir: string, file: string, source: string): number {
   let opened = 0
+  // `<Name` for a wrapper, `<Name.Root` for a base-ui namespace, and the same
+  // name handed to `createElement`.
+  const opens = (local: string, namespace: boolean): number => {
+    const name = escape(local) + (namespace ? "\\.Root" : "")
+    const tags = count(source, new RegExp(`<${name}(?=[\\s/>])`, "g"))
+    const calls = count(source, new RegExp(`createElement\\(\\s*${name}(?![\\w$.])`, "g"))
+    let aliased = 0
+    for (const alias of source.matchAll(
+      new RegExp(`\\b(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*${escape(local)}(\\.Root)?(?![\\w$.])`, "g"),
+    )) {
+      aliased += opens(alias[1], namespace && alias[2] === undefined)
+    }
+    return tags + calls + aliased
+  }
   for (const match of source.matchAll(IMPORT)) {
     const clause = match[1]
     const names = MODAL_MODULES[resolveImport(srcDir, file, match[2] ?? match[3] ?? match[4])]
@@ -83,10 +111,10 @@ function rootsOpened(srcDir: string, file: string, source: string): number {
       if (!imported) continue
       if (names !== "*" && !names.includes(imported)) continue
       // A base-ui namespace is opened as `<Local.Root>`, a wrapper as `<Local>`.
-      const tag = names === "*" || resolveImport(srcDir, file, match[2]) === "@base-ui/react"
-        ? `<${escape(local)}\\.Root(?=[\\s/>])`
-        : `<${escape(local)}(?=[\\s/>])`
-      opened += count(source, new RegExp(tag, "g"))
+      opened += opens(
+        local,
+        names === "*" || resolveImport(srcDir, file, match[2]) === "@base-ui/react",
+      )
     }
     const whole = /^\s*([\w$]+)\s*(?:,|$)/.exec(clause)?.[1]
     if (whole) opened += 1
@@ -100,8 +128,34 @@ function rootsOpened(srcDir: string, file: string, source: string): number {
 const ROLE =
   /(?<![[\w])["'`]?role["'`]?\s*(?:[=:]\s*\{?|,)\s*["'`](?:alert)?dialog["'`]|(?<![[\w-])["'`]?aria-?modal["'`]?\s*[=:,]/gi
 
-// One class string that pins a layer over the whole viewport.
-const FULL_SCREEN = /["'`][^"'`]*\bfixed\b[^"'`]*\binset-0\b[^"'`]*["'`]|["'`][^"'`]*\binset-0\b[^"'`]*\bfixed\b[^"'`]*["'`]/g
+// A dialog role held in a constant, and every place that constant is a role.
+function rolesFromConstants(source: string): number {
+  let found = 0
+  for (const held of source.matchAll(
+    /\b(?:const|let|var)\s+([\w$]+)\s*=\s*["'`](?:alert)?dialog["'`]/g,
+  )) {
+    const name = escape(held[1])
+    found += count(
+      source,
+      new RegExp(`(?<![[\\w])["'\`]?role["'\`]?\\s*(?:[=:]\\s*\\{?|,)\\s*${name}(?![\\w$])`, "g"),
+    )
+  }
+  return found
+}
+
+// One class string, or one run of comma-separated strings (the arguments of
+// `cn`), that pins a layer over the whole viewport.
+const LITERAL = String.raw`["'\`][^"'\`]*["'\`]`
+const RUN = String.raw`(?:\s*,\s*${LITERAL})*?\s*,\s*`
+const FULL_SCREEN = new RegExp(
+  [
+    String.raw`["'\`][^"'\`]*\bfixed\b[^"'\`]*\binset-0\b[^"'\`]*["'\`]`,
+    String.raw`["'\`][^"'\`]*\binset-0\b[^"'\`]*\bfixed\b[^"'\`]*["'\`]`,
+    String.raw`["'\`][^"'\`]*\bfixed\b[^"'\`]*["'\`]${RUN}["'\`][^"'\`]*\binset-0\b[^"'\`]*["'\`]`,
+    String.raw`["'\`][^"'\`]*\binset-0\b[^"'\`]*["'\`]${RUN}["'\`][^"'\`]*\bfixed\b[^"'\`]*["'\`]`,
+  ].join("|"),
+  "g",
+)
 
 interface ModalMarks {
   /** Dialog or sheet roots opened. */
@@ -115,7 +169,7 @@ interface ModalMarks {
 function modalMarks(srcDir: string, file: string, source: string): ModalMarks {
   return {
     roots: rootsOpened(srcDir, file, source),
-    roles: count(source, ROLE),
+    roles: count(source, ROLE) + rolesFromConstants(source),
     layers: count(source, FULL_SCREEN),
   }
 }
@@ -132,126 +186,121 @@ function touchesPrimitive(srcDir: string, file: string, source: string): boolean
 }
 
 // The only files that may build a modal from the primitives: the two
-// primitives themselves and this module, which wraps them.
+// primitives themselves and the component that wraps them.
 const PRIMITIVES = ["components/ui/dialog.tsx", "components/ui/sheet.tsx"]
+const MODAL_COMPONENT = ["components/modal/Modal.tsx"]
 
 function isGuarded(name: string): boolean {
-  if (!/\.tsx?$/.test(name) || name.includes(".test.")) return false
-  if (PRIMITIVES.includes(name)) return false
-  return !/^(?:components\/modal|test)\//.test(name)
+  if (!EXTENSION.test(name) || name.endsWith(".d.ts") || name.includes(".test.")) return false
+  return !PRIMITIVES.includes(name) && !MODAL_COMPONENT.includes(name)
 }
 
-const marksOf = (name: string, source: string) => {
-  const marks = modalMarks(srcDir, name, source)
-  return marks.roots + marks.roles + marks.layers
-}
+const marksOf = (name: string, source: string): ModalMarks => modalMarks(srcDir, name, source)
+const total = (marks: ModalMarks) => marks.roots + marks.roles + marks.layers
 
-interface Entry {
-  /** How many marks of a modal the file carries today: dialog or sheet roots
-   * it opens, dialog roles written by hand, full-screen layers. */
-  marks: number
+interface Entry extends ModalMarks {
   why?: string
 }
 
-// The files that still build a modal another way. Each pins its marks, so a
-// modal added to a listed file fails as one added to a new file does, and an
-// entry whose file has moved or changed fails until the entry follows it.
-const STILL_TO_MOVE: Record<string, Entry> = {
-  "components/AddProjectDialog.tsx": { marks: 1 },
-  "components/AgentEnvDialog.tsx": { marks: 1 },
-  "components/AgentInfoDialog.tsx": { marks: 1 },
-  "components/AgentStartupCommandDialog.tsx": { marks: 1 },
-  "components/AttachPullRequestDialog.tsx": { marks: 2 },
-  "components/ChangeBaseBranchDialog.tsx": { marks: 2 },
-  "components/ChangeProviderDialog.tsx": { marks: 1 },
-  "components/CheckoutDefaultBranchDialog.tsx": { marks: 1 },
-  "components/CloneProjectDialog.tsx": { marks: 1 },
-  "components/CommitDialog.tsx": { marks: 1 },
-  "components/ConfigEditorDialog.tsx": { marks: 1 },
-  "components/ConfirmCloseEditorTabDialog.tsx": { marks: 1 },
-  "components/ConfirmCloseTabDialog.tsx": { marks: 1 },
-  "components/ConfirmDeleteTerminalDialog.tsx": { marks: 1 },
-  "components/ConfirmDetachAgentDialog.tsx": { marks: 1 },
-  "components/ConfirmDiscardFileDialog.tsx": { marks: 1 },
-  "components/ConfirmDiscardFilesDialog.tsx": { marks: 1 },
-  "components/ConfirmForceReconnectDialog.tsx": { marks: 1 },
-  "components/ConfirmForceStopAgentDialog.tsx": { marks: 1 },
-  "components/ConfirmRecreateWorkingCopyDialog.tsx": { marks: 1 },
-  "components/ConfirmReloadFileDialog.tsx": { marks: 1 },
-  "components/ConfirmReopenEncodingDialog.tsx": { marks: 1 },
-  "components/ConfirmStopTabDialog.tsx": { marks: 1 },
-  "components/ConfirmUseExistingBranchDialog.tsx": { marks: 1 },
-  "components/ConfirmVanishedEditorDialog.tsx": { marks: 1 },
-  "components/CopiedTextDialog.tsx": { marks: 1 },
-  "components/CreateAgentDialog.tsx": { marks: 1 },
-  "components/CustomizeWebappDialog.tsx": { marks: 3 },
-  "components/DeleteEntryDialog.tsx": { marks: 1 },
-  "components/DeleteProjectDialog.tsx": { marks: 1 },
-  "components/DeleteSessionDialog.tsx": { marks: 1 },
-  "components/FileInfoDialog.tsx": { marks: 1 },
-  "components/FirstLoadDialog.tsx": { marks: 1 },
-  "components/FormDialogContent.tsx": { marks: 0, why: "The shell the forms not yet moved share; it goes with the last of them." },
-  "components/GlobalEnvDialog.tsx": { marks: 1 },
-  "components/MacrosDialog.tsx": { marks: 3 },
-  "components/MoveEntryDialog.tsx": { marks: 1 },
-  "components/NewEntryDialog.tsx": { marks: 1 },
-  "components/ProjectInfoDialog.tsx": { marks: 1 },
-  "components/ProjectList.tsx": { marks: 0, why: "The Projects list's header, which goes when ProjectsDialog moves; the New agent picker takes only its rows." },
-  "components/ProjectSettingsDialog.tsx": { marks: 1 },
-  "components/ProjectsDialog.tsx": { marks: 1 },
-  "components/PullRequestsDialog.tsx": { marks: 2 },
-  "components/RemoveProjectDialog.tsx": { marks: 1 },
-  "components/RenameEntryDialog.tsx": { marks: 1 },
-  "components/RenameSessionDialog.tsx": { marks: 1 },
-  "components/SaveConflictDialog.tsx": { marks: 1 },
-  "components/StackNewDialog.tsx": { marks: 1 },
-  "components/StartupLogsDialog.tsx": { marks: 1 },
-  "components/TaskManagerDialog.tsx": { marks: 2 },
-  "components/WorktreesDialog.tsx": { marks: 3 },
-  "components/ui/command.tsx": { marks: 1, why: "CommandDialog, which only its own test mounts: delete it or move it." },
-}
+const NONE = { roots: 0, roles: 0, layers: 0 } as const
+const ROOT = { roots: 1, roles: 0, layers: 0 } as const
+const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 
-// The size of the list above. THESE NUMBERS ONLY GO DOWN: a modal is moved
-// onto `Modal` and its entry and marks leave. Raising one is adding a modal
-// built another way, which is what this guard exists to stop.
-const STILL_TO_MOVE_SIZE = { files: 52, marks: 60 }
+// The files that still build a modal another way. Each pins its marks of each
+// kind, so a modal added to a listed file fails as one added to a new file
+// does, and so does trading one kind of mark for another; an entry whose file
+// has moved or changed fails until the entry follows it.
+const STILL_TO_MOVE: Record<string, Entry> = {
+  "components/AddProjectDialog.tsx": { ...ROOT },
+  "components/AgentEnvDialog.tsx": { ...ROOT },
+  "components/AgentInfoDialog.tsx": { ...ROOT },
+  "components/AgentStartupCommandDialog.tsx": { ...ROOT },
+  "components/AttachPullRequestDialog.tsx": { ...ROOTS(2) },
+  "components/ChangeBaseBranchDialog.tsx": { ...ROOTS(2) },
+  "components/ChangeProviderDialog.tsx": { ...ROOT },
+  "components/CheckoutDefaultBranchDialog.tsx": { ...ROOT },
+  "components/CloneProjectDialog.tsx": { ...ROOT },
+  "components/CommitDialog.tsx": { ...ROOT },
+  "components/ConfigEditorDialog.tsx": { ...ROOT },
+  "components/ConfirmCloseEditorTabDialog.tsx": { ...ROOT },
+  "components/ConfirmCloseTabDialog.tsx": { ...ROOT },
+  "components/ConfirmDeleteTerminalDialog.tsx": { ...ROOT },
+  "components/ConfirmDetachAgentDialog.tsx": { ...ROOT },
+  "components/ConfirmDiscardFileDialog.tsx": { ...ROOT },
+  "components/ConfirmDiscardFilesDialog.tsx": { ...ROOT },
+  "components/ConfirmForceReconnectDialog.tsx": { ...ROOT },
+  "components/ConfirmForceStopAgentDialog.tsx": { ...ROOT },
+  "components/ConfirmRecreateWorkingCopyDialog.tsx": { ...ROOT },
+  "components/ConfirmReloadFileDialog.tsx": { ...ROOT },
+  "components/ConfirmReopenEncodingDialog.tsx": { ...ROOT },
+  "components/ConfirmStopTabDialog.tsx": { ...ROOT },
+  "components/ConfirmUseExistingBranchDialog.tsx": { ...ROOT },
+  "components/ConfirmVanishedEditorDialog.tsx": { ...ROOT },
+  "components/CopiedTextDialog.tsx": { ...ROOT },
+  "components/CreateAgentDialog.tsx": { ...ROOT },
+  "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
+  "components/DeleteEntryDialog.tsx": { ...ROOT },
+  "components/DeleteProjectDialog.tsx": { ...ROOT },
+  "components/DeleteSessionDialog.tsx": { ...ROOT },
+  "components/FileInfoDialog.tsx": { ...ROOT },
+  "components/FirstLoadDialog.tsx": { ...ROOT },
+  "components/FormDialogContent.tsx": { ...NONE, why: "The shell the forms not yet moved share; it goes with the last of them." },
+  "components/GlobalEnvDialog.tsx": { ...ROOT },
+  "components/MacrosDialog.tsx": { ...ROOTS(3) },
+  "components/MoveEntryDialog.tsx": { ...ROOT },
+  "components/NewEntryDialog.tsx": { ...ROOT },
+  "components/ProjectInfoDialog.tsx": { ...ROOT },
+  "components/ProjectList.tsx": { ...NONE, why: "The Projects list's header, which goes when ProjectsDialog moves; the New agent picker takes only its rows." },
+  "components/ProjectSettingsDialog.tsx": { ...ROOT },
+  "components/ProjectsDialog.tsx": { ...ROOT },
+  "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
+  "components/RemoveProjectDialog.tsx": { ...ROOT },
+  "components/RenameEntryDialog.tsx": { ...ROOT },
+  "components/RenameSessionDialog.tsx": { ...ROOT },
+  "components/SaveConflictDialog.tsx": { ...ROOT },
+  "components/StackNewDialog.tsx": { ...ROOT },
+  "components/StartupLogsDialog.tsx": { ...ROOT },
+  "components/TaskManagerDialog.tsx": { ...ROOTS(2) },
+  "components/WorktreesDialog.tsx": { ...ROOTS(3) },
+  "components/ui/command.tsx": { ...ROOT, why: "CommandDialog, which only its own test mounts: delete it or move it." },
+}
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One
 // the detector cannot see names what to find in its file instead.
 const NOT_MODALS: Record<string, Entry & { file: string; why: string; names?: string }> = {
   "the offline cover": {
     file: "components/OfflineOverlay.tsx",
-    marks: 3,
+    roots: 0, roles: 2, layers: 1,
     why: "Nobody can dismiss it: no focus trap, no Escape, no history entry. It lifts when the connection is back.",
   },
   "the auth gate": {
     file: "components/AuthGate.tsx",
-    marks: 1,
+    roots: 0, roles: 0, layers: 1,
     why: "A page in place of the app (sign-in, first password, unreachable), with the app inert under it; it has no dialog role, so only its full-screen layer is seen.",
   },
   "the editor overlay": {
     file: "components/EditorOverlay.tsx",
-    marks: 1,
+    ...ROOT,
     why: "A host for the whole editor at a URL position of its own, 80rem wide: not a modal with parts.",
   },
   "the phone's app menu": {
     file: "components/AppMenuSheet.tsx",
-    marks: 1,
+    ...ROOT,
     why: "A menu drawn as a bottom sheet.",
   },
   "menus and popovers as bottom sheets": {
     file: "components/ui/popupSheet.ts",
-    marks: 1,
+    roots: 0, roles: 0, layers: 1,
     why: "The backdrop the dropdown, context menu and popover primitives share on a phone.",
   },
   "the phone's sidebar drawer": {
     file: "components/ui/sidebar.tsx",
-    marks: 1,
+    ...ROOT,
     why: "Navigation chrome that slides in from the side.",
   },
   "the take-over card": {
     file: "components/terminal/partPieces.tsx",
-    marks: 0,
+    ...NONE,
     names: "function TakeoverCard(",
     why: "A cover inside one pane, over a terminal this device does not drive; the page around it stays live.",
   },
@@ -261,7 +310,7 @@ const listed = (name: string): Entry | undefined =>
   STILL_TO_MOVE[name] ?? Object.values(NOT_MODALS).find((entry) => entry.file === name)
 
 describe("the detector", () => {
-  const marks = (source: string, file = "components/Some.tsx") => marksOf(file, source)
+  const marks = (source: string, file = "components/Some.tsx") => total(marksOf(file, source))
 
   it("follows an import to the module it reaches, however it is spelled", () => {
     for (const [file, specifier] of [
@@ -292,6 +341,12 @@ describe("the detector", () => {
       ['import * as Parts from "@/components/ui/dialog"\n<Parts.Dialog />', 1],
       ['const parts = await import("@/components/ui/sheet")', 1],
       ['export { Dialog } from "@/components/ui/dialog"', 1],
+      ['import { Drawer } from "@base-ui/react/drawer"\n<Drawer.Root />', 1],
+      ['import { Drawer } from "@base-ui/react"\n<Drawer.Root />', 1],
+      ['import { Dialog } from "@/components/ui/dialog"\nconst D = Dialog\n<D open />', 1],
+      ['import { Dialog } from "@base-ui/react/dialog"\nconst R = Dialog.Root\n<R />', 1],
+      ['import { Dialog } from "@/components/ui/dialog"\ncreateElement(Dialog, { open: true })', 1],
+      ['import { Dialog } from "@base-ui/react/dialog"\nReact.createElement(Dialog.Root, {})', 1],
     ] as const) {
       expect(marks(bad), bad).toBe(expected)
     }
@@ -308,6 +363,9 @@ describe("the detector", () => {
       'const props = { "aria-modal": true }',
       '<div className="fixed inset-0 z-[300] bg-background">',
       'const COVER = "inset-0 z-10 fixed"',
+      '<div className={cn("fixed", "inset-0")}>',
+      'cn("inset-0 z-50", "bg-background", "fixed")',
+      'const ROLE = "alertdialog"\n<div role={ROLE}>',
     ]) {
       expect(marks(bad), bad).toBeGreaterThan(0)
     }
@@ -322,6 +380,7 @@ describe("the detector", () => {
       `const LAYER = '[role="dialog"], [role="alertdialog"]'`,
       '<div className="absolute inset-0">',
       '<div role="dialogue-box">',
+      'cn("fixed top-0", "right-0")',
     ]) {
       expect(marks(fine), fine).toBe(0)
     }
@@ -333,8 +392,12 @@ describe("the detector", () => {
     expect(touchesPrimitive(srcDir, "components/Some.tsx", source)).toBe(true)
   })
 
-  it("guards every source file but the two primitives, this module and tests", () => {
+  it("guards every source file but the two primitives, the Modal component and tests", () => {
     expect(isGuarded("components/SomeDialog.tsx")).toBe(true)
+    expect(isGuarded("components/modal/SomethingNew.tsx")).toBe(true)
+    expect(isGuarded("test/someHelper.tsx")).toBe(true)
+    expect(isGuarded("lib/legacy.js")).toBe(true)
+    expect(isGuarded("components/Old.jsx")).toBe(true)
     expect(isGuarded("components/terminal/SomeCard.tsx")).toBe(true)
     expect(isGuarded("components/ui/command.tsx")).toBe(true)
     expect(isGuarded("components/ui/new-wrapper.tsx")).toBe(true)
@@ -347,14 +410,15 @@ describe("the detector", () => {
 })
 
 describe("a modal is built with the Modal component", () => {
-  const found = new Map<string, number>()
+  const found = new Map<string, ModalMarks>()
   for (const path of walk(srcDir)) {
     const name = relative(srcDir, path).split("\\").join("/")
     if (!isGuarded(name)) continue
     const source = readFileSync(path, "utf-8")
     const marks = marksOf(name, source)
-    if (marks > 0 || touchesPrimitive(srcDir, name, source)) found.set(name, marks)
+    if (total(marks) > 0 || touchesPrimitive(srcDir, name, source)) found.set(name, marks)
   }
+  const kinds = ["roots", "roles", "layers"] as const
 
   it("and nowhere else: no file outside the lists builds one", () => {
     const unlisted = [...found.keys()].filter((name) => listed(name) === undefined)
@@ -364,33 +428,30 @@ describe("a modal is built with the Modal component", () => {
     ).toEqual([])
   })
 
-  it("and a listed file builds no more of them than it did", () => {
-    const changed = [...found]
-      .filter(([name, marks]) => listed(name) !== undefined && listed(name)!.marks !== marks)
-      .map(([name, marks]) => `${name}: listed ${listed(name)!.marks}, found ${marks}`)
+  it("and a listed file carries exactly the marks of each kind it is listed with", () => {
+    const changed = [...found].flatMap(([name, marks]) => {
+      const entry = listed(name)
+      if (entry === undefined) return []
+      return kinds
+        .filter((kind) => entry[kind] !== marks[kind])
+        .map((kind) => `${name}: ${kind} listed ${entry[kind]}, found ${marks[kind]}`)
+    })
     expect(
       changed,
-      "A listed file's marks changed. More: a modal was added without the Modal component; build it with <Modal>. Fewer: lower the entry and STILL_TO_MOVE_SIZE with it.",
+      "A listed file's marks changed. More: a modal was added without the Modal component; build it with <Modal>. Fewer: lower the entry with it.",
     ).toEqual([])
   })
 
   it("keeps no entry for a file that no longer needs one", () => {
     const stale = Object.keys(STILL_TO_MOVE).filter((name) => !found.has(name))
-    expect(stale, "Moved or gone: delete the entry and lower STILL_TO_MOVE_SIZE.").toEqual([])
+    expect(stale, "Moved or gone: delete the entry.").toEqual([])
     for (const [name, entry] of Object.entries(NOT_MODALS)) {
       expect(existsSync(join(srcDir, entry.file)), `${name}: ${entry.file} is gone`).toBe(true)
       const source = readFileSync(join(srcDir, entry.file), "utf-8")
-      expect(marksOf(entry.file, source), name).toBe(entry.marks)
+      const marks = marksOf(entry.file, source)
+      for (const kind of kinds) expect(marks[kind], `${name}: ${kind}`).toBe(entry[kind])
       if (entry.names) expect(source, `${name} is no longer in ${entry.file}`).toContain(entry.names)
       expect(entry.why.length, name).toBeGreaterThan(0)
     }
-  })
-
-  it("has a list of files still to move that only shrinks", () => {
-    const entries = Object.values(STILL_TO_MOVE)
-    expect(
-      { files: entries.length, marks: entries.reduce((sum, entry) => sum + entry.marks, 0) },
-      "STILL_TO_MOVE_SIZE only goes down. If the list grew, a modal was added without the Modal component: build it with <Modal> rather than raising the number.",
-    ).toEqual(STILL_TO_MOVE_SIZE)
   })
 })
