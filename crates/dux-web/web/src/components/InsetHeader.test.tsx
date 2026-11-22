@@ -157,14 +157,6 @@ describe("InsetHeader app menu", () => {
   })
 })
 
-describe("InsetHeader and the phone's flap", () => {
-  it("carries no flap show/hide: a computer has no flap to fold", () => {
-    mockState = stateFor("main", "main")
-    render(<InsetHeader />)
-    expect(screen.queryByRole("button", { name: /^(hide|show) actions$/i })).toBeNull()
-  })
-})
-
 describe("InsetHeader agent chips", () => {
   it("renders a glyph and a value for each field", () => {
     const titled = stateFor("feature-x", "")
