@@ -8,7 +8,7 @@ import {
   terminalKeysApply,
 } from "@/lib/composebar"
 import { isFirstTab } from "@/lib/agentTabs"
-import { useIsMobile } from "@/hooks/use-mobile"
+import { useIsPhoneDevice } from "@/hooks/use-mobile"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useTypingSurface } from "@/hooks/use-typing-surface"
 import { useFilePicker } from "@/hooks/use-file-picker"
@@ -287,7 +287,7 @@ export function useTerminalPaneSetup(props: TerminalPartProps) {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const ptyRef = useRef<PtySocket | null>(null)
-  const isMobile = useIsMobile()
+  const phoneDevice = useIsPhoneDevice()
   const isCoarsePointer = useIsCoarsePointer()
   const typingSurface = useTypingSurface()
   const { input: pickerInput, open: openFilePicker } = useFilePicker()
@@ -326,7 +326,7 @@ export function useTerminalPaneSetup(props: TerminalPartProps) {
     termRef,
     fitAddonRef,
     ptyRef,
-    isMobile,
+    phoneDevice,
     pickerInput,
     openFilePicker,
     dragActive,

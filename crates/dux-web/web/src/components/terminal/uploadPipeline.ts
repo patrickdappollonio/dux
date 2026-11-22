@@ -81,11 +81,12 @@ export type UploadPipelineDeps = {
   /// activating click, or the browser's user activation is spent and no dialog
   /// appears.
   openFilePicker: () => Promise<File[]>
-  /// Whether the pane is currently the input owner, and whether it is the
-  /// mobile layout: both are RENDER values, because the drag handlers are
-  /// rendered props rather than long-lived closures.
+  /// Whether the pane is currently the input owner, and whether this device is
+  /// a phone (`isPhoneDevice`, whatever layout is chosen): both are RENDER
+  /// values, because the drag handlers are rendered props rather than
+  /// long-lived closures.
   isOwner: boolean
-  isMobile: boolean
+  phoneDevice: boolean
   fileDropEnabled: boolean
   /// What the pane's row is, an agent (its tabs and its own terminals) or a
   /// terminal of its own, for a refusal to name.
@@ -128,7 +129,7 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
     insertComposeText,
     openFilePicker,
     isOwner,
-    isMobile,
+    phoneDevice,
     fileDropEnabled,
     rowSubject,
     rowDriver,
@@ -517,7 +518,9 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
   }
 
   // A drag from a non-owner, on a phone, or while file drop is off is left
-  // entirely alone: no overlay and no preventDefault.
+  // entirely alone: no overlay and no preventDefault. A phone is the device,
+  // not the layout: a computer showing the phone layout still drags files in,
+  // and the browser would otherwise open the dropped file in place of dux.
   //
   // The server refuses every upload under `[server] file_drop_max_bytes = 0`
   // and stays the real enforcement; this gate stops a disabled feature from
@@ -533,7 +536,7 @@ export function useUploadPipeline(deps: UploadPipelineDeps): UploadPipeline {
       // A pane still under its card while this page's take-over of the row is
       // in flight takes the drop, which waits for the claim.
       (isOwner || takeoverInFlight(row)) &&
-      !isMobile &&
+      !phoneDevice &&
       dragCarriesFiles(e.dataTransfer.types)
     )
   }

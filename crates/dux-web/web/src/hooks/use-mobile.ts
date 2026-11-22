@@ -3,6 +3,7 @@ import * as React from "react"
 import {
   currentShellLayout,
   currentLayoutChoice,
+  isPhoneDevice,
   subscribeShellLayout,
   type ShellLayout,
 } from "@/lib/shellLayout"
@@ -28,4 +29,9 @@ export function useIsMobile() {
 /** The person's layout choice on this device, live; null while automatic. */
 export function useLayoutChoice(): ShellLayout | null {
   return React.useSyncExternalStore(subscribeShellLayout, currentLayoutChoice, () => null)
+}
+
+/** Whether this device is a phone whatever layout is chosen, live. */
+export function useIsPhoneDevice(): boolean {
+  return React.useSyncExternalStore(subscribeShellLayout, isPhoneDevice, () => false)
 }

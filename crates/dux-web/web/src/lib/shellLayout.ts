@@ -96,17 +96,21 @@ export function readLayoutChoice(): ShellLayout | null {
 interface Answer {
   layout: ShellLayout
   choice: ShellLayout | null
+  phoneDevice: boolean
 }
 
 function computeAnswer(): Answer {
   const choice = readLayoutChoice()
-  const layout = resolveShellLayout({
+  const device = {
     width: window.innerWidth,
     screenShortSide: screenShortSide(),
     coarse: coarsePointer(),
+  }
+  return {
+    layout: resolveShellLayout({ ...device, choice }),
     choice,
-  })
-  return { layout, choice }
+    phoneDevice: device.coarse && resolveShellLayout({ ...device, choice: null }) === "phone",
+  }
 }
 
 // While anything subscribes, one set of window listeners keeps `cached` up to
@@ -120,7 +124,13 @@ let detach: (() => void) | null = null
 function refresh(): void {
   if (cached === null) return
   const next = computeAnswer()
-  if (next.layout === cached.layout && next.choice === cached.choice) return
+  if (
+    next.layout === cached.layout &&
+    next.choice === cached.choice &&
+    next.phoneDevice === cached.phoneDevice
+  ) {
+    return
+  }
   cached = next
   for (const listener of [...listeners]) listener()
 }
@@ -177,10 +187,19 @@ export function currentLayoutChoice(): ShellLayout | null {
 }
 
 /**
+ * Whether this device is a phone, or a touch screen the size of one, whatever
+ * layout a person chose: the question for what the hardware can do (drag a
+ * file in) rather than for how the page is laid out.
+ */
+export function isPhoneDevice(): boolean {
+  if (typeof window === "undefined") return false
+  return answer().phoneDevice
+}
+
+/**
  * Subscribe to everything that can move the answer: the choice, the window's
  * size (rotation included), the primary pointer, and a choice another tab of
- * this browser stored. The listener runs only when the layout or the choice
- * changed. Returns the unsubscribe.
+ * this browser stored. The listener runs only when an answer changed. Returns the unsubscribe.
  */
 export function subscribeShellLayout(listener: () => void): () => void {
   if (listeners.size === 0) {

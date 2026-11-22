@@ -5,6 +5,7 @@ import {
   LAYOUT_CHOICE_KEY,
   currentShellLayout,
   installShellLayoutAttribute,
+  isPhoneDevice,
   readLayoutChoice,
   resolveShellLayout,
   setLayoutChoice,
@@ -190,6 +191,24 @@ describe("the device's layout choice", () => {
       expect(seen).toHaveBeenCalledTimes(1)
     } finally {
       stop()
+    }
+  })
+
+  it.each([
+    ["a computer in the phone layout", 1440, { width: 2560, height: 1440 }, false, "phone", false],
+    ["a narrow computer window", 600, { width: 2560, height: 1440 }, false, null, false],
+    ["a phone in the computer layout", 390, { width: 390, height: 844 }, true, "computer", true],
+    ["a phone turned sideways", 851, { width: 851, height: 393 }, true, null, true],
+    ["a tablet", 1180, { width: 1180, height: 820 }, true, null, false],
+  ] as const)("tells a phone by its hardware, not its layout, on %s", (_n, width, screen, coarse, choice, phone) => {
+    const media = stubCoarsePointer(coarse)
+    try {
+      vi.stubGlobal("innerWidth", width)
+      vi.stubGlobal("screen", screen)
+      setLayoutChoice(choice)
+      expect(isPhoneDevice()).toBe(phone)
+    } finally {
+      media.restore()
     }
   })
 

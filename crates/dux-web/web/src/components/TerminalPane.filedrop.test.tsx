@@ -11,6 +11,7 @@ import type { DuxState } from "@/lib/store"
 import { notifyPtyOwner, resetPtyOwnerEpochs } from "@/lib/ptyOwnership"
 import { toastChips, toastText } from "@/test/toastText"
 import { stubCoarsePointer } from "@/test/matchMedia"
+import { setLayoutChoice } from "@/lib/shellLayout"
 
 /// A stand-in for xterm that does what xterm's `paste()` REALLY does.
 ///
@@ -490,6 +491,36 @@ describe("dropping a file onto an agent", () => {
     const opts = uploadDroppedFile.mock.calls[0][1] as { pty: string; conn: () => string | null }
     expect(opts.pty).toBe("s1")
     expect(opts.conn()).toBe("42")
+  })
+})
+
+describe("a drop and the layout", () => {
+  afterEach(() => setLayoutChoice(null))
+
+  it("is taken on a computer showing the phone layout", async () => {
+    uploadDroppedFile.mockResolvedValue(saved("shot.png"))
+    setLayoutChoice("phone")
+    render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+    const pane = screen.getByTestId("terminal-container").closest(".group")!
+    const over = createEvent.dragOver(pane, { dataTransfer: fileTransfer([file("shot.png")]) })
+    fireEvent(pane, over)
+    expect(over.defaultPrevented).toBe(true)
+    await drop([file("shot.png")])
+    expect(uploadDroppedFile).toHaveBeenCalledTimes(1)
+  })
+
+  it("is left to the browser on a phone showing the computer layout", async () => {
+    const pointer = stubCoarsePointer(true)
+    try {
+      vi.stubGlobal("innerWidth", 390)
+      vi.stubGlobal("screen", { width: 390, height: 844 })
+      setLayoutChoice("computer")
+      render(<TerminalPane kind="agent" id="s1" sessionId="s1" />)
+      await drop([file("shot.png")])
+      expect(uploadDroppedFile).not.toHaveBeenCalled()
+    } finally {
+      pointer.restore()
+    }
   })
 })
 

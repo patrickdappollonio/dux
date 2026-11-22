@@ -115,7 +115,7 @@ function setup(
       insertComposeText: (t) => drafted.push(t),
       openFilePicker: async () => [],
       isOwner: opts.owner ?? true,
-      isMobile: false,
+      phoneDevice: false,
       fileDropEnabled: true,
       rowSubject: "agent",
       rowDriver: () => "Firefox on Linux",
