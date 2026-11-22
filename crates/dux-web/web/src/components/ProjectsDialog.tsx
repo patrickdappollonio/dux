@@ -1,7 +1,8 @@
 import { GitBranch, TriangleAlert } from "lucide-react"
 import { useMemo, useState } from "react"
 
-import { ProjectList, type ProjectListRow } from "@/components/ProjectList"
+import { ProjectList } from "@/components/ProjectList"
+import type { ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { Dialog, DialogContent } from "@/components/ui/dialog"

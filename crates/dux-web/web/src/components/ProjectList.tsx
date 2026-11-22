@@ -5,7 +5,7 @@ import {
   Search,
   type LucideIcon,
 } from "lucide-react"
-import { useId, useMemo, useRef, useState, type ReactNode } from "react"
+import { useId, useRef, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -21,7 +21,11 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { MatchHighlight } from "@/components/MatchHighlight"
-import { useSearchPick } from "@/hooks/use-search-pick"
+import {
+  useProjectSearch,
+  type ProjectListRow,
+  type ProjectSearch,
+} from "@/components/projectSearch"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { openAddProject } from "@/lib/store"
 import { ACTIVE_ROW_RING, FOCUS_RING } from "@/lib/focusRing"
@@ -33,68 +37,69 @@ import {
 } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 
-/** One row of a project list: a project, or an orphaned group of agents whose
- * project record is gone. */
-export interface ProjectListRow {
-  id: string
-  name: string
-  /** Trailing text on the first line (a count), or null for none. */
-  label: string | null
-  /** An optional second line under the name. */
-  detail?: ReactNode
+/** The rows of a project list, each with the project's `⋯` menu. The caller
+ * hands the rows over already in order and puts this in the part that scrolls. */
+export function ProjectRows({
+  search,
+  onPick,
+  menu,
+}: {
+  search: ProjectSearch
+  onPick?: (id: string) => void
+  menu: (id: string) => ReactNode
+}) {
+  const { query, filtered, pick } = search
+  // Which row's menu is open. Controlled so a click on the row can open the
+  // same menu its `⋯` does.
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
+  return (
+    <>
+      <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+        Choose a project
+      </p>
+      {filtered.length === 0 ? (
+        <p className="px-2 py-4 text-sm text-muted-foreground">
+          {query.trim() === "" ? (
+            "No projects yet."
+          ) : (
+            <>
+              No projects match <InlineCode>{query}</InlineCode>.
+            </>
+          )}
+        </p>
+      ) : (
+        filtered.map((row) => (
+          <ProjectRow
+            key={row.id}
+            row={row}
+            onPick={onPick}
+            pickId={pick.rowId(row.id)}
+            active={pick.activeKey === row.id}
+            menuOpen={menuOpenId === row.id}
+            setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
+            menu={menu}
+            needle={query.trim().toLowerCase()}
+          />
+        ))
+      )}
+    </>
+  )
 }
 
-/**
- * The body of a dialog that lists projects, shared by the New agent picker and
- * the Projects list so the two cannot drift: the header with its search field,
- * the rows, each with the project's `⋯` menu, and the "Add a new project…"
- * footer. The caller renders it inside a `DialogContent` laid out as a flex
- * column and hands it the rows already in order (both callers freeze the order
- * when they open, so a list that re-sorts under the pointer cannot land a click
- * on the wrong project).
- *
- * `onPick` is what a row click does, and what Enter in the search field does to
- * the active match. Without one, a row click opens that row's menu, which is
- * the same menu its `⋯` opens, and the search field only filters.
- *
- * `footerAction`, when given, sits beside "Add a new project…" as an equal
- * second door (the New agent picker's standalone agent); without one the footer
- * is that single action.
- */
+/** The body of the Projects list. The caller renders it inside a
+ * `DialogContent` laid out as a flex column. */
 export function ProjectList({
   title,
   description,
   rows,
-  onPick,
   menu,
-  footerAction,
 }: {
   title: string
   description: string
   rows: ProjectListRow[]
-  onPick?: (id: string) => void
   menu: (id: string) => ReactNode
-  footerAction?: ProjectListFooterAction
 }) {
-  const [query, setQuery] = useState("")
-  // Which row's menu is open. Controlled so a click on the row can open the
-  // same menu its `⋯` does.
-  const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (q === "") return rows
-    return rows.filter((row) => row.name.toLowerCase().includes(q))
-  }, [rows, query])
-
-  const pick = useSearchPick({
-    query,
-    // A list without `onPick` has nothing for Enter to do.
-    items: onPick ? filtered : [],
-    keyOf: (row) => row.id,
-    onPick: (row) => onPick?.(row.id),
-  })
-
+  const search = useProjectSearch(rows, undefined)
   return (
     <>
       <DialogHeader className="shrink-0 p-4 pb-3">
@@ -103,106 +108,41 @@ export function ProjectList({
         <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
           <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            value={search.query}
+            onChange={(event) => search.setQuery(event.target.value)}
             placeholder="Search projects"
             aria-label="Search projects"
-            {...pick.fieldProps}
+            {...search.pick.fieldProps}
             className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
             autoFocus
           />
         </div>
       </DialogHeader>
 
-      {/* Height h-72 (not max-h) so the modal never grows or shrinks with the
-          result count as the user types; the list scrolls internally and the
-          empty state fills the same space instead of collapsing. It is a flex
-          child that may SHRINK (min-h-0, never grow) so that when the soft
-          keyboard shrinks the popup's dvh cap, this list gives up the space
-          and the header and Add-project footer stay on screen and tappable. */}
+      {/* A fixed height, so the dialog does not resize as a search narrows the
+          rows, and the one child that shrinks when the popup is capped. */}
       <ScrollArea className="h-72 min-h-0 shrink border-t">
         <div className="p-2">
-          <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-            Choose a project
-          </p>
-          {filtered.length === 0 ? (
-            <p className="px-2 py-4 text-sm text-muted-foreground">
-              {query.trim() === "" ? (
-                "No projects yet."
-              ) : (
-                <>
-                  No projects match <InlineCode>{query}</InlineCode>.
-                </>
-              )}
-            </p>
-          ) : (
-            filtered.map((row) => (
-              <ProjectRow
-                key={row.id}
-                row={row}
-                onPick={onPick}
-                pickId={pick.rowId(row.id)}
-                active={pick.activeKey === row.id}
-                menuOpen={menuOpenId === row.id}
-                setMenuOpen={(open) => setMenuOpenId(open ? row.id : null)}
-                menu={menu}
-                needle={query.trim().toLowerCase()}
-              />
-            ))
-          )}
+          <ProjectRows search={search} menu={menu} />
         </div>
       </ScrollArea>
 
-      {/* One column on a narrow phone, where two labels side by side would
-          truncate, and two equal columns from sm up with a thin rule in its
-          own column between them. The rule is display:none while stacked, so
-          it draws nothing and adds no row gap there. The gap-3 gutter keeps
-          the two targets misclick-safe apart on either axis, and side by side
-          it sits on both sides of the rule. */}
-      <div
-        className={cn(
-          "grid shrink-0 grid-cols-1 gap-3 border-t p-2",
-          footerAction && "sm:grid-cols-[1fr_auto_1fr]",
-        )}
-      >
-        <FooterButton
-          title="Add a new project…"
-          icon={FolderPlus}
-          onSelect={openAddProject}
-        />
-        {footerAction ? (
-          <>
-            <div
-              data-slot="footer-divider"
-              aria-hidden="true"
-              className="hidden w-px self-stretch bg-border sm:block"
-            />
-            <FooterButton {...footerAction} />
-          </>
-        ) : null}
+      <div className="grid shrink-0 grid-cols-1 border-t p-2">
+        <FooterButton title="Add a new project…" icon={FolderPlus} onSelect={openAddProject} />
       </div>
     </>
   )
 }
 
-/** A second action beside "Add a new project…" in the list's footer. */
-export interface ProjectListFooterAction {
-  /** Trailing "…" when it opens a dialog, as every footer action so far does. */
+interface FooterAction {
   title: string
   icon: LucideIcon
   onSelect: () => void
 }
 
-// A footer action. The height is explicit and shared, so the pair is always one
-// height whatever their labels: 36px under a fine pointer, where the only
-// neighbours are the list above (behind a border and padding) and the other
-// footer action across a 12px gutter, and the 40px floor on a phone and on any
-// coarse pointer.
-// It is not a `Button` (its label is left-aligned, muted and regular weight), so
-// it borrows that Button's keyboard focus ring; the transparent 1px border is
-// what the ring's border half colours, and px-[7px] keeps the content where px-2
-// had it.
-function FooterButton({ title, icon: Icon, onSelect }: ProjectListFooterAction) {
+// 36px under a fine pointer, whose only neighbour is the list above, behind a
+// border. The transparent border is what the focus ring's border half colours.
+function FooterButton({ title, icon: Icon, onSelect }: FooterAction) {
   return (
     <button
       type="button"
