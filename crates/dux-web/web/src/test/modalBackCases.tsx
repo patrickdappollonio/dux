@@ -48,20 +48,26 @@ const asking = () => screen.queryByText("Discard unsaved changes?")
 
 export function describeModalBack(browser: BrowserHistory): void {
   describe("the browser's Back over a modal", () => {
+    // Set by hand and put back by hand: unstubbing every global would take the
+    // caller's own stubs (its offline `fetch`) with it.
+    const width = window.innerWidth
+    const media = window.matchMedia
     beforeEach(() => {
-      vi.stubGlobal("innerWidth", 1280)
-      vi.stubGlobal("matchMedia", (query: string) => ({
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
+      window.matchMedia = ((query: string) => ({
         matches: false,
         media: query,
         addEventListener: () => {},
         removeEventListener: () => {},
-      }))
+      })) as unknown as typeof window.matchMedia
     })
     // A close takes the modal's entry away by a traversal, which on a history
     // that runs them later is still under way when the test ends.
     afterEach(async () => {
       cleanup()
-      vi.unstubAllGlobals()
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
+      window.matchMedia = media
+      Reflect.deleteProperty(navigator, "userActivation")
       await new Promise((resolve) => setTimeout(resolve, 20))
     })
 
@@ -113,7 +119,10 @@ export function describeModalBack(browser: BrowserHistory): void {
       const before = browser.index
       render(editing({ changes: 1, onClose }))
       await waitFor(() => expect(browser.index).toBe(before + 1))
-      vi.stubGlobal("navigator", { userActivation: { isActive: false } })
+      Object.defineProperty(navigator, "userActivation", {
+        configurable: true,
+        value: { isActive: false },
+      })
       act(() => browser.back())
       await waitFor(() => expect(asking()).not.toBeNull())
       await waitFor(() => expect(browser.index).toBe(before + 1))

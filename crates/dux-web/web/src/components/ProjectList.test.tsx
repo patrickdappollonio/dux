@@ -5,10 +5,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { installBrowserHistory } from "@/test/browserHistory"
 
 const browser = installBrowserHistory()
-vi.stubGlobal(
-  "fetch",
-  vi.fn(() => Promise.reject(new Error("offline test"))),
-)
+const offline = vi.fn(() => Promise.reject(new Error("offline test")))
+vi.stubGlobal("fetch", offline)
 await import("@/lib/store")
 
 import { Dialog, DialogContent } from "@/components/ui/dialog"
@@ -45,6 +43,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
+  vi.stubGlobal("fetch", offline)
   void browser
 })
 

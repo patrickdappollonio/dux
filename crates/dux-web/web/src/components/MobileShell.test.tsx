@@ -2220,6 +2220,22 @@ describe("MobileShell flap show/hide", () => {
     }
   })
 
+  // Out of theater the header is back and nothing hides its show/hide, so only
+  // the flight keeps a press off it while the flap flies home under it.
+  it("takes no press on the show/hide while the flap flies home out of theater", () => {
+    mockState = agentState({ theater: true })
+    const view = render(<MobileShell />)
+    const later = performance.now() + 10_000
+    const clock = vi.spyOn(performance, "now").mockReturnValue(later)
+    try {
+      mockState = agentState({ theater: false })
+      view.rerender(<MobileShell />)
+      expect(screen.getByLabelText("Hide actions").hasAttribute("inert")).toBe(true)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it("leaves a hidden flap hidden under a full-pane cover, with the way back in the header", () => {
     setFlapHidden(true)
     registerPaneCover("s1", "box")

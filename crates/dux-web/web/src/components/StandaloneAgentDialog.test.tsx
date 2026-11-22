@@ -227,7 +227,12 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   it("keeps the project list's space while the list is on its way", () => {
     seed(null)
     const view = render(<StandaloneAgentDialog />)
-    expect(document.querySelector("[data-project-shortcuts-pending]")).not.toBeNull()
+    const pending = document.querySelector("[data-project-shortcuts-pending]")
+    // The rows' own height for as many rows as there are projects, which is
+    // how many arrive.
+    const room = pending?.querySelector<HTMLElement>("[style]")
+    expect(room?.style.getPropertyValue("--rows")).toBe("2")
+    expect(room?.className).toContain("h-[min(calc(var(--rows)*2.25rem),8.75rem)]")
     seed(SHORTCUTS)
     view.rerender(<StandaloneAgentDialog />)
     expect(document.querySelector("[data-project-shortcuts-pending]")).toBeNull()

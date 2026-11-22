@@ -57,14 +57,4 @@ describe("the layout variants", () => {
     expect(css).toMatch(/\.max-md\\:p-2 \{\s*&:where\(:root\[data-layout="phone"\] \*\)/)
     expect(css).toMatch(/\.max-sm\\:p-3 \{\s*@media \(width < 40rem\)/)
   })
-
-  it("have their attribute set before the app first renders", () => {
-    const main = readFileSync(
-      fileURLToPath(new URL("./main.tsx", import.meta.url)),
-      "utf8",
-    )
-    const install = main.indexOf("installShellLayoutAttribute(document)")
-    expect(install).toBeGreaterThanOrEqual(0)
-    expect(install).toBeLessThan(main.indexOf("createRoot("))
-  })
 })

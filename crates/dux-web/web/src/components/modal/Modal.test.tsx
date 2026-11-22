@@ -12,10 +12,8 @@ import { describeModalBack } from "@/test/modalBackCases"
 // Back reaches a modal through the store, which gives every open one a history
 // entry, so the real store is loaded over a history that has one.
 const browser = installBrowserHistory()
-vi.stubGlobal(
-  "fetch",
-  vi.fn(() => Promise.reject(new Error("offline test"))),
-)
+const offline = vi.fn(() => Promise.reject(new Error("offline test")))
+vi.stubGlobal("fetch", offline)
 await import("@/lib/store")
 
 import { Modal, useModalLifetime } from "./index"
@@ -79,6 +77,9 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  // The width and the pointer each test set, and nothing the store relies on.
+  vi.unstubAllGlobals()
+  vi.stubGlobal("fetch", offline)
   void browser
 })
 
@@ -382,6 +383,38 @@ describe("a picker's description", () => {
       .getByText("What this is for")
       .compareDocumentPosition(screen.getByLabelText("Search things"))
     expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
+
+// The body's scroll position is kept across a switch between card and cover;
+// the scroll events the browser fires as it clamps the other presentation are
+// not the person's and change nothing.
+describe("the body's scroll across a switch between card and cover", () => {
+  const body = () => document.querySelector<HTMLElement>('[data-slot="modal-body"]')!
+  const scrollTo = (top: number) => {
+    body().scrollTop = top
+    fireEvent.scroll(body())
+  }
+
+  it("comes back where the person left it, whatever the clamping in between", () => {
+    render(<Sample kind="form">{"A long body"}</Sample>)
+    scrollTo(120)
+    at(PHONE)
+    expect(body().scrollTop).toBe(120)
+    // The cover has less to scroll, and the browser clamps it.
+    scrollTo(0)
+    at(COMPUTER)
+    expect(body().scrollTop).toBe(120)
+  })
+
+  it("keeps where the person scrolled to after a switch once they scroll again", () => {
+    render(<Sample kind="form">{"A long body"}</Sample>)
+    scrollTo(120)
+    at(PHONE)
+    fireEvent.wheel(body())
+    scrollTo(40)
+    at(COMPUTER)
+    expect(body().scrollTop).toBe(40)
   })
 })
 
