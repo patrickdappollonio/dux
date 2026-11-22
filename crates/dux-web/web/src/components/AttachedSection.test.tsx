@@ -57,26 +57,21 @@ describe("a guarded dialog told who is in the way", () => {
     expect(confirm).toHaveBeenCalledOnce()
   })
 
-  // A confirm built with `Modal` disables a footer button only with a reason,
-  // so the driving case carries one, and a known driver's hint wins over it.
-  it("as a modal action, gives the driving case a reason and the pending case a spinner", () => {
+  it("names every device that drives, and says so of each row it would change", () => {
     const base = { verb: "Remove", pending: false, onConfirm: () => {} }
-    expect(guardedConfirmAction({ ...base, blockers: null })).toMatchObject({
-      label: "Remove",
-      tone: "destructive",
-      disabledReason: null,
-    })
+    const tui: AttachedBlocker = {
+      ...blocker("b", true),
+      surface: "terminal_ui",
+      device: null,
+      target: { kind: "terminal", id: "term-3" },
+    }
     expect(
-      guardedConfirmAction({ ...base, blockers: [blocker("a", true)] }).disabledReason,
-    ).toMatch(/Take it over/)
-    expect(guardedConfirmAction({ ...base, blockers: [blocker("b", false)] })).toMatchObject({
-      label: "Remove anyway",
-      disabledReason: null,
-    })
+      guardedConfirmAction({ ...base, blockers: [blocker("a", true), tui] }).disabledReason,
+    ).toBe(
+      "Firefox on Linux and the dux TUI are driving agents or terminals this would change. Take them over on this device first.",
+    )
     expect(
-      guardedConfirmAction({ ...base, blockers: null, drivenHint: "Laptop is driving." })
-        .disabledReason,
-    ).toBe("Laptop is driving.")
-    expect(guardedConfirmAction({ ...base, blockers: null, pending: true }).busy).toBe(true)
+      guardedConfirmAction({ ...base, blockers: [tui] }).disabledReason,
+    ).toBe("The dux TUI is driving this right now. Take it over on this device first.")
   })
 })

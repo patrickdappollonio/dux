@@ -157,6 +157,42 @@ describe("ConfirmForceStopAgentDialog", () => {
     await vi.waitFor(() => expect(closeForceStopAgent).toHaveBeenCalled())
   })
 
+  // While the request is out the button holds a spinner; once the server names
+  // a device that is driving, the button is withheld and its reason names it.
+  it("is busy while the request is out, then names the device that is driving", async () => {
+    seed({
+      forceStopAgentTarget: "s1",
+      spine: { sessions: [session({ id: "s1", title: "fix-auth" })] },
+    } as Partial<DuxState>)
+    let answer: (blockers: unknown) => void = () => {}
+    killSessionPty.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)))
+    render(<ConfirmForceStopAgentDialog />)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Force stop" }))
+    const button = screen.getByRole("button", { name: "Force stop" })
+    expect(button.getAttribute("aria-busy")).toBe("true")
+
+    answer([{
+        surface: "browser",
+        device: "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        address: "10.0.0.7",
+        verified: true,
+        driving: true,
+        target: { kind: "tab", id: "s1-slot", agent: "s1" },
+        key: "k1",
+      }])
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull())
+    expect(button.hasAttribute("disabled")).toBe(true)
+    fireEvent.click(button.parentElement!)
+    expect(
+      (
+        await screen.findAllByText(
+          "Firefox on Linux is driving this right now. Take it over on this device first.",
+        )
+      ).length,
+    ).toBeGreaterThan(0)
+  })
+
   it("cancels without stopping, and Cancel is the default focus", async () => {
     seed({
       forceStopAgentTarget: "s1",

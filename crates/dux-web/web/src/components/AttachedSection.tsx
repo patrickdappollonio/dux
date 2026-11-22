@@ -75,7 +75,6 @@ function drivenElsewhereProse(part: DrivenElsewhere): Prose {
   ]
 }
 
-/** Why a guarded confirm cannot go ahead while a blocker is driving. */
 /** `guardedConfirmAction` as a button, for a dialog not built with `Modal`.
  * A double click's second click never reaches the override that replaced the
  * button under it. */
@@ -90,6 +89,8 @@ export function GuardedConfirmButton({
   blockers: readonly AttachedBlocker[] | null
   pending: boolean
   onConfirm: () => void
+  /** For a dialog that knows before sending what another device drives: why
+   * the button is disabled, or null while nothing is. */
   drivenHint?: string | null
 }): ReactNode {
   const action = guardedConfirmAction({ verb, blockers, pending, onConfirm, drivenHint })
