@@ -115,17 +115,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
   {
     file: "components/TaskManagerDialog.tsx",
-    line: '<span className="whitespace-nowrap font-mono text-xs text-muted-foreground">',
-    reason: "A process row's command detail: a table cell, out of the chip rule's scope.",
-  },
-  {
-    file: "components/TaskManagerDialog.tsx",
-    line: '<span className="whitespace-nowrap font-mono">',
-    reason: "A child process's name in a table cell, out of the chip rule's scope.",
-  },
-  {
-    file: "components/TaskManagerDialog.tsx",
-    line: '<span className="truncate font-mono">',
+    line: '<span className="flex min-w-0 items-baseline font-mono">',
     reason: "A child process's name in the phone layout's row, out of the chip rule's scope.",
   },
   {

@@ -490,12 +490,12 @@ function DesktopRow({
             <RowIcon kind={row.kind} />
             <ShortenedName name={row.name} />
             {row.kind === "dux" ? <DuxBadge /> : null}
-            {/* Gives way before the name does, and never takes more than a
-                third of the cell from it. */}
+            {/* Kept whole while it is short, and never more than two fifths
+                of the cell: the name is what gives way to it. */}
             {row.detail ? (
               <ShortenedName
                 name={row.detail}
-                className="max-w-[33%] shrink-[2] font-mono text-xs text-muted-foreground"
+                className="max-w-[40%] shrink-0 font-mono text-xs text-muted-foreground"
               />
             ) : null}
           </div>
