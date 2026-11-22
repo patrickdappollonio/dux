@@ -25,11 +25,13 @@ function parse(raw: string | null): boolean {
 }
 
 let current: boolean | null = null
+let changedAt = Number.NEGATIVE_INFINITY
 
 const listeners = new Set<() => void>()
 
 function change(next: boolean): void {
   current = next
+  changedAt = performance.now()
   for (const listener of listeners) listener()
 }
 
@@ -45,6 +47,17 @@ export function readFlapHidden(): boolean {
   return current
 }
 
+/** When the choice last moved, on the `performance.now()` clock. */
+export function flapHiddenChangedAt(): number {
+  return changedAt
+}
+
+/** Forget the page's answer and when it moved, as a fresh page would. */
+export function resetFlapHiddenForTests(): void {
+  current = null
+  changedAt = Number.NEGATIVE_INFINITY
+}
+
 /** Fold the flap away (`true`) or bring it back (`false`). */
 export function setFlapHidden(next: boolean): void {
   try {
@@ -52,7 +65,7 @@ export function setFlapHidden(next: boolean): void {
   } catch {
     // Not kept across a reload; this page still follows the press.
   }
-  change(next)
+  if (next !== readFlapHidden()) change(next)
 }
 
 function onStorage(ev: StorageEvent): void {

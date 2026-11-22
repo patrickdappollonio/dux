@@ -53,7 +53,8 @@ installBootStubs()
 
 const { useTheaterFlight } = await import("./use-theater-flight")
 const { THEATER_TRANSITION_MS } = await import("@/lib/theater")
-const { FLIGHT_CHROME_SLACK_MS } = await import("@/lib/theaterFlight")
+const { FLIGHT_ATTACH_MS, FLIGHT_CHROME_SLACK_MS } = await import("@/lib/theaterFlight")
+const { resetFlapHiddenForTests, setFlapHidden } = await import("@/lib/flapHidden")
 
 function state(theater: boolean): DuxState {
   return { theater } as unknown as DuxState
@@ -87,6 +88,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  // Every fake clock starts at zero, so the fold's last move is forgotten too.
+  setFlapHidden(false)
+  resetFlapHiddenForTests()
   vi.useRealTimers()
 })
 
@@ -134,5 +138,53 @@ describe("a cover landing on a flight in progress", () => {
     expect(view.phase()).toBe("floating")
     view.tick(10 * THEATER_TRANSITION_MS)
     expect(view.phase()).toBe("floating")
+  })
+})
+
+// The flight measures the flap where it rests on the band, at the start of the
+// detach and again for the landing. A fold moving under it (the header's
+// show/hide stays pressable while the chrome collapses and expands) would hand
+// the pill a rect sliding into the band, so a fold that moves during a flight
+// lands it at its resting end, and a mode that moves while the fold is still
+// sliding swaps with no flight.
+describe("the flap's fold and a flight", () => {
+  const fold = (hidden: boolean) => act(() => setFlapHidden(hidden))
+  it("lands a departure at rest when the flap folds during the collapse", () => {
+    const view = mount(false, false)
+    view.set(true, false)
+    expect(view.phase()).toBe("collapsing")
+    fold(true)
+    expect(view.phase()).toBe("floating")
+    view.tick(10 * THEATER_TRANSITION_MS)
+    expect(view.phase()).toBe("floating")
+  })
+
+  it("lands a return at rest when the flap folds on the way home", () => {
+    const view = mount(true, false)
+    view.set(false, false)
+    expect(view.phase()).toBe("expanding")
+    view.tick(THEATER_TRANSITION_MS + FLIGHT_CHROME_SLACK_MS)
+    expect(view.phase()).toBe("returning")
+    fold(true)
+    expect(view.phase()).toBe("docked")
+    view.tick(10 * THEATER_TRANSITION_MS)
+    expect(view.phase()).toBe("docked")
+  })
+
+  it("swaps into theater while a shown flap is still sliding down, and flies once it rests", () => {
+    fold(true)
+    const view = mount(false, false)
+    fold(false)
+    view.tick(FLIGHT_ATTACH_MS / 2)
+    view.set(true, false)
+    expect(view.phase()).toBe("floating")
+
+    view.tick(FLIGHT_ATTACH_MS)
+    view.set(false, false)
+    expect(view.phase()).toBe("expanding")
+    for (let i = 0; i < 4; i++) view.tick(THEATER_TRANSITION_MS + FLIGHT_CHROME_SLACK_MS)
+    expect(view.phase()).toBe("docked")
+    view.set(true, false)
+    expect(view.phase()).toBe("collapsing")
   })
 })

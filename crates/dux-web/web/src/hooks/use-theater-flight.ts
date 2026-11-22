@@ -2,9 +2,11 @@ import * as React from "react"
 
 import { useFlapHidden } from "@/hooks/use-flap-hidden"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
+import { flapHiddenChangedAt } from "@/lib/flapHidden"
 import { useDux } from "@/lib/store"
 import { theaterTransitionMs, topChromeHidden } from "@/lib/theater"
 import {
+  FLIGHT_ATTACH_MS,
   flightForModeFrom,
   flightHoldMs,
   flightNext,
@@ -31,7 +33,9 @@ import {
  * flap simply being there.
  *
  * A flap the user folded away is not a dock either: there is nothing on screen to fly from
- * or land on, so the mode swaps exactly as it does for a page that opens in theater.
+ * or land on, so the mode swaps exactly as it does for a page that opens in theater. The same
+ * holds while the fold is still sliding, and a fold that moves mid-flight lands the flight at
+ * its resting end, so the pill never measures a flap that is not at rest on the band.
  */
 export function useTheaterFlight(coverOwnsPane: boolean): FlightPhase {
   const { theater } = useDux()
@@ -56,11 +60,20 @@ export function useTheaterFlight(coverOwnsPane: boolean): FlightPhase {
     }
     // The mode moving is the user's gesture and flies; the chrome moving while
     // the mode stands still is the cover, and that one swaps.
-    const ms = wasTheater.current === theater || flapFolded ? 0 : chromeMs.current
+    const flapAtRest =
+      !flapFolded && performance.now() - flapHiddenChangedAt() >= FLIGHT_ATTACH_MS
+    const ms = wasTheater.current === theater || !flapAtRest ? 0 : chromeMs.current
     wasTheater.current = theater
     wasHidden.current = hidden
     setPhase((live) => flightForModeFrom(live, hidden, ms))
   }, [theater, hidden, flapFolded])
+
+  const wasFolded = React.useRef(flapFolded)
+  React.useEffect(() => {
+    if (wasFolded.current === flapFolded) return
+    wasFolded.current = flapFolded
+    setPhase(hidden ? "floating" : "docked")
+  }, [flapFolded, hidden])
 
   React.useEffect(() => {
     const hold = flightHoldMs(phase, chromeMs.current)
