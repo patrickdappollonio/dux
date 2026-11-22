@@ -1,7 +1,7 @@
 import { FolderPlus } from "lucide-react"
 import { useMemo, useState } from "react"
 
-import { Modal, useOpenEpoch, type ModalDoor } from "@/components/modal"
+import { Modal, useModalLifetime, type ModalDoor } from "@/components/modal"
 import { ProjectRows } from "@/components/ProjectList"
 import { useProjectSearch, type ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
@@ -31,8 +31,11 @@ import { formatRegularCount } from "@/lib/formatRegularCount"
 // project's default_provider and is retargeted from the agent menu.
 export function NewAgentPickerDialog() {
   const { newAgentPickerOpen } = useDux()
+  const life = useModalLifetime(newAgentPickerOpen)
   // Keyed by the open, so each one starts with a fresh search and order.
-  return <Picker key={useOpenEpoch(newAgentPickerOpen)} open={newAgentPickerOpen} />
+  return life.mounted ? (
+    <Picker key={life.epoch} open={newAgentPickerOpen} onClosed={life.onClosed} />
+  ) : null
 }
 
 // Per-intent copy + the action a project row fires. "new" keeps the pick-provider-
@@ -55,7 +58,7 @@ const INTENT_COPY = {
   },
 } as const
 
-function Picker({ open }: { open: boolean }) {
+function Picker({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const {
     spine,
     newAgentPickerIntent,
@@ -156,6 +159,7 @@ function Picker({ open }: { open: boolean }) {
       kind="picker"
       open={open}
       onClose={dismissNewAgentPicker}
+      onClosed={onClosed}
       size="lg"
       title={INTENT_COPY[intent].title}
       description={INTENT_COPY[intent].description}

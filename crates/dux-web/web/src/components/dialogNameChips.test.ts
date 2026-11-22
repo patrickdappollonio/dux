@@ -301,7 +301,7 @@ describe("every name a modal shows is the shared chip", () => {
     expect(
       isScanned(
         "components/terminal/Chooser.tsx",
-        'import { Modal, useOpenEpoch } from "@/components/modal"',
+        'import { Modal, useModalLifetime } from "@/components/modal"',
       ),
     ).toBe(true)
     expect(

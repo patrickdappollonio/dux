@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 
 import { AgentNameInput } from "@/components/AgentNameFields"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
-import { Modal, useOpenEpoch } from "@/components/modal"
+import { Modal, useModalLifetime } from "@/components/modal"
 import { ProjectShortcutList } from "@/components/ProjectShortcutList"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -40,7 +40,7 @@ import {
  * Every refusal is the server's and arrives as a toast, shared with the terminal
  * UI so the two surfaces cannot answer the same question differently.
  */
-function StandaloneAgentBrowser({ open }: { open: boolean }) {
+function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const { browsePath, browseEntries, browseLoading, standaloneProjectShortcuts } =
     useDux()
   const [selected, setSelected] = useState<string | null>(null)
@@ -108,6 +108,7 @@ function StandaloneAgentBrowser({ open }: { open: boolean }) {
       kind="form"
       open={open}
       onClose={closeStandaloneAgentPicker}
+      onClosed={onClosed}
       size="xl"
       title="New standalone agent"
       // The words "standalone agent" appear here on purpose: every other
@@ -187,11 +188,13 @@ function StandaloneAgentBrowser({ open }: { open: boolean }) {
 
 export function StandaloneAgentDialog() {
   const { standaloneAgentPickerOpen } = useDux()
+  const life = useModalLifetime(standaloneAgentPickerOpen)
   // Keyed by the open, so the choice and the name start empty on every one.
-  return (
+  return life.mounted ? (
     <StandaloneAgentBrowser
-      key={useOpenEpoch(standaloneAgentPickerOpen)}
+      key={life.epoch}
       open={standaloneAgentPickerOpen}
+      onClosed={life.onClosed}
     />
-  )
+  ) : null
 }

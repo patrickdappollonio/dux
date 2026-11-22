@@ -2,7 +2,7 @@ import { Bot, ChevronRight } from "lucide-react"
 import { Fragment, useMemo, useState, type KeyboardEvent } from "react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
-import { Modal, useOpenEpoch } from "@/components/modal"
+import { Modal, useModalLifetime } from "@/components/modal"
 import { RowStateWord } from "@/components/RowStateWord"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
@@ -37,30 +37,38 @@ import { cn } from "@/lib/utils"
 // has no list behind it to go back to.
 export function NewLauncherDialog() {
   const { newLauncherOpen, newLauncherStep } = useDux()
+  const life = useModalLifetime(newLauncherOpen)
   // Keyed by the open, so each one starts on its entry step with an empty search.
-  return (
+  return life.mounted ? (
     <Launcher
-      key={useOpenEpoch(newLauncherOpen)}
+      key={life.epoch}
       open={newLauncherOpen}
       entry={newLauncherStep}
+      onClosed={life.onClosed}
     />
-  )
+  ) : null
 }
 
-function Launcher({ open, entry }: { open: boolean; entry: "list" | "pick-agent" }) {
+function Launcher({
+  open,
+  entry,
+  onClosed,
+}: {
+  open: boolean
+  entry: "list" | "pick-agent"
+  onClosed: () => void
+}) {
   const phone = useIsMobile()
   const [step, setStep] = useState(entry)
   // Coming back from the agent step puts focus back on the row that went there.
   const [returned, setReturned] = useState(false)
-  const agents = useAgentPick(open && step === "pick-agent")
+  const agents = useAgentPick(step === "pick-agent")
+  const common = { open, onClose: closeNewLauncher, onClosed, size: "w600", step } as const
   if (step === "pick-agent") {
     return (
       <Modal
         kind="picker"
-        open={open}
-        onClose={closeNewLauncher}
-        size="xl"
-        step={step}
+        {...common}
         title="New terminal for an agent"
         description="Which agent's copy of the code should the command line open in?"
         // Named after the dialog it returns to; absent when this step is the
@@ -90,10 +98,7 @@ function Launcher({ open, entry }: { open: boolean; entry: "list" | "pick-agent"
   return (
     <Modal
       kind="picker"
-      open={open}
-      onClose={closeNewLauncher}
-      size="xl"
-      step={step}
+      {...common}
       title="Start something new"
       description={
         phone
@@ -286,7 +291,7 @@ function moveFocusAmongRows(event: KeyboardEvent<HTMLElement>) {
 // drives can, unless a pane of its row is on this page: there its card asks
 // for a take-over first.
 //
-// `active` is false while the step is not on screen, and the list is then empty.
+// `active` is false while the list step is on screen, and the agents are then not read.
 function useAgentPick(active: boolean) {
   const { spine } = useDux()
   const [query, setQuery] = useState("")

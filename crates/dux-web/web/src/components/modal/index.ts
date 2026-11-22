@@ -1,9 +1,14 @@
 export { Modal } from "./Modal"
-export { useOpenEpoch } from "./useOpenEpoch"
+export { useModalLifetime } from "./useModalLifetime"
 export type {
   ModalAction,
+  ModalAnchor,
+  ModalButtonAction,
+  ModalCloseReason,
   ModalDoor,
+  ModalHeight,
   ModalKind,
+  ModalLinkAction,
   ModalProps,
   ModalSearch,
   ModalSize,

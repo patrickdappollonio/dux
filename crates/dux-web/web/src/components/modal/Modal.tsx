@@ -1,11 +1,10 @@
 import { ChevronLeft, Search, X } from "lucide-react"
-import { useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
 
 import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogDescription,
   DialogTitle,
@@ -16,62 +15,112 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
 import { focusTarget } from "./focus"
-import { CARD_WIDTH, COVER_BOTTOM_INSET, modalPresentation } from "./layout"
+import {
+  CARD_ANCHOR,
+  CARD_HEIGHT,
+  CARD_WIDTH,
+  COVER_BOTTOM_INSET,
+  INERT_BUTTON,
+  modalPresentation,
+} from "./layout"
 import { ModalDoors, ModalFooter, type SafeButton } from "./ModalFooter"
-import type { ModalAction, ModalProps, ModalSearch } from "./types"
+import type { ModalAction, ModalCloseReason, ModalProps, ModalSearch } from "./types"
 
 /** Every modal in the web UI. The caller hands over its kind and its parts;
  * the kind decides how it is presented, focused, laid out and closed. */
 export function Modal(props: ModalProps) {
   const phone = useIsMobile()
-  const { open, onClose, kind } = props
+  const { onClose, kind } = props
+  const vanished = props.vanished === true
+  const open = props.open && !vanished
+  const busy = props.busy === true
   const unsaved = kind === "form" ? (props.unsavedEdits ?? null) : null
-  // Why the discard confirm is up: a press here, or the browser's Back.
-  const [asked, setAsked] = useState<"press" | "back" | null>(null)
-  const asking = open ? asked : null
+  // The way out that raised the discard question, while it is up.
+  const [asked, setAsked] = useState<ModalCloseReason | null>(null)
+  const [wasOpen, setWasOpen] = useState(open)
+  if (wasOpen !== open) {
+    setWasOpen(open)
+    if (!open) setAsked(null)
+  }
   const placeFocus = useRef<(() => HTMLElement | null) | null>(null)
+  // A Back that arrived while busy, answered once the modal is free.
+  const backWaits = useRef(false)
 
-  const leave = (cancel?: () => void, byBack = false) => {
-    if (props.busy === true) return cancel?.()
-    if (unsaved !== null && unsaved.changes > 0) {
-      cancel?.()
-      setAsked((was) => was ?? (byBack ? "back" : "press"))
-      return
+  /** Takes a way out, and says whether the modal is closing. */
+  const leave = (reason: ModalCloseReason): boolean => {
+    if (busy) {
+      if (reason === "back") backWaits.current = true
+      return false
     }
-    setAsked(null)
-    onClose()
+    if (asked !== null) {
+      // Back abandons the question on top, as its Keep editing does.
+      if (reason === "back") setAsked(null)
+      return false
+    }
+    if (props.beforeClose?.(reason) === "stay") return false
+    if (unsaved !== null && unsaved.changes > 0) {
+      if (reason !== "back" || unsaved.setAside === undefined) {
+        setAsked(reason)
+        return false
+      }
+      unsaved.setAside()
+    }
+    onClose(reason)
+    return true
   }
 
+  useEffect(() => {
+    if (props.open && vanished) onClose("vanished")
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open, vanished])
+  useEffect(() => {
+    if (!open) backWaits.current = false
+    if (!open || busy || !backWaits.current) return
+    backWaits.current = false
+    leave("back")
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, busy])
+
+  const presentation = modalPresentation(kind, phone)
+  const frame = kind === "confirm" ? null : props
   return (
     <>
       <Dialog
         open={open}
         onOpenChange={(next, details) => {
-          if (!next) leave(details.cancel, details.reason === "imperative-action")
+          if (next) return
+          if (!leave(details.reason === "escape-key" ? "escape" : "outside")) details.cancel()
         }}
-        // A Back that was answered with a question is spent: giving the entry
-        // up stops Back's repeated asking, and Keep editing takes a new one.
-        historyEntry={props.historyEntry !== false && asking !== "back"}
+        onBack={() => !leave("back")}
+        onOpenChangeComplete={(now) => {
+          if (!now) props.onClosed?.()
+        }}
+        historyEntry={props.historyEntry !== false}
       >
         <DialogContent
-          cover={modalPresentation(kind, phone) === "cover"}
+          cover={presentation === "cover"}
           data-kind={kind}
-          data-presentation={modalPresentation(kind, phone)}
-          showCloseButton={!phone && kind === "picker"}
+          data-presentation={presentation}
+          showCloseButton={false}
           destructive={kind === "confirm" && props.confirm.tone === "destructive"}
           finalFocus={props.finalFocus}
           // False leaves focus where it is; true would move it to the popup's
           // first control. Only a popup whose parts have not mounted gets that.
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
           className={cn(
-            modalPresentation(kind, phone) === "card" &&
-              cn("flex flex-col gap-0 p-0", CARD_WIDTH[props.size ?? "sm"]),
+            presentation === "card" &&
+              cn(
+                "flex flex-col gap-0 p-0",
+                CARD_WIDTH[props.size ?? "sm"],
+                CARD_HEIGHT[frame?.height ?? "content"],
+                CARD_ANCHOR[frame?.anchor ?? "center"],
+              ),
           )}
         >
           <ModalParts
             {...props}
             phone={phone}
-            leave={() => leave()}
+            leave={leave}
             onFocusTarget={(target) => {
               placeFocus.current = target
             }}
@@ -80,13 +129,15 @@ export function Modal(props: ModalProps) {
       </Dialog>
       {unsaved !== null ? (
         <ConfirmDiscardEditsDialog
-          open={asking !== null}
+          open={open && asked !== null}
           holder={unsaved.holder}
           changes={unsaved.changes}
+          leaves={unsaved.leaves}
           onKeep={() => setAsked(null)}
           onDiscard={() => {
+            const reason = asked ?? "cancel"
             setAsked(null)
-            onClose()
+            onClose(reason)
           }}
         />
       ) : null}
@@ -109,10 +160,13 @@ function footerActions(props: ModalProps): readonly ModalAction[] {
 
 // The popup's contents. A component of its own so that it mounts with the
 // popup, and its layout effect runs after everything in the body has mounted.
+//
+// A cover and a card are the same elements in the same places with other
+// classes, so a switch of layout under an open modal remounts nothing.
 function ModalParts(
   props: ModalProps & {
     phone: boolean
-    leave: () => void
+    leave: (reason: ModalCloseReason) => boolean
     /** Handed the function that says what takes focus now, on every render. */
     onFocusTarget: (target: () => HTMLElement | null) => void
   },
@@ -120,24 +174,26 @@ function ModalParts(
   const { kind, phone, leave, open, onFocusTarget } = props
   const cover = modalPresentation(kind, phone) === "cover"
   const coarse = useIsCoarsePointer()
+  const busy = props.busy === true
   const header = useRef<HTMLDivElement | null>(null)
   const body = useRef<HTMLDivElement | null>(null)
-  const safeRef = useRef<HTMLButtonElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
 
-  const back = kind === "confirm" ? undefined : props.back
-  const step = kind === "confirm" ? undefined : props.step
-  const named = kind === "confirm" ? undefined : props.initialFocus
+  const frame = kind === "confirm" ? null : props
+  const back = frame?.back
+  const step = frame?.step
+  const callerSafeRef = kind === "picker" ? undefined : props.safeRef
   const target = () => {
     const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
     if (!popup) return null
+    const named = frame?.initialFocus
     return focusTarget({
       kind,
       coarse,
       popup,
       body: body.current,
-      named: named?.current ?? null,
-      safeButton: safeRef.current,
+      named: (typeof named === "function" ? named() : named?.current) ?? null,
+      safeButton: popup.querySelector<HTMLElement>("[data-modal-safe]"),
       search: searchRef.current,
     })
   }
@@ -160,179 +216,153 @@ function ModalParts(
 
   // A report's Close is drawn on a card only, since a cover's title row closes
   // it; a form keeps Cancel on both, because Cancel abandons what was typed.
-  const safe: SafeButton | null =
+  const safeLabel =
     kind === "confirm"
-      ? { label: props.cancelLabel, onSelect: leave, disabled: props.busy === true }
+      ? props.cancelLabel
       : kind === "form"
-        ? {
-            label: props.cancelLabel ?? "Cancel",
-            onSelect: leave,
-            disabled: props.busy === true,
-          }
+        ? (props.cancelLabel ?? "Cancel")
         : kind === "report" && !cover
-          ? { label: "Close", onSelect: leave, disabled: props.busy === true }
+          ? (props.closeLabel ?? "Close")
           : null
+  const safe: SafeButton | null =
+    safeLabel === null ? null : { label: safeLabel, onSelect: () => leave("cancel"), inert: busy }
 
-  const search =
-    kind === "picker" && props.search ? (
-      <SearchField search={props.search} inputRef={searchRef} />
-    ) : null
+  const actions = footerActions(props)
+  // A report's destructive action starts the row, apart from its Close.
+  const leading = kind === "report" ? actions.filter((a) => a.tone === "destructive") : []
+  const hasFooter = kind === "picker" ? props.doors !== undefined : safe !== null || actions.length > 0
+  const hasBody = props.children !== undefined && props.children !== null && props.children !== false
+  const hasSearch = kind === "picker" && props.search !== undefined
+  const steady = kind === "picker" && props.steadyHeight === true
+  const fixedHeight = !cover && (frame?.height ?? "content") !== "content"
+
   const description = props.description ? (
     <DialogDescription className="text-pretty">{props.description}</DialogDescription>
   ) : null
-  const footer =
-    kind === "picker" ? (
-      props.doors ? (
-        <ModalDoors doors={props.doors} phone={phone} cover={cover} />
-      ) : null
-    ) : (
-      <ModalFooter
-        stacked={phone}
-        cover={cover}
-        safe={safe}
-        safeRef={safeRef}
-        actions={footerActions(props)}
-        note={kind === "confirm" ? undefined : props.footerNote}
-      />
-    )
-  const hasFooter =
-    kind === "picker" ? props.doors !== undefined : safe !== null || footerActions(props).length > 0
-
-  if (cover) {
-    return (
-      <>
-        <div
-          ref={header}
-          data-slot="modal-header"
-          className="flex min-h-14 shrink-0 items-center gap-1 border-b py-2 pr-2 pl-4"
-        >
-          {back ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="-ml-2 size-10 shrink-0"
-              aria-label={back.label}
-              onClick={back.onSelect}
-            >
-              <ChevronLeft />
-            </Button>
-          ) : null}
-          <DialogTitle className="min-w-0 flex-1 leading-snug">{props.title}</DialogTitle>
-          <DialogClose
-            render={
-              <Button variant="ghost" size="icon" className="size-10 shrink-0" aria-label="Close" />
-            }
-          >
-            <X />
-          </DialogClose>
-        </div>
-        {search ? <div className="shrink-0 border-b px-4 py-3">{search}</div> : null}
-        <div
-          ref={body}
-          data-slot="modal-body"
-          className={cn(
-            "min-h-0 flex-1 overflow-y-auto overscroll-contain",
-            kind === "picker" ? "p-2" : "flex flex-col gap-4 p-4",
-            !hasFooter && COVER_BOTTOM_INSET,
-          )}
-        >
-          {description && kind === "picker" ? (
-            <div className="px-2 pt-1 pb-2">{description}</div>
-          ) : (
-            description
-          )}
-          {props.children}
-        </div>
-        {footer}
-      </>
-    )
-  }
-
-  const hasBody = props.children !== undefined && props.children !== null && props.children !== false
+  // A cover's description scrolls with the body, under the title row.
+  const bodyDescription = !cover ? null : kind === "picker" && description ? (
+    <div className="px-2 pt-1 pb-2">{description}</div>
+  ) : (
+    description
+  )
+  const bodyClass = cn(
+    kind === "picker" ? "p-2" : "flex flex-col gap-4",
+    kind !== "picker" && (cover ? "p-4" : "px-4 pt-1 pb-6"),
+    cover && !hasFooter && COVER_BOTTOM_INSET,
+  )
   return (
     <>
       <div
         ref={header}
         data-slot="modal-header"
-        className={cn(
-          "flex shrink-0 flex-col gap-2 p-4",
-          kind === "picker" ? "pb-3" : !hasBody && "pb-6",
-        )}
+        className={
+          cover
+            ? "flex min-h-14 shrink-0 items-center gap-1 border-b py-2 pr-2 pl-4"
+            : cn(
+                "flex shrink-0 flex-col gap-2 p-4",
+                hasSearch ? "pb-0" : kind === "picker" ? "pb-3" : !hasBody && "pb-6",
+              )
+        }
       >
         {back ? (
-          // Quieter than the modal's actions: it navigates. 32px, as its only
-          // neighbour is the corner close across the header.
+          // Quieter than the modal's actions: it navigates. On a card it is
+          // 32px, as its only neighbour is the corner close across the header.
           <Button
             variant="ghost"
-            size="sm"
+            size={cover ? "icon" : "sm"}
+            aria-label={`Back to ${back.label}`}
             onClick={back.onSelect}
-            className="-mt-1 -ml-1.5 h-8 self-start px-1.5 text-muted-foreground pointer-coarse:min-h-10"
+            className={
+              cover
+                ? "-ml-2 size-10 shrink-0"
+                : "-mt-1 -ml-1.5 h-8 self-start px-1.5 text-muted-foreground pointer-coarse:min-h-10"
+            }
           >
             <ChevronLeft />
-            {back.label}
+            {cover ? null : back.label}
           </Button>
         ) : null}
-        <DialogTitle className={cn("leading-snug", kind === "picker" && "pr-8")}>
+        <DialogTitle
+          className={cn("leading-snug", cover ? "min-w-0 flex-1" : kind === "picker" && "pr-8")}
+        >
           {props.title}
         </DialogTitle>
-        {description}
-        {search ? <div className="mt-2">{search}</div> : null}
+        {cover || kind === "picker" ? (
+          // The card's 28px box keeps its place; at phone width and under a
+          // coarse pointer an invisible margin widens its tap area to 40px.
+          <Button
+            variant="ghost"
+            size={cover ? "icon" : "icon-sm"}
+            aria-label="Close"
+            disabled={busy}
+            focusableWhenDisabled
+            onClick={() => leave("close-control")}
+            className={cn(
+              INERT_BUTTON,
+              cover
+                ? "size-10 shrink-0"
+                : "absolute top-2 right-2 after:absolute after:-inset-[7px] after:hidden max-md:after:block pointer-coarse:after:block",
+            )}
+          >
+            <X />
+          </Button>
+        ) : null}
+        {cover ? null : description}
       </div>
-      {hasBody ? (
-        <CardBody
-          padded={kind !== "picker"}
-          steady={kind === "picker" && props.steadyHeight === true}
-          bodyRef={body}
-        >
-          {props.children}
-        </CardBody>
-      ) : null}
-      {footer}
-    </>
-  )
-}
-
-function CardBody({
-  padded,
-  steady,
-  bodyRef,
-  children,
-}: {
-  padded: boolean
-  steady: boolean
-  bodyRef: Ref<HTMLDivElement>
-  children: ReactNode
-}) {
-  if (padded) {
-    return (
-      // -mt-1 pt-1: room for a focus ring on the body's first control, which
-      // the scroller would otherwise cut.
-      <div
-        ref={bodyRef}
-        data-slot="modal-body"
-        className="-mt-1 flex min-h-0 shrink flex-col gap-4 overflow-y-auto px-4 pt-1 pb-6"
-      >
-        {children}
-      </div>
-    )
-  }
-  if (steady) {
-    return (
-      <ScrollArea className="h-72 min-h-0 shrink border-t">
-        <div ref={bodyRef} data-slot="modal-body" className="p-2">
-          {children}
+      {hasSearch ? (
+        <div className={cover ? "shrink-0 border-b px-4 py-3" : "shrink-0 px-4 pt-4 pb-3"}>
+          <SearchField search={props.search!} inputRef={searchRef} />
         </div>
-      </ScrollArea>
-    )
-  }
-  return (
-    <div
-      ref={bodyRef}
-      data-slot="modal-body"
-      className="min-h-0 shrink overflow-y-auto p-2"
-    >
-      {children}
-    </div>
+      ) : null}
+      {frame?.toolbar ? (
+        <div
+          data-slot="modal-toolbar"
+          className={cover ? "shrink-0 border-b px-4 py-2" : "shrink-0 px-4 pb-3"}
+        >
+          {frame.toolbar}
+        </div>
+      ) : null}
+      {!cover && !hasBody ? null : steady ? (
+        <ScrollArea className={cover ? "min-h-0 flex-1" : "h-72 min-h-0 shrink border-t"}>
+          <div ref={body} data-slot="modal-body" className={bodyClass}>
+            {bodyDescription}
+            {props.children}
+          </div>
+        </ScrollArea>
+      ) : (
+        <div
+          ref={body}
+          data-slot="modal-body"
+          className={cn(
+            "min-h-0 overflow-y-auto",
+            cover ? "flex-1 overscroll-contain" : fixedHeight ? "flex-1" : "shrink",
+            // -mt-1 with the padding's pt-1: room for a focus ring on the
+            // body's first control, which the scroller would otherwise cut.
+            !cover && kind !== "picker" && "-mt-1",
+            bodyClass,
+          )}
+        >
+          {bodyDescription}
+          {props.children}
+        </div>
+      )}
+      {kind === "picker" ? (
+        props.doors ? (
+          <ModalDoors doors={props.doors} phone={phone} cover={cover} />
+        ) : null
+      ) : (
+        <ModalFooter
+          stacked={phone}
+          cover={cover}
+          safe={safe}
+          safeRef={callerSafeRef}
+          safeEnds={kind === "report"}
+          leading={leading}
+          actions={actions.filter((a) => !leading.includes(a))}
+          note={kind === "confirm" ? undefined : props.footerNote}
+        />
+      )}
+    </>
   )
 }
 
@@ -348,7 +378,6 @@ function SearchField({
       <Search className="size-4 shrink-0 text-muted-foreground" />
       <input
         ref={inputRef}
-        type="search"
         value={search.value}
         onChange={(event) => search.onChange(event.target.value)}
         placeholder={search.label}

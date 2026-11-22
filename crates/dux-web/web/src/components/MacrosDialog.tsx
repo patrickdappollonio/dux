@@ -99,7 +99,7 @@ import {
   savedMacrosEdit,
   validateMacros,
 } from "@/lib/macros"
-import { proseText, renderProse, type Prose } from "@/lib/prose"
+import { chip, proseText, renderProse, type Prose } from "@/lib/prose"
 import { matchCharRanges } from "@/lib/searchMatch"
 import {
   closeMacrosDialog,
@@ -630,6 +630,7 @@ function MacrosEditor({
         open={discardOpen}
         holder="The macros have"
         changes={changes}
+        leaves={[chip("config.toml")]}
         onKeep={() => setDiscardOpen(false)}
         finalFocus={() => {
           const from = discardFrom.current

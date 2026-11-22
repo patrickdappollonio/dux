@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { FolderPlus } from "lucide-react"
 
+import { chip } from "@/lib/prose"
+
 import { installBrowserHistory } from "@/test/browserHistory"
 
 // Back reaches a modal through the store, which gives every open one a history
@@ -15,7 +17,7 @@ vi.stubGlobal(
 )
 await import("@/lib/store")
 
-import { Modal } from "./index"
+import { Modal, useModalLifetime } from "./index"
 import type { ModalAction, ModalKind } from "./types"
 
 const PHONE = 390
@@ -101,6 +103,62 @@ describe("how a modal is presented", () => {
   )
 })
 
+// A resize or a rotation across the layout switch changes the presentation
+// under an open modal; what the caller put in it must not start over.
+describe("a layout switch under an open modal", () => {
+  function Counter() {
+    const [count, setCount] = useState(0)
+    return (
+      <button type="button" onClick={() => setCount(count + 1)}>
+        pressed {count}
+      </button>
+    )
+  }
+  function Flipping({ kind }: { kind: "form" | "picker" | "report" }) {
+    const common = { open: true, onClose: () => {}, title: "Sample", historyEntry: false }
+    if (kind === "form") {
+      return (
+        <Modal kind="form" {...common} submit={save}>
+          <Counter />
+        </Modal>
+      )
+    }
+    if (kind === "report") {
+      return (
+        <Modal kind="report" {...common}>
+          <Counter />
+        </Modal>
+      )
+    }
+    return (
+      <Modal
+        kind="picker"
+        {...common}
+        steadyHeight
+        search={{ value: "", onChange: () => {}, label: "Search things" }}
+      >
+        <Counter />
+      </Modal>
+    )
+  }
+
+  it.each(["form", "picker", "report"] as const)("keeps a %s's body and its state", (kind) => {
+    const view = render(<Flipping kind={kind} />)
+    fireEvent.click(screen.getByText("pressed 0"))
+    const body = screen.getByText("pressed 1")
+    const search = screen.queryByLabelText("Search things")
+    at(PHONE)
+    view.rerender(<Flipping kind={kind} />)
+    expect(popup().dataset.presentation).toBe("cover")
+    expect(screen.getByText("pressed 1")).toBe(body)
+    expect(screen.queryByLabelText("Search things")).toBe(search)
+    at(COMPUTER)
+    view.rerender(<Flipping kind={kind} />)
+    expect(popup().dataset.presentation).toBe("card")
+    expect(screen.getByText("pressed 1")).toBe(body)
+  })
+})
+
 describe("the way out the modal draws", () => {
   it.each(["form", "picker", "report"] as const)(
     "puts one close button in a phone cover's title row for a %s",
@@ -112,6 +170,7 @@ describe("the way out the modal draws", () => {
       expect(closeButtons()[0].closest('[data-slot="modal-header"]')).not.toBeNull()
       fireEvent.click(closeButtons()[0])
       expect(onClose).toHaveBeenCalledTimes(1)
+      expect(onClose).toHaveBeenCalledWith("close-control")
     },
   )
 
@@ -365,6 +424,128 @@ describe("the footer", () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  // The second click of a double click lands on whatever the first put under
+  // the pointer, so a destructive button counts only the first.
+  it("counts only the first click of a double click on a destructive action", () => {
+    const onSelect = vi.fn()
+    render(
+      <Modal
+        kind="confirm"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        cancelLabel="Cancel"
+        confirm={{ label: "Delete", tone: "destructive", onSelect }}
+      />,
+    )
+    fireEvent.click(button("Delete"), { detail: 2 })
+    expect(onSelect).not.toHaveBeenCalled()
+    fireEvent.click(button("Delete"), { detail: 1 })
+    expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it("names a report's safe button as asked and sets a destructive action apart from it", () => {
+    render(
+      <Modal
+        kind="report"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        closeLabel="Done"
+        actions={[
+          { label: "Refresh", tone: "plain", onSelect: () => {} },
+          { label: "Stop everything…", tone: "destructive", onSelect: () => {} },
+        ]}
+      />,
+    )
+    const order = [...footer()!.querySelectorAll("button")].map((b) => b.textContent)
+    expect(order).toEqual(["Stop everything…", "Refresh", "Done"])
+    expect(cell("Stop everything…").className).toContain("mr-auto")
+  })
+
+  it("draws an action with an address as a link that opens in a new tab", () => {
+    const onSelect = vi.fn()
+    render(
+      <Modal
+        kind="report"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        actions={[{ label: "Open full notes", tone: "primary", href: "https://example.test/notes", onSelect }]}
+      />,
+    )
+    const link = screen.getByRole("link", { name: "Open full notes" }) as HTMLAnchorElement
+    expect(link.getAttribute("href")).toBe("https://example.test/notes")
+    expect(link.target).toBe("_blank")
+    expect(link.rel).toContain("noopener")
+    link.addEventListener("click", (event) => event.preventDefault())
+    fireEvent.click(link)
+    expect(onSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it("lays out any number of doors, and a toolbar outside the part that scrolls", () => {
+    const door = (label: string) => ({ label, icon: FolderPlus, onSelect: () => {} })
+    render(
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        toolbar={<button type="button">Sort</button>}
+        doors={[door("One…"), door("Two…"), door("Three…")]}
+      >
+        <button type="button">row</button>
+      </Modal>,
+    )
+    expect([...footer()!.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+      "One…",
+      "Two…",
+      "Three…",
+    ])
+    const body = document.querySelector('[data-slot="modal-body"]')!
+    expect(body.contains(screen.getByText("row"))).toBe(true)
+    expect(body.contains(screen.getByText("Sort"))).toBe(false)
+    expect(popup().contains(screen.getByText("Sort"))).toBe(true)
+  })
+
+  it("hands the caller its safe button", () => {
+    const safe = { current: null as HTMLButtonElement | null }
+    render(
+      <Modal
+        kind="confirm"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        cancelLabel="Keep it"
+        confirm={remove}
+        safeRef={safe}
+      />,
+    )
+    expect(safe.current).toBe(button("Keep it"))
+  })
+
+  // A disabled button drops keyboard focus to the page, so a busy one stays
+  // focusable and says it is unavailable.
+  it("keeps a busy action focusable", () => {
+    render(
+      <Modal
+        kind="form"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        submit={{ label: "Save", tone: "primary", onSelect: () => {}, busy: true }}
+      />,
+    )
+    expect((button("Save") as HTMLButtonElement).disabled).toBe(false)
+    expect(button("Save").getAttribute("aria-disabled")).toBe("true")
+  })
+
   it("takes no press on a busy action", () => {
     const onSelect = vi.fn()
     render(
@@ -380,6 +561,46 @@ describe("the footer", () => {
     expect(button("Save").getAttribute("aria-busy")).toBe("true")
     fireEvent.click(button("Save"))
     expect(onSelect).not.toHaveBeenCalled()
+  })
+})
+
+describe("a card's frame", () => {
+  it("is as wide and as tall as its tokens say, and hangs from the top when asked", () => {
+    render(
+      <Modal
+        kind="report"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        size="w600"
+        height="h640"
+        anchor="top"
+      />,
+    )
+    expect(popup().className).toContain("sm:max-w-[600px]")
+    expect(popup().className).toContain("h-[min(40rem,calc(100dvh-2rem))]")
+    expect(popup().className).toContain("translate-y-0")
+  })
+})
+
+describe("where focus goes when a modal closes", () => {
+  it("is where the caller says", async () => {
+    function Closing({ open }: { open: boolean }) {
+      const target = useRef<HTMLButtonElement | null>(null)
+      return (
+        <>
+          <button type="button" ref={target}>
+            elsewhere
+          </button>
+          <Modal kind="report" open={open} onClose={() => {}} title="Sample" historyEntry={false} finalFocus={target} />
+        </>
+      )
+    }
+    const view = render(<Closing open />)
+    await waitFor(() => expect(popup().contains(document.activeElement)).toBe(true))
+    view.rerender(<Closing open={false} />)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByText("elsewhere")))
   })
 })
 
@@ -414,25 +635,105 @@ describe("the browser's Back", () => {
     await waitFor(() => expect(browser.index).toBe(before + 1))
     act(() => browser.back())
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    expect(onClose).toHaveBeenCalledWith("back")
     view.unmount()
 
+    // One that opened by itself takes no entry, so the one after it takes
+    // the first.
     const after = browser.index
-    render(<Modal kind="report" open onClose={onClose} title="Sample" historyEntry={false} />)
-    await new Promise((r) => setTimeout(r, 30))
-    expect(browser.index).toBe(after)
+    render(<Modal kind="report" open onClose={onClose} title="Itself" historyEntry={false} />)
+    render(<Modal kind="report" open onClose={onClose} title="By hand" />)
+    await waitFor(() => expect(browser.index).toBe(after + 1))
+    expect(browser.length).toBe(after + 2)
   })
 })
 
-describe("a form with unsaved edits", () => {
-  function Editing({ changes, onClose }: { changes: number; onClose: () => void }) {
-    return (
+describe("why a modal closed", () => {
+  it.each([
+    ["cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
+    ["escape", () => fireEvent.keyDown(popup(), { key: "Escape" })],
+  ] as const)("is told to the caller: %s", async (reason, leave) => {
+    const onClose = vi.fn()
+    render(<Sample kind="form" onClose={onClose} />)
+    await waitFor(() => expect(popup().contains(document.activeElement)).toBe(true))
+    leave()
+    expect(onClose).toHaveBeenCalledWith(reason)
+  })
+
+  // Preferences: the first Escape clears its search, the second closes.
+  it("lets the caller answer a way out itself and stay open", async () => {
+    const onClose = vi.fn()
+    let searching = true
+    render(
       <Modal
         kind="form"
         open
         onClose={onClose}
         title="Sample"
+        historyEntry={false}
         submit={save}
-        unsavedEdits={{ holder: "The sample has", changes }}
+        beforeClose={(reason) => {
+          if (reason !== "escape" || !searching) return "close"
+          searching = false
+          return "stay"
+        }}
+      />,
+    )
+    await waitFor(() => expect(popup().contains(document.activeElement)).toBe(true))
+    fireEvent.keyDown(popup(), { key: "Escape" })
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.keyDown(popup(), { key: "Escape" })
+    expect(onClose).toHaveBeenCalledWith("escape")
+  })
+
+  it("closes at once when its target vanishes, busy and unsaved or not", () => {
+    const onClose = vi.fn()
+    const form = (vanished: boolean) => (
+      <Modal
+        kind="form"
+        open
+        busy
+        vanished={vanished}
+        onClose={onClose}
+        title="Sample"
+        historyEntry={false}
+        submit={save}
+        unsavedEdits={{ holder: "The sample has", changes: 2, leaves: ["the sample"] }}
+      />
+    )
+    const view = render(form(false))
+    expect(onClose).not.toHaveBeenCalled()
+    view.rerender(form(true))
+    expect(onClose).toHaveBeenCalledWith("vanished")
+    expect(screen.queryByText("Discard unsaved changes?")).toBeNull()
+  })
+})
+
+describe("a form with unsaved edits", () => {
+  function Editing({
+    changes,
+    onClose,
+    open = true,
+    setAside,
+  }: {
+    changes: number
+    onClose: () => void
+    open?: boolean
+    setAside?: () => void
+  }) {
+    return (
+      <Modal
+        kind="form"
+        open={open}
+        onClose={onClose}
+        title="Sample"
+        submit={save}
+        unsavedEdits={{
+          holder: "The sample has",
+          changes,
+          leaves: ["the file ", chip("notes.md")],
+          setAside,
+        }}
       />
     )
   }
@@ -452,6 +753,17 @@ describe("a form with unsaved edits", () => {
     await waitFor(() => expect(asking()).not.toBeNull())
     fireEvent.click(screen.getByRole("button", { name: "Discard changes" }))
     expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledWith("escape")
+  })
+
+  it("says what discarding leaves as it was, in the caller's words", async () => {
+    render(<Editing changes={2} onClose={() => {}} />)
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    const sentence = (await screen.findByText(/Discarding them leaves/)).textContent
+    expect(sentence).toBe(
+      "The sample has 2 unsaved changes. Discarding them leaves the file notes.md as it was.",
+    )
+    expect(screen.getByText("notes.md", { selector: "code" })).toBeTruthy()
   })
 
   it("closes at once when nothing was changed", () => {
@@ -462,9 +774,20 @@ describe("a form with unsaved edits", () => {
     expect(asking()).toBeNull()
   })
 
-  // Back keeps asking a modal that refused it to close. One Back is one
-  // question: answered with Keep editing, it is not asked again.
-  it("asks once on Back, and Keep editing ends that Back", async () => {
+  it("does not ask again on the next open after it was closed from outside", async () => {
+    const view = render(<Editing changes={2} onClose={() => {}} />)
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(asking()).not.toBeNull())
+    view.rerender(<Editing changes={2} onClose={() => {}} open={false} />)
+    await waitFor(() => expect(asking()).toBeNull())
+    view.rerender(<Editing changes={2} onClose={() => {}} />)
+    await waitFor(() => expect(popup()).not.toBeNull())
+    expect(asking()).toBeNull()
+  })
+
+  // Back asks as Cancel does, and the form keeps its history entry while it
+  // asks, so no later Back can carry the page away from under it.
+  it("asks once on Back and stays on its history entry", async () => {
     const onClose = vi.fn()
     const before = browser.index
     render(<Editing changes={1} onClose={onClose} />)
@@ -473,47 +796,131 @@ describe("a form with unsaved edits", () => {
     await waitFor(() => expect(asking()).not.toBeNull())
     fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))
     await waitFor(() => expect(asking()).toBeNull())
-    await new Promise((r) => setTimeout(r, 450))
-    expect(asking()).toBeNull()
+    await waitFor(() => expect(browser.index).toBe(before + 1))
     expect(onClose).not.toHaveBeenCalled()
+
+    act(() => browser.back())
+    await waitFor(() => expect(asking()).not.toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }))
+    expect(onClose).toHaveBeenCalledWith("back")
+  })
+
+  // A Back gives the page no user activation, and an entry pushed without one
+  // is skipped by the next Back: the question then has no entry of its own.
+  it("never lets Back leave the page while the question it raised is up", async () => {
+    const onClose = vi.fn()
+    const before = browser.index
+    render(<Editing changes={1} onClose={onClose} />)
+    await waitFor(() => expect(browser.index).toBe(before + 1))
+    vi.stubGlobal("navigator", { userActivation: { isActive: false } })
+    try {
+      act(() => browser.back())
+      await waitFor(() => expect(asking()).not.toBeNull())
+      expect(browser.index).toBe(before + 1)
+      // The next Back abandons the question, as its Keep editing does.
+      act(() => browser.back())
+      await waitFor(() => expect(asking()).toBeNull())
+      expect(browser.index).toBe(before + 1)
+      expect(onClose).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  // Macros and Preferences: the edits are kept for the next opening, so Back
+  // has nothing to ask about.
+  it("sets the edits aside on Back when the caller can, and asks on Cancel still", async () => {
+    const onClose = vi.fn()
+    const setAside = vi.fn()
+    const before = browser.index
+    render(<Editing changes={1} onClose={onClose} setAside={setAside} />)
+    await waitFor(() => expect(browser.index).toBe(before + 1))
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(asking()).not.toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))
+    await waitFor(() => expect(asking()).toBeNull())
+    expect(setAside).not.toHaveBeenCalled()
+    await waitFor(() => expect(browser.index).toBe(before + 1))
+    act(() => browser.back())
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith("back"))
+    expect(setAside).toHaveBeenCalledTimes(1)
+    expect(asking()).toBeNull()
   })
 })
 
 describe("a busy modal", () => {
-  it("refuses every way out", () => {
+  function Saving({ busy, onClose, kind = "form" }: { busy: boolean; onClose: () => void; kind?: "form" | "picker" }) {
+    if (kind === "picker") {
+      return <Modal kind="picker" open busy={busy} onClose={onClose} title="Sample" historyEntry={false} />
+    }
+    return <Modal kind="form" open busy={busy} onClose={onClose} title="Sample" submit={save} />
+  }
+  const cancel = () => screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement
+
+  it("refuses every way out, which a modal that is not busy takes", async () => {
     const onClose = vi.fn()
-    render(
-      <Modal
-        kind="form"
-        open
-        busy
-        onClose={onClose}
-        title="Sample"
-        historyEntry={false}
-        submit={save}
-      />,
-    )
-    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+    const view = render(<Saving busy onClose={onClose} />)
+    await waitFor(() => expect(popup().contains(document.activeElement)).toBe(true))
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" })
+    fireEvent.click(cancel())
     expect(onClose).not.toHaveBeenCalled()
+    view.rerender(<Saving busy={false} onClose={onClose} />)
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" })
+    expect(onClose).toHaveBeenCalledWith("escape")
+  })
+
+  // A disabled button would drop the focus it holds to the page.
+  it("shows and announces that its ways out do nothing, and keeps them focusable", () => {
+    for (const kind of ["form", "picker"] as const) {
+      for (const width of [COMPUTER, PHONE]) {
+        at(width)
+        render(<Saving busy kind={kind} onClose={() => {}} />)
+        const ways = kind === "form" && width === COMPUTER ? [cancel()] : closeButtons()
+        expect(ways.length, `${kind} at ${width}`).toBeGreaterThan(0)
+        for (const way of ways) {
+          expect(way.getAttribute("aria-disabled"), `${kind} at ${width}`).toBe("true")
+          expect((way as HTMLButtonElement).disabled).toBe(false)
+        }
+        cleanup()
+      }
+    }
+  })
+
+  it("holds its history entry through a Back, and closes once it is free", async () => {
+    const onClose = vi.fn()
+    const before = browser.index
+    const view = render(<Saving busy onClose={onClose} />)
+    await waitFor(() => expect(browser.index).toBe(before + 1))
+    act(() => browser.back())
+    await waitFor(() => expect(browser.index).toBe(before + 1))
+    expect(onClose).not.toHaveBeenCalled()
+    view.rerender(<Saving busy={false} onClose={onClose} />)
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith("back"))
   })
 })
 
-// A modal cannot be written without its kind, nor a kind without its parts;
-// `tsc` fails on an unused directive, so each line below is a compile error.
-export function NotAModal() {
-  return (
-    <>
-      {/* @ts-expect-error no kind */}
-      <Modal open onClose={() => {}} title="x" />
-      {/* @ts-expect-error a confirm without its safe button */}
-      <Modal kind="confirm" open onClose={() => {}} title="x" confirm={remove} />
-      {/* @ts-expect-error a confirm without its action */}
-      <Modal kind="confirm" open onClose={() => {}} title="x" cancelLabel="Cancel" />
-      {/* @ts-expect-error a form without its submit */}
-      <Modal kind="form" open onClose={() => {}} title="x" />
-      {/* @ts-expect-error a caller-chosen class */}
-      <Modal kind="report" open onClose={() => {}} title="x" className="max-h-96" />
-    </>
-  )
-}
+// The component that holds a modal's state and reads the store for it exists
+// from the open until the close has finished, and not while closed.
+describe("a modal's lifetime", () => {
+  let mounts = 0
+  function Inner({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+    useState(() => (mounts += 1))
+    return <Modal kind="report" open={open} onClose={() => {}} onClosed={onClosed} title="Sample" historyEntry={false} />
+  }
+  function Host({ open }: { open: boolean }) {
+    const life = useModalLifetime(open)
+    return life.mounted ? <Inner key={life.epoch} open={open} onClosed={life.onClosed} /> : null
+  }
+
+  it("mounts on open, lasts through the close and starts fresh on the next open", async () => {
+    mounts = 0
+    const view = render(<Host open={false} />)
+    expect(mounts).toBe(0)
+    view.rerender(<Host open />)
+    expect(mounts).toBe(1)
+    view.rerender(<Host open={false} />)
+    await waitFor(() => expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull())
+    view.rerender(<Host open />)
+    expect(mounts).toBe(2)
+  })
+})

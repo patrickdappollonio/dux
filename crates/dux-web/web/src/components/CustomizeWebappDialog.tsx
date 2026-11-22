@@ -110,7 +110,7 @@ import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { wireProse } from "@/lib/prose"
+import { chip, wireProse } from "@/lib/prose"
 import {
   changesPaneVisible,
   closeCustomizeWebapp,
@@ -1725,6 +1725,7 @@ function PreferencesForm({
         open={discardOpen}
         holder="Preferences has"
         changes={unsavedCount}
+        leaves={[chip("config.toml")]}
         onKeep={() => setDiscardOpen(false)}
         onDiscard={() => {
           setDiscardOpen(false)

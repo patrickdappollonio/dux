@@ -102,6 +102,14 @@ describe("NewAgentPickerDialog", () => {
     expect(screen.getByText("zzz", { selector: "code" })).toBeTruthy()
   })
 
+  // A search-type field clears itself on Escape, which here also closes the
+  // dialog, and Chromium draws a clear button of its own in it.
+  it("searches in a plain text field", () => {
+    seed("new")
+    render(<NewAgentPickerDialog />)
+    expect((screen.getByLabelText("Search projects") as HTMLInputElement).type).toBe("text")
+  })
+
   // New agent… and New terminal from a row's menu take the user somewhere
   // else, so the picker must not stay open over where they land.
   it("closes the picker before a row menu item that leaves it", async () => {
@@ -542,7 +550,8 @@ describe("NewAgentPickerDialog", () => {
       expect(footer().className).toContain("grid-cols-[1fr_auto_1fr]")
       for (const button of footerButtons()) {
         expect(button.className).toContain("min-h-11")
-        expect(button.className).not.toContain("truncate")
+        // The label wraps in its half of the row rather than truncating.
+        expect(button.querySelector("span")!.className).not.toContain("truncate")
       }
     })
 
@@ -552,6 +561,9 @@ describe("NewAgentPickerDialog", () => {
       const dividers = footer().querySelectorAll('[data-slot="footer-divider"]')
       expect(dividers).toHaveLength(1)
       const divider = dividers[0] as HTMLElement
+      // Between the two doors. Each door sits in its disabled-hint wrapper.
+      expect(divider.previousElementSibling).toBe(footerButtons()[0].parentElement)
+      expect(divider.nextElementSibling).toBe(footerButtons()[1].parentElement)
       expect(divider.getAttribute("aria-hidden")).toBe("true")
       expect(divider.tagName.toLowerCase()).not.toBe("button")
       expect(divider.classList.contains("w-px")).toBe(true)
