@@ -2,15 +2,8 @@ import { TriangleAlert } from "lucide-react"
 
 import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatDisplayDate } from "@/lib/projectInfo"
 import { prName, sessionPrs } from "@/lib/pr"
@@ -50,9 +43,9 @@ function MissingDirectoryLine({
 }
 
 // Read-only "Agent info…" modal. Pure presentation of existing ViewModel data:
-// no wire commands, no git reads. Mirrors `ProjectInfoDialog` (Dialog primitives,
-// the `InfoRow` definition list, and the vanished-target guard) so the two info
-// surfaces stay consistent. Works identically on desktop and mobile.
+// no wire commands, no git reads. Mirrors `ProjectInfoDialog` (a report with the
+// `InfoRow` definition list that closes when its target vanishes) so the two
+// info surfaces stay consistent.
 export function AgentInfoDialog() {
   const { agentInfoTarget, spine } = useDux()
 
@@ -63,19 +56,6 @@ export function AgentInfoDialog() {
     session = spine.sessions.find((s) => s.id === agentInfoTarget)
   }
 
-  // Closes the dialog when the agent vanishes from the ViewModel; see the hook.
-  const isOpen = useVanishedTargetGuard(
-    agentInfoTarget !== null,
-    session !== undefined,
-    closeAgentInfo,
-  )
-
-  function handleOpenChange(open: boolean) {
-    if (!open) closeAgentInfo()
-  }
-
-  // Compute the body only when a session resolves so the hooks above still run
-  // unconditionally on every render.
   let body: React.ReactNode = null
   if (session) {
     const name = sessionLabel(session)
@@ -191,18 +171,18 @@ export function AgentInfoDialog() {
   }
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      {/* Wider than the sm:max-w-sm default: the branch and worktree rows carry
-          full paths that deserve room before wrapping. */}
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
-          <DialogTitle>
-            {session ? sessionLabel(session) : "Agent info"}
-          </DialogTitle>
-        </DialogHeader>
-        {body}
-        <DialogFooter showCloseButton />
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="report"
+      open={agentInfoTarget !== null}
+      // An agent removed while the dialog is open closes it.
+      vanished={agentInfoTarget !== null && session === undefined}
+      onClose={closeAgentInfo}
+      // The branch and worktree rows carry full paths that deserve room
+      // before wrapping.
+      size="xl"
+      title={session ? sessionLabel(session) : "Agent info"}
+    >
+      {body}
+    </Modal>
   )
 }

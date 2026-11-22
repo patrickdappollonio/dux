@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
@@ -303,6 +303,15 @@ describe("AgentInfoDialog", () => {
       },
     })
     expect(screen.queryByText(/Pull request/)).toBeNull()
+  })
+
+  it("has one Close on a computer, in its footer, and no corner X", () => {
+    renderDialogOpenFor({ title: "fix-auth" })
+    const closes = screen.getAllByRole("button", { name: "Close" })
+    expect(closes).toHaveLength(1)
+    expect(closes[0]!.closest('[data-slot="modal-footer"]')).not.toBeNull()
+    fireEvent.click(closes[0]!)
+    expect(closeAgentInfoSpy).toHaveBeenCalled()
   })
 
   it("closes when the target session is no longer in the spine", () => {

@@ -3,17 +3,8 @@ import { Loader2 } from "lucide-react"
 
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { InfoRow } from "@/components/InfoRow"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import { FileApiError, fileApi } from "@/lib/fileApi"
 import {
   entryKindLabel,
@@ -52,8 +43,8 @@ interface FileInfoDialogProps {
 }
 
 // Read-only "File info…" panel for one worktree entry. It fetches its own facts,
-// since none of them live in the ViewModel, which is also what the vanished-target
-// guard keys on: a 404 dismisses the panel, while a 400 is a REFUSAL and stays on
+// since none of them live in the ViewModel, which is also what its vanished
+// target keys on: a 404 dismisses the panel, while a 400 is a REFUSAL and stays on
 // screen with its reason. There is no poll and no subscription, so the facts are as
 // fresh as the last fetch, and only opening and the window regaining focus trigger
 // one. A file deleted while this tab stays focused is not noticed; that gap is accepted.
@@ -103,75 +94,57 @@ export function FileInfoDialog({
     return () => window.removeEventListener("focus", revalidate)
   }, [path])
 
-  const isOpen = useVanishedTargetGuard(target !== null, !vanished, onClose)
-
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
+    <Modal
+      kind="report"
+      open={target !== null}
+      vanished={target !== null && vanished}
+      onClose={() => onClose()}
+      size="lg"
+      title={
+        <span className="block truncate">{path === null ? "File info" : basename(path)}</span>
+      }
     >
-      <DialogContent showCloseButton={false} className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="truncate">
-            {path === null ? "File info" : basename(path)}
-          </DialogTitle>
-        </DialogHeader>
-        {/* Read-only and scrollable: a long path or a stack of git rows must
-            never push the dismiss button off the dialog. */}
-        <ScrollArea className="max-h-[60vh]">
-          {error !== null ? (
-            <p className="text-sm text-destructive">{error}</p>
-          ) : info === null ? (
-            <div className="flex items-center justify-center py-6 text-muted-foreground">
-              <Loader2 className="size-4 motion-safe:animate-spin" />
-            </div>
-          ) : (
-            <dl className="flex flex-col gap-2 pr-3">
-              <InfoRow label="Path">
-                <InlineCode>{info.path}</InlineCode>
-              </InfoRow>
-              <InfoRow label="Kind">{entryKindLabel(info.kind)}</InfoRow>
-              {info.symlink_target !== null && (
-                <InfoRow label="Links to">
-                  <InlineCode>{info.symlink_target}</InlineCode>
-                </InfoRow>
-              )}
-              <InfoRow label="Size">{formatBytes(info.size)}</InfoRow>
-              <InfoRow label="Modified">
-                {formatModified(info.modified)}
-              </InfoRow>
-              <InfoRow label="Permissions">
-                <InlineCode>{info.permissions}</InlineCode>
-              </InfoRow>
-              <InfoRow label="Mode">
-                <InlineCode>{info.mode}</InlineCode>
-              </InfoRow>
-              <InfoRow label="Git">
-                <div className="flex flex-col gap-1">
-                  {gitStatusRows(info.git).map((row) => (
-                    <span
-                      key={`${row.status ?? ""}-${row.label}`}
-                      className="flex items-center gap-1.5"
-                    >
-                      {row.status !== undefined && (
-                        <FileStatusIcon status={row.status} />
-                      )}
-                      {row.label}
-                    </span>
-                  ))}
-                </div>
-              </InfoRow>
-            </dl>
+      {error !== null ? (
+        <p className="text-sm text-destructive">{error}</p>
+      ) : info === null ? (
+        <div className="flex items-center justify-center py-6 text-muted-foreground">
+          <Loader2 className="size-4 motion-safe:animate-spin" />
+        </div>
+      ) : (
+        <dl className="flex flex-col gap-2">
+          <InfoRow label="Path">
+            <InlineCode>{info.path}</InlineCode>
+          </InfoRow>
+          <InfoRow label="Kind">{entryKindLabel(info.kind)}</InfoRow>
+          {info.symlink_target !== null && (
+            <InfoRow label="Links to">
+              <InlineCode>{info.symlink_target}</InlineCode>
+            </InfoRow>
           )}
-        </ScrollArea>
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onClose}>
-            Close
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          <InfoRow label="Size">{formatBytes(info.size)}</InfoRow>
+          <InfoRow label="Modified">{formatModified(info.modified)}</InfoRow>
+          <InfoRow label="Permissions">
+            <InlineCode>{info.permissions}</InlineCode>
+          </InfoRow>
+          <InfoRow label="Mode">
+            <InlineCode>{info.mode}</InlineCode>
+          </InfoRow>
+          <InfoRow label="Git">
+            <div className="flex flex-col gap-1">
+              {gitStatusRows(info.git).map((row) => (
+                <span
+                  key={`${row.status ?? ""}-${row.label}`}
+                  className="flex items-center gap-1.5"
+                >
+                  {row.status !== undefined && <FileStatusIcon status={row.status} />}
+                  {row.label}
+                </span>
+              ))}
+            </div>
+          </InfoRow>
+        </dl>
+      )}
+    </Modal>
   )
 }

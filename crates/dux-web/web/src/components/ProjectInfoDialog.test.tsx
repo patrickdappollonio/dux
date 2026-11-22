@@ -1,16 +1,17 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
 let mockState: DuxState
+const closeProjectInfoSpy = vi.hoisted(() => vi.fn())
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
   return {
     ...actual,
     useDux: () => mockState,
-    closeProjectInfo: vi.fn(),
+    closeProjectInfo: closeProjectInfoSpy,
   }
 })
 
@@ -75,5 +76,15 @@ describe("ProjectInfoDialog", () => {
     render(<ProjectInfoDialog />)
     expect(screen.getByText("Base branch")).toBeTruthy()
     expect(screen.getByText("No base recorded yet")).toBeTruthy()
+  })
+
+  it("has one Close on a computer, in its footer, and no corner X", () => {
+    seed("main")
+    render(<ProjectInfoDialog />)
+    const closes = screen.getAllByRole("button", { name: "Close" })
+    expect(closes).toHaveLength(1)
+    expect(closes[0]!.closest('[data-slot="modal-footer"]')).not.toBeNull()
+    fireEvent.click(closes[0]!)
+    expect(closeProjectInfoSpy).toHaveBeenCalled()
   })
 })
