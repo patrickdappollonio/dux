@@ -323,3 +323,21 @@ describe("the pushed workspace document", () => {
     warn.mockRestore()
   })
 })
+
+describe("the commit message kept for an agent", () => {
+  it("is dropped once a pushed document no longer has the agent", async () => {
+    const mod = await bootStore(makeWorkspace({ rev: 1, sessions: [session("s1"), session("s2")] }))
+    for (const id of ["s1", "s2"]) {
+      mod.openCommit(id)
+      mod.setCommitDraft(`message for ${id}`)
+      mod.closeCommit()
+    }
+    mod.eventsSocket.onEvent({
+      event: "workspace",
+      rev: 2,
+      workspace: makeWorkspace({ rev: 2, sessions: [session("s2")] }),
+    })
+    await settle()
+    expect(mod.getSnapshot().commitDrafts).toEqual({ s2: "message for s2" })
+  })
+})

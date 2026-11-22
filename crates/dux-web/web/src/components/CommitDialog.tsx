@@ -1,17 +1,20 @@
 import { useId, useState } from "react"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Textarea } from "@/components/ui/textarea"
 import {
   agentChangeBlockReason,
   useRowDriverLabel,
   useAgentChangeBlockById,
 } from "@/hooks/use-agent-active-elsewhere"
-import { closeCommit, getSnapshot, setCommitDraft, useDux } from "@/lib/store"
+import { closeCommit, commitLanded, getSnapshot, setCommitDraft, useDux } from "@/lib/store"
 
 export function CommitDialog() {
-  const { commitTarget, commitDraft } = useDux()
+  const { commitTarget: openTarget, commitDraft, spine } = useDux()
+  const isOpen = openTarget !== null
+  // The agent this open is about, kept while the close animates.
+  const commitTarget = useHeldWhileClosed(isOpen, openTarget)
   const [committing, setCommitting] = useState(false)
   const reasonId = useId()
   // A page that does not drive the agent keeps the message it was writing,
@@ -21,39 +24,29 @@ export function CommitDialog() {
   const reason =
     commitTarget !== null && block !== null ? agentChangeBlockReason(block, device) : null
   const blocked = reason !== null
-
-  const isOpen = commitTarget !== null
+  const vanished =
+    isOpen && spine !== null && !spine.sessions.some((s) => s.id === openTarget)
 
   async function handleCommit() {
-    if (!commitTarget || !commitDraft.trim() || committing || blocked) return
-    // What this commit was sent from: the dialog's opening, its agent and the
-    // exact text in the box.
-    const sentFrom = {
-      target: commitTarget,
-      opening: getSnapshot().commitOpening,
-      draft: commitDraft,
-    }
+    if (!isOpen || !commitTarget || !commitDraft.trim() || committing || blocked) return
+    // What this commit was sent from: its agent and the exact text in the box.
+    const sentFrom = { target: commitTarget, draft: commitDraft }
     setCommitting(true)
     try {
       await git.commit(sentFrom.target, sentFrom.draft.trim())
-      // The answer closes the dialog only while it is still the one the
-      // commit was sent from, unchanged since: a dialog reopened (for this
-      // agent or another) or a message typed since is never wiped. The toast
-      // then says the commit landed instead.
+      // The answer closes the dialog only while it is still open on the agent
+      // the commit was sent from, with the message that was sent: a dialog
+      // opened for another agent, or a message typed since, is never wiped.
+      // The toast then says the commit landed instead, and a dialog cancelled
+      // while the commit ran has no message being written to speak of.
       const now = getSnapshot()
-      if (
-        now.commitTarget === sentFrom.target &&
-        now.commitOpening === sentFrom.opening &&
-        now.commitDraft === sentFrom.draft
-      ) {
-        closeCommit()
-      } else if (now.commitTarget === null) {
-        // The dialog was cancelled while the commit ran: there is no message
-        // being written to speak of.
-        notifySuccess("The commit landed.")
-      } else {
+      const stillOpen = now.commitTarget === sentFrom.target && now.commitDraft === sentFrom.draft
+      commitLanded(sentFrom.target, sentFrom.draft)
+      if (!stillOpen) {
         notifySuccess(
-          "The earlier commit landed. The message you are writing now was left as it is.",
+          now.commitTarget === null
+            ? "The commit landed."
+            : "The earlier commit landed. The message you are writing now was left as it is.",
         )
       }
     } catch (err) {
@@ -67,6 +60,8 @@ export function CommitDialog() {
     <Modal
       kind="form"
       open={isOpen}
+      // An agent deleted while its Commit is open closes it.
+      vanished={vanished}
       onClose={() => closeCommit()}
       title="Commit changes"
       submit={{

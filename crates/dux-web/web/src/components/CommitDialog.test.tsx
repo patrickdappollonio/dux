@@ -47,7 +47,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { CommitDialog } = await import("./CommitDialog")
-const { openCommit, setCommitDraft } = await import("@/lib/store")
+const { getSnapshot, openCommit, setCommitDraft } = await import("@/lib/store")
 
 afterEach(() => {
   cleanup()
@@ -133,5 +133,56 @@ describe("CommitDialog while this page does not drive the agent", () => {
       resetPaneCovers()
       closeCommit()
     })
+  })
+})
+
+// A message closed without committing is kept for its agent, in this page
+// only, and given back when Commit is opened for that agent again.
+describe("CommitDialog: the message kept for an agent", () => {
+  const box = () => screen.getByPlaceholderText("Commit message…") as HTMLTextAreaElement
+
+  it("gives a message closed by Escape back to the same agent, and none to another", async () => {
+    const { closeCommit } = await import("@/lib/store")
+    act(() => openCommit("agent-keep"))
+    render(<CommitDialog />)
+    fireEvent.change(box(), { target: { value: "half a message" } })
+    fireEvent.keyDown(box(), { key: "Escape" })
+    expect(getSnapshot().commitTarget).toBeNull()
+    act(() => openCommit("agent-other"))
+    expect(box().value).toBe("")
+    act(() => closeCommit())
+    act(() => openCommit("agent-keep"))
+    expect(box().value).toBe("half a message")
+    act(() => closeCommit())
+  })
+
+  it("forgets the message once it is committed", async () => {
+    act(() => openCommit("agent-done"))
+    render(<CommitDialog />)
+    fireEvent.change(box(), { target: { value: "the whole message" } })
+    fireEvent.click(screen.getByRole("button", { name: "Commit" }))
+    await act(async () => {
+      resolveCommit?.()
+      await Promise.resolve()
+    })
+    expect(getSnapshot().commitTarget).toBeNull()
+    act(() => openCommit("agent-done"))
+    expect(box().value).toBe("")
+  })
+
+  it("forgets a message closed while its commit ran, once the commit lands", async () => {
+    const { closeCommit } = await import("@/lib/store")
+    act(() => openCommit("agent-ran"))
+    render(<CommitDialog />)
+    fireEvent.change(box(), { target: { value: "sent then closed" } })
+    fireEvent.click(screen.getByRole("button", { name: "Commit" }))
+    act(() => closeCommit())
+    await act(async () => {
+      resolveCommit?.()
+      await Promise.resolve()
+    })
+    act(() => openCommit("agent-ran"))
+    expect(box().value).toBe("")
+    act(() => closeCommit())
   })
 })
