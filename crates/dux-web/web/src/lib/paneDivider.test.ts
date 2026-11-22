@@ -96,6 +96,23 @@ describe("dividerPressHits", () => {
     gate.remove()
   })
 
+  // A menu or dialog portalled over the page can sit right over a divider; a
+  // press on it is a press on that layer, never on the divider underneath.
+  it("refuses a press inside the band that landed on a layer above the page", () => {
+    const page = document.createElement("div")
+    document.body.append(page)
+    const el = divider(200, 201)
+    page.append(el)
+    const portal = document.createElement("div")
+    const item = document.createElement("div")
+    portal.append(item)
+    document.body.append(portal)
+    expect(dividerPressHits(el, press(item, 200), DIVIDER_TARGET_MIN.fine)).toBe(false)
+    expect(dividerPressHits(el, press(page, 200), DIVIDER_TARGET_MIN.fine)).toBe(true)
+    page.remove()
+    portal.remove()
+  })
+
   it("refuses a press outside the band that landed on something else", () => {
     const el = divider(200, 201)
     expect(

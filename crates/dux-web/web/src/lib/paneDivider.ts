@@ -127,8 +127,24 @@ export function dividerPressHits(
   if (target === el || (target instanceof Node && el.contains(target))) {
     return true
   }
+  // Nor is a press on a menu or dialog portalled over the page: the band is
+  // found by coordinates, and those layers live outside the page's own tree.
+  if (target instanceof Node && onAnotherLayer(el, target)) return false
   const band = dividerHitBand(el.getBoundingClientRect(), minWidth)
   return withinDividerBand(band, event.clientX, event.clientY)
+}
+
+// Whether `target` sits under a different child of <body> than the divider.
+// The body itself, under every layer, is not another one.
+function onAnotherLayer(el: HTMLElement, target: Node): boolean {
+  const layer = (node: Node): Node | null => {
+    let n: Node = node
+    while (n.parentNode !== null && n.parentNode !== document.body) n = n.parentNode
+    return n.parentNode === document.body ? n : null
+  }
+  const theirs = layer(target)
+  const mine = layer(el)
+  return theirs !== null && mine !== null && theirs !== mine
 }
 
 // The keyboard vocabulary of a vertical divider, matching the library's own
