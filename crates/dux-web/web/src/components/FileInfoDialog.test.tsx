@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { FileInfoDialog } from "./FileInfoDialog"
 import type { WorktreeEntryInfo } from "@/lib/fileInfo"
 import { agentRoot } from "@/lib/editorRoot"
+import { holdCloseAnimations } from "@/test/closeAnimation"
 
 const FILE_INFO: WorktreeEntryInfo = {
   path: "src/main.rs",
@@ -200,3 +201,38 @@ describe("FileInfoDialog", () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 })
+
+describe("FileInfoDialog across opens", () => {
+  it("opens again for a path that answered gone before, once the file is back", async () => {
+    let gone = true
+    stubFetch(() =>
+      gone ? { status: 404, text: "no such entry in the worktree" } : { status: 200, body: FILE_INFO },
+    )
+    const onClose = vi.fn()
+    const root = agentRoot("s1")
+    const view = render(
+      <FileInfoDialog root={root} target={{ path: "src/main.rs" }} onClose={onClose} />,
+    )
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+    view.rerender(<FileInfoDialog root={root} target={null} onClose={onClose} />)
+    await waitFor(() => expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull())
+
+    gone = false
+    view.rerender(<FileInfoDialog root={root} target={{ path: "src/main.rs" }} onClose={onClose} />)
+    await waitFor(() => screen.getByText("rw-r--r--"))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps the facts it showed while it closes", async () => {
+    const root = agentRoot("s1")
+    const view = render(
+      <FileInfoDialog root={root} target={{ path: "src/main.rs" }} onClose={() => {}} />,
+    )
+    await waitFor(() => screen.getByText("rw-r--r--"))
+    holdCloseAnimations()
+    view.rerender(<FileInfoDialog root={root} target={null} onClose={() => {}} />)
+    expect(screen.getByText("rw-r--r--")).toBeTruthy()
+    expect(screen.getByRole("heading", { hidden: true }).textContent).toBe("main.rs")
+  })
+})
+
