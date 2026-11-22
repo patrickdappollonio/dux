@@ -2,7 +2,7 @@ import { Bot, ChevronRight } from "lucide-react"
 import { Fragment, useMemo, useState, type KeyboardEvent } from "react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, ModalGroupHeading, useModalLifetime } from "@/components/modal"
 import { RowStateWord } from "@/components/RowStateWord"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
@@ -163,21 +163,14 @@ function LauncherGroup({
 }) {
   const headingId = `new-launcher-${group.id}`
   return (
-    <div role="group" aria-labelledby={headingId} className="flex flex-col gap-0.5">
-      <div
-        className={cn(
-          "flex gap-x-2 gap-y-0.5 px-2",
-          phone ? "flex-col pt-3 pb-1" : "flex-wrap items-baseline pt-1.5 pb-1",
-        )}
-      >
-        <span
-          id={headingId}
-          className="text-xs font-semibold tracking-wide text-foreground/85 uppercase"
-        >
-          {group.title}
-        </span>
-        <span className="text-xs text-muted-foreground">{group.caption}</span>
-      </div>
+    <div
+      role="group"
+      aria-labelledby={headingId}
+      className={cn("flex flex-col gap-0.5", phone && "pt-1.5")}
+    >
+      <ModalGroupHeading id={headingId} caption={group.caption}>
+        {group.title}
+      </ModalGroupHeading>
       {group.lead ? (
         <p className="px-2 pb-1 text-sm text-foreground">
           {group.lead}
@@ -349,12 +342,7 @@ function AgentRows({ agents }: { agents: ReturnType<typeof useAgentPick> }) {
               aria-label={group.title}
               className="flex flex-col gap-0.5"
             >
-              <span
-                aria-hidden="true"
-                className="px-2 pt-2 pb-0.5 text-xs font-semibold tracking-wide text-foreground/85 uppercase"
-              >
-                {group.title}
-              </span>
+              <ModalGroupHeading hidden>{group.title}</ModalGroupHeading>
               {group.sessions.map((session) => (
                 <AgentPickRow
                   key={session.id}

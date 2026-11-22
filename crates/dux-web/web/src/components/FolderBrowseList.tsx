@@ -1,6 +1,7 @@
 import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { ModalGroupHeading } from "@/components/modal"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { baseName } from "@/lib/paths"
@@ -88,9 +89,7 @@ export function FolderBrowseList({
           </button>
           {/* Non-interactive divider separating the commit action from the
               navigation list below. */}
-          <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Browse
-          </div>
+          <ModalGroupHeading inset>Browse</ModalGroupHeading>
           {entries.map((entry) => {
             // The synthetic parent row reads as an "up" action rather than a
             // folder: a distinct glyph and the parent's basename, no path

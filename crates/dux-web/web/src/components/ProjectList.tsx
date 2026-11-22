@@ -21,6 +21,7 @@ import {
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { MatchHighlight } from "@/components/MatchHighlight"
+import { ModalGroupHeading } from "@/components/modal"
 import {
   useProjectSearch,
   type ProjectListRow,
@@ -54,9 +55,7 @@ export function ProjectRows({
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   return (
     <>
-      <p className="px-2 pt-1 pb-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-        Choose a project
-      </p>
+      <ModalGroupHeading>Choose a project</ModalGroupHeading>
       {filtered.length === 0 ? (
         <p className="px-2 py-4 text-sm text-muted-foreground">
           {query.trim() === "" ? (

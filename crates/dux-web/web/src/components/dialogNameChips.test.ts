@@ -95,6 +95,16 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
       "A placeholder is an attribute and can hold no markup, so the quotes are the only delimiter available.",
   },
   {
+    file: "components/FolderBrowseList.tsx",
+    line: '<span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">',
+    reason: "A folder row's pill naming the folder the row acts on: a list row, out of the chip rule's scope.",
+  },
+  {
+    file: "components/ProjectShortcutList.tsx",
+    line: '<span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">',
+    reason: "A project row's folder beside its name: a list row, out of the chip rule's scope.",
+  },
+  {
     file: "components/FirstLoadDialog.tsx",
     line: '<span className="font-mono">{state.notes?.version ?? ""}</span>',
     reason: "A release number in the heading's badge: a version, not a name in a sentence.",

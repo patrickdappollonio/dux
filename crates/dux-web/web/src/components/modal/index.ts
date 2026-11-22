@@ -1,4 +1,5 @@
 export { Modal } from "./Modal"
+export { ModalGroupHeading } from "./ModalGroupHeading"
 export { useModalLifetime } from "./useModalLifetime"
 export type {
   ModalAction,

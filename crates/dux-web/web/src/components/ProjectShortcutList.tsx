@@ -1,5 +1,6 @@
 import { FolderGit2 } from "lucide-react"
 
+import { ModalGroupHeading } from "@/components/modal"
 import { useScrollEdges } from "@/hooks/use-scroll-edges"
 import type {
   ProjectShortcutListView,
@@ -39,9 +40,7 @@ export function ProjectShortcutList({
   return (
     <div className="flex shrink-0 flex-col gap-1.5">
       <div className="flex flex-col overflow-hidden rounded-md border">
-        <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-          Your projects
-        </div>
+        <ModalGroupHeading inset>Your projects</ModalGroupHeading>
         {/* Capped and scrolling by itself, so a long project list takes the
             explorer's room only up to a point. The cap is about three and a
             half coarse rows on a phone or any coarse pointer (44px each), and a
