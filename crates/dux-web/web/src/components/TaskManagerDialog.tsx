@@ -456,9 +456,12 @@ function statCells(stats: ResourceStatsView | null) {
 
 // The stop column stays pinned at the table's trailing edge while a long name
 // scrolls the rest sideways, so no row's Force stop is ever out of reach. Opaque,
-// so what scrolls under it does not show through; on a hovered row it takes the
-// row's tint mixed onto the same surface.
-const STOP_COLUMN = "sticky right-0 bg-popover pl-2"
+// so what scrolls under it does not show through, and faded on its leading edge
+// over the column's own gutter so a figure passing under it is not cut sharp; on
+// a hovered row it takes the row's tint mixed onto the same surface. -3px seats
+// it on the scroller's padded edge (see the scroller's -mr-[3px] pr-[3px]).
+const STOP_COLUMN =
+  "sticky -right-[3px] bg-popover pl-2 before:pointer-events-none before:absolute before:inset-y-0 before:right-full before:w-2 before:bg-gradient-to-l before:from-popover before:to-transparent"
 const STOP_COLUMN_HOVER =
   "group-hover/task:bg-[color-mix(in_oklab,var(--muted)_50%,var(--popover))]"
 
