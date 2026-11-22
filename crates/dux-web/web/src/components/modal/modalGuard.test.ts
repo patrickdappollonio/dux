@@ -211,7 +211,6 @@ const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 const STILL_TO_MOVE: Record<string, Entry> = {
   "components/AddProjectDialog.tsx": { ...ROOT },
   "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
-  "components/FirstLoadDialog.tsx": { ...ROOT },
   "components/MacrosDialog.tsx": { ...ROOTS(3) },
   "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
   "components/TaskManagerDialog.tsx": { ...ROOTS(2) },

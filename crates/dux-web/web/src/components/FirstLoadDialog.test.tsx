@@ -111,7 +111,7 @@ function seed(firstLoad: Partial<FirstLoadDialogState> | null) {
 /** The dialog footer, so a query for "Close" cannot also match the dialog's own
  *  sr-only X close button in the corner. */
 function footer(): HTMLElement {
-  const el = document.querySelector('[data-slot="dialog-footer"]')
+  const el = document.querySelector('[data-slot="modal-footer"]')
   if (el === null) throw new Error("no dialog footer rendered")
   return el as HTMLElement
 }
@@ -406,41 +406,21 @@ describe("FirstLoadDialog", () => {
   })
 
   // One renderer covers desktop AND mobile (GlobalOverlays mounts it once for
-  // both shells), so the phone treatment is expressed as `max-md:` overrides on
-  // the same element rather than a second component.
-  it("renders as a bottom sheet on phones from the one renderer", () => {
+  // both shells): a report, which the Modal component draws as a card on a
+  // computer and as a cover on a phone.
+  it("is a report 700px wide, comfortably wider than a routine dialog", () => {
     seed({ screen: "welcome" })
     render(<FirstLoadDialog />)
-    const popup = document.querySelector('[data-slot="dialog-content"]')
-    expect(popup).not.toBeNull()
-    const cls = popup!.className
-    // 700px, comfortably wider than a routine dialog.
-    expect(cls).toContain("sm:max-w-[700px]")
-    // Docked to the bottom edge, full width, square bottom corners on phones.
-    expect(cls).toContain("max-md:bottom-0")
-    expect(cls).toContain("max-md:translate-y-0")
-    expect(cls).toContain("max-md:rounded-b-none")
+    const popup = document.querySelector('[data-slot="dialog-content"]')!
+    expect(popup.getAttribute("data-kind")).toBe("report")
+    expect(popup.className).toContain("700px")
   })
 
-  it("stacks the buttons full width on phones and keeps them in a row on desktop", () => {
-    seed({ screen: "welcome" })
-    render(<FirstLoadDialog />)
-    const add = within(footer()).getByRole("button", {
-      name: /add a project/i,
-    })
-    expect(add.className).toContain("max-md:w-full")
-    // The footer keeps the destination URL opposite the buttons on desktop.
-    expect(footer().className).toContain("sm:justify-between")
-  })
-
-  // ── the phone masthead ─────────────────────────────────────────────────────
-  //
-  // On phones the sheet is three bands: a pinned masthead, ONE scrolling body,
-  // and the pinned footer. The split is driven by useIsMobile, whose snapshot
-  // reads window.innerWidth, so these tests resize jsdom's window. The original
-  // width is captured and restored: hardcoding a "desktop" width on the way out
-  // would quietly redefine the default every other test in the file runs at.
-  describe("the phone bottom sheet", () => {
+  // The split is driven by useIsMobile, whose snapshot reads window.innerWidth,
+  // so these tests resize jsdom's window. The original width is captured and
+  // restored: hardcoding a "desktop" width on the way out would quietly
+  // redefine the default every other test in the file runs at.
+  describe("on a phone", () => {
     const ORIGINAL_WIDTH = window.innerWidth
 
     function setViewportWidth(width: number) {
@@ -451,130 +431,62 @@ describe("FirstLoadDialog", () => {
       })
     }
 
-    function masthead(): HTMLElement | null {
-      return document.querySelector('[data-slot="first-load-masthead"]')
-    }
-
-    function bodyRegion(): HTMLElement {
-      const el = document.querySelector('[data-slot="first-load-body"]')
-      if (el === null) throw new Error("no scrolling body region rendered")
-      return el as HTMLElement
-    }
+    const titleRow = () => document.querySelector<HTMLElement>('[data-slot="modal-header"]')!
+    const body = () => document.querySelector<HTMLElement>('[data-slot="modal-body"]')!
 
     beforeEach(() => setViewportWidth(390))
     afterEach(() => setViewportWidth(ORIGINAL_WIDTH))
 
-    it("pins a masthead carrying the dux mark and the title", () => {
+    it("covers the screen, with the dux mark and the title in the title row", () => {
       seed({ screen: "welcome" })
       render(<FirstLoadDialog />)
 
-      const bar = masthead()
-      expect(bar).not.toBeNull()
-      // The real logo mark, decorative to screen readers, in its own chip.
-      const mark = bar!.querySelector('img[src="/dux-logo.png"]')
-      expect(mark).not.toBeNull()
-      expect(mark!.getAttribute("aria-hidden")).toBe("true")
-      expect(mark!.getAttribute("alt")).toBe("")
-      // The title travels with it, so it cannot scroll away.
       expect(
-        within(bar as HTMLElement).getByText("Welcome to dux"),
-      ).toBeTruthy()
+        document.querySelector('[data-slot="dialog-content"]')!.getAttribute("data-presentation"),
+      ).toBe("cover")
+      // The real logo mark, decorative to screen readers, so the title's name
+      // is its words alone.
+      const mark = titleRow().querySelector('img[src="/dux-logo.png"]')!
+      expect(mark.getAttribute("aria-hidden")).toBe("true")
+      expect(mark.getAttribute("alt")).toBe("")
+      expect(within(titleRow()).getByText("Welcome to dux")).toBeTruthy()
+      // Exactly one logo: no duck column beside the prose.
+      expect(document.querySelectorAll('img[src="/dux-logo.png"]')).toHaveLength(1)
     })
 
-    it("makes the body the only scroller, with the masthead and footer outside it", () => {
+    it("scrolls the tagline with the prose it introduces, under the pinned title row", () => {
       seed({ screen: "welcome" })
       render(<FirstLoadDialog />)
 
-      // The popup stops being the scroller: the base primitive's `grid` and
-      // `overflow-y-auto` are neutralized so the sheet is a flex column.
-      const popup = document.querySelector('[data-slot="dialog-content"]')!
-      expect(popup.className).toContain("max-md:flex")
-      expect(popup.className).toContain("max-md:flex-col")
-      expect(popup.className).toContain("max-md:overflow-hidden")
-
-      // ...and the middle band scrolls instead.
-      const body = bodyRegion()
-      expect(body.className).toContain("max-md:min-h-0")
-      expect(body.className).toContain("max-md:flex-1")
-      expect(body.className).toContain("max-md:overflow-y-auto")
-
-      // The prose is inside it; the pinned bands exist AND sit outside it
-      // (Node.contains(null) is false, so the null checks keep "outside the
-      // scroller" distinguishable from "not rendered at all").
-      expect(within(body).getByText(/Point dux at any git repo\./)).toBeTruthy()
-      const bar = masthead()
-      const foot = footer()
-      expect(bar).not.toBeNull()
-      expect(foot).not.toBeNull()
-      expect(body.contains(bar)).toBe(false)
-      expect(body.contains(foot)).toBe(false)
-
-      // The tagline moved INTO the scrolling body on phones (it introduces
-      // the prose it scrolls with); losing it there is silent design drift.
+      expect(within(body()).getByText(/Point dux at any git repo\./)).toBeTruthy()
       expect(
-        within(body).getByText("One git worktree per coding agent, and a real terminal."),
+        within(body()).getByText("One git worktree per coding agent, and a real terminal."),
       ).toBeTruthy()
+      expect(body().contains(titleRow())).toBe(false)
+      expect(body().contains(footer())).toBe(false)
     })
 
-    it("carries the version chip in the what's-new masthead", () => {
+    it("shows the version chip with the what's-new notes", () => {
       seed({ screen: "whats_new", notes: NOTES })
       render(<FirstLoadDialog />)
 
-      const bar = masthead()
-      expect(bar).not.toBeNull()
-      const inBar = within(bar as HTMLElement)
-      expect(inBar.getByText("What's new in")).toBeTruthy()
-      expect(inBar.getByText("v0.6.0")).toBeTruthy()
-      expect(inBar.getByText("Quieter plumbing, louder failures")).toBeTruthy()
-      // The release bullets still scroll.
-      expect(within(bodyRegion()).getByText("In this release")).toBeTruthy()
+      expect(within(titleRow()).getByText("Quieter plumbing, louder failures")).toBeTruthy()
+      expect(within(body()).getByText("What's new in")).toBeTruthy()
+      expect(within(body()).getByText("v0.6.0")).toBeTruthy()
+      expect(within(body()).getByText("In this release")).toBeTruthy()
     })
 
-    it("keeps exactly one dialog title per screen, at either width", () => {
-      for (const width of [390, 1280]) {
-        for (const state of [
-          { screen: "welcome" as const },
-          { screen: "whats_new" as const, notes: NOTES },
-        ]) {
-          setViewportWidth(width)
-          seed(state)
-          render(<FirstLoadDialog />)
-          // Two titles in one dialog is two accessible names, which is why the
-          // masthead is a DOM branch rather than a `hidden`/`md:block` pair.
-          expect(
-            document.querySelectorAll('[data-slot="dialog-title"]'),
-          ).toHaveLength(1)
-          cleanup()
-        }
-      }
-    })
-
-    it("shows the art column and no masthead at desktop width", () => {
+    it("shows the duck's column and no mark in the title at desktop width", () => {
       setViewportWidth(1280)
       seed({ screen: "welcome" })
       render(<FirstLoadDialog />)
 
-      expect(masthead()).toBeNull()
-      // Exactly one logo on desktop: the duck in its own column.
       const logos = document.querySelectorAll('img[src="/dux-logo.png"]')
       expect(logos).toHaveLength(1)
-      expect(logos[0].parentElement!.className).toContain("md:w-[152px]")
-      // And the title is back inside the text column beside it.
-      expect(screen.getByText("Welcome to dux")).toBeTruthy()
+      expect(titleRow().contains(logos[0])).toBe(false)
+      // The hairline divider between the art column and the prose.
+      expect(logos[0].parentElement!.className).toContain("border-r")
+      expect(logos[0].getAttribute("aria-hidden")).toBe("true")
     })
-  })
-
-  it("drops the duck on phones and keeps it on desktop", () => {
-    seed({ screen: "welcome" })
-    render(<FirstLoadDialog />)
-    const duck = document.querySelector('img[src="/dux-logo.png"]')
-    expect(duck).not.toBeNull()
-    // The real logo image, not ASCII art, and decorative to screen readers.
-    expect(duck!.getAttribute("aria-hidden")).toBe("true")
-    const column = duck!.parentElement!
-    expect(column.className).toContain("hidden")
-    expect(column.className).toContain("md:flex")
-    // The hairline divider between the art column and the prose.
-    expect(column.className).toContain("border-r")
   })
 })
