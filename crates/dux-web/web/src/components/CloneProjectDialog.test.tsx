@@ -219,7 +219,9 @@ describe("CloneProjectDialog", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(store.getSnapshot().cloneProject?.name).toBe("third")
     expect(screen.queryByRole("alert")).toBeNull()
-    expect((clone() as HTMLButtonElement).disabled).toBe(true)
+    // Busy sending, it keeps its focus and says it is unavailable.
+    expect(clone().getAttribute("aria-busy")).toBe("true")
+    expect(clone().getAttribute("aria-disabled")).toBe("true")
 
     third.release(reply(202, JSON.stringify({ op_id: "op-c" })))
     await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
@@ -346,7 +348,15 @@ describe("CloneProjectDialog for a pull request", () => {
     expect(screen.getByText("New agent from PR")).toBeTruthy()
     const chips = [...document.querySelectorAll("code")].map((c) => c.textContent)
     expect(chips).toEqual(["github.com/acme/widget", "#3", "Fix the thing", "fix-thing"])
-    expect(screen.getByText(/Fix the thing/)).toBeTruthy()
+    // The pull request's title and branch are part of the form, not what the
+    // dialog is described as.
+    const line = screen.getByText(/from branch/)
+    expect(line.closest('[data-slot="modal-body"]')).not.toBeNull()
+    expect(screen.getByRole("dialog").getAttribute("aria-describedby")).toBeTruthy()
+    const description = document.getElementById(
+      screen.getByRole("dialog").getAttribute("aria-describedby")!,
+    )!
+    expect(description.textContent).not.toContain("Fix the thing")
     expect((screen.getByLabelText("Repository address") as HTMLInputElement).value).toBe(
       "https://github.com/acme/widget.git",
     )
@@ -560,7 +570,8 @@ describe("CloneProjectDialog for a pull request", () => {
     fireEvent.click(primary("Clone and create"))
     await waitFor(() => expect(posted).toHaveLength(1))
     type(destination(), "/home/u/elsewhere")
-    expect(primary("Clone and create").disabled).toBe(true)
+    expect(primary("Clone and create").getAttribute("aria-busy")).toBe("true")
+    expect(primary("Clone and create").getAttribute("aria-disabled")).toBe("true")
     sent.release(reply(202, JSON.stringify({ op_id: "op-1" })))
     await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
     expect(posted).toHaveLength(1)

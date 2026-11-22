@@ -1,16 +1,10 @@
 import { Bot, Plus, SquareTerminal } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
-import { useEffect, useState, type ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
@@ -84,52 +78,52 @@ export function StackNewDialog({
   const device = useRowDriverLabel({ sessionId: session.id })
   const changesBlocked = block !== null
   const underCard = block === "other" || block === "nobody"
-  useEffect(() => {
-    if (open && underCard) onClose()
-  }, [open, underCard, onClose])
   const provider = defaultProviderForSession(spine, session)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
-  const tabDisabled =
-    changesBlocked || session.tabs.length >= cap || createTabInFlight.includes(session.id)
+  // Held while the close animates: the tab a press adds is in flight by then.
+  const tabDisabled = useHeldWhileClosed(
+    open,
+    changesBlocked || session.tabs.length >= cap || createTabInFlight.includes(session.id),
+  )
   const run = (act: () => void) => {
     onClose()
     act()
   }
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Add to this agent</DialogTitle>
-          <DialogDescription>
-            {block !== null
-              ? addToAgentBlockHint(block, device)
-              : "Another tab works in the same worktree; a terminal opens in its dock."}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-0.5">
-          <NewRow
-            icon={Bot}
-            title="New agent tab"
-            excerpt={
-              <>
-                Starts <InlineCode>{provider}</InlineCode> beside this agent&rsquo;s
-                other tabs.
-              </>
-            }
-            disabled={tabDisabled}
-            autoFocus
-            onActivate={() => run(() => addTab(session.id))}
-          />
-          <NewRow
-            icon={SquareTerminal}
-            title="New terminal"
-            excerpt="Opens a shell in this agent's worktree, in its dock."
-            disabled={changesBlocked}
-            onActivate={() => run(() => createTerminal(session.id))}
-          />
-        </div>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="picker"
+      open={open}
+      vanished={open && underCard}
+      onClose={() => onClose()}
+      size="md"
+      title="Add to this agent"
+      description={
+        block !== null
+          ? addToAgentBlockHint(block, device)
+          : "Another tab works in the same worktree; a terminal opens in its dock."
+      }
+    >
+      <div className="flex flex-col gap-0.5">
+        <NewRow
+          icon={Bot}
+          title="New agent tab"
+          excerpt={
+            <>
+              Starts <InlineCode>{provider}</InlineCode> beside this agent&rsquo;s other tabs.
+            </>
+          }
+          disabled={tabDisabled}
+          onActivate={() => run(() => addTab(session.id))}
+        />
+        <NewRow
+          icon={SquareTerminal}
+          title="New terminal"
+          excerpt="Opens a shell in this agent's worktree, in its dock."
+          disabled={changesBlocked}
+          onActivate={() => run(() => createTerminal(session.id))}
+        />
+      </div>
+    </Modal>
   )
 }
 
@@ -138,21 +132,18 @@ function NewRow({
   title,
   excerpt,
   disabled = false,
-  autoFocus = false,
   onActivate,
 }: {
   icon: LucideIcon
   title: string
   excerpt: ReactNode
   disabled?: boolean
-  autoFocus?: boolean
   onActivate: () => void
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
-      autoFocus={autoFocus}
       onClick={onActivate}
       // The rows sit 2px apart with nothing else between them, and each is at
       // least 56px tall, well over the touch floor.

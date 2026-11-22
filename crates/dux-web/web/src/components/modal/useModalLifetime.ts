@@ -25,3 +25,13 @@ export function useModalLifetime(open: boolean): {
     onClosed: () => setMounted((now) => now && open),
   }
 }
+
+/** `value` while `open`, and the value it had when the modal closed while it
+ * animates out, so a closing modal shows what it showed when the close began.
+ * `value` must keep its identity between renders while it is unchanged (a
+ * store field, not an object built during render). */
+export function useHeldWhileClosed<T>(open: boolean, value: T): T {
+  const [held, setHeld] = useState(value)
+  if (open && !Object.is(held, value)) setHeld(value)
+  return open ? value : held
+}

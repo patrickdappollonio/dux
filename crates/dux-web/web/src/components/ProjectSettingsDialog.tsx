@@ -1,8 +1,6 @@
 import { useState } from "react"
 
-import { FormDialogContent } from "@/components/FormDialogContent"
-import { Button } from "@/components/ui/button"
-import { Dialog } from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -12,93 +10,135 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { envToText, parseEnv } from "@/lib/env"
+import { envEdit, envLeftOutNote, envToText, type EnvEdit } from "@/lib/env"
+import { chip, prose } from "@/lib/prose"
 import { closeProjectSettings, updateProjectSettings, useDux } from "@/lib/store"
 import type { PatchProjectBody } from "@/lib/projectsApi"
 import type { ProjectView } from "@/lib/types"
 
-// The form body is mounted only while the dialog is open and a project resolves.
-// Each local state seeds from the project prop via a lazy initializer so there
-// is no set-state-in-effect to seed the controls on open.
-function ProjectSettingsForm({
-  project,
-  providers,
-}: {
-  project: ProjectView
-  providers: string[]
-}) {
+export function ProjectSettingsDialog() {
+  const { projectSettingsTarget } = useDux()
+  const open = projectSettingsTarget !== null
+  const life = useModalLifetime(open)
+  // Keyed by the open, so every control starts from the project's settings.
+  return life.mounted ? (
+    <ProjectSettingsForm key={life.epoch} open={open} onClosed={life.onClosed} />
+  ) : null
+}
+
+interface Draft {
+  provider: string
+  autoReopen: string
+  startup: string
+  env: EnvEdit
+}
+
+// One tri-state PATCH body: only the fields that changed (the server leaves an
+// omitted field untouched), with `null` clearing a scalar back to the
+// inherited default.
+function settingsPatch(project: ProjectView, draft: Draft): PatchProjectBody {
+  const patch: PatchProjectBody = {}
+
+  const newProvider = draft.provider === "" ? null : draft.provider
+  if (newProvider !== (project.explicit_default_provider ?? null)) {
+    patch.provider = newProvider
+  }
+
+  const newAutoReopen =
+    draft.autoReopen === "inherit" ? null : draft.autoReopen === "on" ? true : false
+  if (newAutoReopen !== (project.auto_reopen_agents ?? null)) {
+    patch.auto_reopen_agents = newAutoReopen
+  }
+
+  const newStartup = draft.startup.trim() === "" ? null : draft.startup
+  if (newStartup !== (project.startup_command ?? null)) {
+    patch.startup_command = newStartup
+  }
+
+  if (draft.env.changed > 0) {
+    patch.env = draft.env.env
+  }
+  return patch
+}
+
+function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const { spine, bootstrap, projectSettingsTarget } = useDux()
+  // The project this open is about, kept while the close animates.
+  const [targetId] = useState(projectSettingsTarget)
+  // The project as it was when the close began, kept while the close animates,
+  // so the settings a save just applied do not read as unchanged.
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find((p) => p.id === targetId),
+  )
+  const providers = bootstrap?.available_providers ?? []
   // "" means "inherit the global default provider".
   const [provider, setProvider] = useState<string>(
-    () => project.explicit_default_provider ?? "",
+    () => project?.explicit_default_provider ?? "",
   )
   const [autoReopen, setAutoReopen] = useState<string>(() =>
-    project.auto_reopen_agents === null
+    project?.auto_reopen_agents == null
       ? "inherit"
       : project.auto_reopen_agents
         ? "on"
         : "off",
   )
-  const [startup, setStartup] = useState(() => project.startup_command ?? "")
-  const [envText, setEnvText] = useState(() => envToText(project.env))
+  const [startup, setStartup] = useState(() => project?.startup_command ?? "")
+  const [openedEnv] = useState(() => envToText(project?.env ?? {}))
+  const [envText, setEnvText] = useState(openedEnv)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
+  const env = envEdit(project?.env ?? {}, openedEnv, envText)
+  const patch =
+    project === undefined ? {} : settingsPatch(project, { provider, autoReopen, startup, env })
+  // Counted as the other forms count: one per setting, and the environment
+  // per variable and per line Save leaves out.
+  const changes = Object.keys(patch).filter((field) => field !== "env").length + env.edits
+  const leftOutNote = envLeftOutNote(env.leftOut)
 
   async function handleSave() {
-    // Build one tri-state PATCH body: include only the fields that changed (the
-    // server leaves an omitted field untouched), with `null` clearing a scalar
-    // back to the inherited default. `updateProjectSettings` sends no request for
-    // an empty patch and says there was nothing to save.
-    const patch: PatchProjectBody = {}
-
-    const newProvider = provider === "" ? null : provider
-    if (newProvider !== (project.explicit_default_provider ?? null)) {
-      patch.provider = newProvider
+    if (project === undefined || Object.keys(patch).length === 0 || saving) return
+    setSaving(true)
+    try {
+      // The PATCH is not atomic across its fields, so a rejection (toasted)
+      // keeps the dialog open over what may be a partly applied change.
+      if (await updateProjectSettings(project.id, patch)) closeProjectSettings()
+    } finally {
+      setSaving(false)
     }
-
-    const newAutoReopen =
-      autoReopen === "inherit" ? null : autoReopen === "on" ? true : false
-    if (newAutoReopen !== (project.auto_reopen_agents ?? null)) {
-      patch.auto_reopen_agents = newAutoReopen
-    }
-
-    const newStartup = startup.trim() === "" ? null : startup
-    if (newStartup !== (project.startup_command ?? null)) {
-      patch.startup_command = newStartup
-    }
-
-    const env = parseEnv(envText)
-    if (JSON.stringify(env) !== JSON.stringify(project.env)) {
-      patch.env = env
-    }
-
-    // Close only once the PATCH succeeds. The PATCH is not atomic across its
-    // independent fields, so on a rejection we keep the dialog open (the error is
-    // toasted) rather than dismissing it over a partially-applied change.
-    if (await updateProjectSettings(project.id, patch)) closeProjectSettings()
   }
 
-  const phone = useIsMobile()
+  const projectName = project?.name ?? ""
   return (
-    <FormDialogContent
-      phone={phone}
+    <Modal
+      kind="form"
+      open={open}
+      // A project removed while the dialog is open closes it; a rejected save,
+      // by contrast, deliberately keeps it open.
+      vanished={open && project === undefined}
+      onClose={closeProjectSettings}
+      onClosed={onClosed}
+      busy={saving}
+      size="lg"
       title={
         <>
-          Project settings: <InlineCode>{project.name}</InlineCode>
+          Project settings: <InlineCode>{projectName}</InlineCode>
         </>
       }
       description="Per-project overrides. Leave a field on the inherited default to fall back to the global configuration."
-      onClose={closeProjectSettings}
-      className="sm:max-w-lg"
-      footer={
-        <>
-          <Button variant="outline" onClick={closeProjectSettings}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave}>Save</Button>
-        </>
-      }
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        busy: saving,
+        disabledReason: Object.keys(patch).length === 0 ? "Nothing to save yet: no setting has changed." : null,
+      }}
+      unsavedEdits={{
+        changes,
+        holder: "The project settings have",
+        leaves: prose`the settings of project ${chip(projectName)}`,
+      }}
     >
-
       <div className="grid gap-4">
         <div className="grid gap-2">
           <label className="text-sm font-medium">Default provider</label>
@@ -155,39 +195,9 @@ function ProjectSettingsForm({
             placeholder="KEY=VALUE"
             className="min-h-32 font-mono"
           />
+          {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
         </div>
       </div>
-    </FormDialogContent>
-  )
-}
-
-export function ProjectSettingsDialog() {
-  const { spine, bootstrap, projectSettingsTarget } = useDux()
-  const project = spine?.projects.find(
-    (p) => p.id === projectSettingsTarget,
-  )
-  // Closes the dialog when the project vanishes from the ViewModel; this is
-  // orthogonal to the save flow above, which deliberately stays open on a
-  // rejected save. See the hook.
-  const open = useVanishedTargetGuard(
-    projectSettingsTarget !== null,
-    project !== undefined,
-    closeProjectSettings,
-  )
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) closeProjectSettings()
-      }}
-    >
-      {open && project && (
-        <ProjectSettingsForm
-          project={project}
-          providers={bootstrap?.available_providers ?? []}
-        />
-      )}
-    </Dialog>
+    </Modal>
   )
 }

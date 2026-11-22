@@ -1,13 +1,5 @@
 import { GlyphSpinner } from "@/components/GlyphSpinner"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -16,8 +8,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import type { StartupLogsScope } from "@/lib/store"
 import {
   closeStartupLogs,
   selectStartupLog,
@@ -32,127 +22,106 @@ import { startupLogsCopy } from "./startupLogsCopy"
 // View startup-command logs. Each run of the project startup command writes a
 // timestamped log file; this lists them newest first and shows the selected
 // file's contents, fetched into the store when the viewer opens.
-function StartupLogsBody({
-  scope,
-  targetId,
-}: {
-  scope: StartupLogsScope
-  targetId: string
-}) {
-  const {
-    spine,
-    startupLogsEntries,
-    startupLogsSelected,
-    startupLogsLoading,
-    startupLogsError,
-  } = useDux()
-
-  const project = spine?.projects.find((p) => p.id === targetId)
-  const session = spine?.sessions.find((s) => s.id === targetId)
-  const { title, description, emptyMessage } = startupLogsCopy(
-    scope,
-    project?.name,
-    session ? sessionLabel(session) : undefined,
-  )
+function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: string }) {
+  const live = useDux()
+  // What the viewer showed when the close began, kept while the close animates.
+  const startupLogsEntries = useHeldWhileClosed(open, live.startupLogsEntries)
+  const startupLogsSelected = useHeldWhileClosed(open, live.startupLogsSelected)
+  const startupLogsLoading = useHeldWhileClosed(open, live.startupLogsLoading)
+  const startupLogsError = useHeldWhileClosed(open, live.startupLogsError)
   const hasLogs = startupLogsEntries.length > 0
 
-  return (
-    <DialogContent showCloseButton={false} className="sm:max-w-3xl">
-      <DialogHeader>
-        <DialogTitle>{renderProse(title)}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
+  return startupLogsError ? (
+    <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+      {startupLogsError}
+    </div>
+  ) : !hasLogs && startupLogsLoading ? (
+    <div className="flex h-64 items-center justify-center">
+      <GlyphSpinner className="text-lg text-muted-foreground" />
+    </div>
+  ) : !hasLogs ? (
+    <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
+      {emptyMessage}
+    </div>
+  ) : (
+    <div className="grid gap-3">
+      <Select
+        value={startupLogsSelected?.name ?? startupLogsEntries[0]?.name ?? ""}
+        onValueChange={(name) => name && selectStartupLog(name)}
+      >
+        <SelectTrigger className="w-full font-mono">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {startupLogsEntries.map((entry) => (
+            <SelectItem key={entry.name} value={entry.name} className="font-mono">
+              {entry.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
 
-      {startupLogsError ? (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {startupLogsError}
-        </div>
-      ) : !hasLogs && startupLogsLoading ? (
-        <div className="flex h-64 items-center justify-center">
-          <GlyphSpinner className="text-lg text-muted-foreground" />
-        </div>
-      ) : !hasLogs ? (
-        <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-          {emptyMessage}
-        </div>
-      ) : (
-        <div className="grid gap-3">
-          <Select
-            value={startupLogsSelected?.name ?? startupLogsEntries[0]?.name ?? ""}
-            onValueChange={(name) => name && selectStartupLog(name)}
+      <ScrollArea className="h-[50vh] rounded-md border md:h-96">
+        {/* The relative positioning anchors the in-flight spinner over the
+            content while switching to a different log file. */}
+        <div className="relative">
+          {/* The bundled terminal stack (not bare font-mono) so startup-command
+              output gets the same box-drawing/block/braille glyph coverage as
+              the live terminal. */}
+          <pre
+            className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed"
+            style={{ fontFamily: DUX_TERMINAL_FONT_STACK }}
           >
-            <SelectTrigger className="w-full font-mono">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {startupLogsEntries.map((entry) => (
-                <SelectItem key={entry.name} value={entry.name} className="font-mono">
-                  {entry.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-
-          <ScrollArea className="h-[50vh] rounded-md border md:h-96">
-            {/* The relative positioning anchors the in-flight spinner over the
-                content while switching to a different log file. */}
-            <div className="relative">
-              {/* The bundled terminal stack (not bare font-mono) so startup-command
-                  output gets the same box-drawing/block/braille glyph coverage as
-                  the live terminal. */}
-              <pre
-                className="whitespace-pre-wrap break-words p-3 font-mono text-xs leading-relaxed"
-                style={{ fontFamily: DUX_TERMINAL_FONT_STACK }}
-              >
-                {startupLogsSelected?.content ?? ""}
-              </pre>
-              {startupLogsLoading ? (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-                  <GlyphSpinner className="text-lg text-muted-foreground" />
-                </div>
-              ) : null}
+            {startupLogsSelected?.content ?? ""}
+          </pre>
+          {startupLogsLoading ? (
+            <div className="absolute inset-0 flex items-center justify-center bg-background/60">
+              <GlyphSpinner className="text-lg text-muted-foreground" />
             </div>
-          </ScrollArea>
+          ) : null}
         </div>
-      )}
-
-      <DialogFooter>
-        <Button variant="outline" onClick={closeStartupLogs}>
-          Close
-        </Button>
-      </DialogFooter>
-    </DialogContent>
+      </ScrollArea>
+    </div>
   )
 }
 
 export function StartupLogsDialog() {
-  const { startupLogsScope, startupLogsTarget, spine } = useDux()
-  // Closes the dialog when the entity it is scoped to vanishes from the
-  // ViewModel: the logs belong to a deleted agent's worktree, or to a removed
-  // project, and either way they are gone. The lookup MUST follow the scope,
-  // because resolving a project id against the session list would find nothing
-  // and slam a perfectly valid project view shut on its first frame. See the
-  // hook.
-  const targetExists =
+  const live = useDux()
+  const open = live.startupLogsTarget !== null
+  // The scope and target the viewer showed, kept while the close animates.
+  const startupLogsScope = useHeldWhileClosed(open, live.startupLogsScope)
+  const startupLogsTarget = useHeldWhileClosed(open, live.startupLogsTarget)
+  const { spine } = live
+  // Looked up by scope: a project id resolved against the sessions finds
+  // nothing and would close a valid project view on its first frame.
+  const project =
     startupLogsScope === "project"
-      ? spine?.projects.some((p) => p.id === startupLogsTarget) === true
-      : spine?.sessions.some((s) => s.id === startupLogsTarget) === true
-  const open = useVanishedTargetGuard(
-    startupLogsTarget !== null,
-    targetExists,
-    closeStartupLogs,
+      ? spine?.projects.find((p) => p.id === startupLogsTarget)
+      : undefined
+  const session =
+    startupLogsScope === "project"
+      ? undefined
+      : spine?.sessions.find((s) => s.id === startupLogsTarget)
+  const targetExists = project !== undefined || session !== undefined
+  const { title, description, emptyMessage } = startupLogsCopy(
+    startupLogsScope,
+    project?.name,
+    session ? sessionLabel(session) : undefined,
   )
 
   return (
-    <Dialog
+    <Modal
+      kind="report"
       open={open}
-      onOpenChange={(o) => {
-        if (!o) closeStartupLogs()
-      }}
+      vanished={open && !targetExists}
+      onClose={closeStartupLogs}
+      size="3xl"
+      title={renderProse(title)}
+      description={description}
     >
-      {open && startupLogsTarget !== null && (
-        <StartupLogsBody scope={startupLogsScope} targetId={startupLogsTarget} />
-      )}
-    </Dialog>
+      {startupLogsTarget !== null && targetExists ? (
+        <StartupLogsBody open={open} emptyMessage={emptyMessage} />
+      ) : null}
+    </Modal>
   )
 }

@@ -1,19 +1,10 @@
 import { useEffect, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Input } from "@/components/ui/input"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
 import { renderProse } from "@/lib/prose"
 import {
@@ -37,7 +28,14 @@ import {
 // box, with a line saying what stays on the old name when the branch has an
 // open or draft pull request or a pushed copy.
 export function RenameSessionDialog() {
-  const { renameTarget, renameDraft, renameBranch, renamePending, spine } = useDux()
+  const live = useDux()
+  const isOpen = live.renameTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const renameTarget = useHeldWhileClosed(isOpen, live.renameTarget)
+  const renameDraft = useHeldWhileClosed(isOpen, live.renameDraft)
+  const renameBranch = useHeldWhileClosed(isOpen, live.renameBranch)
+  const renamePending = useHeldWhileClosed(isOpen, live.renamePending)
+  const spine = useHeldWhileClosed(isOpen, live.spine)
   const session = spine?.sessions.find((s) => s.id === renameTarget)
   const branch = session
     ? matchWorkspace<string | null>(session.workspace, {
@@ -64,11 +62,7 @@ export function RenameSessionDialog() {
   } | null>(null)
   const pushed = pushedAnswer?.id === renameTarget && pushedAnswer.pushed
 
-  const open = useVanishedTargetGuard(
-    renameTarget !== null,
-    session !== undefined,
-    closeRename,
-  )
+  const open = renameTarget !== null && session !== undefined
 
   useEffect(() => {
     if (!open || !branchNamed || !renameTarget) return
@@ -91,6 +85,7 @@ export function RenameSessionDialog() {
     !isValidAgentName(renameDraft.trim())
   const blocked = renameBlockedReason(renameDraft, renameBranch, branchNamed)
   const canSave = !invalidNonEmpty && blocked === null && !renamePending
+  const saveRefusal = invalidNonEmpty ? INVALID_AGENT_NAME : blocked
   const warns = openPr !== null || pushed
 
   function handleSubmit() {
@@ -99,87 +94,79 @@ export function RenameSessionDialog() {
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) closeRename()
+    <Modal
+      kind="form"
+      open={isOpen}
+      // An agent removed while the dialog is open closes it.
+      vanished={isOpen && session === undefined}
+      onClose={closeRename}
+      title="Rename agent"
+      description={
+        branchNamed
+          ? "Sets the name this agent shows. Leave it empty to show its branch name again."
+          : "Sets the name this agent shows. Leave it empty to show its folder's name again."
+      }
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: handleSubmit,
+        busy: renamePending,
+        disabledReason: saveRefusal,
       }}
     >
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>Rename agent</DialogTitle>
-          <DialogDescription>
-            {branchNamed
-              ? "Sets the name this agent shows. Leave it empty to show its branch name again."
-              : "Sets the name this agent shows. Leave it empty to show its folder's name again."}
-          </DialogDescription>
-        </DialogHeader>
-        <Input
-          value={renameDraft}
-          onChange={(e) => {
-            const el = e.target
-            const raw = el.value
-            const caret = el.selectionStart ?? raw.length
-            setRenameDraft(raw)
-            // Keep the caret put when sanitization shrinks the string (same
-            // approach as the new-agent input).
-            const sanitized = sanitizeAgentName(raw)
-            if (sanitized !== raw) {
-              const next = Math.max(0, caret - (raw.length - sanitized.length))
-              requestAnimationFrame(() => el.setSelectionRange(next, next))
+      <Input
+        value={renameDraft}
+        onChange={(e) => {
+          const el = e.target
+          const raw = el.value
+          const caret = el.selectionStart ?? raw.length
+          setRenameDraft(raw)
+          // Keep the caret put when sanitization shrinks the string (same
+          // approach as the new-agent input).
+          const sanitized = sanitizeAgentName(raw)
+          if (sanitized !== raw) {
+            const next = Math.max(0, caret - (raw.length - sanitized.length))
+            requestAnimationFrame(() => el.setSelectionRange(next, next))
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault()
+            handleSubmit()
+          }
+        }}
+        placeholder={fallbackName}
+        aria-label="Agent name"
+        aria-invalid={invalidNonEmpty}
+      />
+      <p className="text-xs text-muted-foreground">Any name git accepts for a branch.</p>
+      {branch !== null && (
+        <div className="grid gap-1">
+          <CheckboxRow
+            id="rename-branch"
+            checked={renameBranch}
+            onCheckedChange={(checked) => setRenameBranch(checked)}
+          >
+            Also rename the git branch
+          </CheckboxRow>
+          <p
+            className={
+              warns
+                ? "flex items-start gap-1.5 text-xs text-dux-warning"
+                : "text-xs text-muted-foreground"
             }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault()
-              handleSubmit()
-            }
-          }}
-          placeholder={fallbackName}
-          aria-label="Agent name"
-          aria-invalid={invalidNonEmpty}
-          autoFocus
-        />
-        <p className="text-xs text-muted-foreground">
-          Any name git accepts for a branch.
-        </p>
-        {branch !== null && (
-          <div className="grid gap-1">
-            <CheckboxRow
-              id="rename-branch"
-              checked={renameBranch}
-              onCheckedChange={(checked) => setRenameBranch(checked)}
-            >
-              Also rename the git branch
-            </CheckboxRow>
-            <p
-              className={
-                warns
-                  ? "flex items-start gap-1.5 text-xs text-dux-warning"
-                  : "text-xs text-muted-foreground"
-              }
-              data-testid="rename-branch-note"
-            >
-              {warns && <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
-              <span>{renderProse(renameBranchNoteProse(branch, openPr, pushed))}</span>
-            </p>
-          </div>
-        )}
-        {blocked !== null && (
-          <p className="text-xs text-destructive" role="alert">
-            {blocked}
+            data-testid="rename-branch-note"
+          >
+            {warns && <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
+            <span>{renderProse(renameBranchNoteProse(branch, openPr, pushed))}</span>
           </p>
-        )}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" onClick={closeRename}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} disabled={!canSave}>
-            Save
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      )}
+      {blocked !== null && (
+        <p className="text-xs text-destructive" role="alert">
+          {blocked}
+        </p>
+      )}
+    </Modal>
   )
 }

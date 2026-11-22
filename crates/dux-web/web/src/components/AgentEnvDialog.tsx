@@ -1,101 +1,103 @@
 import { useState } from "react"
 
-import { FormDialogContent } from "@/components/FormDialogContent"
-import { Button } from "@/components/ui/button"
-import { Dialog } from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
-import { envToText, parseEnv } from "@/lib/env"
+import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
+import { chip, prose } from "@/lib/prose"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
-import type { ProjectView, SessionView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Edit environment variables from an agent's menu. Env is project-scoped, so this
 // edits the agent's PROJECT env, layered over the global env, and the copy says so.
-// Mounted only while open and a project resolves; state seeds lazily from it.
-function AgentEnvForm({
-  session,
-  project,
-}: {
-  session: SessionView
-  project: ProjectView
-}) {
-  const [text, setText] = useState(() => envToText(project.env))
-  const agentName = sessionLabel(session)
+export function AgentEnvDialog() {
+  const { agentEnvTarget } = useDux()
+  const open = agentEnvTarget !== null
+  const life = useModalLifetime(open)
+  // Keyed by the open, so the text starts from the project's env each time.
+  return life.mounted ? (
+    <AgentEnvForm key={life.epoch} open={open} onClosed={life.onClosed} />
+  ) : null
+}
+
+function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const { spine, agentEnvTarget } = useDux()
+  // The agent this open is about, kept while the close animates.
+  const [targetId] = useState(agentEnvTarget)
+  // The agent and its project as they were when the close began, kept while
+  // the close animates, so the settings a save just applied do not read as
+  // unchanged.
+  const session = useHeldWhileClosed(
+    open,
+    spine?.sessions.find((s) => s.id === targetId),
+  )
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find(
+      (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+    ),
+  )
+  const [opened] = useState(() => envToText(project?.env ?? {}))
+  const [text, setText] = useState(opened)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
+  const edit = envEdit(project?.env ?? {}, opened, text)
+  const leftOutNote = envLeftOutNote(edit.leftOut)
 
   async function handleSave() {
-    const env = parseEnv(text)
-    // Unchanged is an empty patch: no request, a nothing-to-save notice, close.
-    const patch =
-      JSON.stringify(env) === JSON.stringify(project.env) ? {} : { env }
-    if (await updateProjectSettings(project.id, patch, "environment")) closeAgentEnv()
+    if (project === undefined || edit.changed === 0 || saving) return
+    setSaving(true)
+    try {
+      if (await updateProjectSettings(project.id, { env: edit.env }, "environment")) {
+        closeAgentEnv()
+      }
+    } finally {
+      setSaving(false)
+    }
   }
 
-  // On a phone, focusing the text would raise the keyboard over the form.
-  const phone = useIsMobile()
+  const projectName = project?.name ?? ""
   return (
-    <FormDialogContent
-      phone={phone}
+    <Modal
+      kind="form"
+      open={open}
+      // The agent or its project removed while the dialog is open closes it.
+      vanished={open && (session === undefined || project === undefined)}
+      onClose={closeAgentEnv}
+      onClosed={onClosed}
       title={
         <>
-          Environment: <InlineCode>{agentName}</InlineCode>
+          Environment: <InlineCode>{session ? sessionLabel(session) : ""}</InlineCode>
         </>
       }
       description={
         <>
           KEY=VALUE per line, applied to every agent and terminal in project{" "}
-          <InlineCode>{project.name}</InlineCode> (layered over the
-          global env). This applies to the whole project, not just this agent.
+          <InlineCode>{projectName}</InlineCode> (layered over the global env). This applies
+          to the whole project, not just this agent.
         </>
       }
-      onClose={closeAgentEnv}
-      footer={
-        <>
-          <Button variant="outline" onClick={closeAgentEnv}>
-            Cancel
-          </Button>
-          <Button onClick={() => void handleSave()}>Save</Button>
-        </>
-      }
+      busy={saving}
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        busy: saving,
+        disabledReason: edit.changed === 0 ? "Nothing to save yet: no variable has changed." : null,
+      }}
+      unsavedEdits={{
+        changes: edit.edits,
+        holder: "The environment has",
+        leaves: prose`the environment of project ${chip(projectName)}`,
+      }}
     >
       <Textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="KEY=VALUE"
         className="min-h-48 font-mono max-md:flex-1"
-        autoFocus={!phone}
       />
-    </FormDialogContent>
-  )
-}
-
-export function AgentEnvDialog() {
-  const { spine, agentEnvTarget } = useDux()
-  const session = spine?.sessions.find((s) => s.id === agentEnvTarget)
-  const project = spine?.projects.find(
-    (p) =>
-      session !== undefined && p.id === workspaceProjectId(session.workspace),
-  )
-  // Closes the dialog when the agent or its project vanishes from the
-  // ViewModel; see the hook.
-  const open = useVanishedTargetGuard(
-    agentEnvTarget !== null,
-    session !== undefined && project !== undefined,
-    closeAgentEnv,
-  )
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) closeAgentEnv()
-      }}
-    >
-      {open && session && project && (
-        <AgentEnvForm session={session} project={project} />
-      )}
-    </Dialog>
+      {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
+    </Modal>
   )
 }

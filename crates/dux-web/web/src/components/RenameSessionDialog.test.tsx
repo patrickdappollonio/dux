@@ -173,7 +173,10 @@ describe("RenameSessionDialog", () => {
     seed("s1", managedSession, "feat/signin")
     mockState = { ...mockState, renamePending: true }
     renderDialog()
-    expect(saveButton().disabled).toBe(true)
+    // Busy, it keeps its focus, so it says it is unavailable rather than being
+    // disabled outright.
+    expect(saveButton().getAttribute("aria-disabled")).toBe("true")
+    expect(saveButton().getAttribute("aria-busy")).toBe("true")
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
     expect(submitRename).not.toHaveBeenCalled()
   })

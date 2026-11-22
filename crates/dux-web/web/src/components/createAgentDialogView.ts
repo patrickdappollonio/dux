@@ -1,4 +1,4 @@
-import { isValidAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName } from "@/lib/agentName"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { chip, type Prose } from "@/lib/prose"
 import type { CreateAgentTarget, DuxState } from "@/lib/store"
@@ -12,7 +12,6 @@ export interface CreateAgentDialogView {
   title: Prose
   description: string
   namePlaceholder: string
-  nameAutoFocus: boolean
   showPrFields: boolean
   prPlaceholder: string
   showProjectPicker: boolean
@@ -23,6 +22,8 @@ export interface CreateAgentDialogView {
 export interface CreateAgentFormView {
   invalidName: boolean
   submitDisabled: boolean
+  /** Why the submit is held, or null while it is held only by a lookup in flight. */
+  submitRefusal: string | null
 }
 
 export function createAgentDialogView(
@@ -42,7 +43,6 @@ function closedDialogView(): CreateAgentDialogView {
     title: ["New agent"],
     description: "",
     namePlaceholder: "Branch name (optional)",
-    nameAutoFocus: true,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -62,7 +62,6 @@ function newDialogView(
     description:
       "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name.",
     namePlaceholder: "Branch name (optional)",
-    nameAutoFocus: true,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -83,7 +82,6 @@ function forkDialogView(
     description:
       "Forks the agent into a new git worktree + branch (copying its uncommitted and untracked files) and launches a fresh session.",
     namePlaceholder: "Branch name",
-    nameAutoFocus: true,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -107,7 +105,6 @@ function prDialogView(
     description:
       "Fetches the PR's head branch into a new git worktree and launches the agent. Paste a PR URL or enter a PR number. Leave the name blank to use the PR's branch name.",
     namePlaceholder: "Branch name (optional)",
-    nameAutoFocus: false,
     showPrFields: true,
     prPlaceholder: "PR URL, #123, or 123",
     showProjectPicker: false,
@@ -124,7 +121,6 @@ function referenceFirstPrDialogView(): CreateAgentDialogView {
     description:
       "Paste a pull request link, or type owner/repo#123. dux finds the project that repository is open in, fetches the PR's head branch into a new git worktree and launches the agent. Leave the name blank to use the PR's branch name.",
     namePlaceholder: "Branch name (optional)",
-    nameAutoFocus: false,
     showPrFields: true,
     prPlaceholder: "Pull request link, or owner/repo#123",
     showProjectPicker: true,
@@ -148,13 +144,18 @@ export function createAgentFormView(
   const emptyName = draft.trim() === ""
   const invalidName = !emptyName && !isValidAgentName(draft)
   const emptyPr = prInput.trim() === ""
+  const submitRefusal = invalidName
+    ? INVALID_AGENT_NAME
+    : kind === "fork" && emptyName
+      ? "Type a name for the fork first."
+      : kind === "pr" && emptyPr
+        ? "Enter the pull request first."
+        : awaitingReviewCopyAgreement
+          ? "Tick Create a review copy to go ahead."
+          : null
   return {
     invalidName,
-    submitDisabled:
-      invalidName ||
-      (kind === "fork" && emptyName) ||
-      (kind === "pr" && emptyPr) ||
-      resolvingPr ||
-      awaitingReviewCopyAgreement,
+    submitDisabled: submitRefusal !== null || resolvingPr,
+    submitRefusal,
   }
 }

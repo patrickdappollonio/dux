@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { holdCloseAnimations } from "@/test/closeAnimation"
 import type { Spine } from "@/lib/types"
 
 // Journeys through "Change base branch…" with the REAL store and dialog: only
@@ -141,6 +142,15 @@ afterEach(() => {
 })
 
 describe("ChangeBaseBranchDialog", () => {
+  it("keeps the branches on screen while it closes, rather than the loading line", async () => {
+    await openFor()
+    holdCloseAnimations()
+    fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(store.getSnapshot().changeBaseBranchTarget).toBeNull()
+    expect(screen.queryByText(/Fetching origin/)).toBeNull()
+    expect(screen.getAllByTestId("branch-row").length).toBe(4)
+  })
+
   it("shows that it is loading until the listing lands", async () => {
     let release = () => {}
     hold = new Promise((resolve) => (release = resolve))

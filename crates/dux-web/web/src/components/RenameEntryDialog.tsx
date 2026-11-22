@@ -1,14 +1,6 @@
 import { useState } from "react"
-import { Loader2 } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
@@ -42,44 +34,39 @@ export function RenameEntryDialog({
   onClose,
   onSubmit,
 }: RenameEntryDialogProps) {
-  return (
-    <Dialog
-      open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
-    >
-      <DialogContent showCloseButton={false} className="sm:max-w-md">
-        {target && (
-          <RenameEntryDialogBody
-            target={target}
-            isDirty={isDirty}
-            onClose={onClose}
-            onSubmit={onSubmit}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
-  )
+  const life = useModalLifetime(target !== null)
+  // Keyed by the open, so the name starts from the entry's own each time.
+  return life.mounted ? (
+    <RenameEntryDialogBody
+      key={life.epoch}
+      target={target}
+      isDirty={isDirty}
+      onClose={onClose}
+      onClosed={life.onClosed}
+      onSubmit={onSubmit}
+    />
+  ) : null
 }
 
 function RenameEntryDialogBody({
   target,
-  isDirty,
+  isDirty: liveDirty,
   onClose,
+  onClosed,
   onSubmit,
-}: {
-  target: RenameEntryTarget
-  isDirty: boolean
-  onClose: () => void
-  onSubmit: (newName: string) => Promise<void>
-}) {
-  const [name, setName] = useState(() => finalSegment(target.path))
+}: RenameEntryDialogProps & { onClosed: () => void }) {
+  // The entry this open is about; the last one is kept while the close animates.
+  const [last, setLast] = useState(target)
+  if (target !== null && target !== last) setLast(target)
+  const path = (target ?? last)?.path ?? ""
+  const isDirty = useHeldWhileClosed(target !== null, liveDirty)
+  const [name, setName] = useState(() => finalSegment(path))
   const [submitting, setSubmitting] = useState(false)
 
   const validation = validateEntryName(name)
   const canSubmit =
     !isDirty && name.trim().length > 0 && validation.ok && !submitting
+  const dirtyRefusal = "Save or discard changes in this file before renaming."
 
   function submit(): void {
     if (!canSubmit) return
@@ -88,16 +75,28 @@ function RenameEntryDialogBody({
   }
 
   return (
-    <>
-      <DialogHeader>
-        <DialogTitle>
-          Rename <InlineCode>{finalSegment(target.path)}</InlineCode>
-        </DialogTitle>
-      </DialogHeader>
+    <Modal
+      kind="form"
+      open={target !== null}
+      onClose={() => onClose()}
+      onClosed={onClosed}
+      size="md"
+      title={
+        <>
+          Rename <InlineCode>{finalSegment(path)}</InlineCode>
+        </>
+      }
+      submit={{
+        label: "Rename",
+        tone: "primary",
+        onSelect: submit,
+        busy: submitting,
+        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
+      }}
+    >
       <Input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        autoFocus
         onFocus={(e) => e.currentTarget.select()}
         disabled={isDirty}
         aria-invalid={name.length > 0 && !validation.ok}
@@ -109,24 +108,11 @@ function RenameEntryDialogBody({
         }}
       />
       {isDirty ? (
-        <p className="text-sm text-destructive">
-          Save or discard changes in this file before renaming.
-        </p>
+        <p className="text-sm text-destructive">{dirtyRefusal}</p>
       ) : (
         name.length > 0 &&
-        !validation.ok && (
-          <p className="text-sm text-destructive">{validation.error}</p>
-        )
+        !validation.ok && <p className="text-sm text-destructive">{validation.error}</p>
       )}
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button disabled={!canSubmit} aria-busy={submitting} onClick={submit}>
-          {submitting ? <Loader2 className="motion-safe:animate-spin" /> : null}
-          Rename
-        </Button>
-      </DialogFooter>
-    </>
+    </Modal>
   )
 }

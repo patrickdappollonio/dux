@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { holdCloseAnimations } from "@/test/closeAnimation"
 
 let mockState: DuxState
 const closeAgentInfoSpy = vi.hoisted(() => vi.fn())
@@ -93,7 +94,7 @@ function renderDialogOpenFor(
       sessions: [{ ...base, ...session, workspace } as unknown as SessionView],
     },
   } as unknown as DuxState
-  render(<AgentInfoDialog />)
+  return render(<AgentInfoDialog />)
 }
 
 // The pull request row's value, read whole: its number is a chip, so the row's
@@ -305,6 +306,15 @@ describe("AgentInfoDialog", () => {
     expect(screen.queryByText(/Pull request/)).toBeNull()
   })
 
+  it("has one Close on a computer, in its footer, and no corner X", () => {
+    renderDialogOpenFor({ title: "fix-auth" })
+    const closes = screen.getAllByRole("button", { name: "Close" })
+    expect(closes).toHaveLength(1)
+    expect(closes[0]!.closest('[data-slot="modal-footer"]')).not.toBeNull()
+    fireEvent.click(closes[0]!)
+    expect(closeAgentInfoSpy).toHaveBeenCalled()
+  })
+
   it("closes when the target session is no longer in the spine", () => {
     // The dialog's target points at an id absent from `spine.sessions` (the agent
     // was removed while the dialog was open). The vanished-target effect fires
@@ -338,3 +348,15 @@ describe("AgentInfoDialog", () => {
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
   })
 })
+
+describe("AgentInfoDialog while it closes", () => {
+  it("keeps the agent it showed rather than emptying", () => {
+    const view = renderDialogOpenFor({ title: "fix-auth" })
+    holdCloseAnimations()
+    mockState = { ...mockState, agentInfoTarget: null } as DuxState
+    view.rerender(<AgentInfoDialog />)
+    expect(screen.getByRole("heading", { hidden: true }).textContent).toBe("fix-auth")
+    expect(screen.getByText("Repo", { selector: "code" })).toBeTruthy()
+  })
+})
+

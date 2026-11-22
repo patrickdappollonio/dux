@@ -1,21 +1,14 @@
-import type { KeyboardEvent } from "react"
+import { useRef, type KeyboardEvent } from "react"
 
 import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
+import { Modal } from "@/components/modal"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
-import { isValidAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName } from "@/lib/agentName"
 import { type CloneProjectPr, reviewCopyBlocksSubmit, reviewCopyShown } from "@/lib/cloneProjectPr"
 import {
   addExistingOfferProse,
@@ -55,17 +48,13 @@ function offerBody(pr: CloneProjectPr, folder: string) {
 // final ride the status toasts from there.
 export function CloneProjectDialog() {
   const { cloneProject: form } = useDux()
+  const destinationRef = useRef<HTMLInputElement | null>(null)
   if (!form) return null
   const pr = form.pr
   const name = form.name.trim()
   const invalidName = name !== "" && !isValidAgentName(name)
-  const submitDisabled =
-    form.submitting ||
-    invalidName ||
-    (pr !== null && name === "") ||
-    (pr === null && form.url.trim() === "") ||
-    form.path.trim() === "" ||
-    (pr !== null && reviewCopyBlocksSubmit(pr, name))
+  const refusal = cloneRefusal(form.url, form.path, name, invalidName, pr)
+  const submitDisabled = form.submitting || refusal !== null
 
   function handleSubmit() {
     if (!submitDisabled) submitCloneProject()
@@ -78,107 +67,132 @@ export function CloneProjectDialog() {
   }
 
   return (
-    <Dialog open onOpenChange={(open) => !open && closeCloneProject()}>
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{pr ? "New agent from PR" : "Clone a repository"}</DialogTitle>
-          <DialogDescription>
-            {pr
-              ? renderProse(offerBody(pr, form.path.trim()))
-              : "Paste the address of a git remote, a GitHub page from your browser, or just owner/repo. dux clones its default branch, adds it as a project and starts an agent there. It never asks for a password: the credentials and ssh keys you already use in a shell are the ones it uses."}
-          </DialogDescription>
-          {pr && (
-            <p className="text-sm text-muted-foreground">
-              {renderProse(prose`${chip(pr.offer.title)} from branch ${chip(pr.offer.head_branch)}`)}
-            </p>
-          )}
-        </DialogHeader>
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="clone-address" className="text-sm font-medium">
-            Repository address
-          </label>
-          <Input
-            id="clone-address"
-            value={form.url}
-            onChange={(event) => setCloneProjectUrl(event.target.value)}
-            onKeyDown={handleEnter}
-            placeholder="owner/repo or a git URL"
-            autoFocus={!pr}
-            readOnly={pr !== null}
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="clone-destination" className="text-sm font-medium">
-            Destination folder
-          </label>
-          <Input
-            id="clone-destination"
-            value={form.path}
-            onChange={(event) => setCloneProjectPath(event.target.value)}
-            onKeyDown={handleEnter}
-            placeholder="/path/to/the/new/folder"
-            autoFocus={pr !== null}
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <p className="text-sm font-medium">{pr ? "Agent" : "First agent"}</p>
-          <AgentNameInput
-            value={form.name}
-            onChange={setCloneProjectName}
-            onSubmit={handleSubmit}
-            placeholder={pr ? "Agent name" : "Agent name (optional)"}
-            ariaLabel="Agent name"
-            invalid={invalidName}
-            generating={form.namePending}
-            autoFocus={false}
-          />
-          <p className="text-xs text-muted-foreground">
-            Any name git accepts for a branch. This becomes the branch
-            name.
-          </p>
-        </div>
-        {pr ? (
-          <PullRequestReviewCopy pr={pr} name={name} />
-        ) : (
-          <RandomizeNameCheckbox
-            checked={form.randomize}
-            onToggle={toggleCloneProjectRandomize}
-          />
-        )}
-        {form.error && (
-          <p role="alert" className="text-destructive text-sm">
-            {form.error}
-          </p>
-        )}
-        {pr?.hasProjects && (
-          <div className="flex justify-start">
-            <Button
-              variant="link"
-              className="h-auto px-0 max-md:min-h-10 pointer-coarse:min-h-10 text-muted-foreground"
-              onClick={chooseExistingProjectForClone}
-            >
-              Choose an existing project
-            </Button>
-          </div>
-        )}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" onClick={closeCloneProject}>
-            Cancel
+    <Modal
+      kind="form"
+      open
+      onClose={closeCloneProject}
+      title={pr ? "New agent from PR" : "Clone a repository"}
+      description={
+        <>
+          {pr
+            ? renderProse(offerBody(pr, form.path.trim()))
+            : "Paste the address of a git remote, a GitHub page from your browser, or just owner/repo. dux clones its default branch, adds it as a project and starts an agent there. It never asks for a password: the credentials and ssh keys you already use in a shell are the ones it uses."}
+        </>
+      }
+      // The address is the pull request's and read-only in a pull request's
+      // offer, so the folder is the first field there is to type in.
+      initialFocus={pr ? destinationRef : undefined}
+      submit={{
+        label: !pr
+          ? "Clone"
+          : pr.folder === "checkout"
+            ? "Add this folder as a project"
+            : "Clone and create",
+        tone: "primary",
+        onSelect: handleSubmit,
+        busy: form.submitting,
+        disabledReason: refusal,
+      }}
+    >
+      {pr && (
+        <p className="text-sm text-muted-foreground">
+          {renderProse(prose`${chip(pr.offer.title)} from branch ${chip(pr.offer.head_branch)}`)}
+        </p>
+      )}
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="clone-address" className="text-sm font-medium">
+          Repository address
+        </label>
+        <Input
+          id="clone-address"
+          value={form.url}
+          onChange={(event) => setCloneProjectUrl(event.target.value)}
+          onKeyDown={handleEnter}
+          placeholder="owner/repo or a git URL"
+          readOnly={pr !== null}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="clone-destination" className="text-sm font-medium">
+          Destination folder
+        </label>
+        <Input
+          ref={destinationRef}
+          id="clone-destination"
+          value={form.path}
+          onChange={(event) => setCloneProjectPath(event.target.value)}
+          onKeyDown={handleEnter}
+          placeholder="/path/to/the/new/folder"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <p className="text-sm font-medium">{pr ? "Agent" : "First agent"}</p>
+        <AgentNameInput
+          value={form.name}
+          onChange={setCloneProjectName}
+          onSubmit={handleSubmit}
+          placeholder={pr ? "Agent name" : "Agent name (optional)"}
+          ariaLabel="Agent name"
+          invalid={invalidName}
+          generating={form.namePending}
+          autoFocus={false}
+        />
+        <p className="text-xs text-muted-foreground">
+          Any name git accepts for a branch. This becomes the branch
+          name.
+        </p>
+      </div>
+      {pr ? (
+        <PullRequestReviewCopy pr={pr} name={name} />
+      ) : (
+        <RandomizeNameCheckbox
+          checked={form.randomize}
+          onToggle={toggleCloneProjectRandomize}
+        />
+      )}
+      {form.error && (
+        <p role="alert" className="text-destructive text-sm">
+          {form.error}
+        </p>
+      )}
+      {pr?.hasProjects && (
+        <div className="flex justify-start">
+          <Button
+            variant="link"
+            className="h-auto px-0 max-md:min-h-10 pointer-coarse:min-h-10 text-muted-foreground"
+            onClick={chooseExistingProjectForClone}
+          >
+            Choose an existing project
           </Button>
-          <Button onClick={handleSubmit} disabled={submitDisabled}>
-            {!pr ? "Clone" : pr.folder === "checkout" ? "Add this folder as a project" : "Clone and create"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      )}
+    </Modal>
   )
+}
+
+// Why the dialog's button is held, or null when it may be pressed.
+function cloneRefusal(
+  url: string,
+  path: string,
+  name: string,
+  invalidName: boolean,
+  pr: CloneProjectPr | null,
+): string | null {
+  if (invalidName) return INVALID_AGENT_NAME
+  if (pr === null && url.trim() === "") return "Enter the repository address first."
+  if (path.trim() === "") return "Enter the destination folder first."
+  if (pr === null) return null
+  if (name === "") return "Type a name for the agent first."
+  if (!reviewCopyBlocksSubmit(pr, name)) return null
+  return reviewCopyShown(pr, name).state === "no_free_name"
+    ? "No review copy can be made for this name. Choose another name."
+    : "Tick Create a review copy to go ahead."
 }
 
 // What the dialog says about a review copy, for the name as it stands: the

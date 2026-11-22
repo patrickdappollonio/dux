@@ -1,70 +1,99 @@
 import { useState } from "react"
 
-import { FormDialogContent } from "@/components/FormDialogContent"
-import { Button } from "@/components/ui/button"
-import { Dialog } from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
-import { useIsMobile } from "@/hooks/use-mobile"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
+import { chip, prose } from "@/lib/prose"
 import {
   closeAgentStartupCommand,
   updateProjectSettings,
   useDux,
 } from "@/lib/store"
-import type { ProjectView, SessionView } from "@/lib/types"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
 
 // Edit the startup command from an agent's menu. It is project-scoped, so this
-// edits the agent's PROJECT and the copy says so. The form is mounted only while
-// open and a project resolves; its state seeds lazily from the project.
-function AgentStartupCommandForm({
-  session,
-  project,
-}: {
-  session: SessionView
-  project: ProjectView
-}) {
-  const [startup, setStartup] = useState(() => project.startup_command ?? "")
-  const agentName = sessionLabel(session)
+// edits the agent's PROJECT and the copy says so.
+export function AgentStartupCommandDialog() {
+  const { agentStartupCommandTarget } = useDux()
+  const open = agentStartupCommandTarget !== null
+  const life = useModalLifetime(open)
+  // Keyed by the open, so the text starts from the project's command each time.
+  return life.mounted ? (
+    <AgentStartupCommandForm key={life.epoch} open={open} onClosed={life.onClosed} />
+  ) : null
+}
+
+function AgentStartupCommandForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const { spine, agentStartupCommandTarget } = useDux()
+  // The agent this open is about, kept while the close animates.
+  const [targetId] = useState(agentStartupCommandTarget)
+  // The agent and its project as they were when the close began, kept while
+  // the close animates, so the settings a save just applied do not read as
+  // unchanged.
+  const session = useHeldWhileClosed(
+    open,
+    spine?.sessions.find((s) => s.id === targetId),
+  )
+  // A standalone agent belongs to no project, so the lookup must not happen at
+  // all for one rather than miss.
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find(
+      (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+    ),
+  )
+  const [startup, setStartup] = useState(() => project?.startup_command ?? "")
+  const next = startup.trim() === "" ? null : startup
+  const changed = project !== undefined && next !== (project.startup_command ?? null)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
 
   async function handleSave() {
-    const next = startup.trim() === "" ? null : startup
-    // Unchanged is an empty patch: `updateProjectSettings` sends no request,
-    // says there was nothing to save, and the dialog closes.
-    const patch =
-      next === (project.startup_command ?? null) ? {} : { startup_command: next }
-    if (await updateProjectSettings(project.id, patch, "startup command")) {
-      closeAgentStartupCommand()
+    if (project === undefined || !changed || saving) return
+    setSaving(true)
+    try {
+      if (await updateProjectSettings(project.id, { startup_command: next }, "startup command")) {
+        closeAgentStartupCommand()
+      }
+    } finally {
+      setSaving(false)
     }
   }
 
-  // On a phone, focusing the text would raise the keyboard over the form.
-  const phone = useIsMobile()
+  const projectName = project?.name ?? ""
   return (
-    <FormDialogContent
-      phone={phone}
+    <Modal
+      kind="form"
+      open={open}
+      // The agent or its project removed while the dialog is open closes it.
+      vanished={open && (session === undefined || project === undefined)}
+      onClose={closeAgentStartupCommand}
+      onClosed={onClosed}
       title={
         <>
-          Startup command: <InlineCode>{agentName}</InlineCode>
+          Startup command: <InlineCode>{session ? sessionLabel(session) : ""}</InlineCode>
         </>
       }
       description={
         <>
           Runs after each agent or terminal launches in project{" "}
-          <InlineCode>{project.name}</InlineCode>. This applies to
-          every agent in the project, not just this one. Leave empty to clear it.
+          <InlineCode>{projectName}</InlineCode>. This applies to every agent in the project,
+          not just this one. Leave empty to clear it.
         </>
       }
-      onClose={closeAgentStartupCommand}
-      footer={
-        <>
-          <Button variant="outline" onClick={closeAgentStartupCommand}>
-            Cancel
-          </Button>
-          <Button onClick={() => void handleSave()}>Save</Button>
-        </>
-      }
+      busy={saving}
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        busy: saving,
+        disabledReason: changed ? null : "Nothing to save yet: the startup command has not changed.",
+      }}
+      unsavedEdits={{
+        changes: changed ? 1 : 0,
+        holder: "The startup command has",
+        leaves: prose`the startup command of project ${chip(projectName)}`,
+      }}
     >
       <Textarea
         value={startup}
@@ -79,39 +108,7 @@ function AgentStartupCommandForm({
         }}
         placeholder="npm run dev"
         className="min-h-16 font-mono"
-        autoFocus={!phone}
       />
-    </FormDialogContent>
-  )
-}
-
-export function AgentStartupCommandDialog() {
-  const { spine, agentStartupCommandTarget } = useDux()
-  const session = spine?.sessions.find((s) => s.id === agentStartupCommandTarget)
-  // A standalone agent belongs to no project, so the lookup must not happen at
-  // all for one rather than miss.
-  const project = spine?.projects.find(
-    (p) =>
-      session !== undefined && p.id === workspaceProjectId(session.workspace),
-  )
-  // Closes the dialog when the agent or its project vanishes from the
-  // ViewModel; see the hook.
-  const open = useVanishedTargetGuard(
-    agentStartupCommandTarget !== null,
-    session !== undefined && project !== undefined,
-    closeAgentStartupCommand,
-  )
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) closeAgentStartupCommand()
-      }}
-    >
-      {open && session && project && (
-        <AgentStartupCommandForm session={session} project={project} />
-      )}
-    </Dialog>
+    </Modal>
   )
 }

@@ -23,6 +23,9 @@ export function sanitizeAgentName(next: string): string {
   return out
 }
 
+/** Why a dialog will not take a name `isValidAgentName` refuses. */
+export const INVALID_AGENT_NAME = "That name is not one git accepts for a branch."
+
 /**
  * Exact port of `dux_core::git::is_valid_agent_name`, the rules of
  * `git check-ref-format --branch`; both are pinned by the shared

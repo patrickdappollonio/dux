@@ -515,9 +515,10 @@ export interface DuxState {
   composeDrafts: Record<string, string>
   commitTarget: string | null
   commitDraft: string
-  // Bumped each time the commit dialog opens, so a commit's answer can tell
-  // whether the dialog on screen is still the one it was sent from.
-  commitOpening: number
+  // The message each agent's Commit was closed on without committing, given
+  // back when it opens again for that agent. In this page's memory only, and
+  // dropped once committed or once the agent leaves the spine.
+  commitDrafts: Record<string, string>
   deleteTarget: string | null
   // The companion terminal id pending close confirmation, or null. Mirrors the
   // TUI, which ALWAYS confirms terminal deletion (the running process is killed).
@@ -1197,7 +1198,7 @@ let state: DuxState = {
   composeDrafts: {},
   commitTarget: null,
   commitDraft: "",
-  commitOpening: 0,
+  commitDrafts: {},
   deleteTarget: null,
   deleteTerminalTarget: null,
   closeTabTarget: null,
@@ -2376,6 +2377,7 @@ function applyWorkspace(rawSpine: Spine, seq: number, pushed = false): void {
     // and no way back to one, so its unsent text is unreachable rather than
     // preserved.
     composeDrafts: pruneComposeDrafts(state.composeDrafts, spine),
+    commitDrafts: pruneCommitDrafts(state.commitDrafts, spine),
     pendingAgentOrder: reconcilePendingAgentOrder(spine, state.pendingAgentOrder),
     pendingTerminalOrder: reconcilePendingTerminalOrder(spine, state.pendingTerminalOrder),
     pendingTerminalPlacement: reconcilePendingTerminalPlacement(
@@ -6378,15 +6380,43 @@ export function discardFile(sessionId: string, row: ChangedFileView): void {
 }
 
 export function openCommit(sessionId: string): void {
+  setState({ commitTarget: sessionId, commitDraft: state.commitDrafts[sessionId] ?? "" })
+}
+
+// Closes Commit without committing, keeping its message for the agent while
+// the agent exists. The box keeps the text too, so the dialog does not empty
+// while it animates out.
+export function closeCommit(): void {
+  const target = state.commitTarget
+  if (target === null) return
+  const gone = state.spine !== null && !state.spine.sessions.some((s) => s.id === target)
   setState({
-    commitTarget: sessionId,
-    commitDraft: "",
-    commitOpening: getSnapshot().commitOpening + 1,
+    commitTarget: null,
+    commitDrafts: withCommitDraft(state.commitDrafts, target, gone ? "" : state.commitDraft),
   })
 }
 
-export function closeCommit(): void {
-  setState({ commitTarget: null, commitDraft: "" })
+// A commit of `message` landed for `sessionId`: the message is no longer a
+// draft, and Commit closes when it is still open on that agent with that text.
+export function commitLanded(sessionId: string, message: string): void {
+  const kept = state.commitDrafts[sessionId] === message
+  const open = state.commitTarget === sessionId && state.commitDraft === message
+  if (!kept && !open) return
+  setState({
+    ...(open ? { commitTarget: null } : {}),
+    commitDrafts: kept ? withCommitDraft(state.commitDrafts, sessionId, "") : state.commitDrafts,
+  })
+}
+
+function withCommitDraft(
+  drafts: Record<string, string>,
+  sessionId: string,
+  message: string,
+): Record<string, string> {
+  const next = { ...drafts }
+  if (message.trim() === "") delete next[sessionId]
+  else next[sessionId] = message
+  return next
 }
 
 export function setCommitDraft(text: string): void {
@@ -9653,6 +9683,17 @@ function pruneComposeDrafts(
   if (kept.length === keys.length) return drafts
   const next: Record<string, string> = {}
   for (const id of kept) next[id] = drafts[id]
+  return next
+}
+
+/// Drop the kept commit message of every agent no longer in the spine,
+/// returning the same object when nothing changed.
+function pruneCommitDrafts(drafts: Record<string, string>, spine: Spine): Record<string, string> {
+  const live = new Set(spine.sessions.map((s) => s.id))
+  const keys = Object.keys(drafts)
+  if (keys.every((id) => live.has(id))) return drafts
+  const next: Record<string, string> = {}
+  for (const id of keys) if (live.has(id)) next[id] = drafts[id]
   return next
 }
 

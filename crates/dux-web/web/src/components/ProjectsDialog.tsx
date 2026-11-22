@@ -1,18 +1,18 @@
-import { GitBranch, TriangleAlert } from "lucide-react"
+import { FolderPlus, GitBranch, TriangleAlert } from "lucide-react"
 import { useMemo, useState } from "react"
 
-import { ProjectList } from "@/components/ProjectList"
-import type { ProjectListRow } from "@/components/projectSearch"
+import { Modal, useModalLifetime } from "@/components/modal"
+import { ProjectRows } from "@/components/ProjectList"
+import { useProjectSearch, type ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
-import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
   applyFrozenOrder,
   orderProjectsByRecency,
   projectAgentCounts,
 } from "@/lib/projectOrder"
-import { closeProjects, useDux } from "@/lib/store"
+import { closeProjects, openAddProject, useDux } from "@/lib/store"
 import type { ProjectView, SidebarGroup } from "@/lib/types"
 
 // The Projects list, opened from the app menu: every project and every orphaned
@@ -25,22 +25,11 @@ import type { ProjectView, SidebarGroup } from "@/lib/types"
 // new agent, a new terminal) closes the list first, through `onLeave`.
 export function ProjectsDialog() {
   const { projectsDialogOpen } = useDux()
-  return (
-    <Dialog
-      open={projectsDialogOpen}
-      onOpenChange={(open) => {
-        if (!open) closeProjects()
-      }}
-    >
-      {/* The New agent picker's layout, for the same reasons: a flex column
-          whose list is the one child that shrinks under the soft keyboard. */}
-      <DialogContent className="flex flex-col gap-0 p-0 sm:max-w-lg">
-        {/* Mounted only while open, so the frozen order and the search reset
-            on each open without a reset effect. */}
-        {projectsDialogOpen ? <ProjectsBody /> : null}
-      </DialogContent>
-    </Dialog>
-  )
+  const life = useModalLifetime(projectsDialogOpen)
+  // Keyed by the open, so the frozen order and the search reset on each one.
+  return life.mounted ? (
+    <ProjectsBody key={life.epoch} open={projectsDialogOpen} onClosed={life.onClosed} />
+  ) : null
 }
 
 // A row of the list before it is drawn: a live project, or an orphaned group
@@ -49,7 +38,7 @@ type Entry =
   | { id: string; kind: "project"; project: ProjectView }
   | { id: string; kind: "orphan"; group: SidebarGroup }
 
-function ProjectsBody() {
+function ProjectsBody({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const { spine } = useDux()
   const sessions = useMemo(() => spine?.sessions ?? [], [spine])
   const entries = useMemo<Entry[]>(() => {
@@ -116,13 +105,32 @@ function ProjectsBody() {
     }
   })
 
+  // Without a pick, Enter picks nothing and a row's own button opens its menu.
+  const search = useProjectSearch(rows, undefined)
   return (
-    <ProjectList
+    <Modal
+      kind="picker"
+      open={open}
+      onClose={closeProjects}
+      onClosed={onClosed}
+      size="lg"
       title="Projects"
       description="Every project dux knows about. Open one to see its actions."
-      rows={rows}
-      menu={(id) => <ProjectMenuItems id={id} onLeave={closeProjects} />}
-    />
+      search={{
+        value: search.query,
+        onChange: search.setQuery,
+        label: "Search projects",
+        fieldProps: search.pick.fieldProps,
+      }}
+      steadyHeight
+      doors={[{ label: "Add a new project…", icon: FolderPlus, onSelect: openAddProject }]}
+    >
+      <ProjectRows
+        search={search}
+        heading="Choose a project"
+        menu={(id) => <ProjectMenuItems id={id} onLeave={closeProjects} />}
+      />
+    </Modal>
   )
 }
 

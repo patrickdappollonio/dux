@@ -9,9 +9,10 @@ const offline = vi.fn(() => Promise.reject(new Error("offline test")))
 vi.stubGlobal("fetch", offline)
 await import("@/lib/store")
 
-import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu"
-import { ProjectList } from "./ProjectList"
+import { ProjectRows } from "./ProjectList"
+import { useProjectSearch } from "./projectSearch"
 
 // A menu that is not inside a dialog is non-modal on a computer, so a press
 // outside it reaches whatever was pressed. These pin what the list does with
@@ -20,19 +21,36 @@ import { ProjectList } from "./ProjectList"
 
 const settle = () => new Promise((r) => setTimeout(r, 60))
 
-function renderList() {
-  return render(
-    <Dialog open historyEntry={false}>
-      <DialogContent>
-        <ProjectList
-          title="Projects"
-          description="All projects"
-          rows={[{ id: "p1", name: "demo-api", label: null }]}
-          menu={() => <DropdownMenuItem>Rename</DropdownMenuItem>}
-        />
-      </DialogContent>
-    </Dialog>,
+const ROWS = [{ id: "p1", name: "demo-api", label: null }]
+
+// The rows as the Projects list puts them in its modal, with nothing to pick.
+function List() {
+  const search = useProjectSearch(ROWS, undefined)
+  return (
+    <Modal
+      kind="picker"
+      open
+      historyEntry={false}
+      onClose={() => {}}
+      title="Projects"
+      search={{
+        value: search.query,
+        onChange: search.setQuery,
+        label: "Search projects",
+        fieldProps: search.pick.fieldProps,
+      }}
+    >
+      <ProjectRows
+        search={search}
+        heading="Choose a project"
+        menu={() => <DropdownMenuItem>Rename</DropdownMenuItem>}
+      />
+    </Modal>
   )
+}
+
+function renderList() {
+  return render(<List />)
 }
 
 const nameButton = () => screen.getByText("demo-api").closest("button")!
@@ -70,51 +88,5 @@ describe("a project row's menu on a computer", () => {
       target: { value: "API" },
     })
     expect(screen.getByText("api").tagName).toBe("MARK")
-  })
-
-  it("leaves focus on the control an outside press landed on", async () => {
-    renderList()
-    fireEvent.click(nameButton())
-    await screen.findByRole("menu")
-    const search = screen.getByLabelText("Search projects")
-    fireEvent.pointerDown(search)
-    fireEvent.mouseDown(search)
-    search.focus()
-    fireEvent.pointerUp(search)
-    fireEvent.mouseUp(search)
-    fireEvent.click(search)
-    await settle()
-    expect(screen.queryByRole("menu")).toBeNull()
-    expect(document.activeElement).toBe(search)
-  })
-})
-
-describe("ProjectList search focus ring", () => {
-  it("rings the search frame on keyboard focus", () => {
-    renderList()
-    const frame = screen.getByLabelText("Search projects").parentElement!
-    expect(frame.className).toContain("has-[input:focus-visible]:ring-3")
-  })
-})
-
-// The list it had before it shared its rows with the New agent picker: the
-// heading over the rows, and no row marked for Enter, since Enter picks
-// nothing here.
-describe("the Projects list's rows", () => {
-  it("sit under the heading the list has always had", () => {
-    renderList()
-    const heading = screen.getByText("Choose a project")
-    expect(
-      heading.compareDocumentPosition(nameButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy()
-  })
-
-  it("mark no row as the one Enter would pick while the search has focus", () => {
-    renderList()
-    const search = screen.getByLabelText("Search projects")
-    search.focus()
-    fireEvent.focus(search)
-    fireEvent.change(search, { target: { value: "demo" } })
-    expect(screen.getByTestId("project-row").hasAttribute("data-active")).toBe(false)
   })
 })

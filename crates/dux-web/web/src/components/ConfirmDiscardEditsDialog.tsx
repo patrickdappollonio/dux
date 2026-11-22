@@ -30,7 +30,8 @@ export function ConfirmDiscardEditsDialog({
       title="Discard unsaved changes?"
       description={
         <>
-          {holder} {unsavedChangesLabel(changes)}. Discarding them leaves{" "}
+          {holder} {unsavedChangesLabel(changes)}. Discarding {changes === 1 ? "it" : "them"}{" "}
+          leaves{" "}
           {renderProse(leaves)} as it was.
         </>
       }

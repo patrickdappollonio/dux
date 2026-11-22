@@ -3,14 +3,7 @@ import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { Input } from "@/components/ui/input"
@@ -35,18 +28,19 @@ import {
 } from "@/lib/store"
 
 export function CreateAgentDialog() {
-  const {
-    createAgentTarget,
-    createAgentDraft,
-    createAgentRandomize,
-    createAgentCopyChanges,
-    createAgentNamePending,
-    createAgentPrInput,
-    createAgentPrResolving,
-    createAgentPrError,
-    createAgentReviewCopy,
-    spine,
-  } = useDux()
+  const live = useDux()
+  const open = live.createAgentTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const createAgentTarget = useHeldWhileClosed(open, live.createAgentTarget)
+  const createAgentDraft = useHeldWhileClosed(open, live.createAgentDraft)
+  const createAgentRandomize = useHeldWhileClosed(open, live.createAgentRandomize)
+  const createAgentCopyChanges = useHeldWhileClosed(open, live.createAgentCopyChanges)
+  const createAgentNamePending = useHeldWhileClosed(open, live.createAgentNamePending)
+  const createAgentPrInput = useHeldWhileClosed(open, live.createAgentPrInput)
+  const createAgentPrResolving = useHeldWhileClosed(open, live.createAgentPrResolving)
+  const createAgentPrError = useHeldWhileClosed(open, live.createAgentPrError)
+  const createAgentReviewCopy = useHeldWhileClosed(open, live.createAgentReviewCopy)
+  const spine = useHeldWhileClosed(open, live.spine)
   const dialog = createAgentDialogView(createAgentTarget, spine)
   const form = createAgentFormView(
     dialog.kind,
@@ -62,63 +56,55 @@ export function CreateAgentDialog() {
   }
 
   return (
-    // Reopened by the server's answer rather than by a click, in which case it
-    // takes no history entry for the browser's Back.
-    <Dialog
-      open={dialog.open}
-      onOpenChange={handleOpenChange}
+    <Modal
+      kind="form"
+      open={open && dialog.open}
+      onClose={closeCreateAgent}
+      // Reopened by the server's answer rather than by a click, in which case it
+      // takes no history entry for the browser's Back.
       historyEntry={createAgentReviewCopy === null}
+      title={renderProse(dialog.title)}
+      description={dialog.description}
+      submit={{
+        label: createAgentPrResolving ? "Finding the project…" : dialog.submitLabel,
+        tone: "primary",
+        onSelect: handleSubmit,
+        busy: createAgentPrResolving,
+        disabledReason: form.submitRefusal,
+      }}
     >
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>{renderProse(dialog.title)}</DialogTitle>
-          <DialogDescription>{dialog.description}</DialogDescription>
-        </DialogHeader>
-        <PrReferenceFields
-          dialog={dialog}
-          value={createAgentPrInput}
-          error={createAgentPrError}
-          onSubmit={handleSubmit}
+      <PrReferenceFields
+        dialog={dialog}
+        value={createAgentPrInput}
+        error={createAgentPrError}
+        onSubmit={handleSubmit}
+      />
+      <AgentNameInput
+        value={createAgentDraft}
+        onChange={setCreateAgentDraft}
+        onSubmit={handleSubmit}
+        placeholder={dialog.namePlaceholder}
+        invalid={form.invalidName}
+        generating={createAgentNamePending}
+        autoFocus={false}
+      />
+      <p className="text-xs text-muted-foreground">
+        Any name git accepts for a branch. This becomes the branch name.
+      </p>
+      <AgentOptions
+        showCopyChanges={dialog.showCopyChanges}
+        randomize={createAgentRandomize}
+        copyChanges={createAgentCopyChanges}
+      />
+      {createAgentReviewCopy && (
+        <ReviewCopyQuestion
+          warning={createAgentReviewCopy.warning}
+          agreed={createAgentReviewCopy.agreed}
+          onAgreedChange={setCreateAgentReviewCopyAgreed}
         />
-        <AgentNameInput
-          value={createAgentDraft}
-          onChange={setCreateAgentDraft}
-          onSubmit={handleSubmit}
-          placeholder={dialog.namePlaceholder}
-          invalid={form.invalidName}
-          generating={createAgentNamePending}
-          autoFocus={dialog.nameAutoFocus}
-        />
-        <p className="text-xs text-muted-foreground">
-          Any name git accepts for a branch. This becomes the branch name.
-        </p>
-        <AgentOptions
-          showCopyChanges={dialog.showCopyChanges}
-          randomize={createAgentRandomize}
-          copyChanges={createAgentCopyChanges}
-        />
-        {createAgentReviewCopy && (
-          <ReviewCopyQuestion
-            warning={createAgentReviewCopy.warning}
-            agreed={createAgentReviewCopy.agreed}
-            onAgreedChange={setCreateAgentReviewCopyAgreed}
-          />
-        )}
-        <div className="h-2" />
-        <AgentDialogFooter
-          submitLabel={
-            createAgentPrResolving ? "Finding the project…" : dialog.submitLabel
-          }
-          disabled={form.submitDisabled}
-          onSubmit={handleSubmit}
-        />
-      </DialogContent>
-    </Dialog>
+      )}
+    </Modal>
   )
-}
-
-function handleOpenChange(open: boolean): void {
-  if (!open) closeCreateAgent()
 }
 
 function handleEnter(
@@ -160,7 +146,6 @@ function PrReferenceFields({
         aria-label="GitHub pull request"
         aria-invalid={error !== null}
         aria-describedby={error ? "create-agent-pr-error" : undefined}
-        autoFocus
       />
       {error && (
         <p
@@ -213,28 +198,5 @@ function AgentOptions({
         </CheckboxRow>
       )}
     </>
-  )
-}
-
-interface AgentDialogFooterProps {
-  submitLabel: string
-  disabled: boolean
-  onSubmit: () => void
-}
-
-function AgentDialogFooter({
-  submitLabel,
-  disabled,
-  onSubmit,
-}: AgentDialogFooterProps) {
-  return (
-    <DialogFooter>
-      <Button variant="outline" onClick={closeCreateAgent}>
-        Cancel
-      </Button>
-      <Button onClick={onSubmit} disabled={disabled}>
-        {submitLabel}
-      </Button>
-    </DialogFooter>
   )
 }
