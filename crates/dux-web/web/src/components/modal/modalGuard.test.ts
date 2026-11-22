@@ -33,7 +33,6 @@ function walk(dir: string): string[] {
 const MODAL_MODULES: Record<string, readonly string[] | "*"> = {
   "components/ui/dialog.tsx": ["Dialog"],
   "components/ui/sheet.tsx": ["Sheet"],
-  "components/ui/command.tsx": ["CommandDialog"],
   "@base-ui/react/dialog": "*",
   "@base-ui/react/alert-dialog": "*",
   "@base-ui/react/drawer": "*",
@@ -179,7 +178,6 @@ function modalMarks(srcDir: string, file: string, source: string): ModalMarks {
 function touchesPrimitive(srcDir: string, file: string, source: string): boolean {
   for (const match of source.matchAll(IMPORT)) {
     const reached = resolveImport(srcDir, file, match[2] ?? match[3] ?? match[4])
-    if (reached === "components/ui/command.tsx") continue
     if (reached in MODAL_MODULES) return true
   }
   return false
@@ -221,7 +219,6 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
   "components/TaskManagerDialog.tsx": { ...ROOTS(2) },
   "components/WorktreesDialog.tsx": { ...ROOTS(3) },
-  "components/ui/command.tsx": { ...ROOT, why: "CommandDialog, which only its own test mounts: delete it or move it." },
 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One
@@ -294,7 +291,6 @@ describe("the detector", () => {
     for (const [bad, expected] of [
       ['import { Dialog, DialogContent } from "@/components/ui/dialog"\n<Dialog open><DialogContent /></Dialog>', 1],
       ['import {\n  Sheet as Drawer,\n  SheetContent,\n} from "./ui/sheet"\n<Drawer /><Drawer />', 2],
-      ['import { CommandDialog } from "@/components/ui/command"\n<CommandDialog />', 1],
       ['import { Dialog } from "@base-ui/react/dialog"\n<Dialog.Root><Dialog.Popup /></Dialog.Root>', 1],
       ['import { Dialog as D } from "@base-ui/react"\n<D.Root />', 1],
       ['import * as Parts from "@/components/ui/dialog"\n<Parts.Dialog />', 1],
