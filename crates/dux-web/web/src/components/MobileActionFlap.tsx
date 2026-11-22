@@ -17,7 +17,7 @@ import {
   FLIGHT_EASE,
   registerFlapElement,
 } from "@/lib/theaterFlight"
-import type { SelectedTarget } from "@/lib/store"
+import { useDux, type SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 // Where the phone's pane actions live when theater is off: a flap hanging from
@@ -190,10 +190,12 @@ const FLAP_ID = "phone-action-flap"
  */
 export function FlapToggle() {
   const folded = useFlapHidden()
+  const { theater } = useDux()
   const ref = useRef<HTMLButtonElement | null>(null)
   // Leaving theater from the pill destroys the control that was pressed; with
   // the flap folded its theater button is out of reach, so this takes focus.
-  useTheaterToggleFocusWhen(ref, folded)
+  // Asked on the mode leaving too, since the collapsing header may never remount.
+  useTheaterToggleFocusWhen(ref, folded && !theater)
   const label = folded ? "Show actions" : "Hide actions"
   return (
     <SimpleTooltip content={label} side="bottom">

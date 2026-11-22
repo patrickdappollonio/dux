@@ -2177,6 +2177,26 @@ describe("MobileShell flap show/hide", () => {
     expect(flap().hasAttribute("inert")).toBe(true)
   })
 
+  // The pill's exit asks for focus on whatever control replaces it. Pressed
+  // while the collapsing header is still mounted, nothing remounts to take
+  // that request, and a request left waiting pulled focus onto the theater
+  // button the next time the flap came back, with no press asking for it.
+  it("puts focus on the header's show button when theater is left during the collapse, and nowhere after", () => {
+    setFlapHidden(true)
+    mockState = agentState()
+    const view = render(<MobileShell />)
+    mockState = agentState({ theater: true })
+    view.rerender(<MobileShell />)
+    const show = screen.getByRole("button", { name: "Show actions" })
+    fireEvent.click(screen.getByLabelText("Leave theater mode"))
+    mockState = agentState({ theater: false })
+    view.rerender(<MobileShell />)
+    expect(document.activeElement).toBe(show)
+
+    fireEvent.click(show)
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Theater mode" }))
+  })
+
   it("leaves a hidden flap hidden under a full-pane cover, with the way back in the header", () => {
     setFlapHidden(true)
     registerPaneCover("s1", "box")
