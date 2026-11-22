@@ -8,6 +8,7 @@ import type { ModalAction } from "./types"
 
 const act: ModalAction = { label: "Go", tone: "primary", onSelect: () => {} }
 const common = { open: true, onClose: () => {}, title: "x" }
+const search = { value: "", onChange: () => {}, label: "Search" }
 
 export function ModalTypeContract() {
   return (
@@ -45,6 +46,14 @@ export function ModalTypeContract() {
         {...common}
         doors={[{ label: "Add…", icon: FolderPlus, onSelect: () => {} }]}
       />
+      {/* @ts-expect-error a search field's type is the modal's */}
+      <Modal kind="picker" {...common} search={{ ...search, fieldProps: { type: "search" } }} />
+      {/* @ts-expect-error a search field's style is the modal's */}
+      <Modal kind="picker" {...common} search={{ ...search, fieldProps: { style: {} } }} />
+      {/* @ts-expect-error a search field's class is the modal's */}
+      <Modal kind="picker" {...common} search={{ ...search, fieldProps: { className: "x" } }} />
+      {/* @ts-expect-error a search field's element is the modal's, which focuses it */}
+      <Modal kind="picker" {...common} search={{ ...search, fieldProps: { ref: null } }} />
     </>
   )
 }

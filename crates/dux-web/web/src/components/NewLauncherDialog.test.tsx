@@ -182,6 +182,14 @@ describe("NewLauncherDialog agent step", () => {
     expect(screen.getByText("login").tagName).toBe("MARK")
   })
 
+  // Every modal search is the same plain field (see the New agent picker's
+  // test of it).
+  it("searches agents in a plain text field", () => {
+    render(<NewLauncherDialog />)
+    fireEvent.click(row("New terminal for an agent"))
+    expect((screen.getByLabelText("Search agents") as HTMLInputElement).type).toBe("text")
+  })
+
   // Enter picks the marked row only from the search field, so with focus
   // anywhere else no row is marked.
   it("marks the row Enter would pick only while the search field has focus", () => {

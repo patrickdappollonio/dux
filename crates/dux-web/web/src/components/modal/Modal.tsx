@@ -486,8 +486,12 @@ function SearchField({
     // A label, so a press anywhere in the 40px box lands in the field.
     <label className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
       <Search className="size-4 shrink-0 text-muted-foreground" />
+      {/* Plain text, never `type="search"`: that clears itself on Escape,
+          which here also closes the modal, and Chromium draws a clear button
+          of its own in it. */}
       <input
         ref={inputRef}
+        type="text"
         value={search.value}
         onChange={(event) => search.onChange(event.target.value)}
         placeholder={search.label}

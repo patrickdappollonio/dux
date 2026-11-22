@@ -88,7 +88,7 @@ function Launcher({
           value: agents.query,
           onChange: agents.setQuery,
           label: "Search agents",
-          fieldProps: { ...agents.pick.fieldProps, type: "search" },
+          fieldProps: agents.pick.fieldProps,
         }}
       >
         <AgentRows agents={agents} />

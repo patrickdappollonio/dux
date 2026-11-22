@@ -71,8 +71,12 @@ export interface ModalSearch {
   onChange: (value: string) => void
   /** The field's placeholder and its accessible name. */
   label: string
-  /** Extra props for the input, such as `useSearchPick`'s. */
-  fieldProps?: Omit<React.ComponentProps<"input">, "value" | "onChange" | "className">
+  /** `useSearchPick`'s keyboard and focus handlers and the row it marks.
+   * The field's type, look and element are the modal's. */
+  fieldProps?: Pick<
+    React.ComponentProps<"input">,
+    "onKeyDown" | "onFocus" | "onBlur" | "aria-activedescendant"
+  >
 }
 
 /** A form's edits that closing would lose. The question reads "`holder` N
