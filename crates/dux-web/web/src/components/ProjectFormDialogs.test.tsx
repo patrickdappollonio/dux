@@ -70,10 +70,12 @@ const session = {
     worktree_path: "",
   },
 }
+// In byte order, as the server sends it, which is not the order the dialogs
+// write the text in: an untouched form must still have nothing to save.
 const project = {
   id: "p1",
   name: "acme",
-  env: {},
+  env: { PATH: "/usr/bin", http_proxy: "http://proxy" },
   startup_command: null,
   explicit_default_provider: null,
   auto_reopen_agents: null,
@@ -166,9 +168,8 @@ describe.each([
 
   it("asks before Cancel or Escape loses an edit, and closes only on Discard", async () => {
     render(<Dialog />)
-    fireEvent.change(screen.getByPlaceholderText(placeholder), {
-      target: { value: "FOO=1" },
-    })
+    const field = screen.getByPlaceholderText(placeholder) as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: `${field.value}\nFOO=1` } })
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     const question = await screen.findByText(/Discarding them leaves/)
     expect(question.textContent).toBe(sentence)
@@ -182,35 +183,80 @@ describe.each([
   })
 })
 
-describe("project settings' Save", () => {
+// One Save for all three: held with its reason while nothing would change,
+// and busy while the request is out, so no way out claims to leave the
+// settings as they were under a save that is about to land.
+describe.each([
+  [
+    "the agent's environment",
+    AgentEnvDialog,
+    "KEY=VALUE",
+    () => store.closeAgentEnv,
+    "Nothing to save yet: no variable has changed.",
+    { env: { PATH: "/usr/bin", http_proxy: "http://proxy", FOO: "1" } },
+  ],
+  [
+    "the agent's startup command",
+    AgentStartupCommandDialog,
+    "npm run dev",
+    () => store.closeAgentStartupCommand,
+    "Nothing to save yet: the startup command has not changed.",
+    { startup_command: "\nFOO=1" },
+  ],
+  [
+    "the project settings",
+    ProjectSettingsDialog,
+    "npm run dev",
+    () => store.closeProjectSettings,
+    "Nothing to save yet: no setting has changed.",
+    { startup_command: "\nFOO=1" },
+  ],
+])("%s' Save", (_name, Dialog, placeholder, close, held, patch) => {
   it("says why it is held while nothing was changed", async () => {
-    render(<ProjectSettingsDialog />)
+    render(<Dialog />)
     const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
     expect(save.disabled).toBe(true)
     fireEvent.click(save.parentElement!)
-    expect(
-      (await screen.findAllByText("Nothing to save yet: no setting has changed.")).length,
-    ).toBeGreaterThan(0)
+    expect((await screen.findAllByText(held)).length).toBeGreaterThan(0)
   })
 
-  it("takes no second press while a save is on its way", async () => {
+  it("is busy while a save is on its way: no way out asks or closes, and a second press sends nothing", async () => {
     let finish: (ok: boolean) => void = () => {}
     vi.mocked(store.updateProjectSettings).mockReturnValue(
       new Promise<boolean>((resolve) => {
         finish = resolve
       }),
     )
-    render(<ProjectSettingsDialog />)
-    fireEvent.change(screen.getByPlaceholderText("npm run dev"), {
-      target: { value: "make dev" },
-    })
+    render(<Dialog />)
+    const field = screen.getByPlaceholderText(placeholder) as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: `${field.value}\nFOO=1` } })
     const save = screen.getByRole("button", { name: "Save" })
     fireEvent.click(save)
     await waitFor(() => expect(save.getAttribute("aria-busy")).toBe("true"))
+    fireEvent.keyDown(field, { key: "Escape" })
     fireEvent.click(save)
+    expect(screen.queryByText("Discard unsaved changes?")).toBeNull()
+    expect(close()).not.toHaveBeenCalled()
     expect(store.updateProjectSettings).toHaveBeenCalledTimes(1)
-    expect(store.updateProjectSettings).toHaveBeenCalledWith("p1", { startup_command: "make dev" })
+    expect(vi.mocked(store.updateProjectSettings).mock.calls[0].slice(0, 2)).toEqual(["p1", patch])
     await act(async () => finish(true))
-    expect(store.closeProjectSettings).toHaveBeenCalled()
+    expect(close()).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Text that Save cannot use is still an edit the question asks about, and the
+// form says which lines Save leaves out.
+describe.each([
+  ["the agent's environment", AgentEnvDialog, () => store.closeAgentEnv],
+  ["the project settings", ProjectSettingsDialog, () => store.closeProjectSettings],
+])("a line %s cannot use", (_name, Dialog, close) => {
+  it("asks before it is thrown away, and says Save leaves it out", async () => {
+    render(<Dialog />)
+    const field = screen.getByPlaceholderText("KEY=VALUE") as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: `${field.value}\n# the proxy is for CI` } })
+    expect(screen.getByText("Line 3 is not KEY=VALUE, so Save leaves it out.")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    expect((await screen.findByText(/Discarding/)).textContent).toMatch(/ 1 unsaved change\./)
+    expect(close()).not.toHaveBeenCalled()
   })
 })

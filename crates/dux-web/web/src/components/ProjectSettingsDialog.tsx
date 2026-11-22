@@ -10,7 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
-import { envToText, parseEnv } from "@/lib/env"
+import { envEdit, envLeftOutNote, envToText, type EnvEdit } from "@/lib/env"
 import { chip, prose } from "@/lib/prose"
 import { closeProjectSettings, updateProjectSettings, useDux } from "@/lib/store"
 import type { PatchProjectBody } from "@/lib/projectsApi"
@@ -30,7 +30,7 @@ interface Draft {
   provider: string
   autoReopen: string
   startup: string
-  envText: string
+  env: EnvEdit
 }
 
 // One tri-state PATCH body: only the fields that changed (the server leaves an
@@ -55,9 +55,8 @@ function settingsPatch(project: ProjectView, draft: Draft): PatchProjectBody {
     patch.startup_command = newStartup
   }
 
-  const env = parseEnv(draft.envText)
-  if (JSON.stringify(env) !== JSON.stringify(project.env)) {
-    patch.env = env
+  if (draft.env.changed > 0) {
+    patch.env = draft.env.env
   }
   return patch
 }
@@ -80,14 +79,19 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
         : "off",
   )
   const [startup, setStartup] = useState(() => project?.startup_command ?? "")
-  const [envText, setEnvText] = useState(() => envToText(project?.env ?? {}))
+  const [openedEnv] = useState(() => envToText(project?.env ?? {}))
+  const [envText, setEnvText] = useState(openedEnv)
   const [saving, setSaving] = useState(false)
+  const env = envEdit(project?.env ?? {}, openedEnv, envText)
   const patch =
-    project === undefined ? {} : settingsPatch(project, { provider, autoReopen, startup, envText })
-  const changes = Object.keys(patch).length
+    project === undefined ? {} : settingsPatch(project, { provider, autoReopen, startup, env })
+  // Counted as the other forms count: one per setting, and the environment
+  // per variable and per line Save leaves out.
+  const changes = Object.keys(patch).filter((field) => field !== "env").length + env.edits
+  const leftOutNote = envLeftOutNote(env.leftOut)
 
   async function handleSave() {
-    if (project === undefined || saving) return
+    if (project === undefined || Object.keys(patch).length === 0 || saving) return
     setSaving(true)
     try {
       // The PATCH is not atomic across its fields, so a rejection (toasted)
@@ -108,6 +112,7 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
       vanished={open && project === undefined}
       onClose={closeProjectSettings}
       onClosed={onClosed}
+      busy={saving}
       size="lg"
       title={
         <>
@@ -120,7 +125,7 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
         tone: "primary",
         onSelect: () => void handleSave(),
         busy: saving,
-        disabledReason: changes === 0 ? "Nothing to save yet: no setting has changed." : null,
+        disabledReason: Object.keys(patch).length === 0 ? "Nothing to save yet: no setting has changed." : null,
       }}
       unsavedEdits={{
         changes,
@@ -184,6 +189,7 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
             placeholder="KEY=VALUE"
             className="min-h-32 font-mono"
           />
+          {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
         </div>
       </div>
     </Modal>

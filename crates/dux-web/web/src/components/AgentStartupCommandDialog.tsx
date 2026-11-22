@@ -36,14 +36,17 @@ function AgentStartupCommandForm({ open, onClosed }: { open: boolean; onClosed: 
   const [startup, setStartup] = useState(() => project?.startup_command ?? "")
   const next = startup.trim() === "" ? null : startup
   const changed = project !== undefined && next !== (project.startup_command ?? null)
+  const [saving, setSaving] = useState(false)
 
   async function handleSave() {
-    if (project === undefined) return
-    // Unchanged is an empty patch: `updateProjectSettings` sends no request,
-    // says there was nothing to save, and the dialog closes.
-    const patch = changed ? { startup_command: next } : {}
-    if (await updateProjectSettings(project.id, patch, "startup command")) {
-      closeAgentStartupCommand()
+    if (project === undefined || !changed || saving) return
+    setSaving(true)
+    try {
+      if (await updateProjectSettings(project.id, { startup_command: next }, "startup command")) {
+        closeAgentStartupCommand()
+      }
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -68,7 +71,14 @@ function AgentStartupCommandForm({ open, onClosed }: { open: boolean; onClosed: 
           not just this one. Leave empty to clear it.
         </>
       }
-      submit={{ label: "Save", tone: "primary", onSelect: () => void handleSave() }}
+      busy={saving}
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        busy: saving,
+        disabledReason: changed ? null : "Nothing to save yet: the startup command has not changed.",
+      }}
       unsavedEdits={{
         changes: changed ? 1 : 0,
         holder: "The startup command has",

@@ -3,7 +3,7 @@ import { useState } from "react"
 import { Modal, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
-import { envChangeCount, envToText, parseEnv } from "@/lib/env"
+import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
 import { chip, prose } from "@/lib/prose"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
 import { sessionLabel, workspaceProjectId } from "@/lib/agentWorkspace"
@@ -28,16 +28,22 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
   const project = spine?.projects.find(
     (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
   )
-  const [text, setText] = useState(() => envToText(project?.env ?? {}))
-  const saved = project?.env ?? {}
+  const [opened] = useState(() => envToText(project?.env ?? {}))
+  const [text, setText] = useState(opened)
+  const [saving, setSaving] = useState(false)
+  const edit = envEdit(project?.env ?? {}, opened, text)
+  const leftOutNote = envLeftOutNote(edit.leftOut)
 
   async function handleSave() {
-    if (project === undefined) return
-    const env = parseEnv(text)
-    // Unchanged is an empty patch: no request, a nothing-to-save notice, close.
-    const patch =
-      JSON.stringify(env) === JSON.stringify(project.env) ? {} : { env }
-    if (await updateProjectSettings(project.id, patch, "environment")) closeAgentEnv()
+    if (project === undefined || edit.changed === 0 || saving) return
+    setSaving(true)
+    try {
+      if (await updateProjectSettings(project.id, { env: edit.env }, "environment")) {
+        closeAgentEnv()
+      }
+    } finally {
+      setSaving(false)
+    }
   }
 
   const projectName = project?.name ?? ""
@@ -61,9 +67,16 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
           to the whole project, not just this agent.
         </>
       }
-      submit={{ label: "Save", tone: "primary", onSelect: () => void handleSave() }}
+      busy={saving}
+      submit={{
+        label: "Save",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        busy: saving,
+        disabledReason: edit.changed === 0 ? "Nothing to save yet: no variable has changed." : null,
+      }}
       unsavedEdits={{
-        changes: envChangeCount(saved, parseEnv(text)),
+        changes: edit.edits,
         holder: "The environment has",
         leaves: prose`the environment of project ${chip(projectName)}`,
       }}
@@ -74,6 +87,7 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
         placeholder="KEY=VALUE"
         className="min-h-48 font-mono max-md:flex-1"
       />
+      {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
     </Modal>
   )
 }
