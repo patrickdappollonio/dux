@@ -125,7 +125,7 @@ export function ProjectList({
           rows, and the one child that shrinks when the popup is capped. */}
       <ScrollArea className="h-72 min-h-0 shrink border-t">
         <div className="p-2">
-          <ProjectRows search={search} menu={menu} />
+          <ProjectRows search={search} heading="Choose a project" menu={menu} />
         </div>
       </ScrollArea>
 

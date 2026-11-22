@@ -97,11 +97,24 @@ describe("ProjectList search focus ring", () => {
   })
 })
 
-// "Choose a project" is the New agent picker's question; the Projects list
-// asks nothing of the kind.
-describe("the Projects list's heading", () => {
-  it("does not ask the person to choose a project", () => {
+// The list it had before it shared its rows with the New agent picker: the
+// heading over the rows, and no row marked for Enter, since Enter picks
+// nothing here.
+describe("the Projects list's rows", () => {
+  it("sit under the heading the list has always had", () => {
     renderList()
-    expect(screen.queryByText("Choose a project")).toBeNull()
+    const heading = screen.getByText("Choose a project")
+    expect(
+      heading.compareDocumentPosition(nameButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+  })
+
+  it("mark no row as the one Enter would pick while the search has focus", () => {
+    renderList()
+    const search = screen.getByLabelText("Search projects")
+    search.focus()
+    fireEvent.focus(search)
+    fireEvent.change(search, { target: { value: "demo" } })
+    expect(screen.getByTestId("project-row").hasAttribute("data-active")).toBe(false)
   })
 })
