@@ -506,11 +506,13 @@ function DesktopRow({
             ) : null}
           </div>
         </td>
-        {/* `tabular-nums` so digits do not jitter as the numbers change. */}
-        <td className="py-1.5 pr-2 text-right tabular-nums">{pid}</td>
-        <td className="py-1.5 pr-2 text-right tabular-nums">{procs}</td>
-        <td className="py-1.5 pr-2 text-right tabular-nums">{cpu}</td>
-        <td className="py-1.5 pr-2 text-right tabular-nums">{mem}</td>
+        {/* `tabular-nums` so digits do not jitter as the numbers change, and
+            `whitespace-nowrap` so a long name widening the table scrolls it
+            rather than breaking "45.8 MiB" across two lines. */}
+        <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{pid}</td>
+        <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{procs}</td>
+        <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{cpu}</td>
+        <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{mem}</td>
         <td className="py-1.5 text-right">
           {row.stoppable ? (
             <ExplainedWhenDisabled disabled={stopBlocked !== null} hint={stopBlocked} className="rounded-lg">
@@ -553,15 +555,15 @@ function DesktopRow({
                   ) : null}
                 </div>
               </td>
-              <td className="py-0.5 pr-2 text-right tabular-nums">
+              <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums">
                 {child.pid}
               </td>
               {/* A child is one process, so its Procs cell is intentionally empty. */}
-              <td className="py-0.5 pr-2 text-right tabular-nums" />
-              <td className="py-0.5 pr-2 text-right tabular-nums">
+              <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums" />
+              <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums">
                 {formatCpu(child.cpu_percent)}
               </td>
-              <td className="py-0.5 pr-2 text-right tabular-nums">
+              <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums">
                 {formatBytes(child.rss_bytes)}
               </td>
               <td />
