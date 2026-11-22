@@ -31,10 +31,13 @@ const STACKED_BUTTON = "h-auto min-h-11 w-full py-2 text-center whitespace-norma
 function ActionButton({
   action,
   stacked,
+  modalBusy,
   cellClassName,
 }: {
   action: ModalAction
   stacked: boolean
+  /** The whole modal is busy: no action takes a press, and each keeps its focus. */
+  modalBusy: boolean
   cellClassName?: string
 }) {
   const reason = action.disabledReason ?? null
@@ -59,7 +62,7 @@ function ActionButton({
       hint={reason}
       className={cn("rounded-lg", cellClassName)}
     >
-      {action.href !== undefined && reason === null ? (
+      {action.href !== undefined && reason === null && !modalBusy ? (
         <a
           data-slot="button"
           href={action.href}
@@ -75,7 +78,7 @@ function ActionButton({
           variant={VARIANT[action.tone]}
           // Only a reason takes the button out of the tab order: its wrapper
           // takes the focus then. A busy one keeps the focus it has.
-          disabled={reason !== null || busy}
+          disabled={reason !== null || busy || modalBusy}
           focusableWhenDisabled={reason === null}
           aria-busy={busy ? true : undefined}
           className={className}
@@ -135,6 +138,7 @@ export function ModalFooter({
   leading,
   actions,
   note,
+  busy,
 }: {
   stacked: boolean
   cover: boolean
@@ -147,6 +151,8 @@ export function ModalFooter({
   /** In reading order; the last is the main one unless the safe button is. */
   actions: readonly ModalAction[]
   note?: ReactNode
+  /** The modal is busy. */
+  busy: boolean
 }) {
   const count = leading.length + actions.length + (safe === null ? 0 : 1)
   if (count === 0) return null
@@ -192,6 +198,7 @@ export function ModalFooter({
             key={`leading-${index}`}
             action={action}
             stacked={stacked}
+            modalBusy={busy}
             cellClassName={cell(count === 1, index === 0)}
           />
         ))}
@@ -201,6 +208,7 @@ export function ModalFooter({
             key={index}
             action={action}
             stacked={stacked}
+            modalBusy={busy}
             cellClassName={cell(count === 1, false)}
           />
         ))}

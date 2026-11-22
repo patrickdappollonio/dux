@@ -19,6 +19,7 @@ vi.stubGlobal(
 await import("@/lib/store")
 
 import { Modal, useModalLifetime } from "./index"
+import { closeReasonFrom } from "./closeReason"
 import type { ModalAction, ModalKind } from "./types"
 
 const PHONE = 390
@@ -741,6 +742,17 @@ describe("a destructive confirm", () => {
   })
 })
 
+describe("the way out base-ui reports", () => {
+  it("is told to the caller as the way out it was", () => {
+    expect(closeReasonFrom("escape-key")).toBe("escape")
+    expect(closeReasonFrom("outside-press")).toBe("outside")
+    expect(closeReasonFrom("focus-out")).toBe("outside")
+    expect(closeReasonFrom("close-press")).toBe("close-control")
+    expect(closeReasonFrom("imperative-action")).toBeNull()
+    expect(closeReasonFrom("none")).toBeNull()
+  })
+})
+
 describe("why a modal closed", () => {
   it.each([
     ["cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
@@ -909,6 +921,30 @@ describe("a busy modal", () => {
     view.rerender(<Saving busy={false} onClose={onClose} />)
     fireEvent.keyDown(document.activeElement!, { key: "Escape" })
     expect(onClose).toHaveBeenCalledWith("escape")
+  })
+
+  it("takes no press on its footer actions or its step's Back, and keeps them focusable", () => {
+    const pressed = vi.fn()
+    render(
+      <Modal
+        kind="form"
+        open
+        busy
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        back={{ label: "Start", onSelect: pressed }}
+        secondary={{ label: "Other", tone: "plain", onSelect: pressed }}
+        submit={{ label: "Save", tone: "primary", onSelect: pressed }}
+      />,
+    )
+    for (const name of ["Back to Start", "Other", "Save"]) {
+      const control = screen.getByRole("button", { name }) as HTMLButtonElement
+      fireEvent.click(control)
+      expect(control.disabled, name).toBe(false)
+      expect(control.getAttribute("aria-disabled"), name).toBe("true")
+    }
+    expect(pressed).not.toHaveBeenCalled()
   })
 
   // A disabled button would drop the focus it holds to the page.

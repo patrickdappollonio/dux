@@ -14,6 +14,7 @@ import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
+import { closeReasonFrom } from "./closeReason"
 import { focusTarget, isTextEntry } from "./focus"
 import {
   CARD_ANCHOR,
@@ -90,7 +91,9 @@ export function Modal(props: ModalProps) {
         open={open}
         onOpenChange={(next, details) => {
           if (next) return
-          if (!leave(details.reason === "escape-key" ? "escape" : "outside")) details.cancel()
+          const reason = closeReasonFrom(details.reason)
+          // A close no person asked for is not a way out: `open` is the caller's.
+          if (reason === null || !leave(reason)) details.cancel()
         }}
         onBack={() => !leave("back")}
         onOpenChangeComplete={(now) => {
@@ -364,12 +367,15 @@ function ModalParts(
             variant="ghost"
             size={cover ? "icon" : "sm"}
             aria-label={`Back to ${back.label}`}
+            disabled={busy}
+            focusableWhenDisabled
             onClick={back.onSelect}
-            className={
+            className={cn(
+              INERT_BUTTON,
               cover
                 ? "-ml-2 size-10 shrink-0"
-                : "-mt-1 -ml-1.5 h-8 self-start px-1.5 text-muted-foreground pointer-coarse:min-h-10"
-            }
+                : "-mt-1 -ml-1.5 h-8 self-start px-1.5 text-muted-foreground pointer-coarse:min-h-10",
+            )}
           >
             <ChevronLeft />
             {cover ? null : back.label}
@@ -462,6 +468,7 @@ function ModalParts(
           safeEnds={kind === "report"}
           leading={leading}
           actions={actions.filter((a) => !leading.includes(a))}
+          busy={busy}
           note={kind === "confirm" ? undefined : props.footerNote}
         />
       )}
