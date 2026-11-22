@@ -1003,3 +1003,26 @@ describe("TaskManagerDialog focus rings", () => {
     expect(scroller.className).toContain("-mr-[3px]")
   })
 })
+
+describe("TaskManagerDialog pinned stop column", () => {
+  // The fade on the column's leading edge is for a figure passing under it, so
+  // it is there only while the table is scrolled short of its trailing end.
+  it("fades its edge only while something scrolls under it", async () => {
+    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    await screen.findByLabelText(/^Force stop/)
+    const scroller = screen.getByTestId("task-manager-scroll").firstElementChild as HTMLElement
+    const size = (scrollWidth: number, scrollLeft: number) => {
+      Object.defineProperty(scroller, "clientWidth", { configurable: true, value: 400 })
+      Object.defineProperty(scroller, "scrollWidth", { configurable: true, value: scrollWidth })
+      scroller.scrollLeft = scrollLeft
+      fireEvent.scroll(scroller)
+    }
+    size(400, 0)
+    expect(scroller.hasAttribute("data-covered")).toBe(false)
+    size(600, 0)
+    expect(scroller.hasAttribute("data-covered")).toBe(true)
+    size(600, 200)
+    expect(scroller.hasAttribute("data-covered")).toBe(false)
+  })
+})

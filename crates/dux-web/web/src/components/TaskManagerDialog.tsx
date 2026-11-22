@@ -267,7 +267,10 @@ function TaskManagerBody() {
             data-testid="task-manager-scroll"
             className="max-h-96 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
           >
-            <div className="-mr-[3px] overflow-x-auto pr-[3px]">
+            <div
+              ref={markCoveredStopColumn}
+              className="group/hscroll -mr-[3px] overflow-x-auto pr-[3px]"
+            >
               {/* Desktop: the 4-column table. */}
               {isMobile ? null : (
               <table className="w-full border-collapse text-sm">
@@ -456,14 +459,36 @@ function statCells(stats: ResourceStatsView | null) {
 
 // The stop column stays pinned at the table's trailing edge while a long name
 // scrolls the rest sideways, so no row's Force stop is ever out of reach. Opaque,
-// so what scrolls under it does not show through, and faded on its leading edge
-// over the column's own gutter so a figure passing under it is not cut sharp; on
-// a hovered row it takes the row's tint mixed onto the same surface. -3px seats
-// it on the scroller's padded edge (see the scroller's -mr-[3px] pr-[3px]).
+// so what scrolls under it does not show through, and, only while something is
+// under it (`data-covered` on the scroller), faded on its leading edge over the
+// column's own gutter so a figure passing under it is not cut sharp. On a
+// hovered row the cell and its fade take the row's tint mixed onto the same
+// surface, so the tint runs unbroken into the column. -3px seats it on the
+// scroller's padded edge (see the scroller's -mr-[3px] pr-[3px]).
 const STOP_COLUMN =
-  "sticky -right-[3px] bg-popover pl-2 before:pointer-events-none before:absolute before:inset-y-0 before:right-full before:w-2 before:bg-gradient-to-l before:from-popover before:to-transparent"
+  "sticky -right-[3px] bg-popover pl-2 before:pointer-events-none before:absolute before:inset-y-0 before:right-full before:hidden before:w-2 before:bg-gradient-to-l before:from-popover before:to-transparent group-data-covered/hscroll:before:block"
 const STOP_COLUMN_HOVER =
-  "group-hover/task:bg-[color-mix(in_oklab,var(--muted)_50%,var(--popover))]"
+  "group-hover/task:bg-[color-mix(in_oklab,var(--muted)_50%,var(--popover))] group-hover/task:before:from-[color-mix(in_oklab,var(--muted)_50%,var(--popover))]"
+
+// Marks the table's horizontal scroller `data-covered` while the table runs on
+// past the pinned stop column, which is when part of a row sits under it.
+function markCoveredStopColumn(el: HTMLDivElement | null): (() => void) | void {
+  if (!el) return
+  const update = () => {
+    const covered = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+    el.toggleAttribute("data-covered", covered)
+  }
+  update()
+  el.addEventListener("scroll", update, { passive: true })
+  const observer =
+    typeof ResizeObserver === "function" ? new ResizeObserver(update) : null
+  observer?.observe(el)
+  if (el.firstElementChild) observer?.observe(el.firstElementChild)
+  return () => {
+    el.removeEventListener("scroll", update)
+    observer?.disconnect()
+  }
+}
 
 function DesktopRow({
   row,
