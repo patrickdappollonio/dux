@@ -61,7 +61,7 @@ import {
   SidebarInset,
   SidebarProvider,
 } from "@/components/ui/sidebar"
-import { useIsMobile } from "@/hooks/use-mobile"
+import { useIsMobile, useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { SHELL_HEIGHT_CLASS, SHELL_SAFE_TOP, shellHeight } from "@/lib/appViewport"
 import {
   useChromeGesture,
@@ -148,9 +148,12 @@ export { CHANGES_PANE_HEAL_FRAMES } from "@/hooks/use-changes-pane-controller"
 
 // Exported for the unit tests, which drive the panel callbacks directly; `App`
 // below is still the only production caller.
+function keepSidebarAtRail(): void {}
+
 export function DesktopShell() {
   const dux = useDux()
   const { sidebarWidth, sidebarOpen, theater, selectedTarget } = dux
+  const narrow = useIsNarrowComputerLayout()
   // Theater's cover exception, on this layout too. A tablet with no keyboard
   // reaches the computer layout by itself and has no Escape, so a
   // full-pane cover brings the top bar back with the Theater button in it. The
@@ -180,8 +183,14 @@ export function DesktopShell() {
       // primitive's internal state keeps flipping, and writing, while theater
       // has the panel unmounted, and the layout the user came from is then
       // different on the way out.
-      open={sidebarOpen}
-      onOpenChange={setSidebarOpen}
+      //
+      // The computer layout chosen on a window narrower than the breakpoint
+      // keeps the sidebar at its rail, whatever is stored, and stores nothing:
+      // expanded beside the page it would leave the header too narrow for the
+      // app menu, the way back to the phone layout. Its expand button floats
+      // the sidebar over the page instead (AppSidebar).
+      open={sidebarOpen && !narrow}
+      onOpenChange={narrow ? keepSidebarAtRail : setSidebarOpen}
       // The side safe-area insets, as the phone shell has them: a phone held
       // sideways in this layout has its notch or camera cutout at one side,
       // and the header's Settings button sat under it. The sidebar's fixed

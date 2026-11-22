@@ -79,6 +79,13 @@ export function useSidebarFloat(enabled: boolean) {
     setOpen(false)
   }, [clearTimers])
 
+  // Opened by a press rather than a hover: no delay, and nothing suppressed.
+  const show = useCallback(() => {
+    clearTimers()
+    suppressed.current = false
+    setOpen(true)
+  }, [clearTimers])
+
   const scheduleClose = useCallback(() => {
     window.clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => {
@@ -195,5 +202,5 @@ export function useSidebarFloat(enabled: boolean) {
     }
   }, [open, panel, close, scheduleClose])
 
-  return { open, attachPanel: setPanel, iconHover, close }
+  return { open, attachPanel: setPanel, iconHover, show, close }
 }

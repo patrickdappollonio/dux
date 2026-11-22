@@ -3,6 +3,7 @@ import * as React from "react"
 import {
   currentShellLayout,
   currentLayoutChoice,
+  isNarrowComputerLayout,
   isPhoneDevice,
   subscribeShellLayout,
   type ShellLayout,
@@ -34,4 +35,9 @@ export function useLayoutChoice(): ShellLayout | null {
 /** Whether this device is a phone whatever layout is chosen, live. */
 export function useIsPhoneDevice(): boolean {
   return React.useSyncExternalStore(subscribeShellLayout, isPhoneDevice, () => false)
+}
+
+/** Whether the computer layout is shown narrower than the breakpoint, live. */
+export function useIsNarrowComputerLayout(): boolean {
+  return React.useSyncExternalStore(subscribeShellLayout, isNarrowComputerLayout, () => false)
 }

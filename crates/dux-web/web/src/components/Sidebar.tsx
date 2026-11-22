@@ -57,6 +57,7 @@ import {
 import type { ChangesSlice, SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { useSidebarFloat } from "@/hooks/use-sidebar-float"
+import { useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
@@ -270,7 +271,8 @@ function CollapsedAgentRail({
 // Edge affordance on the sidebar's right edge: drag-to-resize when expanded,
 // click-to-expand when collapsed, desktop only. The gesture is the Changes
 // divider's shared one; only the band and the collapse target differ.
-function SidebarResizeHandle() {
+// `expand` stands in for expanding where the sidebar must stay at its rail.
+function SidebarResizeHandle({ expand }: { expand?: () => void }) {
   const { state, isMobile } = useSidebar()
   // A collapse unmounts the control the keyboard was standing on, so this carries
   // the focus intent across the swap. State, because the claim crosses components.
@@ -284,6 +286,7 @@ function SidebarResizeHandle() {
         focusOnMount={focusOnMount}
         onFocusClaimed={releaseFocusClaim}
         claimFocus={claimFocus}
+        expand={expand}
       />
     )
   }
@@ -319,7 +322,8 @@ function SidebarExpandStrip({
   focusOnMount,
   onFocusClaimed,
   claimFocus,
-}: SidebarEdgeProps) {
+  expand,
+}: SidebarEdgeProps & { expand?: () => void }) {
   const { setOpen } = useSidebar()
   const ref = useRef<HTMLButtonElement | null>(null)
   useFocusHandoff(focusOnMount, onFocusClaimed, ref)
@@ -332,6 +336,10 @@ function SidebarExpandStrip({
       // `detail` is 0 only for a keyboard-synthesised click. A keyboard expand
       // hands focus to the drag edge; a mouse click leaves focus where it is.
       onClick={(event) => {
+        if (expand) {
+          expand()
+          return
+        }
         if (event.detail === 0) claimFocus()
         setOpen(true)
       }}
@@ -542,8 +550,17 @@ export function AppSidebar() {
   // the primitive while the collapsed state and the layout stay put, so every
   // section is the expanded one and nothing is rendered twice.
   const { state, isMobile } = useSidebar()
-  const { open: floatOpen, attachPanel, iconHover, close: closeFloat } =
-    useSidebarFloat(state === "collapsed" && !isMobile)
+  const {
+    open: floatOpen,
+    attachPanel,
+    iconHover,
+    show: showFloat,
+    close: closeFloat,
+  } = useSidebarFloat(state === "collapsed" && !isMobile)
+  // The computer layout chosen on a window this narrow keeps the rail (see
+  // DesktopShell), so its expand and collapse buttons open and close this
+  // floating sidebar instead.
+  const narrow = useIsNarrowComputerLayout()
   const onSelectSession = (sessionId: string | null) => {
     selectSession(sessionId)
     closeFloat()
@@ -597,13 +614,20 @@ export function AppSidebar() {
             {/* Collapse toggle: shown only while expanded. When collapsed it
                 hides (the row is too narrow) and the rail trigger below takes
                 over so the sidebar can still be reopened without the edge handle. */}
-            <SidebarTrigger className="shrink-0 group-data-[collapsible=icon]:hidden" />
+            <SidebarTrigger
+              onClick={narrow ? closeFloat : undefined}
+              className="shrink-0 group-data-[collapsible=icon]:hidden"
+            />
           </SidebarMenuItem>
           {/* Rail-only expand button: visible ONLY when collapsed, centered under
               the logo, so there is always a discoverable control to reopen the
               sidebar (the edge handle alone was too easy to miss). */}
           <SidebarMenuItem className="hidden group-data-[collapsible=icon]:flex group-data-[collapsible=icon]:justify-center">
-            <SidebarTrigger aria-label="Expand sidebar" className="size-8" />
+            <SidebarTrigger
+              aria-label="Expand sidebar"
+              onClick={narrow ? showFloat : undefined}
+              className="size-8"
+            />
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
@@ -641,7 +665,9 @@ export function AppSidebar() {
           </Button>
         </div>
       </SidebarFooter>
-      <SidebarResizeHandle />
+      <SidebarResizeHandle
+        expand={narrow ? (floatOpen ? closeFloat : showFloat) : undefined}
+      />
     </Sidebar>
   )
 }

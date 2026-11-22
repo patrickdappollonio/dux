@@ -97,6 +97,7 @@ interface Answer {
   layout: ShellLayout
   choice: ShellLayout | null
   phoneDevice: boolean
+  narrowComputer: boolean
 }
 
 function computeAnswer(): Answer {
@@ -106,10 +107,12 @@ function computeAnswer(): Answer {
     screenShortSide: screenShortSide(),
     coarse: coarsePointer(),
   }
+  const layout = resolveShellLayout({ ...device, choice })
   return {
-    layout: resolveShellLayout({ ...device, choice }),
+    layout,
     choice,
     phoneDevice: device.coarse && resolveShellLayout({ ...device, choice: null }) === "phone",
+    narrowComputer: layout === "computer" && device.width < MOBILE_BREAKPOINT,
   }
 }
 
@@ -127,7 +130,8 @@ function refresh(): void {
   if (
     next.layout === cached.layout &&
     next.choice === cached.choice &&
-    next.phoneDevice === cached.phoneDevice
+    next.phoneDevice === cached.phoneDevice &&
+    next.narrowComputer === cached.narrowComputer
   ) {
     return
   }
@@ -194,6 +198,16 @@ export function currentLayoutChoice(): ShellLayout | null {
 export function isPhoneDevice(): boolean {
   if (typeof window === "undefined") return false
   return answer().phoneDevice
+}
+
+/**
+ * Whether the computer layout is shown in a window narrower than the
+ * breakpoint, which only a person's choice brings about: too narrow for the
+ * expanded sidebar beside the page.
+ */
+export function isNarrowComputerLayout(): boolean {
+  if (typeof window === "undefined") return false
+  return answer().narrowComputer
 }
 
 /**

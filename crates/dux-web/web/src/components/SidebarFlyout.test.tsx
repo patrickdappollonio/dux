@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { SidebarProvider } from "@/components/ui/sidebar"
+import { setLayoutChoice } from "@/lib/shellLayout"
 import type { DuxState } from "@/lib/store"
 
 // The floating sidebar a mouse opens from the collapsed rail. These tests run the
@@ -322,6 +323,40 @@ describe("AppSidebar floating sidebar from the collapsed rail", () => {
     expect(floating()).toBe(false)
     act(() => railIcon("live-work (Repo)").focus())
     advance(1000)
+    expect(floating()).toBe(false)
+  })
+})
+
+describe("AppSidebar in the computer layout on a phone-narrow window", () => {
+  afterEach(() => setLayoutChoice(null))
+
+  const railExpand = () =>
+    document.querySelector('[data-sidebar="trigger"][aria-label="Expand sidebar"]') as HTMLElement
+
+  const controlled = (onOpenChange: (open: boolean) => void) => (
+    <SidebarProvider open={false} onOpenChange={onOpenChange}>
+      <AppSidebar />
+    </SidebarProvider>
+  )
+
+  it("floats the sidebar over the page from the rail's expand button, and its collapse button closes it", () => {
+    vi.stubGlobal("innerWidth", 390)
+    setLayoutChoice("computer")
+    render(controlled(() => {}))
+    fireEvent.click(railExpand())
+    expect(floating()).toBe(true)
+    expect(sidebar().getAttribute("data-state")).toBe("collapsed")
+    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }))
+    expect(floating()).toBe(false)
+  })
+
+  it("expands as ever on a window wide enough for it", () => {
+    vi.stubGlobal("innerWidth", 1024)
+    setLayoutChoice("computer")
+    const onOpenChange = vi.fn()
+    render(controlled(onOpenChange))
+    fireEvent.click(railExpand())
+    expect(onOpenChange).toHaveBeenCalledWith(true)
     expect(floating()).toBe(false)
   })
 })
