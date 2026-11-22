@@ -10,25 +10,18 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal, useModalLifetime } from "@/components/modal"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useIsTruncated } from "@/hooks/use-truncated"
+import { FOCUS_RING } from "@/lib/focusRing"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatBytes, formatCpu } from "@/lib/formatStats"
 import {
@@ -70,34 +63,21 @@ import { cn } from "@/lib/utils"
 // REST poll, because an event names what changed and never carries the value.
 export function TaskManagerDialog() {
   const { taskManagerOpen, stopAllOpen } = useDux()
-
-  function handleOpenChange(open: boolean) {
-    if (!open) closeTaskManager()
-  }
-
+  const life = useModalLifetime(taskManagerOpen)
   return (
     <>
-      <Dialog open={taskManagerOpen} onOpenChange={handleOpenChange}>
-        {/* No `destructive` on the dialog itself: the grayscale backdrop suits a
-            kill modal but fights a monitor you read numbers off. The nested
-            confirmations keep it. */}
-        <DialogContent
-          showCloseButton={false}
-          className="sm:max-w-[min(44rem,calc(100%-2rem))]"
-        >
-          {/* The body mounts only while open, so its sample and expansion state
-              reset by unmounting rather than by being cleared, and the poll loop
-              is torn down by the effect's own cleanup. */}
-          {taskManagerOpen ? <TaskManagerBody /> : null}
-        </DialogContent>
-      </Dialog>
-
+      {/* Mounted only from an open until its close has finished, so the sample
+          and the expansion state reset by unmounting rather than by being
+          cleared, and the poll loop is torn down by the effect's own cleanup. */}
+      {life.mounted ? (
+        <TaskManager key={life.epoch} open={taskManagerOpen} onClosed={life.onClosed} />
+      ) : null}
       <ConfirmStopAllDialog open={stopAllOpen} />
     </>
   )
 }
 
-function TaskManagerBody() {
+function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }) {
   const state = useDux()
   const { spine } = state
   // ONE layout renders at a time, not two hidden behind CSS: rendering both would
@@ -228,138 +208,115 @@ function TaskManagerBody() {
   }
 
   return (
-    <>
-          <DialogHeader>
-            <div className="flex items-center justify-between gap-2">
-              <DialogTitle>Task Manager</DialogTitle>
-              {/* Coexists with the stalled indicator below, never both at once:
-                  this pill claims the numbers are live, the stalled message
-                  says they are not, and showing both would contradict itself. */}
-              {stale ? null : <LivePollPill intervalMs={RESOURCE_POLL_INTERVAL_MS} />}
-            </div>
-            <DialogDescription>
-              What&apos;s running, what it costs, and how to stop it. Agents
-              detach and can be reconnected; terminals are destroyed.
-            </DialogDescription>
-          </DialogHeader>
+    // A report, not a destructive confirm: the greyed backdrop suits a kill
+    // modal but fights a monitor you read numbers off. The nested
+    // confirmations keep it.
+    <Modal
+      kind="report"
+      open={open}
+      onClose={closeTaskManager}
+      onClosed={onClosed}
+      size="w704"
+      title="Task Manager"
+      description="What's running, what it costs, and how to stop it. Agents detach and can be reconnected; terminals are destroyed."
+      // Whether the numbers are live, above the list and out of its scroll.
+      // Never both at once: the pill claims the numbers are live and the
+      // stalled message says they are not. A permanently failing poll must not
+      // go on rendering the last good numbers as though they were live: the
+      // message appears once a run of failures crosses the staleness threshold
+      // and clears the moment a poll succeeds again. No toast: this is a
+      // persistent state of the numbers, not a one-off event.
+      toolbar={
+        stale ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+            Stats stalled: showing the last successful sample, not live numbers.
+          </p>
+        ) : (
+          <LivePollPill intervalMs={RESOURCE_POLL_INTERVAL_MS} />
+        )
+      }
+      closeLabel="Done"
+      actions={
+        empty
+          ? undefined
+          : [
+              {
+                label: "Force stop everything…",
+                tone: "destructive",
+                onSelect: openStopAll,
+                disabledReason: nothingToStop,
+              },
+            ]
+      }
+      footerNote={summary ? <span className="tabular-nums">{summary}</span> : undefined}
+    >
+      {/* A name too long for its row is shortened, with the whole of it in a
+          hint (see `ShortenedName`), so the list never scrolls sideways and no
+          row's Force stop is ever out of reach. On a computer the list scrolls
+          inside the card, with a stable gutter so the scrollbar never touches
+          the Force stop buttons or the dashes; header and rows share one table,
+          so their columns stay aligned whether or not the list scrolls. On a
+          phone the cover's body is the scroller. */}
+      <div
+        data-testid="task-manager-scroll"
+        className="md:max-h-96 md:overflow-y-auto md:pr-2 md:[scrollbar-gutter:stable]"
+      >
+        {/* Desktop: the table. */}
+        {isMobile ? null : (
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="text-[10px] tracking-wide text-muted-foreground uppercase">
+                <th className="py-1 pr-2 text-left font-medium">Name</th>
+                <th className="py-1 pr-2 text-right font-medium">PID</th>
+                <th className="py-1 pr-2 text-right font-medium">Procs</th>
+                <th className="py-1 pr-2 text-right font-medium">CPU</th>
+                <th className="py-1 pr-2 text-right font-medium">Memory</th>
+                <th className="py-1" />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <DesktopRow
+                  key={row.key}
+                  row={row}
+                  expanded={expanded.has(row.key)}
+                  onToggle={() => toggleExpanded(row.key)}
+                  onStop={() => handleStop(row)}
+                  stopBlocked={stopBlocked(row)}
+                />
+              ))}
+            </tbody>
+          </table>
+        )}
 
-          {/* A permanently failing poll must not go on rendering the last good
-              numbers as though they were live: this surfaces once a run of
-              failures crosses the staleness threshold, and clears the moment
-              a poll succeeds again. Subtle by design, no toast: this is a
-              persistent state of the numbers, not a one-off event. */}
-          {stale ? (
-            <p className="flex items-center gap-1.5 px-2 text-xs text-muted-foreground">
-              <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
-              Stats stalled: showing the last successful sample, not live
-              numbers.
-            </p>
-          ) : null}
-
-          {/* The table scrolls HORIZONTALLY before any name is ellipsized: child
-              rows are command names ("node", "rg", "nvim") and a name truncated
-              to nothing tells the user less than a scrollbar does. The vertical
-              scroller reserves a stable gutter and pads its own right edge, so
-              the scrollbar never touches the Force stop buttons or the dashes;
-              header and rows share one table inside it, so their columns stay
-              aligned whether or not the list scrolls. */}
-          <div
-            data-testid="task-manager-scroll"
-            className="max-h-96 overflow-y-auto pr-2 [scrollbar-gutter:stable]"
-          >
-            <div
-              ref={markCoveredStopColumn}
-              className="group/hscroll -mr-[3px] overflow-x-auto pr-[3px]"
-            >
-              {/* Desktop: the 4-column table. */}
-              {isMobile ? null : (
-              <table className="w-full border-collapse text-sm">
-                <thead>
-                  <tr className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                    <th className="py-1 pr-2 text-left font-medium">Name</th>
-                    <th className="py-1 pr-2 text-right font-medium">PID</th>
-                    <th className="py-1 pr-2 text-right font-medium">Procs</th>
-                    <th className="py-1 pr-2 text-right font-medium">CPU</th>
-                    <th className="py-1 pr-2 text-right font-medium">Memory</th>
-                    <th className={cn("py-1", STOP_COLUMN)} />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <DesktopRow
-                      key={row.key}
-                      row={row}
-                      expanded={expanded.has(row.key)}
-                      onToggle={() => toggleExpanded(row.key)}
-                      onStop={() => handleStop(row)}
-                      stopBlocked={stopBlocked(row)}
-                    />
-                  ))}
-                </tbody>
-              </table>
-              )}
-
-              {/* Mobile: stacked cards carrying the same rows. */}
-              {isMobile ? (
-                <div className="flex flex-col gap-1">
-                  {rows.map((row) => (
-                    <MobileRow
-                      key={row.key}
-                      row={row}
-                      expanded={expanded.has(row.key)}
-                      onToggle={() => toggleExpanded(row.key)}
-                      onStop={() => handleStop(row)}
-                      stopBlocked={stopBlocked(row)}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            {empty ? (
-              <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-                Nothing is running.
-              </p>
-            ) : null}
+        {/* Mobile: stacked cards carrying the same rows. */}
+        {isMobile ? (
+          <div className="flex flex-col gap-1">
+            {rows.map((row) => (
+              <MobileRow
+                key={row.key}
+                row={row}
+                expanded={expanded.has(row.key)}
+                onToggle={() => toggleExpanded(row.key)}
+                onStop={() => handleStop(row)}
+                stopBlocked={stopBlocked(row)}
+              />
+            ))}
           </div>
+        ) : null}
 
-          {/* Misclick-safe spacing between the list and the footer buttons. */}
-          <div className="h-2" />
-          <DialogFooter>
-            {summary ? (
-              <p className="self-center text-xs text-muted-foreground tabular-nums sm:mr-auto">
-                {summary}
-              </p>
-            ) : null}
-            {empty ? null : (
-              <ExplainedWhenDisabled
-                disabled={nothingToStop !== null}
-                hint={nothingToStop}
-                className="rounded-lg"
-              >
-                {/* Destructive here, unlike a `⋯` menu's neutral items: a dialog
-                    footer button is the surface `variant="destructive"` is
-                    reserved for. The wrapper stretches in the phone's column
-                    footer and the button fills it, as Done does. */}
-                <Button
-                  variant="destructive"
-                  className="max-sm:w-full"
-                  disabled={nothingToStop !== null}
-                  onClick={openStopAll}
-                >
-                  Force stop everything…
-                </Button>
-              </ExplainedWhenDisabled>
-            )}
-            <Button variant="outline" autoFocus onClick={closeTaskManager}>
-              Done
-            </Button>
-          </DialogFooter>
-    </>
+        {empty ? (
+          <p className="px-2 py-6 text-center text-sm text-muted-foreground">
+            Nothing is running.
+          </p>
+        ) : null}
+      </div>
+    </Modal>
   )
 }
 
-// The header's "still live" cue. The interval is read from the poll constant so
+// The "still live" cue. The interval is read from the poll constant so
 // the copy cannot drift, and the blink reuses `.agent-status-dot`'s one definition.
 function LivePollPill({ intervalMs }: { intervalMs: number }) {
   return (
@@ -457,37 +414,33 @@ function statCells(stats: ResourceStatsView | null) {
   }
 }
 
-// The stop column stays pinned at the table's trailing edge while a long name
-// scrolls the rest sideways, so no row's Force stop is ever out of reach. Opaque,
-// so what scrolls under it does not show through, and, only while something is
-// under it (`data-covered` on the scroller), faded on its leading edge over the
-// column's own gutter so a figure passing under it is not cut sharp. On a
-// hovered row the cell and its fade take the row's tint mixed onto the same
-// surface, so the tint runs unbroken into the column. -3px seats it on the
-// scroller's padded edge (see the scroller's -mr-[3px] pr-[3px]).
-const STOP_COLUMN =
-  "sticky -right-[3px] bg-popover pl-2 before:pointer-events-none before:absolute before:inset-y-0 before:right-full before:hidden before:w-2 before:bg-gradient-to-l before:from-popover before:to-transparent group-data-covered/hscroll:before:block"
-const STOP_COLUMN_HOVER =
-  "group-hover/task:bg-[color-mix(in_oklab,var(--muted)_50%,var(--popover))] group-hover/task:before:from-[color-mix(in_oklab,var(--muted)_50%,var(--popover))]"
-
-// Marks the table's horizontal scroller `data-covered` while the table runs on
-// past the pinned stop column, which is when part of a row sits under it.
-function markCoveredStopColumn(el: HTMLDivElement | null): (() => void) | void {
-  if (!el) return
-  const update = () => {
-    const covered = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
-    el.toggleAttribute("data-covered", covered)
-  }
-  update()
-  el.addEventListener("scroll", update, { passive: true })
-  const observer =
-    typeof ResizeObserver === "function" ? new ResizeObserver(update) : null
-  observer?.observe(el)
-  if (el.firstElementChild) observer?.observe(el.firstElementChild)
-  return () => {
-    el.removeEventListener("scroll", update)
-    observer?.disconnect()
-  }
+// A name in the list, cut with an ellipsis when its row has no room for all of
+// it. While it is cut, the whole name is in the shared tooltip: on hover, on
+// keyboard focus (the name is a tab stop only then) and, for a finger, on a tap.
+function ShortenedName({ name, className }: { name: string; className?: string }) {
+  const { ref, truncated } = useIsTruncated<HTMLSpanElement>(name)
+  const [hovered, setHovered] = useState(false)
+  const [tapped, setTapped] = useState(false)
+  return (
+    <SimpleTooltip
+      content={name}
+      open={truncated && (hovered || tapped)}
+      onOpenChange={(next) => {
+        setHovered(next)
+        if (!next) setTapped(false)
+      }}
+    >
+      <span
+        ref={ref}
+        data-shortened={truncated ? "" : undefined}
+        tabIndex={truncated ? 0 : undefined}
+        onClick={truncated ? () => setTapped(true) : undefined}
+        className={cn("min-w-0 truncate rounded-sm", FOCUS_RING, className)}
+      >
+        {name}
+      </span>
+    </SimpleTooltip>
+  )
 }
 
 function DesktopRow({
@@ -522,9 +475,12 @@ function DesktopRow({
           isTotal && "border-t border-border font-medium",
         )}
       >
-        <td className="py-1.5 pr-2">
+        {/* The one column that gives way: it takes the width the others
+            leave, and `max-w-0` lets it go below its content's, so a long
+            name is shortened rather than widening the table. */}
+        <td className="w-full max-w-0 py-1.5 pr-2">
           <div
-            className={cn("flex items-center gap-1.5", row.nested && "pl-5")}
+            className={cn("flex min-w-0 items-center gap-1.5", row.nested && "pl-5")}
           >
             {isTotal ? (
               <span className="inline-block w-4" />
@@ -532,24 +488,25 @@ function DesktopRow({
               <ExpandToggle row={row} expanded={expanded} onToggle={onToggle} />
             )}
             <RowIcon kind={row.kind} />
-            {/* `whitespace-nowrap`, never truncate: the container scrolls. */}
-            <span className="whitespace-nowrap">{row.name}</span>
+            <ShortenedName name={row.name} />
             {row.kind === "dux" ? <DuxBadge /> : null}
+            {/* Gives way before the name does, and never takes more than a
+                third of the cell from it. */}
             {row.detail ? (
-              <span className="whitespace-nowrap font-mono text-xs text-muted-foreground">
-                {row.detail}
-              </span>
+              <ShortenedName
+                name={row.detail}
+                className="max-w-[33%] shrink-[2] font-mono text-xs text-muted-foreground"
+              />
             ) : null}
           </div>
         </td>
         {/* `tabular-nums` so digits do not jitter as the numbers change, and
-            `whitespace-nowrap` so a long name widening the table scrolls it
-            rather than breaking "45.8 MiB" across two lines. */}
+            `whitespace-nowrap` so "45.8 MiB" never breaks across two lines. */}
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{pid}</td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{procs}</td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{cpu}</td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{mem}</td>
-        <td className={cn("py-1.5 text-right", STOP_COLUMN, STOP_COLUMN_HOVER)}>
+        <td className="py-1.5 text-right">
           {row.stoppable ? (
             <ExplainedWhenDisabled disabled={stopBlocked !== null} hint={stopBlocked} className="rounded-lg">
               <Button
@@ -576,16 +533,14 @@ function DesktopRow({
               data-testid={`child-row-${child.pid}`}
               className="text-xs text-muted-foreground"
             >
-              <td className="py-0.5 pr-2">
-                <div className={cn("pl-10", row.nested && "pl-15")}>
-                  <span className="whitespace-nowrap font-mono">
-                    {child.name}
-                  </span>
+              <td className="w-full max-w-0 py-0.5 pr-2">
+                <div className={cn("flex min-w-0 items-baseline pl-10", row.nested && "pl-15")}>
+                  <ShortenedName name={child.name} className="font-mono" />
                   {/* The root is in its own breakdown so the entries sum to the
                       row's total. Label it, or it reads as a phantom duplicate
                       of the row above. */}
                   {child.is_root ? (
-                    <span className="ml-1.5 whitespace-nowrap text-muted-foreground/70">
+                    <span className="ml-1.5 shrink-0 whitespace-nowrap text-muted-foreground/70">
                       (this process)
                     </span>
                   ) : null}
@@ -602,7 +557,7 @@ function DesktopRow({
               <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums">
                 {formatBytes(child.rss_bytes)}
               </td>
-              <td className={STOP_COLUMN} />
+              <td />
             </tr>
           ))
         : null}
@@ -644,14 +599,10 @@ function MobileRow({
           )}
           <RowIcon kind={row.kind} />
           <div className="min-w-0">
-            {/* Truncate here (a phone genuinely cannot fit a long branch name),
-                but the tooltip keeps the full name reachable. */}
-            <SimpleTooltip content={row.name}>
-              <div className="flex min-w-0 items-center gap-1.5 truncate text-sm">
-                <span className="truncate">{row.name}</span>
-                {row.kind === "dux" ? <DuxBadge /> : null}
-              </div>
-            </SimpleTooltip>
+            <div className="flex min-w-0 items-center gap-1.5 text-sm">
+              <ShortenedName name={row.name} />
+              {row.kind === "dux" ? <DuxBadge /> : null}
+            </div>
             <div className="truncate text-xs text-muted-foreground tabular-nums">
               {cpu} · {mem} · {procs} procs
             </div>
@@ -680,13 +631,13 @@ function MobileRow({
               key={child.pid}
               className="flex items-center justify-between gap-2 text-xs text-muted-foreground"
             >
-              <span className="truncate font-mono">
-                {child.name}
+              <span className="flex min-w-0 items-baseline font-mono">
+                <ShortenedName name={child.name} />
                 {/* Same root marker as desktop: the breakdown includes the row's
                     own process so the numbers add up, and it must not read as a
                     phantom duplicate. */}
                 {child.is_root ? (
-                  <span className="ml-1.5 text-muted-foreground/70">
+                  <span className="ml-1.5 shrink-0 text-muted-foreground/70">
                     (this process)
                   </span>
                 ) : null}
@@ -739,46 +690,33 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
     if (done) closeStopAll()
   }
 
-  function handleOpenChange(next: boolean) {
-    if (!next) closeStopAll()
-  }
-
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Force stop everything?</DialogTitle>
-          <DialogDescription>
-            {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")} immediately, with no shutdown wait. `}
-            Agents detach and stay in Projects, reopenable; terminals are
-            destroyed and cannot be recovered.
-          </DialogDescription>
-        </DialogHeader>
-        {plan.left.length > 0 ? (
-          <p className="text-sm text-muted-foreground">{renderProse(leftRunningProse(plan.left))}</p>
-        ) : null}
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            autoFocus
-            onClick={closeStopAll}
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Force stop everything"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-            drivenHint={nothingToStop}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={open}
+      onClose={closeStopAll}
+      title="Force stop everything?"
+      description={
+        <>
+          {`This stops ${formatRegularCount(agents, "agent")} and ${formatRegularCount(terminals, "terminal")} immediately, with no shutdown wait. `}
+          Agents detach and stay in Projects, reopenable; terminals are
+          destroyed and cannot be recovered.
+        </>
+      }
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Force stop everything",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+        drivenHint: nothingToStop,
+      })}
+    >
+      {plan.left.length > 0 ? (
+        <p className="text-sm text-muted-foreground">{renderProse(leftRunningProse(plan.left))}</p>
+      ) : null}
+      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
+    </Modal>
   )
 }
-

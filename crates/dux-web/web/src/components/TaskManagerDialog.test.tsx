@@ -979,9 +979,10 @@ describe("TaskManagerDialog", () => {
 
     const stop = await screen.findByLabelText(/^Force stop/)
     const scroller = screen.getByTestId("task-manager-scroll")
-    expect(scroller.className).toContain("overflow-y-auto")
-    expect(scroller.className).toContain("[scrollbar-gutter:stable]")
-    expect(scroller.className).toMatch(/(^|\s)pr-\d/)
+    // On a computer; a phone's cover scrolls its whole body instead.
+    expect(scroller.className).toContain("md:overflow-y-auto")
+    expect(scroller.className).toContain("md:[scrollbar-gutter:stable]")
+    expect(scroller.className).toMatch(/(^|\s)md:pr-\d/)
 
     const header = screen.getByRole("columnheader", { name: "Memory" })
     const table = header.closest("table")
@@ -991,38 +992,83 @@ describe("TaskManagerDialog", () => {
   })
 })
 
-describe("TaskManagerDialog focus rings", () => {
-  // A browser check must Tab to a Force stop button and see its whole ring,
-  // the process table lining up where it did.
-  it("gives the table's horizontal scroller room on the right that it takes back outward", () => {
-    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+describe("TaskManagerDialog long names", () => {
+  const LONG = "feature/a-very-long-branch-name-that-no-row-has-room-for"
+
+  // jsdom lays nothing out, so the long name is the one that reports itself cut.
+  function cutTheLongName() {
+    const cut = (el: HTMLElement) => el.textContent === LONG
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return cut(this) ? 500 : 100
+    })
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(100)
+  }
+
+  afterEach(() => vi.restoreAllMocks())
+
+  it("shortens a name its row has no room for, and gives the whole of it on a tap or on focus", async () => {
+    cutTheLongName()
+    seed({
+      spine: { sessions: [session({ id: "s1", title: LONG }), session({ id: "s2", title: "short" })] },
+    } as Partial<DuxState>)
     render(<TaskManagerDialog />)
-    const scroller = screen.getByTestId("task-manager-scroll").firstElementChild!
-    expect(scroller.className).toContain("overflow-x-auto")
-    expect(scroller.className).toContain("pr-[3px]")
-    expect(scroller.className).toContain("-mr-[3px]")
+
+    const name = await screen.findByText(LONG)
+    expect(name.className).toContain("truncate")
+    // A tab stop only while it is cut, so a keyboard reaches the hint.
+    expect(name.getAttribute("tabindex")).toBe("0")
+    expect(screen.getByText("short").hasAttribute("tabindex")).toBe(false)
+    expect(screen.getAllByText(LONG)).toHaveLength(1)
+    fireEvent.click(name)
+    await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(2))
+  })
+
+  it("never scrolls the table sideways for a name", async () => {
+    seed({ spine: { sessions: [session({ id: "s1", title: LONG })] } } as Partial<DuxState>)
+    render(<TaskManagerDialog />)
+    const table = (await screen.findByText(LONG)).closest("table")!
+    for (let el: HTMLElement | null = table; el !== null; el = el.parentElement) {
+      expect(el.className).not.toContain("overflow-x-auto")
+    }
+    // The name's cell is the one that gives way.
+    expect(screen.getByText(LONG).closest("td")!.className).toContain("max-w-0")
   })
 })
 
-describe("TaskManagerDialog pinned stop column", () => {
-  // The fade on the column's leading edge is for a figure passing under it, so
-  // it is there only while the table is scrolled short of its trailing end.
-  it("fades its edge only while something scrolls under it", async () => {
-    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
+describe("TaskManagerDialog stop-all confirm", () => {
+  it("names the device that is driving, and offers no way past it", async () => {
+    seed({
+      stopAllOpen: true,
+      spine: { sessions: [session({ id: "s1" })] },
+    } as Partial<DuxState>)
     render(<TaskManagerDialog />)
-    await screen.findByLabelText(/^Force stop/)
-    const scroller = screen.getByTestId("task-manager-scroll").firstElementChild as HTMLElement
-    const size = (scrollWidth: number, scrollLeft: number) => {
-      Object.defineProperty(scroller, "clientWidth", { configurable: true, value: 400 })
-      Object.defineProperty(scroller, "scrollWidth", { configurable: true, value: scrollWidth })
-      scroller.scrollLeft = scrollLeft
-      fireEvent.scroll(scroller)
-    }
-    size(400, 0)
-    expect(scroller.hasAttribute("data-covered")).toBe(false)
-    size(600, 0)
-    expect(scroller.hasAttribute("data-covered")).toBe(true)
-    size(600, 200)
-    expect(scroller.hasAttribute("data-covered")).toBe(false)
+    stopAllRunning.mockResolvedValueOnce({
+      agents: ["s1"],
+      terminals: [],
+      blockers: [
+        {
+          surface: "terminal_ui",
+          device: null,
+          address: null,
+          verified: true,
+          driving: true,
+          target: { kind: "tab", id: "s1", agent: "s1" },
+          key: "k1",
+        },
+      ],
+    })
+    fireEvent.click(await screen.findByText("Force stop everything"))
+    await waitFor(() =>
+      expect(
+        (screen.getByText("Force stop everything").closest("button") as HTMLButtonElement).disabled,
+      ).toBe(true),
+    )
+    expect(screen.queryByText("Force stop everything anyway")).toBeNull()
+    fireEvent.click(screen.getByText("Force stop everything").closest("button")!.parentElement!)
+    expect(
+      await screen.findByText("The dux TUI is driving this right now. Take it over on this device first."),
+    ).toBeTruthy()
   })
 })

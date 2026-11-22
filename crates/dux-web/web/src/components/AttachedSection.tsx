@@ -1,8 +1,3 @@
-import type { ReactNode } from "react"
-
-import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
-import { guardedConfirmAction } from "@/components/guardedConfirmAction"
-import { Button } from "@/components/ui/button"
 import type { DrivenElsewhere } from "@/hooks/use-agent-active-elsewhere"
 import {
   type AttachedBlocker,
@@ -73,45 +68,4 @@ function drivenElsewhereProse(part: DrivenElsewhere): Prose {
       ? [", driven from another device"]
       : [", driven from ", chip(part.device)]),
   ]
-}
-
-/** `guardedConfirmAction` as a button, for a dialog not built with `Modal`.
- * A double click's second click never reaches the override that replaced the
- * button under it. */
-export function GuardedConfirmButton({
-  verb,
-  blockers,
-  pending,
-  onConfirm,
-  drivenHint,
-}: {
-  verb: string
-  blockers: readonly AttachedBlocker[] | null
-  pending: boolean
-  onConfirm: () => void
-  /** For a dialog that knows before sending what another device drives: why
-   * the button is disabled, or null while nothing is. */
-  drivenHint?: string | null
-}): ReactNode {
-  const action = guardedConfirmAction({ verb, blockers, pending, onConfirm, drivenHint })
-  const knownDriven = drivenHint !== undefined && drivenHint !== null
-  const button = (
-    <Button
-      variant="destructive"
-      disabled={pending || action.disabledReason !== null}
-      className={drivenHint === undefined ? undefined : "w-full"}
-      onClick={(event) => {
-        if (blockers !== null && event.detail > 1) return
-        onConfirm()
-      }}
-    >
-      {action.label}
-    </Button>
-  )
-  if (drivenHint === undefined) return button
-  return (
-    <ExplainedWhenDisabled disabled={knownDriven} hint={drivenHint} className="rounded-lg">
-      {button}
-    </ExplainedWhenDisabled>
-  )
 }
