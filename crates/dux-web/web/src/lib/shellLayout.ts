@@ -79,8 +79,6 @@ function storage(): Storage | null {
 let fallback: ShellLayout | null = null
 let memoryOnly = false
 
-const listeners = new Set<() => void>()
-
 /** The person's choice on this device; only a value this module wrote counts. */
 export function readLayoutChoice(): ShellLayout | null {
   if (memoryOnly) return fallback
@@ -93,6 +91,60 @@ export function readLayoutChoice(): ShellLayout | null {
     return fallback
   }
   return raw === "phone" || raw === "computer" ? raw : null
+}
+
+interface Answer {
+  layout: ShellLayout
+  choice: ShellLayout | null
+}
+
+function computeAnswer(): Answer {
+  const choice = readLayoutChoice()
+  const layout = resolveShellLayout({
+    width: window.innerWidth,
+    screenShortSide: screenShortSide(),
+    coarse: coarsePointer(),
+    choice,
+  })
+  return { layout, choice }
+}
+
+// While anything subscribes, one set of window listeners keeps `cached` up to
+// date and every read is answered from it; the soft keyboard fires `resize`
+// over and over, and dozens of components ask. With nobody subscribed there is
+// nothing to keep a cache fresh, so a read computes.
+const listeners = new Set<() => void>()
+let cached: Answer | null = null
+let detach: (() => void) | null = null
+
+function refresh(): void {
+  if (cached === null) return
+  const next = computeAnswer()
+  if (next.layout === cached.layout && next.choice === cached.choice) return
+  cached = next
+  for (const listener of [...listeners]) listener()
+}
+
+function attach(): () => void {
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === LAYOUT_CHOICE_KEY || event.key === null) refresh()
+  }
+  const mql =
+    typeof window.matchMedia === "function"
+      ? window.matchMedia(COARSE_POINTER_QUERY)
+      : null
+  window.addEventListener("resize", refresh)
+  window.addEventListener("storage", onStorage)
+  mql?.addEventListener("change", refresh)
+  return () => {
+    window.removeEventListener("resize", refresh)
+    window.removeEventListener("storage", onStorage)
+    mql?.removeEventListener("change", refresh)
+  }
+}
+
+function answer(): Answer {
+  return cached ?? computeAnswer()
 }
 
 /** Store the choice, or `null` to choose automatically again. */
@@ -108,43 +160,39 @@ export function setLayoutChoice(next: ShellLayout | null): void {
   } catch {
     memoryOnly = true
   } finally {
-    for (const listener of listeners) listener()
+    refresh()
   }
 }
 
 /** The layout this device shows right now. Outside a browser: the computer's. */
 export function currentShellLayout(): ShellLayout {
   if (typeof window === "undefined") return "computer"
-  return resolveShellLayout({
-    width: window.innerWidth,
-    screenShortSide: screenShortSide(),
-    coarse: coarsePointer(),
-    choice: readLayoutChoice(),
-  })
+  return answer().layout
+}
+
+/** The person's choice on this device as the layout last read it. */
+export function currentLayoutChoice(): ShellLayout | null {
+  if (typeof window === "undefined") return null
+  return answer().choice
 }
 
 /**
  * Subscribe to everything that can move the answer: the choice, the window's
  * size (rotation included), the primary pointer, and a choice another tab of
- * this browser stored. Returns the unsubscribe.
+ * this browser stored. The listener runs only when the layout or the choice
+ * changed. Returns the unsubscribe.
  */
 export function subscribeShellLayout(listener: () => void): () => void {
-  listeners.add(listener)
-  const onStorage = (event: StorageEvent) => {
-    if (event.key === LAYOUT_CHOICE_KEY || event.key === null) listener()
+  if (listeners.size === 0) {
+    cached = computeAnswer()
+    detach = attach()
   }
-  window.addEventListener("resize", listener)
-  window.addEventListener("storage", onStorage)
-  const mql =
-    typeof window.matchMedia === "function"
-      ? window.matchMedia(COARSE_POINTER_QUERY)
-      : null
-  mql?.addEventListener("change", listener)
+  listeners.add(listener)
   return () => {
-    listeners.delete(listener)
-    window.removeEventListener("resize", listener)
-    window.removeEventListener("storage", onStorage)
-    mql?.removeEventListener("change", listener)
+    if (!listeners.delete(listener) || listeners.size > 0) return
+    detach?.()
+    detach = null
+    cached = null
   }
 }
 

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   LAYOUT_CHOICE_KEY,
-  SHORT_SCREEN_MAX,
   currentShellLayout,
   installShellLayoutAttribute,
   readLayoutChoice,
@@ -38,21 +37,10 @@ describe("resolveShellLayout", () => {
     expect(resolveShellLayout({ ...device, choice: null })).toBe(expected)
   })
 
-  it("keeps a tablet on the computer layout while the keyboard is up", () => {
-    // The keyboard shrinks the viewport to about 400 px tall; the rule never
-    // reads the viewport's height, so only the screen's short side counts.
-    expect(resolveShellLayout({ ...TABLET_LANDSCAPE, choice: null })).toBe("computer")
-  })
-
   it("reads an unknown screen size as not short", () => {
     expect(
       resolveShellLayout({ width: 1024, screenShortSide: 0, coarse: true, choice: null }),
     ).toBe("computer")
-  })
-
-  it("puts the threshold between the largest phone and the smallest tablet", () => {
-    expect(SHORT_SCREEN_MAX).toBeGreaterThan(LANDSCAPE_IPHONE_MAX.screenShortSide)
-    expect(SHORT_SCREEN_MAX).toBeLessThan(SMALL_TABLET_LANDSCAPE.screenShortSide)
   })
 
   it.each([
@@ -132,29 +120,73 @@ describe("the device's layout choice", () => {
     }
   })
 
-  it("tells subscribers when the choice, the window or the pointer moves", () => {
+  it("tells subscribers when the choice, the window or the pointer moves the answer", () => {
     const media = stubCoarsePointer(false)
+    vi.stubGlobal("innerWidth", 851)
+    vi.stubGlobal("screen", { width: 851, height: 393 })
     const seen = vi.fn()
     const stop = subscribeShellLayout(seen)
     try {
       setLayoutChoice("phone")
+      setLayoutChoice(null)
+      vi.stubGlobal("innerWidth", 390)
+      window.dispatchEvent(new Event("resize"))
+      vi.stubGlobal("innerWidth", 851)
       window.dispatchEvent(new Event("resize"))
       media.set("(pointer: coarse)", true)
-      expect(seen).toHaveBeenCalledTimes(3)
+      expect(seen).toHaveBeenCalledTimes(5)
     } finally {
       stop()
       media.restore()
     }
-    setLayoutChoice(null)
-    expect(seen).toHaveBeenCalledTimes(3)
+    setLayoutChoice("phone")
+    expect(seen).toHaveBeenCalledTimes(5)
+  })
+
+  it("keeps a tablet on the computer layout while the keyboard takes the viewport's height", () => {
+    const media = stubCoarsePointer(true)
+    vi.stubGlobal("innerWidth", 1180)
+    vi.stubGlobal("innerHeight", 760)
+    vi.stubGlobal("screen", { width: 1180, height: 820 })
+    const seen = vi.fn()
+    const stop = subscribeShellLayout(seen)
+    try {
+      vi.stubGlobal("innerHeight", 400)
+      window.dispatchEvent(new Event("resize"))
+      expect(currentShellLayout()).toBe("computer")
+      expect(seen).not.toHaveBeenCalled()
+    } finally {
+      stop()
+      media.restore()
+    }
+  })
+
+  it("listens once and answers from memory however many subscribe", () => {
+    const media = stubCoarsePointer(false)
+    const addListener = vi.spyOn(window, "addEventListener")
+    const stops = Array.from({ length: 40 }, () => subscribeShellLayout(() => {}))
+    const getItem = vi.spyOn(Storage.prototype, "getItem")
+    try {
+      for (let i = 0; i < 40; i++) currentShellLayout()
+      window.dispatchEvent(new Event("resize"))
+      expect(addListener.mock.calls.filter(([type]) => type === "resize")).toHaveLength(1)
+      expect(getItem).toHaveBeenCalledTimes(1)
+    } finally {
+      for (const stop of stops) stop()
+      addListener.mockRestore()
+      getItem.mockRestore()
+      media.restore()
+    }
   })
 
   it("follows a choice another tab of this browser stored", () => {
     const seen = vi.fn()
     const stop = subscribeShellLayout(seen)
     try {
-      window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_CHOICE_KEY }))
+      localStorage.setItem(LAYOUT_CHOICE_KEY, "phone")
       window.dispatchEvent(new StorageEvent("storage", { key: "something-else" }))
+      expect(seen).not.toHaveBeenCalled()
+      window.dispatchEvent(new StorageEvent("storage", { key: LAYOUT_CHOICE_KEY }))
       expect(seen).toHaveBeenCalledTimes(1)
     } finally {
       stop()

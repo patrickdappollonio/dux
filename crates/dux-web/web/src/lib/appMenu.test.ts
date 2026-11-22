@@ -48,10 +48,15 @@ vi.mock("@/lib/configApi", () => ({
   configApi: { reload: () => reload(), recheckGithub: () => recheckGithub() },
 }))
 
-const setLayoutChoice = vi.fn()
+// A stand-in device whose automatic answer is the phone layout, so a choice
+// still in force reads as whatever was chosen.
+let storedChoice: unknown = null
+const setLayoutChoice = vi.fn((next: unknown) => {
+  storedChoice = next
+})
 vi.mock("@/lib/shellLayout", () => ({
   setLayoutChoice: (next: unknown) => setLayoutChoice(next),
-  currentShellLayout: () => "phone",
+  currentShellLayout: () => storedChoice ?? "phone",
 }))
 
 import {
@@ -451,7 +456,10 @@ describe("Sign out", () => {
 })
 
 describe("the layout entries", () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    storedChoice = null
+  })
 
   const layoutItems = (
     shown: "phone" | "computer",
@@ -495,7 +503,8 @@ describe("the layout entries", () => {
     expect(setLayoutChoice).toHaveBeenLastCalledWith(null)
   })
 
-  it("says which layout the automatic choice landed on", () => {
+  it("says which layout the automatic choice landed on, once it is no longer the chosen one", () => {
+    storedChoice = "computer"
     layoutItems("computer", "computer")[1].run()
     expect(notifyInfo).toHaveBeenCalledWith(
       "dux chooses the layout for this screen again, and it chose the phone layout.",
