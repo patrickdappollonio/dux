@@ -235,8 +235,9 @@ function ModalParts(
   // The body's scroll position, kept across a switch between card and cover.
   // The browser clamps it wherever the other presentation has less to scroll
   // (a tall cover often has nothing to), and the switch back would otherwise
-  // start at the top. The scroll events that clamping fires are not the
-  // person's, so the ones in the frames right after a switch are not kept.
+  // start at the top. The scroll events that clamping fires arrive frames
+  // later and are not the person's, so after a switch none is kept until the
+  // person next wheels, touches, presses or types.
   const keptScroll = useRef(0)
   const switching = useRef(false)
   const wasCover = useRef(cover)
@@ -246,8 +247,16 @@ function ModalParts(
     const onScroll = () => {
       if (!switching.current) keptScroll.current = scroller.scrollTop
     }
+    const onInput = () => {
+      switching.current = false
+    }
+    const inputs = ["wheel", "touchstart", "pointerdown", "keydown"] as const
     scroller.addEventListener("scroll", onScroll)
-    return () => scroller.removeEventListener("scroll", onScroll)
+    for (const type of inputs) window.addEventListener(type, onInput, true)
+    return () => {
+      scroller.removeEventListener("scroll", onScroll)
+      for (const type of inputs) window.removeEventListener(type, onInput, true)
+    }
   }, [open, cover])
   useLayoutEffect(() => {
     if (wasCover.current === cover) return
@@ -256,11 +265,6 @@ function ModalParts(
     if (scroller === null) return
     switching.current = true
     scroller.scrollTop = keptScroll.current
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        switching.current = false
-      }),
-    )
   }, [cover])
 
   // In a cover, a field that takes focus is brought into the part of the body
