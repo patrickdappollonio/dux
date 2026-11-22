@@ -385,27 +385,42 @@ describe("a picker's description", () => {
 })
 
 describe("a card that changes step", () => {
-  it("keeps the height it had", () => {
-    function Steps() {
-      const [step, setStep] = useState("long")
-      return (
-        <Modal kind="picker" open onClose={() => {}} title="Sample" historyEntry={false} step={step}>
-          <button type="button" onClick={() => setStep("short")}>
-            next
-          </button>
-        </Modal>
-      )
-    }
-    const height = vi
+  // A card's height is its step's own, unless a height is held on it.
+  const natural: Record<string, number> = { long: 600, short: 300 }
+  let height: ReturnType<typeof vi.spyOn> | null = null
+  beforeEach(() => {
+    height = vi
       .spyOn(HTMLElement.prototype, "offsetHeight", "get")
       .mockImplementation(function (this: HTMLElement) {
-        return this.dataset.slot === "dialog-content" ? 600 : 0
+        if (this.dataset.slot !== "dialog-content") return 0
+        const held = parseFloat(this.style.height)
+        if (held > 0) return held
+        return natural[this.querySelector<HTMLElement>("[data-step]")?.dataset.step ?? ""] ?? 0
       })
-    render(<Steps />)
+  })
+  afterEach(() => height?.mockRestore())
+
+  function Steps({ first }: { first: string }) {
+    const [step, setStep] = useState(first)
+    return (
+      <Modal kind="picker" open onClose={() => {}} title="Sample" historyEntry={false} step={step}>
+        <button type="button" data-step={step} onClick={() => setStep(step === "long" ? "short" : "long")}>
+          next
+        </button>
+      </Modal>
+    )
+  }
+
+  it.each([
+    ["long", "short", 600, 300],
+    ["short", "long", 300, 600],
+  ] as const)("keeps the %s step's height for the %s one until the window resizes", (first, _next, kept, after) => {
+    render(<Steps first={first} />)
     fireEvent.click(screen.getByText("next"))
     // Held exactly, so a taller step scrolls inside it rather than growing it.
-    expect(popup().style.height).toContain("600px")
-    height.mockRestore()
+    expect(popup().offsetHeight).toBe(kept)
+    at(COMPUTER - 100)
+    expect(popup().offsetHeight).toBe(after)
   })
 })
 

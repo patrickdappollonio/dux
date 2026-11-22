@@ -209,15 +209,19 @@ function ModalParts(
   useLayoutEffect(() => {
     const was = last.current
     last.current = { open, step }
-    if (!open) return
     const popup = header.current?.closest('[data-slot="dialog-content"]')
+    if (!open) {
+      if (popup instanceof HTMLElement) popup.style.height = ""
+      return
+    }
     const stepChanged = was !== null && was.open && was.step !== step
     // On open the popup places focus itself, unless a control inside already
     // took it; that case and a change of step are placed here.
     // A card keeps the height it had across a change of step, in both
     // directions, so the list or the button under the pointer does not jump; a
     // step with more to show scrolls inside it. The card's max-height still
-    // caps it to the window.
+    // caps it to the window, and a resize of the window lets go of the held
+    // height so the card is measured again for the step it shows.
     if (stepChanged && !cover && popup instanceof HTMLElement && shownHeight.current > 0) {
       popup.style.height = `${shownHeight.current}px`
     }
@@ -231,6 +235,17 @@ function ModalParts(
     if (cover) popup.style.height = ""
     shownHeight.current = cover ? 0 : popup.offsetHeight
   })
+  useEffect(() => {
+    if (!open || cover) return
+    const release = () => {
+      const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
+      if (!popup) return
+      popup.style.height = ""
+      shownHeight.current = popup.offsetHeight
+    }
+    window.addEventListener("resize", release)
+    return () => window.removeEventListener("resize", release)
+  }, [open, cover])
 
   // The body's scroll position, kept across a switch between card and cover.
   // The browser clamps it wherever the other presentation has less to scroll
