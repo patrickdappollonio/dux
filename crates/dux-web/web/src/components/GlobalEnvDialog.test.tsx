@@ -116,8 +116,8 @@ describe("GlobalEnvDialog", () => {
     fireEvent.change(text, { target: { value: "FOO=1\nBAR=2" } })
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     expect(await screen.findByText("Discard unsaved changes?")).toBeTruthy()
-    expect(screen.getByText(/Discarding them leaves/).textContent).toBe(
-      "The global environment has 1 unsaved change. Discarding them leaves the global environment as it was.",
+    expect(screen.getByText(/Discarding (it|them) leaves/).textContent).toBe(
+      "The global environment has 1 unsaved change. Discarding it leaves the global environment as it was.",
     )
     expect(store.closeGlobalEnv).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))

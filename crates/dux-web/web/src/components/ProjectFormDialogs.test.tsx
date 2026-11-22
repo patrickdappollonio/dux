@@ -143,21 +143,21 @@ describe.each([
     AgentEnvDialog,
     "KEY=VALUE",
     () => store.closeAgentEnv,
-    "The environment has 1 unsaved change. Discarding them leaves the environment of project acme as it was.",
+    "The environment has 1 unsaved change. Discarding it leaves the environment of project acme as it was.",
   ],
   [
     "the agent's startup command",
     AgentStartupCommandDialog,
     "npm run dev",
     () => store.closeAgentStartupCommand,
-    "The startup command has 1 unsaved change. Discarding them leaves the startup command of project acme as it was.",
+    "The startup command has 1 unsaved change. Discarding it leaves the startup command of project acme as it was.",
   ],
   [
     "the project settings",
     ProjectSettingsDialog,
     "npm run dev",
     () => store.closeProjectSettings,
-    "The project settings have 1 unsaved change. Discarding them leaves the settings of project acme as it was.",
+    "The project settings have 1 unsaved change. Discarding it leaves the settings of project acme as it was.",
   ],
 ])("closing %s", (_name, Dialog, placeholder, close, sentence) => {
   it("closes at once while nothing was changed", () => {
@@ -171,7 +171,7 @@ describe.each([
     const field = screen.getByPlaceholderText(placeholder) as HTMLTextAreaElement
     fireEvent.change(field, { target: { value: `${field.value}\nFOO=1` } })
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
-    const question = await screen.findByText(/Discarding them leaves/)
+    const question = await screen.findByText(/Discarding (it|them) leaves/)
     expect(question.textContent).toBe(sentence)
     // The project's name is the chip, not part of the words.
     expect(within(question).getByText("acme")).not.toBe(question)
