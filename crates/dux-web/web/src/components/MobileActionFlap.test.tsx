@@ -264,7 +264,10 @@ describe("the docked action flap", () => {
   it("paints over the chrome stack, so it can interrupt the band's hairline", () => {
     render(<MobileActionFlap target={target} subject={{ kind: "agent", session: session() }} band="strip" />)
     const box = screen.getByTestId("mobile-action-flap")
-    expect(box.className).toContain("-top-px")
+    // One pixel above the pane, on the band's hairline: the fold's clip box
+    // plus the flap's own offset inside it.
+    const clip = box.parentElement!
+    expect(parseFloat(clip.style.top) + parseFloat(box.style.top)).toBe(-1)
     expect(box.className).toContain("z-30")
   })
 

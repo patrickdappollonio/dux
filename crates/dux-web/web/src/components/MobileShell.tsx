@@ -12,7 +12,7 @@ import { AgentTabsStrip } from "@/components/AgentTabsStrip"
 import { DockStrip } from "@/components/DockStrip"
 import { FlatAgentList } from "@/components/FlatAgentList"
 import { CHIP_GLYPHS } from "@/components/headerChipGlyphs"
-import { MobileActionFlap } from "@/components/MobileActionFlap"
+import { FlapToggle, MobileActionFlap } from "@/components/MobileActionFlap"
 import { PhoneAgentStack } from "@/components/PhoneAgentStack"
 import { agentStackModel } from "@/components/agentStackModel"
 import { PrListMenuItems } from "@/components/PrListMenu"
@@ -188,6 +188,7 @@ function AgentlessTerminalScreen({
               {terminal ? terminalTitle(terminal, ownedTerminals) : "Terminal"}
             </span>
           </div>
+          <FlapToggle />
         </header>
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
@@ -341,12 +342,14 @@ interface TerminalHeaderProps {
   projectName: string | undefined
 }
 
-// The agent screen's header: Back, the identity, and the pull request.
+// The agent screen's header: Back, the identity, the pull request and the
+// flap's show/hide.
 //
-// It carries no actions, which is what buys the identity the whole remaining
-// width: the agent's name, assistant, branch and project are what tell you which
-// of half a dozen near-identical terminals you are looking at. The actions live
-// in the flap hanging off the band below.
+// It carries no actions, which is what buys the identity the remaining width:
+// the agent's name, assistant, branch and project are what tell you which of
+// half a dozen near-identical terminals you are looking at. The actions live in
+// the flap hanging off the band below; the show/hide is fixed-size, so the name
+// still ellipsizes before it gives way.
 //
 // The pull requests stay as the compact chip, the phone's whole PR surface: one
 // tap to the review, or with several to the list of them. It carries `#N`
@@ -372,6 +375,7 @@ function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProp
         />
       </div>
       {session.pr ? <HeaderPrChip session={session} /> : null}
+      <FlapToggle />
     </header>
   )
 }

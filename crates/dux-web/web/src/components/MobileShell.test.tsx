@@ -147,6 +147,7 @@ const { registerPaneInputGroup, resetPaneInputGroups } = await import(
 )
 const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 const { NewAgentPickerDialog } = await import("./NewAgentPickerDialog")
+const { setFlapHidden } = await import("@/lib/flapHidden")
 
 function makeState(overrides: Partial<DuxState> = {}): DuxState {
   return {
@@ -2068,5 +2069,120 @@ describe("MobileShell one part of an agent at a time", () => {
     render(<MobileShell />)
     expect(screen.getByTestId("mobile-action-flap")).toBeTruthy()
     expect(screen.queryByTestId("pane-part-switch")).toBeNull()
+  })
+})
+
+// ONE SHOW/HIDE FOR THE WHOLE FLAP. The flap hangs over the first lines of the
+// terminal, and the header beside the name is mostly empty, so the header
+// carries the one button that takes the flap off the terminal and brings it
+// back, remembered on this device for every pane.
+describe("MobileShell flap show/hide", () => {
+  afterEach(() => setFlapHidden(false))
+
+  function agentState(overrides: Record<string, unknown> = {}): DuxState {
+    return makeState({
+      spine: makeSessionSpine(1),
+      bootstrap: { title: "dux", dux_version: "v1", available_providers: ["claude"] },
+      selectedTarget: { kind: "agent", sessionId: "s1", tabId: "s1" },
+      selectedSessionId: "s1",
+      mobileScreen: "terminal",
+      changes: { sessionId: "s1", phase: "loaded", staged: [], unstaged: [] },
+      ...overrides,
+    } as unknown as Partial<DuxState>)
+  }
+
+  function terminalState(): DuxState {
+    return makeState({
+      spine: {
+        projects: [{ id: "p1", name: "Repo", path: "/tmp/p1", default_provider: "claude" }],
+        sessions: [],
+        terminals: [
+          {
+            id: "pt-1",
+            owner: { kind: "project", project_id: "p1" },
+            label: "Terminal 2",
+            has_output: true,
+            foreground_cmd: null,
+          },
+        ],
+        sidebar: { groups: [], agentless_start: null },
+      },
+      selectedTarget: {
+        kind: "terminal",
+        terminalId: "pt-1",
+        owner: { kind: "project", projectId: "p1" },
+      },
+      selectedSessionId: null,
+      mobileScreen: "terminal",
+    } as unknown as Partial<DuxState>)
+  }
+
+  const flap = () => screen.getByTestId("mobile-action-flap")
+
+  it("puts the button at the agent header's trailing end, at the touch floor", () => {
+    mockState = agentState()
+    render(<MobileShell />)
+    const header = screen.getByLabelText("Back").closest("header")!
+    const toggle = screen.getByRole("button", { name: "Hide actions" })
+    expect(header.lastElementChild?.contains(toggle)).toBe(true)
+    expect(toggle.getAttribute("aria-expanded")).toBe("true")
+    expect(toggle.className).toMatch(/(?:^|\s)size-10(?:\s|$)/)
+  })
+
+  it("hides the flap on a press and takes its controls out of reach, then brings it back", () => {
+    mockState = agentState()
+    render(<MobileShell />)
+    fireEvent.click(screen.getByRole("button", { name: "Hide actions" }))
+    expect(flap().hasAttribute("inert")).toBe(true)
+    expect(flap().getAttribute("aria-hidden")).toBe("true")
+    expect(screen.queryByRole("button", { name: "Theater mode" })).toBeNull()
+    const show = screen.getByRole("button", { name: "Show actions" })
+    expect(show.getAttribute("aria-expanded")).toBe("false")
+    fireEvent.click(show)
+    expect(flap().hasAttribute("inert")).toBe(false)
+    expect(screen.getByRole("button", { name: "Theater mode" })).toBeTruthy()
+  })
+
+  it("offers the same button on a terminal screen", () => {
+    mockState = terminalState()
+    render(<MobileShell />)
+    const header = screen.getByLabelText("Back").closest("header")!
+    const toggle = screen.getByRole("button", { name: "Hide actions" })
+    expect(header.lastElementChild?.contains(toggle)).toBe(true)
+    fireEvent.click(toggle)
+    expect(flap().hasAttribute("inert")).toBe(true)
+  })
+
+  it("remembers the choice across a remount, for every pane", () => {
+    mockState = agentState()
+    const view = render(<MobileShell />)
+    fireEvent.click(screen.getByRole("button", { name: "Hide actions" }))
+    view.unmount()
+    mockState = terminalState()
+    render(<MobileShell />)
+    expect(screen.getByRole("button", { name: "Show actions" })).toBeTruthy()
+    expect(flap().hasAttribute("inert")).toBe(true)
+  })
+
+  it("is gone in theater, and leaving theater with the flap hidden lands at once, with no flight", () => {
+    setFlapHidden(true)
+    mockState = agentState({ theater: true })
+    const view = render(<MobileShell />)
+    expect(screen.queryByRole("button", { name: "Show actions" })).toBeNull()
+    expect(screen.getByTestId("theater-pill")).toBeTruthy()
+    mockState = agentState({ theater: false })
+    view.rerender(<MobileShell />)
+    // No dock to fly home to, so the pill does not linger for a return flight.
+    expect(screen.queryByTestId("theater-pill")).toBeNull()
+    expect(flap().hasAttribute("inert")).toBe(true)
+  })
+
+  it("leaves a hidden flap hidden under a full-pane cover, with the way back in the header", () => {
+    setFlapHidden(true)
+    registerPaneCover("s1", "box")
+    mockState = agentState({ theater: true })
+    render(<MobileShell />)
+    expect(flap().hasAttribute("inert")).toBe(true)
+    expect(screen.getByRole("button", { name: "Show actions" })).toBeTruthy()
   })
 })

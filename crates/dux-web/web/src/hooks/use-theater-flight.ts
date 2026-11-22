@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { useFlapHidden } from "@/hooks/use-flap-hidden"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { useDux } from "@/lib/store"
 import { theaterTransitionMs, topChromeHidden } from "@/lib/theater"
@@ -28,11 +29,15 @@ import {
  * an instant swap: there is nothing to fly, because the pill the cluster would travel as is
  * withheld under such a cover, and half a flight with neither end painted is worse than the
  * flap simply being there.
+ *
+ * A flap the user folded away is not a dock either: there is nothing on screen to fly from
+ * or land on, so the mode swaps exactly as it does for a page that opens in theater.
  */
 export function useTheaterFlight(coverOwnsPane: boolean): FlightPhase {
   const { theater } = useDux()
   const hidden = topChromeHidden({ theater, coverOwnsPane })
   const reducedMotion = usePrefersReducedMotion()
+  const flapFolded = useFlapHidden()
   const chromeMs = React.useRef(theaterTransitionMs(reducedMotion))
   React.useEffect(() => {
     chromeMs.current = theaterTransitionMs(reducedMotion)
@@ -51,11 +56,11 @@ export function useTheaterFlight(coverOwnsPane: boolean): FlightPhase {
     }
     // The mode moving is the user's gesture and flies; the chrome moving while
     // the mode stands still is the cover, and that one swaps.
-    const ms = wasTheater.current === theater ? 0 : chromeMs.current
+    const ms = wasTheater.current === theater || flapFolded ? 0 : chromeMs.current
     wasTheater.current = theater
     wasHidden.current = hidden
     setPhase((live) => flightForModeFrom(live, hidden, ms))
-  }, [theater, hidden])
+  }, [theater, hidden, flapFolded])
 
   React.useEffect(() => {
     const hold = flightHoldMs(phase, chromeMs.current)

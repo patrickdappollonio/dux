@@ -1,11 +1,22 @@
 import type * as React from "react"
 import { useLayoutEffect, useRef, useState } from "react"
+import { PanelTopClose, PanelTopOpen } from "lucide-react"
 
 import { PaneActionCluster } from "@/components/PaneActionCluster"
 import { PaneMenu, type PaneMenuSubject } from "@/components/PaneMenu"
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { Button } from "@/components/ui/button"
+import { useFlapHidden } from "@/hooks/use-flap-hidden"
+import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
-import { buildFlapShape } from "@/lib/flapShape"
-import { FLAP_FILL_VAR, registerFlapElement } from "@/lib/theaterFlight"
+import { setFlapHidden } from "@/lib/flapHidden"
+import { buildFlapShape, FLAP_BLEED } from "@/lib/flapShape"
+import {
+  FLAP_FILL_VAR,
+  FLIGHT_ATTACH_MS,
+  FLIGHT_EASE,
+  registerFlapElement,
+} from "@/lib/theaterFlight"
 import type { SelectedTarget } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
@@ -49,94 +60,156 @@ export function MobileActionFlap({
   const ref = useRef<HTMLDivElement | null>(null)
   const theaterRef = useRef<HTMLButtonElement | null>(null)
   const shape = useFlapShape(ref)
+  // Folded away by the header's show/hide button: still mounted, so showing it
+  // again can slide it back down out of the band.
+  const folded = useFlapHidden()
+  const reducedMotion = usePrefersReducedMotion()
   // The way back into focus after the pill's own theater button was pressed:
   // that press destroyed the pill, and this is the control that replaced it.
   // Only once the flap is really on screen; focus on an invisible control is a
   // keyboard pointed at nothing.
-  useTheaterToggleFocusWhen(theaterRef, !hidden)
+  useTheaterToggleFocusWhen(theaterRef, !hidden && !folded)
   // Published so the flight can measure the dock. What travels is one
   // measurement, never control over what the flap does.
   useLayoutEffect(() => registerFlapElement(ref.current), [])
 
   return (
+    // The fold's clip: it starts at the top of the SVG's bleed into the band,
+    // so a flap sliding up retracts INTO the band rather than painting over the
+    // header. It passes every press through to the terminal beneath.
     <div
-      ref={ref}
-      data-testid="mobile-action-flap"
-      // `-top-px` is the one pixel that makes it a flap rather than a box: the
-      // body starts ON the band's bottom hairline, so the fill covers that line
-      // for the flap's own width and the two are visibly one shape.
-      //
-      // Top right, over the few cells where xterm paints its own scrollbar,
-      // which is the accepted cost of chrome painted over the terminal.
-      //
-      // `z-30` clears the chrome stack's `z-10` and the pane's full-pane covers
-      // at `z-20`: the flap paints over the band's border to interrupt it, and
-      // it is the only surface carrying these controls while a cover owns the
-      // terminal. Same level as the floating pill it becomes, which is never
-      // painted at the same time.
-      className={cn(
-        "absolute -top-px right-3 z-30 flex items-center gap-0.5 p-[5px]",
-        // No drop shadow, deliberately: on the near-black terminal a big soft
-        // shadow quantizes into one-step bands whose contours read as a squared
-        // ghost box around the flap. The hairline outline is its whole edge
-        // treatment.
-      )}
-      // Hidden by its own opacity rather than `visibility`: visibility is
-      // inherited, and the cluster's buttons transition `all`, so each of them
-      // eased an inherited `hidden` in and stayed painted for a whole button
-      // transition beside the pill already flying away. `inert` is what
-      // `visibility` also did: no press, no focus, nothing announced.
-      inert={hidden}
-      // PUBLISHED, not merely used: the detach and the arrival snap paint the
-      // travelling capsule in this colour, and they read it back off this
-      // element rather than assuming the strip's tone (see `peekFlapFill`).
-      style={
-        {
-          [FLAP_FILL_VAR]:
-            band === "strip" ? "var(--dux-flap-bg)" : "var(--background)",
-          ...(hidden ? { opacity: 0 } : null),
-        } as React.CSSProperties
-      }
+      className="pointer-events-none absolute inset-x-0 bottom-0 overflow-hidden"
+      style={{ top: -(1 + FLAP_BLEED) }}
     >
-      {shape ? (
-        <svg
-          aria-hidden
-          className="pointer-events-none absolute -z-10"
-          width={shape.width}
-          height={shape.height}
-          viewBox={shape.viewBox}
-          style={{ left: shape.left, top: shape.top }}
-        >
-          <path d={shape.fill} fill={`var(${FLAP_FILL_VAR})`} />
-          <path
-            d={shape.stroke}
-            fill="none"
-            stroke="var(--border)"
-            strokeWidth={1}
-          />
-        </svg>
-      ) : null}
-
-      <PaneActionCluster
-        target={target}
-        sessionId={subject.kind === "agent" ? subject.session.id : undefined}
-        theaterRef={theaterRef}
-        // The one pane menu, which the floating pill opens too: the cluster
-        // flies across the screen as one object, so its `⋯` cannot mean
-        // something else once it lands.
-        ellipsis={
-          <PaneMenu
-            subject={subject}
-            pane={target}
-            side="bottom"
-            // A phone pane screen's header is Back and identity only, and the
-            // cog stayed behind on the hub, so the drill is the way to the
-            // app's own actions from here.
-            settingsDrill
-          />
+      <div
+        ref={ref}
+        id={FLAP_ID}
+        data-testid="mobile-action-flap"
+        // One pixel above the pane (the clip's top plus the bleed) is the one
+        // pixel that makes it a flap rather than a box: the body starts ON the
+        // band's bottom hairline, so the fill covers that line for the flap's own
+        // width and the two are visibly one shape.
+        //
+        // Top right, over the few cells where xterm paints its own scrollbar,
+        // which is the accepted cost of chrome painted over the terminal.
+        //
+        // `z-30` clears the chrome stack's `z-10` and the pane's full-pane covers
+        // at `z-20`: the flap paints over the band's border to interrupt it, and
+        // it is the only surface carrying these controls while a cover owns the
+        // terminal. Same level as the floating pill it becomes, which is never
+        // painted at the same time.
+        className={cn(
+          "pointer-events-auto absolute right-3 z-30 flex items-center gap-0.5 p-[5px]",
+          // No drop shadow, deliberately: on the near-black terminal a big soft
+          // shadow quantizes into one-step bands whose contours read as a squared
+          // ghost box around the flap. The hairline outline is its whole edge
+          // treatment.
+        )}
+        // Hidden by its own opacity rather than `visibility`: visibility is
+        // inherited, and the cluster's buttons transition `all`, so each of them
+        // eased an inherited `hidden` in and stayed painted for a whole button
+        // transition beside the pill already flying away. `inert` is what
+        // `visibility` also did: no press, no focus, nothing announced.
+        inert={hidden || folded}
+        // Folded, it is out of the accessibility tree as well as out of reach.
+        aria-hidden={folded || undefined}
+        // PUBLISHED, not merely used: the detach and the arrival snap paint the
+        // travelling capsule in this colour, and they read it back off this
+        // element rather than assuming the strip's tone (see `peekFlapFill`).
+        style={
+          {
+            [FLAP_FILL_VAR]:
+              band === "strip" ? "var(--dux-flap-bg)" : "var(--background)",
+            top: FLAP_BLEED,
+            // Folded: lifted by its own height and the band rows above it, which
+            // puts the whole silhouette, bleed included, above the clip.
+            transform: folded
+              ? `translateY(calc(-100% - ${FLAP_BLEED + 2}px))`
+              : undefined,
+            transition: reducedMotion
+              ? undefined
+              : `transform ${FLIGHT_ATTACH_MS}ms ${FLIGHT_EASE}`,
+            ...(hidden ? { opacity: 0 } : null),
+          } as React.CSSProperties
         }
-      />
+      >
+        {shape ? (
+          <svg
+            aria-hidden
+            className="pointer-events-none absolute -z-10"
+            width={shape.width}
+            height={shape.height}
+            viewBox={shape.viewBox}
+            style={{ left: shape.left, top: shape.top }}
+          >
+            <path d={shape.fill} fill={`var(${FLAP_FILL_VAR})`} />
+            <path
+              d={shape.stroke}
+              fill="none"
+              stroke="var(--border)"
+              strokeWidth={1}
+            />
+          </svg>
+        ) : null}
+
+        <PaneActionCluster
+          target={target}
+          sessionId={subject.kind === "agent" ? subject.session.id : undefined}
+          theaterRef={theaterRef}
+          // The one pane menu, which the floating pill opens too: the cluster
+          // flies across the screen as one object, so its `⋯` cannot mean
+          // something else once it lands.
+          ellipsis={
+            <PaneMenu
+              subject={subject}
+              pane={target}
+              side="bottom"
+              // A phone pane screen's header is Back and identity only, and the
+              // cog stayed behind on the hub, so the drill is the way to the
+              // app's own actions from here.
+              settingsDrill
+            />
+          }
+        />
+      </div>
     </div>
+  )
+}
+
+/// The flap's element id, for the header button's `aria-controls`. A phone
+/// shows one pane screen, so one flap, at a time.
+const FLAP_ID = "phone-action-flap"
+
+/**
+ * The phone header's one show/hide for the whole flap: the flap covers the
+ * terminal's first lines, and this takes it off them and brings it back,
+ * remembered on this device for every pane.
+ *
+ * Ghost like Back beside it: it changes what the header's own chrome shows
+ * rather than acting on the session, so it stays quieter than the cluster.
+ */
+export function FlapToggle() {
+  const folded = useFlapHidden()
+  const ref = useRef<HTMLButtonElement | null>(null)
+  // Leaving theater from the pill destroys the control that was pressed; with
+  // the flap folded its theater button is out of reach, so this takes focus.
+  useTheaterToggleFocusWhen(ref, folded)
+  const label = folded ? "Show actions" : "Hide actions"
+  return (
+    <SimpleTooltip content={label} side="bottom">
+      <Button
+        ref={ref}
+        variant="ghost"
+        size="icon"
+        className="size-10 shrink-0"
+        aria-label={label}
+        aria-expanded={!folded}
+        aria-controls={FLAP_ID}
+        onClick={() => setFlapHidden(!folded)}
+      >
+        {folded ? <PanelTopOpen /> : <PanelTopClose />}
+      </Button>
+    </SimpleTooltip>
   )
 }
 
