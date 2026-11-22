@@ -94,7 +94,6 @@ const ALLOWED: Record<string, string> = {
   "components/ConfigEditorDialog.tsx": NOT_MOVED,
   "components/FormDialogContent.tsx":
     "The shell the forms not yet moved share; it goes with the last of them.",
-  "components/StandaloneAgentDialog.tsx": NOT_MOVED,
   "components/AddProjectDialog.tsx": NOT_MOVED,
   "components/MoveEntryDialog.tsx": NOT_MOVED,
   "components/WorktreesDialog.tsx": NOT_MOVED,

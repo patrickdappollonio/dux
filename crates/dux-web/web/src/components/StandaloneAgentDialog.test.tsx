@@ -188,10 +188,27 @@ describe("StandaloneAgentDialog project shortcuts", () => {
   it("keeps the footer outside the part that scrolls", () => {
     seed(SHORTCUTS)
     render(<StandaloneAgentDialog />)
-    const body = document.querySelector("[data-standalone-picker-body]")!
+    const body = document.querySelector('[data-slot="modal-body"]')!
     expect(body.className).toContain("overflow-y-auto")
     expect(body.contains(createButton())).toBe(false)
     expect(body.contains(shortcutRows()[0])).toBe(true)
+  })
+
+  // The phone report this pins: Cancel and Create agent stacked as two
+  // full-width rows, taking as much of the screen as the folder list.
+  it("covers a phone's screen with Cancel and Create agent on one row", () => {
+    vi.stubGlobal("innerWidth", 390)
+    try {
+      seed(SHORTCUTS)
+      render(<StandaloneAgentDialog />)
+      const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+      expect(popup.dataset.presentation).toBe("cover")
+      const row = createButton().closest(".grid-cols-2")!
+      expect(row.contains(screen.getByRole("button", { name: "Cancel" }))).toBe(true)
+      expect(row.querySelector(".col-span-2")).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it("does not let a greyed-out row be picked", () => {
