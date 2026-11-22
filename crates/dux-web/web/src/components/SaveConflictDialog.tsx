@@ -47,7 +47,7 @@ export function SaveConflictDialog({
 
   // Both offers would start a second operation on the file, so they wait.
   const busyReason = busy
-    ? "Another save or reload of this file is still running. Wait for it to finish."
+    ? "Another action on this file is still running. Wait for it to finish."
     : null
   return (
     <Modal

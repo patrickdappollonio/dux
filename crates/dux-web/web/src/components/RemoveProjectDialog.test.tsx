@@ -64,10 +64,13 @@ afterEach(() => {
 })
 
 describe("RemoveProjectDialog", () => {
-  // A ghost project has no record of its own: its agents are what the dialog
-  // is for, so they keep it open.
-  it("stays open for a ghost project that still has agents", () => {
-    seed([ghostAgent], [])
+  // A ghost project has no record of its own: its sidebar group or its agents
+  // are what the dialog is for, so either keeps it open.
+  it.each([
+    ["agents", [ghostAgent], []],
+    ["a sidebar group", [], [{ project_id: "ghost", name: "ghost-1a2b" }]],
+  ])("stays open for a ghost project that still has %s", (_, sessions, groups) => {
+    seed(sessions, groups)
     render(<RemoveProjectDialog />)
     expect(screen.getByText("Remove project?")).toBeTruthy()
     expect(closeRemoveProject).not.toHaveBeenCalled()
