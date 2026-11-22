@@ -1,15 +1,7 @@
 import { useId, useState } from "react"
-import { Loader2 } from "lucide-react"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal } from "@/components/modal"
 import { Textarea } from "@/components/ui/textarea"
 import {
   agentChangeBlockReason,
@@ -71,53 +63,39 @@ export function CommitDialog() {
     }
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) closeCommit()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>Commit changes</DialogTitle>
-        </DialogHeader>
-        <Textarea
-          placeholder="Commit message…"
-          value={commitDraft}
-          onChange={(e) => setCommitDraft(e.target.value)}
-          className="min-h-24 resize-none"
-          readOnly={blocked}
-          aria-describedby={blocked ? reasonId : undefined}
-          autoFocus
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault()
-              handleCommit()
-            }
-          }}
-        />
-        {blocked ? (
-          <p id={reasonId} className="text-sm text-muted-foreground">
-            {reason}
-          </p>
-        ) : null}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => closeCommit()}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleCommit}
-            disabled={committing || !commitDraft.trim() || blocked}
-            aria-busy={committing}
-            aria-describedby={blocked ? reasonId : undefined}
-          >
-            {committing ? (
-              <Loader2 className="motion-safe:animate-spin" />
-            ) : null}
-            Commit
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="form"
+      open={isOpen}
+      onClose={() => closeCommit()}
+      title="Commit changes"
+      submit={{
+        label: "Commit",
+        tone: "primary",
+        onSelect: () => void handleCommit(),
+        busy: committing,
+        disabledReason: reason ?? (commitDraft.trim() ? null : "Write a commit message first."),
+      }}
+    >
+      <Textarea
+        placeholder="Commit message…"
+        value={commitDraft}
+        onChange={(e) => setCommitDraft(e.target.value)}
+        className="min-h-24 resize-none"
+        readOnly={blocked}
+        aria-describedby={blocked ? reasonId : undefined}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault()
+            void handleCommit()
+          }
+        }}
+      />
+      {blocked ? (
+        <p id={reasonId} className="text-sm text-muted-foreground">
+          {reason}
+        </p>
+      ) : null}
+    </Modal>
   )
 }

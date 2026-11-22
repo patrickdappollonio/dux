@@ -1,15 +1,6 @@
 import { useState } from "react"
-import { Loader2 } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
@@ -27,42 +18,35 @@ interface NewEntryDialogProps {
 }
 
 // The one New File and New Folder dialog, driven by `target`, whose `kind`
-// switches the title and placeholder. The body is mounted only while `target` is
-// non-null, so its local `name` state resets on every open.
+// switches the title and placeholder. Its body is keyed by the open, so its
+// local `name` state resets on every one.
 export function NewEntryDialog({
   target,
   onClose,
   onSubmit,
 }: NewEntryDialogProps) {
-  return (
-    <Dialog
-      open={target !== null}
-      onOpenChange={(open) => {
-        if (!open) onClose()
-      }}
-    >
-      <DialogContent showCloseButton={false} className="sm:max-w-md">
-        {target && (
-          <NewEntryDialogBody
-            target={target}
-            onClose={onClose}
-            onSubmit={onSubmit}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
-  )
+  const life = useModalLifetime(target !== null)
+  return life.mounted ? (
+    <NewEntryDialogBody
+      key={life.epoch}
+      target={target}
+      onClose={onClose}
+      onClosed={life.onClosed}
+      onSubmit={onSubmit}
+    />
+  ) : null
 }
 
 function NewEntryDialogBody({
   target,
   onClose,
+  onClosed,
   onSubmit,
-}: {
-  target: NewEntryTarget
-  onClose: () => void
-  onSubmit: (name: string) => Promise<void>
-}) {
+}: NewEntryDialogProps & { onClosed: () => void }) {
+  // Where this open creates; the last one is kept while the close animates.
+  const [last, setLast] = useState(target)
+  if (target !== null && target !== last) setLast(target)
+  const place = target ?? last ?? { kind: "file" as const, dir: "" }
   const [name, setName] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -75,22 +59,33 @@ function NewEntryDialogBody({
     onSubmit(name.trim()).finally(() => setSubmitting(false))
   }
 
-  const dirLabel = target.dir === "" ? "/" : target.dir
-  const title = target.kind === "file" ? "New file" : "New folder"
+  const dirLabel = place.dir === "" ? "/" : place.dir
 
   return (
-    <>
-      <DialogHeader>
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>
+    <Modal
+      kind="form"
+      open={target !== null}
+      onClose={() => onClose()}
+      onClosed={onClosed}
+      size="md"
+      title={place.kind === "file" ? "New file" : "New folder"}
+      description={
+        <>
           in <InlineCode>{dirLabel}</InlineCode>
-        </DialogDescription>
-      </DialogHeader>
+        </>
+      }
+      submit={{
+        label: "Create",
+        tone: "primary",
+        onSelect: submit,
+        busy: submitting,
+        disabledReason: validation.ok ? null : validation.error,
+      }}
+    >
       <Input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder={target.kind === "file" ? "example.ts" : "components"}
-        autoFocus
+        placeholder={place.kind === "file" ? "example.ts" : "components"}
         aria-invalid={name.length > 0 && !validation.ok}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
@@ -102,15 +97,6 @@ function NewEntryDialogBody({
       {name.length > 0 && !validation.ok && (
         <p className="text-sm text-destructive">{validation.error}</p>
       )}
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button disabled={!canSubmit} aria-busy={submitting} onClick={submit}>
-          {submitting ? <Loader2 className="motion-safe:animate-spin" /> : null}
-          Create
-        </Button>
-      </DialogFooter>
-    </>
+    </Modal>
   )
 }
