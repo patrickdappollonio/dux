@@ -189,6 +189,13 @@ describe("nextExpandedExplorerPx", () => {
 })
 
 describe("explorerExpandTarget", () => {
+  it("in the phone layout on a wide screen, opens no wider than the remembered width", () => {
+    // 70% of a sideways phone is about 600px, and of a computer shown the
+    // phone layout about 1000px.
+    expect(explorerExpandTarget(341, true, 851)).toBe("341px")
+    expect(explorerExpandTarget(null, true, 1440)).toBe(`${EXPLORER_DEFAULT_SIZE_PX}px`)
+  })
+
   it("reopens at the remembered pixel width", () => {
     expect(explorerExpandTarget(341)).toBe("341px")
   })
@@ -201,10 +208,10 @@ describe("explorerExpandTarget", () => {
     // A fixed 280px on a 390px viewport leaves the content pane 110px, and
     // the reason the width is in pixels (two shells, one tree) does not apply
     // to a viewport with no room for either.
-    expect(explorerExpandTarget(341, true)).toBe(
+    expect(explorerExpandTarget(341, true, 390)).toBe(
       `${100 - EDITOR_CONTENT_MIN_SIZE}%`,
     )
-    expect(explorerExpandTarget(null, true)).toBe(
+    expect(explorerExpandTarget(null, true, 390)).toBe(
       `${100 - EDITOR_CONTENT_MIN_SIZE}%`,
     )
   })

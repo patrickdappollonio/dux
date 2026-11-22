@@ -671,8 +671,9 @@ describe("Toaster placement", () => {
       bottom: "calc(env(safe-area-inset-bottom) + 2.5rem)",
     })
     expect(placement.swipeDirections).toBe(TOAST_SWIPE_DIRECTIONS)
-    // Nothing is said about sonner's own sub-600px variables from this shell.
-    expect(placement.mobileOffset).toBeUndefined()
+    // The same inset below sonner's own 600px query, which a phone in the
+    // computer layout reaches.
+    expect(placement.mobileOffset).toEqual(placement.offset)
   })
 
   it("anchors the phone at the top, where the typing surfaces are not", () => {

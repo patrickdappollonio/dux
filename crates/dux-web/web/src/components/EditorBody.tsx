@@ -547,15 +547,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   const lastExpandedExplorerPxRef = useRef<number | null>(
     storedExplorer?.px ?? null,
   )
+  // The panel group's box, measured when the explorer opens.
+  const bodyRef = useRef<HTMLDivElement | null>(null)
   function toggleExplorer(): void {
     const panel = explorerPanelRef.current
     if (!panel) return
     if (panel.isCollapsed()) {
-      // On a phone the expand target ignores the remembered pixel width and
+      // In the phone layout a group too narrow for the remembered pixel width
       // opens to the widest width the content pane's minimum permits, as a
       // percentage. See explorerExpandTarget.
       panel.resize(
-        explorerExpandTarget(lastExpandedExplorerPxRef.current, isMobile),
+        explorerExpandTarget(
+          lastExpandedExplorerPxRef.current,
+          isMobile,
+          bodyRef.current?.clientWidth ?? 0,
+        ),
       )
     } else {
       panel.collapse()
@@ -2055,7 +2061,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       {/* Body: worktree file tree (left, a collapsible resizable panel) +
           Monaco editor/diff (right). The outer div mirrors DesktopShell's
           panel-group mount (min-h-0 flex-1 wrapper, size-full group). */}
-      <div className="min-h-0 flex-1">
+      <div ref={bodyRef} className="min-h-0 flex-1">
         <ResizablePanelGroup
           orientation="horizontal"
           id={EDITOR_LAYOUT_ID}

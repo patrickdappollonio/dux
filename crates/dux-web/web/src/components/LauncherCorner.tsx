@@ -69,7 +69,7 @@ export function LauncherCorner({ className }: { className?: string }) {
             </Button>
           }
         />
-        <DropdownMenuContent side="top" align="end" className="md:w-[23rem]">
+        <DropdownMenuContent side="top" align="end" className="md:w-[min(23rem,calc(100vw-2rem))]">
           {menu.map((group, index) => (
             <Fragment key={group.id}>
               {index > 0 ? <DropdownMenuSeparator /> : null}

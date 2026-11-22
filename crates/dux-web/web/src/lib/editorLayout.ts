@@ -131,14 +131,19 @@ export function nextExpandedExplorerPx(
 // as a string with its unit. Not `panel.expand()`, which falls back to minSize
 // when no in-memory expand size exists, opening the explorer at its minimum.
 //
-// On a phone the remembered width is ignored and the target stays a percentage,
-// because a fixed 280px leaves too little content pane on a narrow viewport. It
-// is 100% minus the content pane's minimum, the widest the group's constraints
-// permit.
+// In the phone layout a group of `groupPx` too narrow for the remembered width
+// beside the content pane's minimum (a fixed 280px leaves a 390px phone 110px)
+// opens the explorer as a percentage instead: 100% minus the content pane's
+// minimum, the widest the group's constraints permit. Where the remembered
+// width does fit (a phone held sideways, a computer showing the phone layout)
+// it is used, so the explorer is never wider than it is on the computer.
 export function explorerExpandTarget(
   lastExpandedPx: number | null,
   mobile = false,
+  groupPx = 0,
 ): string {
-  if (mobile) return `${100 - EDITOR_CONTENT_MIN_SIZE}%`
-  return `${lastExpandedPx ?? EXPLORER_DEFAULT_SIZE_PX}px`
+  const px = lastExpandedPx ?? EXPLORER_DEFAULT_SIZE_PX
+  const widest = (groupPx * (100 - EDITOR_CONTENT_MIN_SIZE)) / 100
+  if (mobile && px > widest) return `${100 - EDITOR_CONTENT_MIN_SIZE}%`
+  return `${px}px`
 }

@@ -25,10 +25,11 @@ export const TOAST_SWIPE_DIRECTIONS_TOP: ToasterProps["swipeDirections"] = [
 
 /// Where the toasts sit, per shell: the phone anchors at the TOP always, because
 /// the bottom of a pane screen is its typing surface, and the computer keeps the
-/// bottom. Both offsets carry the same expression, because sonner switches to its
-/// mobile variables at its own 600px query rather than the app's 768px breakpoint,
-/// and the safe-area inset is added here, since the toaster is fixed and sits
-/// outside the mobile root that pads for the notch.
+/// bottom. Both offsets carry the same expression on either shell, because sonner
+/// switches to its mobile variables at its own 600px query, which says nothing
+/// about the shell (a phone can be shown the computer layout), and the safe-area
+/// inset is added here, since the toaster is fixed and sits outside the shell
+/// that pads for the notch.
 const TOP_INSET = "calc(env(safe-area-inset-top) + 1rem)"
 const BOTTOM_INSET = "calc(env(safe-area-inset-bottom) + 2.5rem)"
 
@@ -46,11 +47,10 @@ export function toastPlacement(isMobile: boolean): {
       swipeDirections: TOAST_SWIPE_DIRECTIONS_TOP,
     }
   }
-  // No `mobileOffset` on this branch: sonner's mobile variables are unreachable
-  // from a viewport wide enough to be on this shell.
   return {
     position: "bottom-center",
     offset: { bottom: BOTTOM_INSET },
+    mobileOffset: { bottom: BOTTOM_INSET },
     swipeDirections: TOAST_SWIPE_DIRECTIONS,
   }
 }

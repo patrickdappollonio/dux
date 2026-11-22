@@ -577,7 +577,7 @@ export function AppSidebar() {
       ref={attachPanel}
       collapsible="icon"
       floatOpen={floatOpen}
-      className="group-data-[side=left]:border-r-0"
+      className="pb-[env(safe-area-inset-bottom)] group-data-[side=left]:border-r-0"
     >
       <SidebarHeader>
         <SidebarMenu>

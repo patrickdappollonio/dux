@@ -194,7 +194,8 @@ export function DesktopShell() {
       // The side safe-area insets, as the phone shell has them: a phone held
       // sideways in this layout has its notch or camera cutout at one side,
       // and the header's Settings button sat under it. The sidebar's fixed
-      // container starts after the left inset for the same reason.
+      // container starts after the left inset for the same reason, and it and
+      // the page below keep clear of the bottom inset (the home indicator).
       style={
         {
           "--sidebar-width": sidebarWidth,
@@ -211,7 +212,10 @@ export function DesktopShell() {
           the chrome collapse (see `useTheaterGesture`), so the whole change
           costs one refit at the geometry it settles on. */}
       {theater ? null : <AppSidebar />}
-      <SidebarInset className={`flex ${SHELL_HEIGHT_CLASS} min-h-0 flex-col overflow-hidden`}>
+      <SidebarInset
+        className={`flex ${SHELL_HEIGHT_CLASS} min-h-0 flex-col overflow-hidden`}
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
         {/* Theater takes this stack and the band-plus-strip inside TerminalArea
             on the same flag, so the gesture above pays for one refit between
             them. The hidden Changes pane's reopen control lives in this header
