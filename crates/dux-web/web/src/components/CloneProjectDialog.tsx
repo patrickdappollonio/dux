@@ -4,7 +4,7 @@ import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
@@ -47,7 +47,14 @@ function offerBody(pr: CloneProjectPr, folder: string) {
 // the dialog open; a started clone closes it, and the progress and the one
 // final ride the status toasts from there.
 export function CloneProjectDialog() {
-  const { cloneProject: form } = useDux()
+  const open = useDux().cloneProject !== null
+  const life = useModalLifetime(open)
+  return life.mounted ? <CloneProjectForm key={life.epoch} open={open} onClosed={life.onClosed} /> : null
+}
+
+function CloneProjectForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  // The form as it was when the close began, kept while the close animates.
+  const form = useHeldWhileClosed(open, useDux().cloneProject)
   const destinationRef = useRef<HTMLInputElement | null>(null)
   if (!form) return null
   const pr = form.pr
@@ -69,8 +76,9 @@ export function CloneProjectDialog() {
   return (
     <Modal
       kind="form"
-      open
+      open={open}
       onClose={closeCloneProject}
+      onClosed={onClosed}
       title={pr ? "New agent from PR" : "Clone a repository"}
       description={
         <>
