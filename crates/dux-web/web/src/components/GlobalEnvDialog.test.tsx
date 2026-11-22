@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -13,6 +13,7 @@ vi.mock("@/lib/store", async (importOriginal) => {
     closeGlobalEnv: vi.fn(),
     dismissGlobalEnvConflict: vi.fn(),
     saveGlobalEnv: vi.fn(),
+    reloadGlobalEnvDraft: vi.fn(() => Promise.resolve()),
   }
 })
 
@@ -49,6 +50,7 @@ function coarsePointer() {
 installBootStubs()
 const { GlobalEnvDialog } = await import("./GlobalEnvDialog")
 const store = await import("@/lib/store")
+const { openModals } = await import("@/lib/modalHistory")
 
 function seed() {
   mockState = {
@@ -124,5 +126,86 @@ describe("GlobalEnvDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }))
     expect(store.closeGlobalEnv).toHaveBeenCalled()
+  })
+
+  it("holds Save while nothing would change, and says why", async () => {
+    render(<GlobalEnvDialog />)
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    fireEvent.click(save.parentElement!)
+    expect(
+      (await screen.findAllByText("Nothing to save yet: no variable has changed.")).length,
+    ).toBeGreaterThan(0)
+  })
+
+  it("asks before a line Save cannot use is thrown away, and says Save leaves it out", async () => {
+    render(<GlobalEnvDialog />)
+    const text = screen.getByPlaceholderText("KEY=VALUE")
+    fireEvent.change(text, { target: { value: "FOO=1\nBAR" } })
+    expect(screen.getByText("Line 2 is not KEY=VALUE, so Save leaves it out.")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    expect((await screen.findByText(/Discarding/)).textContent).toMatch(/ 1 unsaved change\./)
+    expect(store.closeGlobalEnv).not.toHaveBeenCalled()
+  })
+
+  it("takes a history entry when the person opens it, and none when a refused save reopens it", () => {
+    const { unmount } = render(<GlobalEnvDialog />)
+    expect(openModals()).toHaveLength(1)
+    unmount()
+    mockState = {
+      ...mockState,
+      globalEnvDraft: { FOO: "2" },
+      globalEnvConflict: "The global environment changed.",
+    } as DuxState
+    render(<GlobalEnvDialog />)
+    expect(openModals()).toHaveLength(0)
+  })
+
+  it("puts the caret back in the text after Reload the environment", async () => {
+    mockState = {
+      ...mockState,
+      globalEnvDraft: { FOO: "2" },
+      globalEnvConflict: "The global environment changed.",
+    } as DuxState
+    const { rerender } = render(<GlobalEnvDialog />)
+    const reload = screen.getByRole("button", { name: "Reload the environment" })
+    reload.focus()
+    fireEvent.click(reload)
+    await act(async () => {
+      mockState = {
+        ...mockState,
+        globalEnvDraft: null,
+        globalEnvConflict: null,
+        globalEnvEpoch: 1,
+      } as DuxState
+      rerender(<GlobalEnvDialog />)
+    })
+    const text = screen.getByPlaceholderText("KEY=VALUE") as HTMLTextAreaElement
+    expect(text.value).toBe("FOO=1")
+    expect(document.activeElement).toBe(text)
+  })
+
+  it("puts focus on the dialog, not the text, after Reload the environment under a finger", async () => {
+    coarsePointer()
+    mockState = {
+      ...mockState,
+      globalEnvDraft: { FOO: "2" },
+      globalEnvConflict: "The global environment changed.",
+    } as DuxState
+    const { rerender } = render(<GlobalEnvDialog />)
+    const reload = screen.getByRole("button", { name: "Reload the environment" })
+    reload.focus()
+    fireEvent.click(reload)
+    await act(async () => {
+      mockState = {
+        ...mockState,
+        globalEnvDraft: null,
+        globalEnvConflict: null,
+        globalEnvEpoch: 1,
+      } as DuxState
+      rerender(<GlobalEnvDialog />)
+    })
+    const popup = document.querySelector<HTMLElement>('[data-slot="dialog-content"]')!
+    expect(document.activeElement).toBe(popup)
   })
 })
