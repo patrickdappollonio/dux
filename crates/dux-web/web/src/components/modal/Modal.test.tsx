@@ -7,6 +7,7 @@ import { FolderPlus } from "lucide-react"
 import { chip } from "@/lib/prose"
 
 import { installBrowserHistory } from "@/test/browserHistory"
+import { describeModalBack } from "@/test/modalBackCases"
 
 // Back reaches a modal through the store, which gives every open one a history
 // entry, so the real store is loaded over a history that has one.
@@ -725,29 +726,6 @@ describe("a destructive confirm", () => {
   })
 })
 
-describe("the browser's Back", () => {
-  it("closes a modal as its Cancel does, and leaves one that opened by itself alone", async () => {
-    const onClose = vi.fn()
-    const before = browser.index
-    const view = render(
-      <Modal kind="report" open onClose={onClose} title="Sample" />,
-    )
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    act(() => browser.back())
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
-    expect(onClose).toHaveBeenCalledWith("back")
-    view.unmount()
-
-    // One that opened by itself takes no entry, so the one after it takes
-    // the first.
-    const after = browser.index
-    render(<Modal kind="report" open onClose={onClose} title="Itself" historyEntry={false} />)
-    render(<Modal kind="report" open onClose={onClose} title="By hand" />)
-    await waitFor(() => expect(browser.index).toBe(after + 1))
-    expect(browser.length).toBe(after + 2)
-  })
-})
-
 describe("why a modal closed", () => {
   it.each([
     ["cancel", () => fireEvent.click(screen.getByRole("button", { name: "Cancel" }))],
@@ -895,68 +873,6 @@ describe("a form with unsaved edits", () => {
     await waitFor(() => expect(popup()).not.toBeNull())
     expect(asking()).toBeNull()
   })
-
-  // Back asks as Cancel does, and the form keeps its history entry while it
-  // asks, so no later Back can carry the page away from under it.
-  it("asks once on Back and stays on its history entry", async () => {
-    const onClose = vi.fn()
-    const before = browser.index
-    render(<Editing changes={1} onClose={onClose} />)
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    act(() => browser.back())
-    await waitFor(() => expect(asking()).not.toBeNull())
-    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))
-    await waitFor(() => expect(asking()).toBeNull())
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    expect(onClose).not.toHaveBeenCalled()
-
-    act(() => browser.back())
-    await waitFor(() => expect(asking()).not.toBeNull())
-    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }))
-    expect(onClose).toHaveBeenCalledWith("back")
-  })
-
-  // A Back gives the page no user activation, and an entry pushed without one
-  // is skipped by the next Back: the question then has no entry of its own.
-  it("never lets Back leave the page while the question it raised is up", async () => {
-    const onClose = vi.fn()
-    const before = browser.index
-    render(<Editing changes={1} onClose={onClose} />)
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    vi.stubGlobal("navigator", { userActivation: { isActive: false } })
-    try {
-      act(() => browser.back())
-      await waitFor(() => expect(asking()).not.toBeNull())
-      expect(browser.index).toBe(before + 1)
-      // The next Back abandons the question, as its Keep editing does.
-      act(() => browser.back())
-      await waitFor(() => expect(asking()).toBeNull())
-      expect(browser.index).toBe(before + 1)
-      expect(onClose).not.toHaveBeenCalled()
-    } finally {
-      vi.unstubAllGlobals()
-    }
-  })
-
-  // Macros and Preferences: the edits are kept for the next opening, so Back
-  // has nothing to ask about.
-  it("sets the edits aside on Back when the caller can, and asks on Cancel still", async () => {
-    const onClose = vi.fn()
-    const setAside = vi.fn()
-    const before = browser.index
-    render(<Editing changes={1} onClose={onClose} setAside={setAside} />)
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
-    await waitFor(() => expect(asking()).not.toBeNull())
-    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))
-    await waitFor(() => expect(asking()).toBeNull())
-    expect(setAside).not.toHaveBeenCalled()
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    act(() => browser.back())
-    await waitFor(() => expect(onClose).toHaveBeenCalledWith("back"))
-    expect(setAside).toHaveBeenCalledTimes(1)
-    expect(asking()).toBeNull()
-  })
 })
 
 describe("a busy modal", () => {
@@ -996,18 +912,6 @@ describe("a busy modal", () => {
       }
     }
   })
-
-  it("holds its history entry through a Back, and closes once it is free", async () => {
-    const onClose = vi.fn()
-    const before = browser.index
-    const view = render(<Saving busy onClose={onClose} />)
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    act(() => browser.back())
-    await waitFor(() => expect(browser.index).toBe(before + 1))
-    expect(onClose).not.toHaveBeenCalled()
-    view.rerender(<Saving busy={false} onClose={onClose} />)
-    await waitFor(() => expect(onClose).toHaveBeenCalledWith("back"))
-  })
 })
 
 // The component that holds a modal's state and reads the store for it exists
@@ -1035,3 +939,5 @@ describe("a modal's lifetime", () => {
     expect(mounts).toBe(2)
   })
 })
+
+describeModalBack(browser)

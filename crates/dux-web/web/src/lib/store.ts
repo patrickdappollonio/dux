@@ -4189,6 +4189,10 @@ function onTraversal(): void {
 interface ModalEntry {
   // The `OpenModal` the entry belongs to.
   modalId: number
+  // The modal id written into the entry's state, which is the one it was
+  // pushed or last rewritten for: an entry can pass to another modal without
+  // the browser being on it to rewrite it.
+  labelId: number
   // The Navigation API keys of the entry and of the entry pushed over.
   navKey: string
   behindNavKey: string
@@ -4198,6 +4202,10 @@ interface ModalEntry {
 // has just traversed, the browser is parked on the last one.
 let modalEntries: ModalEntry[] = []
 let modalReconcileQueued = false
+// A return onto modal entries (`returnToModalEntries`) is waiting for the
+// browser's own traversal to finish; until it has started its own, the entries
+// say where the browser is going rather than where it is.
+let modalReturnWaiting = false
 
 // Bring the modal entries in line with the open modals once the commit that
 // opened or closed them has finished, so a menu that closes in the same commit
@@ -4221,7 +4229,7 @@ function parkedOn(entry: ModalEntry, nav: Navigation): boolean {
   const state: unknown = history.state
   if (typeof state !== "object" || state === null) return false
   const label = (state as { duxModal?: { session?: unknown; id?: unknown } }).duxModal
-  return label?.session === PAGE_SESSION && label.id === entry.modalId
+  return label?.session === PAGE_SESSION && label.id === entry.labelId
 }
 
 function reconcileModalEntries(): void {
@@ -4231,7 +4239,7 @@ function reconcileModalEntries(): void {
   // Nothing is written while a traversal is pending: dux's own lands through
   // `landTraversal`, and the browser's through popstate, both of which come
   // back here.
-  if (pendingTraversal !== null) return
+  if (pendingTraversal !== null || modalReturnWaiting) return
   if (nav.transition) {
     nav.transition.finished.then(scheduleModalReconcile, scheduleModalReconcile)
     return
@@ -4260,7 +4268,7 @@ function reconcileModalEntries(): void {
       // taken away and pushed again.
       try {
         history.replaceState(modalEntryState(fresh[0].id), "", historyUrlFor(currentHash()))
-        modalEntries.push({ ...top, modalId: fresh[0].id })
+        modalEntries.push({ ...top, modalId: fresh[0].id, labelId: fresh[0].id })
         fresh = fresh.slice(1)
       } catch (err) {
         console.warn("[dux] history write refused", err)
@@ -4294,7 +4302,7 @@ function reconcileModalEntries(): void {
     }
     const navKey = nav.currentEntry?.key
     if (!navKey || navKey === behind) return
-    modalEntries.push({ modalId: modal.id, navKey, behindNavKey: behind })
+    modalEntries.push({ modalId: modal.id, labelId: modal.id, navKey, behindNavKey: behind })
     rememberEntryIndex()
   }
 }
@@ -4312,14 +4320,13 @@ function leaveModalEntries(): boolean {
   const left = modalEntries.slice(at + 1)
   const stayed = at >= 0 || here === modalEntries[0].behindNavKey
   modalEntries = modalEntries.slice(0, at + 1)
-  const held = closeModals(left.map((entry) => entry.modalId))
-  // An entry above one whose modal closed went with it, so only the oldest
-  // unbroken run of modals that stayed open can have theirs back.
-  let keep = 0
-  while (keep < left.length && held.includes(left[keep].modalId)) keep += 1
-  const kept = left.slice(0, keep)
-  retireModalEntries(left.slice(keep))
-  spendModals(left.slice(keep).map((entry) => entry.modalId))
+  const held = new Set(closeModals(left.map((entry) => entry.modalId)))
+  // The modals that stayed open take the oldest of the entries left, in the
+  // order they opened, so they stay one unbroken run above the entries kept;
+  // the entries above them, whose modals closed, are retired.
+  const staying = left.filter((entry) => held.has(entry.modalId))
+  const kept = staying.map((entry, i) => ({ ...left[i], modalId: entry.modalId }))
+  retireModalEntries(left.slice(kept.length))
   if (kept.length === 0) return stayed
   return returnToModalEntries(kept) || stayed
 }
@@ -4336,12 +4343,32 @@ function returnToModalEntries(kept: readonly ModalEntry[]): boolean {
     spendModals(kept.map((entry) => entry.modalId))
   }
   modalEntries = [...without, ...kept]
-  const listed = nav?.entries().some((entry) => entry.key === top.navKey) ?? false
-  if (nav !== null && !nav.transition && listed) {
-    if (traverseExactly(nav, top.navKey, { newerIntent: false }, giveUp)) return true
+  const listed = () => nav?.entries().some((entry) => entry.key === top.navKey) ?? false
+  if (nav === null || !listed()) {
+    giveUp()
+    return false
   }
-  giveUp()
-  return false
+  // The Back that brought the browser here is still finishing in a browser
+  // that runs traversals as tasks (popstate fires while it is up), and a
+  // traversal started now would be refused; the return waits for it.
+  const attempt = () => {
+    modalReturnWaiting = false
+    if (modalEntries[modalEntries.length - 1] !== top) {
+      scheduleModalReconcile()
+      return
+    }
+    if (nav.transition) {
+      modalReturnWaiting = true
+      nav.transition.finished.then(attempt, attempt)
+      return
+    }
+    if (!listed() || !traverseExactly(nav, top.navKey, { newerIntent: false }, giveUp)) {
+      giveUp()
+      scheduleModalReconcile()
+    }
+  }
+  attempt()
+  return true
 }
 
 // Whether the page holds a user activation now. A browser that cannot say is

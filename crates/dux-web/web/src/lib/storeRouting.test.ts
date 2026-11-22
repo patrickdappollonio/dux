@@ -1153,6 +1153,35 @@ describe("moving in pushes, and Back unwinds exactly", () => {
       expect(mod.getSnapshot().selectedTarget).toBeNull()
     })
 
+    // A modal that answers Back by asking first (a form with unsaved edits)
+    // stays open on it. Under it a plain dialog that a jump of two entries
+    // closed: the one that stayed keeps an entry, the lowest of the two, so
+    // the next Back is its own again.
+    it("keeps an entry for a modal that stayed open over a dialog a long Back closed", async () => {
+      const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])
+      mod.selectSession("s1")
+      const plain = await openDialog()
+      const modals = await import("./modalHistory")
+      let asked = 0
+      modals.registerModal(() => {
+        asked += 1
+        return true
+      })
+      await settle()
+      expect(index).toBe(4)
+      history.go(-2)
+      await settle()
+      expect(plain.closedByBack).toBe(1)
+      expect(asked).toBe(1)
+      expect(index).toBe(3)
+      history.back()
+      await settle()
+      expect(asked).toBe(2)
+      expect(index).toBe(3)
+      expect(loc.hash).toBe("#/agent/s1")
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+    })
+
     it("hands a closing menu's entry to the dialog it opened", async () => {
       // A menu item that opens a dialog closes the menu in the same commit.
       const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])

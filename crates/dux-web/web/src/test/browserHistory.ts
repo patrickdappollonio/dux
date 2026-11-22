@@ -11,6 +11,11 @@
 //
 // Install it before the store is imported, so the store's first look at the
 // history is this one.
+//
+// `{ traversal: "later" }` runs every traversal, the browser's own Back
+// included, as a later task, as a browser does: `navigation.transition` is set
+// from the call until the traversal has finished, popstate fires while it is
+// still set, and `committed` and `finished` settle after the landing.
 
 interface Entry {
   url: string
@@ -23,6 +28,8 @@ export interface BrowserHistory {
   back(): void
   /** The browser's Forward button. */
   forward(): void
+  /** A jump of `delta` entries, as a long press on Back offers. */
+  go(delta: number): void
   /** How many entries there are, as `history.length` reports it. */
   readonly length: number
   /** Where the cursor is. */
@@ -31,7 +38,10 @@ export interface BrowserHistory {
   states(): unknown[]
 }
 
-export function installBrowserHistory(): BrowserHistory {
+export function installBrowserHistory(
+  options: { traversal?: "now" | "later" } = {},
+): BrowserHistory {
+  const later = options.traversal === "later"
   let nextKey = 0
   const mint = () => `k${++nextKey}`
   let entries: Entry[] = [{ url: "/", state: null, key: mint() }]
@@ -44,6 +54,25 @@ export function installBrowserHistory(): BrowserHistory {
     if (target < 0 || target >= entries.length || target === index) return
     index = target
     popstate()
+  }
+
+  // Runs `move` now, or as a later task with the transition up meanwhile.
+  const traverse = (move: () => void): Promise<void> => {
+    if (!later) {
+      move()
+      return Promise.resolve()
+    }
+    let done = () => {}
+    const finished = new Promise<void>((resolve) => {
+      done = resolve
+    })
+    navigation.transition = { finished }
+    setTimeout(() => {
+      move()
+      navigation.transition = null
+      done()
+    }, 0)
+    return finished
   }
 
   const history = {
@@ -61,13 +90,13 @@ export function installBrowserHistory(): BrowserHistory {
     replaceState(state: unknown, _title: string, url?: string) {
       entries[index] = { ...entries[index], url: String(url ?? entries[index].url), state }
     },
-    back: () => land(index - 1),
-    forward: () => land(index + 1),
-    go: (delta: number) => land(index + delta),
+    back: () => void traverse(() => land(index - 1)),
+    forward: () => void traverse(() => land(index + 1)),
+    go: (delta: number) => void traverse(() => land(index + delta)),
   }
 
   const navigation = {
-    transition: null,
+    transition: null as { finished: Promise<void> } | null,
     get currentEntry() {
       return { key: entries[index].key, index, url: entries[index].url }
     },
@@ -76,10 +105,12 @@ export function installBrowserHistory(): BrowserHistory {
     },
     traverseTo(key: string) {
       const target = entries.findIndex((entry) => entry.key === key)
-      const committed =
-        target < 0 ? Promise.reject(new Error("InvalidStateError")) : Promise.resolve()
-      committed.catch(() => {})
-      if (target >= 0) land(target)
+      if (target < 0) {
+        const refused = Promise.reject(new Error("InvalidStateError"))
+        refused.catch(() => {})
+        return { committed: refused, finished: refused }
+      }
+      const committed = traverse(() => land(entries.findIndex((entry) => entry.key === key)))
       return { committed, finished: committed }
     },
   }
@@ -90,6 +121,7 @@ export function installBrowserHistory(): BrowserHistory {
   return {
     back: history.back,
     forward: history.forward,
+    go: history.go,
     get length() {
       return entries.length
     },
