@@ -209,7 +209,6 @@ const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 // does, and so does trading one kind of mark for another; an entry whose file
 // has moved or changed fails until the entry follows it.
 const STILL_TO_MOVE: Record<string, Entry> = {
-  "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One

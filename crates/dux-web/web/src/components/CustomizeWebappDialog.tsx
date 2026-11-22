@@ -1,8 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react"
-import type { KeyboardEvent, ReactNode, RefObject } from "react"
+import type { KeyboardEvent, RefObject } from "react"
 import {
   Check,
-  ChevronLeft,
   ChevronRight,
   CircleCheck,
   CircleDot,
@@ -10,7 +9,6 @@ import {
   RotateCcw,
   Search,
   Undo2,
-  X,
   ZoomOut,
   type LucideIcon,
 } from "lucide-react"
@@ -21,11 +19,9 @@ import {
   notifyWarning,
 } from "@/lib/notify"
 
-import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
-import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
-import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
+import { Modal, useModalLifetime, type ModalCloseReason } from "@/components/modal"
 import {
   CHANGED_LABEL,
   TOPIC_ICON,
@@ -48,14 +44,6 @@ import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -72,7 +60,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import {
   DEFAULT_FAVICON_HREF,
@@ -1072,35 +1059,12 @@ function TopicNav({
   )
 }
 
-// How the dialog answers a request to close: the root hands every dismissal to
-// the form, which alone knows whether there is anything to lose.
-interface CloseHandler {
-  // Cancel, Escape, the close button, a press outside: asks first when there
-  // are unsaved changes.
-  request: () => void
-  // The browser's Back, which closes the dialog and cannot be asked to wait,
-  // so unsaved changes are set aside for the next opening.
-  back: () => void
-  // Clears the search if there is one, saying whether there was, so Escape
-  // clears a search before it closes anything.
-  clearSearch: () => boolean
-}
-
-function PreferencesForm({
-  phone,
-  saving,
-  setSaving,
-  savingRef,
-  closeRef,
-  confirmsOutlet,
-}: {
-  phone: boolean
-  saving: boolean
-  setSaving: (v: boolean) => void
-  savingRef: RefObject<boolean>
-  closeRef: RefObject<CloseHandler | null>
-  confirmsOutlet: ConfirmsSetterRef
-}) {
+function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const phone = useIsMobile()
+  // One persist at a time: the ref gates re-entry synchronously, and the state
+  // makes the modal busy, so no way out orphans a write.
+  const savingRef = useRef(false)
+  const [saving, setSaving] = useState(false)
   const dux = useDux()
   const { bootstrap } = dux
   // Read once: what this opening hands the form.
@@ -1143,25 +1107,24 @@ function PreferencesForm({
   const words = searchWords(query)
   const searching = words.length > 0
   const [view, setView] = useState<View>(start.topic ?? "look")
-  // On a phone the topics come first and a topic's rows are a second sheet,
-  // which holds a history entry of its own so Back returns to the topics.
+  // On a phone the topics come first and a topic's rows are the cover's second
+  // step: its title row carries the way back, and the browser's Back takes it.
   const [step, setStep] = useState<"topics" | "topic">(start.topic ? "topic" : "topics")
   // The rows a confirmed "Reset all" puts back, frozen while its confirm is up.
   const [resetAll, setResetAll] = useState<{ keys: string[]; names: string[] } | null>(null)
-  const [discardOpen, setDiscardOpen] = useState(false)
   const [notificationPermission, setNotificationPermission] = useState(
     initialNotificationPermission,
   )
 
   const coarsePointer = useIsCoarsePointer()
   const searchRef = useRef<HTMLInputElement | null>(null)
-  const sheetRef = useRef<HTMLDivElement | null>(null)
-  const backRef = useRef<HTMLButtonElement | null>(null)
   const navEls = useRef(new Map<View, HTMLButtonElement>())
   const rowEls = useRef(new Map<string, HTMLDivElement>())
   // The row that takes focus once a reset or an undo has removed the button
   // pressed, and the button it prefers, else the row's control.
   const focusAfter = useRef<{ key: string; prefer: string } | null>(null)
+  // Whether the phone's topics are on screen again after a topic was left.
+  const leftTopic = useRef(false)
   // Set by a confirmed "Reset all", for the confirm's close to read.
   const resetAllDone = useRef(false)
 
@@ -1249,33 +1212,6 @@ function PreferencesForm({
   const passwordTyped =
     passwordDraft.current !== "" || passwordDraft.next !== "" || passwordDraft.confirm !== ""
   const unsavedCount = unsavedSettings.length + (passwordTyped ? 1 : 0)
-
-  useEffect(() => {
-    closeRef.current = {
-      request: () => (unsavedCount > 0 ? setDiscardOpen(true) : closeCustomizeWebapp()),
-      back: () => {
-        if (unsavedCount === 0) {
-          closeCustomizeWebapp()
-          return
-        }
-        const draft = {
-          values: Object.fromEntries(unsavedSettings.map((d) => [d.key, overrides[d.key]])),
-          saved: Object.fromEntries(
-            unsavedSettings.map((d) => [d.key, editedOver[d.key] ?? originalOf(d)]),
-          ),
-        }
-        setAsidePreferencesDraft(draft, unsavedCount, passwordTyped)
-      },
-      clearSearch: () => {
-        if (query === "") return false
-        setQuery("")
-        return true
-      },
-    }
-    return () => {
-      closeRef.current = null
-    }
-  })
 
   // After a reset or an undo its button is gone, so focus moves to the button
   // that took its place, else the control beside it.
@@ -1610,33 +1546,26 @@ function PreferencesForm({
     </Empty>
   )
 
-  // The heading of the view on screen, a sheet's title on a phone.
-  const title = (text: string) =>
-    phone ? (
-      <SheetTitle className={headingClass}>{text}</SheetTitle>
-    ) : (
-      <h3 className={headingClass}>{text}</h3>
-    )
+  // On a phone the view's name is the cover's title, so its body opens on
+  // the rows.
+  const heading = (text: string) => (phone ? null : <h3 className={headingClass}>{text}</h3>)
 
   const viewBody =
     view === "changed" ? (
       changedList.length === 0 ? (
-        <>
-          {phone ? title(CHANGED_LABEL) : null}
-          {changedEmpty}
-        </>
+        changedEmpty
       ) : (
         <>
-          <div className="flex items-start gap-2 pb-1">
-            <div className="flex min-w-0 flex-1 flex-col gap-1">
-              {title(CHANGED_LABEL)}
-              {phone ? null : (
+          <div className="flex items-start justify-end gap-2 pb-1">
+            {phone ? null : (
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                {heading(CHANGED_LABEL)}
                 <p className="text-xs text-muted-foreground">
                   Everything here differs from what dux ships with. The reset on a
                   row puts that one back, and a row you reset stays until you leave.
                 </p>
-              )}
-            </div>
+              </div>
+            )}
             {resetAllButton}
           </div>
           {renderRows(changedList, true)}
@@ -1644,7 +1573,7 @@ function PreferencesForm({
       )
     ) : (
       <>
-        <div className="pb-1">{title(topicLabel(view))}</div>
+        {phone ? null : <div className="pb-1">{heading(topicLabel(view))}</div>}
         {renderRows(topicSettings(view), false)}
       </>
     )
@@ -1698,8 +1627,6 @@ function PreferencesForm({
     </ExplainedWhenDisabled>
   )
 
-  const request = () => closeRef.current?.request()
-
   const labelsOf = (keys: string[]) =>
     descriptors.filter((d) => keys.includes(d.key)).map((d) => d.label)
   const partialNotice =
@@ -1709,205 +1636,174 @@ function PreferencesForm({
       </p>
     )
 
-  const confirms = (
-    <>
-      <ConfirmResetAll
-        names={resetAll?.names ?? null}
-        onCancel={() => setResetAll(null)}
-        onConfirm={confirmResetAll}
-        finalFocus={() => {
-          if (!resetAllDone.current) return true
-          resetAllDone.current = false
-          return (phone ? backRef.current : navEls.current.get("changed")) ?? true
-        }}
-      />
-      <ConfirmDiscardEditsDialog
-        open={discardOpen}
-        holder="Preferences has"
-        changes={unsavedCount}
-        leaves={[chip("config.toml")]}
-        onKeep={() => setDiscardOpen(false)}
-        onDiscard={() => {
-          setDiscardOpen(false)
-          closeCustomizeWebapp()
-        }}
-      />
-    </>
-  )
-  usePublishConfirms(confirmsOutlet, confirms)
+  const inTopic = phone && step === "topic"
+  // The title row's Back, which the modal draws on the phone's second step.
+  const backButton = () =>
+    document.querySelector<HTMLElement>('button[aria-label="Back to all topics"]')
 
-  // Stable, so a render while the dialog is open never asks for it again.
-  const [desktopInitialFocus] = useState(
-    () => () =>
-      (coarsePointer ? navEls.current.get(start.topic ?? "look") : searchRef.current) ?? true,
+  // What takes focus when the modal opens or changes step. With a mouse the
+  // search, to type into at once; under a finger a topic, since a focused
+  // field would raise the soft keyboard over the dialog. On a phone's second
+  // step the way back, and back on the topics the topic that was left.
+  const initialFocus = (): HTMLElement | null => {
+    if (inTopic) return backButton()
+    if (!phone && coarsePointer) return navEls.current.get(start.topic ?? "look") ?? null
+    return (phone && leftTopic.current ? navEls.current.get(view) : null) ?? searchRef.current
+  }
+  const toTopics = () => {
+    leftTopic.current = true
+    setStep("topics")
+  }
+
+  const common = {
+    kind: "form",
+    open,
+    onClosed,
+    // Back with edits has set them aside, which closed the dialog already.
+    onClose: (reason: ModalCloseReason) => {
+      if (reason !== "back" || unsavedCount === 0) closeCustomizeWebapp()
+    },
+    beforeClose: (reason: ModalCloseReason) => {
+      // Escape over a search clears the search; the next one closes.
+      if (reason === "escape" && query !== "") {
+        setQuery("")
+        return "stay"
+      }
+      // On the phone's second step the browser's Back is the title row's.
+      if (reason === "back" && inTopic) {
+        toTopics()
+        return "stay"
+      }
+      return "close"
+    },
+    // Back cannot stop to ask, so it sets the edits aside for the next opening.
+    unsavedEdits: {
+      changes: unsavedCount,
+      holder: "Preferences has",
+      leaves: [chip("config.toml")],
+      setAside: () =>
+        setAsidePreferencesDraft(
+          {
+            values: Object.fromEntries(unsavedSettings.map((d) => [d.key, overrides[d.key]])),
+            saved: Object.fromEntries(
+              unsavedSettings.map((d) => [d.key, editedOver[d.key] ?? originalOf(d)]),
+            ),
+          },
+          unsavedCount,
+          passwordTyped,
+        ),
+    },
+    // Closing mid-persist would let the pending success close a freshly
+    // reopened dialog, or read as "the edit was discarded" when the request
+    // still lands on the server.
+    busy: saving,
+    size: "w940",
+    height: "h680",
+    initialFocus,
+    submit: {
+      label:
+        phone && unsavedCount > 0
+          ? `Save ${unsavedCount} ${unsavedCount === 1 ? "change" : "changes"}`
+          : "Save",
+      tone: "primary",
+      onSelect: () => void save(),
+      busy: saving,
+    },
+  } as const
+
+  const confirm = (
+    <ConfirmResetAll
+      names={resetAll?.names ?? null}
+      onCancel={() => setResetAll(null)}
+      onConfirm={confirmResetAll}
+      finalFocus={() => {
+        if (!resetAllDone.current) return true
+        resetAllDone.current = false
+        return (phone ? backButton() : navEls.current.get("changed")) ?? true
+      }}
+    />
   )
 
   if (phone) {
-    const closeButton = (
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-10 shrink-0"
-        aria-label="Close"
-        onClick={request}
-      >
-        <X />
-      </Button>
-    )
-    const footer = (
-      <div className="flex shrink-0 flex-col gap-2 border-t bg-muted/50 px-4 pt-3 pb-4">
-        {partialNotice}
-        <Button disabled={saving} className="h-11 w-full" onClick={save}>
-          {unsavedCount > 0
-            ? `Save ${unsavedCount} ${unsavedCount === 1 ? "change" : "changes"}`
-            : "Save"}
-        </Button>
-        <Button variant="outline" disabled={saving} className="h-11 w-full" onClick={request}>
-          Cancel
-        </Button>
-      </div>
-    )
-    const inTopic = step === "topic"
-    // The footer rides wherever rows are on screen, and wherever there is
-    // something unsaved to keep or drop.
-    const topicHasRows = view !== "changed" || changedList.length > 0
     return (
-      <SheetContent
-        ref={sheetRef}
-        side="bottom"
-        showCloseButton={false}
-        // The sheet itself: a control focused by the opening would wear its
-        // focus ring, or raise the soft keyboard, for no reason the person gave.
-        initialFocus={() => sheetRef.current ?? true}
-        fullHeight
-        className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
-      >
-        <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
-          <SheetTitle className="flex-1">Preferences</SheetTitle>
-          {closeButton}
-        </div>
-        <div className="shrink-0 px-4 pt-3 pb-1">{searchBox}</div>
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-2">
-          {searching ? (
+      <>
+        <Modal
+          {...common}
+          title={
+            !inTopic ? "Preferences" : view === "changed" ? CHANGED_LABEL : topicLabel(view)
+          }
+          step={inTopic ? "topic" : "topics"}
+          back={inTopic ? { label: "all topics", onSelect: toTopics } : undefined}
+          toolbar={inTopic ? undefined : searchBox}
+          footerNote={partialNotice ?? undefined}
+        >
+          {inTopic ? (
+            viewBody
+          ) : searching ? (
             searchResults
           ) : (
-            <>
+            <div className="flex flex-col">
               {nav}
               <div aria-hidden className="my-1.5 h-px shrink-0 bg-border" />
               {openConfigButton}
-            </>
+            </div>
           )}
-        </div>
-        {/* The topic's sheet covers this one and carries its own. */}
-        {!inTopic && (searching || unsavedCount > 0) ? footer : null}
-        <Dialog
-          open={inTopic}
-          onOpenChange={(open, details) => {
-            if (open) return
-            // Back is the one close that steps back; Escape and a press
-            // outside close the whole dialog, asking first.
-            if (details.reason === "imperative-action") {
-              setStep("topics")
-              return
-            }
-            details.cancel()
-            request()
-          }}
-        >
-          <SheetContent
-            side="bottom"
-            showCloseButton={false}
-            initialFocus={() => backRef.current ?? true}
-            finalFocus={() => navEls.current.get(view) ?? true}
-            fullHeight
-            className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
-          >
-            <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
-              <Button
-                ref={backRef}
-                variant="ghost"
-                className="h-10 pl-1"
-                aria-label="Back to all topics"
-                onClick={() => setStep("topics")}
-              >
-                <ChevronLeft />
-                Preferences
-              </Button>
-              <div className="flex-1" />
-              {closeButton}
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pt-3 pb-2">
-              {viewBody}
-            </div>
-            {topicHasRows || unsavedCount > 0 ? footer : null}
-          </SheetContent>
-        </Dialog>
-      </SheetContent>
+        </Modal>
+        {confirm}
+      </>
     )
   }
 
   return (
-    <DialogContent
-      // Type-immediately into the search with a mouse; under a finger focusing
-      // the field would pop the soft keyboard over the dialog the moment it opens.
-      initialFocus={desktopInitialFocus}
-      // A flex column rather than the popup's grid, so only the two columns give
-      // up height when the popup hits its cap.
-      className="flex h-[min(42.5rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[58.75rem]"
-    >
-      <DialogHeader className="shrink-0 pr-8">
-        <DialogTitle>Preferences</DialogTitle>
-        <DialogDescription>
-          Saved to <InlineCode>config.toml</InlineCode> and applied to every connected
-          browser.
-        </DialogDescription>
-      </DialogHeader>
-
-      <div className="grid min-h-0 flex-1 grid-cols-[13.75rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6">
-        <div className="flex min-h-0 flex-col gap-3">
-          {searchBox}
-          {/* The 3px of padding is the room a topic's focus ring needs inside
-              the clipping scroll box. */}
-          <div className="-m-[3px] min-h-0 shrink overflow-y-auto p-[3px]">{nav}</div>
-          <div className="flex-1" />
-          {openConfigButton}
-        </div>
-        {/* The 3px of padding on the content is the room a control's focus ring
-            needs inside the clipping viewport; -ml and the 9px right padding
-            (12px less the 3px) give it back, so the rows stay in line with the
-            heading and the scrollbar keeps its place. Keyed by what is shown,
-            so a new view starts at its top. */}
-        <ScrollArea
-          key={searching ? "search" : view}
-          className="-ml-[3px] h-full min-h-0 pr-[9px]"
-        >
-          <div className="flex min-h-full flex-col px-[3px] pb-[3px]">
-            {searching ? searchResults : viewBody}
+    <>
+      <Modal
+        {...common}
+        title="Preferences"
+        description={
+          <>
+            Saved to <InlineCode>config.toml</InlineCode> and applied to every connected
+            browser.
+          </>
+        }
+        footerNote={
+          <span aria-live="polite">
+            {unsavedCount > 0 ? unsavedChangesLabel(unsavedCount) : null}
+          </span>
+        }
+      >
+        <div className="grid min-h-0 flex-1 grid-cols-[13.75rem_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] gap-6">
+          <div className="flex min-h-0 flex-col gap-3">
+            {searchBox}
+            {/* The 3px of padding is the room a topic's focus ring needs inside
+                the clipping scroll box. */}
+            <div className="-m-[3px] min-h-0 shrink overflow-y-auto p-[3px]">{nav}</div>
+            <div className="flex-1" />
+            {openConfigButton}
           </div>
-        </ScrollArea>
-      </div>
-
-      {partialNotice}
-      <DialogFooter className="shrink-0 sm:items-center">
-        <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
-          {unsavedCount > 0 ? unsavedChangesLabel(unsavedCount) : null}
-        </span>
-        {/* Cancel is disabled too while a write is in flight: closing the
-            dialog mid-persist would let the pending success close a freshly
-            reopened dialog session, or misread as "the edit was discarded"
-            when the request still lands on the server. */}
-        <Button variant="outline" disabled={saving} onClick={request}>
-          Cancel
-        </Button>
-        <Button disabled={saving} onClick={save}>
-          Save
-        </Button>
-      </DialogFooter>
-    </DialogContent>
+          {/* The 3px of padding on the content is the room a control's focus ring
+              needs inside the clipping viewport; -ml and the 9px right padding
+              (12px less the 3px) give it back, so the rows stay in line with the
+              heading and the scrollbar keeps its place. Keyed by what is shown,
+              so a new view starts at its top. */}
+          <ScrollArea
+            key={searching ? "search" : view}
+            className="-ml-[3px] h-full min-h-0 pr-[9px]"
+          >
+            <div className="flex min-h-full flex-col px-[3px] pb-[3px]">
+              {searching ? searchResults : viewBody}
+            </div>
+          </ScrollArea>
+        </div>
+        {partialNotice}
+      </Modal>
+      {confirm}
+    </>
   )
 }
 
 // "Reset all" puts the listed settings back in the draft only; Save writes it.
+// A sibling of the form's modal, never inside it: a dialog nested in another
+// draws no overlay of its own.
 function ConfirmResetAll({
   names,
   onCancel,
@@ -1924,88 +1820,39 @@ function ConfirmResetAll({
   if (names !== null && names !== shown) setShown(names)
   const count = shown.length
   return (
-    <Dialog
+    <Modal
+      kind="confirm"
       open={names !== null}
-      onOpenChange={(open) => {
-        if (!open) onCancel()
+      onClose={onCancel}
+      title={
+        count === 1
+          ? "Reset 1 setting to its default?"
+          : `Reset ${count} settings to their defaults?`
+      }
+      description={
+        <>
+          {listNames(shown)} {count === 1 ? "goes" : "go"} back to what dux ships
+          with. <InlineCode>config.toml</InlineCode> is written when you save.
+        </>
+      }
+      cancelLabel="Cancel"
+      confirm={{
+        label: count === 1 ? "Reset 1 setting" : `Reset ${count} settings`,
+        tone: "destructive",
+        onSelect: onConfirm,
       }}
-    >
-      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
-        <DialogHeader>
-          <DialogTitle>
-            {count === 1
-              ? "Reset 1 setting to its default?"
-              : `Reset ${count} settings to their defaults?`}
-          </DialogTitle>
-          <DialogDescription>
-            {listNames(shown)} {count === 1 ? "goes" : "go"} back to what dux ships
-            with. <InlineCode>config.toml</InlineCode> is written when you save.
-          </DialogDescription>
-        </DialogHeader>
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            {count === 1 ? "Reset 1 setting" : `Reset ${count} settings`}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      finalFocus={finalFocus}
+    />
   )
 }
 
 // Topics beside their settings on a computer; on a phone, a topic's settings
-// are a second sheet over the topics. Every edit and reset waits for Save.
+// are the second step of the same cover. Every edit and reset waits for Save.
 export function CustomizeWebappDialog() {
-  const { customizeWebappOpen, customizeWebappEpoch } = useDux()
-  const isMobile = useIsMobile()
-
-  // One persist at a time: the ref gates re-entry synchronously, the state disables
-  // the footer, and both gate `onOpenChange` too, so no dismissal orphans a write.
-  const savingRef = useRef(false)
-  const [saving, setSaving] = useState(false)
-  const closeRef = useRef<CloseHandler | null>(null)
-  const confirmsOutlet = useRef<((confirms: ReactNode) => void) | null>(null)
-
-  return (
-    <>
-      <ConfirmsOutlet setterRef={confirmsOutlet} />
-      <Dialog
-        open={customizeWebappOpen}
-        onOpenChange={(open, details) => {
-          if (open || savingRef.current) return
-          const form = closeRef.current
-          if (form === null) {
-            closeCustomizeWebapp()
-            return
-          }
-          // Back is the shared primitive's imperative close; it keeps asking
-          // until the dialog is gone, so it cannot stop at a question.
-          if (details.reason === "imperative-action") {
-            form.back()
-            return
-          }
-          details.cancel()
-          // Escape over a search clears the search; the next one closes.
-          if (details.reason === "escape-key" && form.clearSearch()) return
-          form.request()
-        }}
-      >
-        {customizeWebappOpen ? (
-          <PreferencesForm
-            key={customizeWebappEpoch}
-            phone={isMobile}
-            saving={saving}
-            setSaving={setSaving}
-            savingRef={savingRef}
-            closeRef={closeRef}
-            confirmsOutlet={confirmsOutlet}
-          />
-        ) : null}
-      </Dialog>
-    </>
-  )
+  const { customizeWebappOpen } = useDux()
+  const life = useModalLifetime(customizeWebappOpen)
+  // Keyed by the open, so each one starts from the draft that opening hands it.
+  return life.mounted ? (
+    <PreferencesForm key={life.epoch} open={customizeWebappOpen} onClosed={life.onClosed} />
+  ) : null
 }

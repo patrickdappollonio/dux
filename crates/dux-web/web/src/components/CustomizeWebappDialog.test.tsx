@@ -493,7 +493,9 @@ describe("CustomizeWebappDialog", () => {
     const saveButton = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
     fireEvent.click(saveButton)
 
-    expect(saveButton.disabled).toBe(true)
+    // Busy: it takes no press and keeps its focus, so it is not `disabled`.
+    expect(saveButton.getAttribute("aria-disabled")).toBe("true")
+    expect(screen.getByRole("button", { name: "Cancel" }).getAttribute("aria-disabled")).toBe("true")
     resolveWrite(true)
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
   })
@@ -1260,7 +1262,7 @@ describe("CustomizeWebappDialog resets", () => {
       "Instance name, Copy on select and GitHub integration go back to what dux ships with.",
     )
     const cancel = within(confirm).getByRole("button", { name: "Cancel" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
     fireEvent.click(cancel)
     await settle()
 
@@ -1436,15 +1438,15 @@ describe("CustomizeWebappDialog on a phone", () => {
     expect(screen.getByLabelText("Bind your Tailscale address")).toBeTruthy()
   })
 
-  // The topics' sheet takes its entry first, so Back from a topic opened
-  // straight away still stops on the topics.
+  // The topic is the second step of the one cover, which holds the one entry,
+  // so Back from a topic opened straight away still stops on the topics.
   it("Back goes to the topics first when it opened straight on a topic", async () => {
     phone = true
     seed()
     mockState.customizeWebappTopic = "network"
     render(<CustomizeWebappDialog />)
     await opened()
-    expect(openModals()).toHaveLength(2)
+    expect(openModals()).toHaveLength(1)
 
     await back()
     expect(screen.queryByLabelText("Bind your Tailscale address")).toBeNull()
