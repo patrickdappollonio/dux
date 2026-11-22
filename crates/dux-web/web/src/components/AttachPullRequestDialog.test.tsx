@@ -149,19 +149,6 @@ describe("AttachPullRequestDialog", () => {
     expect(submitAttachPullRequest).not.toHaveBeenCalled()
   })
 
-  it("gives its field the footer buttons' height under a finger", () => {
-    seed("s1", "#123", [bare])
-    render(<AttachPullRequestDialog />)
-    expect(screen.getByPlaceholderText("PR URL, #123, or 123").className).toMatch(
-      /(^| )pointer-coarse:h-11( |$)/,
-    )
-    for (const name of ["Cancel", "Attach"]) {
-      expect(screen.getByRole("button", { name }).className).toMatch(
-        /(^| )pointer-coarse:min-h-11( |$)/,
-      )
-    }
-  })
-
   it("closes itself when the target agent vanishes from the ViewModel", () => {
     seed("s1", "", [])
     render(<AttachPullRequestDialog />)

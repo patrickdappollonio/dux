@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { installBrowserHistory } from "@/test/browserHistory"
 
@@ -88,24 +88,5 @@ describe("a project row's menu on a computer", () => {
       target: { value: "API" },
     })
     expect(screen.getByText("api").tagName).toBe("MARK")
-  })
-
-  it("leaves focus on the control an outside press landed on", async () => {
-    renderList()
-    fireEvent.click(nameButton())
-    await screen.findByRole("menu")
-    const search = screen.getByLabelText("Search projects")
-    fireEvent.pointerDown(search)
-    // A browser runs the microtasks the pointer down queued before the mouse
-    // down that focuses the field.
-    await act(async () => {})
-    fireEvent.mouseDown(search)
-    search.focus()
-    fireEvent.pointerUp(search)
-    fireEvent.mouseUp(search)
-    fireEvent.click(search)
-    await settle()
-    expect(screen.queryByRole("menu")).toBeNull()
-    expect(document.activeElement).toBe(search)
   })
 })

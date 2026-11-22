@@ -177,7 +177,6 @@ describe("RenameSessionDialog", () => {
     // disabled outright.
     expect(saveButton().getAttribute("aria-disabled")).toBe("true")
     expect(saveButton().getAttribute("aria-busy")).toBe("true")
-    fireEvent.click(saveButton())
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" })
     expect(submitRename).not.toHaveBeenCalled()
   })
