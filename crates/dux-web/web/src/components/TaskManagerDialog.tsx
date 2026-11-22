@@ -278,7 +278,7 @@ function TaskManagerBody() {
                     <th className="py-1 pr-2 text-right font-medium">Procs</th>
                     <th className="py-1 pr-2 text-right font-medium">CPU</th>
                     <th className="py-1 pr-2 text-right font-medium">Memory</th>
-                    <th className="py-1" />
+                    <th className={cn("py-1", STOP_COLUMN)} />
                   </tr>
                 </thead>
                 <tbody>
@@ -454,6 +454,14 @@ function statCells(stats: ResourceStatsView | null) {
   }
 }
 
+// The stop column stays pinned at the table's trailing edge while a long name
+// scrolls the rest sideways, so no row's Force stop is ever out of reach. Opaque,
+// so what scrolls under it does not show through; on a hovered row it takes the
+// row's tint mixed onto the same surface.
+const STOP_COLUMN = "sticky right-0 bg-popover pl-2"
+const STOP_COLUMN_HOVER =
+  "group-hover/task:bg-[color-mix(in_oklab,var(--muted)_50%,var(--popover))]"
+
 function DesktopRow({
   row,
   expanded,
@@ -482,7 +490,7 @@ function DesktopRow({
       <tr
         data-testid={`task-row-${row.key}`}
         className={cn(
-          "hover:bg-muted/50",
+          "group/task hover:bg-muted/50",
           isTotal && "border-t border-border font-medium",
         )}
       >
@@ -513,7 +521,7 @@ function DesktopRow({
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{procs}</td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{cpu}</td>
         <td className="py-1.5 pr-2 text-right whitespace-nowrap tabular-nums">{mem}</td>
-        <td className="py-1.5 text-right">
+        <td className={cn("py-1.5 text-right", STOP_COLUMN, STOP_COLUMN_HOVER)}>
           {row.stoppable ? (
             <ExplainedWhenDisabled disabled={stopBlocked !== null} hint={stopBlocked} className="rounded-lg">
               <Button
@@ -566,7 +574,7 @@ function DesktopRow({
               <td className="py-0.5 pr-2 text-right whitespace-nowrap tabular-nums">
                 {formatBytes(child.rss_bytes)}
               </td>
-              <td />
+              <td className={STOP_COLUMN} />
             </tr>
           ))
         : null}
