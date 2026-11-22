@@ -224,7 +224,6 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/CopiedTextDialog.tsx": { ...ROOT },
   "components/CreateAgentDialog.tsx": { ...ROOT },
   "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
-  "components/DeleteSessionDialog.tsx": { ...ROOT },
   "components/FileInfoDialog.tsx": { ...ROOT },
   "components/FirstLoadDialog.tsx": { ...ROOT },
   "components/FormDialogContent.tsx": { ...NONE, why: "The shell the forms not yet moved share; it goes with the last of them." },

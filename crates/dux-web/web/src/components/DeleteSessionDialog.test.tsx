@@ -304,29 +304,6 @@ describe("DeleteSessionDialog", () => {
     }
   })
 
-  // The pill already separates the boxes from the buttons, so the dialog's
-  // misclick spacing is taken out while it is up and grows back as it leaves:
-  // the pill sits one ordinary gap above the footer.
-  it("drops the spacing above the footer while the pill is up", async () => {
-    vi.useFakeTimers()
-    try {
-      seed("s1", [session1])
-      render(<DeleteSessionDialog />)
-      tickWorktree()
-      const spacing = screen.getByTestId("delete-footer-spacing")
-      expect(spacing.className).toContain("h-0")
-      await act(async () => {})
-      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
-      expect(spacing.className).toContain("h-0")
-      act(() => vi.advanceTimersByTime(5000))
-      expect(spacing.className).toContain("h-6")
-      expect(spacing.className).not.toContain("h-0")
-      expect(document.querySelector('[data-slot="dialog-content"] > .h-2')).toBeNull()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
   // Every box's row is the touch floor on a phone, so a tap beside a box
   // still lands on it.
   it("gives the worktree and branch rows the touch floor", async () => {

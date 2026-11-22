@@ -1,22 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Check, CircleAlert, Loader2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { InlineCode } from "@/components/ui/inline-code"
-import {
-  AttachedSection,
-  GuardedConfirmButton,
-} from "@/components/AttachedSection"
+import { AttachedSection } from "@/components/AttachedSection"
+import { guardedConfirmAction } from "@/components/guardedConfirmAction"
+import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   folderWorkspace,
   managedWorkspace,
@@ -436,16 +426,7 @@ export function DeleteSessionDialog() {
     setEntry(null)
   }
 
-  // The component stays mounted across opens, so a vanish-close must reset the
-  // boxes too, or the next delete confirm opens pre-checked.
-  const isOpen = useVanishedTargetGuard(
-    deleteTarget !== null,
-    session !== undefined,
-    () => {
-      reset()
-      closeDelete()
-    },
-  )
+  const isOpen = deleteTarget !== null && session !== undefined
 
   const { blockers, pending, cancelRef, confirm } = useAttachedOverride(
     isOpen,
@@ -512,137 +493,114 @@ export function DeleteSessionDialog() {
     closeDelete()
   }
 
-  function handleCancel() {
+  // The component stays mounted across opens, so every close, a vanished
+  // target's included, resets the boxes, or the next confirm opens pre-checked.
+  function handleClose() {
     reset()
     closeDelete()
   }
 
-  function handleOpenChange(open: boolean) {
-    if (!open) handleCancel()
-  }
-
   return (
-    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} destructive>
-        <DialogHeader>
-          <DialogTitle>Delete agent?</DialogTitle>
-        </DialogHeader>
+    <Modal
+      kind="confirm"
+      open={deleteTarget !== null}
+      vanished={session === undefined}
+      onClose={handleClose}
+      title="Delete agent?"
+      cancelLabel="Cancel"
+      safeRef={cancelRef}
+      confirm={guardedConfirmAction({
+        verb: "Delete",
+        blockers,
+        pending,
+        onConfirm: () => void handleConfirm(),
+      })}
+    >
+      <p className="text-sm text-muted-foreground">
+        This removes the agent session <InlineCode>{name}</InlineCode> from
+        dux.
+      </p>
+      {folder && (
+        // Said out loud because the sentence above reads as though something on
+        // disk goes too: a standalone agent's folder is left exactly as it was.
         <p className="text-sm text-muted-foreground">
-          This removes the agent session <InlineCode>{name}</InlineCode> from
-          dux.
+          Its folder <InlineCode>{folder.folder_label}</InlineCode> is left
+          untouched: dux never creates, moves or removes a
+          standalone agent&rsquo;s folder. Anything the agent wrote there is
+          still there.
         </p>
-        {folder && (
-          // Said out loud because the sentence above reads as though something on
-          // disk goes too: a standalone agent's folder is left exactly as it was.
-          <p className="text-sm text-muted-foreground">
-            Its folder <InlineCode>{folder.folder_label}</InlineCode> is left
-            untouched: dux never creates, moves or removes a
-            standalone agent&rsquo;s folder. Anything the agent wrote there is
-            still there.
-          </p>
-        )}
-        {managed && (
-          // One child of the dialog's grid, so the rows collapsing inside it
-          // take their spacing with them instead of leaving a gap behind.
-          <div className="flex flex-col">
-            <CheckboxRow
-              id="delete-worktree"
-              checked={deleteWorktree}
-              onCheckedChange={setDeleteWorktree}
-            >
-              Also delete the git worktree (irreversible)
-            </CheckboxRow>
-            {/* Revealed by the worktree box rather than sitting beside it disabled:
-                git will not delete a branch still checked out, so there is
-                nothing to offer. */}
-            <Collapse open={deleteWorktree}>
-              <WorktreeFilesNote note={files} />
-              {firstBoxShown && (
+      )}
+      {managed && (
+        // One child of the modal's body, so the rows collapsing inside it
+        // take their spacing with them instead of leaving a gap behind.
+        <div className="flex flex-col">
+          <CheckboxRow
+            id="delete-worktree"
+            checked={deleteWorktree}
+            onCheckedChange={setDeleteWorktree}
+          >
+            Also delete the git worktree (irreversible)
+          </CheckboxRow>
+          {/* Revealed by the worktree box rather than sitting beside it disabled:
+              git will not delete a branch still checked out, so there is
+              nothing to offer. */}
+          <Collapse open={deleteWorktree}>
+            <WorktreeFilesNote note={files} />
+            {firstBoxShown && (
+              <CheckboxRow
+                id="delete-branch"
+                checked={deleteCurrent}
+                disabled={!currentAnswerable}
+                onCheckedChange={setCurrentAnswer}
+              >
+                {renderProse(
+                  currentBranchLabelProse(
+                    current?.name ?? ready?.current_name ?? managed.branch_name,
+                  ),
+                )}
+              </CheckboxRow>
+            )}
+            {ready && current && (
+              <BranchWarning prose={currentBranchWarningProse(current.origin)} />
+            )}
+            {ready && others.length > 0 && (
+              <>
                 <CheckboxRow
-                  id="delete-branch"
-                  checked={deleteCurrent}
-                  disabled={!currentAnswerable}
-                  onCheckedChange={setCurrentAnswer}
+                  id="delete-other-branches"
+                  checked={deleteOthers}
+                  disabled={!othersAnswerable}
+                  onCheckedChange={setOthersAnswer}
                 >
                   {renderProse(
-                    currentBranchLabelProse(
-                      current?.name ?? ready?.current_name ?? managed.branch_name,
-                    ),
+                    otherBranchesLabelProse(others.map((o) => o.name)),
                   )}
                 </CheckboxRow>
-              )}
-              {ready && current && (
-                <BranchWarning prose={currentBranchWarningProse(current.origin)} />
-              )}
-              {ready && others.length > 0 && (
-                <>
-                  <CheckboxRow
-                    id="delete-other-branches"
-                    checked={deleteOthers}
-                    disabled={!othersAnswerable}
-                    onCheckedChange={setOthersAnswer}
-                  >
-                    {renderProse(
-                      otherBranchesLabelProse(others.map((o) => o.name)),
-                    )}
-                  </CheckboxRow>
-                  <BranchWarning
-                    prose={otherBranchesWarningProse(others, deleteOthers)}
-                  />
-                </>
-              )}
-              {ready && (
                 <BranchWarning
-                  prose={lossProse(ready, deleteCurrent, deleteOthers)}
+                  prose={otherBranchesWarningProse(others, deleteOthers)}
                 />
-              )}
-              {own.length > 0 && (
-                <p className="text-sm text-muted-foreground">
-                  {renderProse(protectedBranchesProse(own))}
-                </p>
-              )}
-            </Collapse>
-            <Collapse open={pillShown}>
-              <AnimatedHeight>
-                <BranchCheckPill
-                  check={check.state === "none" ? { state: "pending" } : check}
-                />
-              </AnimatedHeight>
-            </Collapse>
-            {/* Misclick-safe spacing between the checkboxes and the buttons,
-                one grid gap plus the h-2 every other dialog puts there. The
-                pill already stands between them, so while it is up the
-                spacing goes, and it grows back as the pill leaves rather than
-                popping in after it. */}
-            <div
-              data-testid="delete-footer-spacing"
-              className={cn(
-                "shrink-0 transition-[height] duration-200 ease-out motion-reduce:transition-none",
-                pillShown ? "h-0" : "h-6",
-              )}
-            />
-          </div>
-        )}
-        <AttachedSection blockers={blockers} />
-        {/* Misclick-safe spacing; a managed agent's rides with its pill. */}
-        {!managed && <div className="h-2" />}
-        <DialogFooter>
-          <Button
-            ref={cancelRef}
-            variant="outline"
-            onClick={handleCancel}
-            autoFocus
-          >
-            Cancel
-          </Button>
-          <GuardedConfirmButton
-            verb="Delete"
-            blockers={blockers}
-            pending={pending}
-            onConfirm={() => void handleConfirm()}
-          />
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+              </>
+            )}
+            {ready && (
+              <BranchWarning
+                prose={lossProse(ready, deleteCurrent, deleteOthers)}
+              />
+            )}
+            {own.length > 0 && (
+              <p className="text-sm text-muted-foreground">
+                {renderProse(protectedBranchesProse(own))}
+              </p>
+            )}
+          </Collapse>
+          <Collapse open={pillShown}>
+            <AnimatedHeight>
+              <BranchCheckPill
+                check={check.state === "none" ? { state: "pending" } : check}
+              />
+            </AnimatedHeight>
+          </Collapse>
+        </div>
+      )}
+      <AttachedSection blockers={blockers} />
+    </Modal>
   )
 }
