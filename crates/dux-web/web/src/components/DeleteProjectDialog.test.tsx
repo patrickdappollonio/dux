@@ -146,6 +146,17 @@ describe("DeleteProjectDialog", () => {
     expect(closeDeleteProject).toHaveBeenCalled()
   })
 
+  // Once every worktree answers clean there is nothing to say, so no empty body
+  // pads the card.
+  it("shows no body once every worktree is clean", async () => {
+    seed("p1", [project1], [sessionA])
+    render(<DeleteProjectDialog />)
+    expect(document.querySelector('[data-slot="modal-body"]')).not.toBeNull()
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-slot="modal-body"]')).toBeNull(),
+    )
+  })
+
   // Every worktree the cascade removes is asked about on its own: one line per
   // agent with uncommitted files or a failed look, the agent as a chip, quiet
   // while git is asked, and nothing for a clean worktree.

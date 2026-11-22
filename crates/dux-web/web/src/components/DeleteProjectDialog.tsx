@@ -22,23 +22,22 @@ import { sessionsApi } from "@/lib/sessionsApi"
 import { deleteProjectProse } from "@/lib/projectConfirm"
 import { renderProse } from "@/lib/prose"
 
-// One line per agent worktree the cascade removes that holds uncommitted
-// files, in the agent delete dialog's words: quietly while git is asked, then
-// the count or the failed look; a clean worktree says nothing. Mounted only
-// while the dialog is open, so every open asks afresh. Each agent is asked
-// through its own read-only route, the one the command line's `projects rm`
-// asks, so a project-level route would only repeat it; an agent that joins
-// the project while the dialog is open is asked too. Nothing here holds the
-// confirm.
-function ProjectWorktreeFiles({
-  agents,
-}: {
-  agents: readonly { id: string; name: string }[]
-}) {
-  const [answers, setAnswers] = useState<
-    ReadonlyMap<string, UncommittedAnswer>
-  >(() => new Map())
-  const asked = useRef(new Set<string>())
+// A note per worktree the cascade removes with uncommitted files (quiet while git
+// is asked, nothing when clean), asked afresh on every opening; it never holds the confirm.
+function useProjectWorktreeNotes(
+  open: boolean,
+  agents: readonly { id: string; name: string }[],
+) {
+  // Every opening and closing moves `opening`, so answers to an earlier one are
+  // never shown in a later one.
+  const [seen, setSeen] = useState({ open, opening: 0 })
+  if (seen.open !== open) setSeen({ open, opening: seen.opening + 1 })
+  const opening = seen.opening
+  const [answers, setAnswers] = useState<{
+    opening: number
+    byId: ReadonlyMap<string, UncommittedAnswer>
+  }>(() => ({ opening, byId: new Map() }))
+  const asked = useRef({ opening, ids: new Set<string>() })
   const live = useRef(true)
   useEffect(() => {
     live.current = true
@@ -46,11 +45,12 @@ function ProjectWorktreeFiles({
       live.current = false
     }
   }, [])
-  const ids = agents.map((agent) => agent.id).join("\n")
+  const ids = open ? agents.map((agent) => agent.id).join("\n") : ""
   useEffect(() => {
+    if (asked.current.opening !== opening) asked.current = { opening, ids: new Set() }
     for (const id of ids.split("\n")) {
-      if (id === "" || asked.current.has(id)) continue
-      asked.current.add(id)
+      if (id === "" || asked.current.ids.has(id)) continue
+      asked.current.ids.add(id)
       sessionsApi
         .uncommittedFiles(id)
         .then(
@@ -61,22 +61,24 @@ function ProjectWorktreeFiles({
           }),
         )
         .then((answer) => {
-          if (live.current) setAnswers((prev) => new Map(prev).set(id, answer))
+          if (!live.current) return
+          setAnswers((prev) =>
+            prev.opening > opening
+              ? prev
+              : {
+                  opening,
+                  byId: new Map(prev.opening === opening ? prev.byId : []).set(id, answer),
+                },
+          )
         })
     }
-  }, [ids])
-  const notes = agents.flatMap((agent) => {
-    const note = worktreeFilesNote(agent.name, answers.get(agent.id) ?? null)
+  }, [ids, opening])
+  const byId = answers.opening === opening ? answers.byId : new Map<string, UncommittedAnswer>()
+  if (!open) return []
+  return agents.flatMap((agent) => {
+    const note = worktreeFilesNote(agent.name, byId.get(agent.id) ?? null)
     return note === null ? [] : [{ id: agent.id, note }]
   })
-  if (notes.length === 0) return null
-  return (
-    <div className="flex flex-col gap-1">
-      {notes.map(({ id, note }) => (
-        <WorktreeFilesNote key={id} note={note} />
-      ))}
-    </div>
-  )
 }
 
 // The destructive cascade counterpart to `RemoveProjectDialog`: it also deletes
@@ -105,6 +107,7 @@ export function DeleteProjectDialog() {
     id: s.id,
     name: sessionLabel(s),
   }))
+  const notes = useProjectWorktreeNotes(isOpen, worktrees)
 
   async function handleConfirm() {
     if (!deleteProjectTarget) return
@@ -131,9 +134,15 @@ export function DeleteProjectDialog() {
         onConfirm: () => void handleConfirm(),
       })}
     >
-      {worktrees.length > 0 || driven.length > 0 || blockers?.length ? (
+      {notes.length > 0 || driven.length > 0 || blockers?.length ? (
         <>
-          {isOpen && <ProjectWorktreeFiles agents={worktrees} />}
+          {notes.length > 0 && (
+            <div className="flex flex-col gap-1">
+              {notes.map(({ id, note }) => (
+                <WorktreeFilesNote key={id} note={note} />
+              ))}
+            </div>
+          )}
           <DrivenElsewhereSection driven={driven} />
           <AttachedSection blockers={blockers} />
         </>
