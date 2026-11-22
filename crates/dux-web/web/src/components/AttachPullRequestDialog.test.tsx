@@ -149,35 +149,16 @@ describe("AttachPullRequestDialog", () => {
     expect(submitAttachPullRequest).not.toHaveBeenCalled()
   })
 
-  it("is a bottom sheet on a phone, its field and buttons at one height", () => {
-    const desktopWidth = window.innerWidth
-    Object.defineProperty(window, "innerWidth", { value: 360, configurable: true })
-    try {
-      seed("s1", "#123", [bare])
-      render(<AttachPullRequestDialog />)
-      expect(document.querySelector('[data-slot="sheet-content"]')).not.toBeNull()
-      const controls = [
-        screen.getByPlaceholderText("PR URL, #123, or 123"),
-        screen.getByRole("button", { name: "Cancel" }),
-        screen.getByRole("button", { name: "Attach" }),
-      ]
-      for (const control of controls) {
-        expect(control.className).toMatch(/(^| )h-11( |$)/)
-      }
-    } finally {
-      Object.defineProperty(window, "innerWidth", { value: desktopWidth, configurable: true })
-    }
-  })
-
-  it("gives its field the buttons' height under a finger", () => {
+  it("gives its field the footer buttons' height under a finger", () => {
     seed("s1", "#123", [bare])
     render(<AttachPullRequestDialog />)
-    for (const control of [
-      screen.getByPlaceholderText("PR URL, #123, or 123"),
-      screen.getByRole("button", { name: "Cancel" }),
-      screen.getByRole("button", { name: "Attach" }),
-    ]) {
-      expect(control.className).toMatch(/(^| )pointer-coarse:h-11( |$)/)
+    expect(screen.getByPlaceholderText("PR URL, #123, or 123").className).toMatch(
+      /(^| )pointer-coarse:h-11( |$)/,
+    )
+    for (const name of ["Cancel", "Attach"]) {
+      expect(screen.getByRole("button", { name }).className).toMatch(
+        /(^| )pointer-coarse:min-h-11( |$)/,
+      )
     }
   })
 

@@ -219,7 +219,9 @@ describe("CloneProjectDialog", () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(store.getSnapshot().cloneProject?.name).toBe("third")
     expect(screen.queryByRole("alert")).toBeNull()
-    expect((clone() as HTMLButtonElement).disabled).toBe(true)
+    // Busy sending, it keeps its focus and says it is unavailable.
+    expect(clone().getAttribute("aria-busy")).toBe("true")
+    expect(clone().getAttribute("aria-disabled")).toBe("true")
 
     third.release(reply(202, JSON.stringify({ op_id: "op-c" })))
     await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
@@ -560,7 +562,9 @@ describe("CloneProjectDialog for a pull request", () => {
     fireEvent.click(primary("Clone and create"))
     await waitFor(() => expect(posted).toHaveLength(1))
     type(destination(), "/home/u/elsewhere")
-    expect(primary("Clone and create").disabled).toBe(true)
+    expect(primary("Clone and create").getAttribute("aria-busy")).toBe("true")
+    expect(primary("Clone and create").getAttribute("aria-disabled")).toBe("true")
+    fireEvent.click(primary("Clone and create"))
     sent.release(reply(202, JSON.stringify({ op_id: "op-1" })))
     await waitFor(() => expect(store.getSnapshot().cloneProject).toBeNull())
     expect(posted).toHaveLength(1)
