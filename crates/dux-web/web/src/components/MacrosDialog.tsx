@@ -18,7 +18,6 @@ import {
 } from "@dnd-kit/sortable"
 import {
   ArrowUpToLine,
-  ChevronLeft,
   ChevronRight,
   Copy,
   Ellipsis,
@@ -27,15 +26,16 @@ import {
   SquareSlash,
   Trash2,
   TriangleAlert,
-  X,
 } from "lucide-react"
 
-import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
-import { ConfirmsOutlet } from "@/components/ConfirmsOutlet"
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
-import { usePublishConfirms, type ConfirmsSetterRef } from "@/hooks/use-publish-confirms"
-import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { MatchHighlight } from "@/components/MatchHighlight"
+import {
+  Modal,
+  useHeldWhileClosed,
+  useModalLifetime,
+  type ModalCloseReason,
+} from "@/components/modal"
 import {
   addItem,
   changeCount,
@@ -58,14 +58,6 @@ import {
 } from "@/components/macrosDraft"
 import { Button } from "@/components/ui/button"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
@@ -84,7 +76,6 @@ import {
 } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
-import { SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { tabsListVariants } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -135,124 +126,52 @@ const WHOLE_MARKS = "[&_mark]:inline-block"
 
 const DESCRIPTION = "Text you send to an agent or a terminal from its Macros… button."
 
-// How the dialog answers a request to close: the root hands every dismissal to
-// the editor, which alone knows whether there is anything to lose.
-interface CloseHandler {
-  // Cancel, Escape, the close button, a press outside: asks first when there
-  // are unsaved changes.
-  request: () => void
-  // The browser's Back on the list, which closes the dialog and cannot be
-  // asked to wait, so unsaved changes are set aside for the next opening.
-  back: () => void
-}
-
 // The macro editor: list and editor side by side on a computer; on a phone the
-// list, and the editor as a second sheet over it. Nothing is written until
-// Save sends the whole list.
+// list, and the editor as a second step of the same cover. Nothing is written
+// until Save sends the whole list.
 export function MacrosDialog() {
-  const { macrosDialogOpen, macrosDraftEpoch, bootstrap } = useDux()
-  const isMobile = useIsMobile()
-  const closeRef = useRef<CloseHandler | null>(null)
-  const confirmsOutlet = useRef<((confirms: ReactNode) => void) | null>(null)
-
-  return (
-    <>
-      <ConfirmsOutlet setterRef={confirmsOutlet} />
-      <Dialog
-        open={macrosDialogOpen}
-        onOpenChange={(open, details) => {
-          if (open) return
-          const editor = closeRef.current
-          if (editor === null) {
-            closeMacrosDialog()
-            return
-          }
-          // Back is the shared primitive's imperative close; it keeps asking
-          // until the dialog is gone, so it cannot stop at a question.
-          if (details.reason === "imperative-action") {
-            editor.back()
-            return
-          }
-          details.cancel()
-          editor.request()
-        }}
-      >
-        {macrosDialogOpen ? (
-          bootstrap === null ? (
-            <Shell phone={isMobile}>
-              <p className="py-10 text-center text-sm text-muted-foreground">
-                Loading the macros…
-              </p>
-            </Shell>
-          ) : (
-            <MacrosEditor
-              key={macrosDraftEpoch}
-              phone={isMobile}
-              closeRef={closeRef}
-              confirmsOutlet={confirmsOutlet}
-            />
-          )
-        ) : null}
-      </Dialog>
-    </>
-  )
+  const { macrosDialogOpen } = useDux()
+  const life = useModalLifetime(macrosDialogOpen)
+  return life.mounted ? (
+    <MacrosEditor key={life.epoch} open={macrosDialogOpen} onClosed={life.onClosed} />
+  ) : null
 }
 
-// A dialog on a computer, a bottom sheet on a phone, both under the one dialog
-// root, so a rotation swaps the shell without remounting the editor's draft.
-// Closing hands focus where the opener asked, else where the dialog chooses.
-function Shell({
-  phone,
-  initialFocus,
-  sheetRef,
-  children,
-}: {
-  phone: boolean
-  initialFocus?: () => HTMLElement | boolean | null
-  sheetRef?: RefObject<HTMLDivElement | null>
-  children: ReactNode
-}) {
-  const finalFocus = () => macrosDialogReturnFocus() ?? true
-  if (phone) {
-    return (
-      <SheetContent
-        ref={sheetRef}
-        side="bottom"
-        showCloseButton={false}
-        initialFocus={initialFocus}
-        finalFocus={finalFocus}
-        fullHeight
-        className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
-      >
-        {children}
-      </SheetContent>
-    )
+// State that starts over whenever `session` changes: the editor is reseeded in
+// place when its draft is reloaded, with the modal around it staying open.
+function useSessionState<T>(
+  session: string,
+  init: () => T,
+): [T, (next: T | ((prev: T) => T)) => void] {
+  const [held, setHeld] = useState(() => ({ session, value: init() }))
+  let now = held
+  if (held.session !== session) {
+    now = { session, value: init() }
+    setHeld(now)
   }
-  return (
-    <DialogContent
-      initialFocus={initialFocus}
-      finalFocus={finalFocus}
-      className="flex h-[min(40rem,calc(100dvh-2rem))] flex-col gap-4 sm:max-w-[55rem]"
-    >
-      {children}
-    </DialogContent>
-  )
+  return [
+    now.value,
+    (next) =>
+      setHeld((prev) => ({
+        session: prev.session,
+        value: typeof next === "function" ? (next as (prev: T) => T)(prev.value) : next,
+      })),
+  ]
 }
 
-function MacrosEditor({
-  phone,
-  closeRef,
-  confirmsOutlet,
-}: {
-  phone: boolean
-  closeRef: RefObject<CloseHandler | null>
-  confirmsOutlet: ConfirmsSetterRef
-}) {
-  const { bootstrap, macrosDraft, macrosConflict } = useDux()
-  // Read once: the editing session this mounting opens. The dots and the
-  // change count compare against the list its edits were made against, and
-  // Save sends that list's version.
-  const [start] = useState(() => {
+function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const state = useDux()
+  const { bootstrap, macrosDraft } = state
+  // Closing clears it in the store; held, the notice stays while it fades.
+  const macrosConflict = useHeldWhileClosed(open, state.macrosConflict)
+  const phone = useIsMobile()
+  const loading = bootstrap === null
+  // One editing session: an opening, or a reload of the draft inside one, once
+  // the macros have loaded.
+  const session = `${state.macrosDraftEpoch}:${loading ? "loading" : "loaded"}`
+  // Read once per session. The dots and the change count compare against the
+  // list its edits were made against, and Save sends that list's version.
+  const [start] = useSessionState(session, () => {
     const edit =
       macrosDraft ??
       savedMacrosEdit(bootstrap?.macros ?? [], bootstrap?.macros_version ?? null)
@@ -268,34 +187,30 @@ function MacrosEditor({
     }
   })
   const { baseline, version } = start
-  const [items, setItems] = useState<DraftMacro[]>(start.items)
-  const [selectedKey, setSelectedKey] = useState<number | null>(start.selected)
-  const [query, setQuery] = useState("")
-  const [filter, setFilter] = useState<MacroFilter>("all")
-  // On a phone, "edit" is the second step, a sheet of its own over the list,
-  // so it holds a history entry of its own and Back returns to the list.
-  const [step, setStep] = useState<"list" | "edit">(start.step)
-  const [deleteKey, setDeleteKey] = useState<number | null>(null)
-  const [discardOpen, setDiscardOpen] = useState(false)
-  // Focused when the discard confirm opened; it has no trigger to return to.
-  const discardFrom = useRef<Element | null>(null)
+  const [items, setItems] = useSessionState<DraftMacro[]>(session, () => start.items)
+  const [selectedKey, setSelectedKey] = useSessionState<number | null>(session, () => start.selected)
+  const [query, setQuery] = useSessionState(session, () => "")
+  const [filter, setFilter] = useSessionState<MacroFilter>(session, () => "all")
+  // On a phone, "edit" is the second step of the cover: its title row carries
+  // the way back to the list, and the browser's Back takes it too.
+  const [step, setStep] = useSessionState<"list" | "edit">(session, () => start.step)
+  const [deleteKey, setDeleteKey] = useSessionState<number | null>(session, () => null)
   // The macros added here that the user has typed into: one not typed into
   // yet is not called nameless before anything was asked of it.
-  const [touched, setTouched] = useState<ReadonlySet<number>>(() => new Set())
+  const [touched, setTouched] = useSessionState<ReadonlySet<number>>(session, () => new Set())
   // Bumped to put the caret in the name field of the selected macro.
   const [focusName, setFocusName] = useState(0)
   const nameRef = useRef<HTMLInputElement | null>(null)
-  const backRef = useRef<HTMLButtonElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
   const emptyNewRef = useRef<HTMLButtonElement | null>(null)
   const rowEls = useRef(new Map<number, HTMLLIElement>())
-  const sheetRef = useRef<HTMLDivElement | null>(null)
   // The row a press just selected, which is already where the pointer is.
   const pressed = useRef<number | null>(null)
   // The row still to be brought into view, for when it is not drawn yet.
   const owedScroll = useRef<number | null>(null)
   // The row focus lands on when the list comes back: the one the phone's
   // editor opened from, or the neighbour of a deleted macro.
-  const listFocus = useRef<number | null>(null)
+  const listFocus = useRef<number | null>(start.picked ? start.selected : null)
   // Whether the phone's editor opens with the caret in the name (a new macro).
   const editorFocusesName = useRef(false)
   // Set by a confirmed delete, for the confirm's close to read.
@@ -315,20 +230,6 @@ function MacrosEditor({
   function currentEdit() {
     return draftToEdit(items, baseline, version, phone && step === "list" ? null : selectedKey)
   }
-
-  useEffect(() => {
-    closeRef.current = {
-      request: () => {
-        if (changes === 0) return closeMacrosDialog()
-        discardFrom.current = document.activeElement
-        setDiscardOpen(true)
-      },
-      back: () => (changes > 0 ? setAsideMacrosDraft(currentEdit(), changes) : closeMacrosDialog()),
-    }
-    return () => {
-      closeRef.current = null
-    }
-  })
 
   useEffect(() => {
     if (focusName > 0) nameRef.current?.focus()
@@ -437,12 +338,24 @@ function MacrosEditor({
     else setFocusName((n) => n + 1)
   }
 
-  // Where focus goes when the list is back on screen: the row it should land
-  // on, else the empty state's New macro, else the dialog's own choice.
-  function listFocusTarget(): HTMLElement | boolean {
+  // The row focus should land on when the list is on screen, else the empty
+  // state's New macro.
+  function listFocusRow(): HTMLElement | null {
     const key = listFocus.current
     const row = key === null ? undefined : rowEls.current.get(key)
-    return row ?? emptyNewRef.current ?? true
+    return row ?? emptyNewRef.current
+  }
+
+  // What takes focus when the modal opens or changes step; null leaves it to
+  // the modal, which on a computer picks the search field.
+  function initialFocus(): HTMLElement | null {
+    // A refused save's notice put focus on its Keep editing as it mounted:
+    // reloading throws the edits away, so the focus stays there.
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.closest("[data-stale-save]")) return active
+    if (!phone) return start.picked ? nameRef.current : emptyNewRef.current
+    if (step === "edit") return editorFocusesName.current ? nameRef.current : null
+    return listFocusRow() ?? searchRef.current
   }
 
   function save() {
@@ -484,53 +397,49 @@ function MacrosEditor({
     />
   )
 
-  const search = (
-    <div
-      className={cn(
-        "flex min-w-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
-        // In the phone's column a flex basis would override the height.
-        phone ? "shrink-0" : "flex-1",
-        CONTROL_HEIGHT,
-      )}
-    >
-      <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-      <input
-        value={query}
-        onChange={(event) => narrow(event.target.value, filter)}
-        placeholder="Search macros"
-        aria-label="Search macros"
-        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+  // Search and New share a row, with the filter under them: the head of the
+  // computer's list column, and on a phone the row over the list that does
+  // not scroll with it.
+  const listHead = (
+    <>
+      <div className="flex items-center gap-2">
+        <div
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
+            CONTROL_HEIGHT,
+          )}
+        >
+          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(event) => narrow(event.target.value, filter)}
+            placeholder="Search macros"
+            aria-label="Search macros"
+            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          />
+        </div>
+        <Button variant="outline" className={cn("shrink-0", CONTROL_HEIGHT)} onClick={addNew}>
+          <Plus />
+          New
+        </Button>
+      </div>
+      <SegmentedChoice
+        label="Show macros for"
+        value={filter}
+        options={FILTERS.map((f) => ({
+          value: f.value,
+          label: (
+            <>
+              {f.label}
+              <span className="tabular-nums">{filterCounts(items)[f.value]}</span>
+            </>
+          ),
+        }))}
+        onChange={(f) => narrow(query, f)}
+        className="w-full shrink-0"
       />
-    </div>
-  )
-
-  const filterChoice = (
-    <SegmentedChoice
-      label="Show macros for"
-      value={filter}
-      options={FILTERS.map((f) => ({
-        value: f.value,
-        label: (
-          <>
-            {f.label}
-            <span className="tabular-nums">{filterCounts(items)[f.value]}</span>
-          </>
-        ),
-      }))}
-      onChange={(f) => narrow(query, f)}
-      className="w-full shrink-0"
-    />
-  )
-
-  const newButton = (
-    <Button
-      variant="outline"
-      className={cn("shrink-0", CONTROL_HEIGHT)}
-      onClick={addNew}
-    >
-      <Plus />
-      New
-    </Button>
+    </>
   )
 
   const empty = (
@@ -559,11 +468,13 @@ function MacrosEditor({
     </Empty>
   )
 
+  const editing = phone && step === "edit" && selected !== null
   // The way to the macro at fault, unless it is the one already on screen.
   const problemOnScreen =
-    shownProblem !== null && shownProblem.key === selectedKey && (!phone || step === "edit")
-  const notices = (
-    <>
+    shownProblem !== null && shownProblem.key === selectedKey && (!phone || editing)
+  const hasNotices = Boolean(macrosConflict) || (shownProblem !== null && items.length > 0)
+  const notices = hasNotices ? (
+    <div className="flex shrink-0 flex-col gap-2">
       {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
       {shownProblem && items.length > 0 ? (
         <div className="flex items-center gap-3">
@@ -581,214 +492,131 @@ function MacrosEditor({
           )}
         </div>
       ) : null}
-    </>
-  )
+    </div>
+  ) : null
 
-  const saveHint =
-    (problem ? proseText(problem.message) : null) ??
-    (changes === 0 ? "Nothing has changed since the macros were saved." : null)
-  const saveDisabled = saveHint !== null
-  const saveLabel =
-    phone && changes > 0 ? `Save ${changes} ${changes === 1 ? "change" : "changes"}` : "Save"
-  const saveButton = (
-    <ExplainedWhenDisabled
-      disabled={saveDisabled}
-      hint={saveHint}
-      className={cn("rounded-lg", phone && "w-full")}
-    >
-      <Button disabled={saveDisabled} className={cn(phone && "h-11 w-full")} onClick={save}>
-        {saveLabel}
-      </Button>
-    </ExplainedWhenDisabled>
-  )
-  const cancelButton = (
-    <Button
-      variant="outline"
-      className={cn(phone && "h-11 w-full")}
-      onClick={() => closeRef.current?.request()}
-    >
-      Cancel
-    </Button>
-  )
-  // With nothing to keep or lose, the one way out is Close.
+  const saveHint = loading
+    ? "The macros are still loading."
+    : ((problem ? proseText(problem.message) : null) ??
+      (changes === 0 ? "Nothing has changed since the macros were saved." : null))
+  // With nothing to keep or lose, the way out says Close.
   const quiet = items.length === 0 && changes === 0
 
-  const confirms = (
-    <>
-      <ConfirmDeleteMacro
-        macro={deleting}
-        saved={deleting !== null && deleting.origin !== null}
-        onCancel={() => setDeleteKey(null)}
-        onConfirm={confirmDelete}
-        finalFocus={() => {
-          if (!deleted.current) return true
-          deleted.current = false
-          return listFocusTarget()
-        }}
-      />
-      <ConfirmDiscardEditsDialog
-        open={discardOpen}
-        holder="The macros have"
-        changes={changes}
-        leaves={[chip("config.toml")]}
-        onKeep={() => setDiscardOpen(false)}
-        finalFocus={() => {
-          const from = discardFrom.current
-          return from instanceof HTMLElement && from.isConnected ? from : true
-        }}
-        onDiscard={() => {
-          setDiscardOpen(false)
-          closeMacrosDialog()
-        }}
-      />
-    </>
+  const common = {
+    kind: "form",
+    open,
+    onClosed,
+    // Back with edits has set them aside, which closed the dialog already.
+    onClose: (reason: ModalCloseReason) => {
+      if (reason !== "back" || changes === 0) closeMacrosDialog()
+    },
+    // On the phone's editor the browser's Back is the title row's: it returns
+    // to the list, and only from there does it close.
+    beforeClose: (reason: ModalCloseReason) => {
+      if (reason !== "back" || !editing) return "close"
+      setStep("list")
+      return "stay"
+    },
+    // Back cannot stop to ask, so it sets the edits aside for the next opening.
+    unsavedEdits: {
+      changes,
+      holder: "The macros have",
+      leaves: [chip("config.toml")],
+      setAside: () => setAsideMacrosDraft(currentEdit(), changes),
+    },
+    size: "w880",
+    height: "h640",
+    initialFocus,
+    // Where the opener asked, else where the modal chooses.
+    finalFocus: () => macrosDialogReturnFocus() ?? true,
+    cancelLabel: quiet ? "Close" : "Cancel",
+    submit: {
+      label: phone && changes > 0 ? `Save ${changes} ${changes === 1 ? "change" : "changes"}` : "Save",
+      tone: "primary",
+      onSelect: save,
+      disabledReason: saveHint,
+    },
+  } as const
+
+  const confirm = (
+    <ConfirmDeleteMacro
+      macro={deleting}
+      onCancel={() => setDeleteKey(null)}
+      onConfirm={confirmDelete}
+      finalFocus={() => {
+        if (!deleted.current) return true
+        deleted.current = false
+        return listFocusRow() ?? true
+      }}
+    />
   )
 
-  usePublishConfirms(confirmsOutlet, confirms)
-
-  const initialFocus = () => {
-    // The sheet itself on a phone: a control focused by the opening would
-    // wear its focus ring for no reason the person gave.
-    if (phone) return sheetRef.current ?? true
-    return start.picked ? (nameRef.current ?? true) : true
+  if (loading) {
+    return (
+      <Modal {...common} title="Macros">
+        <p className="py-10 text-center text-sm text-muted-foreground">Loading the macros…</p>
+      </Modal>
+    )
   }
 
   if (phone) {
-    const closeButton = (
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-10 shrink-0"
-        aria-label="Close"
-        onClick={() => closeRef.current?.request()}
-      >
-        <X />
-      </Button>
-    )
-    const footer = quiet ? null : (
-      <div className="flex shrink-0 flex-col gap-2 border-t bg-muted/50 px-4 pt-3 pb-4">
-        {notices}
-        {saveButton}
-        {cancelButton}
-      </div>
-    )
-    const editing = step === "edit" && selected !== null
     return (
-      <Shell phone initialFocus={initialFocus} sheetRef={sheetRef}>
-        <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
-          <SheetTitle className="flex-1">Macros</SheetTitle>
-          {items.length > 0 ? newButton : null}
-          {closeButton}
-        </div>
-        {items.length === 0 ? (
-          <div className="flex min-h-0 flex-1 flex-col p-4">{empty}</div>
-        ) : (
-          <>
-            <div className="flex shrink-0 flex-col gap-2 px-4 pt-3 pb-1">
-              {search}
-              {filterChoice}
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 py-1">{list}</div>
-          </>
-        )}
-        {/* The editor's sheet covers this one and carries its own. */}
-        {editing ? null : footer}
-        <Dialog
-          open={editing}
-          onOpenChange={(open, details) => {
-            if (open) return
-            // Back is the one close that steps back; Escape and a press
-            // outside close the whole dialog, asking first.
-            if (details.reason === "imperative-action") {
-              setStep("list")
-              return
-            }
-            details.cancel()
-            closeRef.current?.request()
-          }}
+      <>
+        <Modal
+          {...common}
+          title={editing ? "Edit macro" : "Macros"}
+          step={editing ? "edit" : "list"}
+          back={editing ? { label: "all macros", onSelect: () => setStep("list") } : undefined}
+          toolbar={
+            editing || items.length === 0 ? undefined : (
+              <div className="flex flex-col gap-2">{listHead}</div>
+            )
+          }
+          footerNote={notices ?? undefined}
         >
-          <SheetContent
-            side="bottom"
-            showCloseButton={false}
-            initialFocus={() =>
-              (editorFocusesName.current ? nameRef.current : backRef.current) ?? true
-            }
-            finalFocus={listFocusTarget}
-            fullHeight
-            className="gap-0 rounded-t-2xl pb-[env(safe-area-inset-bottom)]"
-          >
-            <SheetTitle className="sr-only">Edit macro</SheetTitle>
-            <div className="flex min-h-16 shrink-0 items-center gap-2 border-b py-3 pr-3 pl-4">
-              <Button
-                ref={backRef}
-                variant="ghost"
-                className="h-10 pl-1"
-                aria-label="Back to all macros"
-                onClick={() => setStep("list")}
-              >
-                <ChevronLeft />
-                Macros
-              </Button>
-              <div className="flex-1" />
-              {closeButton}
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">{editor}</div>
-            {footer}
-          </SheetContent>
-        </Dialog>
-      </Shell>
+          {editing ? editor : items.length === 0 ? empty : list}
+        </Modal>
+        {confirm}
+      </>
     )
   }
 
   return (
-    <Shell phone={false} initialFocus={initialFocus}>
-      <DialogHeader className="shrink-0 pr-8">
-        <DialogTitle>Macros</DialogTitle>
-        <DialogDescription>{DESCRIPTION}</DialogDescription>
-      </DialogHeader>
-      {items.length === 0 ? (
-        <div className="flex min-h-0 flex-1 flex-col">{empty}</div>
-      ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[18rem_minmax(0,1fr)] gap-4">
-          <div className="flex min-h-0 flex-col gap-2">
-            <div className="flex items-center gap-2">
-              {search}
-              {newButton}
-            </div>
-            {filterChoice}
-            {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
-                into the column gap so the rows still line up with the search. */}
-            <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
-              <div
-                className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
-                style={{ height: listHeight }}
-              >
-                {list}
+    <>
+      <Modal
+        {...common}
+        title="Macros"
+        description={DESCRIPTION}
+        footerNote={
+          <span aria-live="polite">{changes > 0 ? unsavedChangesLabel(changes) : null}</span>
+        }
+      >
+        {items.length === 0 ? (
+          <div className="flex min-h-0 flex-1 flex-col">{empty}</div>
+        ) : (
+          <div className="grid min-h-0 flex-1 grid-cols-[18rem_minmax(0,1fr)] gap-4">
+            <div className="flex min-h-0 flex-col gap-2">
+              {listHead}
+              {/* The scrollbar keeps clear of the rows: a stable gutter, pulled
+                  into the column gap so the rows still line up with the search. */}
+              <div ref={setListRoom} className="flex min-h-0 flex-1 flex-col">
+                <div
+                  className="-mr-2 flex min-h-0 flex-col overflow-y-auto pr-2 [scrollbar-gutter:stable]"
+                  style={{ height: listHeight }}
+                >
+                  {list}
+                </div>
               </div>
             </div>
+            <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
+              {editor}
+            </div>
           </div>
-          <div className="flex min-h-0 flex-col overflow-y-auto rounded-lg border p-4">
-            {editor}
-          </div>
-        </div>
-      )}
-      {notices}
-      <DialogFooter className="shrink-0 sm:items-center">
-        {quiet ? (
-          <Button variant="outline" onClick={() => closeRef.current?.request()}>
-            Close
-          </Button>
-        ) : (
-          <>
-            <span aria-live="polite" className="text-xs text-muted-foreground sm:mr-auto">
-              {changes > 0 ? unsavedChangesLabel(changes) : null}
-            </span>
-            {cancelButton}
-            {saveButton}
-          </>
         )}
-      </DialogFooter>
-    </Shell>
+        {notices}
+      </Modal>
+      {confirm}
+    </>
   )
 }
 
@@ -1207,55 +1035,48 @@ function MacroFields({
   )
 }
 
-// Delete only takes the macro out of the draft; Save is what writes it.
+// Delete only takes the macro out of the draft; Save is what writes it. A
+// sibling of the editor's modal, never inside it: a dialog nested in another
+// draws no overlay of its own.
 function ConfirmDeleteMacro({
-  macro,
-  saved,
+  macro: live,
   onCancel,
   onConfirm,
   finalFocus,
 }: {
   macro: DraftMacro | null
-  saved: boolean
   onCancel: () => void
   onConfirm: () => void
   finalFocus: () => HTMLElement | boolean
 }) {
-  const named = macro !== null && macro.name.trim() !== ""
+  // The macro it asked about, kept while the close animates.
+  const [last, setLast] = useState(live)
+  if (live !== null && live !== last) setLast(live)
+  const macro = live ?? last
+  const name = macro?.name.trim() ?? ""
   return (
-    <Dialog
-      open={macro !== null}
-      onOpenChange={(open) => {
-        if (!open) onCancel()
-      }}
-    >
-      <DialogContent showCloseButton={false} destructive finalFocus={finalFocus}>
-        <DialogHeader>
-          <DialogTitle>Delete this macro?</DialogTitle>
-          <DialogDescription>
-            {named ? <InlineCode>{macro.name.trim()}</InlineCode> : "This untitled macro"}{" "}
-            {saved ? (
-              <>
-                leaves the list now and from <InlineCode>config.toml</InlineCode> when
-                you save.
-              </>
-            ) : (
-              "leaves the list now. It was never saved, so nothing else changes."
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        {/* Misclick-safe spacing between the body and the buttons. */}
-        <div className="h-2" />
-        <DialogFooter>
-          <Button variant="outline" autoFocus onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            Delete
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Modal
+      kind="confirm"
+      open={live !== null}
+      onClose={onCancel}
+      title="Delete this macro?"
+      description={
+        <>
+          {name !== "" ? <InlineCode>{name}</InlineCode> : "This untitled macro"}{" "}
+          {macro !== null && macro.origin !== null ? (
+            <>
+              leaves the list now and from <InlineCode>config.toml</InlineCode> when
+              you save.
+            </>
+          ) : (
+            "leaves the list now. It was never saved, so nothing else changes."
+          )}
+        </>
+      }
+      cancelLabel="Cancel"
+      confirm={{ label: "Delete", tone: "destructive", onSelect: onConfirm }}
+      finalFocus={finalFocus}
+    />
   )
 }
 
@@ -1265,7 +1086,8 @@ function StaleSaveNotice({ message }: { message: string }) {
   return (
     <div
       role="alert"
-      className="flex shrink-0 flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
+      data-stale-save=""
+      className="flex shrink-0 flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-foreground"
     >
       <div className="flex items-start gap-2">
         <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />

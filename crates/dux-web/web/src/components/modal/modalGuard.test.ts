@@ -210,7 +210,6 @@ const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 // has moved or changed fails until the entry follows it.
 const STILL_TO_MOVE: Record<string, Entry> = {
   "components/CustomizeWebappDialog.tsx": { ...ROOTS(3) },
-  "components/MacrosDialog.tsx": { ...ROOTS(3) },
 }
 
 // Surfaces that are deliberately not modals of the four kinds, by name. One

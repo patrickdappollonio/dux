@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import type { DragEndEvent } from "@dnd-kit/core"
 import type { DuxState } from "@/lib/store"
@@ -320,7 +320,7 @@ describe("MacrosDialog closing", () => {
     const ask = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
     expect(closeMacrosDialogMock).not.toHaveBeenCalled()
     const keep = within(ask).getByRole("button", { name: "Keep editing" })
-    expect(document.activeElement).toBe(keep)
+    await waitFor(() => expect(document.activeElement).toBe(keep))
 
     await click(keep)
     expect(closeMacrosDialogMock).not.toHaveBeenCalled()
@@ -421,7 +421,7 @@ describe("MacrosDialog editor", () => {
     await menuPick("Delete…")
     const confirm = await screen.findByRole("dialog", { name: "Delete this macro?" })
     const cancel = within(confirm).getByRole("button", { name: "Cancel" })
-    expect(document.activeElement).toBe(cancel)
+    await waitFor(() => expect(document.activeElement).toBe(cancel))
     expect(within(confirm).getByText("Review").getAttribute("data-slot")).toBe("inline-code")
 
     await click(cancel)
@@ -677,8 +677,10 @@ describe("MacrosDialog stale save", () => {
 
     const notice = screen.getByRole("alert")
     expect(notice.textContent).toContain("changed after this dialog read it")
-    // Reloading throws the edits away, so keeping them is what has focus.
+    // Reloading throws the edits away, so keeping them is what has focus, and
+    // the dialog's own choice of focus on opening leaves it there.
     const keep = screen.getByRole("button", { name: "Keep editing" })
+    await settle()
     expect(document.activeElement).toBe(keep)
 
     await click(screen.getByRole("button", { name: "Reload macros" }))
@@ -686,6 +688,23 @@ describe("MacrosDialog stale save", () => {
 
     await click(keep)
     expect(dismissMacrosConflictMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("starts over from a reloaded list in place, without opening the dialog again", async () => {
+    seed(seedMacros)
+    const { rerender } = render(<MacrosDialog />)
+    await typeInto("Text", "changed")
+    expect(screen.getByText("1 unsaved change")).toBeTruthy()
+    const dialog = screen.getByRole("dialog", { name: "Macros" })
+
+    // What a reload leaves in the store: the saved list as a new draft.
+    const reloaded = [{ name: "Lint", text: "cargo clippy", surface: "terminal" as const }]
+    seed(reloaded)
+    mockState = { ...mockState, macrosDraftEpoch: 1 }
+    rerender(<MacrosDialog />)
+    expect(listedNames()).toEqual(["Lint"])
+    expect(screen.queryByText(/unsaved change/)).toBeNull()
+    expect(screen.getByRole("dialog", { name: "Macros" })).toBe(dialog)
   })
 
   it("shows the refused edits as unsaved changes", () => {
@@ -739,12 +758,29 @@ describe("MacrosDialog brings the selected macro into view", () => {
 })
 
 describe("MacrosDialog focus on a phone", () => {
-  it("opens with focus on the sheet, not on New", async () => {
+  it("opens under a finger with focus on the dialog, not on New or the search field", async () => {
     phone = true
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query === "(pointer: coarse)",
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    )
     seed(seedMacros)
     render(<MacrosDialog />)
     await settle()
     expect(document.activeElement).toBe(screen.getByRole("dialog", { name: "Macros" }))
+  })
+
+  it("opens under a mouse in the phone's layout with focus in the search field", async () => {
+    phone = true
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    await settle()
+    expect(document.activeElement).toBe(screen.getByLabelText("Search macros"))
   })
 
   it("hands focus back to the control that opened it after a Save from a macro's editor", async () => {
