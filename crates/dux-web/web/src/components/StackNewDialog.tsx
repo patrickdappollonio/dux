@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react"
 import { useState, type ReactNode } from "react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
@@ -80,8 +80,11 @@ export function StackNewDialog({
   const underCard = block === "other" || block === "nobody"
   const provider = defaultProviderForSession(spine, session)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
-  const tabDisabled =
-    changesBlocked || session.tabs.length >= cap || createTabInFlight.includes(session.id)
+  // Held while the close animates: the tab a press adds is in flight by then.
+  const tabDisabled = useHeldWhileClosed(
+    open,
+    changesBlocked || session.tabs.length >= cap || createTabInFlight.includes(session.id),
+  )
   const run = (act: () => void) => {
     onClose()
     act()

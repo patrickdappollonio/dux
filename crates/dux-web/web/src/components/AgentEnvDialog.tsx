@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
 import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
@@ -24,13 +24,23 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
   const { spine, agentEnvTarget } = useDux()
   // The agent this open is about, kept while the close animates.
   const [targetId] = useState(agentEnvTarget)
-  const session = spine?.sessions.find((s) => s.id === targetId)
-  const project = spine?.projects.find(
-    (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+  // The agent and its project as they were when the close began, kept while
+  // the close animates, so the settings a save just applied do not read as
+  // unchanged.
+  const session = useHeldWhileClosed(
+    open,
+    spine?.sessions.find((s) => s.id === targetId),
+  )
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find(
+      (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+    ),
   )
   const [opened] = useState(() => envToText(project?.env ?? {}))
   const [text, setText] = useState(opened)
-  const [saving, setSaving] = useState(false)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
   const edit = envEdit(project?.env ?? {}, opened, text)
   const leftOutNote = envLeftOutNote(edit.leftOut)
 

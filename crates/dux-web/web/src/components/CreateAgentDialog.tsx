@@ -3,7 +3,7 @@ import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { Input } from "@/components/ui/input"
@@ -28,18 +28,19 @@ import {
 } from "@/lib/store"
 
 export function CreateAgentDialog() {
-  const {
-    createAgentTarget,
-    createAgentDraft,
-    createAgentRandomize,
-    createAgentCopyChanges,
-    createAgentNamePending,
-    createAgentPrInput,
-    createAgentPrResolving,
-    createAgentPrError,
-    createAgentReviewCopy,
-    spine,
-  } = useDux()
+  const live = useDux()
+  const open = live.createAgentTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const createAgentTarget = useHeldWhileClosed(open, live.createAgentTarget)
+  const createAgentDraft = useHeldWhileClosed(open, live.createAgentDraft)
+  const createAgentRandomize = useHeldWhileClosed(open, live.createAgentRandomize)
+  const createAgentCopyChanges = useHeldWhileClosed(open, live.createAgentCopyChanges)
+  const createAgentNamePending = useHeldWhileClosed(open, live.createAgentNamePending)
+  const createAgentPrInput = useHeldWhileClosed(open, live.createAgentPrInput)
+  const createAgentPrResolving = useHeldWhileClosed(open, live.createAgentPrResolving)
+  const createAgentPrError = useHeldWhileClosed(open, live.createAgentPrError)
+  const createAgentReviewCopy = useHeldWhileClosed(open, live.createAgentReviewCopy)
+  const spine = useHeldWhileClosed(open, live.spine)
   const dialog = createAgentDialogView(createAgentTarget, spine)
   const form = createAgentFormView(
     dialog.kind,
@@ -57,7 +58,7 @@ export function CreateAgentDialog() {
   return (
     <Modal
       kind="form"
-      open={dialog.open}
+      open={open && dialog.open}
       onClose={closeCreateAgent}
       // Reopened by the server's answer rather than by a click, in which case it
       // takes no history entry for the browser's Back.

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import type { SessionView } from "@/lib/types"
+import { holdCloseAnimations } from "@/test/closeAnimation"
 
 let mockState: DuxState
 const closeAgentInfoSpy = vi.hoisted(() => vi.fn())
@@ -93,7 +94,7 @@ function renderDialogOpenFor(
       sessions: [{ ...base, ...session, workspace } as unknown as SessionView],
     },
   } as unknown as DuxState
-  render(<AgentInfoDialog />)
+  return render(<AgentInfoDialog />)
 }
 
 // The pull request row's value, read whole: its number is a chip, so the row's
@@ -347,3 +348,15 @@ describe("AgentInfoDialog", () => {
     expect(screen.queryByText(/changed since creation/i)).toBeNull()
   })
 })
+
+describe("AgentInfoDialog while it closes", () => {
+  it("keeps the agent it showed rather than emptying", () => {
+    const view = renderDialogOpenFor({ title: "fix-auth" })
+    holdCloseAnimations()
+    mockState = { ...mockState, agentInfoTarget: null } as DuxState
+    view.rerender(<AgentInfoDialog />)
+    expect(screen.getByRole("heading", { hidden: true }).textContent).toBe("fix-auth")
+    expect(screen.getByText("Repo", { selector: "code" })).toBeTruthy()
+  })
+})
+

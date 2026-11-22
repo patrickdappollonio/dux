@@ -2,7 +2,7 @@ import { TriangleAlert } from "lucide-react"
 
 import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { formatDisplayDate } from "@/lib/projectInfo"
@@ -47,7 +47,11 @@ function MissingDirectoryLine({
 // `InfoRow` definition list that closes when its target vanishes) so the two
 // info surfaces stay consistent.
 export function AgentInfoDialog() {
-  const { agentInfoTarget, spine } = useDux()
+  const live = useDux()
+  const open = live.agentInfoTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const agentInfoTarget = useHeldWhileClosed(open, live.agentInfoTarget)
+  const spine = useHeldWhileClosed(open, live.spine)
 
   // Derive the session from the ViewModel so an agent removed while the dialog
   // is open closes it gracefully, mirroring the project info dialog.
@@ -173,9 +177,9 @@ export function AgentInfoDialog() {
   return (
     <Modal
       kind="report"
-      open={agentInfoTarget !== null}
+      open={open}
       // An agent removed while the dialog is open closes it.
-      vanished={agentInfoTarget !== null && session === undefined}
+      vanished={open && session === undefined}
       onClose={closeAgentInfo}
       // The branch and worktree rows carry full paths that deserve room
       // before wrapping.

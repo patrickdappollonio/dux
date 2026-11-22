@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
@@ -50,7 +50,7 @@ export function RenameEntryDialog({
 
 function RenameEntryDialogBody({
   target,
-  isDirty,
+  isDirty: liveDirty,
   onClose,
   onClosed,
   onSubmit,
@@ -59,6 +59,7 @@ function RenameEntryDialogBody({
   const [last, setLast] = useState(target)
   if (target !== null && target !== last) setLast(target)
   const path = (target ?? last)?.path ?? ""
+  const isDirty = useHeldWhileClosed(target !== null, liveDirty)
   const [name, setName] = useState(() => finalSegment(path))
   const [submitting, setSubmitting] = useState(false)
 

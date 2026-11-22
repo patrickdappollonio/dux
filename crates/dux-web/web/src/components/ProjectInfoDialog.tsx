@@ -1,6 +1,6 @@
 import { InfoRow } from "@/components/InfoRow"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { projectBranchDisplay } from "@/lib/projectBranch"
@@ -11,7 +11,11 @@ import type { ProjectView } from "@/lib/types"
 // Read-only "Project info…" modal. Pure presentation of existing ViewModel data:
 // no wire commands, no git reads.
 export function ProjectInfoDialog() {
-  const { projectInfoTarget, spine } = useDux()
+  const live = useDux()
+  const open = live.projectInfoTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const projectInfoTarget = useHeldWhileClosed(open, live.projectInfoTarget)
+  const spine = useHeldWhileClosed(open, live.spine)
 
   // Derive the project from the ViewModel so a project removed while the dialog
   // is open closes it gracefully, mirroring the terminal confirmation dialog.
@@ -86,9 +90,9 @@ export function ProjectInfoDialog() {
   return (
     <Modal
       kind="report"
-      open={projectInfoTarget !== null}
+      open={open}
       // A project removed while the dialog is open closes it.
-      vanished={projectInfoTarget !== null && project === undefined}
+      vanished={open && project === undefined}
       onClose={closeProjectInfo}
       title={project?.name ?? "Project info"}
     >

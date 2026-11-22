@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import { holdCloseAnimations } from "@/test/closeAnimation"
+
 import { RenameEntryDialog } from "./RenameEntryDialog"
 
 afterEach(() => {
@@ -69,3 +71,18 @@ describe("RenameEntryDialog", () => {
     expect(onSubmit).toHaveBeenCalledWith("new.ts")
   })
 })
+
+describe("RenameEntryDialog while it closes", () => {
+  it("keeps the dirty refusal and the held field it showed when the close began", () => {
+    const props = { onClose: () => {}, onSubmit: () => Promise.resolve() }
+    const { rerender } = render(
+      <RenameEntryDialog target={{ path: "src/a/old.ts", isDir: false }} isDirty {...props} />,
+    )
+    holdCloseAnimations()
+    // The parent clears the target, and the file it named is no longer dirty.
+    rerender(<RenameEntryDialog target={null} isDirty={false} {...props} />)
+    expect(screen.getByText("Save or discard changes in this file before renaming.")).toBeTruthy()
+    expect((screen.getByDisplayValue("old.ts") as HTMLInputElement).disabled).toBe(true)
+  })
+})
+

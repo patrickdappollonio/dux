@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react"
 import { TriangleAlert } from "lucide-react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
@@ -23,7 +23,9 @@ export function GlobalEnvDialog() {
 }
 
 function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
-  const { bootstrap, globalEnvDraft, globalEnvConflict: conflict, globalEnvEpoch } = useDux()
+  const { bootstrap, globalEnvDraft, globalEnvConflict, globalEnvEpoch } = useDux()
+  // The refusal stays on screen while the close animates.
+  const conflict = useHeldWhileClosed(open, globalEnvConflict)
   // Reseeded whenever the store bumps the epoch: a refused save reopening it
   // with its edits, or a reload from the server's table.
   const seed = () => ({

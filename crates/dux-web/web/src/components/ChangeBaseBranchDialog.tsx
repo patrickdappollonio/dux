@@ -3,7 +3,7 @@ import { Fragment, useMemo, useState, type ReactNode } from "react"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { MatchHighlight } from "@/components/MatchHighlight"
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
@@ -37,7 +37,9 @@ export function ChangeBaseBranchDialog() {
 }
 
 function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void }) {
-  const { changeBaseBranchTarget, changeBaseBranchListing: listing, spine } = useDux()
+  const { changeBaseBranchTarget, changeBaseBranchListing, spine } = useDux()
+  // The listing as it was when the close began, kept while the close animates.
+  const listing = useHeldWhileClosed(open, changeBaseBranchListing)
   // The project this open is about, kept while the close animates.
   const [targetId] = useState(changeBaseBranchTarget)
   const project = spine?.projects.find((p) => p.id === targetId)

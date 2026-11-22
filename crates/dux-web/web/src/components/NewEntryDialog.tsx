@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
@@ -48,7 +48,10 @@ function NewEntryDialogBody({
   if (target !== null && target !== last) setLast(target)
   const place = target ?? last ?? { kind: "file" as const, dir: "" }
   const [name, setName] = useState("")
-  const [submitting, setSubmitting] = useState(false)
+  const [submittingNow, setSubmitting] = useState(false)
+  // A create that finishes as the dialog closes keeps its spinner while the
+  // close animates.
+  const submitting = useHeldWhileClosed(target !== null, submittingNow)
 
   const validation = validateEntryName(name)
   const canSubmit = name.trim().length > 0 && validation.ok && !submitting

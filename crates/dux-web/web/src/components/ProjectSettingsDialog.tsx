@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -65,7 +65,12 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
   const { spine, bootstrap, projectSettingsTarget } = useDux()
   // The project this open is about, kept while the close animates.
   const [targetId] = useState(projectSettingsTarget)
-  const project = spine?.projects.find((p) => p.id === targetId)
+  // The project as it was when the close began, kept while the close animates,
+  // so the settings a save just applied do not read as unchanged.
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find((p) => p.id === targetId),
+  )
   const providers = bootstrap?.available_providers ?? []
   // "" means "inherit the global default provider".
   const [provider, setProvider] = useState<string>(
@@ -81,7 +86,8 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
   const [startup, setStartup] = useState(() => project?.startup_command ?? "")
   const [openedEnv] = useState(() => envToText(project?.env ?? {}))
   const [envText, setEnvText] = useState(openedEnv)
-  const [saving, setSaving] = useState(false)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
   const env = envEdit(project?.env ?? {}, openedEnv, envText)
   const patch =
     project === undefined ? {} : settingsPatch(project, { provider, autoReopen, startup, env })

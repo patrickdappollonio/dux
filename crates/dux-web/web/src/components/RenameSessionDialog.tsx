@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 
 import { CheckboxRow } from "@/components/CheckboxRow"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Input } from "@/components/ui/input"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { matchWorkspace, standaloneAgentDefaultName } from "@/lib/agentWorkspace"
@@ -28,7 +28,14 @@ import {
 // box, with a line saying what stays on the old name when the branch has an
 // open or draft pull request or a pushed copy.
 export function RenameSessionDialog() {
-  const { renameTarget, renameDraft, renameBranch, renamePending, spine } = useDux()
+  const live = useDux()
+  const isOpen = live.renameTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const renameTarget = useHeldWhileClosed(isOpen, live.renameTarget)
+  const renameDraft = useHeldWhileClosed(isOpen, live.renameDraft)
+  const renameBranch = useHeldWhileClosed(isOpen, live.renameBranch)
+  const renamePending = useHeldWhileClosed(isOpen, live.renamePending)
+  const spine = useHeldWhileClosed(isOpen, live.spine)
   const session = spine?.sessions.find((s) => s.id === renameTarget)
   const branch = session
     ? matchWorkspace<string | null>(session.workspace, {
@@ -89,9 +96,9 @@ export function RenameSessionDialog() {
   return (
     <Modal
       kind="form"
-      open={renameTarget !== null}
+      open={isOpen}
       // An agent removed while the dialog is open closes it.
-      vanished={renameTarget !== null && session === undefined}
+      vanished={isOpen && session === undefined}
       onClose={closeRename}
       title="Rename agent"
       description={

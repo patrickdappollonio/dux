@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -35,7 +35,12 @@ function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () =>
   const { changeProviderTarget, spine, bootstrap } = useDux()
   // The agent this open is about, kept while the close animates.
   const [targetId] = useState(changeProviderTarget)
-  const session = spine?.sessions.find((s) => s.id === targetId)
+  // The agent as it was when the close began, kept while the close animates,
+  // so a change that lands as it closes does not disable its button.
+  const session = useHeldWhileClosed(
+    open,
+    spine?.sessions.find((s) => s.id === targetId),
+  )
   const providers = bootstrap?.available_providers ?? []
   const [provider, setProvider] = useState<string>(() => session?.provider ?? "")
   const unchanged = session === undefined || provider === session.provider

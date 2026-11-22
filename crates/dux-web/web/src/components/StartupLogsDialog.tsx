@@ -1,5 +1,5 @@
 import { GlyphSpinner } from "@/components/GlyphSpinner"
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -22,9 +22,13 @@ import { startupLogsCopy } from "./startupLogsCopy"
 // View startup-command logs. Each run of the project startup command writes a
 // timestamped log file; this lists them newest first and shows the selected
 // file's contents, fetched into the store when the viewer opens.
-function StartupLogsBody({ emptyMessage }: { emptyMessage: string }) {
-  const { startupLogsEntries, startupLogsSelected, startupLogsLoading, startupLogsError } =
-    useDux()
+function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: string }) {
+  const live = useDux()
+  // What the viewer showed when the close began, kept while the close animates.
+  const startupLogsEntries = useHeldWhileClosed(open, live.startupLogsEntries)
+  const startupLogsSelected = useHeldWhileClosed(open, live.startupLogsSelected)
+  const startupLogsLoading = useHeldWhileClosed(open, live.startupLogsLoading)
+  const startupLogsError = useHeldWhileClosed(open, live.startupLogsError)
   const hasLogs = startupLogsEntries.length > 0
 
   return startupLogsError ? (
@@ -82,7 +86,12 @@ function StartupLogsBody({ emptyMessage }: { emptyMessage: string }) {
 }
 
 export function StartupLogsDialog() {
-  const { startupLogsScope, startupLogsTarget, spine } = useDux()
+  const live = useDux()
+  const open = live.startupLogsTarget !== null
+  // The scope and target the viewer showed, kept while the close animates.
+  const startupLogsScope = useHeldWhileClosed(open, live.startupLogsScope)
+  const startupLogsTarget = useHeldWhileClosed(open, live.startupLogsTarget)
+  const { spine } = live
   // Looked up by scope: a project id resolved against the sessions finds
   // nothing and would close a valid project view on its first frame.
   const project =
@@ -103,15 +112,15 @@ export function StartupLogsDialog() {
   return (
     <Modal
       kind="report"
-      open={startupLogsTarget !== null}
-      vanished={startupLogsTarget !== null && !targetExists}
+      open={open}
+      vanished={open && !targetExists}
       onClose={closeStartupLogs}
       size="3xl"
       title={renderProse(title)}
       description={description}
     >
       {startupLogsTarget !== null && targetExists ? (
-        <StartupLogsBody emptyMessage={emptyMessage} />
+        <StartupLogsBody open={open} emptyMessage={emptyMessage} />
       ) : null}
     </Modal>
   )

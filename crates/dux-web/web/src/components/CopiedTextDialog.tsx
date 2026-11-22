@@ -1,6 +1,6 @@
 import { useRef } from "react"
 
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
 import { closeCopyText, useCopyText } from "@/lib/agentCopy"
@@ -10,13 +10,15 @@ import { closeCopyText, useCopyText } from "@/lib/agentCopy"
 // text cannot be edited by accident, and a phone raises no keyboard over it,
 // which is why it takes focus on open under a finger too.
 export function CopiedTextDialog() {
-  const view = useCopyText()
+  const live = useCopyText()
+  // The text the dialog showed, kept while the close animates.
+  const view = useHeldWhileClosed(live !== null, live)
   const text = useRef<HTMLTextAreaElement | null>(null)
 
   return (
     <Modal
       kind="report"
-      open={view !== null}
+      open={live !== null}
       onClose={closeCopyText}
       size="lg"
       initialFocus={text}

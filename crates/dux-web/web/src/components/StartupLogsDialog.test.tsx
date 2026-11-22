@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { holdCloseAnimations } from "@/test/closeAnimation"
 
 // The startup-command log viewer serves two SCOPES from one dialog: one agent's
 // runs, and every run across every agent of a project. What the dialog must get
@@ -62,6 +63,9 @@ const SPINE = {
   ],
 }
 
+let rerender: (ui: React.ReactElement) => void = () => {}
+const cleanupless = (ui: React.ReactElement) => rerender(ui)
+
 function renderOpen(over: Partial<DuxState>) {
   mockState = {
     spine: SPINE,
@@ -73,7 +77,7 @@ function renderOpen(over: Partial<DuxState>) {
     startupLogsError: null,
     ...over,
   } as unknown as DuxState
-  render(<StartupLogsDialog />)
+  ;({ rerender } = render(<StartupLogsDialog />))
 }
 
 const ONE_RUN = {
@@ -206,5 +210,23 @@ describe("startupLogsCopy", () => {
     expect(startupLogsCopy("agent", "Repo", "Fix login").title).toContainEqual(
       chip("Fix login"),
     )
+  })
+})
+
+// The dialog animates out after it closes, and shows what it showed when the
+// close began rather than what the store was reset to.
+describe("StartupLogsDialog while it closes", () => {
+  it("keeps its title and its log", () => {
+    renderOpen({ startupLogsTarget: "s1", startupLogsScope: "agent", ...ONE_RUN })
+    holdCloseAnimations()
+    mockState = {
+      ...mockState,
+      startupLogsTarget: null,
+      startupLogsEntries: [],
+      startupLogsSelected: null,
+    } as DuxState
+    cleanupless(<StartupLogsDialog />)
+    expect(screen.getByRole("heading", { hidden: true }).textContent).toBe("Startup command logs: Fix login")
+    expect(screen.getByText("install ok")).toBeTruthy()
   })
 })

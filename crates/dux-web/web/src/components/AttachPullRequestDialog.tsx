@@ -1,4 +1,4 @@
-import { Modal } from "@/components/modal"
+import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { sessionLabel } from "@/lib/agentWorkspace"
@@ -16,7 +16,12 @@ import {
 // status toast stream, so submitting closes the dialog at once. The body says
 // how many the agent has, because attaching adds rather than replaces.
 export function AttachPullRequestDialog() {
-  const { attachPullRequestTarget, attachPullRequestDraft, spine } = useDux()
+  const live = useDux()
+  const open = live.attachPullRequestTarget !== null
+  // What the dialog showed when the close began, kept while the close animates.
+  const attachPullRequestTarget = useHeldWhileClosed(open, live.attachPullRequestTarget)
+  const attachPullRequestDraft = useHeldWhileClosed(open, live.attachPullRequestDraft)
+  const spine = useHeldWhileClosed(open, live.spine)
   const session = spine?.sessions.find((s) => s.id === attachPullRequestTarget)
 
   const name = session ? sessionLabel(session) : ""
@@ -31,9 +36,9 @@ export function AttachPullRequestDialog() {
   return (
     <Modal
       kind="form"
-      open={attachPullRequestTarget !== null}
+      open={open}
       // Attaching a pull request to a deleted agent is moot.
-      vanished={attachPullRequestTarget !== null && session === undefined}
+      vanished={open && session === undefined}
       onClose={closeAttachPullRequest}
       title="Attach pull request"
       description={

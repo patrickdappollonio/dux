@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { Modal, useModalLifetime } from "@/components/modal"
+import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
 import { chip, prose } from "@/lib/prose"
@@ -27,16 +27,26 @@ function AgentStartupCommandForm({ open, onClosed }: { open: boolean; onClosed: 
   const { spine, agentStartupCommandTarget } = useDux()
   // The agent this open is about, kept while the close animates.
   const [targetId] = useState(agentStartupCommandTarget)
-  const session = spine?.sessions.find((s) => s.id === targetId)
+  // The agent and its project as they were when the close began, kept while
+  // the close animates, so the settings a save just applied do not read as
+  // unchanged.
+  const session = useHeldWhileClosed(
+    open,
+    spine?.sessions.find((s) => s.id === targetId),
+  )
   // A standalone agent belongs to no project, so the lookup must not happen at
   // all for one rather than miss.
-  const project = spine?.projects.find(
-    (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+  const project = useHeldWhileClosed(
+    open,
+    spine?.projects.find(
+      (p) => session !== undefined && p.id === workspaceProjectId(session.workspace),
+    ),
   )
   const [startup, setStartup] = useState(() => project?.startup_command ?? "")
   const next = startup.trim() === "" ? null : startup
   const changed = project !== undefined && next !== (project.startup_command ?? null)
-  const [saving, setSaving] = useState(false)
+  const [savingNow, setSaving] = useState(false)
+  const saving = useHeldWhileClosed(open, savingNow)
 
   async function handleSave() {
     if (project === undefined || !changed || saving) return
