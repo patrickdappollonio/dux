@@ -200,6 +200,7 @@ describe("the device's layout choice", () => {
     ["a phone in the computer layout", 390, { width: 390, height: 844 }, true, "computer", true],
     ["a phone turned sideways", 851, { width: 851, height: 393 }, true, null, true],
     ["a tablet", 1180, { width: 1180, height: 820 }, true, null, false],
+    ["a tablet in a narrow split-screen window", 500, { width: 1180, height: 820 }, true, null, false],
   ] as const)("tells a phone by its hardware, not its layout, on %s", (_n, width, screen, coarse, choice, phone) => {
     const media = stubCoarsePointer(coarse)
     try {

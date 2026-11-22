@@ -111,9 +111,18 @@ function computeAnswer(): Answer {
   return {
     layout,
     choice,
-    phoneDevice: device.coarse && resolveShellLayout({ ...device, choice: null }) === "phone",
+    phoneDevice: isPhoneHardware(device),
     narrowComputer: layout === "computer" && device.width < MOBILE_BREAKPOINT,
   }
+}
+
+// A touch screen whose short side is a phone's. The window's width is asked
+// only when the screen does not say, because a tablet's window can be as narrow
+// as a phone's (an iPad in Split View) while it can still drag a file in.
+function isPhoneHardware(device: Omit<ShellLayoutInputs, "choice">): boolean {
+  if (!device.coarse) return false
+  if (device.screenShortSide > 0) return device.screenShortSide < SHORT_SCREEN_MAX
+  return device.width < MOBILE_BREAKPOINT
 }
 
 // While anything subscribes, one set of window listeners keeps `cached` up to
@@ -191,9 +200,9 @@ export function currentLayoutChoice(): ShellLayout | null {
 }
 
 /**
- * Whether this device is a phone, or a touch screen the size of one, whatever
- * layout a person chose: the question for what the hardware can do (drag a
- * file in) rather than for how the page is laid out.
+ * Whether this device is a touch screen whose short side is a phone's, whatever
+ * layout a person chose and however narrow its window: the question for what
+ * the hardware can do (drag a file in) rather than for how the page is laid out.
  */
 export function isPhoneDevice(): boolean {
   if (typeof window === "undefined") return false
