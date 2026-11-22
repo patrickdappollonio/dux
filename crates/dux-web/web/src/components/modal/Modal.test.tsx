@@ -485,7 +485,8 @@ describe("the footer", () => {
     expect(footer()).toBeNull()
   })
 
-  it("keeps a picker's two doors side by side on a phone", () => {
+  // Half a phone's width is too narrow for a door's icon and label on one line.
+  it("stacks a picker's doors one to a row on a phone", () => {
     at(PHONE)
     render(
       <Modal
@@ -500,7 +501,8 @@ describe("the footer", () => {
         ]}
       />,
     )
-    expect(footer()!.className).toContain("grid-cols-[1fr_auto_1fr]")
+    expect(footer()!.className).toContain("grid-cols-1")
+    expect(footer()!.querySelector('[data-slot="footer-divider"]')).toBeNull()
     expect(button("Add an agent…").className).toContain("min-h-11")
   })
 

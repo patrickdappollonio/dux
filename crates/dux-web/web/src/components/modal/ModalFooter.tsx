@@ -221,9 +221,10 @@ export function ModalDoors({
   phone: boolean
   cover: boolean
 }) {
-  // A phone seats two to a row; a card gives every door an equal column, with
-  // a rule between neighbours.
-  const ruled = doors.length === 2 || (!phone && doors.length > 2)
+  // A phone stacks them one to a row, where half its width cannot hold a
+  // door's icon and label on one line; a computer gives every door an equal
+  // column, with a rule between neighbours.
+  const ruled = !phone && doors.length > 1
   const columns: CSSProperties | undefined =
     ruled && doors.length > 2
       ? { gridTemplateColumns: doors.map(() => "minmax(0,1fr)").join(" auto ") }
@@ -233,12 +234,11 @@ export function ModalDoors({
       data-slot="modal-footer"
       style={columns}
       className={cn(
-        "grid shrink-0 gap-3 border-t px-2 pt-2",
-        doors.length === 1
+        "grid shrink-0 border-t px-2 pt-2",
+        phone ? "gap-0" : "gap-3",
+        doors.length === 1 || phone
           ? "grid-cols-1"
-          : doors.length === 2
-            ? "grid-cols-[1fr_auto_1fr]"
-            : !ruled && "grid-cols-2",
+          : doors.length === 2 && "grid-cols-[1fr_auto_1fr]",
         cover ? COVER_BOTTOM_INSET : "pb-2",
       )}
     >
@@ -270,7 +270,7 @@ function DoorButton({ door, phone }: { door: ModalDoor; phone: boolean }) {
         onClick={door.onSelect}
         className={cn(
           "flex min-w-0 flex-1 items-center gap-2.5 rounded-md border border-transparent px-[7px] text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground disabled:pointer-events-none disabled:opacity-50",
-          // On a phone the label wraps rather than truncating in half a row.
+          // On a phone a label too long for its row wraps rather than truncating.
           phone ? "min-h-11 py-1 leading-tight" : "h-9 pointer-coarse:h-10",
           FOCUS_RING,
         )}

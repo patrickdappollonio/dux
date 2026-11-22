@@ -541,16 +541,16 @@ describe("NewAgentPickerDialog", () => {
       expect(heights[0]).toContain("pointer-coarse:h-10")
     })
 
-    // A phone's footer does not spend a row on each action: the two share one,
-    // each at least 44px tall, and a label that does not fit its half wraps.
-    it("sets the actions side by side on a phone too, each a finger tall", () => {
+    // Half a phone's width wraps each label onto two lines beside its icon, so
+    // a phone gives each action a row of its own, at least 44px tall.
+    it("stacks the actions on a phone, each a finger tall", () => {
       vi.stubGlobal("innerWidth", 390)
       seed("new")
       render(<NewAgentPickerDialog />)
-      expect(footer().className).toContain("grid-cols-[1fr_auto_1fr]")
+      expect(footer().className).toContain("grid-cols-1")
       for (const button of footerButtons()) {
         expect(button.className).toContain("min-h-11")
-        // The label wraps in its half of the row rather than truncating.
+        // A label too long for the row wraps rather than truncating.
         expect(button.querySelector("span")!.className).not.toContain("truncate")
       }
     })
