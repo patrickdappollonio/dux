@@ -201,8 +201,8 @@ such as a missing name or two macros with the same name, the dialog says what an
 to take you to the macro concerned.
 
 > [!TIP]
-> Closing with unsaved changes is safe. **Cancel**, Escape or the close button ask before
-> they throw anything away. Your browser's Back (from the list, on a phone) closes the
+> Closing with unsaved changes is safe. **Cancel**, Escape, a press outside the dialog and,
+> on a phone, its close button ask before they throw anything away. Your browser's Back (from the list, on a phone) closes the
 > dialog without asking and keeps your changes instead: a message offers to **Restore**
 > them, and the next time you open the editor, whichever way you open it, they are still
 > there. They are only gone once you discard them.
