@@ -39,6 +39,7 @@ export function MobileActionFlap({
   subject,
   band,
   hidden = false,
+  moving = false,
 }: {
   /// The pane on screen, which is what Macros writes to and what the `⋯` reads
   /// its input group under. A different question from `subject`: a companion
@@ -56,6 +57,10 @@ export function MobileActionFlap({
   /// flight: it is the dock the capsule flies onto, so the choreography
   /// measures the real element and the final swap moves nothing.
   hidden?: boolean
+  /// The theater gesture is not at rest. The flap rises with the collapsing
+  /// header over the spot where the header's controls were, so a press meant
+  /// for them must not open the flap's menu just before the flap goes away.
+  moving?: boolean
 }) {
   const ref = useRef<HTMLDivElement | null>(null)
   const theaterRef = useRef<HTMLButtonElement | null>(null)
@@ -109,7 +114,7 @@ export function MobileActionFlap({
         // eased an inherited `hidden` in and stayed painted for a whole button
         // transition beside the pill already flying away. `inert` is what
         // `visibility` also did: no press, no focus, nothing announced.
-        inert={hidden || folded}
+        inert={hidden || folded || moving}
         // Folded, it is out of the accessibility tree as well as out of reach.
         aria-hidden={folded || undefined}
         // PUBLISHED, not merely used: the detach and the arrival snap paint the
@@ -184,7 +189,12 @@ export function MobileActionFlap({
  * name, like its tooltip, says what a press does, which also says which way it
  * is set, so it carries no expanded state.
  */
-export function FlapToggle() {
+export function FlapToggle({ still }: {
+  /// The header is on screen and the theater gesture at rest. Anything else
+  /// takes no press: the header is on its way out or in, and a fold that lands
+  /// under the flight would change what the flight flies from or to.
+  still: boolean
+}) {
   const folded = useFlapHidden()
   const { theater } = useDux()
   const ref = useRef<HTMLButtonElement | null>(null)
@@ -201,6 +211,7 @@ export function FlapToggle() {
         size="icon"
         className="size-10 shrink-0"
         aria-label={label}
+        inert={!still}
         onClick={() => setFlapHidden(!folded)}
       >
         {folded ? <PanelTopOpen /> : <PanelTopClose />}

@@ -207,6 +207,11 @@ export function flightNext(phase: FlightPhase): FlightPhase {
   }
 }
 
+/** Is the gesture at rest, with nothing on its way up, down or across? */
+export function flightAtRest(phase: FlightPhase): boolean {
+  return phase === "docked" || phase === "floating"
+}
+
 /**
  * Is the flap in the DOM? Everywhere but settled theater. It stays mounted and
  * hidden through the return flight because it is the dock the choreography

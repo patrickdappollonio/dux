@@ -35,7 +35,7 @@ import {
   usePaneCoverOwned,
 } from "@/lib/paneCover"
 import { topChromeHidden } from "@/lib/theater"
-import { flapMounted, flapVisible, pillMounted } from "@/lib/theaterFlight"
+import { flapMounted, flapVisible, flightAtRest, pillMounted } from "@/lib/theaterFlight"
 import { readStackMemory } from "@/lib/stackMemory"
 import { mobileHeaderLanes } from "@/lib/headerSubject"
 import { resolveInstanceTitle } from "@/lib/instanceTitle"
@@ -188,7 +188,7 @@ function AgentlessTerminalScreen({
               {terminal ? terminalTitle(terminal, ownedTerminals) : "Terminal"}
             </span>
           </div>
-          <FlapToggle />
+          <FlapToggle still={!chromeHidden && flightAtRest(flight)} />
         </header>
       </TheaterChrome>
       <div className="relative min-h-0 flex-1">
@@ -203,6 +203,7 @@ function AgentlessTerminalScreen({
             subject={subject}
             band="plain"
             hidden={!flapVisible(flight)}
+            moving={!flightAtRest(flight)}
           />
         ) : null}
         <ChunkBoundary>
@@ -340,6 +341,8 @@ interface TerminalHeaderProps {
   session: SessionView
   focusedTab: AgentTabView | undefined
   projectName: string | undefined
+  /// Whether the flap's show/hide takes presses (see `FlapToggle`).
+  flapToggleStill: boolean
 }
 
 // The agent screen's header: Back, the identity, the pull request and the
@@ -355,7 +358,12 @@ interface TerminalHeaderProps {
 // tap to the review, or with several to the list of them. It carries `#N`
 // beside the glyph, as the sidebar row and the desktop banner do, so the chip
 // can be matched against the tab open in the review.
-function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProps) {
+function TerminalHeader({
+  session,
+  focusedTab,
+  projectName,
+  flapToggleStill,
+}: TerminalHeaderProps) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
       <Button
@@ -375,7 +383,7 @@ function TerminalHeader({ session, focusedTab, projectName }: TerminalHeaderProp
         />
       </div>
       {session.pr ? <HeaderPrChip session={session} /> : null}
-      <FlapToggle />
+      <FlapToggle still={flapToggleStill} />
     </header>
   )
 }
@@ -540,6 +548,7 @@ function AgentTerminalScreen({
           session={session}
           focusedTab={model.tab}
           projectName={projectName}
+          flapToggleStill={!chromeHidden && flightAtRest(flight)}
         />
         {strip}
       </TheaterChrome>
@@ -553,6 +562,7 @@ function AgentTerminalScreen({
             subject={{ kind: "agent", session }}
             band={strip !== null ? "strip" : "plain"}
             hidden={!flapVisible(flight)}
+            moving={!flightAtRest(flight)}
           />
         ) : null}
         <PhoneAgentStack

@@ -2200,6 +2200,26 @@ describe("MobileShell flap show/hide", () => {
     expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Theater mode" }))
   })
 
+  // The flap rises with the collapsing header over the spot the show/hide sat
+  // in, so a late tap there landed on the flap's `⋯` and opened a menu that
+  // closed itself as the flap went away.
+  it("takes no press on the show/hide or the flap while the header collapses into theater", () => {
+    mockState = agentState()
+    const view = render(<MobileShell />)
+    // Long after any earlier fold, so the flap is at rest and the mode flies.
+    const later = performance.now() + 10_000
+    const clock = vi.spyOn(performance, "now").mockReturnValue(later)
+    try {
+      mockState = agentState({ theater: true })
+      view.rerender(<MobileShell />)
+      const toggle = screen.getByLabelText("Hide actions")
+      expect(toggle.hasAttribute("inert")).toBe(true)
+      expect(flap().hasAttribute("inert")).toBe(true)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it("leaves a hidden flap hidden under a full-pane cover, with the way back in the header", () => {
     setFlapHidden(true)
     registerPaneCover("s1", "box")
