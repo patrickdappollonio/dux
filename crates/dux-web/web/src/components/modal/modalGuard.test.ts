@@ -212,8 +212,6 @@ const ROOTS = (roots: number) => ({ roots, roles: 0, layers: 0 })
 // has moved or changed fails until the entry follows it.
 const STILL_TO_MOVE: Record<string, Entry> = {
   "components/AddProjectDialog.tsx": { ...ROOT },
-  "components/AgentEnvDialog.tsx": { ...ROOT },
-  "components/AgentStartupCommandDialog.tsx": { ...ROOT },
   "components/CheckoutDefaultBranchDialog.tsx": { ...ROOT },
   "components/ConfigEditorDialog.tsx": { ...ROOT },
   "components/ConfirmCloseEditorTabDialog.tsx": { ...ROOT },
@@ -236,10 +234,8 @@ const STILL_TO_MOVE: Record<string, Entry> = {
   "components/DeleteSessionDialog.tsx": { ...ROOT },
   "components/FirstLoadDialog.tsx": { ...ROOT },
   "components/FormDialogContent.tsx": { ...NONE, why: "The shell the forms not yet moved share; it goes with the last of them." },
-  "components/GlobalEnvDialog.tsx": { ...ROOT },
   "components/MacrosDialog.tsx": { ...ROOTS(3) },
   "components/MoveEntryDialog.tsx": { ...ROOT },
-  "components/ProjectSettingsDialog.tsx": { ...ROOT },
   "components/PullRequestsDialog.tsx": { ...ROOTS(2) },
   "components/RemoveProjectDialog.tsx": { ...ROOT },
   "components/SaveConflictDialog.tsx": { ...ROOT },

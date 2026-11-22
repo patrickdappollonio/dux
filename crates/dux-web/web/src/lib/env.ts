@@ -25,3 +25,17 @@ export function parseEnv(text: string): Record<string, string> {
   }
   return env
 }
+
+// How many variables differ between two env maps: added, removed or given
+// another value.
+export function envChangeCount(
+  before: Record<string, string>,
+  after: Record<string, string>,
+): number {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+  let changed = 0
+  for (const key of keys) {
+    if (before[key] !== after[key]) changed += 1
+  }
+  return changed
+}

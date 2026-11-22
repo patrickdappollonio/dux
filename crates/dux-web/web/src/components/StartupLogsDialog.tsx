@@ -83,11 +83,8 @@ function StartupLogsBody({ emptyMessage }: { emptyMessage: string }) {
 
 export function StartupLogsDialog() {
   const { startupLogsScope, startupLogsTarget, spine } = useDux()
-  // The logs belong to a deleted agent's worktree, or to a removed project,
-  // and either way they are gone, so the dialog closes. The lookup MUST follow
-  // the scope, because resolving a project id against the session list would
-  // find nothing and slam a perfectly valid project view shut on its first
-  // frame.
+  // Looked up by scope: a project id resolved against the sessions finds
+  // nothing and would close a valid project view on its first frame.
   const project =
     startupLogsScope === "project"
       ? spine?.projects.find((p) => p.id === startupLogsTarget)
@@ -103,8 +100,6 @@ export function StartupLogsDialog() {
     session ? sessionLabel(session) : undefined,
   )
 
-  // Focus on open is the report's own: its Close, under a mouse, since the
-  // logs are still loading then and the Close is all there is.
   return (
     <Modal
       kind="report"

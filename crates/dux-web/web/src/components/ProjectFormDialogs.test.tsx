@@ -1,17 +1,24 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
 // The project-scoped forms an agent's or a project's menu opens. On a phone each
-// is a full-height sheet with its own close button, and none focuses a text
-// field by itself, because that raises the keyboard over the form.
+// covers the screen with its own close button, and under a finger none focuses
+// a text field by itself, because that raises the keyboard over the form.
 
 let mockState: DuxState
 vi.mock("@/lib/store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/store")>()
-  return { ...actual, useDux: () => mockState }
+  return {
+    ...actual,
+    useDux: () => mockState,
+    closeAgentEnv: vi.fn(),
+    closeAgentStartupCommand: vi.fn(),
+    closeProjectSettings: vi.fn(),
+    updateProjectSettings: vi.fn(),
+  }
 })
 
 let phone = false
@@ -34,10 +41,21 @@ function installBootStubs() {
     vi.fn(() => Promise.reject(new Error("offline test"))),
   )
 }
+// The pointer is asked through `matchMedia`, which jsdom lacks.
+function coarsePointer() {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(pointer: coarse)",
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }))
+}
+
 installBootStubs()
 const { AgentEnvDialog } = await import("./AgentEnvDialog")
 const { AgentStartupCommandDialog } = await import("./AgentStartupCommandDialog")
 const { ProjectSettingsDialog } = await import("./ProjectSettingsDialog")
+const store = await import("@/lib/store")
 
 const session = {
   id: "s1",
@@ -75,20 +93,27 @@ afterEach(() => {
   cleanup()
   phone = false
   vi.unstubAllGlobals()
+  vi.clearAllMocks()
 })
 
 describe.each([
   ["the agent's environment", AgentEnvDialog, "KEY=VALUE"],
   ["the agent's startup command", AgentStartupCommandDialog, "npm run dev"],
 ])("%s", (_name, Dialog, placeholder) => {
-  it("puts the caret in the text on a computer", () => {
+  it("puts the caret in the text under a mouse", async () => {
     render(<Dialog />)
-    expect(document.activeElement).toBe(screen.getByPlaceholderText(placeholder))
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByPlaceholderText(placeholder)),
+    )
   })
 
-  it("does not focus the text on a phone, and closes from its own button", () => {
+  it("does not focus the text under a finger, and closes from its own button on a phone", async () => {
     phone = true
+    coarsePointer()
     render(<Dialog />)
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-slot")).toBe("dialog-content"),
+    )
     expect(document.activeElement).not.toBe(screen.getByPlaceholderText(placeholder))
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Save" })).toBeTruthy()
@@ -96,10 +121,96 @@ describe.each([
 })
 
 describe("project settings", () => {
-  it("is a sheet that closes from its own button on a phone", () => {
+  it("covers the screen and closes from its own button on a phone", async () => {
     phone = true
+    coarsePointer()
     render(<ProjectSettingsDialog />)
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-slot")).toBe("dialog-content"),
+    )
     expect(screen.getByRole("button", { name: "Close" })).toBeTruthy()
     expect(document.activeElement).not.toBe(screen.getByPlaceholderText("KEY=VALUE"))
+  })
+})
+
+// These forms hold edits nothing else keeps, so every way out asks before it
+// loses them, in words that name what discarding leaves as it was.
+describe.each([
+  [
+    "the agent's environment",
+    AgentEnvDialog,
+    "KEY=VALUE",
+    () => store.closeAgentEnv,
+    "The environment has 1 unsaved change. Discarding them leaves the environment of project acme as it was.",
+  ],
+  [
+    "the agent's startup command",
+    AgentStartupCommandDialog,
+    "npm run dev",
+    () => store.closeAgentStartupCommand,
+    "The startup command has 1 unsaved change. Discarding them leaves the startup command of project acme as it was.",
+  ],
+  [
+    "the project settings",
+    ProjectSettingsDialog,
+    "npm run dev",
+    () => store.closeProjectSettings,
+    "The project settings have 1 unsaved change. Discarding them leaves the settings of project acme as it was.",
+  ],
+])("closing %s", (_name, Dialog, placeholder, close, sentence) => {
+  it("closes at once while nothing was changed", () => {
+    render(<Dialog />)
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(close()).toHaveBeenCalled()
+  })
+
+  it("asks before Cancel or Escape loses an edit, and closes only on Discard", async () => {
+    render(<Dialog />)
+    fireEvent.change(screen.getByPlaceholderText(placeholder), {
+      target: { value: "FOO=1" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    const question = await screen.findByText(/Discarding them leaves/)
+    expect(question.textContent).toBe(sentence)
+    // The project's name is the chip, not part of the words.
+    expect(within(question).getByText("acme")).not.toBe(question)
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }))
+    await waitFor(() => expect(screen.queryByText("Discard unsaved changes?")).toBeNull())
+    fireEvent.keyDown(screen.getByPlaceholderText(placeholder), { key: "Escape" })
+    fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }))
+    expect(close()).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("project settings' Save", () => {
+  it("says why it is held while nothing was changed", async () => {
+    render(<ProjectSettingsDialog />)
+    const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    fireEvent.click(save.parentElement!)
+    expect(
+      (await screen.findAllByText("Nothing to save yet: no setting has changed.")).length,
+    ).toBeGreaterThan(0)
+  })
+
+  it("takes no second press while a save is on its way", async () => {
+    let finish: (ok: boolean) => void = () => {}
+    vi.mocked(store.updateProjectSettings).mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve
+      }),
+    )
+    render(<ProjectSettingsDialog />)
+    fireEvent.change(screen.getByPlaceholderText("npm run dev"), {
+      target: { value: "make dev" },
+    })
+    const save = screen.getByRole("button", { name: "Save" })
+    fireEvent.click(save)
+    await waitFor(() => expect(save.getAttribute("aria-busy")).toBe("true"))
+    fireEvent.click(save)
+    expect(store.updateProjectSettings).toHaveBeenCalledTimes(1)
+    expect(store.updateProjectSettings).toHaveBeenCalledWith("p1", { startup_command: "make dev" })
+    await act(async () => finish(true))
+    expect(store.closeProjectSettings).toHaveBeenCalled()
   })
 })
