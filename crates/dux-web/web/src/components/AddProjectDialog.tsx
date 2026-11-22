@@ -96,7 +96,9 @@ function NewFolderControl({
     )
   }
   return (
-    <div className="flex items-center gap-1">
+    // Beside the path on a computer; on a phone a row of its own, where the
+    // name takes the width the two buttons leave.
+    <div className="flex min-w-0 items-center gap-1 max-md:w-full">
       <Input
         autoFocus
         value={name}

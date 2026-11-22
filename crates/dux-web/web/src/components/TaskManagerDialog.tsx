@@ -713,10 +713,18 @@ function ConfirmStopAllDialog({ open }: { open: boolean }) {
         drivenHint: nothingToStop,
       })}
     >
-      {plan.left.length > 0 ? (
-        <p className="text-sm text-muted-foreground">{renderProse(leftRunningProse(plan.left))}</p>
+      {/* One child, null when there is nothing to add: a body of empty parts
+          would still be drawn, as a gap under the question. */}
+      {plan.left.length > 0 || blockers?.length ? (
+        <>
+          {plan.left.length > 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {renderProse(leftRunningProse(plan.left))}
+            </p>
+          ) : null}
+          <AttachedSection blockers={blockers} />
+        </>
       ) : null}
-      {blockers?.length ? <AttachedSection blockers={blockers} /> : null}
     </Modal>
   )
 }
