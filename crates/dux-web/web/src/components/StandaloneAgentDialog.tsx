@@ -6,7 +6,7 @@ import { Modal, useModalLifetime } from "@/components/modal"
 import { ProjectShortcutList } from "@/components/ProjectShortcutList"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { InlineCode } from "@/components/ui/inline-code"
-import { isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
+import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
 import { standaloneAgentDefaultName } from "@/lib/agentWorkspace"
 import type { ProjectShortcutView } from "@/lib/types"
 import {
@@ -15,8 +15,6 @@ import {
   createStandaloneAgent,
   useDux,
 } from "@/lib/store"
-
-const INVALID_NAME = "That name is not one git accepts for a branch."
 
 /**
  * Pick a folder you already have and run an agent in it.
@@ -127,7 +125,7 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
         disabledReason: !selected
           ? "Choose a folder for the agent to run in first."
           : invalidName
-            ? INVALID_NAME
+            ? INVALID_AGENT_NAME
             : null,
       }}
     >
@@ -196,7 +194,7 @@ function StandaloneAgentBrowser({ open, onClosed }: { open: boolean; onClosed: (
             className={invalidName ? "text-xs text-destructive" : "text-xs text-muted-foreground"}
           >
             {invalidName ? (
-              INVALID_NAME
+              INVALID_AGENT_NAME
             ) : (
               <>
                 Left empty, the agent is called{" "}
