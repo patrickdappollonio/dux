@@ -203,6 +203,26 @@ afterEach(() => {
 })
 
 describe("ProjectsDialog", () => {
+  // Enter picks nothing here, so no row is marked as the one it would pick,
+  // and the rows sit under the heading the list has always had.
+  it("shows its heading over the rows and marks no row for Enter", () => {
+    openList()
+    const heading = screen.getByText("Choose a project")
+    expect(
+      heading.compareDocumentPosition(row("acme")) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    const search = screen.getByLabelText("Search projects")
+    act(() => search.focus())
+    fireEvent.focus(search)
+    fireEvent.change(search, { target: { value: "a" } })
+    fireEvent.keyDown(search, { key: "Enter" })
+    for (const each of screen.getAllByTestId("project-row")) {
+      expect(each.hasAttribute("data-active")).toBe(false)
+    }
+    expect(screen.queryByRole("menu")).toBeNull()
+    expect(listIsOpen()).toBe(true)
+  })
+
   // Standalone agents belong to no project, so the Projects list is not where
   // one is created: only the New agent picker offers that door.
   it("offers only Add a new project in its footer", () => {
@@ -503,6 +523,11 @@ describe("ProjectsDialog", () => {
 
     it("shows the clipped path while the row's button has keyboard focus", async () => {
       openList()
+      // The modal focuses its search field as it opens; a keyboard user moves
+      // on from there.
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByLabelText("Search projects")),
+      )
       clip(pathBox(), true)
       act(() => rowButton().focus())
       await waitFor(() => expect(hintShown()).toBe(true))

@@ -1,34 +1,17 @@
-import {
-  Ellipsis,
-  Folder,
-  FolderPlus,
-  Search,
-  type LucideIcon,
-} from "lucide-react"
+import { Ellipsis, Folder } from "lucide-react"
 import { useId, useRef, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
-import {
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { InlineCode } from "@/components/ui/inline-code"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { ModalGroupHeading } from "@/components/modal"
-import {
-  useProjectSearch,
-  type ProjectListRow,
-  type ProjectSearch,
-} from "@/components/projectSearch"
+import { type ProjectListRow, type ProjectSearch } from "@/components/projectSearch"
 import { matchCharRanges } from "@/lib/searchMatch"
-import { openAddProject } from "@/lib/store"
 import { FOCUS_RING, PICK_ROW } from "@/lib/focusRing"
 import {
   ALWAYS_REVEALED_ON_PHONE,
@@ -85,78 +68,6 @@ export function ProjectRows({
         ))
       )}
     </>
-  )
-}
-
-/** The body of the Projects list. The caller renders it inside a
- * `DialogContent` laid out as a flex column. */
-export function ProjectList({
-  title,
-  description,
-  rows,
-  menu,
-}: {
-  title: string
-  description: string
-  rows: ProjectListRow[]
-  menu: (id: string) => ReactNode
-}) {
-  const search = useProjectSearch(rows, undefined)
-  return (
-    <>
-      <DialogHeader className="shrink-0 p-4 pb-3">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription className="text-pretty">{description}</DialogDescription>
-        <div className="mt-2 flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
-          <Search className="size-4 shrink-0 text-muted-foreground" />
-          <input
-            value={search.query}
-            onChange={(event) => search.setQuery(event.target.value)}
-            placeholder="Search projects"
-            aria-label="Search projects"
-            {...search.pick.fieldProps}
-            className="min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-muted-foreground"
-            autoFocus
-          />
-        </div>
-      </DialogHeader>
-
-      {/* A fixed height, so the dialog does not resize as a search narrows the
-          rows, and the one child that shrinks when the popup is capped. */}
-      <ScrollArea className="h-72 min-h-0 shrink border-t">
-        <div className="p-2">
-          <ProjectRows search={search} heading="Choose a project" menu={menu} />
-        </div>
-      </ScrollArea>
-
-      <div className="grid shrink-0 grid-cols-1 border-t p-2">
-        <FooterButton title="Add a new project…" icon={FolderPlus} onSelect={openAddProject} />
-      </div>
-    </>
-  )
-}
-
-interface FooterAction {
-  title: string
-  icon: LucideIcon
-  onSelect: () => void
-}
-
-// 36px under a fine pointer, whose only neighbour is the list above, behind a
-// border. The transparent border is what the focus ring's border half colours.
-function FooterButton({ title, icon: Icon, onSelect }: FooterAction) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={cn(
-        "flex h-9 min-w-0 items-center gap-2.5 rounded-md border border-transparent px-[7px] text-left text-sm text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground max-md:h-10 pointer-coarse:h-10",
-        FOCUS_RING,
-      )}
-    >
-      <Icon className="size-4 shrink-0" />
-      <span className="min-w-0 truncate">{title}</span>
-    </button>
   )
 }
 

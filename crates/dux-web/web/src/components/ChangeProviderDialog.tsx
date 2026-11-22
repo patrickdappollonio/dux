@@ -1,14 +1,6 @@
 import { useState } from "react"
 
-import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Modal, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -17,29 +9,39 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useVanishedTargetGuard } from "@/hooks/use-vanished-target"
 import {
   changeAgentProvider,
   closeChangeProvider,
   useDux,
 } from "@/lib/store"
-import type { SessionView } from "@/lib/types"
 import { sessionLabel } from "@/lib/agentWorkspace"
 
-// The form body is mounted only while the dialog is open and a session resolves.
-// `provider` seeds from the session prop via a lazy initializer so there is no
-// set-state-in-effect to seed the control on open.
-function ChangeProviderForm({
-  session,
-  providers,
-}: {
-  session: SessionView
-  providers: string[]
-}) {
-  const [provider, setProvider] = useState<string>(() => session.provider)
-  const label = sessionLabel(session)
+// Swap which CLI an agent session uses, mirroring the TUI's
+// `change-agent-provider`. The swap is persisted for the NEXT launch and never
+// kills or relaunches a running agent, so the copy says so. Provider names come
+// from the bootstrap document's `available_providers` (the server's configured list), and
+// the server re-validates the choice.
+export function ChangeProviderDialog() {
+  const { changeProviderTarget } = useDux()
+  const open = changeProviderTarget !== null
+  const life = useModalLifetime(open)
+  // Keyed by the open, so the choice starts from the agent's provider each time.
+  return life.mounted ? (
+    <ChangeProviderForm key={life.epoch} open={open} onClosed={life.onClosed} />
+  ) : null
+}
+
+function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () => void }) {
+  const { changeProviderTarget, spine, bootstrap } = useDux()
+  // The agent this open is about, kept while the close animates.
+  const [targetId] = useState(changeProviderTarget)
+  const session = spine?.sessions.find((s) => s.id === targetId)
+  const providers = bootstrap?.available_providers ?? []
+  const [provider, setProvider] = useState<string>(() => session?.provider ?? "")
+  const unchanged = session === undefined || provider === session.provider
 
   async function handleSave() {
+    if (session === undefined) return
     // No change → just close. Otherwise close only once the change is accepted, so
     // a rejected/invalid provider keeps the dialog open (error toasted) instead of
     // dismissing over a change that never applied.
@@ -51,26 +53,41 @@ function ChangeProviderForm({
   }
 
   return (
-    <DialogContent showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>
-          Change provider: <InlineCode>{label}</InlineCode>
-        </DialogTitle>
-        <DialogDescription>
-          Pick the CLI this agent uses. The change takes effect the next time
-          this agent launches; the running session keeps its current provider
-          until you reconnect it. dux resumes the chosen provider&rsquo;s prior
-          session on this worktree when one is available and no other tab of that
-          provider is already running.
-        </DialogDescription>
-      </DialogHeader>
-
+    <Modal
+      kind="form"
+      open={open}
+      // An agent removed while the dialog is open closes it; a rejected save,
+      // by contrast, deliberately keeps it open.
+      vanished={open && session === undefined}
+      onClose={closeChangeProvider}
+      onClosed={onClosed}
+      title={
+        session ? (
+          <>
+            Change provider: <InlineCode>{sessionLabel(session)}</InlineCode>
+          </>
+        ) : (
+          "Change provider"
+        )
+      }
+      description={
+        <>
+          Pick the CLI this agent uses. The change takes effect the next time this agent
+          launches; the running session keeps its current provider until you reconnect it.
+          dux resumes the chosen provider&rsquo;s prior session on this worktree when one is
+          available and no other tab of that provider is already running.
+        </>
+      }
+      submit={{
+        label: "Change provider",
+        tone: "primary",
+        onSelect: () => void handleSave(),
+        disabledReason: unchanged ? "Pick a provider other than the one this agent uses." : null,
+      }}
+    >
       <div className="grid gap-2">
         <label className="text-sm font-medium">Provider</label>
-        <Select
-          value={provider}
-          onValueChange={(value) => setProvider(value ?? provider)}
-        >
+        <Select value={provider} onValueChange={(value) => setProvider(value ?? provider)}>
           <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>
@@ -83,49 +100,6 @@ function ChangeProviderForm({
           </SelectContent>
         </Select>
       </div>
-
-      <DialogFooter>
-        <Button variant="outline" onClick={closeChangeProvider}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave} disabled={provider === session.provider}>
-          Change provider
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  )
-}
-
-// Swap which CLI an agent session uses, mirroring the TUI's
-// `change-agent-provider`. The swap is persisted for the NEXT launch and never
-// kills or relaunches a running agent, so the copy says so. Provider names come
-// from the bootstrap document's `available_providers` (the server's configured list), and
-// the server re-validates the choice.
-export function ChangeProviderDialog() {
-  const { changeProviderTarget, spine, bootstrap } = useDux()
-  const session = spine?.sessions.find((s) => s.id === changeProviderTarget)
-  // Closes the dialog when the agent vanishes from the ViewModel; this is
-  // orthogonal to the save flow above, which deliberately stays open on a
-  // rejected save. See the hook.
-  const open = useVanishedTargetGuard(
-    changeProviderTarget !== null,
-    session !== undefined,
-    closeChangeProvider,
-  )
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) closeChangeProvider()
-      }}
-    >
-      {open && session && (
-        <ChangeProviderForm
-          session={session}
-          providers={bootstrap?.available_providers ?? []}
-        />
-      )}
-    </Dialog>
+    </Modal>
   )
 }
