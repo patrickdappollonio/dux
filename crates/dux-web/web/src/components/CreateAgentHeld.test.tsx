@@ -85,7 +85,9 @@ afterEach(async () => {
     store.closeExistingBranch()
     store.closeCreateAgent()
   })
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  // A create left unanswered says so at its deadline, which must not land in
+  // the next test.
+  await new Promise((resolve) => setTimeout(resolve, WAIT_MS + 40))
 })
 
 const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").length
