@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/popover"
 import { useSecondTicks } from "@/hooks/use-second-ticks"
 import { startStoppedAgent } from "@/lib/store"
+import { chip, prose, renderProse } from "@/lib/prose"
 import { verdictSentenceNow } from "@/lib/tabVerdict"
 import type { AgentTabView } from "@/lib/types"
 
@@ -44,7 +45,6 @@ export function StoppedAgentBand({
 }) {
   const verdict = slotTab?.last_run_failed ? slotTab.last_run_verdict : null
   useSecondTicks(verdict != null)
-  const provider = slotTab?.provider ?? "The agent"
   const excerpt = verdict?.excerpt ?? []
   return (
     <div
@@ -52,7 +52,7 @@ export function StoppedAgentBand({
       className="flex min-h-9 pointer-coarse:min-h-11 shrink-0 items-center gap-3 border-b bg-muted/30 px-3 py-1 text-sm"
     >
       <p className="min-w-0 flex-1 truncate">
-        <span className="font-mono">{provider}</span> isn&rsquo;t running.
+        {slotTab ? renderProse(prose`${chip(slotTab.provider)} isn’t running.`) : "The agent isn’t running."}
         {verdict ? (
           <span className="text-muted-foreground"> {verdictSentenceNow(verdict)}</span>
         ) : null}
@@ -101,9 +101,7 @@ export function StoppedAgentShortCard({
       testId="stopped-agent-short-card"
       icon="small"
       title={
-        <>
-          <span className="font-mono">{tab.provider}</span> isn&rsquo;t running.
-        </>
+        renderProse(prose`${chip(tab.provider)} isn’t running.`)
       }
       details="Start picks up its last conversation."
       start={{

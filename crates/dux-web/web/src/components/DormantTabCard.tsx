@@ -1,6 +1,7 @@
 import { useSecondTicks } from "@/hooks/use-second-ticks"
 import { NotRunningCard } from "@/components/NotRunningCard"
 import { startDormantTab } from "@/lib/store"
+import { chip, prose, renderProse } from "@/lib/prose"
 import { genericEndingSentence, verdictSentenceNow } from "@/lib/tabVerdict"
 import type { TabRunVerdict } from "@/lib/types"
 
@@ -40,9 +41,7 @@ export function DormantTabCard({
     <NotRunningCard
       icon="large"
       title={
-        <>
-          This <span className="font-mono">{provider}</span> tab isn&rsquo;t running.
-        </>
+        renderProse(prose`This ${chip(provider)} tab isn’t running.`)
       }
       subtitle={
         lastRunFailed

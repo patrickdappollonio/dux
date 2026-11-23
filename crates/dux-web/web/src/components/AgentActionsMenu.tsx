@@ -34,6 +34,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
 import { defaultProviderForSession } from "@/lib/agentTabs"
+import { InlineCode } from "@/components/ui/inline-code"
 import {
   newTerminalLabel,
   supportsBranchGit,
@@ -330,7 +331,7 @@ function AgentProjectSubmenu({
       <DropdownMenuSubTrigger>
         <Folder />
         <span className="min-w-0 truncate">
-          {projectName ? <>Project &quot;{projectName}&quot;…</> : <>Project…</>}
+          {projectName ? <>Project <InlineCode>{projectName}</InlineCode>…</> : <>Project…</>}
         </span>
       </DropdownMenuSubTrigger>
       <DropdownMenuSubContent>

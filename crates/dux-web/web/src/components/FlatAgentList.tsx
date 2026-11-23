@@ -58,6 +58,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { EmptyState } from "@/components/ui/empty"
+import { InlineCode } from "@/components/ui/inline-code"
 import { agentRowVisual } from "@/lib/agentRow"
 import {
   agentSearchLocation,
@@ -1019,7 +1020,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             }
           />
         ) : nothingMatches ? (
-          <EmptyState size="compact" title={<>Nothing matches “{query}”.</>} />
+          <EmptyState size="compact" title={<>Nothing matches <InlineCode>{query}</InlineCode>.</>} />
         ) : (
           <>
             {/* One context over every row of the main bucket, agents and

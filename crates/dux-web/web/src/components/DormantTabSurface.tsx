@@ -2,6 +2,7 @@ import { DormantTabCard } from "@/components/DormantTabCard"
 import { NotRunningCard } from "@/components/NotRunningCard"
 import { Welcome } from "@/components/Welcome"
 import { startDormantTab } from "@/lib/store"
+import { chip, prose, renderProse } from "@/lib/prose"
 import type { TabRunVerdict } from "@/lib/types"
 
 // What a dormant tab looks like, in one decision both shells read:
@@ -40,12 +41,7 @@ export function DormantTabSurface({
         <div className="mt-6">
           <NotRunningCard
             icon="none"
-            title={
-              <>
-                This <span className="font-mono">{provider}</span> tab isn&rsquo;t
-                running.
-              </>
-            }
+            title={renderProse(prose`This ${chip(provider)} tab isn’t running.`)}
             details={
               <>
                 Starting it picks up this provider&rsquo;s most recent
