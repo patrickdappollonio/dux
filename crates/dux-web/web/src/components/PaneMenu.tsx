@@ -1,13 +1,13 @@
-import { Ellipsis, Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
+import { Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
 import { useId, type ReactNode, type Ref } from "react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { PaneInputGroup } from "@/components/PaneInputGroup"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TerminalActionsMenu } from "@/components/TerminalActionsMenu"
-import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,7 +18,6 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { MENU_GROUP_LABELS } from "@/lib/menuGroupLabels"
 import { useAgentRowWatch } from "@/lib/paneCover"
@@ -128,25 +127,11 @@ export function PaneMenu({
       }}
     >
       <SimpleTooltip content={label}>
-        <DropdownMenuTrigger
+        <EllipsisMenuTrigger
           ref={triggerRef}
-          render={
-            <Button
-              variant={cluster ? "ghost" : "outline"}
-              size="icon"
-              // The header's is 40px square under a finger, like the rest of
-              // its cluster; the flap's circle is 40px already.
-              className={
-                cluster
-                  ? "size-10 shrink-0 rounded-full"
-                  : "shrink-0 pointer-coarse:size-10"
-              }
-              aria-label={label}
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
+          placement={cluster ? "floating" : "header"}
+          aria-label={label}
+        />
       </SimpleTooltip>
       <DropdownMenuContent align="end" side={side}>
         <PaneMenuBody

@@ -1,5 +1,6 @@
 import { useState } from "react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
@@ -77,6 +78,7 @@ function RenameEntryDialogBody({
   const validation = validateEntryName(name)
   const canSubmit =
     !isDirty && name.trim().length > 0 && validation.ok && !submitting
+  const refused = !isDirty && name.length > 0 && !validation.ok
   const dirtyRefusal = "Save or discard changes in this file before renaming."
 
   function submit(): void {
@@ -112,7 +114,8 @@ function RenameEntryDialogBody({
         onChange={(e) => setName(e.target.value)}
         onFocus={(e) => e.currentTarget.select()}
         disabled={isDirty}
-        aria-invalid={name.length > 0 && !validation.ok}
+        aria-invalid={refused}
+        aria-describedby={refused ? "rename-entry-error" : undefined}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault()
@@ -121,10 +124,14 @@ function RenameEntryDialogBody({
         }}
       />
       {isDirty ? (
+        // There when the dialog opens on a dirty file: standing, not announced.
         <p className="text-sm text-destructive">{dirtyRefusal}</p>
       ) : (
-        name.length > 0 &&
-        !validation.ok && <p className="text-sm text-destructive">{validation.error}</p>
+        refused && (
+          <ErrorLine announce="silent" id="rename-entry-error">
+            {validation.error}
+          </ErrorLine>
+        )
       )}
     </Modal>
   )

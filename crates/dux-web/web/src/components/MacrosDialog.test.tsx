@@ -507,7 +507,12 @@ describe("MacrosDialog editor", () => {
     await click(screen.getByRole("button", { name: "Show the macro" }))
     const selected = screen.getAllByRole("option").map((r) => r.getAttribute("aria-selected"))
     expect(selected).toEqual(["false", "true", "false"])
-    expect(screen.getByLabelText("Name")).toHaveProperty("value", "Build")
+    const name = screen.getByLabelText("Name")
+    expect(name).toHaveProperty("value", "Build")
+    // The field at fault is read with the sentence, which is no live region.
+    expect(name.getAttribute("aria-invalid")).toBe("true")
+    expect(name.getAttribute("aria-describedby")).toBe(problem.id)
+    expect(problem.getAttribute("role")).toBeNull()
   })
 
   it("does not call a new macro nameless before anything was typed into it", async () => {

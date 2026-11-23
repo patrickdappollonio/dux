@@ -2,9 +2,11 @@ import { GitBranch, TriangleAlert } from "lucide-react"
 import { Fragment, useMemo, useState, type ReactNode } from "react"
 
 import { LoadingRow } from "@/components/Spinner"
+import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { EmptyState } from "@/components/ui/empty"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
 import { changeBaseBranchProse } from "@/lib/changeBaseBranch"
@@ -127,17 +129,22 @@ function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void 
             <LoadingRow>Fetching origin and listing the branches…</LoadingRow>
           </p>
         ) : listing.kind === "failed" ? (
-          <p className="px-2 py-4 text-sm text-destructive">{listing.message}</p>
+          <div className="px-2 py-4">
+            <ErrorLine>{listing.message}</ErrorLine>
+          </div>
         ) : filtered.length === 0 ? (
-          <p className="px-2 py-4 text-sm text-muted-foreground">
-            {query.trim() === "" ? (
-              "This project has no branches to switch to."
-            ) : (
-              <>
-                No branches match <InlineCode>{query}</InlineCode>.
-              </>
-            )}
-          </p>
+          <EmptyState
+            size="compact"
+            title={
+              query.trim() === "" ? (
+                "This project has no branches to switch to."
+              ) : (
+                <>
+                  No branches match <InlineCode>{query}</InlineCode>.
+                </>
+              )
+            }
+          />
         ) : project ? (
           filtered.map((branch) => (
             <BranchRow

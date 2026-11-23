@@ -17,6 +17,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
+import { EmptyState } from "@/components/ui/empty"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { targetPtyId } from "@/components/terminalAreaModel"
@@ -203,13 +204,12 @@ export function MacroPopover({
         finalFocus={resolveFinalFocus}
       >
         {allMacros.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros found. Start by creating one!
-          </div>
+          <EmptyState size="compact" title="No macros found. Start by creating one!" />
         ) : macros.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros for this target kind. Add one via Edit macros below.
-          </div>
+          <EmptyState
+            size="compact"
+            title="No macros for this target kind. Add one via Edit macros below."
+          />
         ) : (
           <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
         )}
@@ -271,7 +271,12 @@ function MacroCommand({
           conflict, so the primitive's max-h-72 would survive beside it
           and which one wins would be stylesheet-order luck. */}
       <CommandList className="max-h-[none] min-h-0">
-        <CommandEmpty>No matching macros.</CommandEmpty>
+        {/* The list's own empty slot keeps showing and hiding it as the
+            filter changes; the slot's padding and text are the shared
+            line's. */}
+        <CommandEmpty className="p-0">
+          <EmptyState size="compact" title="No matching macros." />
+        </CommandEmpty>
         <CommandGroup>
           {macros.map((macro) => (
             <MacroRow

@@ -1,7 +1,7 @@
 import { useSecondTicks } from "@/hooks/use-second-ticks"
-import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
-import { StartAgentButton } from "@/components/StartAgentButton"
+import { NotRunningCard } from "@/components/NotRunningCard"
 import { startDormantTab } from "@/lib/store"
+import { chip, prose, renderProse } from "@/lib/prose"
 import { genericEndingSentence, verdictSentenceNow } from "@/lib/tabVerdict"
 import type { TabRunVerdict } from "@/lib/types"
 
@@ -36,62 +36,34 @@ export function DormantTabCard({
   lastRunFailed?: boolean
   lastRunVerdict?: TabRunVerdict | null
 }) {
-  const excerpt = lastRunVerdict?.excerpt ?? []
   useSecondTicks(lastRunVerdict != null)
   return (
-    <div className="flex h-full w-full select-none flex-col items-center justify-center gap-4 overflow-hidden px-6 text-center">
-      <img
-        src="/dux-logo.png"
-        alt=""
-        aria-hidden
-        className="size-20 object-contain opacity-70"
-      />
-      <div className="max-w-md space-y-2">
-        <p className="text-sm font-medium">
-          This <span className="font-mono">{provider}</span> tab isn&rsquo;t running.
-        </p>
-        {lastRunFailed ? (
-          <p className="text-sm text-muted-foreground">
-            {lastRunVerdict
-              ? verdictSentenceNow(lastRunVerdict)
-              : genericEndingSentence()}
-          </p>
-        ) : null}
-        {lastRunFailed && excerpt.length > 0 ? (
-          <div className="space-y-1 text-left">
-            <p className="text-xs font-medium text-muted-foreground">
-              Last output
-            </p>
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/40 px-2 py-1.5 text-left font-mono text-xs text-muted-foreground/80">
-              {excerpt.join("\n")}
-            </pre>
-          </div>
-        ) : null}
-        <p className="text-sm text-muted-foreground">
+    <NotRunningCard
+      icon="large"
+      title={
+        renderProse(prose`This ${chip(provider)} tab isn’t running.`)
+      }
+      subtitle={
+        lastRunFailed
+          ? lastRunVerdict
+            ? verdictSentenceNow(lastRunVerdict)
+            : genericEndingSentence()
+          : null
+      }
+      output={lastRunFailed ? (lastRunVerdict?.excerpt ?? []) : []}
+      details={
+        <>
           Starting it picks up this provider&rsquo;s most recent conversation in
           this worktree, unless another tab of the same provider is already running
           or the provider can&rsquo;t resume, in which case it starts fresh. To reach
-          an older conversation, use the provider&rsquo;s own history command.{" "}
-          <a
-            href={DOCS_AGENT_TABS_RESUME}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary underline underline-offset-2"
-          >
-            How resume works&nbsp;→
-          </a>
-        </p>
-      </div>
-      {/* The touch floor, at the take-over card's height idiom: that card is the
-        * nearest analogue here, a full-pane card with one primary act, so
-        * matching it keeps the two the same size under a finger. */}
-      <StartAgentButton
-        sessionId={sessionId}
-        onStart={() => startDormantTab(sessionId, tabId)}
-        className="max-md:min-h-11 pointer-coarse:min-h-11"
-      >
-        Start session
-      </StartAgentButton>
-    </div>
+          an older conversation, use the provider&rsquo;s own history command.
+        </>
+      }
+      start={{
+        sessionId,
+        onStart: () => startDormantTab(sessionId, tabId),
+        label: "Start session",
+      }}
+    />
   )
 }

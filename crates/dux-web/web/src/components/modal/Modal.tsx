@@ -1,4 +1,4 @@
-import { ChevronLeft, Search, X } from "lucide-react"
+import { ChevronLeft, X } from "lucide-react"
 import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
 
 import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { SearchField } from "@/components/ui/search-field"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
@@ -516,7 +517,7 @@ function ModalParts(
               : "shrink-0 px-4 pt-4 pb-3"
           }
         >
-          <SearchField search={props.search!} inputRef={searchRef} />
+          <ModalSearchField search={props.search!} inputRef={searchRef} />
         </div>
       ) : null}
       {frame?.toolbar ? (
@@ -581,7 +582,7 @@ function scrollerOf(body: HTMLElement | null): HTMLElement | null {
   return body.closest<HTMLElement>('[data-slot="scroll-area-viewport"]') ?? body
 }
 
-function SearchField({
+function ModalSearchField({
   search,
   inputRef,
 }: {
@@ -589,23 +590,16 @@ function SearchField({
   inputRef: Ref<HTMLInputElement>
 }): ReactNode {
   return (
-    // A label, so a press anywhere in the 40px box lands in the field.
-    <label className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
-      <Search className="size-4 shrink-0 text-muted-foreground" />
-      {/* Plain text, never `type="search"`: that clears itself on Escape,
-          which here also closes the modal, and Chromium draws a clear button
-          of its own in it. */}
-      <input
-        ref={inputRef}
-        type="text"
-        value={search.value}
-        onChange={(event) => search.onChange(event.target.value)}
-        placeholder={search.label}
-        aria-label={search.label}
-        {...search.fieldProps}
-        data-modal-search=""
-        className="min-w-0 flex-1 self-stretch bg-transparent py-2 text-base outline-none placeholder:text-muted-foreground md:text-sm"
-      />
-    </label>
+    // Plain text on purpose (the shared field is never a search-type input):
+    // Escape here closes the modal, and a native clear on it would swallow
+    // the first one.
+    <SearchField
+      inputRef={inputRef}
+      value={search.value}
+      onChange={search.onChange}
+      label={search.label}
+      {...search.fieldProps}
+      data-modal-search=""
+    />
   )
 }

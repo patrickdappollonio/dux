@@ -398,7 +398,10 @@ describe("FileTree", () => {
         onOpen={() => {}}
       />,
     )
-    const retry = await screen.findByText("Failed to load. Retry")
+    // The whole row is one button that says what failed and what a press does,
+    // and is exactly as tall as the tree's own row (28px with a mouse).
+    const retry = await screen.findByRole("button", { name: "Failed to load. Retry" })
+    expect((retry as HTMLElement).style.height).toBe("28px")
     expect(badCalls).toBe(1)
 
     // Give any (undesired) automatic retry loop a chance to fire.

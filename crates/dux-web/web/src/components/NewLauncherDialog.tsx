@@ -5,6 +5,7 @@ import { IconTile } from "@/components/IconTile"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, ModalGroupHeading, useModalLifetime } from "@/components/modal"
 import { RowStateWord } from "@/components/RowStateWord"
+import { EmptyState } from "@/components/ui/empty"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
   agentChangeBlockReason,
@@ -327,9 +328,10 @@ function AgentRows({ agents }: { agents: ReturnType<typeof useAgentPick> }) {
       ) : null}
       <div className="flex flex-col gap-0.5" onKeyDown={moveFocusAmongRows}>
         {sessions.length === 0 ? (
-          <p className="px-2 py-4 text-sm text-muted-foreground">
-            {needle === "" ? "No agents yet." : "No agents match that search."}
-          </p>
+          <EmptyState
+            size="compact"
+            title={needle === "" ? "No agents yet." : "No agents match that search."}
+          />
         ) : (
           groups.map((group) => (
             <div

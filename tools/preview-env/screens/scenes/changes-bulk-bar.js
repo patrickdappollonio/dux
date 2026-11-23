@@ -44,7 +44,7 @@ module.exports = {
     await expectVisibleText(page, "Select all", { selector: '[role="menu"] *', what: "the menu's Select all" })
     const pane = await boxOf(page, ['#changes-pane'])
     const menu = await boxOf(page, ['[role="menu"]'])
-    const filter = await boxOf(page, ['#changes-pane input[type="search"]'])
+    const filter = await boxOf(page, ['#changes-pane input[aria-label="Filter changed files"]'])
     const y = Math.max(0, Math.round(filter.y - 16))
     return {
       x: Math.round(pane.x),

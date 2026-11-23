@@ -15,11 +15,8 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Ellipsis,
-  EllipsisVertical,
   FileCode2,
   GitCommitVertical,
-  Loader2,
   Minus,
   FolderOpen,
   GitBranch,
@@ -41,12 +38,15 @@ import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
 import { LoadingRow as SpinnerRow, Spinner } from "@/components/Spinner"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
+import { RetryButton } from "@/components/ui/retry-button"
+import { SearchField } from "@/components/ui/search-field"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -66,14 +66,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import {
   branchShownWithoutCheckout,
   changesGitBlockedReason,
@@ -82,7 +75,7 @@ import {
   folderWorkspace,
   supportsBranchGit,
 } from "@/lib/agentWorkspace"
-import { Input } from "@/components/ui/input"
+import { Notice } from "@/components/Notice"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
@@ -140,7 +133,7 @@ import {
 } from "@/lib/changesExpansion"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { ALWAYS_REVEALED_ON_PHONE, HOVER_REVEAL, REVEAL_ROW } from "@/lib/hoverReveal"
+import { REVEAL_ROW } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
@@ -617,19 +610,16 @@ const FileRow = memo(function FileRow({
       {refreshError !== null && onRetryFolder && (
         <div role="gridcell" className="shrink-0 px-2">
           <SimpleTooltip content={refreshError}>
-            <Button
-              variant="ghost"
-              size="sm"
+            <RetryButton
+              size="quiet"
+              warning
+              label="Couldn't refresh · Retry"
               tabIndex={inTabOrder ? undefined : -1}
-              className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
-              onClick={(event) => {
+              onRetry={(event) => {
                 event.stopPropagation()
                 onRetryFolder(file)
               }}
-            >
-              <TriangleAlert />
-              Couldn't refresh · Retry
-            </Button>
+            />
           </SimpleTooltip>
         </div>
       )}
@@ -646,11 +636,7 @@ const FileRow = memo(function FileRow({
         * React routes through this ancestor. */
       <div
         role="gridcell"
-        className={cn(
-          HOVER_REVEAL,
-          "[--reveal-cap:--spacing(10)] has-[[aria-busy=true]]:max-w-(--reveal-cap) has-[[aria-busy=true]]:opacity-100",
-          ALWAYS_REVEALED_ON_PHONE,
-        )}
+        className="flex shrink-0 items-center"
         onClick={(e) => e.stopPropagation()}
       >
         <DropdownMenu
@@ -658,21 +644,14 @@ const FileRow = memo(function FileRow({
             if (open) setMenuMounted(true)
           }}
         >
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled={busy}
-                aria-busy={busy}
-                tabIndex={inTabOrder ? undefined : -1}
-                aria-label={`Actions for ${file.path}`}
-                className={cn("shrink-0", TOUCH_ICON)}
-              />
-            }
-          >
-            {busy ? <Loader2 className="motion-safe:animate-spin" /> : <Ellipsis />}
-          </DropdownMenuTrigger>
+          <EllipsisMenuTrigger
+            placement="row"
+            reveal="hover"
+            fit="roomy"
+            busy={busy}
+            tabIndex={inTabOrder ? undefined : -1}
+            aria-label={`Actions for ${file.path}`}
+          />
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
               {/* Open in the editor. Skipped for deleted files (nothing on
@@ -1098,19 +1077,12 @@ function ChangesHeader({
           </>
         )}
         <DropdownMenu>
-          <DropdownMenuTrigger
+          <EllipsisMenuTrigger
             ref={triggerRef}
-            render={
-              <Button
-                size="icon"
-                variant="outline"
-                aria-label="Changes actions"
-                className={TOUCH_ICON}
-              />
-            }
-          >
-            <EllipsisVertical />
-          </DropdownMenuTrigger>
+            placement="header"
+            fit="roomy"
+            aria-label="Changes actions"
+          />
           <DropdownMenuContent align="end">
             {folded ? (
               <>
@@ -1527,16 +1499,11 @@ function FailedRow({
         <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
       </div>
       <div role="gridcell" className="shrink-0">
-        <Button
-          variant="outline"
-          size="sm"
+        <RetryButton
+          size="row"
           tabIndex={grid.active ? undefined : -1}
-          className="h-8 max-md:h-11 pointer-coarse:min-h-11"
-          onClick={onRetry}
-        >
-          <RefreshCw />
-          Retry
-        </Button>
+          onRetry={onRetry}
+        />
       </div>
     </div>
   )
@@ -2015,30 +1982,20 @@ function ChangesList({
     >
       <div className="flex flex-col gap-1 p-3">
         {!hasChanges ? (
-          <Empty className="border-0 py-6">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Check />
-              </EmptyMedia>
-              <EmptyTitle>No changes</EmptyTitle>
-              <EmptyDescription>
-                {branchGit ? "This worktree is clean." : "This folder is clean."}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            size="section"
+            icon={<Check />}
+            title="No changes"
+            description={branchGit ? "This worktree is clean." : "This folder is clean."}
+          />
         ) : null}
         {hasChanges && filtering && !hasMatches ? (
-          <Empty className="border-0 py-6">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Search />
-              </EmptyMedia>
-              <EmptyTitle>No matching files</EmptyTitle>
-              <EmptyDescription>
-                No changed file matches “{query.trim()}”.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            size="section"
+            icon={<Search />}
+            title="No matching files"
+            description={<>No changed file matches <InlineCode>{query.trim()}</InlineCode>.</>}
+          />
         ) : null}
         {items.length > 0 ? (
           // Rows here hold widgets (a checkbox, a toggle, a menu) and nest by
@@ -2133,22 +2090,18 @@ function ChangesList({
 // editor at, so no header either.
 function noSessionScreen(): ReactElement {
   return (
-    <Empty className="h-full border-0">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <MousePointerClick />
-        </EmptyMedia>
-        <EmptyTitle>No session selected</EmptyTitle>
-        <EmptyDescription>Select a session to see its changes.</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
+    <EmptyState
+      size="page"
+      icon={<MousePointerClick />}
+      title="No session selected"
+      description="Select a session to see its changes."
+    />
   )
 }
 
 // What stands in for the list under the pane's header while there is no list
 // to show: a quiet directory, the first load, or a failed one. Null once the
 // changes are loaded, which is when the list renders instead.
-const BODY_EMPTY = "min-h-0 flex-1 border-0"
 
 function changesBodyInstead(
   sessionId: string,
@@ -2159,20 +2112,16 @@ function changesBodyInstead(
   if (quietReason !== null) {
     const folder = session ? folderWorkspace(session.workspace) : null
     return (
-      <Empty className={BODY_EMPTY}>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <FolderOpen />
-          </EmptyMedia>
-          <EmptyTitle>No changes to show</EmptyTitle>
-          <EmptyDescription>{quietReason}</EmptyDescription>
-          {folder ? (
-            <EmptyDescription className="font-mono break-all">
-              {folder.folder_label}
-            </EmptyDescription>
-          ) : null}
-        </EmptyHeader>
-      </Empty>
+      <EmptyState
+        size="page"
+        icon={<FolderOpen />}
+        title="No changes to show"
+        description={
+          folder
+            ? [quietReason, <div key="folder" className="font-mono break-all">{folder.folder_label}</div>]
+            : quietReason
+        }
+      />
     )
   }
 
@@ -2180,41 +2129,24 @@ function changesBodyInstead(
   const phase = slice?.phase ?? "loading"
   if (phase === "loading" || phase === "idle") {
     return (
-      <Empty className={BODY_EMPTY}>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <Spinner size="fit" tone="current" />
-          </EmptyMedia>
-          <EmptyTitle>Loading changes…</EmptyTitle>
-          <EmptyDescription>Fetching this session's changes.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <EmptyState
+        size="page"
+        icon={<Spinner size="fit" tone="current" />}
+        title="Loading changes…"
+        description="Fetching this session's changes."
+      />
     )
   }
   if (phase !== "error") return null
 
   return (
-    <Empty className={BODY_EMPTY}>
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <TriangleAlert />
-        </EmptyMedia>
-        <EmptyTitle>Couldn't load changes</EmptyTitle>
-        <EmptyDescription>
-          {slice?.error ?? "The changed files couldn't be loaded."}
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button
-          variant="outline"
-          onClick={() => refreshChanges()}
-          className={TOUCH_MIN_HEIGHT}
-        >
-          <RefreshCw />
-          Refresh
-        </Button>
-      </EmptyContent>
-    </Empty>
+    <EmptyState
+      size="page"
+      icon={<TriangleAlert />}
+      title="Couldn't load changes"
+      description={slice?.error ?? "The changed files couldn't be loaded."}
+      actions={<RetryButton label="Refresh" onRetry={() => refreshChanges()} />}
+    />
   )
 }
 
@@ -2340,17 +2272,15 @@ export const ChangedFiles = memo(function ChangedFiles() {
           {bodyInstead}
           {!bodyInstead && hasChanges ? (
             <div className="border-b p-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  type="search"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Filter changed files…"
-                  aria-label="Filter changed files"
-                  className="h-9 pl-8 max-md:h-11 pointer-coarse:h-10 max-md:pointer-coarse:h-11"
-                />
-              </div>
+              {/* Escape empties the filter, as the native search field it
+                  replaced did. */}
+              <SearchField
+                value={query}
+                onChange={setQuery}
+                label="Filter changed files"
+                placeholder="Filter changed files…"
+                escape="clears"
+              />
             </div>
           ) : null}
           {!bodyInstead && anySelected ? (
@@ -2401,26 +2331,21 @@ export const ChangedFiles = memo(function ChangedFiles() {
 
 // Heads the pane while the agent's working copy has no branch checked out,
 // sitting flush under the header: `-mt-4` takes back the card's gap between
-// the header and the content, for this strip only. The tint is the pull
-// request banner's, in the warning tone. The branch chip wraps like the words
+// the header and the content, for this strip only. The branch chip wraps like the words
 // around it, so a long name breaks inside the strip rather than overflowing it.
 function NoBranchCheckedOut({ branch }: { branch: string }) {
   return (
-    <div
-      role="status"
+    <Notice
+      shape="strip"
+      tone="warning"
+      icon={GitBranch}
+      title="No branch checked out"
+      placement="under-card-header"
       data-testid="no-branch-checked-out"
-      data-toast-clear
-      className="-mt-4 flex min-h-9 shrink-0 items-start gap-2 border-b border-dux-warning/30 bg-dux-warning/10 px-3 py-2 text-sm text-dux-warning"
     >
-      <GitBranch className="mt-0.5 size-4 shrink-0" aria-hidden />
-      <div className="min-w-0">
-        <div className="font-semibold">No branch checked out</div>
-        <div className="mt-0.5 text-foreground/80">
-          dux keeps showing <InlineCode>{branch}</InlineCode> until one is checked
-          out again.
-        </div>
-      </div>
-    </div>
+      dux keeps showing <InlineCode>{branch}</InlineCode> until one is checked
+      out again.
+    </Notice>
   )
 }
 

@@ -1497,9 +1497,11 @@ describe("FlatAgentList search result state", () => {
       agentSearch: "definitely absent",
     } as DuxState
     render(<FlatAgentList handlers={handlers} />)
-    expect(
-      screen.getByText("Nothing matches “definitely absent”."),
-    ).toBeTruthy()
+    // The query is a chip, not a quotation.
+    expect(screen.getByText("definitely absent").tagName).toBe("CODE")
+    expect(screen.getByText(/Nothing matches/).textContent).toBe(
+      "Nothing matches definitely absent.",
+    )
     expect(screen.queryByText("Terminals")).toBeNull()
     expect(screen.queryByText("Inactive")).toBeNull()
     expect(dragEndHandlers).toHaveLength(0)

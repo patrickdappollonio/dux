@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react"
-import { ChevronRight, CornerLeftUp, RotateCw } from "lucide-react"
+import { ChevronRight, CornerLeftUp } from "lucide-react"
 
 import { Spinner } from "@/components/Spinner"
+import { ErrorLine } from "@/components/ErrorLine"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
+import { FailedLoad } from "@/components/ui/retry-button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { EmptyState } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { dirIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
@@ -208,21 +211,15 @@ function MoveEntryDialogBody({
               <Spinner />
             </div>
           ) : state.status === "error" ? (
-            <div className="flex flex-col items-start gap-1 px-2 py-2">
-              <p className="text-sm text-destructive">{state.message}</p>
-              <button
-                type="button"
-                onClick={() => setReloadNonce((n) => n + 1)}
-                className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted max-md:min-h-10 pointer-coarse:min-h-10"
-              >
-                <RotateCw className="size-3.5" />
-                Retry
-              </button>
-            </div>
+            <FailedLoad
+              message={state.message}
+              onRetry={() => setReloadNonce((n) => n + 1)}
+            />
           ) : folders.length === 0 ? (
-            <p className="px-2 py-2 text-sm text-muted-foreground">
-              No folders here. This folder can still be the destination.
-            </p>
+            <EmptyState
+              size="compact"
+              title="No folders here. This folder can still be the destination."
+            />
           ) : (
             folders.map((entry) => (
               <button
@@ -243,20 +240,18 @@ function MoveEntryDialogBody({
       </ScrollArea>
 
       {isDirty ? (
+        // There when the dialog opens on a dirty file: standing, not announced.
         <p className="text-sm text-destructive">{dirtyRefusal}</p>
       ) : (
         !validation.ok && (
           // "It is already here" is the state every move dialog OPENS in, so it
-          // reads as a hint; everything else really is wrong and reads as such.
-          <p
-            className={
-              dir === parentDir(target.path)
-                ? "text-sm text-muted-foreground"
-                : "text-sm text-destructive"
-            }
-          >
-            {validation.error}
-          </p>
+          // reads as a hint; everything else really is wrong and reads as such,
+          // and follows the user's choice of folder, so it is announced.
+          dir === parentDir(target.path) ? (
+            <p className="text-sm text-muted-foreground">{validation.error}</p>
+          ) : (
+            <ErrorLine>{validation.error}</ErrorLine>
+          )
         )
       )}
     </Modal>

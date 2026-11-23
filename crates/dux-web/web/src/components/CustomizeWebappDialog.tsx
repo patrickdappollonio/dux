@@ -7,7 +7,6 @@ import {
   CircleDot,
   FileCode,
   RotateCcw,
-  Search,
   Undo2,
   ZoomOut,
   type LucideIcon,
@@ -20,6 +19,7 @@ import {
 } from "@/lib/notify"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
+import { ErrorLine } from "@/components/ErrorLine"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useModalLifetime, type ModalCloseReason } from "@/components/modal"
 import {
@@ -42,14 +42,9 @@ import {
 } from "@/components/preferencesModel"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -883,11 +878,7 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(confirm) => onDraft({ ...draft, confirm })}
           />
-          {error ? (
-            <p role="alert" className="text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
+          <ErrorLine size="xs">{error}</ErrorLine>
         </div>
       ) : null}
     </div>
@@ -1491,20 +1482,23 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
 
   const searchResults =
     found.length === 0 ? (
-      <div
-        role="status"
-        className="flex min-h-full flex-1 flex-col items-center justify-center gap-2 px-6 py-10 text-center"
-      >
-        <ZoomOut aria-hidden className="size-7 text-muted-foreground/70" />
-        <p className="text-sm font-medium">
-          No settings match <InlineCode>{query.trim()}</InlineCode>.
-        </p>
-        <p className="max-w-sm text-xs text-muted-foreground">
-          This dialog holds the everyday settings. Everything else in{" "}
-          <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
-          <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
-        </p>
-      </div>
+      <EmptyState
+        size="page"
+        announce
+        icon={<ZoomOut />}
+        title={
+          <>
+            No settings match <InlineCode>{query.trim()}</InlineCode>.
+          </>
+        }
+        description={
+          <>
+            This dialog holds the everyday settings. Everything else in{" "}
+            <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
+            <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
+          </>
+        }
+      />
     ) : (
       <>
         <p className={phone ? "pt-1 text-xs text-muted-foreground" : headingClass}>
@@ -1534,18 +1528,12 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     ) : null
 
   const changedEmpty = (
-    <Empty className="min-h-full">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <CircleCheck />
-        </EmptyMedia>
-        <EmptyTitle>Everything is at its default</EmptyTitle>
-        <EmptyDescription>
-          Nothing here differs from what dux ships with. Settings you change show
-          up in this list, each with its own reset.
-        </EmptyDescription>
-      </EmptyHeader>
-    </Empty>
+    <EmptyState
+      size="page"
+      icon={<CircleCheck />}
+      title="Everything is at its default"
+      description="Nothing here differs from what dux ships with. Settings you change show up in this list, each with its own reset."
+    />
   )
 
   // On a phone the view's name is the cover's title, so its body opens on
@@ -1581,22 +1569,12 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     )
 
   const searchBox = (
-    <div
-      className={cn(
-        "flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
-        CONTROL_HEIGHT,
-      )}
-    >
-      <Search aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-      <input
-        ref={searchRef}
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search settings"
-        aria-label="Search settings"
-        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-      />
-    </div>
+    <SearchField
+      inputRef={searchRef}
+      value={query}
+      onChange={setQuery}
+      label="Search settings"
+    />
   )
 
   const nav = (

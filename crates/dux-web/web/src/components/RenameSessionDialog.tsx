@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Input } from "@/components/ui/input"
 import { INVALID_AGENT_NAME, isValidAgentName, sanitizeAgentName } from "@/lib/agentName"
@@ -163,11 +164,7 @@ export function RenameSessionDialog() {
           </p>
         </div>
       )}
-      {blocked !== null && (
-        <p className="text-xs text-destructive" role="alert">
-          {blocked}
-        </p>
-      )}
+      <ErrorLine size="xs">{blocked}</ErrorLine>
     </Modal>
   )
 }

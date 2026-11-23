@@ -1,12 +1,12 @@
-import { Ellipsis, Folder } from "lucide-react"
+import { Folder } from "lucide-react"
 import { useId, useRef, useState, type ReactNode } from "react"
 
-import { Button } from "@/components/ui/button"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { ModalGroupHeading } from "@/components/modal"
@@ -14,10 +14,7 @@ import { type ProjectListRow, type ProjectSearch } from "@/components/projectSea
 import { matchCharRanges } from "@/lib/searchMatch"
 import { FOCUS_RING, PICK_ROW } from "@/lib/focusRing"
 import {
-  ALWAYS_REVEALED_ON_PHONE,
-  HOVER_REVEAL,
   REVEAL_ROW,
-  REVEALED_ON_ANY_FOCUS,
 } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 
@@ -43,15 +40,18 @@ export function ProjectRows({
     <>
       {heading ? <ModalGroupHeading>{heading}</ModalGroupHeading> : null}
       {filtered.length === 0 ? (
-        <p className="px-2 py-4 text-sm text-muted-foreground">
-          {query.trim() === "" ? (
-            "No projects yet."
-          ) : (
-            <>
-              No projects match <InlineCode>{query}</InlineCode>.
-            </>
-          )}
-        </p>
+        <EmptyState
+          size="compact"
+          title={
+            query.trim() === "" ? (
+              "No projects yet."
+            ) : (
+              <>
+                No projects match <InlineCode>{query}</InlineCode>.
+              </>
+            )
+          }
+        />
       ) : (
         filtered.map((row) => (
           <ProjectRow
@@ -180,35 +180,12 @@ function ProjectRow({
           setMenuOpen(open)
         }}
       >
-        {/* The shared reveal, also on mouse focus anywhere in the row, and
-            always shown at phone width. The cap is the 40px trigger's. */}
-        <div
-          className={cn(
-            HOVER_REVEAL,
-            "[--reveal-cap:--spacing(10)]",
-            REVEALED_ON_ANY_FOCUS,
-            ALWAYS_REVEALED_ON_PHONE,
-          )}
-        >
-          <DropdownMenuTrigger
-            ref={triggerRef}
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                // 32px under a fine pointer, where the only neighbour on
-                // either axis is this row's own button, whose click opens a
-                // dialog at worst (the picker) or this same menu (the Projects
-                // list); the 40px floor returns on a phone and on any coarse
-                // pointer.
-                className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                aria-label="Project actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
-        </div>
+        <EllipsisMenuTrigger
+          ref={triggerRef}
+          placement="row"
+          reveal="hover-or-focus"
+          aria-label="Project actions"
+        />
         <DropdownMenuContent
           align="end"
           // Most items open a project dialog over this list, and the menu's

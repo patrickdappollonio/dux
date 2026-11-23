@@ -20,16 +20,15 @@ import {
   ArrowUpToLine,
   ChevronRight,
   Copy,
-  Ellipsis,
   Plus,
-  Search,
   SquareSlash,
   Trash2,
-  TriangleAlert,
 } from "lucide-react"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { LoadingRow } from "@/components/Spinner"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
+import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -57,6 +56,8 @@ import {
   type DraftMacro,
   type MacroFilter,
 } from "@/components/macrosDraft"
+import { StaleSaveNotice } from "@/components/StaleSaveNotice"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -65,16 +66,8 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { tabsListVariants } from "@/components/ui/tabs"
@@ -119,6 +112,8 @@ const FILTERS: { value: MacroFilter; label: string }[] = [
 
 // The one height token of the controls that sit together (search, New, the
 // filter, the name field and its `⋯`): 32px for a mouse, 40px under a finger.
+// What the invalid name or text field names in aria-describedby.
+const MACRO_PROBLEM_ID = "macro-problem"
 const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
 
 // Each mark one unbreakable box, which an ellipsis hides whole, so a hidden
@@ -370,6 +365,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     <MacroFields
       key={selected.key}
       macro={selected}
+      problemField={shownProblem?.key === selected.key ? shownProblem.field : null}
       phone={phone}
       first={items[0]?.key === selected.key}
       nameRef={nameRef}
@@ -379,7 +375,9 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
       onDelete={() => setDeleteKey(selected.key)}
     />
   ) : (
-    <p className="m-auto text-center text-sm text-muted-foreground">{emptyText}</p>
+    <div className="m-auto">
+      <EmptyState size="compact" title={emptyText} />
+    </div>
   )
 
   const list = (
@@ -404,22 +402,12 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   const listHead = (
     <>
       <div className="flex items-center gap-2">
-        <div
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
-            CONTROL_HEIGHT,
-          )}
-        >
-          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => narrow(event.target.value, filter)}
-            placeholder="Search macros"
-            aria-label="Search macros"
-            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <SearchField
+          inputRef={searchRef}
+          value={query}
+          onChange={(value) => narrow(value, filter)}
+          label="Search macros"
+        />
         <Button variant="outline" className={cn("shrink-0", CONTROL_HEIGHT)} onClick={addNew}>
           <Plus />
           New
@@ -444,19 +432,18 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   )
 
   const empty = (
-    <Empty className={cn(!phone && "border")}>
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <SquareSlash />
-        </EmptyMedia>
-        <EmptyTitle>No macros yet</EmptyTitle>
-        <EmptyDescription>
+    <EmptyState
+      size="page"
+      icon={<SquareSlash />}
+      title="No macros yet"
+      description={
+        <>
           A macro is text you send with one {phone ? "tap" : "click"}, such as a
           review request you type ten times a day, or a test command for a
           terminal.
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
+        </>
+      }
+      actions={
         <Button
           ref={emptyNewRef}
           className="max-md:min-h-10 pointer-coarse:min-h-10"
@@ -465,8 +452,8 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
           <Plus />
           New macro
         </Button>
-      </EmptyContent>
-    </Empty>
+      }
+    />
   )
 
   const editing = phone && step === "edit" && selected !== null
@@ -476,12 +463,24 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   const hasNotices = Boolean(macrosConflict) || (shownProblem !== null && items.length > 0)
   const notices = hasNotices ? (
     <div className="flex shrink-0 flex-col gap-2">
-      {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
+      {macrosConflict ? (
+        <StaleSaveNotice
+          message={macrosConflict}
+          reloadLabel="Reload macros"
+          onKeepEditing={dismissMacrosConflict}
+          onReload={() => void reloadMacrosDraft()}
+        />
+      ) : null}
       {shownProblem && items.length > 0 ? (
         <div className="flex items-center gap-3">
-          <p className="min-w-0 flex-1 text-xs text-destructive">
-            {renderProse(shownProblem.message)}
-          </p>
+          <div className="min-w-0 flex-1">
+            {/* Follows typing: silent as a live region. When the macro at fault
+                is on screen its field is marked invalid and described by this
+                line; otherwise "Show the macro" is the way to it. */}
+            <ErrorLine announce="silent" size="xs" id={MACRO_PROBLEM_ID}>
+              {renderProse(shownProblem.message)}
+            </ErrorLine>
+          </div>
           {problemOnScreen ? null : (
             <Button
               variant="link"
@@ -658,13 +657,15 @@ function useWholeRowsHeight(
 function visibleProblem(
   items: DraftMacro[],
   touched: ReadonlySet<number>,
-): { message: Prose; key: number } | null {
+): { message: Prose; key: number; field: "name" | "text" | "surface" } | null {
   const shown = items.filter(
     (item) =>
       item.origin !== null || touched.has(item.key) || item.name !== "" || item.text !== "",
   )
   const found = validateMacros(draftToMacros(shown))
-  return found === null ? null : { message: found.message, key: shown[found.index].key }
+  return found === null
+    ? null
+    : { message: found.message, key: shown[found.index].key, field: found.field }
 }
 
 // What an empty list says: a search found nothing, or the filter lists no
@@ -781,7 +782,7 @@ function MacroList({
   }
 
   if (items.length === 0) {
-    return <p className="py-6 text-center text-sm text-muted-foreground">{emptyText}</p>
+    return <EmptyState size="compact" title={emptyText} />
   }
 
   // The one row in the tab order: the selected one when it is listed.
@@ -916,6 +917,7 @@ function MacroRow({
 // is shown, and its text. Every keystroke changes only the draft.
 function MacroFields({
   macro,
+  problemField,
   phone,
   first,
   nameRef,
@@ -925,6 +927,8 @@ function MacroFields({
   onDelete,
 }: {
   macro: DraftMacro
+  // The field the shown problem is about, when it is about this macro.
+  problemField: "name" | "text" | "surface" | null
   phone: boolean
   first: boolean
   nameRef: RefObject<HTMLInputElement | null>
@@ -950,21 +954,12 @@ function MacroFields({
             value={macro.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="Review"
+            aria-invalid={problemField === "name"}
+            aria-describedby={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
             className={CONTROL_HEIGHT}
           />
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  size="icon"
-                  aria-label={`Actions for ${name}`}
-                  className="shrink-0 max-md:size-10 pointer-coarse:size-10"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
+            <EllipsisMenuTrigger placement="header" aria-label={`Actions for ${name}`} />
             <DropdownMenuContent
               align="end"
               finalFocus={() => {
@@ -1027,6 +1022,8 @@ function MacroFields({
           value={macro.text}
           onChange={(e) => onChange({ text: e.target.value })}
           placeholder="review this code for bugs"
+          aria-invalid={problemField === "text"}
+          aria-describedby={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
           className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
         />
         <p className="text-xs text-muted-foreground">
@@ -1083,27 +1080,3 @@ function ConfirmDeleteMacro({
   )
 }
 
-// A save the server refused because the list changed after the dialog read it.
-// Reloading throws these edits away, so "Keep editing" has focus.
-function StaleSaveNotice({ message }: { message: string }) {
-  return (
-    <div
-      role="alert"
-      data-stale-save=""
-      className="flex shrink-0 flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-foreground"
-    >
-      <div className="flex items-start gap-2">
-        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-        <span>{message}</span>
-      </div>
-      <div className="flex justify-end gap-3">
-        <Button variant="outline" autoFocus onClick={dismissMacrosConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          Keep editing
-        </Button>
-        <Button variant="destructive" onClick={() => void reloadMacrosDraft()} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          Reload macros
-        </Button>
-      </div>
-    </div>
-  )
-}

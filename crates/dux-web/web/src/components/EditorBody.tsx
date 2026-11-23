@@ -10,7 +10,6 @@ import {
   Check,
   ChevronLeft,
   CircleAlert,
-  Ellipsis,
   ExternalLink,
   Code2,
   Eye,
@@ -27,7 +26,6 @@ import {
   RotateCw,
   Save,
   SaveAll,
-  Search,
   SquareTerminal,
   X,
 } from "lucide-react"
@@ -123,7 +121,10 @@ import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Spinner } from "@/components/Spinner"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
+import { FailedLoad } from "@/components/ui/retry-button"
+import { SearchField } from "@/components/ui/search-field"
 import { Popover, PopoverContent } from "@/components/ui/popover"
 import { useObjectUrl } from "@/hooks/use-object-url"
 import { useSearchPick } from "@/hooks/use-search-pick"
@@ -185,9 +186,8 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
+import { EmptyState } from "@/components/ui/empty"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -1792,19 +1792,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             languageFieldRef.current?.focus()
           }}
         >
-          <DropdownMenuTrigger
+          <EllipsisMenuTrigger
             ref={mobileFoldRef}
-            render={
-              <Button
-                size="icon"
-                variant="outline"
-                className={cn(HEADER_ICON_CONTROL, "md:hidden max-md:size-10")}
-                aria-label="More editor actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
+            placement="header"
+            phoneOnly
+            aria-label="More editor actions"
+          />
           <DropdownMenuContent
             align="end"
             // The language sheet takes focus once this menu has closed;
@@ -2180,16 +2173,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   of its right edge, where the divider's touch band reaches
                   into this panel, so the `⋯` sits clear of it. */}
               <div data-toast-clear className="flex items-center gap-2 border-b p-2 pointer-coarse:pr-2.5">
-                <div className="relative flex-1">
-                  <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search files…"
-                    {...searchPick.fieldProps}
-                    className="h-8 pl-7 text-sm"
-                  />
-                </div>
+                <SearchField
+                  value={search}
+                  onChange={setSearch}
+                  label="Search files"
+                  placeholder="Search files…"
+                  {...searchPick.fieldProps}
+                />
                 {/* Its own name while it works, the reason while this page
                     may not write, on a wrapper that is always there so the
                     button never remounts when that changes. */}
@@ -2213,18 +2203,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     itself fresh on events, and this is the way to ask it
                     anyway. Sized with New file beside it. */}
                 <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label="Explorer actions"
-                        className="max-md:size-10 pointer-coarse:size-10"
-                      />
-                    }
-                  >
-                    <Ellipsis />
-                  </DropdownMenuTrigger>
+                  <EllipsisMenuTrigger
+                    placement="toolbar"
+                    aria-label="Explorer actions"
+                  />
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={refreshAllLoadedDirs}>
                       <RefreshCw />
@@ -2244,9 +2226,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         <Spinner />
                       </div>
                     ) : filtered.length === 0 ? (
-                      <p className="px-1 py-2 text-sm text-muted-foreground">
-                        No files match.
-                      </p>
+                      <EmptyState size="compact" title="No files match." />
                     ) : (
                       <>
                         {filtered.map((p) => (
@@ -2783,7 +2763,9 @@ export function EditorContentPane(props: EditorContentPaneProps) {
   const { root, tab, image, onImageDims } = props
   if (tab === null) {
     return (
-      <CenteredPane>Select a file from the tree to view or edit it.</CenteredPane>
+      <div className="flex h-full items-center justify-center">
+        <EmptyState size="compact" title="Select a file from the tree to view or edit it." />
+      </div>
     )
   }
   // Images have no text buffer and win even if stale state says "diff".
@@ -2957,13 +2939,7 @@ function ErrorPane({
   onRetry: () => void
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-      {message}
-      <Button size="sm" variant="outline" onClick={onRetry}>
-        <RotateCw />
-        Retry
-      </Button>
-    </div>
+    <FailedLoad layout="center" message={message} onRetry={onRetry} />
   )
 }
 
@@ -2989,25 +2965,15 @@ function ImagePreviewPane({
   const [attempt, setAttempt] = useState(0)
   if (failed) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-        <span>
-          This image could not be loaded. One possibility is that it exceeds
-          the server&rsquo;s raw-file size cap.
-        </span>
-        {/* Mirrors the file-error arm's manual Retry. */}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            setFailed(false)
-            onDims(null)
-            setAttempt((a) => a + 1)
-          }}
-        >
-          <RotateCw />
-          Retry
-        </Button>
-      </div>
+      <FailedLoad
+        layout="center"
+        message="This image could not be loaded. One possibility is that it exceeds the server’s raw-file size cap."
+        onRetry={() => {
+          setFailed(false)
+          onDims(null)
+          setAttempt((a) => a + 1)
+        }}
+      />
     )
   }
   return (

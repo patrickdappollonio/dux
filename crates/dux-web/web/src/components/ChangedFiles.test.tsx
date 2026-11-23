@@ -645,7 +645,7 @@ describe("the Changes pane header in a quiet state", () => {
     render(<ChangedFiles />)
     const classes = screen.getByRole("button", { name: "Refresh" }).className.split(/\s+/)
     expect(classes).toContain("pointer-coarse:min-h-10")
-    expect(classes).toContain("max-md:pointer-coarse:min-h-11")
+    expect(classes).toContain("max-md:min-h-10")
   })
 
   it("carries the editor's reason onto its folded menu items", async () => {
@@ -1256,9 +1256,9 @@ describe("the changes pane's selection on a touch screen", () => {
     const heading = classes(screen.getByText("Unstaged").closest("button")!)
     expect(heading).toContain("pointer-coarse:min-h-10")
     expect(heading).toContain("max-md:pointer-coarse:min-h-11")
-    const filter = classes(screen.getByLabelText("Filter changed files"))
-    expect(filter).toContain("pointer-coarse:h-10")
-    expect(filter).toContain("max-md:pointer-coarse:h-11")
+    const filter = classes(screen.getByLabelText("Filter changed files").parentElement!)
+    expect(filter).toContain("pointer-coarse:min-h-10")
+    expect(filter).toContain("max-md:min-h-10")
   })
 
   it("always reveals the row's ⋯ where the pointer is coarse", () => {

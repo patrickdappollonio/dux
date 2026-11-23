@@ -1,8 +1,8 @@
 import { DormantTabCard } from "@/components/DormantTabCard"
+import { NotRunningCard } from "@/components/NotRunningCard"
 import { Welcome } from "@/components/Welcome"
-import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
-import { StartAgentButton } from "@/components/StartAgentButton"
 import { startDormantTab } from "@/lib/store"
+import { chip, prose, renderProse } from "@/lib/prose"
 import type { TabRunVerdict } from "@/lib/types"
 
 // What a dormant tab looks like, in one decision both shells read:
@@ -37,29 +37,24 @@ export function DormantTabSurface({
   return (
     <Welcome
       action={
-        <div className="mt-6 flex max-w-md flex-col items-center gap-3 px-6 text-center">
-          <p className="text-sm text-muted-foreground">
-            This <span className="font-mono">{provider}</span> tab isn&rsquo;t
-            running. Starting it picks up this provider&rsquo;s most recent
-            conversation in this worktree, unless another tab of the same
-            provider is already running.{" "}
-            <a
-              href={DOCS_AGENT_TABS_RESUME}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline underline-offset-2"
-            >
-              How resume works&nbsp;&rarr;
-            </a>
-          </p>
-          {/* Same touch floor as the card's own button; see the note there. */}
-          <StartAgentButton
-            sessionId={sessionId}
-            onStart={() => startDormantTab(sessionId, tabId)}
-            className="max-md:min-h-11 pointer-coarse:min-h-11"
-          >
-            Start session
-          </StartAgentButton>
+        // The idle screen's logo is the card's icon, so the card draws none.
+        <div className="mt-6">
+          <NotRunningCard
+            icon="none"
+            title={renderProse(prose`This ${chip(provider)} tab isn’t running.`)}
+            details={
+              <>
+                Starting it picks up this provider&rsquo;s most recent
+                conversation in this worktree, unless another tab of the same
+                provider is already running.
+              </>
+            }
+            start={{
+              sessionId,
+              onStart: () => startDormantTab(sessionId, tabId),
+              label: "Start session",
+            }}
+          />
         </div>
       }
     />

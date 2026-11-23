@@ -33,8 +33,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
   const files = [
     "AgentNotFound.tsx",
     "RouteNotFoundScreen.tsx",
-    "DormantTabCard.tsx",
-    "DormantTabSurface.tsx",
+    "NotRunningCard.tsx",
     "AddProjectDialog.tsx",
     "CreateAgentDialog.tsx",
     "CloneProjectDialog.tsx",
@@ -48,6 +47,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
     "ChangeBaseBranchDialog.tsx",
     "FolderBrowseList.tsx",
     "MacrosDialog.tsx",
+    "ellipsisPlacements.ts",
   ]
   for (const file of files) {
     it(`${file} gives a finger what a phone gets`, () => {
@@ -56,6 +56,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
         ["max-md:min-h-10", "pointer-coarse:min-h-10"],
         ["max-md:min-h-11", "pointer-coarse:min-h-11"],
         ["max-md:size-10", "pointer-coarse:size-10"],
+        ["max-md:size-11", "pointer-coarse:size-11"],
       ]) {
         for (const cls of classStringsWith(src, narrow)) {
           expect(cls, `${narrow} without ${coarse}`).toContain(coarse)
@@ -79,14 +80,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
 
 describe("controls that had no touch size at all", () => {
   const cases: [string, string, string, string[]][] = [
-    ["MacrosDialog.tsx", "onClick={dismissMacrosConflict}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "onClick={() => void reloadMacrosDraft()}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "aria-label={`Actions for ${name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
     ["MacrosDialog.tsx", "onClick={() => showProblem(shownProblem.key)}", "<Button", BUTTON_FLOOR],
-    ["GlobalEnvDialog.tsx", "onClick={dismissGlobalEnvConflict}", "<Button", BUTTON_FLOOR],
-    ["GlobalEnvDialog.tsx", "onClick={() => void reloadGlobalEnvDraft()}", "<Button", BUTTON_FLOOR],
-    ["ConfigEditorDialog.tsx", "onClick={dismissConfigEditorConflict}", "<Button", BUTTON_FLOOR],
-    ["ConfigEditorDialog.tsx", "openConfigEditor()}", "<Button", BUTTON_FLOOR],
     ["OfflineOverlay.tsx", "onClick={reconnect}", "<Button", BUTTON_FLOOR],
     ["ChunkBoundary.tsx", "onClick={() => location.reload()}", "<Button", BUTTON_FLOOR],
     ["terminal/partPieces.tsx", "plainBounce(props.ptyRef.current", "<Button", BUTTON_FLOOR],
@@ -94,7 +88,6 @@ describe("controls that had no touch size at all", () => {
     ["MacroPopover.tsx", "onClick={openDialog}", "<PopoverPrimitive.Close", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "const HEADER_CONTROL_SIZING", "const", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "aria-expanded={open}", "<button", BUTTON_FLOOR],
-    ["FlatAgentList.tsx", "<Search className", "<div", BUTTON_FLOOR],
   ]
   for (const [file, marker, tag, classes] of cases) {
     it(`${file} ${marker}`, () => {

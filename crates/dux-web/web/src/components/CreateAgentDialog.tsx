@@ -5,6 +5,7 @@ import {
 } from "@/components/AgentNameFields"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { ErrorLine } from "@/components/ErrorLine"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"
@@ -157,15 +158,7 @@ function PrReferenceFields({
         aria-invalid={error !== null}
         aria-describedby={error ? "create-agent-pr-error" : undefined}
       />
-      {error && (
-        <p
-          id="create-agent-pr-error"
-          role="alert"
-          className="text-destructive text-sm"
-        >
-          {error}
-        </p>
-      )}
+      <ErrorLine id="create-agent-pr-error">{error}</ErrorLine>
       {dialog.showProjectPicker && (
         <div className="flex justify-start">
           <Button

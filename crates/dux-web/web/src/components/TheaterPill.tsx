@@ -1,8 +1,9 @@
-import { Ellipsis, GripVertical } from "lucide-react"
+import { GripVertical } from "lucide-react"
 import type * as React from "react"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { flushSync } from "react-dom"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { PaneActionCluster } from "@/components/PaneActionCluster"
@@ -14,7 +15,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
@@ -905,18 +905,7 @@ function TheaterAppMenu({ paneId }: { paneId: string }) {
   return (
     <DropdownMenu>
       <SimpleTooltip content="Settings">
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Settings"
-              className="size-10 shrink-0 rounded-full"
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
+        <EllipsisMenuTrigger placement="floating" aria-label="Settings" />
       </SimpleTooltip>
       {/* Anchored above the trigger: the pill lives in the pane's bottom corner,
         * where a downward popup has nowhere to go. A phone renders a sheet. */}

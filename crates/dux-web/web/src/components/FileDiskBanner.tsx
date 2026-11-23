@@ -1,7 +1,8 @@
 import { CircleAlert, RotateCw, Trash2, X } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
+import { Notice, type NoticeAction } from "@/components/Notice"
 import type { DiskState } from "@/lib/editorBuffers"
+import { chip, prose, renderProse } from "@/lib/prose"
 
 interface FileDiskBannerProps {
   // Which rung this is. "fresh" renders nothing, so the caller can hand the
@@ -44,54 +45,28 @@ export function FileDiskBanner({
   // unsaved edits" here would be a plain untruth, and the next warning the
   // user reads is worth less for it.
   const paused = state === "paused"
+  const actions: NoticeAction[] = [
+    // A stray click on "Reload" discards text, so it never sits flush against
+    // the dismiss: the notice spaces its buttons apart.
+    deleted
+      ? { label: "Close tab", onSelect: onCloseTab, icon: X }
+      : { label: "Reload from disk", onSelect: onReload, icon: RotateCw, disabled: busy },
+    { label: deleted ? "Keep it open" : "Keep mine", onSelect: onDismiss, look: "quiet" },
+  ]
   return (
-    <div
-      // A live region: the banner appears without the user having done
-      // anything, so a screen reader has to be told.
-      role="status"
-      data-toast-clear
-      className="flex shrink-0 flex-wrap items-center gap-2 border-b border-dux-warning/40 bg-dux-warning/10 px-3 py-2 text-sm"
-    >
+    <Notice shape="strip" tone="warning" icon={deleted ? Trash2 : CircleAlert} actions={actions}>
       {deleted ? (
-        <Trash2 className="size-4 shrink-0 text-dux-warning" />
+        <>
+          {renderProse(prose`${chip(path)} was deleted on disk. `)}
+          {dirty ? "Your unsaved edits are still here." : "The text here is the last copy the editor read."}
+        </>
+      ) : paused ? (
+        renderProse(
+          prose`${chip(path)} changed on disk. A selection is active here, so the reload is paused.`,
+        )
       ) : (
-        <CircleAlert className="size-4 shrink-0 text-dux-warning" />
+        renderProse(prose`${chip(path)} changed on disk, and you have unsaved edits here.`)
       )}
-      <span className="min-w-0 flex-1">
-        {deleted ? (
-          <>
-            <span className="font-mono break-all">{path}</span> was deleted on
-            disk. {dirty ? "Your unsaved edits are still here." : "The text here is the last copy the editor read."}
-          </>
-        ) : paused ? (
-          <>
-            <span className="font-mono break-all">{path}</span> changed on
-            disk. A selection is active here, so the reload is paused.
-          </>
-        ) : (
-          <>
-            <span className="font-mono break-all">{path}</span> changed on
-            disk, and you have unsaved edits here.
-          </>
-        )}
-      </span>
-      {/* gap-2 between the two actions is the misclick-safe spacing: a stray
-          click on "Reload" discards text, so it must not sit flush against
-          the dismiss. */}
-      {deleted ? (
-        <Button size="sm" variant="outline" onClick={onCloseTab} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          <X />
-          Close tab
-        </Button>
-      ) : (
-        <Button size="sm" variant="outline" disabled={busy} onClick={onReload} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          <RotateCw />
-          Reload from disk
-        </Button>
-      )}
-      <Button size="sm" variant="ghost" onClick={onDismiss} className="max-md:min-h-10 pointer-coarse:min-h-10">
-        {deleted ? "Keep it open" : "Keep mine"}
-      </Button>
-    </div>
+    </Notice>
   )
 }

@@ -18,11 +18,9 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Ellipsis,
   Folder,
   GitPullRequest,
   Plus,
-  Search,
   SquarePlus,
   SquareTerminal,
   TriangleAlert,
@@ -31,6 +29,7 @@ import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useCallback, useRef, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { RowStateWord } from "@/components/RowStateWord"
@@ -51,6 +50,7 @@ import {
   setQuietTailManualChoice,
 } from "@/lib/quietTailChoice"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -58,14 +58,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
+import { InlineCode } from "@/components/ui/inline-code"
 import { agentRowVisual } from "@/lib/agentRow"
 import {
   agentSearchLocation,
@@ -107,10 +101,7 @@ import {
   sessionPrs,
 } from "@/lib/pr"
 import {
-  ALWAYS_REVEALED_ON_PHONE,
-  HOVER_REVEAL,
   REVEAL_ROW,
-  REVEALED_ON_ANY_FOCUS,
 } from "@/lib/hoverReveal"
 import { launcherVerb } from "@/lib/launcherVerb"
 import { partitionProjects } from "@/lib/projects"
@@ -408,33 +399,12 @@ function AgentFlatRow({
         </SimpleTooltip>
 
         <DropdownMenu>
-          {/* The shared reveal, also on mouse focus anywhere in the row, and
-              always shown at phone width. The cap is the 40px trigger's. */}
-          <div
-            className={cn(
-              HOVER_REVEAL,
-              "[--reveal-cap:--spacing(10)]",
-              REVEALED_ON_ANY_FOCUS,
-              ALWAYS_REVEALED_ON_PHONE,
-            )}
-          >
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  // 28px under a fine pointer, where the only neighbour on
-                  // either axis is this row's own button, whose click selects
-                  // the agent this menu is about; the 40px floor returns on a
-                  // phone and on any coarse pointer.
-                  className="size-7 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                  aria-label="Session actions"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
-          </div>
+          <EllipsisMenuTrigger
+            placement="row"
+            reveal="hover-or-focus"
+            fit="compact"
+            aria-label="Session actions"
+          />
           {/* THE PANE'S ONE MENU, at the row's anchor. The same body the
               desktop pane header's `⋯` and the phone's flap open, so an agent's
               menu is one menu a user learns once, in whichever place they
@@ -575,29 +545,12 @@ function TerminalFlatRow({
         </span>
       </button>
       <DropdownMenu>
-        {/* The agent row's reveal, for the same reasons. */}
-        <div
-          className={cn(
-            HOVER_REVEAL,
-            "[--reveal-cap:--spacing(10)]",
-            REVEALED_ON_ANY_FOCUS,
-            ALWAYS_REVEALED_ON_PHONE,
-          )}
-        >
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                // Sized as the agent row's trigger, for the same neighbour.
-                className="size-7 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                aria-label="Terminal actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
-        </div>
+        <EllipsisMenuTrigger
+          placement="row"
+          reveal="hover-or-focus"
+          fit="compact"
+          aria-label="Terminal actions"
+        />
         {/* THE PANE'S ONE MENU, at the row's anchor: the same body the desktop
             pane header's `⋯` and the phone flap's open for this terminal, so a
             terminal's menu is one menu learned once. Its INPUT group is still
@@ -1014,17 +967,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             </div>
           ) : null}
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-2.5 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
-          <Search className="size-4 shrink-0 text-muted-foreground" />
-          <input
-            value={agentSearch}
-            onChange={(event) => setAgentSearch(event.target.value)}
-            placeholder="Search agents and terminals"
-            aria-label="Search agents and terminals"
-            {...searchPick.fieldProps}
-            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <SearchField
+          value={agentSearch}
+          onChange={setAgentSearch}
+          label="Search agents and terminals"
+          {...searchPick.fieldProps}
+        />
       </div>
 
       {/* Fades out at its top edge while rows are hidden above and at its
@@ -1037,28 +985,23 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         className="dux-list-fade min-h-0 flex-1 overflow-y-auto px-2 pt-[3px] pb-2 no-scrollbar"
       >
         {nothing ? (
-          <Empty className="border-0 p-4">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Bot />
-              </EmptyMedia>
-              <EmptyTitle>No agents yet</EmptyTitle>
-              {/* The button below flips on an empty workspace and this
-                  sentence does not: it reads true either way. */}
-              <EmptyDescription>
-                Pick a project and dux gives the agent its own worktree.
-              </EmptyDescription>
-            </EmptyHeader>
-            {/* A real button, not a sentence pointing at one elsewhere: an
-                empty workspace is exactly where the next click should be on
-                screen. It doubles with the launcher corner's New agent…, which is accepted:
-                the duplicate costs a tap nobody needs, while the missing one
-                costs a hunt.
-
-                On a confirmed-empty workspace it flips to Add project through
-                the pure helper in lib/launcherVerb.ts. max-md:min-h-11 is the
-                touch floor, matching the launcher. */}
-            <EmptyContent>
+          <EmptyState
+            size="section"
+            icon={<Bot />}
+            title="No agents yet"
+            // The button below flips on an empty workspace and this sentence
+            // does not: it reads true either way.
+            description="Pick a project and dux gives the agent its own worktree."
+            // A real button, not a sentence pointing at one elsewhere: an empty
+            // workspace is exactly where the next click should be on screen. It
+            // doubles with the launcher corner's New agent…, which is accepted:
+            // the duplicate costs a tap nobody needs, while the missing one
+            // costs a hunt.
+            //
+            // On a confirmed-empty workspace it flips to Add project through the
+            // pure helper in lib/launcherVerb.ts. max-md:min-h-11 is the touch
+            // floor, matching the launcher.
+            actions={
               <Button
                 variant="outline"
                 size="sm"
@@ -1072,12 +1015,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 {emptyVerbIsAddProject ? <SquarePlus /> : <Plus />}
                 {emptyVerbIsAddProject ? "Add project" : "New agent"}
               </Button>
-            </EmptyContent>
-          </Empty>
+            }
+          />
         ) : nothingMatches ? (
-          <p className="px-3 py-4 text-sm text-muted-foreground">
-            Nothing matches “{query}”.
-          </p>
+          <EmptyState size="compact" title={<>Nothing matches <InlineCode>{query}</InlineCode>.</>} />
         ) : (
           <>
             {/* One context over every row of the main bucket, agents and

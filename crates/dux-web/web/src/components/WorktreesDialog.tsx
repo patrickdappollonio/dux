@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react"
-import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
+import { Copy, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
 
 import { Spinner } from "@/components/Spinner"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Modal,
@@ -9,14 +10,13 @@ import {
   useHeldWhileClosed,
   useModalLifetime,
 } from "@/components/modal"
-import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { InlineCode } from "@/components/ui/inline-code"
+import { EmptyState } from "@/components/ui/empty"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -312,18 +312,7 @@ function LeftoverRow({
         </div>
       </div>
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-              aria-label="Left-over folder actions"
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
+        <EllipsisMenuTrigger placement="row" aria-label="Left-over folder actions" />
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => clipboardWorktree(folder.path)}>
             <Copy />
@@ -601,9 +590,13 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
           inUse.length === 0 &&
           beingRemoved.length === 0 &&
           attachWorktreeLeftovers.length === 0 ? (
-          <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground max-md:h-40">
-            This project has no worktrees dux manages yet. Create an agent and
-            one appears here.
+          // The spinner's box, so the dialog keeps its height when the list
+          // turns out empty.
+          <div className="flex h-64 items-center justify-center max-md:h-40">
+            <EmptyState
+              size="compact"
+              title="This project has no worktrees dux manages yet. Create an agent and one appears here."
+            />
           </div>
         ) : (
           <div className="flex flex-col">
@@ -628,18 +621,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     </button>
                   </SimpleTooltip>
                   <DropdownMenu>
-                    <DropdownMenuTrigger
-                      render={
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                          aria-label="Worktree actions"
-                        />
-                      }
-                    >
-                      <Ellipsis />
-                    </DropdownMenuTrigger>
+                    <EllipsisMenuTrigger placement="row" aria-label="Worktree actions" />
                     <DropdownMenuContent align="end">
                       {/* Neutral colour: the trailing ellipsis and the
                          confirmation carry the danger, per the row-menu

@@ -1,6 +1,8 @@
 import { Spinner } from "@/components/Spinner"
+import { Notice } from "@/components/Notice"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { EmptyState } from "@/components/ui/empty"
 import {
   Select,
   SelectContent,
@@ -32,16 +34,17 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
   const hasLogs = startupLogsEntries.length > 0
 
   return startupLogsError ? (
-    <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-      {startupLogsError}
-    </div>
+    <Notice shape="box" tone="danger">
+      <span className="text-destructive">{startupLogsError}</span>
+    </Notice>
   ) : !hasLogs && startupLogsLoading ? (
     <div className="flex h-64 items-center justify-center">
       <Spinner size="lg" />
     </div>
   ) : !hasLogs ? (
-    <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-      {emptyMessage}
+    // The spinner's box, so the dialog keeps its height when there are no logs.
+    <div className="flex h-64 items-center justify-center">
+      <EmptyState size="compact" title={emptyMessage} />
     </div>
   ) : (
     <div className="grid gap-3">
