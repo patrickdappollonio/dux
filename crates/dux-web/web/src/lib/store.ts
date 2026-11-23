@@ -8903,7 +8903,7 @@ function serverReason(e: unknown): string | null {
   if (!(e instanceof SessionsApiError) || e.body !== null) return null
   const text = e.message.trim()
   if (text === "" || text === `request failed (${String(e.status)})`) return null
-  if (/^</.test(text) || [...text].length > SERVER_REASON_MAX_CHARS) return null
+  if (text.startsWith("<") || [...text].length > SERVER_REASON_MAX_CHARS) return null
   const sentence = text.charAt(0).toUpperCase() + text.slice(1)
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`
 }
