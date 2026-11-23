@@ -8840,8 +8840,12 @@ function toastForgottenCreateAnswer(
     return
   }
   const status = e instanceof SessionsApiError ? e.status : undefined
-  // The status stream already says these to this connection.
-  if (status === 409 || status === 422) return
+  // The status stream already says these to this connection, so the deadline's
+  // warning, no longer true, goes rather than sitting beside it.
+  if (status === 409 || status === 422) {
+    dismissNotification(id)
+    return
+  }
   const lower = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
   // Only dux refusing the request says the agent was not created. A fetch that
   // never reached it, or a 5xx (a gateway's included), says nothing either way.

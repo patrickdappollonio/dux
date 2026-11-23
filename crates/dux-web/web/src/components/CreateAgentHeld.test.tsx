@@ -18,10 +18,15 @@ const warnings: string[] = []
 const warningIds: Array<string | undefined> = []
 const errors: string[] = []
 const errorIds: Array<string | undefined> = []
+const dismissed: string[] = []
 vi.mock("@/lib/notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/notify")>()
   return {
     ...actual,
+    dismissNotification: (id: string) => {
+      dismissed.push(id)
+      actual.dismissNotification(id)
+    },
     notifyWarning: (...args: Parameters<typeof actual.notifyWarning>) => {
       warnings.push(actual.noticeText(args[0]))
       warningIds.push(args[1]?.id)
@@ -104,6 +109,7 @@ beforeEach(() => {
   warningIds.length = 0
   errors.length = 0
   errorIds.length = 0
+  dismissed.length = 0
   fetchMock.mockClear()
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
 })
@@ -233,6 +239,18 @@ describe("the New agent form with its create unanswered", () => {
       "created. The change was made, but its operation record did not come back with the reply. The agent may",
     )
     expect(warnings[1]).not.toMatch(/HTTP 500/)
+  })
+
+  // The status stream says these refusals, so the warning beside them goes.
+  it.each([409, 422])("takes its warning away on a %i that comes after the wait", async (status) => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    act(() => held[0](new Response("The project is busy.", { status })))
+    await waitFor(() => expect(dismissed).toEqual([warningIds[0]]))
+    expect(warnings).toHaveLength(1)
+    expect(errors).toHaveLength(0)
   })
 
   it("replaces its warning with a refusal that comes after the wait", async () => {
