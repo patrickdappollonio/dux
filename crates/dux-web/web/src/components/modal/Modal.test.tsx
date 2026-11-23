@@ -1233,23 +1233,31 @@ describe("a busy modal", () => {
   })
 
   it.each([
-    ["isComposing", { isComposing: true }],
-    ["keyCode 229", { keyCode: 229 }],
-  ] as const)("leaves an Enter that ends an IME composition (%s) to the field while busy", (_how, init) => {
-    const pressed = vi.fn()
-    render(
-      <Modal kind="form" open onClose={() => {}} title="Sample" historyEntry={false} busy submit={save}>
-        <input
-          aria-label="name"
-          onKeyDown={(event) => {
-            if (event.key === "Enter") pressed()
-          }}
-        />
-      </Modal>,
-    )
-    fireEvent.keyDown(screen.getByLabelText("name"), { key: "Enter", ...init })
-    expect(pressed).toHaveBeenCalledTimes(1)
-  })
+    ["isComposing", false, { isComposing: true }],
+    ["keyCode 229", false, { keyCode: 229 }],
+    ["isComposing", true, { isComposing: true }],
+    ["keyCode 229", true, { keyCode: 229 }],
+  ] as const)(
+    "keeps an Enter that ends an IME composition (%s) from the caller's handler and leaves it to the field (busy: %s)",
+    (_how, busy, init) => {
+      const pressed = vi.fn()
+      render(
+        <Modal kind="form" open onClose={() => {}} title="Sample" historyEntry={false} busy={busy} submit={save}>
+          <input
+            aria-label="name"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") pressed()
+            }}
+          />
+        </Modal>,
+      )
+      const notPrevented = fireEvent.keyDown(screen.getByLabelText("name"), { key: "Enter", ...init })
+      expect(pressed).not.toHaveBeenCalled()
+      expect(notPrevented).toBe(true)
+      fireEvent.keyDown(screen.getByLabelText("name"), { key: "Enter" })
+      expect(pressed).toHaveBeenCalledTimes(busy ? 0 : 1)
+    },
+  )
 
   // A disabled button would drop the focus it holds to the page.
   it("shows and announces that its ways out do nothing, and keeps them focusable", () => {

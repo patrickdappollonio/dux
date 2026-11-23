@@ -140,11 +140,15 @@ export function Modal(props: ModalProps) {
           // modal or its submit is busy, or its change may not be made from
           // here, it runs nothing.
           onKeyDownCapture={(event) => {
+            // An Enter that ends an IME composition is the composition's: it
+            // reaches no caller's handler, and its default stays so it commits.
+            if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) {
+              event.stopPropagation()
+              return
+            }
             const held = busy || heldReason !== null || (kind === "form" && props.submit.busy === true)
             if (!held) return
             if (event.key !== "Enter" || !submitsOnEnter(event.target, event)) return
-            // An Enter that ends an IME composition is the composition's.
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return
             if (event.target.closest('[data-slot="dialog-content"]') !== event.currentTarget) return
             event.preventDefault()
             event.stopPropagation()
