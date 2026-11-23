@@ -234,11 +234,10 @@ describe("the New agent form with its create unanswered", () => {
       ),
     )
     await waitFor(() => expect(warnings).toHaveLength(2))
-    expect(warnings[1]).toMatch(/not known whether the agent feature-old was created/)
-    expect(warnings[1]).toContain(
-      "created. The change was made, but its operation record did not come back with the reply. The agent may",
+    expect(warnings[1]).toBe(
+      "The server answered the request to create the agent feature-old with an error (HTTP 500): The change was made, but its operation record did not come back with the reply. Look in the list before creating it again.",
     )
-    expect(warnings[1]).not.toMatch(/HTTP 500/)
+    expect(warnings[1]).not.toMatch(/not known/)
   })
 
   // The status stream says these refusals, so the warning beside them goes.

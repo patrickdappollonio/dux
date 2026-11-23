@@ -781,6 +781,11 @@ describe("the phone's explorer", () => {
       baseState(change({ id: "t1", path: PATH }))
       rerender(<StandaloneEditorShell />)
     })
+    return (next: Partial<DuxState>) =>
+      act(() => {
+        baseState(next)
+        rerender(<StandaloneEditorShell />)
+      })
   }
   const tabs = (path: string): Partial<DuxState> => ({
     editorTabs: {
@@ -796,6 +801,29 @@ describe("the phone's explorer", () => {
     // already show.
     await openTreeThen(() => tabs("src/renamed.ts"))
     expect(explorerHidden()).toBe(false)
+  })
+
+  const tabIds = (activeId: string | null, ids: string[]): Partial<DuxState> => ({
+    editorTabs: {
+      [rootKey(agentRoot(SESSION))]: {
+        tabs: ids.map((id) => ({ id, path: `src/${id}.ts`, dirty: false, preview: false, mode: "file" as const })),
+        activeId,
+      },
+    },
+  })
+
+  it("stays open when the front tab closes and another comes to the front", async () => {
+    const change = await openTreeThen(() => tabIds("t1", ["t1", "t2"]))
+    change(tabIds("t2", ["t2"]))
+    expect(explorerHidden()).toBe(false)
+  })
+
+  it("shows when the last tab closes", async () => {
+    const change = await openTreeThen(() => tabIds("t1", ["t1"]))
+    change({ ...tabIds("t1", ["t1"]), editorFileOpens: mockState.editorFileOpens + 1 })
+    await waitFor(() => expect(explorerHidden()).toBe(true))
+    change(tabIds(null, []))
+    await waitFor(() => expect(explorerHidden()).toBe(false))
   })
 
   it("hides when a file opens in place of the preview tab", async () => {

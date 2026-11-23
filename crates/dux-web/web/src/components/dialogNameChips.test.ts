@@ -89,6 +89,11 @@ function lineAround(source: string, index: number): string {
 // that no longer matches anything fails the suite, so the list cannot rot.
 const ALLOWED: { file: string; line: string; reason: string }[] = [
   {
+    file: "lib/store.ts",
+    line: 'if (text.startsWith("<") || [...text].length > SERVER_REASON_MAX_CHARS) return null',
+    reason: 'The guard reads the literal "<" followed by an interpolation-looking tail as a quote opened before a name; it is the HTML-page check on a server answer, with no name in it.',
+  },
+  {
     file: "components/FolderBrowseList.tsx",
     line: '<span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">',
     reason: "The Up row's parent folder, drawn with the folder glyph the folder rows below it carry: a navigation row's destination rather than a name in a sentence. The pinned row's verb and folder above it take the chip.",
