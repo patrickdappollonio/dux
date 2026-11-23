@@ -75,12 +75,42 @@ const CARD_POPUP =
 const COVER_POPUP =
   "fixed inset-0 z-50 flex flex-col bg-popover pt-[env(safe-area-inset-top)] text-sm text-popover-foreground duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0"
 
+// base-ui's focus trap does not stop the page behind focusing itself (a
+// terminal that mounts again across a layout switch focuses its input), and the
+// next key would then go there. A focus that lands behind the open popup is
+// sent back to where it was inside. Behind is the page, or a layer this popup
+// is nested in (the editor overlay under its own dialogs); a layer of its own
+// (its focus guards, a menu it opened) or one opened over it is not. While
+// another popup is open over this one, base-ui marks this one inert, and
+// holding focus is that one's job.
+function holdFocusInside(popup: HTMLElement): () => void {
+  let last: HTMLElement | null = null
+  const onFocusIn = (event: FocusEvent) => {
+    const target = event.target
+    if (!(target instanceof HTMLElement) || !popup.hasAttribute("data-open")) return
+    if (popup.contains(target)) {
+      last = target
+      return
+    }
+    if (popup.closest("[data-base-ui-inert]") !== null) return
+    const own = popup.closest("[data-base-ui-portal]")
+    if (own?.contains(target)) return
+    const layer = target.closest("[data-base-ui-portal]")
+    if (layer !== null && !layer.contains(popup)) return
+    const back = last !== null && last.isConnected && popup.contains(last) ? last : popup
+    back.focus({ preventScroll: true })
+  }
+  document.addEventListener("focusin", onFocusIn, true)
+  return () => document.removeEventListener("focusin", onFocusIn, true)
+}
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
   destructive = false,
   cover = false,
+  ref,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean
@@ -91,7 +121,18 @@ function DialogContent({
   // (black-and-white) as an extra danger cue for consequential confirm dialogs.
   // Blur stays on the base overlay for every dialog regardless.
   destructive?: boolean
+  ref?: React.Ref<HTMLDivElement>
 }) {
+  const release = React.useRef<(() => void) | null>(null)
+  const popupRef = React.useCallback(
+    (popup: HTMLDivElement | null) => {
+      release.current?.()
+      release.current = popup === null ? null : holdFocusInside(popup)
+      if (typeof ref === "function") ref(popup)
+      else if (ref) ref.current = popup
+    },
+    [ref]
+  )
   return (
     <DialogPortal>
       <DialogOverlay
@@ -103,6 +144,7 @@ function DialogContent({
           cover ? COVER_POPUP : CARD_POPUP,
           className
         )}
+        ref={popupRef}
         {...props}
       >
         {children}

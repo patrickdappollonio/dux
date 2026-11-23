@@ -754,6 +754,32 @@ describe("where focus goes when a modal closes", () => {
   })
 })
 
+// The page behind can take focus by itself, as a terminal that mounts again
+// across a layout switch does.
+describe("focus taken by the page behind an open modal", () => {
+  // The page's control mounts after the modal opened, as the terminal does.
+  function Page({ remounted }: { remounted: boolean }) {
+    return (
+      <>
+        {remounted ? <button type="button">behind</button> : null}
+        <Sample kind="form">
+          <input aria-label="first" />
+          <input aria-label="second" />
+        </Sample>
+      </>
+    )
+  }
+
+  it("comes back to where it was in the modal", async () => {
+    const view = render(<Page remounted={false} />)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("first")))
+    act(() => screen.getByLabelText("second").focus())
+    view.rerender(<Page remounted />)
+    act(() => screen.getByText("behind").focus())
+    expect(document.activeElement).toBe(screen.getByLabelText("second"))
+  })
+})
+
 describe("a destructive confirm", () => {
   it("greys the page behind it, and a plain one does not", () => {
     const overlay = () => document.querySelector('[data-slot="dialog-overlay"]')!
