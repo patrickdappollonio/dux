@@ -128,10 +128,15 @@ function ConfirmDeleteWorktree() {
   const open = deleteWorktreeTarget !== null
   // The worktree this was opened on, kept while the close animates.
   const target = useHeldWhileClosed(open, deleteWorktreeTarget)
-  // The component stays mounted across opens, so the answer goes back to its
-  // default once a close has finished, or the next confirmation would open
-  // carrying the last one.
-  const [deleteBranch, setDeleteBranch] = useState(true)
+  // The answer, kept with the worktree it was given for: the component stays
+  // mounted across opens, and a confirmation on another row starts at the
+  // default however soon it follows the last one.
+  const [answer, setAnswer] = useState<{ path: string; deleteBranch: boolean } | null>(null)
+  const targetPath = target?.entry.worktree_path ?? null
+  const deleteBranch = answer !== null && answer.path === targetPath ? answer.deleteBranch : true
+  const setDeleteBranch = (next: boolean) => {
+    if (targetPath !== null) setAnswer({ path: targetPath, deleteBranch: next })
+  }
   // The listing is refetched after every delete, so it is a live truth this
   // dialog can close itself on: a worktree that left the list (removed from
   // another tab, adopted by an agent) is no longer this dialog's subject.
@@ -163,7 +168,7 @@ function ConfirmDeleteWorktree() {
       open={open}
       vanished={open && !stillListed}
       onClose={closeDeleteWorktree}
-      onClosed={() => setDeleteBranch(true)}
+      onClosed={() => setAnswer(null)}
       title={
         <>
           Delete the worktree for <InlineCode>{entry?.branch_name}</InlineCode>?
@@ -367,9 +372,11 @@ function ConfirmDeleteLeftoverFolder() {
   const folder = useHeldWhileClosed(open, deleteLeftoverTarget)?.folder
   const provenance = folder?.branch_provenance ?? null
   const tickedByDefault = provenance === null || provenance === "created"
-  // `null` until the user touches the box, so each open starts at the
-  // default for its own folder; it goes back to null once a close has finished.
-  const [choice, setChoice] = useState<boolean | null>(null)
+  // The user's answer, kept with the folder it was given for, so each
+  // confirmation starts at the default for its own folder however soon it
+  // follows the last one.
+  const [answer, setAnswer] = useState<{ path: string; ticked: boolean } | null>(null)
+  const choice = answer !== null && answer.path === folder?.path ? answer.ticked : null
   const folderPresent = folder?.folder_present ?? true
   const deleteBranches = !folderPresent || (choice ?? tickedByDefault)
   const stillListed =
@@ -400,7 +407,7 @@ function ConfirmDeleteLeftoverFolder() {
       open={open}
       vanished={open && !stillListed}
       onClose={closeDeleteLeftover}
-      onClosed={() => setChoice(null)}
+      onClosed={() => setAnswer(null)}
       title={leftoverDeleteTitle(folderPresent, branches.length)}
       cancelLabel="Cancel"
       confirm={{
@@ -452,7 +459,9 @@ function ConfirmDeleteLeftoverFolder() {
             <CheckboxRow
               id="delete-leftover-branches"
               checked={deleteBranches}
-              onCheckedChange={setChoice}
+              onCheckedChange={(ticked) => {
+                if (folder) setAnswer({ path: folder.path, ticked })
+              }}
             >
               {renderProse(branchCheckboxLabel(branches))}
             </CheckboxRow>
@@ -478,14 +487,22 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
   const state = useDux()
   const { spine } = state
   // The project this open is about, and the listing as it was when the close
-  // began: closing empties the store's copy.
-  const [projectId] = useState(state.attachWorktreeTarget ?? "")
+  // began: closing empties the store's copy. The store's target is followed
+  // while open, because the listing it holds is that project's.
+  const projectId = useHeldWhileClosed(open, state.attachWorktreeTarget) ?? ""
   const attachWorktreeEntries = useHeldWhileClosed(open, state.attachWorktreeEntries)
   const attachWorktreeLeftovers = useHeldWhileClosed(open, state.attachWorktreeLeftovers)
   const attachWorktreeLoading = useHeldWhileClosed(open, state.attachWorktreeLoading)
   const attachWorktreeFromPicker = useHeldWhileClosed(open, state.attachWorktreeFromPicker)
   const [selected, setSelected] = useState<string | null>(null)
   const [name, setName] = useState("")
+  // A pick and a name are about one project's worktrees.
+  const [pickedIn, setPickedIn] = useState(projectId)
+  if (pickedIn !== projectId) {
+    setPickedIn(projectId)
+    setSelected(null)
+    setName("")
+  }
 
   const project = spine?.projects.find((p) => p.id === projectId)
   // The name it had, kept once the project is gone and the dialog is closing.
