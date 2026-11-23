@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { ChevronDown, Code2, FileType, Laptop, Loader2 } from "lucide-react"
+import { ChevronDown, Code2, FileType, Laptop } from "lucide-react"
 
+import { Spinner } from "@/components/Spinner"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
 import { UnsavedDot } from "@/components/UnsavedDot"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
@@ -322,7 +323,7 @@ export function EditorStatusBar({
                   }
                 >
                   {localEditor.opening ? (
-                    <Loader2 className="motion-safe:animate-spin" />
+                    <Spinner size="fit" tone="current" />
                   ) : (
                     <Laptop />
                   )}

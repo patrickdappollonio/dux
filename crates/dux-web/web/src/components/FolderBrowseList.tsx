@@ -1,6 +1,6 @@
 import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { ModalGroupHeading } from "@/components/modal"
 import { Badge } from "@/components/ui/badge"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -69,7 +69,7 @@ export function FolderBrowseList({
             shrinkable ? "h-full min-h-32" : "h-[50dvh] md:h-80"
           }`}
         >
-          <GlyphSpinner className="text-lg text-muted-foreground" />
+          <Spinner size="lg" />
         </div>
       ) : (
         <div className="flex flex-col">

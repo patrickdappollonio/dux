@@ -2,8 +2,8 @@ import * as React from "react"
 
 // Every declarative animation is gated in CSS through Tailwind's `motion-safe:`
 // / `motion-reduce:` variants. A JS-driven animation has no such variant to hang
-// off, so it asks the media query directly: the glyph spinner advances its frame
-// on a timer, and a timer keeps ticking however the CSS is written.
+// off, so it asks the media query directly: a timer keeps ticking however the
+// CSS is written.
 /// The query `usePrefersReducedMotion` subscribes to, exported so tests can
 /// stub the same string the hook asks for.
 export const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)"

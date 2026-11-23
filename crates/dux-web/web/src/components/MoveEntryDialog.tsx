@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
-import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
+import { ChevronRight, CornerLeftUp, RotateCw } from "lucide-react"
 
+import { Spinner } from "@/components/Spinner"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -204,7 +205,7 @@ function MoveEntryDialogBody({
           )}
           {state.status === "loading" ? (
             <div className="flex items-center justify-center py-6 text-muted-foreground">
-              <Loader2 className="size-4 motion-safe:animate-spin" />
+              <Spinner />
             </div>
           ) : state.status === "error" ? (
             <div className="flex flex-col items-start gap-1 px-2 py-2">

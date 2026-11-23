@@ -40,6 +40,7 @@ import { notifyError, notifyInfo } from "@/lib/notify"
 import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
+import { LoadingRow as SpinnerRow, Spinner } from "@/components/Spinner"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
@@ -1323,7 +1324,7 @@ function BulkToolbar({
         >
           <span className="truncate">{groupDigits(ticked)} selected</span>
           {busy !== null ? (
-            <Loader2 className="motion-safe:animate-spin" />
+            <Spinner size="fit" tone="current" />
           ) : (
             <ChevronDown />
           )}
@@ -1352,7 +1353,7 @@ function BulkToolbar({
                 }
                 onClick={() => onRunBulk("stage")}
               >
-                {busy === "stage" ? <Loader2 className="motion-safe:animate-spin" /> : <Plus />}
+                {busy === "stage" ? <Spinner size="fit" tone="current" /> : <Plus />}
                 Stage {groupDigits(counts.unstaged)}
               </DropdownMenuItem>
             ) : null}
@@ -1363,7 +1364,7 @@ function BulkToolbar({
                 aria-describedby={blocked ? writeReasonId : undefined}
                 onClick={() => onRunBulk("unstage")}
               >
-                {busy === "unstage" ? <Loader2 className="motion-safe:animate-spin" /> : <Minus />}
+                {busy === "unstage" ? <Spinner size="fit" tone="current" /> : <Minus />}
                 Unstage {groupDigits(counts.staged)}
               </DropdownMenuItem>
             ) : null}
@@ -1387,7 +1388,7 @@ function BulkToolbar({
                   }
                   onClick={onDiscard}
                 >
-                  {busy === "discard" ? <Loader2 className="motion-safe:animate-spin" /> : <Undo2 />}
+                  {busy === "discard" ? <Spinner size="fit" tone="current" /> : <Undo2 />}
                   Discard {groupDigits(counts.discard)}…
                 </DropdownMenuItem>
               </DropdownMenuGroup>
@@ -1490,8 +1491,7 @@ function LoadingRow({ depth, grid }: { depth: number; grid: GridRowProps }) {
       style={depthIndent(depth)}
     >
       <div role="gridcell" className="flex items-center gap-2">
-        <Loader2 aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
-        <span role="status">Loading…</span>
+        <SpinnerRow announce>Loading…</SpinnerRow>
       </div>
     </div>
   )
@@ -2183,7 +2183,7 @@ function changesBodyInstead(
       <Empty className={BODY_EMPTY}>
         <EmptyHeader>
           <EmptyMedia variant="icon">
-            <Loader2 className="animate-spin" />
+            <Spinner size="fit" tone="current" />
           </EmptyMedia>
           <EmptyTitle>Loading changes…</EmptyTitle>
           <EmptyDescription>Fetching this session's changes.</EmptyDescription>

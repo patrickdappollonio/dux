@@ -1,4 +1,4 @@
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
@@ -37,7 +37,7 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
     </div>
   ) : !hasLogs && startupLogsLoading ? (
     <div className="flex h-64 items-center justify-center">
-      <GlyphSpinner className="text-lg text-muted-foreground" />
+      <Spinner size="lg" />
     </div>
   ) : !hasLogs ? (
     <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
@@ -76,7 +76,7 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
           </pre>
           {startupLogsLoading ? (
             <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-              <GlyphSpinner className="text-lg text-muted-foreground" />
+              <Spinner size="lg" />
             </div>
           ) : null}
         </div>

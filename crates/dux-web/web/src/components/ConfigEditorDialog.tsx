@@ -1,7 +1,8 @@
-import { Info, Loader2, TriangleAlert } from "lucide-react"
+import { Info, TriangleAlert } from "lucide-react"
 
 import { lazy, Suspense, useRef, useState } from "react"
 
+import { LoadingRow, Spinner } from "@/components/Spinner"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
@@ -45,7 +46,7 @@ function ConfigEditorForm({
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-muted-foreground">
-                <Loader2 className="size-5 motion-safe:animate-spin" />
+                <Spinner size="lg" />
               </div>
             }
           >
@@ -164,9 +165,9 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     >
       <div ref={bodyRef} tabIndex={-1} className="flex flex-1 flex-col gap-4 outline-none">
         {loading ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">
-            Loading config.toml…
-          </p>
+          <div className="flex justify-center py-12">
+            <LoadingRow>Loading config.toml…</LoadingRow>
+          </div>
         ) : loadFailed ? (
           // Load failed (no content). Never render an editable, Save-enabled
           // editor here: saving its blank content would overwrite the real

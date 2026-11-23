@@ -13,7 +13,7 @@ import {
 import { ESC, TAB } from "@/lib/termkeys"
 import type { PtySocket } from "@/lib/ptySocket"
 import { type AttachCover } from "@/lib/attachCover"
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { plainBounce } from "@/components/terminal/plainBounce"
 import { type InputSurface } from "@/components/terminal/inputSurface"
 import { type UploadPipeline } from "@/components/terminal/uploadPipeline"
@@ -227,7 +227,7 @@ export function TerminalCover(props: TerminalCoverProps) {
       return (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
-            <GlyphSpinner className="text-primary" />
+            <Spinner tone="primary" />
             <span className="text-sm text-muted-foreground">
               {terminalCoverText(props.cover.wording, props.kind, props.providerName)}
             </span>

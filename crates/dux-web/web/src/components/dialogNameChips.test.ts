@@ -94,11 +94,6 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: 'The guard reads the literal "<" followed by an interpolation-looking tail as a quote opened before a name; it is the HTML-page check on a server answer, with no name in it.',
   },
   {
-    file: "components/FolderBrowseList.tsx",
-    line: '<span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">',
-    reason: "The Up row's parent folder, drawn with the folder glyph the folder rows below it carry: a navigation row's destination rather than a name in a sentence. The pinned row's verb and folder above it take the chip.",
-  },
-  {
     file: "components/ProjectShortcutList.tsx",
     line: '<span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">',
     reason: "A project row's folder beside its name: a list row, out of the chip rule's scope.",

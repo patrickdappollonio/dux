@@ -20,7 +20,6 @@ import {
   FileType,
   GitCompare,
   Laptop,
-  Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -123,6 +122,7 @@ import { rowKeyOfTarget } from "@/lib/paneCover"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { Spinner } from "@/components/Spinner"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
 import { Popover, PopoverContent } from "@/components/ui/popover"
 import { useObjectUrl } from "@/hooks/use-object-url"
@@ -935,7 +935,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-muted-foreground">
-              <Loader2 className="size-5 motion-safe:animate-spin" />
+              <Spinner size="lg" />
             </div>
           }
         >
@@ -1774,7 +1774,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           aria-busy={isSaving}
           onClick={save}
         >
-          {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
+          {isSaving ? <Spinner size="fit" tone="current" /> : <Save />}
           Save
         </Button>
       </ExplainedWhenDisabled>
@@ -2241,7 +2241,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   <div className="p-1">
                     {searchLoading ? (
                       <div className="flex items-center justify-center py-4 text-muted-foreground">
-                        <Loader2 className="size-4 motion-safe:animate-spin" />
+                        <Spinner />
                       </div>
                     ) : filtered.length === 0 ? (
                       <p className="px-1 py-2 text-sm text-muted-foreground">
@@ -2936,7 +2936,7 @@ function FileContentPane({
 function LoadingPane() {
   return (
     <div className="flex h-full items-center justify-center text-muted-foreground">
-      <Loader2 className="size-5 motion-safe:animate-spin" />
+      <Spinner size="lg" />
     </div>
   )
 }

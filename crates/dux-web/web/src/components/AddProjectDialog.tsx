@@ -6,7 +6,7 @@ import {
 } from "lucide-react"
 import { notifyError } from "@/lib/notify"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { LoadingRow } from "@/components/Spinner"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
@@ -287,10 +287,7 @@ function SelectionDetails({
       />
       <PathField value={selected} />
       {inspecting ? (
-        <span className="flex items-center gap-2 text-xs text-muted-foreground">
-          <GlyphSpinner className="text-muted-foreground" />
-          Checking the folder…
-        </span>
+        <LoadingRow size="sm">Checking the folder…</LoadingRow>
       ) : null}
       <InspectionMessages {...messages} />
     </div>

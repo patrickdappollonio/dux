@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
   Modal,
@@ -594,7 +594,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
       <ScrollArea className="h-64 shrink-0 rounded-md border max-md:h-auto max-md:min-h-40 max-md:flex-1">
         {attachWorktreeLoading ? (
           <div className="flex h-64 items-center justify-center max-md:h-40">
-            <GlyphSpinner className="text-lg text-muted-foreground" />
+            <Spinner size="lg" />
           </div>
         ) : adoptable.length === 0 &&
           attached.length === 0 &&

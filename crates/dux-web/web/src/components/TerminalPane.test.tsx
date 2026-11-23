@@ -28,7 +28,6 @@ import {
   stubCoarsePointer,
   type MatchMediaStub,
 } from "@/test/matchMedia"
-import { GLYPH_SPINNER_CLASS, SPINNER_FRAMES } from "@/lib/spinnerFrames"
 import { usePaneInputGroup } from "@/lib/paneInputGroup"
 import {
   agentRowKey,
@@ -1455,21 +1454,15 @@ describe("TerminalPane take-over is a fresh attach", () => {
     expect(pty.sendResize).toHaveBeenCalledWith(24, 80)
   })
 
-  it("covers a reconnecting pane with the shared glyph spinner in its fixed slot", () => {
-    // The reconnect cover pairs a spinner with a label. The spinner's six arc
-    // frames have no common advance in a substituted font, so without the
-    // shared fixed-width slot the label shifts sideways every 100ms.
+  it("covers a reconnecting pane with the shared spinner beside its label", () => {
     const pty = mountSettled()
     // A screen has landed once, so the pane is past its first attach and the
     // cover's word for a dropped socket is "Reconnecting", not "Starting".
     act(() => pty.bytesCb?.(new Uint8Array([0x61])))
     act(() => pty.onReconnecting())
     const label = screen.getByText("Reconnecting\u2026")
-    const spinner = label.parentElement?.querySelector(
-      `.${GLYPH_SPINNER_CLASS}`,
-    ) as HTMLElement
-    expect(spinner, "the cover renders the shared GlyphSpinner").toBeTruthy()
-    expect(SPINNER_FRAMES).toContain(spinner.textContent)
+    const spinner = label.parentElement?.querySelector("svg") as SVGElement
+    expect(spinner?.getAttribute("class")).toContain("motion-safe:animate-spin")
   })
 
   it("shows the Reconnect affordance, not the take-over card, on a dead socket", async () => {
