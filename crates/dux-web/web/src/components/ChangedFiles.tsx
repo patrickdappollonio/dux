@@ -45,6 +45,8 @@ import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
+import { RetryButton } from "@/components/ui/retry-button"
+import { SearchField } from "@/components/ui/search-field"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -73,7 +75,6 @@ import {
   folderWorkspace,
   supportsBranchGit,
 } from "@/lib/agentWorkspace"
-import { Input } from "@/components/ui/input"
 import { Notice } from "@/components/Notice"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -609,19 +610,16 @@ const FileRow = memo(function FileRow({
       {refreshError !== null && onRetryFolder && (
         <div role="gridcell" className="shrink-0 px-2">
           <SimpleTooltip content={refreshError}>
-            <Button
-              variant="ghost"
-              size="sm"
+            <RetryButton
+              size="quiet"
+              warning
+              label="Couldn't refresh · Retry"
               tabIndex={inTabOrder ? undefined : -1}
-              className="h-7 shrink-0 px-2 text-xs text-muted-foreground max-md:min-h-11 pointer-coarse:min-h-11"
-              onClick={(event) => {
+              onRetry={(event) => {
                 event.stopPropagation()
                 onRetryFolder(file)
               }}
-            >
-              <TriangleAlert />
-              Couldn't refresh · Retry
-            </Button>
+            />
           </SimpleTooltip>
         </div>
       )}
@@ -1502,16 +1500,11 @@ function FailedRow({
         <span className="min-w-0 flex-1 text-muted-foreground">{message}</span>
       </div>
       <div role="gridcell" className="shrink-0">
-        <Button
-          variant="outline"
-          size="sm"
+        <RetryButton
+          size="row"
           tabIndex={grid.active ? undefined : -1}
-          className="h-8 max-md:h-11 pointer-coarse:min-h-11"
-          onClick={onRetry}
-        >
-          <RefreshCw />
-          Retry
-        </Button>
+          onRetry={onRetry}
+        />
       </div>
     </div>
   )
@@ -2153,16 +2146,7 @@ function changesBodyInstead(
       icon={<TriangleAlert />}
       title="Couldn't load changes"
       description={slice?.error ?? "The changed files couldn't be loaded."}
-      actions={
-        <Button
-          variant="outline"
-          onClick={() => refreshChanges()}
-          className={TOUCH_MIN_HEIGHT}
-        >
-          <RefreshCw />
-          Refresh
-        </Button>
-      }
+      actions={<RetryButton label="Refresh" onRetry={() => refreshChanges()} />}
     />
   )
 }
@@ -2289,17 +2273,15 @@ export const ChangedFiles = memo(function ChangedFiles() {
           {bodyInstead}
           {!bodyInstead && hasChanges ? (
             <div className="border-b p-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  type="search"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Filter changed files…"
-                  aria-label="Filter changed files"
-                  className="h-9 pl-8 max-md:h-11 pointer-coarse:h-10 max-md:pointer-coarse:h-11"
-                />
-              </div>
+              {/* Escape empties the filter, as the native search field it
+                  replaced did. */}
+              <SearchField
+                value={query}
+                onChange={setQuery}
+                label="Filter changed files"
+                placeholder="Filter changed files…"
+                escape="clears"
+              />
             </div>
           ) : null}
           {!bodyInstead && anySelected ? (

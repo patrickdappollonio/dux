@@ -7,8 +7,9 @@ import {
   useEffect,
   useLayoutEffect,
 } from "react"
-import { ChevronRight, Loader2, RotateCw } from "lucide-react"
+import { ChevronRight, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { FailedLoad, RetryButton } from "@/components/ui/retry-button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { EmptyState } from "@/components/ui/empty"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
@@ -585,17 +586,7 @@ export function FileTree({
             <Loader2 className="size-4 motion-safe:animate-spin" />
           </div>
         ) : rootState.status === "error" ? (
-          <div className="flex flex-col items-start gap-1 px-1 py-2">
-            <p className="text-sm text-destructive">{rootState.message}</p>
-            <button
-              type="button"
-              onClick={() => fetchDir("")}
-              className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted"
-            >
-              <RotateCw className="size-3.5" />
-              Retry
-            </button>
-          </div>
+          <FailedLoad message={rootState.message} onRetry={() => fetchDir("")} />
         ) : rootState.entries.length === 0 ? (
           <EmptyState size="compact" title="No files in this worktree." />
         ) : (
@@ -704,20 +695,20 @@ export function FileTree({
               </li>
             ) : row.kind === "error" ? (
               <li key={row.path}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    fetchDir(row.path.slice(0, -"/__error__".length))
-                  }
-                  className="flex w-full items-center gap-1 rounded py-1 pr-1 text-left text-muted-foreground hover:bg-muted"
+                {/* The whole row is the button, and it is exactly the row's
+                    height: the tree's rows are fixed and laid out by the
+                    virtualizer, so nothing here may be taller. */}
+                <RetryButton
+                  size="fill"
+                  label="Failed to load. Retry"
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                     height: rowHeight,
                   }}
-                >
-                  <RotateCw className="size-3.5 shrink-0" />
-                  <span className="text-sm">Failed to load. Retry</span>
-                </button>
+                  onRetry={() =>
+                    fetchDir(row.path.slice(0, -"/__error__".length))
+                  }
+                />
               </li>
             ) : (
               <li key={row.path}>

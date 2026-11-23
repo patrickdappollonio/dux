@@ -7,7 +7,6 @@ import {
   CircleDot,
   FileCode,
   RotateCcw,
-  Search,
   Undo2,
   ZoomOut,
   type LucideIcon,
@@ -42,6 +41,7 @@ import {
 } from "@/components/preferencesModel"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
@@ -1572,22 +1572,12 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     )
 
   const searchBox = (
-    <div
-      className={cn(
-        "flex shrink-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
-        CONTROL_HEIGHT,
-      )}
-    >
-      <Search aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-      <input
-        ref={searchRef}
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search settings"
-        aria-label="Search settings"
-        className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-      />
-    </div>
+    <SearchField
+      inputRef={searchRef}
+      value={query}
+      onChange={setQuery}
+      label="Search settings"
+    />
   )
 
   const nav = (

@@ -21,7 +21,6 @@ import {
   Folder,
   GitPullRequest,
   Plus,
-  Search,
   SquarePlus,
   SquareTerminal,
   TriangleAlert,
@@ -50,6 +49,7 @@ import {
   setQuietTailManualChoice,
 } from "@/lib/quietTailChoice"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -968,17 +968,12 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
             </div>
           ) : null}
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-input bg-input/30 px-2.5 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
-          <Search className="size-4 shrink-0 text-muted-foreground" />
-          <input
-            value={agentSearch}
-            onChange={(event) => setAgentSearch(event.target.value)}
-            placeholder="Search agents and terminals"
-            aria-label="Search agents and terminals"
-            {...searchPick.fieldProps}
-            className="min-w-0 flex-1 bg-transparent py-1.5 text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <SearchField
+          value={agentSearch}
+          onChange={setAgentSearch}
+          label="Search agents and terminals"
+          {...searchPick.fieldProps}
+        />
       </div>
 
       {/* Fades out at its top edge while rows are hidden above and at its
