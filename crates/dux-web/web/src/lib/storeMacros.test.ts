@@ -571,8 +571,9 @@ describe("store macros commands", () => {
     expect(mod.getSnapshot().macrosDialogOpen).toBe(true)
     expect(mod.getSnapshot().macrosDraft).toEqual(edited)
 
-    // The app menu and the picker's pencil open on the same edits, and the
-    // toast that offered them goes, since they are on screen again.
+    // The app menu and the picker's Edit macros… footer open on the same
+    // edits, and the toast that offered them goes, since they are on screen
+    // again.
     mod.setAsideMacrosDraft(edited, 1)
     vi.mocked(toast.dismiss).mockClear()
     mod.openMacrosDialog()

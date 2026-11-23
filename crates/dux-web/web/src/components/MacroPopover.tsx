@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import type * as React from "react"
-import { Pencil, SquarePen, SquareSlash } from "lucide-react"
+import { SquarePen, SquareSlash } from "lucide-react"
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
-import { defaultFilter } from "cmdk"
 
 import {
   Command,
@@ -107,8 +106,8 @@ export function MacroPopover({
   const pane = usePaneMacroTarget(targetPtyId(target))
   const labeled = anchored !== undefined || variant === "labeled"
 
-  // The Macros dialog opens as the picker closes, taking its pencil with it, so
-  // the dialog hands focus back to what stays: the trigger, else the pane.
+  // The Macros dialog opens as the picker closes, so the dialog hands focus
+  // back to what stays: the trigger, else the pane.
   function openDialog(select: string | null) {
     setOpen(false)
     const anchor = anchored?.ref ?? triggerRef
@@ -212,12 +211,7 @@ export function MacroPopover({
             No macros for this target kind. Add one via Edit macros below.
           </div>
         ) : (
-          <MacroCommand
-            macros={macros}
-            autoFocus={!isMobile}
-            onRun={handleRun}
-            onEdit={(name) => openDialog(name)}
-          />
+          <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
         )}
         {/* The picker's Close part: it closes the picker on its way to the
             dialog, so it is the one control that can carry the role. */}
@@ -243,12 +237,10 @@ function MacroCommand({
   macros,
   autoFocus,
   onRun,
-  onEdit,
 }: {
   macros: MacroView[]
   autoFocus: boolean
   onRun: (name: string) => void
-  onEdit: (name: string) => void
 }) {
   const [search, setSearch] = useState("")
   return (
@@ -287,7 +279,6 @@ function MacroCommand({
               name={macro.name}
               search={search}
               onRun={onRun}
-              onEdit={onEdit}
             />
           ))}
         </CommandGroup>
@@ -296,52 +287,27 @@ function MacroCommand({
   )
 }
 
-// One macro: the option that runs it, and beside it, outside the option, the
-// pencil that opens it in the Macros dialog. The 8px gap keeps a tap that
-// narrowly misses the pencil off the run area; the pencil's own box is its
-// 40px tap area under a finger.
+// One macro: the option that runs it, and nothing else on the row, so the name
+// has the full width and a press anywhere on it runs the macro.
 function MacroRow({
   name,
   search,
   onRun,
-  onEdit,
 }: {
   name: string
   search: string
   onRun: (name: string) => void
-  onEdit: (name: string) => void
 }) {
-  // cmdk hides an option the search does not match, by its own score; the
-  // pencil goes with it.
-  const shown = search === "" || defaultFilter(name, search) > 0
   return (
-    <div role="none" hidden={!shown} className="flex items-center gap-2">
-      <CommandItem
-        value={name}
-        className="min-w-0 flex-1 cursor-pointer"
-        onSelect={() => onRun(name)}
-      >
-        <span className="min-w-0 flex-1 truncate">
-          <MatchHighlight text={name} ranges={cmdkMatchRanges(name, search)} />
-        </span>
-      </CommandItem>
-      <SimpleTooltip content="Edit macro">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={`Edit ${name}`}
-          className="shrink-0 max-md:size-10 pointer-coarse:size-10"
-          // The picker runs its highlighted macro on an Enter anywhere inside
-          // it; here Enter and Space press this button instead.
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") event.stopPropagation()
-          }}
-          onClick={() => onEdit(name)}
-        >
-          <Pencil />
-        </Button>
-      </SimpleTooltip>
-    </div>
+    <CommandItem
+      value={name}
+      className="cursor-pointer"
+      onSelect={() => onRun(name)}
+    >
+      <span className="min-w-0 flex-1 truncate">
+        <MatchHighlight text={name} ranges={cmdkMatchRanges(name, search)} />
+      </span>
+    </CommandItem>
   )
 }
 
