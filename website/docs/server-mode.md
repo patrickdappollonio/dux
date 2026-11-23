@@ -750,7 +750,7 @@ socket another user serves, and says so.
 **Apply on a reload:**
 
 - `allowed_hosts`, `access_log` and `search_index_max_files`.
-- The seven browser timing settings, which an open tab picks up without a refresh.
+- The eight browser timing settings, which an open tab picks up without a refresh.
 - `pty_send_timeout_seconds`, which applies to the next terminal you open.
 - The two `operation_*` settings, which apply to the next change dux is asked to make.
 
