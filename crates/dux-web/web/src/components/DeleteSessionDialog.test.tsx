@@ -695,8 +695,9 @@ describe("DeleteSessionDialog", () => {
   })
 
   // The answer says, before anything is ticked, whether deleting the branches
-  // would lose work that exists nowhere else, and it stays green either way:
-  // an unticked box loses nothing.
+  // would lose work that exists nowhere else: green when it would lose
+  // nothing, and in the warning tone when it would, ticked or not, since that
+  // is what it is there to say.
   it.each([
     {
       what: "one unpushed commit",
@@ -705,6 +706,7 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "1 commit on dux/s1 isn't pushed anywhere",
       chips: ["dux/s1"],
+      tone: "warning",
     },
     {
       what: "several unpushed commits",
@@ -713,6 +715,7 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "3 commits on dux/s1 aren't pushed anywhere",
       chips: ["dux/s1"],
+      tone: "warning",
     },
     {
       what: "two branches with nothing unpushed",
@@ -721,6 +724,7 @@ describe("DeleteSessionDialog", () => {
       ]),
       says: "No unpushed work on dux/s1 or spike",
       chips: ["dux/s1", "spike"],
+      tone: "success",
     },
     {
       what: "two branches where only the other one holds unpushed commits",
@@ -734,6 +738,7 @@ describe("DeleteSessionDialog", () => {
       ),
       says: "2 commits on spike aren't pushed anywhere",
       chips: ["spike"],
+      tone: "warning",
     },
     {
       what: "three branches with nothing unpushed",
@@ -743,6 +748,7 @@ describe("DeleteSessionDialog", () => {
       ]),
       says: "No unpushed work on any of the 3 branches",
       chips: [],
+      tone: "success",
     },
     {
       what: "a repository with no remote",
@@ -751,8 +757,9 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "1 commit on dux/s1 is on no other branch, and this repository has no remote",
       chips: ["dux/s1"],
+      tone: "warning",
     },
-  ])("states the answer for $what in a green pill", async ({ answer, says, chips }) => {
+  ])("states the answer for $what in the $tone tone", async ({ answer, says, chips, tone }) => {
     vi.useFakeTimers()
     try {
       branchUnpushed.mockResolvedValue(answer)
@@ -762,7 +769,11 @@ describe("DeleteSessionDialog", () => {
       const pill = screen.getByRole("status")
       expect(pill.textContent).toBe(says)
       expect(chipsIn(pill)).toEqual(chips)
-      expect(pill.className).toContain("bg-dux-success/10")
+      expect(pill.className).toContain(`bg-dux-${tone}/10`)
+      // The tone is never the only sign: the icon says it too.
+      expect(pill.querySelector("svg")!.getAttribute("class")).toContain(
+        tone === "success" ? "lucide-check" : "lucide-circle-alert",
+      )
       act(() => vi.advanceTimersByTime(3000))
       expect(screen.queryByRole("status")).toBeNull()
     } finally {

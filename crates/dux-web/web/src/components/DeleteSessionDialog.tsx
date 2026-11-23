@@ -65,7 +65,9 @@ function currentBranchFailed(offer: BranchOffer): boolean {
 // first box never disagree, and so is one whose commits git could not count.
 type BranchCheck =
   | { state: "pending" }
-  | { state: "checked"; prose: Prose }
+  /** `loses`: deleting the offered branches would lose commits that are
+   * nowhere else, which is a warning whatever is ticked. */
+  | { state: "checked"; prose: Prose; loses: boolean }
   | { state: "none" }
   | { state: "failed"; prose: Prose }
 
@@ -82,17 +84,23 @@ function branchCheck(offer: OfferState): BranchCheck {
         "git could not read the branch",
       ),
     }
+  const currentLost = lossAnswer(ready.current_unpushed, ready.current_unpushed_error)
+  const othersLost = lossAnswer(ready.others_unpushed, ready.others_unpushed_error)
+  const bothLost = lossAnswer(ready.both_unpushed, ready.both_unpushed_error)
   const answer = branchesCheckedProse(
     ready.current?.name ?? null,
-    lossAnswer(ready.current_unpushed, ready.current_unpushed_error),
+    currentLost,
     ready.others.map((other) => other.name),
-    lossAnswer(ready.others_unpushed, ready.others_unpushed_error),
-    lossAnswer(ready.both_unpushed, ready.both_unpushed_error),
+    othersLost,
+    bothLost,
   )
   if ("failed" in answer) return { state: "failed", prose: answer.failed }
+  // The count the sentence was made from: every offered branch together.
+  const lost =
+    ready.current !== null ? (ready.others.length > 0 ? bothLost : currentLost) : othersLost
   return answer.ok === null
     ? { state: "none" }
-    : { state: "checked", prose: answer.ok }
+    : { state: "checked", prose: answer.ok, loses: !("failed" in lost) && lost.count > 0 }
 }
 
 // How long the answer stays up before the pill leaves.
@@ -322,8 +330,8 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 
 // One pill for the whole branch check, drawn from the dialog's first frame so
 // its arrival moves nothing: a spinner while git is asked, a check with the
-// answer once it answered, and the warning tone with the reason when it could
-// not answer. Every state has an icon of its own, so the tone is never the only
+// answer once it answered that nothing would be lost, and the warning tone
+// when commits would be lost or git could not answer. Every state has an icon of its own, so the tone is never the only
 // signal. The icon sits on the first line however many the text wraps to, and
 // a pill that wraps becomes a rounded rectangle, since a capsule that tall has
 // corners eating its text. A chip moves to the next line whole rather than
@@ -344,7 +352,7 @@ function BranchCheckPill({
           branchesCheckingProse(),
           "border-border text-muted-foreground",
         ]
-      : check.state === "checked"
+      : check.state === "checked" && !check.loses
         ? [
             <Check className="mt-px size-3.5 shrink-0 text-dux-success" />,
             check.prose,
