@@ -71,11 +71,7 @@ function findHandBuiltEmptyStates(files: Record<string, string>): Finding[] {
 // matches fewer times than `count` fails the suite, and one more occurrence than
 // `count` is a finding.
 const ALLOWED: { file: string; look: Look; contains: string; count: number; reason: string }[] = [
-  { file: "components/ui/empty.tsx", look: "quiet-line", contains: "px-3 py-6 text-center text-sm text-balance text-muted-foreground", count: 1, reason: "the component's own compact line" },
-  { file: "components/ConfigEditorDialog.tsx", look: "quiet-line", contains: "py-12 text-center text-sm text-muted-foreground", count: 1, reason: "config.toml while it loads: a loading line" },
   { file: "components/ConfigEditorDialog.tsx", look: "filled-pane", contains: "flex h-full items-center justify-center text-muted-foreground", count: 1, reason: "a spinner while the editor loads: a loading state" },
-  { file: "components/MacrosDialog.tsx", look: "quiet-line", contains: "py-10 text-center text-sm text-muted-foreground", count: 1, reason: "the macros while they load: a loading line" },
-  { file: "components/PullRequestsDialog.tsx", look: "quiet-line", contains: "py-6 text-center text-sm text-muted-foreground", count: 1, reason: "the branches tab while it reads them, or why it could not: a loading or failed line" },
   { file: "components/EditorBody.tsx", look: "filled-pane", contains: "flex h-full items-center justify-center text-muted-foreground", count: 2, reason: "spinners while a buffer or the diff loads: loading states" },
   { file: "components/EditorBody.tsx", look: "filled-pane", contains: "flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground", count: 1, reason: "CenteredPane: why a file cannot be shown (binary, too large, no diff), a message about a file that exists and not an empty list" },
   { file: "components/StandaloneEditor.tsx", look: "filled-pane", contains: "flex h-full items-center justify-center text-muted-foreground", count: 1, reason: "a spinner while the tab boots: a loading state" },

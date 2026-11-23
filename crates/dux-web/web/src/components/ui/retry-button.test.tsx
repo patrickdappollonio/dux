@@ -67,4 +67,11 @@ describe("FailedLoad", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }))
     expect(onRetry).toHaveBeenCalledTimes(1)
   })
+
+  it("tells a screen reader the sentence once, and not the button", () => {
+    render(<FailedLoad message="Failed to fetch" onRetry={() => {}} />)
+    const alerts = screen.getAllByRole("alert")
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].textContent).toBe("Failed to fetch")
+  })
 })

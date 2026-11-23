@@ -48,6 +48,27 @@ type CompactEmptyState = {
 
 export type EmptyStateProps = RoomyEmptyState | CompactEmptyState
 
+// Where a list's one line sits in place of its rows. The compact empty state,
+// the loading line (`ListLine`) and the failed load (`FailedLoad`) all use it,
+// so a list that goes from one to another does not move or change size.
+const LIST_LINE = "px-3 py-6 text-center text-sm text-balance"
+
+/**
+ * A list's loading line, or any other line that stands in place of its rows,
+ * centred where the compact empty state sits. `muted` is for words; a spinner
+ * names its own tone.
+ */
+export function ListLine({ children, muted = false }: { children: ReactNode; muted?: boolean }) {
+  return (
+    <div
+      data-slot="list-line"
+      className={cn("flex flex-col items-center gap-2", LIST_LINE, muted && "text-muted-foreground")}
+    >
+      {children}
+    </div>
+  )
+}
+
 export function EmptyState(props: EmptyStateProps) {
   const role = props.announce ? "status" : undefined
   if (props.size === "compact") {
@@ -55,7 +76,7 @@ export function EmptyState(props: EmptyStateProps) {
       <p
         data-slot="empty"
         role={role}
-        className="px-3 py-6 text-center text-sm text-balance text-muted-foreground"
+        className={cn(LIST_LINE, "text-muted-foreground")}
       >
         {props.title}
       </p>

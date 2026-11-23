@@ -108,7 +108,6 @@ const ALLOWED: Allowed[] = [
   { file: "components/DeleteEntryDialog.tsx", line: 'className="text-sm text-destructive"', reason: STANDING },
   { file: "components/RenameEntryDialog.tsx", line: "{dirtyRefusal}", reason: "the dirty-file refusal, there when the dialog opens on a dirty file: standing, as DeleteEntryDialog's save line" },
   { file: "components/MoveEntryDialog.tsx", line: "{dirtyRefusal}", reason: "the dirty-file refusal, there when the dialog opens on a dirty file: standing, as DeleteEntryDialog's save line" },
-  { file: "components/MoveEntryDialog.tsx", line: "{state.message}", reason: "a failed folder listing with its own Retry: left as it was while that row moves onto a shared failed-load component, whose announcement is settled when the pieces are combined" },
   { file: "components/DeleteSessionDialog.tsx", line: 'return <p className="text-sm text-destructive">', reason: BRANCH_WARNING },
   { file: "components/WorktreeFilesNote.tsx", line: '"text-destructive"', reason: `${STANDING} (what a delete would lose, once git has answered)` },
   { file: "components/WorktreesDialog.tsx", line: 'className="grid gap-2 text-sm text-destructive"', reason: `${STANDING} (the delete-worktree confirm)` },
@@ -117,10 +116,7 @@ const ALLOWED: Allowed[] = [
   { file: "components/CustomizeWebappDialog.tsx", line: 'below && "text-destructive"', reason: "one word of the strength meter's label, not a sentence" },
   { file: "components/StandaloneAgentDialog.tsx", line: '"text-xs text-destructive"', reason: "the name field's help paragraph turning red, always present and tied to the field by aria-describedby" },
   { file: "components/StartupLogsDialog.tsx", line: 'className="text-destructive"', reason: "a span inside a danger Notice, which already announces it" },
-  { file: "components/FileTree.tsx", line: "{rootState.message}", reason: "a failed-load row with its own Retry, built elsewhere" },
   { file: "components/ChangedFiles.tsx", line: "TriangleAlert", reason: "the icon of a failed-load row with its own Retry, built elsewhere" },
-  { file: "components/EditorBody.tsx", line: "text-sm text-destructive", reason: "the editor pane's full-pane load-failure screen, not a dialog" },
-  { file: "components/EditorBody.tsx", line: "text-sm text-destructive", reason: "the editor pane's second full-pane load-failure screen, not a dialog" },
   { file: "components/FlatAgentList.tsx", line: "text-destructive", reason: "a sidebar row's failure word, not a dialog" },
 ]
 

@@ -7,7 +7,7 @@ import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { FailedLoad } from "@/components/ui/retry-button"
 import { InlineCode } from "@/components/ui/inline-code"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { dirIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
@@ -207,11 +207,12 @@ function MoveEntryDialogBody({
             </button>
           )}
           {state.status === "loading" ? (
-            <div className="flex items-center justify-center py-6 text-muted-foreground">
-              <Spinner kind="ring" size="md" />
-            </div>
+            <ListLine>
+              <Spinner kind="ring" size="md" tone="muted" />
+            </ListLine>
           ) : state.status === "error" ? (
             <FailedLoad
+              layout="list"
               message={state.message}
               onRetry={() => setReloadNonce((n) => n + 1)}
             />

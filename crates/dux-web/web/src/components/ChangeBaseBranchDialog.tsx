@@ -6,7 +6,7 @@ import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import { useSearchPick } from "@/hooks/use-search-pick"
 import { sessionLabel, workspaceDirectory } from "@/lib/agentWorkspace"
 import { changeBaseBranchProse } from "@/lib/changeBaseBranch"
@@ -125,15 +125,15 @@ function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void 
         }
       >
         {listing.kind === "loading" ? (
-          <p className="px-2 py-4">
+          <ListLine>
             <LoadingSentence spinner="glyph" size="sm">
               Fetching origin and listing the branches…
             </LoadingSentence>
-          </p>
+          </ListLine>
         ) : listing.kind === "failed" ? (
-          <div className="px-2 py-4">
+          <ListLine>
             <ErrorLine>{listing.message}</ErrorLine>
-          </div>
+          </ListLine>
         ) : filtered.length === 0 ? (
           <EmptyState
             size="compact"

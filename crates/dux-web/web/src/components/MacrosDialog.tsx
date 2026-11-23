@@ -66,7 +66,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { tabsListVariants } from "@/components/ui/tabs"
@@ -553,7 +553,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   if (loading) {
     return (
       <Modal {...common} title="Macros">
-        <p className="py-10 text-center text-sm text-muted-foreground">Loading the macros…</p>
+        <ListLine muted>Loading the macros…</ListLine>
       </Modal>
     )
   }

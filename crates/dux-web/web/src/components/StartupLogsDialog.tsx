@@ -34,9 +34,13 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
   const hasLogs = startupLogsEntries.length > 0
 
   return startupLogsError ? (
-    <Notice shape="box" tone="danger">
-      <span className="text-destructive">{startupLogsError}</span>
-    </Notice>
+    // The spinner's box too, with the notice across it, so a failed read sits
+    // where the spinner and the empty line sit.
+    <div className="flex h-64 flex-col justify-center">
+      <Notice shape="box" tone="danger">
+        <span className="text-destructive">{startupLogsError}</span>
+      </Notice>
+    </div>
   ) : !hasLogs && startupLogsLoading ? (
     <div className="flex h-64 items-center justify-center">
       <Spinner kind="glyph" size="lg" tone="muted" />

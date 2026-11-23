@@ -2,7 +2,9 @@ import * as React from "react"
 import { RotateCw, TriangleAlert } from "lucide-react"
 import type { Button as ButtonPrimitive } from "@base-ui/react/button"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { Button } from "@/components/ui/button"
+import { ListLine } from "@/components/ui/empty"
 
 /**
  * The size is the only look a caller chooses, and each one has its place:
@@ -78,29 +80,32 @@ export function RetryButton({
 }
 
 /**
- * A failed load: its sentence, then the button that repeats it. `start` sits
- * at the top left of a list or a tree, `center` fills a pane. The sentence is
- * the caller's, the server's or the deadline's, and is the only red in it.
+ * A failed load: its sentence, then the button that repeats it. `list` sits
+ * where a list's empty and loading lines sit (`ListLine`), `center` fills a
+ * pane. The sentence is the caller's, the server's or the deadline's; it is the
+ * dialog error line, so it is the only red here and a screen reader hears it
+ * once, when the load fails.
  */
 export function FailedLoad({
   message,
   onRetry,
-  layout = "start",
+  layout,
 }: {
   message: React.ReactNode
   onRetry: RetryButtonProps["onRetry"]
-  layout?: "start" | "center"
+  layout: "list" | "center"
 }) {
-  return (
-    <div
-      className={
-        layout === "center"
-          ? "flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm"
-          : "flex flex-col items-start gap-2 px-2 py-2 text-sm"
-      }
-    >
-      <p className="text-destructive">{message}</p>
+  const body = (
+    <>
+      <ErrorLine>{message}</ErrorLine>
       <RetryButton onRetry={onRetry} />
+    </>
+  )
+  return layout === "list" ? (
+    <ListLine>{body}</ListLine>
+  ) : (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+      {body}
     </div>
   )
 }

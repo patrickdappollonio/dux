@@ -5,6 +5,7 @@ import { ErrorLine } from "@/components/ErrorLine"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { InfoRow } from "@/components/InfoRow"
 import { Modal, useModalLifetime } from "@/components/modal"
+import { ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { FileApiError, fileApi } from "@/lib/fileApi"
 import {
@@ -120,11 +121,13 @@ function FileInfoPanel({
       }
     >
       {error !== null ? (
-        <ErrorLine>{error}</ErrorLine>
+        <ListLine>
+          <ErrorLine>{error}</ErrorLine>
+        </ListLine>
       ) : info === null ? (
-        <div className="flex items-center justify-center py-6 text-muted-foreground">
-          <Spinner kind="ring" size="md" />
-        </div>
+        <ListLine>
+          <Spinner kind="ring" size="md" tone="muted" />
+        </ListLine>
       ) : (
         <dl className="flex flex-col gap-2">
           <InfoRow label="Path">

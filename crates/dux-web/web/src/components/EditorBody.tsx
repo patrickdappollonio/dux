@@ -187,7 +187,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -2222,9 +2222,9 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                 <ScrollArea className="min-h-0 flex-1">
                   <div className="p-1">
                     {searchLoading ? (
-                      <div className="flex items-center justify-center py-4 text-muted-foreground">
-                        <Spinner kind="ring" size="md" />
-                      </div>
+                      <ListLine>
+                        <Spinner kind="ring" size="md" tone="muted" />
+                      </ListLine>
                     ) : filtered.length === 0 ? (
                       <EmptyState size="compact" title="No files match." />
                     ) : (

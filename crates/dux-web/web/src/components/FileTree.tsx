@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils"
 import { Spinner } from "@/components/Spinner"
 import { FailedLoad, RetryButton } from "@/components/ui/retry-button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { FileTreeContextMenu } from "@/components/FileTreeContextMenu"
@@ -583,11 +583,11 @@ export function FileTree({
         }
       >
         {!rootState || rootState.status === "loading" ? (
-          <div className="flex items-center justify-center py-4 text-muted-foreground">
-            <Spinner kind="ring" size="md" />
-          </div>
+          <ListLine>
+            <Spinner kind="ring" size="md" tone="muted" />
+          </ListLine>
         ) : rootState.status === "error" ? (
-          <FailedLoad message={rootState.message} onRetry={() => fetchDir("")} />
+          <FailedLoad layout="list" message={rootState.message} onRetry={() => fetchDir("")} />
         ) : rootState.entries.length === 0 ? (
           <EmptyState size="compact" title="No files in this worktree." />
         ) : (

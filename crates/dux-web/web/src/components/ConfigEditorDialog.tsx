@@ -8,6 +8,7 @@ import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
+import { ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { chip } from "@/lib/prose"
 import {
@@ -151,16 +152,14 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     >
       <div ref={bodyRef} tabIndex={-1} className="flex flex-1 flex-col gap-4 outline-none">
         {loading ? (
-          <p className="py-12 text-center text-sm text-muted-foreground">
-            Loading config.toml…
-          </p>
+          <ListLine muted>Loading config.toml…</ListLine>
         ) : loadFailed ? (
           // Load failed (no content). Never render an editable, Save-enabled
           // editor here: saving its blank content would overwrite the real
           // config.toml. Show the error and a Retry instead.
-          <div className="py-8 text-center">
+          <ListLine>
             <ErrorLine>{error}</ErrorLine>
-          </div>
+          </ListLine>
         ) : (
           <ConfigEditorForm text={text} setText={setText} error={error} conflict={conflict} />
         )}

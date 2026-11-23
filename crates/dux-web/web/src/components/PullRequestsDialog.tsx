@@ -49,7 +49,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { EmptyState } from "@/components/ui/empty"
+import { EmptyState, ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -701,11 +701,11 @@ function BranchesView({
   const isHidden = (key: PrKeyView) => lookup(hidden, key) !== undefined
   if (!branches.data) {
     return branches.error ? (
-      <div className="py-6 text-center">
+      <ListLine>
         <ErrorLine>{branches.error}</ErrorLine>
-      </div>
+      </ListLine>
     ) : (
-      <p className="py-6 text-center text-sm text-muted-foreground">Reading the branches…</p>
+      <ListLine muted>Reading the branches…</ListLine>
     )
   }
   // The server's order: the branch checked out now first, then newest first.
