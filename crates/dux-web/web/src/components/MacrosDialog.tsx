@@ -26,7 +26,6 @@ import {
 } from "lucide-react"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
-import { LoadingRow } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
@@ -554,9 +553,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   if (loading) {
     return (
       <Modal {...common} title="Macros">
-        <div className="flex justify-center py-10">
-          <LoadingRow>Loading the macros…</LoadingRow>
-        </div>
+        <p className="py-10 text-center text-sm text-muted-foreground">Loading the macros…</p>
       </Modal>
     )
   }

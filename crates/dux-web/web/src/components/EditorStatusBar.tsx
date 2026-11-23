@@ -323,7 +323,7 @@ export function EditorStatusBar({
                   }
                 >
                   {localEditor.opening ? (
-                    <Spinner size="fit" tone="current" />
+                    <Spinner kind="ring" size="xs" />
                   ) : (
                     <Laptop />
                   )}

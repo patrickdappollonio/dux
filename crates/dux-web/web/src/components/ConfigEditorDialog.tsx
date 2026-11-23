@@ -2,7 +2,7 @@ import { Info } from "lucide-react"
 
 import { lazy, Suspense, useRef, useState } from "react"
 
-import { LoadingRow, Spinner } from "@/components/Spinner"
+import { Spinner } from "@/components/Spinner"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
@@ -48,7 +48,7 @@ function ConfigEditorForm({
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-muted-foreground">
-                <Spinner size="lg" />
+                <Spinner kind="ring" size="lg" />
               </div>
             }
           >
@@ -151,9 +151,9 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     >
       <div ref={bodyRef} tabIndex={-1} className="flex flex-1 flex-col gap-4 outline-none">
         {loading ? (
-          <div className="flex justify-center py-12">
-            <LoadingRow>Loading config.toml…</LoadingRow>
-          </div>
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            Loading config.toml…
+          </p>
         ) : loadFailed ? (
           // Load failed (no content). Never render an editable, Save-enabled
           // editor here: saving its blank content would overwrite the real

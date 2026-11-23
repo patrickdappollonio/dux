@@ -64,7 +64,7 @@ export function ProjectShortcutList({
             className={`flex items-center justify-center ${expectedRows === null ? ROWS_HEIGHT : ROWS_HEIGHT_FOR_COUNT}`}
             style={expectedRows === null ? undefined : ({ "--rows": expectedRows } as CSSProperties)}
           >
-            <Spinner />
+            <Spinner kind="glyph" size="text" tone="muted" />
           </div>
         </div>
         {/* The caption's line, kept until the server's words arrive. */}

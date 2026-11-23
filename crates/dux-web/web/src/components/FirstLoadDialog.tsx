@@ -1,6 +1,5 @@
 import { FolderGit2, ExternalLink } from "lucide-react"
 
-import { LoadingRow } from "@/components/Spinner"
 import { Badge } from "@/components/ui/badge"
 import { IconTile } from "@/components/IconTile"
 import { ErrorLine } from "@/components/ErrorLine"
@@ -242,7 +241,9 @@ function WhatsNewContent({ state }: { state: FirstLoadDialogState }) {
   return (
     <>
       {state.loading ? (
-        <LoadingRow>Fetching the release notes from GitHub…</LoadingRow>
+        <p className="text-sm text-muted-foreground">
+          Fetching the release notes from GitHub…
+        </p>
       ) : state.error !== null ? (
         // A real error in the body, not just a toast that may have auto-cleared.
         // The load's failure is already announced by that toast, so the line

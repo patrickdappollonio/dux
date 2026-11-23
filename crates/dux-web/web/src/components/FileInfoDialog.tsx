@@ -123,7 +123,7 @@ function FileInfoPanel({
         <ErrorLine>{error}</ErrorLine>
       ) : info === null ? (
         <div className="flex items-center justify-center py-6 text-muted-foreground">
-          <Spinner />
+          <Spinner kind="ring" size="md" />
         </div>
       ) : (
         <dl className="flex flex-col gap-2">

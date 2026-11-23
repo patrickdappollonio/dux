@@ -7,7 +7,7 @@ import {
 import { Notice } from "@/components/Notice"
 import { notifyError } from "@/lib/notify"
 
-import { LoadingRow } from "@/components/Spinner"
+import { LoadingSentence } from "@/components/Spinner"
 import { FolderBrowseList } from "@/components/FolderBrowseList"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
@@ -283,7 +283,9 @@ function SelectionDetails({
       />
       <PathField value={selected} />
       {inspecting ? (
-        <LoadingRow size="sm">Checking the folder…</LoadingRow>
+        <LoadingSentence spinner="glyph" size="xs">
+          Checking the folder…
+        </LoadingSentence>
       ) : null}
       <InspectionMessages {...messages} />
     </div>

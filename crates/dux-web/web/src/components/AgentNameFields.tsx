@@ -69,8 +69,8 @@ export function AgentNameInput({
         autoFocus={autoFocus}
       />
       {generating && (
-        <span className="absolute right-3 top-1/2 -translate-y-1/2">
-          <Spinner />
+        <span className="absolute right-3 top-1/2 flex -translate-y-1/2">
+          <Spinner kind="glyph" size="text" tone="muted" />
         </span>
       )}
     </div>

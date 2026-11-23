@@ -45,7 +45,7 @@ function ActionButton({
   const Icon = action.icon
   const content = (
     <>
-      {busy ? <Spinner size="fit" tone="current" /> : Icon ? <Icon /> : null}
+      {busy ? <Spinner kind="glyph" size="text" /> : Icon ? <Icon /> : null}
       {action.label}
     </>
   )

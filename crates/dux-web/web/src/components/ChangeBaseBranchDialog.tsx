@@ -1,7 +1,7 @@
 import { GitBranch, TriangleAlert } from "lucide-react"
 import { Fragment, useMemo, useState, type ReactNode } from "react"
 
-import { LoadingRow } from "@/components/Spinner"
+import { LoadingSentence } from "@/components/Spinner"
 import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
@@ -126,7 +126,9 @@ function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void 
       >
         {listing.kind === "loading" ? (
           <p className="px-2 py-4">
-            <LoadingRow>Fetching origin and listing the branches…</LoadingRow>
+            <LoadingSentence spinner="glyph" size="sm">
+              Fetching origin and listing the branches…
+            </LoadingSentence>
           </p>
         ) : listing.kind === "failed" ? (
           <div className="px-2 py-4">

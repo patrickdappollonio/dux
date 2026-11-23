@@ -13,7 +13,7 @@ import type { DirEntryView } from "@/lib/types"
  * from the surrounding prose. */
 export function FolderPill({ name }: { name: string }) {
   return (
-    <Badge variant="chip" mono className="min-w-0 shrink">
+    <Badge variant="framed" mono className="min-w-0 shrink">
       <Folder className="size-3 shrink-0 text-muted-foreground" />
       <span className="truncate">{name}</span>
     </Badge>
@@ -69,7 +69,7 @@ export function FolderBrowseList({
             shrinkable ? "h-full min-h-32" : "h-[50dvh] md:h-80"
           }`}
         >
-          <Spinner size="lg" />
+          <Spinner kind="glyph" size="lg" tone="muted" />
         </div>
       ) : (
         <div className="flex flex-col">

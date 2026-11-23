@@ -1,4 +1,3 @@
-
 import { Spinner } from "@/components/Spinner"
 import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { EditorBody } from "@/components/EditorBody"
@@ -57,7 +56,7 @@ export function StandaloneEditorShell() {
       ) : editorTarget === null ? (
         // Booting: the spine has not resolved the deep link yet.
         <div className="flex h-full items-center justify-center text-muted-foreground">
-          <Spinner size="lg" />
+          <Spinner kind="ring" size="lg" />
         </div>
       ) : (
         // The body's own header names what this editor is rooted at.

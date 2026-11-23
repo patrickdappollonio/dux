@@ -9,7 +9,7 @@ import {
 } from "react"
 import { ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { LoadingRow, Spinner } from "@/components/Spinner"
+import { Spinner } from "@/components/Spinner"
 import { FailedLoad, RetryButton } from "@/components/ui/retry-button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { EmptyState } from "@/components/ui/empty"
@@ -584,7 +584,7 @@ export function FileTree({
       >
         {!rootState || rootState.status === "loading" ? (
           <div className="flex items-center justify-center py-4 text-muted-foreground">
-            <Spinner />
+            <Spinner kind="ring" size="md" />
           </div>
         ) : rootState.status === "error" ? (
           <FailedLoad message={rootState.message} onRetry={() => fetchDir("")} />
@@ -635,7 +635,7 @@ export function FileTree({
                     }
                   >
                     {row.state === "loading" ? (
-                      <Spinner size="sm" />
+                      <Spinner kind="ring" size="sm" tone="muted" />
                     ) : (
                       <ChevronRight
                         className={cn(
@@ -684,13 +684,16 @@ export function FileTree({
             ) : row.kind === "loading" ? (
               <li key={row.path}>
                 <div
-                  className="flex items-center py-1 pr-1"
+                  className="flex items-center gap-1 py-1 pr-1 text-muted-foreground"
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                     height: rowHeight,
                   }}
                 >
-                  <LoadingRow>Loading…</LoadingRow>
+                  {/* The spinner stands in the tree's 14px chevron column, so
+                      it lines up with the chevrons of the rows above. */}
+                  <Spinner kind="ring" size="sm" />
+                  <span className="text-sm">Loading…</span>
                 </div>
               </li>
             ) : row.kind === "error" ? (

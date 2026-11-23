@@ -37,7 +37,7 @@ import { notifyError, notifyInfo } from "@/lib/notify"
 import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
-import { LoadingRow as SpinnerRow, Spinner } from "@/components/Spinner"
+import { LoadingSentence, Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
@@ -1296,7 +1296,7 @@ function BulkToolbar({
         >
           <span className="truncate">{groupDigits(ticked)} selected</span>
           {busy !== null ? (
-            <Spinner size="fit" tone="current" />
+            <Spinner kind="ring" size="md" />
           ) : (
             <ChevronDown />
           )}
@@ -1325,7 +1325,7 @@ function BulkToolbar({
                 }
                 onClick={() => onRunBulk("stage")}
               >
-                {busy === "stage" ? <Spinner size="fit" tone="current" /> : <Plus />}
+                {busy === "stage" ? <Spinner kind="ring" size="md" /> : <Plus />}
                 Stage {groupDigits(counts.unstaged)}
               </DropdownMenuItem>
             ) : null}
@@ -1336,7 +1336,7 @@ function BulkToolbar({
                 aria-describedby={blocked ? writeReasonId : undefined}
                 onClick={() => onRunBulk("unstage")}
               >
-                {busy === "unstage" ? <Spinner size="fit" tone="current" /> : <Minus />}
+                {busy === "unstage" ? <Spinner kind="ring" size="md" /> : <Minus />}
                 Unstage {groupDigits(counts.staged)}
               </DropdownMenuItem>
             ) : null}
@@ -1360,7 +1360,7 @@ function BulkToolbar({
                   }
                   onClick={onDiscard}
                 >
-                  {busy === "discard" ? <Spinner size="fit" tone="current" /> : <Undo2 />}
+                  {busy === "discard" ? <Spinner kind="ring" size="md" /> : <Undo2 />}
                   Discard {groupDigits(counts.discard)}…
                 </DropdownMenuItem>
               </DropdownMenuGroup>
@@ -1463,7 +1463,9 @@ function LoadingRow({ depth, grid }: { depth: number; grid: GridRowProps }) {
       style={depthIndent(depth)}
     >
       <div role="gridcell" className="flex items-center gap-2">
-        <SpinnerRow announce>Loading…</SpinnerRow>
+        <LoadingSentence spinner="ring" size="sm" announce>
+          Loading…
+        </LoadingSentence>
       </div>
     </div>
   )
@@ -2131,7 +2133,7 @@ function changesBodyInstead(
     return (
       <EmptyState
         size="page"
-        icon={<Spinner size="fit" tone="current" />}
+        icon={<Spinner kind="ring" size="md" />}
         title="Loading changes…"
         description="Fetching this session's changes."
       />

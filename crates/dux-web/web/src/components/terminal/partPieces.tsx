@@ -227,7 +227,7 @@ export function TerminalCover(props: TerminalCoverProps) {
       return (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex items-center gap-2 rounded-lg border bg-card px-4 py-3 text-card-foreground">
-            <Spinner tone="primary" />
+            <Spinner kind="glyph" size="text" tone="primary" />
             <span className="text-sm text-muted-foreground">
               {terminalCoverText(props.cover.wording, props.kind, props.providerName)}
             </span>

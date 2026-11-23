@@ -22,8 +22,10 @@ const badgeVariants = cva(
         // A label that says something about a row without competing with its
         // title: a count, "Attached", a provider name.
         muted: "bg-muted text-muted-foreground",
-        // A name on a muted fill with a hairline edge: the target a row acts on.
-        chip: "border-border bg-muted text-foreground",
+        // A muted fill with a hairline edge, for a tag that stands alone in a
+        // row (the folder an Up row leads to). A name inside a sentence is
+        // never a badge: it is the `InlineCode` chip.
+        framed: "border-border bg-muted text-foreground",
         // "This process" in the Task Manager: cyan, and deliberately static,
         // because the blink paired with that colour elsewhere means "needs you".
         self: "border-cyan-100/30 bg-cyan-100/10 text-cyan-100",

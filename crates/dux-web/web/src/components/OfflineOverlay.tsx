@@ -155,7 +155,7 @@ export function OfflineOverlay() {
           className="mb-1.5 flex items-center justify-center gap-2 text-lg font-semibold"
         >
           {face.spinner ? (
-            <Spinner />
+            <Spinner kind="ring" size="md" tone="muted" />
           ) : null}
           {face.title}
         </h1>

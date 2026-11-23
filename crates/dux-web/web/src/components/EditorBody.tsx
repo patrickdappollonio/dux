@@ -935,7 +935,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-muted-foreground">
-              <Spinner size="lg" />
+              <Spinner kind="ring" size="lg" />
             </div>
           }
         >
@@ -1774,7 +1774,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           aria-busy={isSaving}
           onClick={save}
         >
-          {isSaving ? <Spinner size="fit" tone="current" /> : <Save />}
+          {isSaving ? <Spinner kind="ring" size="md" /> : <Save />}
           Save
         </Button>
       </ExplainedWhenDisabled>
@@ -2223,7 +2223,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   <div className="p-1">
                     {searchLoading ? (
                       <div className="flex items-center justify-center py-4 text-muted-foreground">
-                        <Spinner />
+                        <Spinner kind="ring" size="md" />
                       </div>
                     ) : filtered.length === 0 ? (
                       <EmptyState size="compact" title="No files match." />
@@ -2918,7 +2918,7 @@ function FileContentPane({
 function LoadingPane() {
   return (
     <div className="flex h-full items-center justify-center text-muted-foreground">
-      <Spinner size="lg" />
+      <Spinner kind="ring" size="lg" />
     </div>
   )
 }

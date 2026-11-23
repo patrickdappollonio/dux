@@ -346,8 +346,8 @@ function BranchCheckPill({ check }: { check: BranchCheck }) {
   const [icon, prose, tone] =
     check.state === "pending"
       ? [
-          <span className="mt-px">
-            <Spinner size="sm" tone="current" />
+          <span className="mt-px flex">
+            <Spinner kind="ring" size="sm" />
           </span>,
           branchesCheckingProse(),
           QUIET_PILL,

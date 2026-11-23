@@ -208,7 +208,7 @@ function MoveEntryDialogBody({
           )}
           {state.status === "loading" ? (
             <div className="flex items-center justify-center py-6 text-muted-foreground">
-              <Spinner />
+              <Spinner kind="ring" size="md" />
             </div>
           ) : state.status === "error" ? (
             <FailedLoad

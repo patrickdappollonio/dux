@@ -62,6 +62,12 @@ const QUOTE_BEFORE_NAME =
 // written as a string or as the first string handed to `cn`.
 const HAND_ROLLED_CHIP = /<span\s+className=(?:"|\{cn\(\s*")[^"]*\bfont-mono\b[^"]*"/g
 
+// The same chip drawn as a badge: a monospace badge is a monospace span with a
+// pill around it. Its props may span lines, so the element is matched up to
+// its `mono` (or a `font-mono` class), and the line reported is that one's.
+const MONO_BADGE =
+  /<Badge\b(?:[^>]*?\smono(?=[\s>/=])(?!=\{\s*false)|[^>]*?\bclassName="[^"]*\bfont-mono\b)/g
+
 // The same chip one level up: StartTruncatedText renders its own span, so a
 // monospace class handed to it is a monospace span all the same. Its props may
 // span lines, so the element is matched up to its className, and the line
@@ -73,6 +79,7 @@ function nameDelimiterViolations(source: string): string[] {
   return [
     ...[...source.matchAll(QUOTE_BEFORE_NAME)].map((m) => m.index ?? 0),
     ...[...source.matchAll(HAND_ROLLED_CHIP)].map((m) => m.index ?? 0),
+    ...[...source.matchAll(MONO_BADGE)].map((m) => (m.index ?? 0) + m[0].length - 1),
     ...[...source.matchAll(MONO_START_TRUNCATED)].map(
       (m) => (m.index ?? 0) + m[0].lastIndexOf("className="),
     ),
@@ -92,6 +99,11 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     file: "lib/store.ts",
     line: 'if (text.startsWith("<") || [...text].length > SERVER_REASON_MAX_CHARS) return null',
     reason: 'The guard reads the literal "<" followed by an interpolation-looking tail as a quote opened before a name; it is the HTML-page check on a server answer, with no name in it.',
+  },
+  {
+    file: "components/FolderBrowseList.tsx",
+    line: '<Badge variant="framed" mono className="min-w-0 shrink">',
+    reason: "The Up row's parent folder, drawn with the folder glyph the folder rows below it carry: a navigation row's destination rather than a name in a sentence. The pinned row's verb and folder above it take the chip.",
   },
   {
     file: "components/ProjectShortcutList.tsx",
@@ -158,7 +170,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   // something other than a name in a sentence.
   {
     file: "components/AgentVitalsTooltip.tsx",
-    line: '<span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">',
+    line: '<Badge variant="muted" size="sm" mono>',
     reason: "The provider's tag beside the agent's name in the vitals card's heading: a tag standing alone, not a name in a sentence.",
   },
   {
@@ -269,6 +281,10 @@ describe("the name-delimiter detector", () => {
       '<StartTruncatedText text={path} className="font-mono" />',
       '<StartTruncatedText text={path} className="flex-1 font-mono text-sm" />',
       '<StartTruncatedText\n  text={path}\n  className="font-mono text-xs"\n/>',
+      // A monospace badge is the same chip with a pill drawn round it.
+      '<p>Delete <Badge variant="muted" mono>{name}</Badge>?</p>',
+      '<Badge className="font-mono">{name}</Badge>',
+      '<Badge\n  variant="framed"\n  mono\n>',
     ]) {
       expect(nameDelimiterViolations(bad), bad).toHaveLength(1)
     }
@@ -299,6 +315,8 @@ describe("the name-delimiter detector", () => {
       "The agent&apos;s folder stays where it is.",
       "Don't {verb} it.",
       'const label = "Reload config"',
+      '<Badge variant="muted" size="sm">{count}</Badge>',
+      '<Badge variant="muted" mono={false}>{count}</Badge>',
     ]) {
       expect(nameDelimiterViolations(fine), fine).toEqual([])
     }

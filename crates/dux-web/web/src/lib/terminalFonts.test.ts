@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { brotliDecompressSync } from "node:zlib"
 import { describe, expect, it } from "vitest"
 
+import { SPINNER_FRAMES } from "./spinnerFrames"
 import {
   DUX_MONO_FAMILY,
   DUX_MONO_FILL_FAMILY,
@@ -327,6 +328,19 @@ describe("Dux Mono Fill subset contents", () => {
     // on every agent row the browser shows. The opt-in Nerd Font set is not
     // carried here: it needs the user's own patched font.
     for (const cp of [0x203b, 0x2737]) {
+      expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)
+    }
+  })
+
+  it("carries every frame of the arc spinner, U+25DC to U+25E1", () => {
+    // The terminal UI spins with these six arcs, so the web terminal and the
+    // screenshot tool draw them from this face whenever a dux runs inside one.
+    // The web's own glyph spinner (`.glyph-spinner` in index.css) names this
+    // face first because no other bundled face and no UI font has them. A
+    // recut that drops one puts either spinner on a substituted glyph from an
+    // unknown face.
+    for (const frame of SPINNER_FRAMES) {
+      const cp = frame.codePointAt(0) as number
       expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)
     }
   })
