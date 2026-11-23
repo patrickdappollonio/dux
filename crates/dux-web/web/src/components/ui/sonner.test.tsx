@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { toast } from "sonner"
-import { afterEach, beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import {
   TOAST_SWIPE_DIRECTIONS,
@@ -771,6 +771,73 @@ describe("Toaster placement", () => {
     } finally {
       flap.remove()
       cover.remove()
+    }
+  })
+
+  // Marked elements laid out at the given boxes, removed again by the returned
+  // function.
+  function chrome(...boxes: Array<[top: number, bottom: number]>): () => void {
+    const els = boxes.map(([top, bottom]) => {
+      const el = document.createElement("div")
+      el.setAttribute("data-toast-clear", "")
+      el.getBoundingClientRect = () =>
+        ({ top, bottom, left: 0, right: 390, width: 390, height: bottom - top, x: 0, y: top }) as DOMRect
+      return el
+    })
+    document.body.append(...els)
+    return () => els.forEach((el) => el.remove())
+  }
+
+  it("clears every row hanging from the top, however short the screen", async () => {
+    const originalHeight = window.innerHeight
+    // A landscape phone with the keyboard up: the flap starts below the middle.
+    window.innerHeight = 160
+    // The header, a tab strip under it, a card's 16px padding, and the flap
+    // overlapping the row above it by a pixel.
+    const remove = chrome([0, 44], [44, 84], [100, 120], [119, 151])
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("159px"))
+    } finally {
+      remove()
+      window.innerHeight = originalHeight
+    }
+  })
+
+  it("ignores marked chrome that does not hang from the top", async () => {
+    const remove = chrome([0, 56], [300, 340])
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("64px"))
+    } finally {
+      remove()
+    }
+  })
+
+  it("measures on a clock only while a toast is up", async () => {
+    const polls = () =>
+      setIntervalSpy.mock.calls.filter(([, ms]) => ms === 250).length
+    const setIntervalSpy = vi.spyOn(window, "setInterval")
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval")
+    try {
+      renderAtWidth(390)
+      expect(polls()).toBe(0)
+      await raiseOne()
+      await waitFor(() => expect(polls()).toBe(1))
+      const poll = setIntervalSpy.mock.results[setIntervalSpy.mock.calls.findIndex(([, ms]) => ms === 250)]
+        .value as number
+      act(() => {
+        toast.dismiss()
+      })
+      await waitFor(() => expect(document.querySelector("[data-sonner-toast]")).toBeNull())
+      await waitFor(() => expect(clearIntervalSpy).toHaveBeenCalledWith(poll))
+    } finally {
+      setIntervalSpy.mockRestore()
+      clearIntervalSpy.mockRestore()
     }
   })
 

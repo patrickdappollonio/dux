@@ -37,30 +37,56 @@ const TOAST_CHROME_POLL_MS = 250
 const TOP_INSET = `var(${TOAST_TOP_VAR}, calc(env(safe-area-inset-top) + 1rem))`
 const BOTTOM_INSET = "calc(env(safe-area-inset-bottom) + 2.5rem)"
 
-/// The phone's top chrome a toast must not cover: its header row, and the flap
-/// of actions hanging under it. Each marks itself with this attribute.
+/// The phone's top chrome a toast must not cover: its header row, the strips
+/// under it, and the flap of actions hanging under those. Each marks itself
+/// with this attribute.
 const TOP_CHROME = "[data-toast-clear]"
 const COVER = '[data-slot="dialog-content"][data-presentation="cover"]:not([data-closed])'
+/// How far below the chrome counted so far a marked row may start and still
+/// hang from it: a card's 1rem padding between two rows.
+const TOAST_CHROME_JOIN = 16
 
 /// Keeps the phone's toasts below the top chrome on screen: the screens' headers
 /// differ in height, the flap folds away, and theater takes the header away,
 /// when the toasts go back to the top. Measured when a toast arrives, on a
 /// resize, and a few times a second while one is up, since the chrome changes
 /// under a toast with no event the toaster hears.
+///
+/// Only rows hanging from the top count: one starting at the notch, or within
+/// `TOAST_CHROME_JOIN` of one already counted. A share of the screen's height
+/// would drop real chrome on a short screen (a landscape phone, the keyboard
+/// up) and count a marked row lower down on a tall one.
 function useClearTopChrome(section: React.RefObject<HTMLElement | null>, active: boolean): void {
   useEffect(() => {
     const el = section.current
     if (!active || !el) return
+    const notch = document.createElement("div")
+    notch.setAttribute("aria-hidden", "true")
+    notch.style.cssText =
+      "position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top);visibility:hidden;pointer-events:none"
+    document.body.append(notch)
+    let poll: ReturnType<typeof setInterval> | undefined
     const measure = () => {
-      if (el.querySelector("[data-sonner-toast]") === null) return
-      let bottom = 0
+      if (el.querySelector("[data-sonner-toast]") === null) {
+        clearInterval(poll)
+        poll = undefined
+        return
+      }
+      poll ??= setInterval(measure, TOAST_CHROME_POLL_MS)
       // A modal covering the screen hides the page's chrome: only its own
-      // title row is on screen then.
+      // rows are on screen then.
       const cover = [...document.querySelectorAll<HTMLElement>(COVER)].at(-1)
-      for (const chrome of (cover ?? document).querySelectorAll<HTMLElement>(TOP_CHROME)) {
-        if (chrome.closest("[inert]")) continue
-        const box = chrome.getBoundingClientRect()
-        if (box.height > 0 && box.top < window.innerHeight / 2) bottom = Math.max(bottom, box.bottom)
+      const boxes = [...(cover ?? document).querySelectorAll<HTMLElement>(TOP_CHROME)]
+        .filter((chrome) => !chrome.closest("[inert]"))
+        .map((chrome) => chrome.getBoundingClientRect())
+        .filter((box) => box.height > 0 && box.bottom > 0)
+        .sort((a, b) => a.top - b.top)
+      let edge = notch.getBoundingClientRect().height
+      let bottom = 0
+      for (const box of boxes) {
+        if (box.top > edge + (bottom > 0 ? TOAST_CHROME_JOIN : 1)) break
+        bottom = Math.max(bottom, box.bottom)
+        edge = bottom
       }
       if (bottom > 0) el.style.setProperty(TOAST_TOP_VAR, `${Math.ceil(bottom) + TOAST_CHROME_GAP}px`)
       else el.style.removeProperty(TOAST_TOP_VAR)
@@ -69,11 +95,11 @@ function useClearTopChrome(section: React.RefObject<HTMLElement | null>, active:
     const arrivals = new MutationObserver(measure)
     arrivals.observe(el, { childList: true, subtree: true })
     window.addEventListener("resize", measure)
-    const poll = setInterval(measure, TOAST_CHROME_POLL_MS)
     return () => {
       clearInterval(poll)
       arrivals.disconnect()
       window.removeEventListener("resize", measure)
+      notch.remove()
       el.style.removeProperty(TOAST_TOP_VAR)
     }
   }, [section, active])

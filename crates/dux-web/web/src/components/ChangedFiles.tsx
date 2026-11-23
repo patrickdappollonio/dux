@@ -1062,6 +1062,7 @@ function ChangesHeader({
   return (
     <CardHeader
       ref={headerRef}
+      data-toast-clear
       className="flex items-center justify-between gap-2 border-b"
     >
       <div className="flex min-w-0 items-baseline gap-2">

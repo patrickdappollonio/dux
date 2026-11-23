@@ -117,6 +117,38 @@ describe("how a modal is presented", () => {
   )
 })
 
+describe("the rows a phone toast starts below", () => {
+  function Rows() {
+    return (
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        description="What this is for"
+        historyEntry={false}
+        search={{ value: "", onChange: () => {}, label: "Search things" }}
+        toolbar={<button type="button">Sort</button>}
+      />
+    )
+  }
+  const marked = (el: HTMLElement) => el.closest("[data-toast-clear]") !== null
+
+  it("are every row above a cover's body", () => {
+    at(PHONE)
+    render(<Rows />)
+    expect(marked(screen.getByRole("heading", { name: "Sample" }))).toBe(true)
+    expect(marked(screen.getByText("What this is for"))).toBe(true)
+    expect(marked(screen.getByLabelText("Search things"))).toBe(true)
+    expect(marked(screen.getByRole("button", { name: "Sort" }))).toBe(true)
+  })
+
+  it("are none on a card, whose rows hang from no edge", () => {
+    render(<Rows />)
+    expect(popup().querySelector("[data-toast-clear]")).toBeNull()
+  })
+})
+
 // A resize or a rotation across the layout switch changes the presentation
 // under an open modal; what the caller put in it must not start over.
 describe("a layout switch under an open modal", () => {
