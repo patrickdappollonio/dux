@@ -2471,6 +2471,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           plain tab lookup rather than the shared hook's two-value form. */}
       <SaveConflictDialog
         busy={fileBusy}
+        writeBlocked={writeBlocked}
         target={
           saveConflict !== null &&
           tabs.some((t) => t.id === saveConflict.tabId)

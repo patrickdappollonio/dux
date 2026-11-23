@@ -25,6 +25,9 @@ interface SaveConflictDialogProps {
   // Another operation is out on the file (lib/editorLane.ts): both offers
   // would start a second one, so they wait for it.
   busy?: boolean
+  // Why this page may not write here now (another device drives the row), or
+  // null. Overwriting writes to disk; reloading only discards the buffer.
+  writeBlocked?: string | null
 }
 
 // What a refused save looks like to the user: the file is not what this buffer
@@ -41,6 +44,7 @@ export function SaveConflictDialog({
   onReload,
   onClose,
   busy = false,
+  writeBlocked = null,
 }: SaveConflictDialogProps) {
   const path = target?.path ?? ""
   const deleted = target?.deleted ?? false
@@ -72,7 +76,7 @@ export function SaveConflictDialog({
       confirm={{
         label: deleted ? "Write it back" : "Overwrite",
         tone: "destructive",
-        disabledReason: busyReason,
+        disabledReason: writeBlocked ?? busyReason,
         onSelect: onOverwrite,
       }}
     >

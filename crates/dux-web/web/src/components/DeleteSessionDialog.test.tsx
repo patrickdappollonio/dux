@@ -1101,6 +1101,29 @@ describe("DeleteSessionDialog", () => {
     expect(deleteSession).toHaveBeenCalledWith("sa1", false, null, null)
   })
 
+  // Deleting ends the agent's row, so it cannot be confirmed over a row this
+  // device does not drive.
+  it("cannot delete an agent whose row this device does not drive", async () => {
+    const { RowReasonContext } = await import("@/components/modal/rowReason")
+    const { useRowChangeReason } = await import("@/hooks/use-agent-active-elsewhere")
+    const { registerPaneCover, agentRowKey } = await import("@/lib/paneCover")
+    seed("s1", [session1])
+    const retire = registerPaneCover("pty-s1", "card", { row: agentRowKey("s1"), driver: "nobody" })
+    try {
+      render(
+        <RowReasonContext.Provider value={useRowChangeReason}>
+          <DeleteSessionDialog />
+        </RowReasonContext.Provider>,
+      )
+      const button = screen.getByRole("button", { name: "Delete" }) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      fireEvent.click(button)
+      expect(deleteSession).not.toHaveBeenCalled()
+    } finally {
+      retire()
+    }
+  })
+
   it("calls closeDelete when the session vanishes mid-open", () => {
     seed("s1", [session1])
     const { rerender } = render(<DeleteSessionDialog />)

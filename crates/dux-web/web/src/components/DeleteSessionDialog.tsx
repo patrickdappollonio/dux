@@ -506,6 +506,7 @@ export function DeleteSessionDialog() {
       open={deleteTarget !== null}
       vanished={session === undefined}
       onClose={handleClose}
+      row={deleteTarget === null ? null : { sessionId: deleteTarget }}
       title="Delete agent?"
       cancelLabel="Cancel"
       safeRef={cancelRef}

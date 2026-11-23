@@ -58,6 +58,35 @@ describe("a file with an operation out", () => {
   })
 })
 
+describe("a file this device may not write", () => {
+  afterEach(cleanup)
+
+  // Overwriting writes to disk; reloading only discards the buffer.
+  it("offers no overwrite from the conflict dialog, and still offers the reload", () => {
+    render(
+      <SaveConflictDialog
+        target={{
+          tabId: "t",
+          path: "a.txt",
+          body: "x",
+          encoding: { encoding: "UTF-8", bom: false },
+          deleted: false,
+        }}
+        writeBlocked="This agent is active on Firefox on Linux."
+        onOverwrite={() => {}}
+        onReload={() => {}}
+        onClose={() => {}}
+      />,
+    )
+    expect(
+      (screen.getByRole("button", { name: /^overwrite$/i }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+    expect(
+      (screen.getByRole("button", { name: /reload from disk/i }) as HTMLButtonElement).disabled,
+    ).toBe(false)
+  })
+})
+
 describe("what a reopen says it did", () => {
   const file = { path: "a", binary: false, content: "", encoding: "Shift_JIS" }
 
