@@ -332,7 +332,7 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // keeps it from making its line taller than the text's, so a wrapped pill
 // grows by whole lines and its padding stays even.
 const QUIET_PILL = "border-border/60 bg-muted/40 text-muted-foreground"
-const WARNING_PILL = "border-dux-warning/30 bg-muted/40"
+const WARNING_PILL = "border-dux-warning/30 bg-dux-warning/10"
 
 function BranchCheckPill({ check }: { check: BranchCheck }) {
   const text = useRef<HTMLSpanElement>(null)

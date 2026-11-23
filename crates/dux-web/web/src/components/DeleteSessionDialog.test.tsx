@@ -774,7 +774,8 @@ describe("DeleteSessionDialog", () => {
       expect(chipsIn(pill)).toEqual(chips)
       // No green anywhere: neutral is the app's grey, a loss its warning yellow.
       expect(pill.outerHTML).not.toContain("dux-success")
-      if (tone === "warning") expect(pill.className).toContain("dux-warning")
+      const classes = pill.className.split(/\s+/)
+      if (tone === "warning") expect(classes).toContain("bg-dux-warning/10")
       else expect(pill.outerHTML).not.toContain("dux-")
       // The tone is never the only sign: the icon says it too.
       expect(pill.querySelector("svg")!.getAttribute("class")).toContain(
@@ -805,7 +806,7 @@ describe("DeleteSessionDialog", () => {
       expect(pill.textContent).toBe(
         "dux could not count the unpushed commits on dux/s1 (git rev-list failed); check it before deleting it.",
       )
-      expect(pill.className).toContain("dux-warning")
+      expect(pill.className.split(/\s+/)).toContain("bg-dux-warning/10")
     } finally {
       vi.useRealTimers()
     }
