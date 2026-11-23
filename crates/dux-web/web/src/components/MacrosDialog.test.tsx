@@ -398,7 +398,7 @@ describe("MacrosDialog closing", () => {
 })
 
 describe("MacrosDialog editor", () => {
-  it("opens on the macro the picker's pencil named", () => {
+  it("opens on the macro it was asked to select", () => {
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
@@ -587,7 +587,7 @@ describe("MacrosDialog on a phone", () => {
     expect(saveMacrosMock).not.toHaveBeenCalled()
   })
 
-  it("opens straight on the macro the pencil named", () => {
+  it("opens straight on the macro it was asked to select", () => {
     phone = true
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
@@ -730,7 +730,7 @@ describe("MacrosDialog brings the selected macro into view", () => {
     delete (Element.prototype as Partial<Element>).scrollIntoView
   })
 
-  it("when it opens on a macro the pencil named", () => {
+  it("when it opens on a macro it was asked to select", () => {
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(scrolled).toContain(row("Deploy"))

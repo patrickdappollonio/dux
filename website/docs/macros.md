@@ -109,14 +109,14 @@ page.
 2. Type to filter.
 3. Click a macro or press Enter to send it.
 
-Each macro in the picker has a pencil beside it. The pencil opens the macro in the editor
-instead of sending it, whether you click it, tap it, or Tab to it and press Enter.
+To change a macro instead of sending it, click **Edit macros** at the bottom of the picker:
+it opens the editor on the whole list, which is also where new macros come from.
 
 The text simply appears at the prompt; there is no confirmation toast. If the pane's message
 box is your typing surface, the macro lands in the box instead, ready for you to edit and
 send.
 
-![The macro picker open in the browser above an agent's terminal, listing the macros for that pane with a pencil beside each one, a search field, and an Edit macros link at the bottom.](/screens/macro-popover.png)
+![The macro picker open in the browser above an agent's terminal, listing the macros for that pane, a search field, and an Edit macros link at the bottom.](/screens/macro-popover.png)
 
 If a pane has no macros for its surface, the popover says so and points you at the
 editor. With no macros at all, it links straight to **Edit macros**.
@@ -179,9 +179,8 @@ hand-edits survive: dux preserves your formatting and ordering.
 
 ## Managing macros in the web UI
 
-Open the cog menu and pick **Configuration → Edit macros…**, click **Edit macros** at the
-bottom of any pane's macro picker, or click the pencil beside a macro to open the editor
-on that one.
+Open the cog menu and pick **Configuration → Edit macros…**, or click **Edit macros** at the
+bottom of any pane's macro picker.
 
 On a computer, the list sits on the left and the selected macro's editor on the right. On a
 phone, the list comes first: tap a macro to open its editor, and the back arrow, or your
