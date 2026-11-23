@@ -135,7 +135,11 @@ function DialogContent({
   )
   return (
     <DialogPortal>
+      {/* Forced, because base-ui draws no backdrop for a dialog nested inside
+          another (the editor overlay's own dialogs), and without one a press
+          outside lands on the dialog behind and closes nothing. */}
       <DialogOverlay
+        forceRender
         className={destructive ? "backdrop-grayscale" : undefined}
       />
       <DialogPrimitive.Popup

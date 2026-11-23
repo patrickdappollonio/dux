@@ -16,6 +16,8 @@ const offline = vi.fn(() => Promise.reject(new Error("offline test")))
 vi.stubGlobal("fetch", offline)
 await import("@/lib/store")
 
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+
 import { Modal, useModalLifetime } from "./index"
 import { closeReasonFrom } from "./closeReason"
 import type { ModalAction, ModalKind } from "./types"
@@ -777,6 +779,44 @@ describe("focus taken by the page behind an open modal", () => {
     view.rerender(<Page remounted />)
     act(() => screen.getByText("behind").focus())
     expect(document.activeElement).toBe(screen.getByLabelText("second"))
+  })
+})
+
+// The editor overlay is a dialog itself, and its own dialogs open inside it.
+describe("a modal opened inside another dialog", () => {
+  function Inside({ onClose }: { onClose: (reason: string) => void }) {
+    return (
+      <Dialog open historyEntry={false}>
+        <DialogContent>
+          <DialogTitle>Editor</DialogTitle>
+          <Modal
+            kind="confirm"
+            open
+            onClose={onClose}
+            title="Delete it?"
+            historyEntry={false}
+            cancelLabel="Cancel"
+            confirm={remove}
+          />
+        </DialogContent>
+      </Dialog>
+    )
+  }
+
+  it("dims the dialog behind it and closes on a press outside it", async () => {
+    const onClose = vi.fn()
+    render(<Inside onClose={onClose} />)
+    const confirm = await screen.findByRole("dialog", { name: "Delete it?" })
+    const overlays = document.querySelectorAll('[data-slot="dialog-overlay"]')
+    expect(overlays).toHaveLength(2)
+    const own = overlays[1]
+    expect(own.compareDocumentPosition(confirm) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    fireEvent.pointerDown(own, { button: 0 })
+    fireEvent.mouseDown(own, { button: 0 })
+    fireEvent.pointerUp(own, { button: 0 })
+    fireEvent.mouseUp(own, { button: 0 })
+    fireEvent.click(own, { button: 0 })
+    expect(onClose).toHaveBeenCalledWith("outside")
   })
 })
 
