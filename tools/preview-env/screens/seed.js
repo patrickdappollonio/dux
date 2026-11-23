@@ -287,7 +287,10 @@ function seedChangedFiles() {
   console.log("changed files written into both worktrees")
 }
 
-async function main() {
+// `pullRequests: false` is the check suite's seed: everything but the pull
+// requests, whose sync can take minutes to find them on a fresh workspace and
+// which no check is about.
+async function seed({ pullRequests = true } = {}) {
   // A fresh workspace opens on the welcome screen, which would otherwise sit
   // over the first scene that happened to be shot before anything dismissed it.
   await api("POST", "/api/v1/first-load/dismiss")
@@ -303,14 +306,18 @@ async function main() {
   await seedTabs()
   await seedTerminals(demoApi.id)
   await api("PUT", "/api/v1/macros", { entries: MACROS })
-  await seedPullRequests()
+  if (pullRequests) await seedPullRequests()
   seedChangedFiles()
   console.log("staging the sidebar")
   await stage("all-working")
   console.log("seed complete")
 }
 
-main().catch((error) => {
-  console.error(String(error))
-  process.exit(1)
-})
+module.exports = { seed, STANDALONE_FOLDER }
+
+if (require.main === module) {
+  seed().catch((error) => {
+    console.error(String(error))
+    process.exit(1)
+  })
+}

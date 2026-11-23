@@ -118,34 +118,72 @@ function containerSh(script) {
 
 // --- Browser ---------------------------------------------------------------
 
-function launchArgs(width, height) {
+// Headless Chromium does not reliably report a fine pointer with hover, and the
+// app picks the typing surface and a dialog's focus on open by the pointer, so a
+// check standing in for a computer says "mouse" outright.
+// The scenes leave it off: their pictures were taken without it.
+const FINE_POINTER =
+  "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"
+
+function launchArgs(width, height, { scale = 2, finePointer = false } = {}) {
   return [
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--force-color-profile=srgb",
     "--hide-scrollbars",
-    "--force-device-scale-factor=2",
+    `--force-device-scale-factor=${scale}`,
     `--window-size=${width},${height}`,
     "--use-gl=angle",
     "--use-angle=swiftshader",
     "--enable-unsafe-swiftshader",
+    ...(finePointer ? [FINE_POINTER] : []),
   ]
 }
 
-async function open({ mobile = false, width, height } = {}) {
+// One browser, with no page of its own yet. `scale` and `finePointer` are for the
+// check suite, which wants a cheaper 1x render and a computer that has a mouse.
+async function launch({ mobile = false, width, height, scale = 2, finePointer = false } = {}) {
   const preset = mobile ? PHONE : DESKTOP
-  const w = width || preset.width
-  const h = height || preset.height
-  const browser = await puppeteer().launch({
+  return puppeteer().launch({
     executablePath: process.env.CHROME,
     headless: "new",
     defaultViewport: null,
-    args: launchArgs(w, h),
+    args: launchArgs(width || preset.width, height || preset.height, { scale, finePointer }),
   })
-  const page = await browser.newPage()
+}
+
+// A page standing in for one device, in a browser or in one of its contexts (a
+// second context is a second device: its own storage, so its own browser id).
+//
+// `screen` overrides what the page reads as the device's screen as well as its
+// viewport. The app decides "phone" by the screen's short side on a touch device,
+// so a phone check sets it; the scenes never did, and keep their behaviour.
+// `userAgent` names the device the server will say is driving.
+async function devicePage(
+  target,
+  { mobile = false, width, height, screen = false, userAgent = null } = {},
+) {
+  const preset = mobile ? PHONE : DESKTOP
+  const w = width || preset.width
+  const h = height || preset.height
+  const page = await target.newPage()
+  if (userAgent) await page.setUserAgent(userAgent)
   const cdp = await page.createCDPSession()
   const metrics = { width: w, height: h, deviceScaleFactor: 0, mobile }
   await cdp.send("Emulation.setDeviceMetricsOverride", metrics)
+  // Defined on the page rather than through the metrics override: headless
+  // Chromium left the page's screen unchanged when the override named one.
+  if (screen) {
+    await page.evaluateOnNewDocument(
+      (sw, sh) => {
+        for (const [key, value] of Object.entries({ width: sw, height: sh, availWidth: sw, availHeight: sh })) {
+          Object.defineProperty(window.screen, key, { configurable: true, get: () => value })
+        }
+      },
+      w,
+      h,
+    )
+  }
   if (mobile) {
     await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 })
     await cdp.send("Emulation.setEmitTouchEventsForMouse", {
@@ -167,7 +205,12 @@ async function open({ mobile = false, width, height } = {}) {
     if (now.width === w && now.height === h) return
     await cdp.send("Emulation.setDeviceMetricsOverride", metrics)
   }
-  return { browser, page, cdp, reassert, width: w, height: h }
+  return { page, cdp, reassert, metrics, width: w, height: h }
+}
+
+async function open({ mobile = false, width, height } = {}) {
+  const browser = await launch({ mobile, width, height })
+  return { browser, ...(await devicePage(browser, { mobile, width, height })) }
 }
 
 // The preview serves with no password, so every page load opens under the red
@@ -179,6 +222,11 @@ async function goto(page, hash, { keepNoPasswordBanner = false } = {}) {
   await page.goto(BASE + "/" + (hash || ""), { waitUntil: "networkidle0", timeout: 45000 })
   await sleep(1500)
   if (keepNoPasswordBanner) return
+  await dismissNoPasswordBanner(page)
+}
+
+// The banner's own Dismiss, for this page load only. True when there was one.
+async function dismissNoPasswordBanner(page) {
   const dismissed = await page.evaluate(() => {
     const banner = document.querySelector('[data-testid="no-auth-banner"]')
     const button =
@@ -189,6 +237,7 @@ async function goto(page, hash, { keepNoPasswordBanner = false } = {}) {
     return true
   })
   if (dismissed) await sleep(500)
+  return dismissed
 }
 
 // Give an agent exactly `count` terminals of its own, docked under it, and hand
@@ -1059,6 +1108,8 @@ module.exports = {
   clearToasts,
   clickLabel,
   clickText,
+  devicePage,
+  dismissNoPasswordBanner,
   // Every guard goes out recorded, so a scene's questions are asked again with
   // the shutter open rather than only where the scene wrote them.
   // Not recorded: it reads the artifact rather than the page, and it runs once,
@@ -1079,6 +1130,7 @@ module.exports = {
   get,
   goto,
   isRefusal,
+  launch,
   measureInk,
   refusal,
   open,

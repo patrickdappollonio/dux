@@ -34,53 +34,20 @@ fail() {
   exit 1
 }
 
-# Docker access, resolved the way up.sh resolves it.
-if docker info > /dev/null 2>&1; then
-  compose() { (cd "$PREVIEW" && docker compose "$@"); }
-else
-  command -v sg > /dev/null 2>&1 || fail "docker access denied and sg is unavailable"
-  compose() {
-    local quoted project=""
-    quoted=$(printf '%q ' "$@")
-    # The project is what tells this stack's container from another one's, so
-    # it is carried into the sub-shell explicitly, and only when set, so an
-    # unset project keeps compose's own default rather than an empty string.
-    if [ -n "${COMPOSE_PROJECT_NAME:-}" ]; then
-      project="export COMPOSE_PROJECT_NAME=$(printf '%q' "$COMPOSE_PROJECT_NAME") && "
-    fi
-    sg docker -c "cd $(printf '%q' "$PREVIEW") && ${project}docker compose $quoted"
-  }
-fi
+# The compose command and prepare_browser, shared with the check suite.
+# shellcheck source=preview.sh
+. "$HERE/preview.sh"
 
 if [ "${1:-}" = "--list" ]; then
   (cd "$HERE" && node run.js --list)
   exit 0
 fi
 
-# Resolved in the browser branch below rather than up front. The terminal UI
-# path needs a Chromium of its own (tui-shot.sh rasterizes the captured cells
-# with one) but it hunts for it itself and says its own thing when it cannot find
-# one, so gating every run here would just be this script refusing on another
-# script's behalf, before the table that says what was rewritten.
-prepare_browser() {
-  [ -d "$PREVIEW/node_modules/puppeteer-core" ] || (cd "$PREVIEW" && npm install --silent)
-
-  # Chromium discovery: an explicit CHROME=, a cached Playwright build, then
-  # common system binaries, in shot.sh's order with Brave added last.
-  if [ -z "${CHROME:-}" ]; then
-    CHROME="$(find "$HOME/.cache/ms-playwright" -path '*/chrome-linux64/chrome' -type f 2>/dev/null | head -1 || true)"
-  fi
-  if [ -z "${CHROME:-}" ]; then
-    for candidate in chromium chromium-browser google-chrome google-chrome-stable brave-origin; do
-      if command -v "$candidate" > /dev/null 2>&1; then
-        CHROME="$(command -v "$candidate")"
-        break
-      fi
-    done
-  fi
-  [ -n "${CHROME:-}" ] && [ -x "$CHROME" ] || fail "no Chromium found; set CHROME=<path-to-chrome>"
-  export CHROME
-}
+# prepare_browser is resolved in the browser branch below rather than up front.
+# The terminal UI path needs a Chromium of its own (tui-shot.sh rasterizes the
+# captured cells with one) but it hunts for it itself and says its own thing when
+# it cannot find one, so gating every run here would just be this script refusing
+# on another script's behalf, before the table that says what was rewritten.
 
 # Every scene, or the ones named. A name is the PNG's own stem.
 mapfile -t MANIFEST < <(cd "$HERE" && node run.js --list)

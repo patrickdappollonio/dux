@@ -320,6 +320,24 @@ on every reshoot: the pet name in `tui-name-new-agent.png`, the run timestamp in
 `tui-startup-command-log.png`, and how far a streaming fixture has counted in any
 shot of a working agent. Everything else should come back the same.
 
+## Browser checks
+
+`checks/` holds a committed suite that drives the web UI in a browser and says,
+one PASS or FAIL line per check, whether the behaviours most often re-checked by
+hand still hold (dialog shapes and focus, the discard question, the New agent
+create, phone toasts, the Delete agent pill, the macro picker, the phone editor,
+Preferences and Back, one driver at a time). It reuses this harness's browser
+driver, seed and helpers:
+
+```bash
+checks/run.sh                 # every check
+checks/run.sh one-driver      # just one
+```
+
+Run it after a web UI change. See [checks/README.md](checks/README.md) for what
+each check protects, how to read a failure, how to add one, and the rule for
+keeping it in step with the product.
+
 ## Logs / teardown
 
 ```bash
@@ -377,4 +395,6 @@ host (`BASE_IMAGE=<image> ./up.sh`) or use the in-container build.
 | `screens/seed.js` | The one idempotent workspace every browser scene is shot against. |
 | `screens/scenes/` | One committed journey per docs screenshot, named after the PNG. |
 | `screens/fixtures/` | The stand-in `gh` and transcript provider a screenshot run installs. |
+| `screens/preview.sh` | The compose command and Chromium discovery `reshoot.sh` and `checks/run.sh` share. |
+| `checks/` | The browser check suite: `run.sh`, one file per check under `checks/cases/`, and its README. |
 | `measurements/` | One-off scripts that drive a behavior and record what the page actually did, with the notes they produced. Not screenshots: a measurement answers a question about timing or state, and its note is the answer. |

@@ -16,3 +16,7 @@ shots/
 # pictures it took are what make the note beside them checkable later.
 !measurements/**/*.js
 !measurements/**/*.png
+# The browser check suite is committed like the scenes; what a failed check
+# saves is not.
+!checks/**/*.js
+checks/failures/
