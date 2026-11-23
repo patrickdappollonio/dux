@@ -112,7 +112,7 @@ once the workspace is seeded.
 | `macro-picker` | computer, phone | The macro picker's rows carry no per-row button, typing filters them, Enter runs the highlighted macro (its bytes go out on the pane's socket on a computer, its text lands in the message box on a phone), and "Edit macros…" opens the Macros dialog. |
 | `phone-editor-tree` | phone | On a phone the editor shows the file tree with no file open, hides it when a file is opened, shows it again from the header's toggle, and keeps it shown after the explorer's ⋯ menu opens and closes, on a tap outside it and on Escape. |
 | `phone-preferences-back` | phone | On a phone, from both "/" and "#/", the browser's Back from an edited Preferences topic returns to the topic list, and a second Back sets the dialog aside with a "Restore" toast without leaving the app. |
-| `computer-dock-appears` | computer | On a computer, moving from an agent with no terminal to one with a terminal docked under it, and opening the first terminal on the agent on screen, each show the agent with its dock and no error card. |
+| `computer-dock-appears` | computer | On a computer, moving from an agent with no terminal to one whose terminal was last left folded away or alone on screen, and opening the first terminal on the agent on screen, each show the agent with its dock and no error card. |
 | `one-driver` | two computers | With a second device having taken over an agent, a confirm that was open on the first device has its action disabled with a reason naming that device, and the agent menu's changing entries are disabled under a reason naming it. |
 
 The last column is each check's own `protects` sentence, word for word:
