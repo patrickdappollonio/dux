@@ -747,6 +747,32 @@ describe("TerminalArea dock", () => {
     expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
   })
 
+  it.each(["agent", "split", "terminal"] as const)(
+    "moves from an agent with no terminal to one with its dock in the %s layout",
+    async (layout) => {
+      const caught = vi.spyOn(console, "error").mockImplementation(() => {})
+      const withDock = dockState({ layout })
+      const lone = structuredClone(withDock.spine!.sessions[0])
+      lone.id = "s2"
+      lone.slot_tab_id = "s2"
+      lone.tabs = [{ ...lone.tabs[0], id: "s2" }]
+      withDock.spine!.sessions.push(lone)
+      mockState = {
+        ...withDock,
+        selectedSessionId: "s2",
+        selectedTarget: { kind: "agent", sessionId: "s2", tabId: "s2" },
+      } as DuxState
+      const { rerender } = render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+
+      mockState = withDock
+      rerender(<TerminalArea />)
+      expect(await screen.findByTestId("stack-dock-box")).toBeTruthy()
+      expect(caught.mock.calls.flat().map(String).join("\n")).not.toMatch(/panel layout/)
+      caught.mockRestore()
+    },
+  )
+
   it.each([
     ["split", true, true],
     ["agent", true, false],

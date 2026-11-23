@@ -323,15 +323,29 @@ function StackSplit({
   // its minimum and reporting that as a changed layout. Until the push, a
   // reported layout is that leftover and never a release of the divider.
   const pushedSplit = useRef(false)
+  // Whether the group has taken in the dock panel, or its removal. A panel
+  // that has just mounted is counted by the group only in the group's next
+  // commit, and a layout naming two panels pushed before then makes the
+  // library throw. Setting this from the same layout-effect pass as the
+  // panel's own registration lands both in one re-render, in which the group,
+  // a child, registers the panel before the push below runs.
+  const [groupHasDock, setGroupHasDock] = useState(hasDock)
   // The library owns the sizes during a drag; every other change of layout or
   // of a strip's height is pushed to it here.
   const agentSize = sizes.agent
   useLayoutEffect(() => {
+    if (groupHasDock !== hasDock) {
+      // The second render is the point: it is the one the group registers in.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setGroupHasDock(hasDock)
+      pushedSplit.current = false
+      return
+    }
     if (hasDock) {
       groupRef.current?.setLayout({ [AGENT_PANEL]: agentSize, [DOCK_PANEL]: 100 - agentSize })
     }
     pushedSplit.current = split
-  }, [hasDock, agentSize, split])
+  }, [hasDock, groupHasDock, agentSize, split])
 
   const onLayoutChanged = (next: Layout) => {
     if (!split || !pushedSplit.current) return

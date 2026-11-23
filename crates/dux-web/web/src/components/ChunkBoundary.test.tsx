@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render } from "@testing-library/react"
+import { cleanup, render, screen } from "@testing-library/react"
 
 // A lazy chunk that will not load sends the boundary to reload the tab. That
 // reload must land on this dux again, never on whatever else answers at the
@@ -74,5 +74,26 @@ describe("ChunkBoundary", () => {
     }
     await failAChunk()
     expect(reload).not.toHaveBeenCalled()
+    expect(screen.getByText("dux needs a reload")).toBeTruthy()
+  })
+
+  it("says any other error is this pane's, shows it, and leaves reloading to the button", async () => {
+    statusReply = () => json({ password_set: false, required_here: false, signed_in: false })
+    const { ChunkBoundary } = await import("./ChunkBoundary")
+    function Throws(): never {
+      throw new Error("Invalid 1 panel layout: 100%, 0%")
+    }
+    render(
+      <ChunkBoundary>
+        <Throws />
+      </ChunkBoundary>,
+    )
+    expect(screen.getByText("This pane hit an error")).toBeTruthy()
+    expect(screen.getByText("Invalid 1 panel layout: 100%, 0%")).toBeTruthy()
+    expect(screen.queryByText("dux needs a reload")).toBeNull()
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(fetch).not.toHaveBeenCalled()
+    screen.getByRole("button", { name: "Reload" }).click()
+    expect(reload).toHaveBeenCalledTimes(1)
   })
 })
