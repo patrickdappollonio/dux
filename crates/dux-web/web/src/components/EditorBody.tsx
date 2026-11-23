@@ -931,7 +931,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     ) : (
       // Rendered markdown of the end state. Lazy like Monaco, so the same
       // ChunkBoundary + Suspense applies.
-      <ChunkBoundary area="editor">
+      <ChunkBoundary area="editor" resetKey={path}>
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -2778,7 +2778,8 @@ interface EditorContentPaneProps {
   writeBlocked: string | null
 }
 
-function EditorContentPane(props: EditorContentPaneProps) {
+// Exported for its test.
+export function EditorContentPane(props: EditorContentPaneProps) {
   const { root, tab, image, onImageDims } = props
   if (tab === null) {
     return (
@@ -2834,7 +2835,7 @@ function DiffContentPane({
       )
     }
     return (
-      <ChunkBoundary area="editor">
+      <ChunkBoundary area="editor" resetKey={tab.path}>
         <Suspense fallback={<LoadingPane />}>
           <DiffHeadViewer
             text={diffHead.text}
@@ -2857,7 +2858,7 @@ function DiffContentPane({
   const allDelete = diff !== null && diff !== undefined && isAllDeleteDiff(diff)
   return (
     <div className={allDelete ? "dux-diff-all-delete h-full" : "h-full"}>
-      <ChunkBoundary area="editor">
+      <ChunkBoundary area="editor" resetKey={tab.path}>
         <Suspense fallback={<LoadingPane />}>
           <DiffViewer
             path={tab.path}
@@ -2904,8 +2905,10 @@ function FileContentPane({
     )
   }
   if (preview) return <>{renderPreview(tab.path)}</>
+  // The path keys the boundary on all four editor cards: a preview tab keeps
+  // its id when it is replaced by another file, so the path is what changes.
   return (
-    <ChunkBoundary area="editor">
+    <ChunkBoundary area="editor" resetKey={tab.path}>
       <Suspense fallback={<LoadingPane />}>
         <CodeEditor
           path={tab.path}
