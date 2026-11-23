@@ -142,6 +142,23 @@ describe("bootstrap slice", () => {
     timing.publishConnectionTiming(undefined)
   })
 
+  // The New agent form's wait for the create's first answer is configured in
+  // `[server]` and only reaches the browser through this document, and a reload
+  // retimes it.
+  it("publishes the configured New agent request deadline, and a reload retimes it", async () => {
+    bootstrapBody = makeBootstrap({ new_agent_request_timeout_seconds: 7 })
+    const mod = await loadStore()
+    const timing = await import("./connectionTiming")
+    expect(timing.newAgentRequestTimeoutMs()).toBe(7_000)
+
+    bootstrapBody = makeBootstrap({ new_agent_request_timeout_seconds: 11 })
+    mod.eventsSocket.onEvent({ event: "config.changed" })
+    await vi.waitFor(() => {
+      expect(timing.newAgentRequestTimeoutMs()).toBe(11_000)
+    })
+    timing.publishConnectionTiming(undefined)
+  })
+
   it("a config.changed event triggers a refetch that replaces the slice", async () => {
     const mod = await loadStore()
     expect(mod.getSnapshot().bootstrap?.welcome_tips).toEqual(["tip one"])
