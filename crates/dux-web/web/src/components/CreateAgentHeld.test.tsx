@@ -15,6 +15,7 @@ vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
 }))
 
 const warnings: string[] = []
+const warningIds: Array<string | undefined> = []
 const errors: string[] = []
 vi.mock("@/lib/notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/notify")>()
@@ -22,6 +23,7 @@ vi.mock("@/lib/notify", async (importOriginal) => {
     ...actual,
     notifyWarning: (...args: Parameters<typeof actual.notifyWarning>) => {
       warnings.push(actual.noticeText(args[0]))
+      warningIds.push(args[1]?.id)
       actual.notifyWarning(...args)
     },
     notifyError: (...args: Parameters<typeof actual.notifyError>) => {
@@ -90,6 +92,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   held.length = 0
   warnings.length = 0
+  warningIds.length = 0
   errors.length = 0
   fetchMock.mockClear()
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
@@ -139,6 +142,19 @@ describe("the New agent form with its create unanswered", () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/has not answered/)
     expect(warnings[0]).toMatch(/may still appear/)
+  })
+
+  it("replaces its warning when a second create also goes unanswered", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(2))
+    passDeadline()
+    expect(warnings).toHaveLength(2)
+    expect(warningIds[0]).toBeDefined()
+    expect(warningIds[1]).toBe(warningIds[0])
   })
 
   it.each([

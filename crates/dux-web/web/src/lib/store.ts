@@ -8757,8 +8757,12 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     newAgentCreate = null
     if (stillOpen()) setState({ createAgentSubmitting: false })
     const agent = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
+    // Not sticky: nothing is lost (the form keeps what was typed) and the list
+    // is where the outcome shows, whatever the toast's window. One id per
+    // project, so a second unanswered create replaces this rather than stacking.
     notifyWarning(
       prose`The server has not answered the request to create ${agent} after ${String(Math.round(wait / 1000))} seconds. The agent may still appear in the list, so look there before creating it again.`,
+      { id: `new-agent-create-unanswered:${projectId}` },
     )
   }, wait)
   sessionsApi
