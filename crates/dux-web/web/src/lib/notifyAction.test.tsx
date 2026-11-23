@@ -41,11 +41,14 @@ describe("a toast's action button", () => {
   })
 
   it("lets go of focus first when its action opens something to take it", () => {
+    let focusedDuring: Element | null = null
     const onClick = vi.fn(() => {
-      expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Go" }))
+      focusedDuring = document.activeElement
     })
     notifyInfo("Closed with edits.", { action: { label: "Go", onClick, opensDialog: true } })
-    pressAction()
+    const button = pressAction()
     expect(onClick).toHaveBeenCalledTimes(1)
+    expect(focusedDuring).not.toBeNull()
+    expect(focusedDuring).not.toBe(button)
   })
 })

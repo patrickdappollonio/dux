@@ -356,7 +356,13 @@ describe("the blocked-copy toast", () => {
     expect(action.props.children).toBe("Show text")
 
     expect(agentCopy.shownCopyText()).toBeNull()
-    pressAction(toast.error)
+    // The button lets go of focus before the dialog opens, so the toaster does
+    // not pull focus back out of it.
+    const blur = vi.fn()
+    ;(lastCall(toast.error)[1].action as ReactElement<{ onClick: (e: unknown) => void }>).props.onClick({
+      currentTarget: { blur },
+    })
+    expect(blur).toHaveBeenCalledTimes(1)
     expect(agentCopy.shownCopyText()).toEqual({ source: "fix-login", text: "secret text" })
   })
 
