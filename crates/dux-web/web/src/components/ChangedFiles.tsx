@@ -801,7 +801,7 @@ function ChangesRecap({
     <span
       ref={ref}
       className={cn(
-        "flex h-4 min-w-0 shrink flex-wrap items-baseline overflow-hidden font-mono text-xs",
+        "flex h-4 min-w-0 shrink flex-wrap items-center overflow-hidden font-mono text-xs",
         className,
       )}
       aria-label={recapLabel(scope, recap)}
@@ -832,8 +832,11 @@ function ChangesRecap({
 }
 
 // A recap figure with the separator before it: pre, so that leading space is
-// drawn at the start of the figure's own box.
-const RECAP_FIGURE = "shrink-0 whitespace-pre"
+// drawn at the start of the figure's own box. The box is trimmed to the digits'
+// height, so the row's centring lands on the ink: the mono font's line box has
+// its digits above its middle, which left them a pixel or more above the word
+// and the badge. A browser without the trim keeps the untrimmed box.
+const RECAP_FIGURE = "shrink-0 whitespace-pre [text-box:trim-both_cap_alphabetic]"
 
 // A section's heading, which folds its rows away. The rows are not its
 // children: the list is one flat window over both sections, so the heading is a
@@ -1065,7 +1068,7 @@ function ChangesHeader({
       data-toast-clear
       className="flex items-center justify-between gap-2 border-b"
     >
-      <div className="flex min-w-0 items-baseline gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         {/* The title never shrinks while anything else can give way, and is
           * capped at its cell, so in a pane too narrow even for the ⋯ alone it
           * is the last thing to shorten, with an ellipsis. */}
