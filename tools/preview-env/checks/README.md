@@ -3,9 +3,9 @@
 A suite of scripted checks that drive the web UI in a real browser against the
 preview container and say, one line per check, whether a behaviour still holds.
 They are the checks that used to be re-scripted by hand after most web UI
-changes: dialog shapes and focus, the discard question, the New agent create,
-toasts on a phone, the Delete agent pill, the macro picker, the phone editor,
-Preferences and the browser's Back, and one driver at a time.
+changes: dialog shapes and focus, the discard question, the New agent create
+and its wait, toasts on a phone, the Delete agent pill, the macro picker, the
+phone editor, Preferences and the browser's Back, and one driver at a time.
 
 What it is not:
 
@@ -52,7 +52,7 @@ for every script here). `run.sh` takes care of the rest:
   removed when the browser closes.
 
 Each check leaves the workspace as the seed left it, so runs go back to back
-with no clean-up. A run of every check takes about 80 seconds on the
+with no clean-up. A run of every check takes about 90 seconds on the
 development machine once the workspace is seeded.
 
 ## The checks
@@ -65,6 +65,7 @@ development machine once the workspace is seeded.
 | `editor-dialog-backdrop` | computer | A dialog opened inside the editor (New file) has its own backdrop and closes on a press outside it, leaving the editor open. |
 | `focus-across-resize` | computer | With a form open, resizing 1440 → 700 → 1440 keeps focus inside the dialog, and a typed letter lands in its field. |
 | `new-agent-create` | computer | With the create held, three Enters send exactly one `POST /api/v1/sessions`; an existing branch's name raises "Attach to existing branch?", and Cancel, Escape and the browser's Back each return to the form with the name kept. |
+| `new-agent-wait` | computer | After `[server] new_agent_request_timeout_seconds` is set to 3 and the config reloaded under a page already open, a held create frees the form after 3 seconds with the name kept and a warning naming 3 seconds, and a late 502 replaces that warning with one toast saying it is not known whether the agent was created; the setting goes back to 30 afterwards, pass or fail. |
 | `phone-toasts` | phone | A toast starts below the lowest top chrome on the hub, on an agent pane (header and action flap) and under a full-screen dialog's title row, and at the top of the screen in theater mode. |
 | `delete-agent-pill` | computer | Delete agent shows the neutral pill for an agent that loses nothing and the warning pill (alert icon, the sentence about commits) for one with a commit on no other branch, from open through 4 seconds later, with the dialog's height unchanged. |
 | `macro-picker` | computer, phone | Rows carry no per-row button, typing filters, Enter runs the highlighted macro (its bytes go out on the pane's socket on a computer, its text lands in the message box on a phone), and "Edit macros…" opens the Macros dialog. |
@@ -179,6 +180,3 @@ web UI change, and before committing one.
   Chromium on the host.
 - **One workspace.** It shares the preview with the screenshot scenes, so do not
   run it while `reshoot.sh` is running.
-- **Left out on purpose:** the New agent form's 30-second "has not answered"
-  deadline, which is about to become a setting; a check can be added once it
-  is one.
