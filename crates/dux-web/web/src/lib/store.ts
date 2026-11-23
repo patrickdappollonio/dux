@@ -1016,6 +1016,10 @@ export interface DuxState {
   // so only the namespaced key keeps two editors apart. A root absent here has
   // no tabs (not yet opened, or cleared when its target vanished).
   editorTabs: Record<string, EditorTabsState>
+  // Counts every ask to open a file in an editor, one already open included,
+  // so the phone's editor can hide its explorer on an open that changes no tab
+  // (a preview tab replaced in place) and not on a rename, which keeps its tab.
+  editorFileOpens: number
   // The tab pending the dirty-close confirmation (destructive-confirm
   // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
   editorCloseTabTarget: { root: EditorRoot; tabId: string } | null
@@ -1331,6 +1335,7 @@ let state: DuxState = {
   editorRoute: null,
   standaloneEditor: bootIsStandaloneEditor(),
   editorTabs: {},
+  editorFileOpens: 0,
   editorCloseTabTarget: null,
   editorTargetGone: null,
   changes: emptyChanges(),
@@ -6669,6 +6674,7 @@ export function editorOpenFile(
       newId: () => newClientId(),
     }),
   )
+  setState({ editorFileOpens: state.editorFileOpens + 1 })
 }
 
 // The mode a tab may actually open in. Two coercions, both to "file", and both

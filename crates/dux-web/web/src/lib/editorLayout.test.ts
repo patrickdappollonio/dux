@@ -7,6 +7,7 @@ import {
   EDITOR_LAYOUT_ID,
   editorMountLayout,
   explorerExpandTarget,
+  explorerLayoutAfterReport,
   EXPLORER_DEFAULT_SIZE_PROP,
   EXPLORER_DEFAULT_SIZE_PX,
   EXPLORER_LAYOUT_KEY,
@@ -185,6 +186,16 @@ describe("nextExpandedExplorerPx", () => {
     expect(nextExpandedExplorerPx(EXPLORER_MIN_SIZE_PX, null)).toBe(
       EXPLORER_MIN_SIZE_PX,
     )
+  })
+})
+
+describe("explorerLayoutAfterReport", () => {
+  it("remembers the width and the collapse a computer reports", () => {
+    expect(explorerLayoutAfterReport(false, true, 341.4, 300)).toEqual({ px: 341, collapsed: true })
+  })
+
+  it("remembers nothing the phone layout reports, its width included", () => {
+    expect(explorerLayoutAfterReport(true, false, 273, 300)).toBeNull()
   })
 })
 

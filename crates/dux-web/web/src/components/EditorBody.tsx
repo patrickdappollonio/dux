@@ -101,9 +101,9 @@ import {
   EXPLORER_MIN_SIZE_PROP,
   EXPLORER_PANEL_ID,
   explorerExpandTarget,
+  explorerLayoutAfterReport,
   explorerMountSize,
   isExplorerCollapsed,
-  nextExpandedExplorerPx,
   parseExplorerLayout,
   serializeExplorerLayout,
 } from "@/lib/editorLayout"
@@ -290,7 +290,8 @@ interface EditorBodyProps {
 }
 
 export function EditorBody({ root, standalone = false }: EditorBodyProps) {
-  const { bootstrap, changes, editorRoute, editorTarget, editorTabs, spine } = useDux()
+  const { bootstrap, changes, editorFileOpens, editorRoute, editorTarget, editorTabs, spine } =
+    useDux()
   // The namespaced key for every per-root map, and the stable dependency for
   // every effect below: the root itself is a fresh object on each render.
   const key = rootKey(root)
@@ -530,19 +531,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
   )
   // In the phone layout the viewport barely fits Monaco alone, so the
   // explorer is hidden while a file is open and shown while none is; the
-  // explorer effect below keeps that true as files open and close. Read at
-  // mount by editorMountLayout below; a later resize or rotation does not
-  // re-collapse an explorer the user has since expanded, because a
-  // defaultLayout only applies at mount.
+  // explorer effect below keeps that true as files open and close and as the
+  // layout turns into the phone's. Read at mount by editorMountLayout below.
   const isMobile = useIsMobile()
   const startExplorerCollapsed = shouldStartExplorerCollapsed(
     isMobile,
     activeTab !== null,
     storedExplorer?.collapsed,
   )
-  // That phone visibility follows the file rather than the person, so it is
-  // never stored: the stored flag stays the computer layout's preference.
-  const storedCollapsedRef = useRef(storedExplorer?.collapsed ?? false)
   // What the group actually mounts with: undefined in the ordinary case, so
   // the explorer panel's own PIXEL defaultSize decides its width, or a true
   // 0%/100% collapse when this open starts collapsed. Structural on purpose:
@@ -594,11 +590,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     if (fileOpen) panel.collapse()
     else toggleExplorer()
   }
-  const activeFileKey = activeTab === null ? null : `${activeTab.id}\n${activeTab.path}`
+  // A file opening, by tab or in place of the preview tab, rather than the
+  // open file being renamed or moved, which keeps its tab.
+  const activeTabId = activeTab?.id ?? null
   useEffect(() => {
-    fitExplorerToFile(activeFileKey !== null)
+    fitExplorerToFile(activeTabId !== null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFileKey])
+  }, [activeTabId, editorFileOpens, isMobile])
 
   // Covers the one gap the mount layout has: the library ignores a
   // defaultLayout whose keys do not cover every panel, so the explorer could
@@ -2110,15 +2108,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           onLayoutChanged={(layout) => {
             const collapsed = isExplorerCollapsed(layout)
             setExplorerCollapsed(collapsed)
-            lastExpandedExplorerPxRef.current = nextExpandedExplorerPx(
+            const remembered = explorerLayoutAfterReport(
+              isMobile,
+              collapsed,
               explorerPanelRef.current?.getSize().inPixels,
               lastExpandedExplorerPxRef.current,
             )
-            if (!isMobile) storedCollapsedRef.current = collapsed
-            writeExplorerLayout(
-              lastExpandedExplorerPxRef.current,
-              storedCollapsedRef.current,
-            )
+            if (remembered === null) return
+            lastExpandedExplorerPxRef.current = remembered.px
+            writeExplorerLayout(remembered.px, remembered.collapsed)
           }}
           className="size-full"
         >
