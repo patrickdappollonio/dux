@@ -382,7 +382,6 @@ describe("DeleteSessionDialog", () => {
     tickWorktree()
     expect(await screen.findByText(/is the project's own branch, so dux keeps it\./)).toBeTruthy()
     expect(screen.queryByText(/could not check the branches/)).toBeNull()
-    expect(screen.queryByRole("status")).toBeNull()
     expect(screen.queryByText(/No branches to check/)).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Delete" }))
     const notOffered = { delete: false, branches: [], unchecked: "not_offered" }
@@ -657,46 +656,51 @@ describe("DeleteSessionDialog", () => {
   })
 
   // The pill is drawn from the first frame so its arrival moves nothing; the
-  // same pill then says the answer landed, and leaves once that has been read.
-  it("shows the checking pill from the first frame, then the checked pill until it leaves", async () => {
+  // same pill then says the answer and never leaves.
+  it("shows the checking pill from the first frame, then the answer in the same pill, which stays", async () => {
     vi.useFakeTimers()
     try {
       let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
       branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
       seed("s1", [session1])
       render(<DeleteSessionDialog />)
-      expect(screen.getByRole("status").textContent).toBe(
+      const checking = screen.getByRole("status")
+      expect(checking.textContent).toBe(
         "Looking for unpushed work on the branches…",
       )
       await act(async () => answer(offer({ name: "dux/s1", origin: "dux" })))
-      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
-      act(() => vi.advanceTimersByTime(2999))
-      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
-      act(() => vi.advanceTimersByTime(1))
-      expect(screen.queryByRole("status")).toBeNull()
+      expect(screen.getByRole("status")).toBe(checking)
+      expect(checking.textContent).toBe("No unpushed work on dux/s1")
+      act(() => vi.advanceTimersByTime(5000))
+      expect(screen.getByRole("status")).toBe(checking)
+      expect(checking.textContent).toBe("No unpushed work on dux/s1")
     } finally {
       vi.useRealTimers()
     }
   })
 
   // With nothing offered the pending pill, drawn before the dialog could know,
-  // goes at once: no green answer and no hold.
-  it("removes the pending pill at once when no branch is offered", async () => {
+  // stays and says why there is nothing to check, once.
+  it("keeps the pill when no branch is offered, naming the project's own branch once", async () => {
     let answer: (o: import("@/lib/sessionsApi").BranchOffer) => void = () => {}
     branchUnpushed.mockReturnValue(new Promise((resolve) => (answer = resolve)))
     seed("s1", [session1])
     render(<DeleteSessionDialog />)
-    expect(screen.getByRole("status").textContent).toBe(
-      "Looking for unpushed work on the branches…",
-    )
+    const checking = screen.getByRole("status")
     await act(async () => answer(offer(null, [], { protected: ["dux/s1"] })))
-    expect(screen.queryByRole("status")).toBeNull()
+    expect(screen.getByRole("status")).toBe(checking)
+    expect(checking.textContent).toBe(
+      "dux/s1 is the project's own branch, so dux keeps it.",
+    )
+    expect(checking.className).not.toContain("dux-")
+    tickWorktree()
+    expect(screen.getAllByText(/is the project's own branch/)).toHaveLength(1)
     expect(screen.queryByText(/No branches to check/)).toBeNull()
   })
 
   // The answer says, before anything is ticked, whether deleting the branches
-  // would lose work that exists nowhere else, and it stays green either way:
-  // an unticked box loses nothing.
+  // would lose work that exists nowhere else: neutral grey when it would lose
+  // nothing, the warning yellow when it would, ticked or not, and it stays.
   it.each([
     {
       what: "one unpushed commit",
@@ -705,6 +709,7 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "1 commit on dux/s1 isn't pushed anywhere",
       chips: ["dux/s1"],
+      tone: "warning",
     },
     {
       what: "several unpushed commits",
@@ -713,6 +718,7 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "3 commits on dux/s1 aren't pushed anywhere",
       chips: ["dux/s1"],
+      tone: "warning",
     },
     {
       what: "two branches with nothing unpushed",
@@ -721,6 +727,7 @@ describe("DeleteSessionDialog", () => {
       ]),
       says: "No unpushed work on dux/s1 or spike",
       chips: ["dux/s1", "spike"],
+      tone: "neutral",
     },
     {
       what: "two branches where only the other one holds unpushed commits",
@@ -734,6 +741,7 @@ describe("DeleteSessionDialog", () => {
       ),
       says: "2 commits on spike aren't pushed anywhere",
       chips: ["spike"],
+      tone: "warning",
     },
     {
       what: "three branches with nothing unpushed",
@@ -743,6 +751,7 @@ describe("DeleteSessionDialog", () => {
       ]),
       says: "No unpushed work on any of the 3 branches",
       chips: [],
+      tone: "neutral",
     },
     {
       what: "a repository with no remote",
@@ -751,8 +760,9 @@ describe("DeleteSessionDialog", () => {
       }),
       says: "1 commit on dux/s1 is on no other branch, and this repository has no remote",
       chips: ["dux/s1"],
+      tone: "warning",
     },
-  ])("states the answer for $what in a green pill", async ({ answer, says, chips }) => {
+  ])("states the answer for $what in the $tone tone, and keeps it", async ({ answer, says, chips, tone }) => {
     vi.useFakeTimers()
     try {
       branchUnpushed.mockResolvedValue(answer)
@@ -762,9 +772,16 @@ describe("DeleteSessionDialog", () => {
       const pill = screen.getByRole("status")
       expect(pill.textContent).toBe(says)
       expect(chipsIn(pill)).toEqual(chips)
-      expect(pill.className).toContain("bg-dux-success/10")
-      act(() => vi.advanceTimersByTime(3000))
-      expect(screen.queryByRole("status")).toBeNull()
+      // No green anywhere: neutral is the app's grey, a loss its warning yellow.
+      expect(pill.outerHTML).not.toContain("dux-success")
+      if (tone === "warning") expect(pill.className).toContain("dux-warning")
+      else expect(pill.outerHTML).not.toContain("dux-")
+      // The tone is never the only sign: the icon says it too.
+      expect(pill.querySelector("svg")!.getAttribute("class")).toContain(
+        tone === "warning" ? "lucide-circle-alert" : "lucide-check",
+      )
+      act(() => vi.advanceTimersByTime(5000))
+      expect(screen.getByRole("status")).toBe(pill)
     } finally {
       vi.useRealTimers()
     }
@@ -788,7 +805,7 @@ describe("DeleteSessionDialog", () => {
       expect(pill.textContent).toBe(
         "dux could not count the unpushed commits on dux/s1 (git rev-list failed); check it before deleting it.",
       )
-      expect(pill.className).toContain("bg-dux-warning/10")
+      expect(pill.className).toContain("dux-warning")
     } finally {
       vi.useRealTimers()
     }
@@ -905,7 +922,7 @@ describe("DeleteSessionDialog", () => {
       await act(async () => {})
       expect(currentBox().getAttribute("aria-checked")).toBe("true")
       expect(screen.queryByText(/This branch existed before the agent\./)).toBeNull()
-      expect(screen.queryByRole("status")).toBeNull()
+      expect(screen.getByRole("status").textContent).toBe("No unpushed work on dux/s1")
     } finally {
       vi.useRealTimers()
     }

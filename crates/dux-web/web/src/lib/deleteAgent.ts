@@ -214,8 +214,9 @@ export type UnpushedAnswer =
  * The commits are said to be on the branches whose own box's count is not
  * zero, or on every offered branch when only their union holds them. More
  * than two such branches are counted rather than named, and the second box
- * counts as a whole, since git counts it as one. `ok: null` is no box offering
- * a branch, which has nothing to say. Mirrors dux-core's
+ * counts as a whole, since git counts it as one. `losesCommits` is whether
+ * that count is not zero, which is what the dialogs warn on. `ok: null` is no
+ * box offering a branch, which has nothing to say. Mirrors dux-core's
  * `branches_checked_prose`, pinned by the shared prose fixture.
  */
 export function branchesCheckedProse(
@@ -224,7 +225,9 @@ export function branchesCheckedProse(
   others: readonly string[],
   othersLost: UnpushedAnswer,
   bothLost: UnpushedAnswer,
-): { ok: Prose | null } | { failed: Prose } {
+):
+  | { ok: { prose: Prose; losesCommits: boolean } | null }
+  | { failed: Prose } {
   const offered = [...(current === null ? [] : [current]), ...others]
   if (offered.length === 0) return { ok: null }
   const [currentFailed, othersFailed] = boxCountFailures(
@@ -258,13 +261,16 @@ export function branchesCheckedProse(
               : `any of the ${offered.length} branches`,
           ]
     return {
-      ok: noRemote
-        ? [
-            "Everything on ",
-            ...where,
-            " is also on another branch, and this repository has no remote",
-          ]
-        : ["No unpushed work on ", ...where],
+      ok: {
+        prose: noRemote
+          ? [
+              "Everything on ",
+              ...where,
+              " is also on another branch, and this repository has no remote",
+            ]
+          : ["No unpushed work on ", ...where],
+        losesCommits: false,
+      },
     }
   }
   const holds = (answer: UnpushedAnswer) => !("failed" in answer) && answer.count > 0
@@ -284,10 +290,13 @@ export function branchesCheckedProse(
       ? " isn't pushed anywhere"
       : " aren't pushed anywhere"
   return {
-    ok: joinProse(
-      [[one ? "1 commit on " : `${lost.count} commits on `], where, [tail]],
-      "",
-    ),
+    ok: {
+      prose: joinProse(
+        [[one ? "1 commit on " : `${lost.count} commits on `], where, [tail]],
+        "",
+      ),
+      losesCommits: true,
+    },
   }
 }
 

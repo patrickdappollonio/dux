@@ -124,6 +124,7 @@ describe("the sentences both surfaces print", () => {
       sentence: string
       args: Record<string, unknown>
       segments: Prose
+      loses_commits?: boolean
     }[]
   }
 
@@ -243,7 +244,7 @@ describe("the sentences both surfaces print", () => {
           args.others_lost as UnpushedAnswer,
           args.both_lost as UnpushedAnswer,
         )
-        return "ok" in answer ? (answer.ok ?? []) : answer.failed
+        return "ok" in answer ? (answer.ok?.prose ?? []) : answer.failed
       }
       case "delete_branches_check_failed":
         return branchesCheckFailedProse(args.reason as string)
@@ -322,6 +323,25 @@ describe("the sentences both surfaces print", () => {
       expect(merged(build(c.sentence, c.args))).toEqual(merged(c.segments))
     },
   )
+
+  // Whether the answer warns is read off the answer, never off its words, and
+  // the terminal UI reads the same fact.
+  it.each(
+    fixture.cases
+      .filter((c) => c.loses_commits !== undefined)
+      .map((c) => [c.what, c] as const),
+  )("agrees with the terminal UI about whether %s loses commits", (_what, c) => {
+    const answer = branchesCheckedProse(
+      c.args.current as string | null,
+      c.args.current_lost as UnpushedAnswer,
+      c.args.others as string[],
+      c.args.others_lost as UnpushedAnswer,
+      c.args.both_lost as UnpushedAnswer,
+    )
+    expect("ok" in answer ? answer.ok?.losesCommits : undefined).toBe(
+      c.loses_commits,
+    )
+  })
 })
 
 describe("building a sentence in the browser", () => {

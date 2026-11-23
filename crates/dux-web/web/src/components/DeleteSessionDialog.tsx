@@ -63,10 +63,12 @@ function currentBranchFailed(offer: BranchOffer): boolean {
 // What the check says as a whole, and the sentence it says it in. A ready offer
 // whose current branch could not be read is a failed check, so the pill and the
 // first box never disagree, and so is one whose commits git could not count.
+// `none` is no box offering a branch, which only the project's own branch
+// leaves, and says so.
 type BranchCheck =
   | { state: "pending" }
-  | { state: "checked"; prose: Prose }
-  | { state: "none" }
+  | { state: "checked"; prose: Prose; losesCommits: boolean }
+  | { state: "none"; prose: Prose }
   | { state: "failed"; prose: Prose }
 
 function branchCheck(offer: OfferState): BranchCheck {
@@ -91,20 +93,16 @@ function branchCheck(offer: OfferState): BranchCheck {
   )
   if ("failed" in answer) return { state: "failed", prose: answer.failed }
   return answer.ok === null
-    ? { state: "none" }
-    : { state: "checked", prose: answer.ok }
+    ? { state: "none", prose: protectedBranchesProse(ready.protected) }
+    : { state: "checked", ...answer.ok }
 }
-
-// How long the answer stays up before the pill leaves.
-const CHECKED_PILL_MS = 3000
 
 // The offer for one open of the dialog, kept under the agent it was asked for
 // so a dialog that moves straight to another agent never shows the first
-// one's answer. `settled` is set once the checked pill has had its time.
+// one's answer.
 interface OfferEntry {
   target: string
   offer: OfferState
-  settled: boolean
 }
 
 function lossAnswer(
@@ -320,21 +318,23 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
   return wrapped
 }
 
-// One pill for the whole branch check, drawn from the dialog's first frame so
-// its arrival moves nothing: a spinner while git is asked, a check with the
-// answer once it answered, and the warning tone with the reason when it could
-// not answer. Every state has an icon of its own, so the tone is never the only
-// signal. The icon sits on the first line however many the text wraps to, and
+// One pill for the whole branch check, drawn from the dialog's first frame and
+// never removed, so neither the answer's arrival nor anything after it moves
+// the dialog: a spinner while git is asked, a check once it answered that
+// nothing would be lost, and an alert in the warning tone when commits would
+// be lost or git could not answer. Quiet grey and a soft yellow rather than
+// green and strong tints, by the user's decision of 2026-11-23: the pill
+// informs, the boxes and the loss warning under them are what ask for care.
+// Every state has an icon of its own, so the tone is never the only signal. The icon sits on the first line however many the text wraps to, and
 // a pill that wraps becomes a rounded rectangle, since a capsule that tall has
 // corners eating its text. A chip moves to the next line whole rather than
 // splitting, unless it is longer than a line on its own; its negative margin
 // keeps it from making its line taller than the text's, so a wrapped pill
 // grows by whole lines and its padding stays even.
-function BranchCheckPill({
-  check,
-}: {
-  check: Exclude<BranchCheck, { state: "none" }>
-}) {
+const QUIET_PILL = "border-border/60 bg-muted/40 text-muted-foreground"
+const WARNING_PILL = "border-dux-warning/30 bg-muted/40"
+
+function BranchCheckPill({ check }: { check: BranchCheck }) {
   const text = useRef<HTMLSpanElement>(null)
   const wrapped = useWrapped(text)
   const [icon, prose, tone] =
@@ -342,18 +342,19 @@ function BranchCheckPill({
       ? [
           <Loader2 className="mt-px size-3.5 shrink-0 motion-safe:animate-spin" />,
           branchesCheckingProse(),
-          "border-border text-muted-foreground",
+          QUIET_PILL,
         ]
-      : check.state === "checked"
+      : check.state === "none" ||
+          (check.state === "checked" && !check.losesCommits)
         ? [
-            <Check className="mt-px size-3.5 shrink-0 text-dux-success" />,
+            <Check className="mt-px size-3.5 shrink-0" />,
             check.prose,
-            "border-dux-success/40 bg-dux-success/10",
+            QUIET_PILL,
           ]
         : [
             <CircleAlert className="mt-px size-3.5 shrink-0 text-dux-warning" />,
             check.prose,
-            "border-dux-warning/40 bg-dux-warning/10",
+            WARNING_PILL,
           ]
   return (
     <div
@@ -441,7 +442,7 @@ export function DeleteSessionDialog() {
     if (!askOffer || !deleteTarget || asked) return
     let live = true
     const answered = (next: OfferState) => {
-      if (live) setEntry({ target: deleteTarget, offer: next, settled: false })
+      if (live) setEntry({ target: deleteTarget, offer: next })
     }
     sessionsApi
       .branchUnpushed(deleteTarget)
@@ -456,23 +457,6 @@ export function DeleteSessionDialog() {
       live = false
     }
   }, [askOffer, deleteTarget, asked])
-
-  // A failed check keeps its pill, since the reason is the only place it is said.
-  const checked = ours !== null && branchCheck(ours.offer).state === "checked"
-  const checkedPending = checked && !ours?.settled
-  useEffect(() => {
-    if (!checkedPending) return
-    const timer = setTimeout(
-      () =>
-        setEntry((prev) => (prev === null ? prev : { ...prev, settled: true })),
-      CHECKED_PILL_MS,
-    )
-    return () => clearTimeout(timer)
-  }, [checkedPending])
-  // Nothing offered (the project's own branch) leaves nothing to say, so the
-  // pending pill, which had to be drawn before the dialog could know, goes at once.
-  const nothingOffered = ours !== null && branchCheck(ours.offer).state === "none"
-  const pillShown = !(checked && ours?.settled) && !nothingOffered
 
   async function handleConfirm() {
     if (!deleteTarget) return
@@ -586,19 +570,18 @@ export function DeleteSessionDialog() {
                 prose={lossProse(ready, deleteCurrent, deleteOthers)}
               />
             )}
-            {own.length > 0 && (
+            {/* The pill already says it when it is all there is to say. */}
+            {own.length > 0 && check.state !== "none" && (
               <p className="text-sm text-muted-foreground">
                 {renderProse(protectedBranchesProse(own))}
               </p>
             )}
           </Collapse>
-          <Collapse open={pillShown}>
+          <div className="pt-4">
             <AnimatedHeight>
-              <BranchCheckPill
-                check={check.state === "none" ? { state: "pending" } : check}
-              />
+              <BranchCheckPill check={check} />
             </AnimatedHeight>
-          </Collapse>
+          </div>
         </div>
       )}
       <AttachedSection blockers={blockers} />
