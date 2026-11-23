@@ -16,6 +16,7 @@ vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
 }))
 
 const warnings: string[] = []
+const errors: string[] = []
 vi.mock("@/lib/notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/notify")>()
   return {
@@ -23,6 +24,10 @@ vi.mock("@/lib/notify", async (importOriginal) => {
     notifyWarning: (...args: Parameters<typeof actual.notifyWarning>) => {
       warnings.push(actual.noticeText(args[0]))
       actual.notifyWarning(...args)
+    },
+    notifyError: (...args: Parameters<typeof actual.notifyError>) => {
+      errors.push(actual.noticeText(args[0]))
+      actual.notifyError(...args)
     },
   }
 })
@@ -60,6 +65,11 @@ const conflict = () =>
     status: 409,
     headers: { "content-type": "application/json" },
   })
+const refused = () =>
+  new Response("The project is gone.", {
+    status: 400,
+    headers: { "content-type": "text/plain" },
+  })
 const started = () =>
   new Response(JSON.stringify({ id: "op-1" }), {
     status: 202,
@@ -76,6 +86,7 @@ async function openForm() {
 beforeEach(() => {
   held.length = 0
   warnings.length = 0
+  errors.length = 0
   fetchMock.mockClear()
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
 })
@@ -134,4 +145,41 @@ describe("the New agent form with its create unanswered", () => {
     expect(form()).not.toBeNull()
     expect(nameField().value).toBe("feature-old")
   })
+
+  it("says a refusal over an existing branch that comes after the wait", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(warnings).toHaveLength(1))
+    act(() => held[0](conflict()))
+    await waitFor(() => expect(errors).toHaveLength(1))
+    expect(errors[0]).toMatch(/feature-old was not created/)
+    expect(errors[0]).toMatch(/already exists/)
+    expect(errors[0]).toMatch(/offer to attach/)
+    expect(question()).toBeNull()
+  })
+
+  it.each([
+    ["over an existing branch", conflict, /already exists/],
+    ["for another reason", refused, /The project is gone/],
+  ] as const)(
+    "says a refusal %s of a create the form has stopped waiting for",
+    async (_why, answer, reason) => {
+      await openForm()
+      fireEvent.click(createButton())
+      await waitFor(() => expect(posts()).toBe(1))
+      act(() => store.closeCreateAgent())
+      act(() => store.openCreateAgent("p1"))
+      await waitFor(() => expect(form()).not.toBeNull())
+      fireEvent.change(nameField(), { target: { value: "feature-new" } })
+      fireEvent.click(createButton())
+      await waitFor(() => expect(posts()).toBe(2))
+      act(() => held[0](answer()))
+      await waitFor(() => expect(errors).toHaveLength(1))
+      expect(errors[0]).toMatch(/feature-old was not created/)
+      expect(errors[0]).toMatch(reason)
+      expect(question()).toBeNull()
+      expect(nameField().value).toBe("feature-new")
+      expect(createButton().getAttribute("aria-busy")).toBe("true")
+    },
+  )
 })

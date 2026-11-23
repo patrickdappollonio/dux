@@ -31,6 +31,7 @@ import {
 import { type AttachedBlocker, AttachedError } from "./attached"
 import {
   type DeleteBranchAnswers,
+  type ExistingBranchConflict,
   existingBranchConflict,
   type PullRequestCloneOffer,
   type ReviewCopyOutlook,
@@ -8769,8 +8770,11 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
       (e) => {
         const current = answered()
         const conflict = existingBranchConflict(e)
+        if (!current) {
+          toastForgottenCreateRefusal(name, e, conflict)
+          return
+        }
         if (conflict) {
-          if (!current) return
           setState({
             ...(stillOpen() ? { createAgentSubmitting: false } : {}),
             existingBranchTarget: {
@@ -8782,10 +8786,32 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
           })
           return
         }
-        if (current && stillOpen()) closeCreateAgent()
+        if (stillOpen()) closeCreateAgent()
         toastCreateError(e, "Could not create the agent.")
       },
     )
+}
+
+// A refusal of a create the form no longer waits for (another create replaced
+// it, or its deadline passed) opens no question and closes nothing, so this
+// toast is the only word the user gets that the agent will not appear.
+function toastForgottenCreateRefusal(
+  name: string,
+  e: unknown,
+  conflict: ExistingBranchConflict | null,
+): void {
+  if (conflict) {
+    notifyError(
+      prose`The agent ${chip(conflict.name)} was not created, because a branch of that name already exists. Creating it again from New agent will offer to attach to that branch.`,
+    )
+    return
+  }
+  const status = e instanceof SessionsApiError ? e.status : undefined
+  // The status stream already says these to this connection.
+  if (status === 409 || status === 422) return
+  const agent = name === "" ? prose`The agent` : prose`The agent ${chip(name)}`
+  const reason = e instanceof Error && e.message !== "" ? e.message : "The server refused it."
+  notifyError(prose`${agent} was not created. ${reason}`)
 }
 
 export function closeExistingBranch(): void {
