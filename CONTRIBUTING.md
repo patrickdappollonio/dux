@@ -325,6 +325,11 @@ When a change makes a docs screenshot stale, regenerate it with
 `tools/preview-env/screens/reshoot.sh` (no arguments for the whole set, or the
 screenshot's own name for just that one) rather than reshooting it by hand.
 
+After a web UI change, run the browser checks with
+`tools/preview-env/checks/run.sh`, and update a check in the same change when
+your change alters the behaviour it covers (see
+[`tools/preview-env/checks/README.md`](tools/preview-env/checks/README.md)).
+
 ## A few house rules worth knowing up front
 
 - **Commit messages are plain sentences.** No `feat:`/`fix:`/`chore:` prefixes and
