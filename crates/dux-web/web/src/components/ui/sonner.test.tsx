@@ -172,8 +172,14 @@ describe("Toaster height cap", () => {
   // padding and border (16px + 1px on each side), and never further than the
   // screen left below where the stack starts. A computer keeps the short cap.
   it.each([
-    { shell: "a phone", width: 390, cap: (c: string) => c.includes("var(--dux-toast-top") },
-    { shell: "a computer", width: 1280, cap: (c: string) => c === "max-h-[min(12rem,40vh)]" },
+    // The exact classes: Tailwind reads them from source text, and the
+    // numbers are the behaviour.
+    {
+      shell: "a phone",
+      width: 390,
+      cap: "max-h-[min(calc(75dvh-34px),calc(100dvh-var(--dux-toast-top,calc(env(safe-area-inset-top)+1rem))-env(safe-area-inset-bottom)-1rem-34px))]",
+    },
+    { shell: "a computer", width: 1280, cap: "max-h-[min(12rem,40vh)]" },
   ])("caps the text's height on $shell and scrolls it inside the toast, leaving a finger's drag to the swipe", async ({ width, cap }) => {
     window.innerWidth = width
     render(<Toaster />)
@@ -186,7 +192,7 @@ describe("Toaster height cap", () => {
     expect(title.className).toContain("overflow-y-auto")
     const caps = title.className.split(/\s+/).filter((c) => c.startsWith("max-h-"))
     expect(caps).toHaveLength(1)
-    expect(cap(caps[0])).toBe(true)
+    expect(caps[0]).toBe(cap)
     // A scroll container hands every touch pan to the browser, which cancels
     // the pointer stream sonner's swipe reads, whatever the toast itself says
     // (measured in Chromium). jsdom computes no touch-action, so the class that
