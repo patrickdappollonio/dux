@@ -103,9 +103,9 @@ function RenameEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason:
-          writeBlocked ?? (isDirty ? dirtyRefusal : validation.ok ? null : validation.error),
+        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
       }}
+      writeBlocked={writeBlocked}
     >
       <Input
         value={name}

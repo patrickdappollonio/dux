@@ -95,7 +95,8 @@ export function Modal(props: ModalProps) {
 
   const presentation = modalPresentation(kind, phone)
   const frame = kind === "confirm" ? null : props
-  const parts = withRowReason(props, rowReason)
+  const heldReason = rowReason ?? props.writeBlocked ?? null
+  const parts = withRowReason(props, heldReason)
   const useReason = useContext(RowReasonContext)
   return (
     <>
@@ -136,10 +137,10 @@ export function Modal(props: ModalProps) {
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
           // A field's own Enter (or a text area's Ctrl/Cmd-Enter) runs the
           // caller's submit, which the footer's gate never sees: while the
-          // modal or its submit is busy, or its row may not be changed from
+          // modal or its submit is busy, or its change may not be made from
           // here, it runs nothing.
           onKeyDownCapture={(event) => {
-            const held = busy || rowReason !== null || (kind === "form" && props.submit.busy === true)
+            const held = busy || heldReason !== null || (kind === "form" && props.submit.busy === true)
             if (!held) return
             if (event.key !== "Enter" || !submitsOnEnter(event.target, event)) return
             if (event.target.closest('[data-slot="dialog-content"]') !== event.currentTarget) return
@@ -217,7 +218,8 @@ function RowChangeReason({
   return null
 }
 
-// The modal's own action, disabled with the row's reason while it has one.
+// The modal's own action, disabled with the reason its change may not be made
+// from here while it has one.
 function withRowReason(props: ModalProps, reason: string | null): ModalProps {
   if (reason === null) return props
   switch (props.kind) {

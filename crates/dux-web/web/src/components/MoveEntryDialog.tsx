@@ -170,9 +170,9 @@ function MoveEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason:
-          writeBlocked ?? (isDirty ? dirtyRefusal : validation.ok ? null : validation.error),
+        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
       }}
+      writeBlocked={writeBlocked}
     >
       {/* Where the browse currently sits, and where the entry would land. */}
       <div className="flex flex-col gap-1">

@@ -135,6 +135,10 @@ interface ModalBase {
    * confirm, a form's submit) changes. While this device may not change that
    * row, the action is disabled with the reason the agent's menu gives. */
   row?: ModalRow | null
+  /** Why this page may not make the modal's change now, answered by the caller
+   * itself rather than through `row` (the editor's write-blocked answer). The
+   * action is disabled with it exactly as with the row's reason. */
+  writeBlocked?: string | null
 }
 
 /** A row of the agents list, by its agent, or by a project or standalone

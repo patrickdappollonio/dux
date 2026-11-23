@@ -59,6 +59,23 @@ describe("NewEntryDialog", () => {
     expect(onSubmit).toHaveBeenCalledWith("new.ts")
   })
 
+  it("Enter submits nothing while another device drives the row", () => {
+    const onSubmit = vi.fn(() => Promise.resolve())
+    render(
+      <NewEntryDialog
+        target={{ kind: "file", dir: "src" }}
+        writeBlocked="This agent is active on Firefox on Linux."
+        onClose={() => {}}
+        onSubmit={onSubmit}
+      />,
+    )
+    const input = screen.getByPlaceholderText("example.ts")
+    fireEvent.change(input, { target: { value: "new.ts" } })
+    fireEvent.keyDown(input, { key: "Enter" })
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByRole("button", { name: /Create/ }).hasAttribute("disabled")).toBe(true)
+  })
+
   it("shows the target dir, using / for the root", () => {
     render(
       <NewEntryDialog

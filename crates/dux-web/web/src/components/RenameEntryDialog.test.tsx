@@ -70,6 +70,23 @@ describe("RenameEntryDialog", () => {
     fireEvent.keyDown(input, { key: "Enter" })
     expect(onSubmit).toHaveBeenCalledWith("new.ts")
   })
+
+  it("Enter submits nothing while another device drives the row", () => {
+    const onSubmit = vi.fn(() => Promise.resolve())
+    render(
+      <RenameEntryDialog
+        target={{ path: "old.ts", isDir: false }}
+        isDirty={false}
+        writeBlocked="This agent is active on Firefox on Linux."
+        onClose={() => {}}
+        onSubmit={onSubmit}
+      />,
+    )
+    const input = screen.getByDisplayValue("old.ts")
+    fireEvent.change(input, { target: { value: "new.ts" } })
+    fireEvent.keyDown(input, { key: "Enter" })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
 })
 
 describe("RenameEntryDialog while it closes", () => {

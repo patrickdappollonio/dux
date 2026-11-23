@@ -94,8 +94,9 @@ function NewEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason: writeBlocked ?? (validation.ok ? null : validation.error),
+        disabledReason: validation.ok ? null : validation.error,
       }}
+      writeBlocked={writeBlocked}
     >
       <Input
         value={name}
