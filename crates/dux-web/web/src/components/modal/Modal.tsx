@@ -47,6 +47,10 @@ export function Modal(props: ModalProps) {
   const placeFocus = useRef<(() => HTMLElement | null) | null>(null)
   // A Back that arrived while busy, answered once the modal is free.
   const backWaits = useRef(false)
+  // The last control focused in the form outside its footer, where Keep
+  // editing gives focus back: the Cancel that raised the question is not where
+  // the person was.
+  const editing = useRef<HTMLElement | null>(null)
 
   /** Takes a way out, and says whether the modal is closing. */
   const leave = (reason: ModalCloseReason): boolean => {
@@ -111,6 +115,10 @@ export function Modal(props: ModalProps) {
           // False leaves focus where it is; true would move it to the popup's
           // first control. Only a popup whose parts have not mounted gets that.
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
+          onFocus={(event) => {
+            const target = event.target
+            if (target.closest('[data-slot="modal-footer"]') === null) editing.current = target
+          }}
           className={cn(
             FIELD_TEXT_SIZE,
             presentation === "card" &&
@@ -139,6 +147,7 @@ export function Modal(props: ModalProps) {
           changes={unsaved.changes}
           leaves={unsaved.leaves}
           onKeep={() => setAsked(null)}
+          finalFocus={() => (editing.current?.isConnected ? editing.current : true)}
           onDiscard={() => {
             const reason = asked ?? "cancel"
             setAsked(null)

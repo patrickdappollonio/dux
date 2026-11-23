@@ -960,6 +960,33 @@ describe("a form with unsaved edits", () => {
     expect(onClose).toHaveBeenCalledWith("escape")
   })
 
+  it("gives focus back to the field being typed in when the question is answered Keep editing", async () => {
+    render(
+      <Modal
+        kind="form"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        submit={save}
+        unsavedEdits={{ holder: "The sample has", changes: 2, leaves: ["the sample"] }}
+      >
+        <input aria-label="first" />
+        <textarea aria-label="notes" />
+      </Modal>,
+    )
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("first")))
+    act(() => screen.getByLabelText("notes").focus())
+    const cancel = screen.getByRole("button", { name: "Cancel" })
+    act(() => cancel.focus())
+    fireEvent.click(cancel)
+    const keep = await screen.findByRole("button", { name: "Keep editing" })
+    await waitFor(() => expect(document.activeElement).toBe(keep))
+    fireEvent.click(keep)
+    await waitFor(() => expect(asking()).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("notes")))
+  })
+
   it("says what discarding leaves as it was, in the caller's words", async () => {
     render(<Editing changes={2} onClose={() => {}} />)
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))

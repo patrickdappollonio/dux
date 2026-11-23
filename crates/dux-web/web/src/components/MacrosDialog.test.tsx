@@ -367,7 +367,8 @@ describe("MacrosDialog closing", () => {
       const again = await screen.findByRole("dialog", { name: "Discard unsaved changes?" })
       await click(within(again).getByRole("button", { name: "Keep editing" }))
       await settle()
-      expect(document.activeElement).toBe(cancel)
+      // Where the person was typing, not the Cancel that raised the question.
+      expect(document.activeElement).toBe(text)
     },
   )
 
