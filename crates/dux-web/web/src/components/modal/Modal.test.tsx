@@ -1232,6 +1232,25 @@ describe("a busy modal", () => {
     expect(submitted).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ["isComposing", { isComposing: true }],
+    ["keyCode 229", { keyCode: 229 }],
+  ] as const)("leaves an Enter that ends an IME composition (%s) to the field while busy", (_how, init) => {
+    const pressed = vi.fn()
+    render(
+      <Modal kind="form" open onClose={() => {}} title="Sample" historyEntry={false} busy submit={save}>
+        <input
+          aria-label="name"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") pressed()
+          }}
+        />
+      </Modal>,
+    )
+    fireEvent.keyDown(screen.getByLabelText("name"), { key: "Enter", ...init })
+    expect(pressed).toHaveBeenCalledTimes(1)
+  })
+
   // A disabled button would drop the focus it holds to the page.
   it("shows and announces that its ways out do nothing, and keeps them focusable", () => {
     for (const kind of ["form", "picker"] as const) {

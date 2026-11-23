@@ -143,6 +143,8 @@ export function Modal(props: ModalProps) {
             const held = busy || heldReason !== null || (kind === "form" && props.submit.busy === true)
             if (!held) return
             if (event.key !== "Enter" || !submitsOnEnter(event.target, event)) return
+            // An Enter that ends an IME composition is the composition's.
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return
             if (event.target.closest('[data-slot="dialog-content"]') !== event.currentTarget) return
             event.preventDefault()
             event.stopPropagation()
