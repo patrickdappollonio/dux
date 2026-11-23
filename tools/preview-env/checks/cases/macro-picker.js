@@ -46,12 +46,16 @@ module.exports = {
 
     const dev = await H.device(ctx, "computer")
     await dev.cdp.send("Network.enable")
-    const frames = []
+    // What the page sends down its terminal sockets. Keystrokes travel as binary
+    // frames (base64 in what the browser reports); text frames are the socket's
+    // own JSON (a resize, a beat) and carry no typing.
+    const sockets = new Set()
+    const sent = []
     dev.cdp.on("Network.webSocketCreated", (e) => {
-      if (/\/pty\b/.test(e.url)) frames.socket = e.requestId
+      if (/\/pty(\?|$)/.test(new URL(e.url).pathname + "?")) sockets.add(e.requestId)
     })
     dev.cdp.on("Network.webSocketFrameSent", (e) => {
-      if (e.requestId === frames.socket) frames.push(e.response.payloadData)
+      if (sockets.has(e.requestId)) sent.push({ binary: e.response.opcode === 2, data: e.response.payloadData })
     })
     await H.goto(dev, H.agentHash(id))
     await H.drive(dev)
@@ -59,20 +63,27 @@ module.exports = {
     H.expect(opened.rows.length >= 2, `the macro picker should list the seeded macros; it lists ${JSON.stringify(opened.rows)}`)
     H.expect(opened.rowButtons.length === 0, `the picker's rows should carry no button of their own; these do: ${opened.rowButtons.join(", ")}`)
     await filterTo(H, dev)
-    frames.length = 0
+    sent.length = 0
     await dev.page.keyboard.press("Enter")
-    const decoded = () => frames.map((f) => Buffer.from(f, "base64").toString("utf8")).join("")
-    await H.until(() => decoded().includes(TEXT), `"${MACRO}" to be sent`, { timeout: 4000 }).catch(() =>
-      H.fail(`Enter on "${MACRO}" should send "${TEXT}" down the pane's socket; it sent ${JSON.stringify(decoded().slice(0, 200))}`),
+    const typed = () =>
+      sent
+        .filter((f) => f.binary)
+        .map((f) => Buffer.from(f.data, "base64").toString("utf8"))
+        .join("")
+    await H.until(() => typed().includes(TEXT), `"${MACRO}" to be sent`, { timeout: 4000 }).catch(() =>
+      H.fail(
+        `Enter on "${MACRO}" should type "${TEXT}" down the pane's socket; it typed ${JSON.stringify(typed().slice(0, 200))}${sent.some((f) => !f.binary) ? ` and sent the text frames ${JSON.stringify(sent.filter((f) => !f.binary).map((f) => f.data.slice(0, 80)))}` : ""}`,
+      ),
     )
 
     await openPicker(H, dev)
     await H.press(dev, { name: "^Edit macros…$", selector: "button" })
     await H.waitForDialog(dev, "^Macros$")
 
+    // The computer still drives the agent, so the phone takes it over.
     const phone = await H.device(ctx, "phone")
     await H.goto(phone, H.agentHash(id))
-    await H.drive(phone)
+    await H.takeOver(phone)
     await openPicker(H, phone)
     await H.press(phone, { name: "^Search macros", selector: 'input[role="combobox"]' })
     await filterTo(H, phone)

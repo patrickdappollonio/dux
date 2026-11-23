@@ -6,8 +6,9 @@ const { AGENT } = require("../dialogs.js")
 const WORKTREE = `/data/dux/worktrees/demo-api/${AGENT}`
 const SUBJECT = "checks: a commit on no other branch"
 
-// The pill, read the way a person reads it: its sentence, and whether its icon
-// is the alert (a circle with a mark in it) rather than the check or spinner.
+// The pill, read the way a person reads it: its sentence. Its icon (a check or
+// an alert) carries no accessible name or role of its own, so nothing but its
+// drawing tells the two apart; the sentence is what the check holds it to.
 async function pill(page) {
   return page.evaluate(() => {
     const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(
@@ -24,7 +25,6 @@ async function pill(page) {
       height: dialog.offsetHeight,
       shown: Boolean(shown),
       text: shown ? status.textContent.replace(/\s+/g, " ").trim() : "",
-      alert: Boolean(shown && status.querySelector("svg circle")),
     }
   })
 }
@@ -33,8 +33,7 @@ const pending = (p) => /^Looking for unpushed work/.test(p.text)
 
 async function check(H, dev, { losing }) {
   await H.paneMenu(dev, "^Delete agent…$")
-  await H.waitFor(dev.page, () => document.querySelector('[role="dialog"],[role="alertdialog"]') !== null, "the Delete agent dialog")
-  await H.frames(dev.page)
+  await H.waitForDialog(dev, "^Delete agent\\?$")
   const atOpen = await pill(dev.page)
   H.expect(atOpen.shown, `the Delete agent dialog should show its branch-check pill from the moment it opens; it has none`)
 
@@ -49,13 +48,13 @@ async function check(H, dev, { losing }) {
   H.expect(later.shown, `for ${what} the pill should still be there 4 seconds after the answer; it is gone`)
   if (losing) {
     H.expect(
-      answered.alert && /commits? on .* (is|are) on no other branch|isn't pushed|aren't pushed/.test(answered.text),
-      `for ${what} the pill should carry the alert icon and say the commits would be lost; it reads "${answered.text}"${answered.alert ? "" : " with no alert icon"}`,
+      /commits? on .* (is|are) on no other branch|isn't pushed|aren't pushed/.test(answered.text),
+      `for ${what} the pill should say its commit would be lost; it reads "${answered.text}"`,
     )
   } else {
     H.expect(
-      !answered.alert && /also on another branch|No unpushed work/.test(answered.text),
-      `for ${what} the pill should be the neutral one saying nothing would be lost; it reads "${answered.text}"${answered.alert ? " with an alert icon" : ""}`,
+      /also on another branch|No unpushed work/.test(answered.text),
+      `for ${what} the pill should say nothing would be lost; it reads "${answered.text}"`,
     )
   }
   const heights = [atOpen.height, answered.height, later.height].map((h) => Math.round(h * 10) / 10)
@@ -70,23 +69,28 @@ async function check(H, dev, { losing }) {
 
 module.exports = {
   protects:
-    "Delete agent shows the neutral pill for an agent that loses nothing and the warning pill (alert icon, the sentence about commits) for one with a commit on no other branch, from open through 4 seconds later, without the dialog's height changing.",
+    "Delete agent shows a pill saying nothing would be lost for an agent whose commits are all on another branch, and one saying its commit would be lost for an agent with a commit on no other branch, from open through 4 seconds later, without the dialog's height changing.",
   async run(ctx, H) {
-    const head = H.lib.containerSh(`cd ${WORKTREE} && git rev-list --count HEAD --not --exclude=refs/heads/${AGENT} --branches`).trim()
-    H.expect(head === "0", `${AGENT} should start with no commit of its own; it has ${head}, which an earlier run left behind (reseed the workspace)`)
+    const head = H.lib.containerSh(`cd ${WORKTREE} && git rev-list --count HEAD --not --exclude=${AGENT} --branches`).trim()
+    H.expect(
+      head === "0",
+      `${AGENT} should start with no commit of its own; it has ${head}, which the runner's start-of-run check should have put back (run.sh --reseed puts it back)`,
+    )
 
     const dev = await H.device(ctx, "computer")
     await H.goto(dev, H.agentHash(await H.agentId(AGENT)))
     await H.drive(dev)
     await check(H, dev, { losing: false })
 
-    H.lib.containerSh(
-      `cd ${WORKTREE} && git -c user.name=checks -c user.email=checks@example.invalid commit -q --allow-empty -m '${SUBJECT}'`,
-    )
+    // The undo is registered before the commit is made, so an interrupt between
+    // the two still runs it; it does nothing when there is no such commit.
     ctx.after(() =>
       H.lib.containerSh(
         `cd ${WORKTREE} && if [ "$(git log -1 --format=%s)" = '${SUBJECT}' ]; then git reset -q --soft HEAD~1; fi`,
       ),
+    )
+    H.lib.containerSh(
+      `cd ${WORKTREE} && git -c user.name=checks -c user.email=checks@example.invalid commit -q --allow-empty -m '${SUBJECT}'`,
     )
     await check(H, dev, { losing: true })
   },

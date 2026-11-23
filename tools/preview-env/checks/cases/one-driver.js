@@ -24,7 +24,7 @@ module.exports = {
 
     const second = await H.device(ctx, "computer", { userAgent: H.OTHER_DEVICE_UA })
     await H.goto(second, H.agentHash(id))
-    await H.drive(second)
+    await H.takeOver(second)
 
     await H.until(async () => {
       const top = await H.topDialog(first.page)
@@ -35,13 +35,7 @@ module.exports = {
         `after ${OTHER} took the agent over, the open "${confirm.name}" should have its Detach disabled; ${top ? `its buttons are ${JSON.stringify(top.buttons.map((b) => b.name + (b.disabled ? " (disabled)" : "")))}` : "the dialog is gone"}`,
       )
     })
-    await H.hover(first, { name: "^Detach$", selector: "button", within: H.DIALOG })
-    const reason = await H.waitFor(
-      first.page,
-      () => [...document.querySelectorAll('[data-slot="tooltip-content"]')].map((t) => t.textContent).find((t) => t && t.trim()),
-      "a reason over the disabled Detach",
-      { timeout: 3000 },
-    )
+    const reason = await H.reasonFor(first, "Detach")
     H.expect(reason.includes(OTHER), `the disabled Detach's reason should name ${OTHER}; it says "${reason}"`)
 
     await H.press(first, { name: "^Cancel$", selector: "button", within: H.DIALOG })

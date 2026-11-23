@@ -4,7 +4,6 @@
 
 const AGENT = "add-rate-limits"
 
-
 module.exports = {
   protects:
     "On a computer a dialog opened inside the editor (New file) has its own backdrop and closes on a press outside it, leaving the editor open.",
@@ -12,8 +11,7 @@ module.exports = {
     const dev = await H.device(ctx, "computer")
     await H.openEditor(dev, await H.agentId(AGENT))
     await H.press(dev, { name: "^New file$", selector: "button" })
-    const d = await H.waitForDialog(dev, ".")
-    H.expect(/new file/i.test(d.name), `the editor's New file should open a dialog about a new file; it opened "${d.name}"`)
+    const d = await H.waitForDialog(dev, "^New file")
 
     // Beside the card, over the editor's file tree.
     const point = { x: Math.max(20, d.box.x / 2), y: d.box.y + d.box.height / 2 }

@@ -2,11 +2,15 @@
 // breakpoint and back, so the next key typed still lands in its field.
 const { AGENT, DIALOGS } = require("../dialogs.js")
 
-async function resize(H, dev, width) {
+// Resizes the window, then waits for the form to have settled at the new size:
+// crossing the phone breakpoint moves it between a card and a cover.
+async function resize(H, dev, width, title) {
   await dev.cdp.send("Emulation.setDeviceMetricsOverride", { ...dev.metrics, width })
   await H.waitFor(dev.page, (w) => innerWidth === w, `the window to be ${width}px wide`, { arg: width })
-  await H.frames(dev.page)
-  await H.sleep(250)
+  await H.waitForDialog(dev, title).catch(async () => {
+    const top = await H.topDialog(dev.page)
+    H.fail(`after resizing to ${width}px the form should still be open; ${top ? `"${top.name}" is on top` : "no dialog is open"}`)
+  })
 }
 
 module.exports = {
@@ -21,9 +25,8 @@ module.exports = {
     const before = d.fields[0].value
 
     for (const width of [700, 1440]) {
-      await resize(H, dev, width)
+      await resize(H, dev, width, DIALOGS.form.title)
       const top = await H.topDialog(dev.page)
-      H.expect(top && top.name === d.name, `after resizing to ${width}px "${d.name}" should still be open; ${top ? `"${top.name}" is` : "nothing is"}`)
       const focus = await H.focused(dev.page)
       H.expect(top.focusInside, `after resizing to ${width}px focus should still be inside "${d.name}"; it is on ${focus.what}`)
     }

@@ -1,8 +1,9 @@
 // The representative dialog of each kind, and how a person opens it. Several
 // checks open the same ones, so the way there is written once.
 //
-// `opener` is the name of the control focus goes back to when the dialog closes:
-// a menu item is gone by then, so it is the menu's trigger.
+// Opening one remembers the control focus goes back to when it closes as the
+// "opener" (see `H.focusIsMarked`): a menu item is gone by then, so it is the
+// menu's trigger. `opener` is that control's name, for a failure to quote.
 const H = require("./harness.js")
 
 // The agent the dialog checks open things on: a quiet seeded agent no scene is
@@ -26,7 +27,7 @@ const DIALOGS = {
   picker: {
     title: "^New agent$",
     from: "hub",
-    open: (dev) => H.press(dev, { name: "^New agent…$", selector: "button" }),
+    open: (dev) => H.press(dev, { name: "^New agent…$", selector: "button", mark: "opener" }),
     opener: "New agent…",
   },
   report: {

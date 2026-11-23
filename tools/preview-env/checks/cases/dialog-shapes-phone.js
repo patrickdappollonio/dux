@@ -56,10 +56,10 @@ module.exports = {
 
       await H.press(dev, { name: `^${closer}$`, selector: "button", within: H.DIALOG })
       await H.waitForNoDialog(dev, `the ${kind} "${d.name}" on its ${closer}`)
-      const back = await H.focused(dev.page)
+      const back = await H.focusIsMarked(dev.page, "opener")
       H.expect(
-        back.name === spec.opener,
-        `closing the ${kind} "${d.name}" should put focus back on "${spec.opener}", which opened it; focus is on ${back.what}`,
+        back.same,
+        `closing the ${kind} "${d.name}" should put focus back on the "${spec.opener}" that opened it (${back.marked}); focus is on ${(await H.focused(dev.page)).what}`,
       )
     }
   },

@@ -6,15 +6,6 @@ const { AGENT } = require("../dialogs.js")
 const TITLE = "^Environment: "
 const TYPED = "CHECKS_DRAFT=1"
 
-async function tooltip(page) {
-  return page.evaluate(() =>
-    [...document.querySelectorAll('[data-slot="tooltip-content"]')]
-      .filter((el) => el.getBoundingClientRect().width > 0)
-      .map((el) => el.textContent.trim())
-      .join(" | "),
-  )
-}
-
 module.exports = {
   protects:
     "A form with nothing changed has its Save disabled with a reason and closes on Escape at once; with an edit, Escape asks \"Discard unsaved changes?\" and Keep editing keeps the text and puts focus back in the field.",
@@ -27,13 +18,8 @@ module.exports = {
     let form = await H.waitForDialog(dev, TITLE)
     const save = form.buttons.find((b) => b.name === "Save")
     H.expect(save && save.disabled, `with nothing changed, "${form.name}" should have its Save disabled; it is ${save ? "enabled" : "missing"}`)
-    await H.hover(dev, { name: "^Save$", selector: "button", within: H.DIALOG })
-    await H.waitFor(
-      dev.page,
-      () => [...document.querySelectorAll('[data-slot="tooltip-content"]')].some((el) => el.getBoundingClientRect().width > 0 && el.textContent.trim().length > 0),
-      "a reason to appear over the disabled Save",
-      { timeout: 3000 },
-    ).catch(async () => H.fail(`the disabled Save in "${form.name}" shows no reason when pointed at (tooltips on screen: "${await tooltip(dev.page)}")`))
+    const reason = await H.reasonFor(dev, "Save")
+    H.expect(reason, `the disabled Save in "${form.name}" should give a reason when pointed at; it gives none`)
 
     await dev.page.keyboard.press("Escape")
     await H.waitForNoDialog(dev, `"${form.name}" with nothing changed, on Escape,`)
@@ -42,11 +28,10 @@ module.exports = {
     form = await H.waitForDialog(dev, TITLE)
     await dev.page.keyboard.type(TYPED)
     await dev.page.keyboard.press("Escape")
-    const question = await H.waitForDialog(dev, ".").catch(() => null)
-    H.expect(
-      question && question.name === "Discard unsaved changes?",
-      `Escape over an edited "${form.name}" should ask "Discard unsaved changes?"; ${question ? `"${question.name}" is on top instead` : "nothing asked"}`,
-    )
+    await H.waitForDialog(dev, "^Discard unsaved changes\\?$").catch(async () => {
+      const top = await H.topDialog(dev.page)
+      H.fail(`Escape over an edited "${form.name}" should ask "Discard unsaved changes?"; ${top ? `"${top.name}" is on top instead` : "no dialog is open"}`)
+    })
 
     await H.press(dev, { name: "^Keep editing$", selector: "button" })
     await H.until(async () => (await H.dialogs(dev.page)).length === 1, "the question to close on Keep editing")
