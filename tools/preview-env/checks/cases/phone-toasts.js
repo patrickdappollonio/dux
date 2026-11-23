@@ -14,6 +14,7 @@ async function toastTop(H, dev) {
   return H.until(async () => {
     const top = await dev.page.evaluate(() => {
       const tops = [...document.querySelectorAll("[data-sonner-toast]")]
+        .filter((t) => t.getAttribute("data-removed") !== "true")
         .map((t) => t.getBoundingClientRect())
         .filter((r) => r.height > 0)
         .map((r) => r.top)
@@ -25,38 +26,41 @@ async function toastTop(H, dev) {
   }, "a toast to settle on screen", { timeout: 6000 })
 }
 
-// The bottom edge of the top chrome a person sees: the header, and the action
-// flap hanging off it on a pane (found by its theater and macro controls, which
-// nothing else at the top carries, named the way a screen reader
-// says them).
-async function chromeBottom(dev) {
-  return dev.page.evaluate(() => {
-    const bottoms = [...document.querySelectorAll("header")]
-      .map((h) => h.getBoundingClientRect())
-      .filter((r) => r.height > 0 && r.top < innerHeight / 3)
-      .map((r) => r.bottom)
+// The bottom edge of the top chrome a person sees: the header, and on a pane
+// the action flap hanging off it, found by its theater and macro controls,
+// named the way a screen reader says them. Every landmark asked for must be
+// there: a renamed control would otherwise quietly leave the flap unmeasured.
+async function chromeBottom(H, dev, { flap }) {
+  const found = await dev.page.evaluate((names) => {
+    const shown = (r) => r.height > 0 && r.top < innerHeight / 3
+    const header = [...document.querySelectorAll("header")].map((h) => h.getBoundingClientRect()).filter(shown)
+    const controls = {}
     for (const b of document.querySelectorAll("button")) {
-      if (!/^(Theater mode|Run a macro)$/.test(window.__checkNameOf(b))) continue
+      const name = window.__checkNameOf(b)
       const r = b.getBoundingClientRect()
-      if (r.height > 0 && r.top < innerHeight / 3) bottoms.push(r.bottom)
+      if (names.includes(name) && shown(r)) controls[name] = r.bottom
     }
-    return bottoms.length ? Math.max(...bottoms) : null
-  })
+    return { header: header.map((r) => r.bottom), controls }
+  }, FLAP_CONTROLS)
+  H.expect(found.header.length, "there is no header at the top of the screen to measure")
+  const missing = flap ? FLAP_CONTROLS.filter((name) => !(name in found.controls)) : []
+  H.expect(!missing.length, `the action flap should carry ${missing.map((n) => `"${n}"`).join(" and ")} at the top of the screen; it does not`)
+  return Math.max(...found.header, ...Object.values(found.controls))
 }
 
+const FLAP_CONTROLS = ["Theater mode", "Run a macro"]
+// Phone toasts re-measure the chrome above them every 250ms while one is up.
+const RETURN_MS = 1000
+
 module.exports = {
-  // Its toasts are replayed to pages opened in the next 30 seconds, so the
-  // checks after it close them on arrival.
-  raisesServerStatuses: true,
   protects:
-    "On a phone a toast starts below the lowest top chrome on the hub, on an agent pane (header and action flap) and under a full-screen dialog's title row, and at the top of the screen in theater mode.",
+    "On a phone a toast starts below the lowest top chrome on the hub, on an agent pane (header and action flap) and under a full-screen dialog's title row, goes back below the flap once that dialog closes, and sits at the top of the screen in theater mode.",
   async run(ctx, H) {
     const dev = await H.device(ctx, "phone")
 
     const below = async (where, bottom) => {
       await raiseToast(H)
       const top = await toastTop(H, dev)
-      H.expect(bottom !== null, `${where}: there is no top chrome to measure`)
       H.expect(
         top >= bottom - 0.5,
         `${where}: the toast should start below the top chrome, which ends at ${Math.round(bottom)}px; it starts at ${Math.round(top)}px, over it`,
@@ -64,11 +68,12 @@ module.exports = {
     }
 
     await H.goto(dev, "")
-    await below("On the hub", await chromeBottom(dev))
+    await below("On the hub", await chromeBottom(H, dev, { flap: false }))
 
     await H.goto(dev, H.agentHash(await H.agentId(AGENT)))
     await H.drive(dev)
-    await below("On an agent pane", await chromeBottom(dev))
+    const paneChrome = await chromeBottom(H, dev, { flap: true })
+    await below("On an agent pane", paneChrome)
 
     await H.paneMenu(dev, "^Rename agent…$")
     const dialog = await H.waitForDialog(dev, "^Rename agent$")
@@ -77,13 +82,25 @@ module.exports = {
     await H.press(dev, { name: "^Close$", selector: "button", within: H.DIALOG })
     await H.waitForNoDialog(dev, `"${dialog.name}"`)
 
-    // The toasts raised so far lie over the flap, so they are closed first, as a
-    // person reaching for the theater button would.
-    await H.dismissToasts(dev)
+    const closed = Date.now()
+    let top = null
+    await H.until(
+      async () => {
+        top = await toastTop(H, dev)
+        return top >= paneChrome - 0.5
+      },
+      "",
+      { timeout: RETURN_MS },
+    ).catch(() =>
+      H.fail(
+        `Once "${dialog.name}" closed, the toasts should go back below the action flap, which ends at ${Math.round(paneChrome)}px, within ${RETURN_MS}ms; ${Date.now() - closed}ms later the topmost starts at ${Math.round(top)}px`,
+      ),
+    )
+
     await H.press(dev, { name: "^Theater mode$", selector: "button" })
     await H.waitFor(dev.page, () => document.querySelector("header") === null, "theater to take the header away")
     await raiseToast(H)
-    const top = await toastTop(H, dev)
-    H.expect(top <= 40, `In theater mode the toast should be at the top of the screen; it starts at ${Math.round(top)}px`)
+    const theaterTop = await toastTop(H, dev)
+    H.expect(theaterTop <= 40, `In theater mode the toast should be at the top of the screen; it starts at ${Math.round(theaterTop)}px`)
   },
 }
