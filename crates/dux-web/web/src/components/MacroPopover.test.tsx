@@ -43,7 +43,7 @@ vi.mock("@/lib/store", () => ({
   useDux: () => mockState(),
   useDuxSelector: (select: (s: unknown) => unknown) => select(mockState()),
   runMacro: (name: string, target: SelectedTarget) => runMacro(name, target),
-  openMacrosDialog: (select?: string | null) => openMacrosDialog(select),
+  openMacrosDialog: () => openMacrosDialog(),
 }))
 
 const { MacroPopover } = await import("./MacroPopover")
@@ -619,6 +619,22 @@ describe("MacroPopover row actions", () => {
     expect(screen.queryByRole("button", { name: "Edit Greet" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Edit Prompt" })).toBeNull()
     expect(screen.getByRole("button", { name: "Edit macros…" })).toBeTruthy()
+  })
+
+  it("filters the rows as you type, and Enter runs the highlighted macro", async () => {
+    runMacro.mockReturnValue("pty")
+    render(<MacroPopover target={target} />)
+    fireEvent.click(screen.getByRole("button", { name: "Run a macro" }))
+    await settle()
+    const input = document.querySelector<HTMLInputElement>('[data-slot="command-input"]')!
+    fireEvent.change(input, { target: { value: "pro" } })
+    await settle()
+    expect(screen.queryByRole("option", { name: /Greet/ })).toBeNull()
+    expect(screen.getByRole("option", { name: /Prompt/ })).toBeTruthy()
+    fireEvent.keyDown(input, { key: "Enter" })
+    await settle()
+    expect(runMacro).toHaveBeenCalledWith("Prompt", target)
+    expect(openMacrosDialog).not.toHaveBeenCalled()
   })
 })
 

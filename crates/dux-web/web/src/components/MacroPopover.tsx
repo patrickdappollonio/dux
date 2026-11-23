@@ -108,11 +108,11 @@ export function MacroPopover({
 
   // The Macros dialog opens as the picker closes, so the dialog hands focus
   // back to what stays: the trigger, else the pane.
-  function openDialog(select: string | null) {
+  function openDialog() {
     setOpen(false)
     const anchor = anchored?.ref ?? triggerRef
     const ptyId = targetPtyId(target)
-    openMacrosDialog(select, () => {
+    openMacrosDialog(() => {
       const back = anchor.current
       if (back?.isConnected) return back
       return paneMacroTargetFor(ptyId)?.typingSurface() ?? null
@@ -219,7 +219,7 @@ export function MacroPopover({
           // shrink-0: the footer never gives up height to the list; when the
           // popup is at its viewport cap it is the list that scrolls.
           className="flex w-full shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm text-muted-foreground hover:text-foreground max-md:min-h-10 pointer-coarse:min-h-10"
-          onClick={() => openDialog(null)}
+          onClick={openDialog}
         >
           <SquarePen className="size-3.5 shrink-0" />
           Edit macros…

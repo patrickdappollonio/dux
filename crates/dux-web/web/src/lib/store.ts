@@ -9490,9 +9490,8 @@ let macrosReturnFocus: (() => HTMLElement | null) | null = null
 // Open the macro-editor dialog, on the edits a Back set aside when there are
 // any, else on the saved list (copied, so edits never touch the bootstrap).
 // Runs in the click/palette handler that opens the dialog, never an effect.
-// `select` names the macro it opens on; `returnFocus` where focus goes on close.
+// `returnFocus` says where focus goes on close.
 export function openMacrosDialog(
-  select: string | null = null,
   returnFocus: (() => HTMLElement | null) | null = null,
 ): void {
   const opener = lastPageControl()
@@ -9500,18 +9499,14 @@ export function openMacrosDialog(
     returnFocus ?? (() => (opener?.isConnected ? opener : null))
   const setAside = macrosSetAside
   if (setAside !== null) {
-    const index = setAside.macros.findIndex((macro) => macro.name === select)
-    reopenMacrosDialog(
-      index === -1 ? setAside : { ...setAside, selected: index },
-      null,
-    )
+    reopenMacrosDialog(setAside, null)
     return
   }
   const bootstrap = state.bootstrap
   setState({
     macrosDialogOpen: true,
     macrosDraft: bootstrap
-      ? savedMacrosEdit(bootstrap.macros, bootstrap.macros_version ?? null, select)
+      ? savedMacrosEdit(bootstrap.macros, bootstrap.macros_version ?? null)
       : null,
     macrosConflict: null,
     macrosDraftEpoch: state.macrosDraftEpoch + 1,

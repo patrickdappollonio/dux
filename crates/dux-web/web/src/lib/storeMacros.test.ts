@@ -283,13 +283,6 @@ describe("store macros dialog", () => {
     expect(snap.macrosDraft).toBeNull()
   })
 
-  it("openMacrosDialog names the macro to open on", async () => {
-    bootstrapMacros = seed
-    const mod = await loadStore()
-    mod.openMacrosDialog("Build")
-    expect(mod.getSnapshot().macrosDraft?.selected).toBe(1)
-  })
-
   it("openMacrosDialog before the bootstrap loads leaves the draft to the bootstrap", async () => {
     failBootstrap = true
     const mod = await loadStoreNoBootstrap()
@@ -579,10 +572,6 @@ describe("store macros commands", () => {
     mod.openMacrosDialog()
     expect(mod.getSnapshot().macrosDraft).toEqual(edited)
     expect(toast.dismiss).toHaveBeenCalledWith("macros-set-aside")
-
-    mod.setAsideMacrosDraft(edited, 1)
-    mod.openMacrosDialog("Review")
-    expect(mod.getSnapshot().macrosDraft).toEqual({ ...edited, selected: 0 })
 
     // A discard is what drops them.
     mod.closeMacrosDialog()

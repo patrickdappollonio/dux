@@ -134,18 +134,13 @@ export interface MacrosEdit {
   selected: number | null
 }
 
-// A session with nothing edited yet, opened on the macro named `select`.
-export function savedMacrosEdit(
-  saved: MacroView[],
-  version: string | null,
-  select: string | null = null,
-): MacrosEdit {
-  const index = saved.findIndex((macro) => macro.name === select)
+// A session with nothing edited yet, on no macro.
+export function savedMacrosEdit(saved: MacroView[], version: string | null): MacrosEdit {
   return {
     macros: saved.map((macro, origin) => ({ ...macro, origin })),
     baseline: saved.map((macro) => ({ ...macro })),
     version,
-    selected: index === -1 ? null : index,
+    selected: null,
   }
 }
 
