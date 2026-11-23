@@ -331,6 +331,11 @@ function useWrapped(el: RefObject<HTMLElement | null>): boolean {
 // splitting, unless it is longer than a line on its own; its negative margin
 // keeps it from making its line taller than the text's, so a wrapped pill
 // grows by whole lines and its padding stays even.
+// The room a two-line pill takes, held from the dialog's first frame so an
+// answer of one or two lines moves nothing around it: two of the pill's text
+// lines plus its `py-[5px]` and its 1px border, top and bottom.
+const PILL_SLOT = "min-h-[calc(2*var(--text-xs)*var(--text-xs--line-height)+12px)]"
+
 const QUIET_PILL = "border-border/60 bg-muted/40 text-muted-foreground"
 const WARNING_PILL = "border-dux-warning/30 bg-dux-warning/10"
 
@@ -578,9 +583,11 @@ export function DeleteSessionDialog() {
             )}
           </Collapse>
           <div className="pt-4">
-            <AnimatedHeight>
-              <BranchCheckPill check={check} />
-            </AnimatedHeight>
+            <div data-slot="branch-check-slot" className={PILL_SLOT}>
+              <AnimatedHeight>
+                <BranchCheckPill check={check} />
+              </AnimatedHeight>
+            </div>
           </div>
         </div>
       )}
