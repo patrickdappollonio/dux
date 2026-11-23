@@ -2,11 +2,18 @@
 # Chromium they drive. Sourced, not run; the sourcing script has set PREVIEW (the
 # tools/preview-env directory) and a fail() of its own.
 
-# Docker access, resolved the way up.sh resolves it.
+# Docker access, resolved the way up.sh resolves it: directly when this shell has
+# it, through `sg docker` when the user was added to the group without a re-login.
 if docker info > /dev/null 2>&1; then
   compose() { (cd "$PREVIEW" && docker compose "$@"); }
+  docker_cmd() { docker "$@"; }
 else
   command -v sg > /dev/null 2>&1 || fail "docker access denied and sg is unavailable"
+  docker_cmd() {
+    local quoted
+    quoted=$(printf '%q ' "$@")
+    sg docker -c "docker $quoted"
+  }
   compose() {
     local quoted project=""
     quoted=$(printf '%q ' "$@")
