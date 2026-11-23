@@ -2448,6 +2448,12 @@ fn patch_server_timeouts_and_concurrency(doc: &mut DocumentMut, config: &Config)
     patch_table_u32(
         doc,
         "server",
+        "new_agent_request_timeout_seconds",
+        config.server.new_agent_request_timeout_seconds,
+    );
+    patch_table_u32(
+        doc,
+        "server",
         "heartbeat_seconds",
         config.server.heartbeat_seconds,
     );
@@ -3930,6 +3936,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
             parsed.server.changes_request_timeout_seconds,
             crate::config::DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS
         );
+        assert_eq!(
+            parsed.server.new_agent_request_timeout_seconds,
+            crate::config::DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS
+        );
 
         let config = Config {
             server: crate::config::ServerConfig {
@@ -3941,6 +3951,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 reconnect_attempts: 26,
                 reconnect_attempt_timeout_seconds: 27,
                 changes_request_timeout_seconds: 28,
+                new_agent_request_timeout_seconds: 29,
                 ..Default::default()
             },
             ..Default::default()
@@ -3955,6 +3966,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         assert_eq!(parsed.server.reconnect_attempts, 26);
         assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 27);
         assert_eq!(parsed.server.changes_request_timeout_seconds, 28);
+        assert_eq!(parsed.server.new_agent_request_timeout_seconds, 29);
     }
 
     /// And a patch rewrites each of them in a file that already carries other
@@ -3969,7 +3981,8 @@ build = { text = \"cargo build\", surface = \"terminal\" }
              heartbeat_seconds = 3\nheartbeat_deadline_seconds = 4\n\
              pty_send_timeout_seconds = 5\nreconnect_attempts = 6\n\
              reconnect_attempt_timeout_seconds = 7\n\
-             changes_request_timeout_seconds = 8\n",
+             changes_request_timeout_seconds = 8\n\
+             new_agent_request_timeout_seconds = 9\n",
         )
         .expect("seed config");
 
@@ -3983,6 +3996,7 @@ build = { text = \"cargo build\", surface = \"terminal\" }
                 reconnect_attempts: 36,
                 reconnect_attempt_timeout_seconds: 37,
                 changes_request_timeout_seconds: 38,
+                new_agent_request_timeout_seconds: 39,
                 ..Default::default()
             },
             ..Default::default()
@@ -4011,6 +4025,10 @@ build = { text = \"cargo build\", surface = \"terminal\" }
         );
         assert_eq!(
             parsed.server.changes_request_timeout_seconds, 38,
+            "saved:\n{saved}"
+        );
+        assert_eq!(
+            parsed.server.new_agent_request_timeout_seconds, 39,
             "saved:\n{saved}"
         );
     }

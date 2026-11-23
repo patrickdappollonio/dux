@@ -36,6 +36,11 @@ export const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS = 10
 /// connection never settles, and the pane would otherwise sit loading forever.
 export const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS = 30
 
+/// How long the New agent form waits for the server's first answer to its
+/// create (the create starting, or a refusal) before it frees the form and says
+/// the server has not answered. It bounds that answer, not the creation.
+export const DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS = 30
+
 /// How often a visible page sends its one periodic frame while it is NOT the
 /// owner-and-visible pair that owes the engine a faster viewed ping.
 export const DEFAULT_HEARTBEAT_SECONDS = 15
@@ -57,6 +62,7 @@ export type ConnectionTimingDoc = Partial<
     | "reconnect_attempts"
     | "reconnect_attempt_timeout_seconds"
     | "changes_request_timeout_seconds"
+    | "new_agent_request_timeout_seconds"
   >
 >
 
@@ -115,6 +121,14 @@ export function changesRequestTimeoutMs(): number {
   return seconds(
     published?.changes_request_timeout_seconds,
     DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS,
+  )
+}
+
+/// `[server] new_agent_request_timeout_seconds` in ms.
+export function newAgentRequestTimeoutMs(): number {
+  return seconds(
+    published?.new_agent_request_timeout_seconds,
+    DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS,
   )
 }
 

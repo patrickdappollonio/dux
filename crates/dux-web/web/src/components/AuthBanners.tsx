@@ -172,6 +172,7 @@ export function AuthBanners({ status }: { status: AuthStatus | null }) {
     <div
       ref={ref}
       data-testid="auth-banners"
+      data-toast-clear
       className="relative z-40 flex flex-col bg-background"
       style={{ paddingTop: "env(safe-area-inset-top)" }}
     >

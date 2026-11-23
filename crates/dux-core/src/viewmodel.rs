@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use std::collections::BTreeMap;
 
+use crate::config_effective::effective_new_agent_request_timeout_seconds;
 use crate::engine::Engine;
 use crate::ids::TabIdRef;
 use crate::model::{AgentSession, Project, ProjectBranchStatus, ProviderKind};
@@ -352,6 +353,9 @@ pub struct BootstrapView {
     /// Mirrors `config.server.changes_request_timeout_seconds`: how long the
     /// Changes pane waits for one changed-files request before giving it up.
     pub changes_request_timeout_seconds: u32,
+    /// Mirrors `config.server.new_agent_request_timeout_seconds`: how long the
+    /// New agent form waits for the server's first answer to its create.
+    pub new_agent_request_timeout_seconds: u32,
     /// Mirrors `config.server.heartbeat_seconds`: how often a visible page
     /// checks that its terminal connection is really alive.
     pub heartbeat_seconds: u32,
@@ -1939,6 +1943,9 @@ impl Engine {
                 crate::config_effective::effective_changes_request_timeout_seconds(
                     self.config.server.changes_request_timeout_seconds,
                 ),
+            new_agent_request_timeout_seconds: effective_new_agent_request_timeout_seconds(
+                self.config.server.new_agent_request_timeout_seconds,
+            ),
             heartbeat_seconds: crate::config_effective::effective_heartbeat_seconds(
                 self.config.server.heartbeat_seconds,
             ),
@@ -3999,6 +4006,7 @@ mod tests {
             "reconnect_attempts",
             "reconnect_attempt_timeout_seconds",
             "changes_request_timeout_seconds",
+            "new_agent_request_timeout_seconds",
         ] {
             assert!(
                 json.contains(&format!("\"{field}\"")),
@@ -4071,6 +4079,16 @@ mod tests {
         );
         engine.config.server.changes_request_timeout_seconds = 9;
         assert_eq!(engine.bootstrap().changes_request_timeout_seconds, 9);
+    }
+
+    /// The New agent form's wait for the server's first answer reaches the
+    /// browser the same way.
+    #[test]
+    fn bootstrap_projects_the_new_agent_request_deadline_from_server_config() {
+        let (mut engine, _tmp) = test_engine();
+        assert_eq!(engine.bootstrap().new_agent_request_timeout_seconds, 30);
+        engine.config.server.new_agent_request_timeout_seconds = 9;
+        assert_eq!(engine.bootstrap().new_agent_request_timeout_seconds, 9);
     }
 
     #[test]

@@ -123,7 +123,7 @@ import {
   reviewCopyAgreement,
   reviewCopyBlocksSubmit,
 } from "./cloneProjectPr"
-import { publishConnectionTiming } from "./connectionTiming"
+import { newAgentRequestTimeoutMs, publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
 import { leftoverDeleteReport, worktreeDeleteReport } from "./worktreeDelete"
@@ -8767,17 +8767,13 @@ export function confirmCreateWithExistingBranch(): void {
 // existing branch's and the question goes up over it.
 //
 // The create still out, if any. A create the server has not answered within
-// `NEW_AGENT_CREATE_DEADLINE_MS` frees the form and is forgotten: its late
-// answer opens no question and closes nothing.
+// `[server] new_agent_request_timeout_seconds` frees the form and is
+// forgotten: its late answer opens no question and closes nothing. The wait
+// bounds that first answer, not the creation, which runs on as an operation
+// once started.
 let newAgentCreate: object | null = null
 // Numbers the creates sent with no name, which have nothing else to key on.
 let unnamedNewAgentCreates = 0
-
-/// How long the New agent form waits for the server's first answer to its
-/// create (the create starting, or a refusal) before it frees the form and says
-/// the server has not answered. Fixed rather than a setting: it bounds one
-/// request, not the creation, which runs on as an operation once started.
-const NEW_AGENT_CREATE_DEADLINE_MS = 30_000
 
 function submitNewAgent(projectId: string, name: string, copyChanges: boolean): void {
   // One create at a time: a second press before the first is answered would
@@ -8800,7 +8796,7 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     name === ""
       ? `new-agent-create:${projectId}:#${String(++unnamedNewAgentCreates)}`
       : `new-agent-create:${projectId}:${name}`
-  const wait = NEW_AGENT_CREATE_DEADLINE_MS
+  const wait = newAgentRequestTimeoutMs()
   const deadline = setTimeout(() => {
     if (newAgentCreate !== create) return
     newAgentCreate = null

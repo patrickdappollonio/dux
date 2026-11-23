@@ -3,6 +3,9 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { toast } from "sonner"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
+import { AuthBanners } from "@/components/AuthBanners"
+import { normalizeAuthStatus } from "@/lib/authApi"
+
 import {
   phoneToastTop,
   TOAST_MIN_ROOM_PX,
@@ -13,6 +16,12 @@ import {
   VISIBLE_TOASTS_DESKTOP,
   VISIBLE_TOASTS_MOBILE,
 } from "./sonner"
+
+// The sign-in banners ask the server again when they mount; here nothing answers.
+vi.mock("@/lib/authGate", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/authGate")>()),
+  refreshAuthStatus: () => Promise.resolve(),
+}))
 
 // jsdom has no Pointer Events implementation: `setPointerCapture` is missing on
 // Element, and sonner calls it on every pointerdown. Stub it so the swipe
@@ -845,6 +854,22 @@ describe("Toaster placement", () => {
     { chrome: 136, height: 136 + 8 + TOAST_MIN_ROOM_PX, inset: 20, top: null },
   ])("starts a phone stack under $chrome px of chrome on a $height px screen at $top", ({ chrome, height, inset, top }) => {
     expect(phoneToastTop(chrome, height, inset)).toBe(top)
+  })
+
+  it("starts a phone toast below a sign-in banner and the header under it", async () => {
+    render(<AuthBanners status={normalizeAuthStatus({ no_auth_warning: true })} />)
+    const banners = screen.getByTestId("auth-banners")
+    banners.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 120, left: 0, right: 390, width: 390, height: 120, x: 0, y: 0 }) as DOMRect
+    const remove = chrome([120, 176])
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("184px"))
+    } finally {
+      remove()
+    }
   })
 
   it("ignores marked chrome that does not hang from the top", async () => {
