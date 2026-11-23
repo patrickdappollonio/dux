@@ -1,12 +1,13 @@
-import { ChevronLeft, ChevronRight, Ellipsis, GitPullRequest } from "lucide-react"
+import { ChevronLeft, ChevronRight, GitPullRequest } from "lucide-react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
+import { BANNER_CONTROL_BOX } from "@/components/ellipsisPlacements"
 import { PrListMenuItems } from "@/components/PrListMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
   prBannerClass,
@@ -24,12 +25,6 @@ import type { PrKeyView, PrView } from "@/lib/types"
 // too, so they sit flush with the strip and with each other; on a coarse
 // pointer the whole strip grows to the 40px touch floor with them.
 const STRIP_HEIGHT = "h-9 pointer-coarse:h-10"
-// The trailing controls' width: the touch floor on a coarse pointer. On a fine
-// pointer they keep the strip's 36px, which is clear of the floor's purpose:
-// above and below them is the terminal or the strip's own edge, nothing a
-// stray press could land on, and beside them sit the anchor (the strip's own
-// link) on one side and the strip's edge on the other.
-const CONTROL_SIZE = "w-9 pointer-coarse:w-10"
 
 // A slim, one-line PR info strip mirroring the TUI's PR banner lane
 // (`render_pr_banner`): a state-colored surface carrying the PR icon, its
@@ -66,7 +61,7 @@ export function PrBanner({
     const key = prKeyOf(prs[stepPrIndex(prs.length, index, dir)])
     if (key) onCursor(key)
   }
-  const control = cn("rounded-none text-current", STRIP_HEIGHT, CONTROL_SIZE)
+  const control = BANNER_CONTROL_BOX
   return (
     <div
       data-testid="pr-banner"
@@ -135,18 +130,7 @@ export function PrBanner({
           </>
         ) : null}
         <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="All pull requests"
-                className={control}
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
+          <EllipsisMenuTrigger placement="banner" aria-label="All pull requests" />
           <DropdownMenuContent
             align="end"
             alignOffset={8}

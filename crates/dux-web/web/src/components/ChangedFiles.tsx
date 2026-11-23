@@ -15,8 +15,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Ellipsis,
-  EllipsisVertical,
   FileCode2,
   GitCommitVertical,
   Loader2,
@@ -40,6 +38,7 @@ import { notifyError, notifyInfo } from "@/lib/notify"
 import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
@@ -139,7 +138,7 @@ import {
 } from "@/lib/changesExpansion"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { ALWAYS_REVEALED_ON_PHONE, HOVER_REVEAL, REVEAL_ROW } from "@/lib/hoverReveal"
+import { REVEAL_ROW } from "@/lib/hoverReveal"
 import { cn } from "@/lib/utils"
 import type { ChangedFileView, SessionView } from "@/lib/types"
 import { agentRoot } from "@/lib/editorRoot"
@@ -645,11 +644,7 @@ const FileRow = memo(function FileRow({
         * React routes through this ancestor. */
       <div
         role="gridcell"
-        className={cn(
-          HOVER_REVEAL,
-          "[--reveal-cap:--spacing(10)] has-[[aria-busy=true]]:max-w-(--reveal-cap) has-[[aria-busy=true]]:opacity-100",
-          ALWAYS_REVEALED_ON_PHONE,
-        )}
+        className="flex shrink-0 items-center"
         onClick={(e) => e.stopPropagation()}
       >
         <DropdownMenu
@@ -657,21 +652,14 @@ const FileRow = memo(function FileRow({
             if (open) setMenuMounted(true)
           }}
         >
-          <DropdownMenuTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon"
-                disabled={busy}
-                aria-busy={busy}
-                tabIndex={inTabOrder ? undefined : -1}
-                aria-label={`Actions for ${file.path}`}
-                className={cn("shrink-0", TOUCH_ICON)}
-              />
-            }
-          >
-            {busy ? <Loader2 className="motion-safe:animate-spin" /> : <Ellipsis />}
-          </DropdownMenuTrigger>
+          <EllipsisMenuTrigger
+            placement="row"
+            reveal="hover"
+            roomy
+            busy={busy}
+            tabIndex={inTabOrder ? undefined : -1}
+            aria-label={`Actions for ${file.path}`}
+          />
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
               {/* Open in the editor. Skipped for deleted files (nothing on
@@ -1097,19 +1085,12 @@ function ChangesHeader({
           </>
         )}
         <DropdownMenu>
-          <DropdownMenuTrigger
+          <EllipsisMenuTrigger
             ref={triggerRef}
-            render={
-              <Button
-                size="icon"
-                variant="outline"
-                aria-label="Changes actions"
-                className={TOUCH_ICON}
-              />
-            }
-          >
-            <EllipsisVertical />
-          </DropdownMenuTrigger>
+            placement="header"
+            roomy
+            aria-label="Changes actions"
+          />
           <DropdownMenuContent align="end">
             {folded ? (
               <>

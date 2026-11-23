@@ -1,5 +1,6 @@
-import { Ellipsis, Plus, SquareTerminal, X } from "lucide-react"
+import { Plus, SquareTerminal, X } from "lucide-react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
@@ -11,7 +12,6 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
   addToAgentBlockHint,
@@ -31,7 +31,7 @@ import {
 } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
 import { terminalTitle } from "@/lib/terminals"
-import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
+import { REVEAL_ROW } from "@/lib/hoverReveal"
 import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
@@ -202,29 +202,12 @@ function DockPill({
       <span className="max-w-40 truncate">{label}</span>
       {/* The tab pill's reveal. */}
       {withMenu ? (
-        <div
-          className={cn(
-            HOVER_REVEAL,
-            "[--reveal-cap:--spacing(8)]",
-            REVEALED_ON_ANY_FOCUS,
-          )}
-        >
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <button
-                  type="button"
-                  aria-label="Terminal actions"
-                  onClick={(e) => e.stopPropagation()}
-                  // The touch floor under a finger: its neighbours are the next
-                  // pill and its own pill's select. A tablet keeps the 20px box
-                  // and an invisible 10px margin takes the tap area to 40px.
-                  className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:pointer-coarse:size-10 md:pointer-coarse:after:block"
-                />
-              }
-            >
-              <Ellipsis className="size-3.5" />
-            </DropdownMenuTrigger>
+            <EllipsisMenuTrigger
+              placement="dock-pill"
+              reveal="hover-or-focus"
+              aria-label="Terminal actions"
+            />
             <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
               {/* This terminal's own actions only: the input rows and the editor
                   live in the pane's top menu. Neutral, like every destructive
@@ -246,7 +229,6 @@ function DockPill({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
       ) : null}
     </div>
   )

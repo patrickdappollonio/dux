@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react"
-import { Copy, Ellipsis, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
+import { Copy, FileWarning, FolderGit2, FolderX, Trash2 } from "lucide-react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import {
@@ -9,14 +10,12 @@ import {
   useHeldWhileClosed,
   useModalLifetime,
 } from "@/components/modal"
-import { Button } from "@/components/ui/button"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -312,18 +311,7 @@ function LeftoverRow({
         </div>
       </div>
       <DropdownMenu>
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-              aria-label="Left-over folder actions"
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
+        <EllipsisMenuTrigger placement="row" aria-label="Left-over folder actions" />
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => clipboardWorktree(folder.path)}>
             <Copy />
@@ -628,18 +616,7 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
                     </button>
                   </SimpleTooltip>
                   <DropdownMenu>
-                    <DropdownMenuTrigger
-                      render={
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-8 shrink-0 max-md:size-10 pointer-coarse:size-10"
-                          aria-label="Worktree actions"
-                        />
-                      }
-                    >
-                      <Ellipsis />
-                    </DropdownMenuTrigger>
+                    <EllipsisMenuTrigger placement="row" aria-label="Worktree actions" />
                     <DropdownMenuContent align="end">
                       {/* Neutral colour: the trailing ellipsis and the
                          confirmation carry the danger, per the row-menu
