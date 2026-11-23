@@ -75,7 +75,7 @@ function ConfigEditorForm({
           {error}
         </p>
       ) : null}
-      <Notice shape="box" tone="info" icon={Info}>
+      <Notice shape="box" tone="info" announce="static" icon={Info}>
         <span>
           Saving writes <InlineCode>config.toml</InlineCode> to disk but
           does not apply it. Run <span className="font-medium">Reload config</span>{" "}

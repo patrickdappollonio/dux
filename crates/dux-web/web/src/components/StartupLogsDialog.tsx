@@ -34,7 +34,7 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
 
   return startupLogsError ? (
     <Notice shape="box" tone="danger">
-      {startupLogsError}
+      <span className="text-destructive">{startupLogsError}</span>
     </Notice>
   ) : !hasLogs && startupLogsLoading ? (
     <div className="flex h-64 items-center justify-center">

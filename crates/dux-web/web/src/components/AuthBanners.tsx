@@ -45,9 +45,11 @@ function NoPasswordBanner({ canSetFirst }: { canSetFirst: boolean }) {
   }
   return (
     <Notice
-      shape="strip"
+      shape="banner"
       tone="danger"
+      emphasis="strong"
       icon={ShieldAlert}
+      lead="No password: anyone who can reach this address can use dux."
       data-testid="no-auth-banner"
       actions={[
         { label: "Dismiss", onSelect: () => dismissBanner("no_auth") },
@@ -59,9 +61,6 @@ function NoPasswordBanner({ canSetFirst }: { canSetFirst: boolean }) {
         },
       ]}
     >
-      <strong className="font-semibold">
-        No password: anyone who can reach this address can use dux.
-      </strong>{" "}
       They can run commands as you, read and change your files, and drive every
       agent. {canSetFirst ? "Set one in Preferences, or run " : "Set one by running "}
       <InlineCode>dux config set server.auth.password</InlineCode> on the machine
@@ -73,18 +72,17 @@ function NoPasswordBanner({ canSetFirst }: { canSetFirst: boolean }) {
 function WeakPasswordBanner() {
   return (
     <Notice
-      shape="strip"
-      tone="warning"
+      shape="banner"
+      tone="neutral"
       icon={KeyRound}
+      iconTone="danger"
+      lead="The dux password is weaker than the minimum it asks for."
       data-testid="weak-password-banner"
       actions={[
         { label: "Dismiss", onSelect: () => dismissBanner("weak") },
         { label: "Change it in Preferences…", onSelect: () => openCustomizeWebapp("network") },
       ]}
     >
-      <strong className="font-semibold">
-        The dux password is weaker than the minimum it asks for.
-      </strong>{" "}
       It still signs you in, but anyone who sees your config file can try to
       guess it offline, and blocking addresses does not slow that down. Change it
       to a long, unique one.

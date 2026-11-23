@@ -191,7 +191,7 @@ function InspectionMessages({
   return (
     <>
       {init ? (
-        <Notice shape="box" tone="warning" icon={AlertTriangle}>
+        <Notice shape="box" tone="warning" announce="static" icon={AlertTriangle}>
           <div className="grid gap-1">
             <span>{init.message}</span>
             <span className="text-xs text-muted-foreground">
@@ -201,12 +201,12 @@ function InspectionMessages({
         </Notice>
       ) : null}
       {blocked ? (
-        <Notice shape="box" tone="warning" icon={Ban}>
+        <Notice shape="box" tone="warning" announce="static" icon={Ban}>
           {renderProse(blocked.messageProse)}
         </Notice>
       ) : null}
       {noCommits ? (
-        <Notice shape="box" tone="warning" icon={AlertTriangle}>
+        <Notice shape="box" tone="warning" announce="static" icon={AlertTriangle}>
           <div className="grid gap-1">
             <span>{noCommits.message}</span>
             <span className="text-xs text-muted-foreground">
@@ -216,29 +216,13 @@ function InspectionMessages({
         </Notice>
       ) : null}
       {branch ? (
-        <Notice shape="box" tone="warning" icon={AlertTriangle}>
-          <div className="grid gap-2">
-            <div className="grid gap-1">
-              <span>{renderProse(branch.messageProse)}</span>
-              {/* Warning tone only when worktrees will NOT branch from the
-                  default; the same tone as the panel's own warning glyph. */}
-              <span
-                data-tone={branch.worktreeTone}
-                className={
-                  branch.worktreeTone === "warning"
-                    ? "text-dux-warning"
-                    : "text-muted-foreground"
-                }
-              >
-                {renderProse(branch.worktreeNoteProse)}
-              </span>
-              {branch.heuristicNote ? (
-                <span className="text-xs text-muted-foreground">
-                  {branch.heuristicNote}
-                </span>
-              ) : null}
-            </div>
-            {branch.canCheckoutDefault && branch.defaultBranch ? (
+        <Notice
+          shape="box"
+          tone="warning"
+          announce="static"
+          icon={AlertTriangle}
+          below={
+            branch.canCheckoutDefault && branch.defaultBranch ? (
               <CheckboxRow
                 id="add-project-checkout-default"
                 checked={checkoutDefault}
@@ -247,6 +231,27 @@ function InspectionMessages({
                 Check out <InlineCode>{branch.defaultBranch}</InlineCode> before
                 adding
               </CheckboxRow>
+            ) : null
+          }
+        >
+          <div className="grid gap-1">
+            <span>{renderProse(branch.messageProse)}</span>
+            {/* Warning tone only when worktrees will NOT branch from the
+                default; the same tone as the panel's own warning glyph. */}
+            <span
+              data-tone={branch.worktreeTone}
+              className={
+                branch.worktreeTone === "warning"
+                  ? "text-dux-warning"
+                  : "text-muted-foreground"
+              }
+            >
+              {renderProse(branch.worktreeNoteProse)}
+            </span>
+            {branch.heuristicNote ? (
+              <span className="text-xs text-muted-foreground">
+                {branch.heuristicNote}
+              </span>
             ) : null}
           </div>
         </Notice>

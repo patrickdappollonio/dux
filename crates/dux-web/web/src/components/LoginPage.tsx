@@ -64,6 +64,7 @@ function PlainHttpWarning() {
     <Notice
       shape="box"
       tone="danger"
+      announce="static"
       icon={ShieldAlert}
       title="This connection is not encrypted"
       data-testid="login-insecure-warning"

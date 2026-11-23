@@ -3,7 +3,6 @@ import { Editor, type OnMount } from "@monaco-editor/react"
 import type { editor as MonacoEditor } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before the editor mounts.
-import { Notice } from "@/components/Notice"
 import { DIFF_THEME_PROPS } from "@/lib/monacoSetup"
 
 interface DiffHeadViewerProps {
@@ -46,9 +45,12 @@ export default function DiffHeadViewer({ text, banner }: DiffHeadViewerProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {banner !== "" && (
-        <Notice shape="strip" tone="info" data-testid="diff-head-banner">
+        <p
+          className="border-b border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="diff-head-banner"
+        >
           {banner}
-        </Notice>
+        </p>
       )}
       <div className="min-h-0 flex-1">
         <Editor

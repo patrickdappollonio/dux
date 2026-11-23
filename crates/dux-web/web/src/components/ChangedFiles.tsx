@@ -2411,7 +2411,7 @@ function NoBranchCheckedOut({ branch }: { branch: string }) {
       tone="warning"
       icon={GitBranch}
       title="No branch checked out"
-      placement="-mt-4"
+      placement="under-card-header"
       data-testid="no-branch-checked-out"
     >
       dux keeps showing <InlineCode>{branch}</InlineCode> until one is checked

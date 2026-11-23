@@ -3,7 +3,6 @@ import { DiffEditor, type DiffOnMount } from "@monaco-editor/react"
 import type { editor as MonacoEditor, IDisposable } from "monaco-editor"
 // Importing the shared bootstrap wires Monaco's self-host (workers + bundled
 // instance) before DiffEditor mounts, and gives us the path→language helper.
-import { Notice } from "@/components/Notice"
 import { DIFF_EDITOR_THEME_PROPS, monacoLanguageForPath } from "@/lib/monacoSetup"
 import { allDeleteDiffOptions } from "@/lib/diffPresentation"
 import { diffQuitEarly } from "@/lib/diffComputation"
@@ -94,10 +93,13 @@ export default function DiffViewer({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {quitEarly && (
-        <Notice shape="strip" tone="info" data-testid="diff-quit-early-notice">
+        <p
+          className="border-b border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="diff-quit-early-notice"
+        >
           This diff was cut short because it took too long to compute; the
           highlights may be coarse.
-        </Notice>
+        </p>
       )}
       <div className="min-h-0 flex-1">
         <DiffEditor

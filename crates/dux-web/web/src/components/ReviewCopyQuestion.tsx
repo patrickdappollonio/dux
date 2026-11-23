@@ -20,7 +20,7 @@ export function ReviewCopyQuestion({
 }) {
   return (
     <>
-      <Notice shape="box" tone="warning" icon={TriangleAlert}>
+      <Notice shape="box" tone="warning" emphasis="strong" announce="alert" icon={TriangleAlert}>
         {renderProse(warning)}
       </Notice>
       {onAgreedChange && (
