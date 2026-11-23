@@ -1,8 +1,9 @@
-import { Component, useState, type ErrorInfo, type ReactNode } from "react"
-import { CopyIcon, RotateCwIcon } from "lucide-react"
+import { Component, type ErrorInfo, type ReactNode } from "react"
+import { RotateCwIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { copyToClipboard } from "@/lib/clipboard"
+import { CopyDetails } from "@/components/CopyDetails"
+import { messageOf, type Caught } from "@/lib/errorText"
 
 // The last-resort boundary around everything main.tsx renders. Without it a
 // render exception outside the inner ChunkBoundary areas unmounts the whole
@@ -11,19 +12,7 @@ import { copyToClipboard } from "@/lib/clipboard"
 // the reload is a button the user presses. It raises no toast either, because
 // the toast host may be part of what crashed.
 
-type Caught = { error: unknown; componentStack: string }
-
 type State = { caught: Caught | null }
-
-function messageOf(error: unknown): string {
-  if (error instanceof Error) return error.message || error.name
-  return String(error)
-}
-
-function detailsOf({ error, componentStack }: Caught): string {
-  const stack = error instanceof Error && error.stack ? error.stack : messageOf(error)
-  return `${stack}\n\nComponent stack:${componentStack}`
-}
 
 export class RootErrorBoundary extends Component<{ children: ReactNode }, State> {
   state: State = { caught: null }
@@ -44,7 +33,6 @@ export class RootErrorBoundary extends Component<{ children: ReactNode }, State>
 }
 
 function ErrorScreen({ caught }: { caught: Caught }) {
-  const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle")
   return (
     <main className="flex min-h-svh items-center justify-center bg-background px-4 py-10 text-foreground">
       <div className="flex w-full max-w-xl flex-col gap-4">
@@ -62,25 +50,7 @@ function ErrorScreen({ caught }: { caught: Caught }) {
             <RotateCwIcon />
             Reload page
           </Button>
-          <Button
-            variant="outline"
-            className="h-10"
-            onClick={() => {
-              void copyToClipboard(detailsOf(caught)).then((ok) =>
-                setCopy(ok ? "copied" : "failed"),
-              )
-            }}
-          >
-            <CopyIcon />
-            Copy details
-          </Button>
-          <span role="status" className="text-sm text-muted-foreground">
-            {copy === "copied"
-              ? "Copied the error and where it happened."
-              : copy === "failed"
-                ? "Could not reach the clipboard; select the message above instead."
-                : ""}
-          </span>
+          <CopyDetails caught={caught} />
         </div>
       </div>
     </main>

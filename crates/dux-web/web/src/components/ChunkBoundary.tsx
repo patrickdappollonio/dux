@@ -1,14 +1,16 @@
-import { Component, type ReactNode } from "react"
+import { Component, type ErrorInfo, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import { CopyDetails } from "@/components/CopyDetails"
 import { confirmedSameDux } from "@/lib/authGate"
+import { messageOf, type Caught } from "@/lib/errorText"
 
 // dux embeds a content-hashed JS bundle in its Rust binary, so a tab left open
 // across a server rebuild still references the old hashed chunk URLs: a lazy
 // import then 404s and, with no error boundary, the whole React tree unmounts
 // into a white screen. This boundary catches that rejection. It also catches
 // every other error thrown while drawing what it wraps, and shows that one as
-// this pane's own error, with no reload of its own.
+// the area's own error, with no reload of its own and a way to copy it.
 //
 // A failed chunk attempts one automatic reload to pick up the new bundle,
 // guarded so a genuinely broken page cannot loop: an auto-reload only happens
@@ -38,28 +40,56 @@ function tryClaimReload(): boolean {
 const CHUNK_LOAD_FAILURE =
   /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS/i
 
-function messageOf(error: unknown): string {
-  if (error instanceof Error) return error.message || error.name
-  return String(error)
-}
+// What the card calls the area it covers, and what it says is still safe. The
+// terminal area's claim about agents and terminals would be a non sequitur over
+// an editor or a dialog, so each kind of area says its own.
+const AREAS = {
+  pane: {
+    title: "This pane hit an error",
+    body: "This pane stopped drawing after an error. Your agents and terminals keep running on the server, and reloading the page brings the pane back.",
+  },
+  editor: {
+    title: "This part of the editor hit an error",
+    body: "This part of the editor stopped drawing after an error. Reloading the page brings it back.",
+  },
+  dialog: {
+    title: "This dialog hit an error",
+    body: "This dialog stopped drawing after an error. Reloading the page brings it back.",
+  },
+} as const
 
 function isChunkLoadFailure(error: unknown): boolean {
   return CHUNK_LOAD_FAILURE.test(messageOf(error))
 }
 
-type State = { caught: { error: unknown } | null }
+type State = { caught: Caught | null }
 
-export class ChunkBoundary extends Component<
-  { children: ReactNode },
-  State
-> {
+type Props = {
+  children: ReactNode
+  area: keyof typeof AREAS
+  // What the boundary is drawing: when it changes, an error card is dropped and
+  // the children get a fresh try. A card raised for one agent or terminal
+  // would otherwise cover every other one the user moves to. A move is the
+  // only reason to change it: the same target gaining or losing a part keeps
+  // its key, so what is mounted under it stays mounted.
+  resetKey?: string
+}
+
+export class ChunkBoundary extends Component<Props, State> {
   state: State = { caught: null }
 
   static getDerivedStateFromError(error: unknown): State {
-    return { caught: { error } }
+    return { caught: { error, componentStack: "" } }
   }
 
-  componentDidCatch(error: unknown) {
+  componentDidUpdate(prev: Props) {
+    if (this.state.caught !== null && prev.resetKey !== this.props.resetKey) {
+      this.setState({ caught: null })
+    }
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo) {
+    this.setState({ caught: { error, componentStack: info.componentStack ?? "" } })
     if (!isChunkLoadFailure(error)) return
     // Auto-reload once; if we already did recently, fall through to the manual
     // card rendered below.
@@ -76,7 +106,7 @@ export class ChunkBoundary extends Component<
       <div className="flex h-full w-full flex-col items-center justify-center gap-4 p-6 text-center">
         <div className="max-w-sm rounded-lg border bg-card p-6 text-card-foreground shadow-sm">
           <p className="text-sm font-medium">
-            {chunk ? "dux needs a reload" : "This pane hit an error"}
+            {chunk ? "dux needs a reload" : AREAS[this.props.area].title}
           </p>
           {chunk ? (
             <p className="mt-2 text-sm text-muted-foreground">
@@ -86,18 +116,20 @@ export class ChunkBoundary extends Component<
           ) : (
             <>
               <p className="mt-2 text-sm text-muted-foreground">
-                This pane stopped drawing after an error. Your agents and terminals
-                keep running on the server, and reloading the page brings the pane
-                back. If it happens again, include the error below when you report it.
+                {AREAS[this.props.area].body} If it happens again, copy the details
+                below into your report.
               </p>
               <pre className="mt-3 max-h-40 overflow-auto rounded-md border bg-muted p-2 text-left font-mono text-xs whitespace-pre-wrap break-words text-foreground">
                 {messageOf(caught.error)}
               </pre>
             </>
           )}
-          <Button className="mt-4 max-md:min-h-10 pointer-coarse:min-h-10" onClick={() => location.reload()}>
-            Reload
-          </Button>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            <Button className="max-md:min-h-10 pointer-coarse:min-h-10" onClick={() => location.reload()}>
+              Reload
+            </Button>
+            {chunk ? null : <CopyDetails caught={caught} />}
+          </div>
         </div>
       </div>
     )

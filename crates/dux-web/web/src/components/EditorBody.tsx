@@ -931,7 +931,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     ) : (
       // Rendered markdown of the end state. Lazy like Monaco, so the same
       // ChunkBoundary + Suspense applies.
-      <ChunkBoundary>
+      <ChunkBoundary area="editor">
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -2834,7 +2834,7 @@ function DiffContentPane({
       )
     }
     return (
-      <ChunkBoundary>
+      <ChunkBoundary area="editor">
         <Suspense fallback={<LoadingPane />}>
           <DiffHeadViewer
             text={diffHead.text}
@@ -2857,7 +2857,7 @@ function DiffContentPane({
   const allDelete = diff !== null && diff !== undefined && isAllDeleteDiff(diff)
   return (
     <div className={allDelete ? "dux-diff-all-delete h-full" : "h-full"}>
-      <ChunkBoundary>
+      <ChunkBoundary area="editor">
         <Suspense fallback={<LoadingPane />}>
           <DiffViewer
             path={tab.path}
@@ -2905,7 +2905,7 @@ function FileContentPane({
   }
   if (preview) return <>{renderPreview(tab.path)}</>
   return (
-    <ChunkBoundary>
+    <ChunkBoundary area="editor">
       <Suspense fallback={<LoadingPane />}>
         <CodeEditor
           path={tab.path}

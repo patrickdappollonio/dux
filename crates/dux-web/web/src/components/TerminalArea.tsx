@@ -165,7 +165,7 @@ function TerminalSurface({
     )
   }
   return (
-    <ChunkBoundary>
+    <ChunkBoundary area="pane" resetKey={paneKey}>
       <Suspense fallback={null}>
         <LiveTerminalPane
           target={target}

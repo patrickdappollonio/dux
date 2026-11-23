@@ -41,7 +41,7 @@ function ConfigEditorForm({
         {/* ChunkBoundary wraps Suspense (not inside it) so a failed lazy
             import after a redeploy surfaces its reload-needed error instead
             of an eternal spinner (same idiom as EditorBody). */}
-        <ChunkBoundary>
+        <ChunkBoundary area="dialog">
           <Suspense
             fallback={
               <div className="flex h-full items-center justify-center text-muted-foreground">

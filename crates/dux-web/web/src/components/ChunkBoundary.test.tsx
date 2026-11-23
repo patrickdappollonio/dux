@@ -38,7 +38,7 @@ async function failAChunk(): Promise<typeof import("@/lib/authGate")> {
   const gate = await import("@/lib/authGate")
   const { ChunkBoundary } = await import("./ChunkBoundary")
   render(
-    <ChunkBoundary>
+    <ChunkBoundary area="pane">
       <Broken />
     </ChunkBoundary>,
   )
@@ -84,7 +84,7 @@ describe("ChunkBoundary", () => {
       throw new Error("Invalid 1 panel layout: 100%, 0%")
     }
     render(
-      <ChunkBoundary>
+      <ChunkBoundary area="pane">
         <Throws />
       </ChunkBoundary>,
     )
@@ -95,5 +95,50 @@ describe("ChunkBoundary", () => {
     expect(fetch).not.toHaveBeenCalled()
     screen.getByRole("button", { name: "Reload" }).click()
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    "Failed to fetch dynamically imported module: https://x/assets/a.js",
+    "error loading dynamically imported module: https://x/assets/a.js",
+    "Importing a module script failed.",
+    "Unable to preload CSS for /assets/a.css",
+  ])("treats %j as an out-of-date tab, not as the area's own error", async (message) => {
+    statusReply = () => json({ password_set: false, required_here: false, signed_in: false })
+    const { ChunkBoundary } = await import("./ChunkBoundary")
+    function Fails(): never {
+      throw new Error(message)
+    }
+    render(
+      <ChunkBoundary area="pane">
+        <Fails />
+      </ChunkBoundary>,
+    )
+    expect(screen.getByText("dux needs a reload")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /Copy details/ })).toBeNull()
+  })
+
+  it.each([
+    ["pane", "This pane hit an error", true],
+    ["editor", "This part of the editor hit an error", false],
+    ["dialog", "This dialog hit an error", false],
+  ] as const)("names the %s it covers and copies the error", async (area, title, mentionsAgents) => {
+    const { ChunkBoundary } = await import("./ChunkBoundary")
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } })
+    function Throws(): never {
+      throw new Error("kaput")
+    }
+    render(
+      <ChunkBoundary area={area}>
+        <Throws />
+      </ChunkBoundary>,
+    )
+    expect(screen.getByText(title)).toBeTruthy()
+    expect(screen.getByText(title).parentElement!.textContent!.includes("agents and terminals")).toBe(
+      mentionsAgents,
+    )
+    screen.getByRole("button", { name: /Copy details/ }).click()
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalled())
+    expect((writeText.mock.calls[0] as unknown as [string])[0]).toContain("kaput")
   })
 })

@@ -206,7 +206,7 @@ function AgentlessTerminalScreen({
             moving={!flightAtRest(flight)}
           />
         ) : null}
-        <ChunkBoundary>
+        <ChunkBoundary area="pane" resetKey={terminalId}>
           <Suspense fallback={null}>
             <LazyTerminalPane
               key={terminalId}

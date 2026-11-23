@@ -87,6 +87,8 @@ type StackStubProps = {
 // The stack's panel group, with its props captured: jsdom has no layout for the
 // panel library to drag in, so a test hands the group the layout a drag would
 // have ended on.
+// A part id whose stack the stub fails to draw, for a test of the error card.
+let throwOnPart: string | null = null
 let groupProps: { onLayoutChanged?: (layout: Record<string, number>) => void } | null = null
 vi.mock("@/components/ui/resizable", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/ui/resizable")>()
@@ -115,6 +117,7 @@ vi.mock("@/components/LazyTerminalPane", async () => {
   },
   LazyTerminalStack: (props: StackStubProps) => {
     stackProps.push(props)
+    if (props.parts.some((p) => String(p.id) === throwOnPart)) throw new Error("stack stub failed")
     const rendered: Record<string, React.ReactNode> = {}
     for (const part of props.parts) {
       const { slot, instance: _instance, ...rest } = part
@@ -288,6 +291,7 @@ function dormantSpine(): DuxState["spine"] {
 }
 
 beforeEach(() => {
+  throwOnPart = null
   installBootStubs()
   startDormantTabMock.mockClear()
   paneProps.length = 0
@@ -772,6 +776,50 @@ describe("TerminalArea dock", () => {
       caught.mockRestore()
     },
   )
+
+  it.each(["agent", "split", "terminal"] as const)(
+    "gains and loses terminals on the agent on screen without crashing in the %s layout",
+    async (layout) => {
+      const caught = vi.spyOn(console, "error").mockImplementation(() => {})
+      mockState = dockState({ layout, terminals: 0 })
+      const { rerender } = render(<TerminalArea />)
+      await screen.findByTestId("stack-agent-box")
+      for (const terminals of [1, 0, 1]) {
+        mockState = dockState({ layout, terminals })
+        rerender(<TerminalArea />)
+        if (terminals > 0) expect(await screen.findByTestId("stack-dock-box")).toBeTruthy()
+        else expect(screen.queryByTestId("stack-dock-box")).toBeNull()
+      }
+      expect(caught.mock.calls.flat().map(String).join("\n")).not.toMatch(/panel layout/)
+      caught.mockRestore()
+    },
+  )
+
+  it("gives the next agent a fresh try after the pane of one hit an error", async () => {
+    const caught = vi.spyOn(console, "error").mockImplementation(() => {})
+    const withDock = dockState({ layout: "split" })
+    const lone = structuredClone(withDock.spine!.sessions[0])
+    lone.id = "s2"
+    lone.slot_tab_id = "s2"
+    lone.tabs = [{ ...lone.tabs[0], id: "s2" }]
+    withDock.spine!.sessions.push(lone)
+    const onS2 = {
+      ...withDock,
+      selectedSessionId: "s2",
+      selectedTarget: { kind: "agent", sessionId: "s2", tabId: "s2" },
+    } as DuxState
+    throwOnPart = "s2"
+    mockState = onS2
+    const { rerender } = render(<TerminalArea />)
+    expect(await screen.findByText("This pane hit an error")).toBeTruthy()
+
+    mockState = withDock
+    rerender(<TerminalArea />)
+    expect(await screen.findByTestId("stack-agent-box")).toBeTruthy()
+    expect(screen.queryByText("This pane hit an error")).toBeNull()
+    throwOnPart = null
+    caught.mockRestore()
+  })
 
   it.each([
     ["split", true, true],

@@ -64,7 +64,7 @@ export function PhoneAgentStack({
     ) : null
 
   return (
-    <ChunkBoundary>
+    <ChunkBoundary area="pane" resetKey={`${sessionId}:${model.typingPtyId}`}>
       <Suspense fallback={null}>
         <LazyTerminalStack
           parts={stackParts}
