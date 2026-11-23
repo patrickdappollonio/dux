@@ -70,11 +70,13 @@ afterEach(async () => {
 })
 
 describe("Attach to existing branch, raised over the New agent form", () => {
+  // Escape is the question's alone: the form under it, a dialog of its own,
+  // must not take the same key. Back reaches the form, which has the history
+  // entry, and the form answers it by closing the question.
   it.each([
-    ["Cancel", () => fireEvent.click(within(question()!).getByRole("button", { name: "Cancel" }))],
-    ["Escape", () => fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })],
-    ["Back", () => act(() => browser.back())],
-  ] as const)("returns to the form with what was typed on %s", async (_way, leave) => {
+    ["Escape closes only the question", () => fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })],
+    ["Back is answered by the form closing the question", () => act(() => browser.back())],
+  ] as const)("%s, leaving the form with what was typed", async (_way, leave) => {
     await submitTakenName()
     expect(form()).not.toBeNull()
     const entries = browser.length
