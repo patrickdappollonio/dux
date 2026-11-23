@@ -33,8 +33,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
   const files = [
     "AgentNotFound.tsx",
     "RouteNotFoundScreen.tsx",
-    "DormantTabCard.tsx",
-    "DormantTabSurface.tsx",
+    "NotRunningCard.tsx",
     "AddProjectDialog.tsx",
     "CreateAgentDialog.tsx",
     "CloneProjectDialog.tsx",

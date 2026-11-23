@@ -17,6 +17,7 @@ import { Modal, useModalLifetime } from "@/components/modal"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { EmptyState } from "@/components/ui/empty"
 import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { useIsMobile, useIsNarrowComputerLayout } from "@/hooks/use-mobile"
@@ -316,9 +317,7 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
         ) : null}
 
         {empty ? (
-          <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-            Nothing is running.
-          </p>
+          <EmptyState size="compact" title="Nothing is running." />
         ) : null}
       </div>
     </Modal>

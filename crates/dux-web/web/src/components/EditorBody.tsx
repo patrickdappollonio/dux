@@ -186,6 +186,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu"
+import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import {
   ResizableHandle,
@@ -2228,9 +2229,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         <Loader2 className="size-4 motion-safe:animate-spin" />
                       </div>
                     ) : filtered.length === 0 ? (
-                      <p className="px-1 py-2 text-sm text-muted-foreground">
-                        No files match.
-                      </p>
+                      <EmptyState size="compact" title="No files match." />
                     ) : (
                       <>
                         {filtered.map((p) => (
@@ -2767,7 +2766,9 @@ export function EditorContentPane(props: EditorContentPaneProps) {
   const { root, tab, image, onImageDims } = props
   if (tab === null) {
     return (
-      <CenteredPane>Select a file from the tree to view or edit it.</CenteredPane>
+      <div className="flex h-full items-center justify-center">
+        <EmptyState size="compact" title="Select a file from the tree to view or edit it." />
+      </div>
     )
   }
   // Images have no text buffer and win even if stale state says "diff".

@@ -3,14 +3,7 @@ import { useId } from "react"
 
 import { AgentNotFound } from "@/components/AgentNotFound"
 import { Button } from "@/components/ui/button"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
@@ -62,51 +55,52 @@ export function TerminalNotFound({
   const blocked = block !== null
   const reasonId = useId()
   return (
-    <Empty className="h-full border-0">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <SearchX />
-        </EmptyMedia>
-        <EmptyTitle>Terminal not found</EmptyTitle>
-        <EmptyDescription>
+    <EmptyState
+      size="page"
+      icon={<SearchX />}
+      title="Terminal not found"
+      description={
+        <>
           This link points at a terminal that is no longer running, probably
           because it was closed or its shell exited. Its id was{" "}
           <InlineCode>{terminalId}</InlineCode>
           .
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent className="flex-row flex-wrap justify-center gap-4">
-        {/* Filled: opening a terminal is this screen's primary act, and the
-          * way up beside it stays outline, as on the agent's screen. A new
-          * terminal is a position of its own, so this one stays one Back
-          * behind it, where the user found it. */}
-        {newTerminal !== null ? (
+        </>
+      }
+      actions={
+        <>
+          {/* Filled: opening a terminal is this screen's primary act, and the
+            * way up beside it stays outline, as on the agent's screen. A new
+            * terminal is a position of its own, so this one stays one Back
+            * behind it, where the user found it. */}
+          {newTerminal !== null ? (
+            <Button
+              className="max-md:min-h-10 pointer-coarse:min-h-10"
+              disabled={blocked}
+              aria-describedby={blocked ? reasonId : undefined}
+              onClick={newTerminal}
+            >
+              <SquareTerminal />
+              New terminal
+            </Button>
+          ) : null}
           <Button
+            variant="outline"
             className="max-md:min-h-10 pointer-coarse:min-h-10"
-            disabled={blocked}
-            aria-describedby={blocked ? reasonId : undefined}
-            onClick={newTerminal}
+            onClick={() => navigateUp()}
           >
-            <SquareTerminal />
-            New terminal
+            Back to agents
           </Button>
-        ) : null}
-        <Button
-          variant="outline"
-          className="max-md:min-h-10 pointer-coarse:min-h-10"
-          onClick={() => navigateUp()}
-        >
-          Back to agents
-        </Button>
-        {/* Said in words, since a disabled button answers no hover and a
-          * finger has none. */}
-        {newTerminal !== null && block !== null ? (
-          <p id={reasonId} className="w-full text-center text-sm text-muted-foreground">
-            {addToAgentBlockHint(block, device)}
-          </p>
-        ) : null}
-      </EmptyContent>
-    </Empty>
+          {/* Said in words, since a disabled button answers no hover and a
+            * finger has none. */}
+          {newTerminal !== null && block !== null ? (
+            <p id={reasonId} className="w-full text-center text-sm text-muted-foreground">
+              {addToAgentBlockHint(block, device)}
+            </p>
+          ) : null}
+        </>
+      }
+    />
   )
 }
 

@@ -47,6 +47,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -336,10 +337,15 @@ function PullRequestsView({
 
   if (visible.length === 0 && hidden.length === 0) {
     return (
-      <p className="py-6 text-center text-sm text-muted-foreground">
-        No pull requests yet. dux looks on every branch{" "}
-        <InlineCode>{name}</InlineCode> has been on, every few minutes.
-      </p>
+      <EmptyState
+        size="compact"
+        title={
+          <>
+            No pull requests yet. dux looks on every branch{" "}
+            <InlineCode>{name}</InlineCode> has been on, every few minutes.
+          </>
+        }
+      />
     )
   }
 

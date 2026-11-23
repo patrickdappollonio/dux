@@ -43,13 +43,7 @@ import {
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -1491,20 +1485,23 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
 
   const searchResults =
     found.length === 0 ? (
-      <div
-        role="status"
-        className="flex min-h-full flex-1 flex-col items-center justify-center gap-2 px-6 py-10 text-center"
-      >
-        <ZoomOut aria-hidden className="size-7 text-muted-foreground/70" />
-        <p className="text-sm font-medium">
-          No settings match <InlineCode>{query.trim()}</InlineCode>.
-        </p>
-        <p className="max-w-sm text-xs text-muted-foreground">
-          This dialog holds the everyday settings. Everything else in{" "}
-          <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
-          <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
-        </p>
-      </div>
+      <EmptyState
+        size="page"
+        announce
+        icon={<ZoomOut />}
+        title={
+          <>
+            No settings match <InlineCode>{query.trim()}</InlineCode>.
+          </>
+        }
+        description={
+          <>
+            This dialog holds the everyday settings. Everything else in{" "}
+            <InlineCode>config.toml</InlineCode> is in the app menu, under{" "}
+            <span className="font-medium text-foreground">{EDIT_CONFIG_TITLE}</span>
+          </>
+        }
+      />
     ) : (
       <>
         <p className={phone ? "pt-1 text-xs text-muted-foreground" : headingClass}>
@@ -1534,18 +1531,12 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     ) : null
 
   const changedEmpty = (
-    <Empty className="min-h-full">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <CircleCheck />
-        </EmptyMedia>
-        <EmptyTitle>Everything is at its default</EmptyTitle>
-        <EmptyDescription>
-          Nothing here differs from what dux ships with. Settings you change show
-          up in this list, each with its own reset.
-        </EmptyDescription>
-      </EmptyHeader>
-    </Empty>
+    <EmptyState
+      size="page"
+      icon={<CircleCheck />}
+      title="Everything is at its default"
+      description="Nothing here differs from what dux ships with. Settings you change show up in this list, each with its own reset."
+    />
   )
 
   // On a phone the view's name is the cover's title, so its body opens on

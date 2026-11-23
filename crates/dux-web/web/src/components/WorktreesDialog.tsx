@@ -12,6 +12,7 @@ import {
 } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { InlineCode } from "@/components/ui/inline-code"
+import { EmptyState } from "@/components/ui/empty"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -589,9 +590,13 @@ function WorktreesBody({ open, onClosed }: { open: boolean; onClosed: () => void
           inUse.length === 0 &&
           beingRemoved.length === 0 &&
           attachWorktreeLeftovers.length === 0 ? (
-          <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground max-md:h-40">
-            This project has no worktrees dux manages yet. Create an agent and
-            one appears here.
+          // The spinner's box, so the dialog keeps its height when the list
+          // turns out empty.
+          <div className="flex h-64 items-center justify-center max-md:h-40">
+            <EmptyState
+              size="compact"
+              title="This project has no worktrees dux manages yet. Create an agent and one appears here."
+            />
           </div>
         ) : (
           <div className="flex flex-col">

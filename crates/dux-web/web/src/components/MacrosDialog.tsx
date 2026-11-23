@@ -65,14 +65,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { tabsListVariants } from "@/components/ui/tabs"
@@ -377,7 +370,9 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
       onDelete={() => setDeleteKey(selected.key)}
     />
   ) : (
-    <p className="m-auto text-center text-sm text-muted-foreground">{emptyText}</p>
+    <div className="m-auto">
+      <EmptyState size="compact" title={emptyText} />
+    </div>
   )
 
   const list = (
@@ -442,19 +437,18 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   )
 
   const empty = (
-    <Empty className={cn(!phone && "border")}>
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <SquareSlash />
-        </EmptyMedia>
-        <EmptyTitle>No macros yet</EmptyTitle>
-        <EmptyDescription>
+    <EmptyState
+      size="page"
+      icon={<SquareSlash />}
+      title="No macros yet"
+      description={
+        <>
           A macro is text you send with one {phone ? "tap" : "click"}, such as a
           review request you type ten times a day, or a test command for a
           terminal.
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
+        </>
+      }
+      actions={
         <Button
           ref={emptyNewRef}
           className="max-md:min-h-10 pointer-coarse:min-h-10"
@@ -463,8 +457,8 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
           <Plus />
           New macro
         </Button>
-      </EmptyContent>
-    </Empty>
+      }
+    />
   )
 
   const editing = phone && step === "edit" && selected !== null
@@ -784,7 +778,7 @@ function MacroList({
   }
 
   if (items.length === 0) {
-    return <p className="py-6 text-center text-sm text-muted-foreground">{emptyText}</p>
+    return <EmptyState size="compact" title={emptyText} />
   }
 
   // The one row in the tab order: the selected one when it is listed.

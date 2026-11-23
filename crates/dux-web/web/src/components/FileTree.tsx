@@ -10,6 +10,7 @@ import {
 import { ChevronRight, Loader2, RotateCw } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { EmptyState } from "@/components/ui/empty"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { FileTreeContextMenu } from "@/components/FileTreeContextMenu"
@@ -596,9 +597,7 @@ export function FileTree({
             </button>
           </div>
         ) : rootState.entries.length === 0 ? (
-          <p className="px-1 py-2 text-sm text-muted-foreground">
-            No files in this worktree.
-          </p>
+          <EmptyState size="compact" title="No files in this worktree." />
         ) : (
           /* Total-height spacer so the scrollbar reflects the full list. */
           <div style={{ height: totalHeight, position: "relative" }}>
