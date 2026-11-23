@@ -8,11 +8,10 @@ import { installBrowserHistory } from "@/test/browserHistory"
 // real store and a history with the Navigation API.
 installBrowserHistory()
 
-// A short wait for the server, so the test does not sit out the real one.
-const WAIT_MS = 60
+// The Changes pane's own wait, set short to show the create does not follow it.
 vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/connectionTiming")>()),
-  changesRequestTimeoutMs: () => WAIT_MS,
+  changesRequestTimeoutMs: () => 60,
 }))
 
 const warnings: string[] = []
@@ -83,7 +82,12 @@ async function openForm() {
   fireEvent.change(nameField(), { target: { value: "feature-old" } })
 }
 
+// The create's deadline is passed on a fake clock rather than sat out.
+const DEADLINE_MS = 30_000
+const passDeadline = () => act(() => vi.advanceTimersByTime(DEADLINE_MS))
+
 beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   held.length = 0
   warnings.length = 0
   errors.length = 0
@@ -98,7 +102,8 @@ afterEach(async () => {
   })
   // A create left unanswered says so at its deadline, which must not land in
   // the next test.
-  await new Promise((resolve) => setTimeout(resolve, WAIT_MS + 40))
+  passDeadline()
+  vi.useRealTimers()
 })
 
 const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === "POST").length
@@ -121,11 +126,15 @@ describe("the New agent form with its create unanswered", () => {
     expect(posts()).toBe(1)
   })
 
-  it("is freed with the name kept and says so once the wait has passed", async () => {
+  it("is freed with the name kept and says so once 30 seconds have passed", async () => {
     await openForm()
     fireEvent.click(createButton())
     await waitFor(() => expect(createButton().getAttribute("aria-busy")).toBe("true"))
-    await waitFor(() => expect(createButton().getAttribute("aria-busy")).toBeNull())
+    act(() => vi.advanceTimersByTime(DEADLINE_MS - 1000))
+    expect(createButton().getAttribute("aria-busy")).toBe("true")
+    expect(warnings).toHaveLength(0)
+    act(() => vi.advanceTimersByTime(1000))
+    expect(createButton().getAttribute("aria-busy")).toBeNull()
     expect(nameField().value).toBe("feature-old")
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/has not answered/)
@@ -138,7 +147,9 @@ describe("the New agent form with its create unanswered", () => {
   ] as const)("opens nothing and closes nothing on %s after the wait", async (_answer, answer) => {
     await openForm()
     fireEvent.click(createButton())
-    await waitFor(() => expect(warnings).toHaveLength(1))
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    expect(warnings).toHaveLength(1)
     act(() => held[0](answer()))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(question()).toBeNull()
@@ -149,7 +160,9 @@ describe("the New agent form with its create unanswered", () => {
   it("says a refusal over an existing branch that comes after the wait", async () => {
     await openForm()
     fireEvent.click(createButton())
-    await waitFor(() => expect(warnings).toHaveLength(1))
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    expect(warnings).toHaveLength(1)
     act(() => held[0](conflict()))
     await waitFor(() => expect(errors).toHaveLength(1))
     expect(errors[0]).toMatch(/feature-old was not created/)
