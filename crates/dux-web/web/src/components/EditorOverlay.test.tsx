@@ -3280,6 +3280,32 @@ describe("the file tree follows what the agent writes", () => {
     await waitFor(() => expect(screen.queryByText("ignored.log")).toBeNull())
   })
 
+  // An entry dialog is about a path; when a refetch finds that path gone, or a
+  // folder it lies in, the dialog closes itself rather than act on nothing. A
+  // sibling that merely shares a prefix leaving is not its folder leaving.
+  it("closes an entry's delete confirm when a refetch finds the folder it is in gone", async () => {
+    rootEntries = [entry("src", true), entry("src-old", true), entry("notes.md", false)]
+    treeMock.mockImplementation(async (..._a: unknown[]) => {
+      const dir = String(_a[1] ?? "")
+      const inside = dir === "src-old" ? [entry("src-old/b.ts", false)] : []
+      return { dir, entries: dir === "" ? rootEntries : inside }
+    })
+    await mountTree()
+    fireEvent.click(screen.getByText("src-old"))
+    fireEvent.contextMenu(await screen.findByText("b.ts"))
+    fireEvent.click(await screen.findByText(/^Delete…$/))
+    await screen.findByRole("button", { name: /^delete$/i })
+
+    rootEntries = [entry("src-old", true), entry("notes.md", false)]
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(screen.queryByText("src")).toBeNull())
+    expect(screen.getByRole("button", { name: /^delete$/i })).toBeTruthy()
+
+    rootEntries = [entry("notes.md", false)]
+    fireEvent(window, new Event("focus"))
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^delete$/i })).toBeNull())
+  })
+
   it("refetches on demand from the explorer menu's Refresh files", async () => {
     await mountTree()
     rootEntries = [entry("notes.md", false), entry("fresh.ts", false)]

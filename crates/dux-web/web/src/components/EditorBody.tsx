@@ -442,17 +442,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     )
     if (hit) setGoneEntryTarget(hit.target)
   }
-  // The info panel is the one editor dialog with a live server-side truth to
-  // key on, so unlike the four above it DOES close itself when its entry
-  // vanishes; the guard lives inside the dialog, next to the fetch that
-  // learns about it.
+  // The info panel closes itself when its entry vanishes too, on the server's
+  // own answer rather than a tree refetch; the guard lives inside the dialog,
+  // next to the fetch that learns about it.
   const [fileInfoTarget, setFileInfoTarget] = useState<FileInfoTarget | null>(
     null,
   )
-  // The two disk-freshness dialogs. Both are local like the four above, but
-  // unlike them they DO have a live truth to close on, so each is given one:
-  // the reload confirm has a `present` predicate recomputed from the buffer
-  // (see below), and the save conflict closes itself when its tab goes away.
+  // The two disk-freshness dialogs. Both are local like the four above, and
+  // each closes on a truth of its own: the reload confirm on a `present`
+  // predicate recomputed from the buffer (see below), and the save conflict
+  // when its tab goes away.
   const [reloadTarget, setReloadTarget] = useState<ReloadFileTarget | null>(
     null,
   )
