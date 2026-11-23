@@ -162,7 +162,7 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
             }
       }
     >
-      <div ref={bodyRef} tabIndex={-1} className="flex min-h-0 flex-1 flex-col gap-4 outline-none">
+      <div ref={bodyRef} tabIndex={-1} className="flex flex-1 flex-col gap-4 outline-none">
         {loading ? (
           <p className="py-12 text-center text-sm text-muted-foreground">
             Loading config.toml…
