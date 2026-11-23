@@ -17,6 +17,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
+import { EmptyState } from "@/components/ui/empty"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { targetPtyId } from "@/components/terminalAreaModel"
@@ -203,13 +204,12 @@ export function MacroPopover({
         finalFocus={resolveFinalFocus}
       >
         {allMacros.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros found. Start by creating one!
-          </div>
+          <EmptyState size="compact" title="No macros found. Start by creating one!" />
         ) : macros.length === 0 ? (
-          <div className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No macros for this target kind. Add one via Edit macros below.
-          </div>
+          <EmptyState
+            size="compact"
+            title="No macros for this target kind. Add one via Edit macros below."
+          />
         ) : (
           <MacroCommand macros={macros} autoFocus={!isMobile} onRun={handleRun} />
         )}

@@ -1,104 +1,88 @@
-import { cva, type VariantProps } from "class-variance-authority"
+import type { ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
-function Empty({ className, ...props }: React.ComponentProps<"div">) {
+// What a surface shows when it has nothing to show. A caller hands over the
+// words, the icon and any buttons, and names how much room the empty state
+// has; its padding, type, colours and what a screen reader hears are decided
+// here. Where it sits in the caller's layout (a box shared with a spinner,
+// centred in a detail pane) stays the caller's.
+//
+// - `page` fills the box it is in, for a pane or a dialog body with nothing
+//   else in it.
+// - `section` takes only its own height, for the place a list would be inside
+//   a pane that has other things in it.
+// - `compact` is one quiet sentence and no icon, for a list inside a dialog or
+//   a menu, where an icon tile and a heading would outweigh the list itself.
+type RoomyEmptyState = {
+  size: "page" | "section"
+  /** A lucide glyph; drawn in a tile and hidden from a screen reader. */
+  icon: ReactNode
+  title: ReactNode
+  /** One paragraph, or several drawn one under another. */
+  description?: ReactNode | readonly ReactNode[]
+  /** Buttons, laid out in a row that wraps. */
+  actions?: ReactNode
+  /** A status region, for an empty state that appears while the user types. */
+  announce?: boolean
+}
+
+type CompactEmptyState = {
+  size: "compact"
+  title: ReactNode
+  announce?: boolean
+}
+
+export type EmptyStateProps = RoomyEmptyState | CompactEmptyState
+
+export function EmptyState(props: EmptyStateProps) {
+  const role = props.announce ? "status" : undefined
+  if (props.size === "compact") {
+    return (
+      <p
+        data-slot="empty"
+        role={role}
+        className="px-3 py-6 text-center text-sm text-balance text-muted-foreground"
+      >
+        {props.title}
+      </p>
+    )
+  }
+  const { size, icon, title, description, actions } = props
+  const paragraphs: readonly ReactNode[] =
+    description === undefined
+      ? []
+      : Array.isArray(description)
+        ? description
+        : [description]
   return (
     <div
       data-slot="empty"
+      role={role}
       className={cn(
-        "flex w-full min-w-0 flex-1 flex-col items-center justify-center gap-4 rounded-xl border-dashed p-6 text-center text-balance",
-        className
+        "flex w-full min-w-0 flex-col items-center justify-center gap-4 p-6 text-center text-balance",
+        size === "page" && "h-full min-h-0 flex-1",
       )}
-      {...props}
-    />
+    >
+      <div className="flex max-w-sm flex-col items-center gap-2">
+        <div
+          aria-hidden
+          className="mb-2 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+        >
+          {icon}
+        </div>
+        <div className="font-heading text-sm font-medium tracking-tight">{title}</div>
+        {paragraphs.map((paragraph, index) => (
+          <div key={index} className="text-sm/relaxed text-muted-foreground">
+            {paragraph}
+          </div>
+        ))}
+      </div>
+      {actions ? (
+        <div className="flex w-full max-w-sm min-w-0 flex-row flex-wrap items-center justify-center gap-4 text-sm">
+          {actions}
+        </div>
+      ) : null}
+    </div>
   )
-}
-
-function EmptyHeader({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="empty-header"
-      className={cn("flex max-w-sm flex-col items-center gap-2", className)}
-      {...props}
-    />
-  )
-}
-
-const emptyMediaVariants = cva(
-  "mb-2 flex shrink-0 items-center justify-center [&_svg]:pointer-events-none [&_svg]:shrink-0",
-  {
-    variants: {
-      variant: {
-        default: "bg-transparent",
-        icon: "flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground [&_svg:not([class*='size-'])]:size-4",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-    },
-  }
-)
-
-function EmptyMedia({
-  className,
-  variant = "default",
-  ...props
-}: React.ComponentProps<"div"> & VariantProps<typeof emptyMediaVariants>) {
-  return (
-    <div
-      data-slot="empty-icon"
-      data-variant={variant}
-      className={cn(emptyMediaVariants({ variant, className }))}
-      {...props}
-    />
-  )
-}
-
-function EmptyTitle({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="empty-title"
-      className={cn(
-        "font-heading text-sm font-medium tracking-tight",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-function EmptyDescription({ className, ...props }: React.ComponentProps<"p">) {
-  return (
-    <div
-      data-slot="empty-description"
-      className={cn(
-        "text-sm/relaxed text-muted-foreground [&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-function EmptyContent({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="empty-content"
-      className={cn(
-        "flex w-full max-w-sm min-w-0 flex-col items-center gap-2.5 text-sm text-balance",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-export {
-  Empty,
-  EmptyHeader,
-  EmptyTitle,
-  EmptyDescription,
-  EmptyContent,
-  EmptyMedia,
 }

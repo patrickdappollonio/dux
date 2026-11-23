@@ -7,6 +7,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { EmptyState } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { ModalGroupHeading } from "@/components/modal"
@@ -43,15 +44,18 @@ export function ProjectRows({
     <>
       {heading ? <ModalGroupHeading>{heading}</ModalGroupHeading> : null}
       {filtered.length === 0 ? (
-        <p className="px-2 py-4 text-sm text-muted-foreground">
-          {query.trim() === "" ? (
-            "No projects yet."
-          ) : (
-            <>
-              No projects match <InlineCode>{query}</InlineCode>.
-            </>
-          )}
-        </p>
+        <EmptyState
+          size="compact"
+          title={
+            query.trim() === "" ? (
+              "No projects yet."
+            ) : (
+              <>
+                No projects match <InlineCode>{query}</InlineCode>.
+              </>
+            )
+          }
+        />
       ) : (
         filtered.map((row) => (
           <ProjectRow

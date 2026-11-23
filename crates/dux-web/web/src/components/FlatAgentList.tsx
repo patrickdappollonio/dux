@@ -57,14 +57,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import { agentRowVisual } from "@/lib/agentRow"
 import {
   agentSearchLocation,
@@ -1039,28 +1032,23 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
         className="dux-list-fade min-h-0 flex-1 overflow-y-auto px-2 pt-[3px] pb-2 no-scrollbar"
       >
         {nothing ? (
-          <Empty className="border-0 p-4">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Bot />
-              </EmptyMedia>
-              <EmptyTitle>No agents yet</EmptyTitle>
-              {/* The button below flips on an empty workspace and this
-                  sentence does not: it reads true either way. */}
-              <EmptyDescription>
-                Pick a project and dux gives the agent its own worktree.
-              </EmptyDescription>
-            </EmptyHeader>
-            {/* A real button, not a sentence pointing at one elsewhere: an
-                empty workspace is exactly where the next click should be on
-                screen. It doubles with the launcher corner's New agent…, which is accepted:
-                the duplicate costs a tap nobody needs, while the missing one
-                costs a hunt.
-
-                On a confirmed-empty workspace it flips to Add project through
-                the pure helper in lib/launcherVerb.ts. max-md:min-h-11 is the
-                touch floor, matching the launcher. */}
-            <EmptyContent>
+          <EmptyState
+            size="section"
+            icon={<Bot />}
+            title="No agents yet"
+            // The button below flips on an empty workspace and this sentence
+            // does not: it reads true either way.
+            description="Pick a project and dux gives the agent its own worktree."
+            // A real button, not a sentence pointing at one elsewhere: an empty
+            // workspace is exactly where the next click should be on screen. It
+            // doubles with the launcher corner's New agent…, which is accepted:
+            // the duplicate costs a tap nobody needs, while the missing one
+            // costs a hunt.
+            //
+            // On a confirmed-empty workspace it flips to Add project through the
+            // pure helper in lib/launcherVerb.ts. max-md:min-h-11 is the touch
+            // floor, matching the launcher.
+            actions={
               <Button
                 variant="outline"
                 size="sm"
@@ -1074,12 +1062,10 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 {emptyVerbIsAddProject ? <SquarePlus /> : <Plus />}
                 {emptyVerbIsAddProject ? "Add project" : "New agent"}
               </Button>
-            </EmptyContent>
-          </Empty>
+            }
+          />
         ) : nothingMatches ? (
-          <p className="px-3 py-4 text-sm text-muted-foreground">
-            Nothing matches “{query}”.
-          </p>
+          <EmptyState size="compact" title={<>Nothing matches “{query}”.</>} />
         ) : (
           <>
             {/* One context over every row of the main bucket, agents and

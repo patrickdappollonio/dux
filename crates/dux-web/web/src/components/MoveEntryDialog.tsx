@@ -4,6 +4,7 @@ import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { EmptyState } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { dirIconKind } from "@/lib/fileIcons"
 import { fileApi } from "@/lib/fileApi"
@@ -219,9 +220,10 @@ function MoveEntryDialogBody({
               </button>
             </div>
           ) : folders.length === 0 ? (
-            <p className="px-2 py-2 text-sm text-muted-foreground">
-              No folders here. This folder can still be the destination.
-            </p>
+            <EmptyState
+              size="compact"
+              title="No folders here. This folder can still be the destination."
+            />
           ) : (
             folders.map((entry) => (
               <button

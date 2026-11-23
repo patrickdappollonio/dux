@@ -65,14 +65,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty"
+import { EmptyState } from "@/components/ui/empty"
 import {
   branchShownWithoutCheckout,
   changesGitBlockedReason,
@@ -2015,30 +2008,20 @@ function ChangesList({
     >
       <div className="flex flex-col gap-1 p-3">
         {!hasChanges ? (
-          <Empty className="border-0 py-6">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Check />
-              </EmptyMedia>
-              <EmptyTitle>No changes</EmptyTitle>
-              <EmptyDescription>
-                {branchGit ? "This worktree is clean." : "This folder is clean."}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            size="section"
+            icon={<Check />}
+            title="No changes"
+            description={branchGit ? "This worktree is clean." : "This folder is clean."}
+          />
         ) : null}
         {hasChanges && filtering && !hasMatches ? (
-          <Empty className="border-0 py-6">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Search />
-              </EmptyMedia>
-              <EmptyTitle>No matching files</EmptyTitle>
-              <EmptyDescription>
-                No changed file matches “{query.trim()}”.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            size="section"
+            icon={<Search />}
+            title="No matching files"
+            description={<>No changed file matches “{query.trim()}”.</>}
+          />
         ) : null}
         {items.length > 0 ? (
           // Rows here hold widgets (a checkbox, a toggle, a menu) and nest by
@@ -2133,22 +2116,18 @@ function ChangesList({
 // editor at, so no header either.
 function noSessionScreen(): ReactElement {
   return (
-    <Empty className="h-full border-0">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <MousePointerClick />
-        </EmptyMedia>
-        <EmptyTitle>No session selected</EmptyTitle>
-        <EmptyDescription>Select a session to see its changes.</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
+    <EmptyState
+      size="page"
+      icon={<MousePointerClick />}
+      title="No session selected"
+      description="Select a session to see its changes."
+    />
   )
 }
 
 // What stands in for the list under the pane's header while there is no list
 // to show: a quiet directory, the first load, or a failed one. Null once the
 // changes are loaded, which is when the list renders instead.
-const BODY_EMPTY = "min-h-0 flex-1 border-0"
 
 function changesBodyInstead(
   sessionId: string,
@@ -2159,20 +2138,16 @@ function changesBodyInstead(
   if (quietReason !== null) {
     const folder = session ? folderWorkspace(session.workspace) : null
     return (
-      <Empty className={BODY_EMPTY}>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <FolderOpen />
-          </EmptyMedia>
-          <EmptyTitle>No changes to show</EmptyTitle>
-          <EmptyDescription>{quietReason}</EmptyDescription>
-          {folder ? (
-            <EmptyDescription className="font-mono break-all">
-              {folder.folder_label}
-            </EmptyDescription>
-          ) : null}
-        </EmptyHeader>
-      </Empty>
+      <EmptyState
+        size="page"
+        icon={<FolderOpen />}
+        title="No changes to show"
+        description={
+          folder
+            ? [quietReason, <div key="folder" className="font-mono break-all">{folder.folder_label}</div>]
+            : quietReason
+        }
+      />
     )
   }
 
@@ -2180,31 +2155,23 @@ function changesBodyInstead(
   const phase = slice?.phase ?? "loading"
   if (phase === "loading" || phase === "idle") {
     return (
-      <Empty className={BODY_EMPTY}>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <Loader2 className="animate-spin" />
-          </EmptyMedia>
-          <EmptyTitle>Loading changes…</EmptyTitle>
-          <EmptyDescription>Fetching this session's changes.</EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <EmptyState
+        size="page"
+        icon={<Loader2 className="animate-spin" />}
+        title="Loading changes…"
+        description="Fetching this session's changes."
+      />
     )
   }
   if (phase !== "error") return null
 
   return (
-    <Empty className={BODY_EMPTY}>
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <TriangleAlert />
-        </EmptyMedia>
-        <EmptyTitle>Couldn't load changes</EmptyTitle>
-        <EmptyDescription>
-          {slice?.error ?? "The changed files couldn't be loaded."}
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
+    <EmptyState
+      size="page"
+      icon={<TriangleAlert />}
+      title="Couldn't load changes"
+      description={slice?.error ?? "The changed files couldn't be loaded."}
+      actions={
         <Button
           variant="outline"
           onClick={() => refreshChanges()}
@@ -2213,8 +2180,8 @@ function changesBodyInstead(
           <RefreshCw />
           Refresh
         </Button>
-      </EmptyContent>
-    </Empty>
+      }
+    />
   )
 }
 

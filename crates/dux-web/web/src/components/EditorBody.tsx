@@ -187,6 +187,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
 import {
   ResizableHandle,
@@ -2244,9 +2245,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                         <Loader2 className="size-4 motion-safe:animate-spin" />
                       </div>
                     ) : filtered.length === 0 ? (
-                      <p className="px-1 py-2 text-sm text-muted-foreground">
-                        No files match.
-                      </p>
+                      <EmptyState size="compact" title="No files match." />
                     ) : (
                       <>
                         {filtered.map((p) => (

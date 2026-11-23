@@ -3,6 +3,7 @@ import { CheckIcon, Code2, SearchIcon, Wand2 } from "lucide-react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { InputGroup, InputGroupAddon } from "@/components/ui/input-group"
+import { EmptyState } from "@/components/ui/empty"
 import { matchLanguageChoices, type LanguageChoice } from "@/lib/editorLanguage"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { cn } from "@/lib/utils"
@@ -269,15 +270,11 @@ export function LanguagePickerList({
         </div>
         {/* Always mounted, so a screen reader announces the sentence when it
             appears rather than missing a region that arrived with it. */}
-        <p
-          role="status"
-          className={cn(
-            "text-center text-sm text-muted-foreground",
-            matches.length === 0 && "px-3 py-6",
-          )}
-        >
-          {matches.length === 0 ? "No language matches that search." : ""}
-        </p>
+        <div role="status">
+          {matches.length === 0 ? (
+            <EmptyState size="compact" title="No language matches that search." />
+          ) : null}
+        </div>
       </div>
     </div>
   )

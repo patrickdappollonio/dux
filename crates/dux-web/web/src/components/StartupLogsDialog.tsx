@@ -1,6 +1,7 @@
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { EmptyState } from "@/components/ui/empty"
 import {
   Select,
   SelectContent,
@@ -40,8 +41,9 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
       <GlyphSpinner className="text-lg text-muted-foreground" />
     </div>
   ) : !hasLogs ? (
-    <div className="flex h-64 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-      {emptyMessage}
+    // The spinner's box, so the dialog keeps its height when there are no logs.
+    <div className="flex h-64 items-center justify-center">
+      <EmptyState size="compact" title={emptyMessage} />
     </div>
   ) : (
     <div className="grid gap-3">

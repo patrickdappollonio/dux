@@ -1,3 +1,4 @@
+import { NotRunningCard, RunOutput } from "@/components/NotRunningCard"
 import { StartAgentButton } from "@/components/StartAgentButton"
 import { Button } from "@/components/ui/button"
 import {
@@ -6,7 +7,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { useSecondTicks } from "@/hooks/use-second-ticks"
-import { DOCS_AGENT_TABS_RESUME } from "@/lib/docs"
 import { startStoppedAgent } from "@/lib/store"
 import { verdictSentenceNow } from "@/lib/tabVerdict"
 import type { AgentTabView } from "@/lib/types"
@@ -65,9 +65,7 @@ export function StoppedAgentBand({
             Last output
           </PopoverTrigger>
           <PopoverContent align="end" className="w-[min(36rem,90vw)]">
-            <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-muted-foreground">
-              {excerpt.join("\n")}
-            </pre>
+            <RunOutput lines={excerpt} where="popover" />
           </PopoverContent>
         </Popover>
       ) : null}
@@ -99,34 +97,20 @@ export function StoppedAgentShortCard({
   tab: AgentTabView
 }) {
   return (
-    <div
-      data-testid="stopped-agent-short-card"
-      className="flex h-full w-full select-none flex-col items-center justify-center gap-3 overflow-hidden px-6 text-center"
-    >
-      <img
-        src="/dux-logo.png"
-        alt=""
-        aria-hidden
-        className="size-10 object-contain opacity-70"
-      />
-      <p className="max-w-md text-sm">
-        <span className="font-mono">{tab.provider}</span> isn&rsquo;t running. Start
-        picks up its last conversation.{" "}
-        <a
-          href={DOCS_AGENT_TABS_RESUME}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-primary underline underline-offset-2"
-        >
-          How resume works&nbsp;&rarr;
-        </a>
-      </p>
-      <StartAgentButton
-        sessionId={sessionId}
-        onStart={() => startStoppedAgent(sessionId, tab.id)}
-      >
-        Start
-      </StartAgentButton>
-    </div>
+    <NotRunningCard
+      testId="stopped-agent-short-card"
+      icon="small"
+      title={
+        <>
+          <span className="font-mono">{tab.provider}</span> isn&rsquo;t running.
+        </>
+      }
+      details="Start picks up its last conversation."
+      start={{
+        sessionId,
+        onStart: () => startStoppedAgent(sessionId, tab.id),
+        label: "Start",
+      }}
+    />
   )
 }
