@@ -1,8 +1,9 @@
-// The Changes pane with two rows ticked, so the bulk bar of plain verbs is up.
+// The Changes pane with two rows ticked and the selection button's menu open.
 const {
   agents,
   boxOf,
   clearToasts,
+  clickText,
   expectNoCover,
   expectVisibleText,
   goto,
@@ -18,29 +19,38 @@ module.exports = {
     await goto(page, `#/agent/${by["fix-login-redirect"].id}`)
     await takeOver(page)
     await clearToasts(page)
-    // The row checkbox is a visually hidden input behind the status marker, so
+    // The pane may be closed, behind its reopen button.
+    await page.evaluate(() =>
+      document.querySelector('button[aria-label^="Show Changes pane"]')?.click(),
+    )
+    await sleep(1200)
+    // The row checkbox sits invisible behind the status marker until hover, so
     // it is clicked directly rather than through the pointer.
     await page.evaluate(() => {
       const boxes = [
-        ...document.querySelectorAll('[data-testid="changes-pane"] input[type="checkbox"]'),
+        ...document.querySelectorAll('#changes-pane [role="checkbox"]'),
       ]
       boxes.slice(0, 2).forEach((c) => c.click())
     })
     await sleep(1200)
-    // The bar is the picture, and it exists only while rows are ticked: a click
-    // that missed leaves the pane looking ordinary and perfectly croppable.
+    // The button exists only while rows are ticked: a click that missed leaves
+    // the pane looking ordinary and perfectly croppable.
     await expectNoCover(page)
-    await expectVisibleText(page, "Stage 2", { what: "the bulk bar's Stage verb" })
-    await expectVisibleText(page, "Discard 2", { what: "the bulk bar's Discard verb" })
-    const pane = await boxOf(page, ['[data-testid="changes-pane"]'])
-    const filter = await boxOf(page, ['[data-testid="changes-pane"] input[type="search"]'])
-    const rows = await boxOf(page, ['[data-testid="changes-pane"] [aria-label^="Actions for "]'])
+    await expectVisibleText(page, "selected", { selector: '[role="toolbar"] button', what: "the selection button" })
+    await clickText(page, "^\\d+ selected$", '#changes-pane button')
+    await sleep(600)
+    await expectVisibleText(page, "Stage 2", { selector: '[role="menu"] *', what: "the menu's Stage verb" })
+    await expectVisibleText(page, "Discard 2", { selector: '[role="menu"] *', what: "the menu's Discard verb" })
+    await expectVisibleText(page, "Select all", { selector: '[role="menu"] *', what: "the menu's Select all" })
+    const pane = await boxOf(page, ['#changes-pane'])
+    const menu = await boxOf(page, ['[role="menu"]'])
+    const filter = await boxOf(page, ['#changes-pane input[type="search"]'])
     const y = Math.max(0, Math.round(filter.y - 16))
     return {
       x: Math.round(pane.x),
       y,
       width: Math.round(pane.width),
-      height: Math.min(900 - y, Math.round(rows.y + rows.height + 16 - y)),
+      height: Math.min(900 - y, Math.round(menu.y + menu.height + 16 - y)),
     }
   },
 }

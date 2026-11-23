@@ -102,20 +102,22 @@ The browser has a ceiling of its own, rather than the terminal UI's. When a vers
 
 ## Several files at once
 
-Hover a row and its status icon turns into a checkbox. Tick it and a bar appears above the list with the verbs for what you picked: **Stage 3**, **Unstage 2**, **Discard 3…**, **Select all**, and **Clear**. On a touch screen there is no hover, so tapping the status icon is what ticks the row.
+Each row starts with its status icon. Hover the row, or move keyboard focus into it, and the icon turns into a checkbox; it stays a checkbox while the row is ticked. On a touch screen there is no hover, so the icon is the tap target, and tapping it ticks the row.
+
+Once anything is ticked, a **selection button** appears above the list, naming the count: **2 selected**. Its menu holds the verbs for what you picked, each with its own count: **Stage 2**, **Unstage 1**, **Discard 2…**, and **Select all**, which becomes **Select none** once every row on screen is ticked. A separate **×** button beside it clears the selection.
 
 - **Each section keeps its own selection**, because the two carry opposite verbs.
-- **Select all** picks every row currently on screen, in both sections, and flips to **Select none** once they are all ticked.
-- **Clear** is the wider one: it empties the whole selection, including rows a filter is hiding.
+- **Select all** picks every row the filter currently shows, in both sections.
+- **×** is the wider one: it empties the whole selection, including rows a filter is hiding.
 
-![Two changed files ticked, with a bar above the list offering Stage 2, Discard 2, Select all and Clear.](/screens/changes-bulk-bar.png)
+![The Changes pane with two files ticked: a button reading "2 selected" above the list with its menu open, offering Stage 2, Discard 2… and Select all, and a clear button beside it.](/screens/changes-bulk-bar.png)
 
 Staging or unstaging a selection is one operation with one message telling you what happened. If a file moved out of its group between the tick and the click, the rest still go through and the message names what was skipped.
 
 Discarding a selection confirms first, and the dialog counts the two outcomes separately: how many untracked files it will delete, and how many tracked files it will restore.
 
 > [!TIP]
-> The filter and the selection are independent. Filter the list, tick what you want, clear the filter and tick some more: the bar still counts and acts on everything you picked, not just the rows on screen.
+> The filter and the selection are independent. Filter the list, tick what you want, clear the filter and tick some more: the selection button still counts and acts on everything you picked, not just the rows on screen.
 
 ## Stage, unstage, discard
 
