@@ -10,7 +10,6 @@ import {
   Check,
   ChevronLeft,
   CircleAlert,
-  Ellipsis,
   ExternalLink,
   Code2,
   Eye,
@@ -123,6 +122,7 @@ import { rowKeyOfTarget } from "@/lib/paneCover"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
 import { Popover, PopoverContent } from "@/components/ui/popover"
 import { useObjectUrl } from "@/hooks/use-object-url"
@@ -185,7 +185,6 @@ import {
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import {
@@ -1792,19 +1791,12 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             languageFieldRef.current?.focus()
           }}
         >
-          <DropdownMenuTrigger
+          <EllipsisMenuTrigger
             ref={mobileFoldRef}
-            render={
-              <Button
-                size="icon"
-                variant="outline"
-                className={cn(HEADER_ICON_CONTROL, "md:hidden max-md:size-10")}
-                aria-label="More editor actions"
-              />
-            }
-          >
-            <Ellipsis />
-          </DropdownMenuTrigger>
+            placement="header"
+            phoneOnly
+            aria-label="More editor actions"
+          />
           <DropdownMenuContent
             align="end"
             // The language sheet takes focus once this menu has closed;
@@ -2213,18 +2205,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                     itself fresh on events, and this is the way to ask it
                     anyway. Sized with New file beside it. */}
                 <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label="Explorer actions"
-                        className="max-md:size-10 pointer-coarse:size-10"
-                      />
-                    }
-                  >
-                    <Ellipsis />
-                  </DropdownMenuTrigger>
+                  <EllipsisMenuTrigger
+                    placement="toolbar"
+                    aria-label="Explorer actions"
+                  />
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={refreshAllLoadedDirs}>
                       <RefreshCw />

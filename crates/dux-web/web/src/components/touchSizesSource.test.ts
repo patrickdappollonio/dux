@@ -48,6 +48,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
     "ChangeBaseBranchDialog.tsx",
     "FolderBrowseList.tsx",
     "MacrosDialog.tsx",
+    "ellipsisPlacements.ts",
   ]
   for (const file of files) {
     it(`${file} gives a finger what a phone gets`, () => {
@@ -56,6 +57,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
         ["max-md:min-h-10", "pointer-coarse:min-h-10"],
         ["max-md:min-h-11", "pointer-coarse:min-h-11"],
         ["max-md:size-10", "pointer-coarse:size-10"],
+        ["max-md:size-11", "pointer-coarse:size-11"],
       ]) {
         for (const cls of classStringsWith(src, narrow)) {
           expect(cls, `${narrow} without ${coarse}`).toContain(coarse)
@@ -79,7 +81,6 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
 
 describe("controls that had no touch size at all", () => {
   const cases: [string, string, string, string[]][] = [
-    ["MacrosDialog.tsx", "aria-label={`Actions for ${name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
     ["MacrosDialog.tsx", "onClick={() => showProblem(shownProblem.key)}", "<Button", BUTTON_FLOOR],
     ["OfflineOverlay.tsx", "onClick={reconnect}", "<Button", BUTTON_FLOOR],
     ["ChunkBoundary.tsx", "onClick={() => location.reload()}", "<Button", BUTTON_FLOOR],
