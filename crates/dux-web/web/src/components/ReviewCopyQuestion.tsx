@@ -1,6 +1,7 @@
 import { TriangleAlert } from "lucide-react"
 
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { Notice } from "@/components/Notice"
 import { type Prose, renderProse } from "@/lib/prose"
 
 // The server will not make a review copy nobody agreed to. A push from the
@@ -19,13 +20,9 @@ export function ReviewCopyQuestion({
 }) {
   return (
     <>
-      <p
-        role="alert"
-        className="flex items-start gap-2 rounded-md border border-dux-warning px-3 py-2 text-sm"
-      >
-        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-        <span>{renderProse(warning)}</span>
-      </p>
+      <Notice shape="box" tone="warning" emphasis="strong" announce="alert" icon={TriangleAlert}>
+        {renderProse(warning)}
+      </Notice>
       {onAgreedChange && (
         <CheckboxRow
           id="create-review-copy"

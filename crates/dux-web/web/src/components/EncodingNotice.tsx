@@ -1,11 +1,11 @@
-import { CircleAlert, X } from "lucide-react"
+import { CircleAlert } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
-import type { EncodingNotice as Notice } from "@/lib/editorEncoding"
+import { Notice } from "@/components/Notice"
+import type { EncodingNotice as EncodingNoticeData } from "@/lib/editorEncoding"
 import { renderProse } from "@/lib/prose"
 
 interface EncodingNoticeProps {
-  notice: Notice
+  notice: EncodingNoticeData
   onDismiss: () => void
 }
 
@@ -20,28 +20,13 @@ interface EncodingNoticeProps {
 // still there when the person comes back to the tab.
 export function EncodingNotice({ notice, onDismiss }: EncodingNoticeProps) {
   return (
-    <div
-      // A live region: it appears on opening a file, unasked.
-      role="status"
-      data-toast-clear
-      className="flex shrink-0 items-center gap-2 border-b border-dux-warning/40 bg-dux-warning/10 px-3 py-2 text-sm"
+    <Notice
+      shape="strip"
+      tone="warning"
+      icon={CircleAlert}
+      onDismiss={notice.dismissable ? onDismiss : undefined}
     >
-      <CircleAlert className="size-4 shrink-0 text-dux-warning" />
-      <span className="min-w-0 flex-1">{renderProse(notice.message)}</span>
-      {notice.dismissable && (
-        // Ghost and icon-only: the one control here, with the sentence as its
-        // only neighbour, so a stray tap lands on text. A finger gets the
-        // 40px floor.
-        <Button
-          size="icon"
-          variant="ghost"
-          className="size-7 shrink-0 pointer-coarse:size-10"
-          aria-label="Dismiss this notice"
-          onClick={onDismiss}
-        >
-          <X />
-        </Button>
-      )}
-    </div>
+      {renderProse(notice.message)}
+    </Notice>
   )
 }

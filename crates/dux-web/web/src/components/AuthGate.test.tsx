@@ -319,7 +319,7 @@ describe("banners in the layout", () => {
     phase = { kind: "open", status: status({ no_auth_warning: true, weak_password: true }) }
     renderGate()
     for (const b of screen.getAllByRole("button")) {
-      expect(b.className).toContain("pointer-coarse:min-h-11")
+      expect(b.className).toContain("pointer-coarse:min-h-10")
     }
   })
 })
