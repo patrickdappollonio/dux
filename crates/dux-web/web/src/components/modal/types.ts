@@ -178,16 +178,27 @@ export interface PickerModalProps extends ModalBase, ModalFrame {
   doors?: readonly [ModalDoor, ...ModalDoor[]]
 }
 
-export interface ReportModalProps extends ModalBase, ModalFrame {
+interface ReportModalBase extends ModalBase, ModalFrame {
   kind: "report"
   /** In reading order. A destructive one starts the footer's row, apart from
    * the Close that ends it. */
   actions?: readonly ModalAction[]
   footerNote?: ReactNode
-  /** What a card's safe button says; "Close" unless given. */
-  closeLabel?: string
-  safeRef?: Ref<HTMLButtonElement>
 }
+
+/** Where a card's way out is: a Close ending its footer, or the corner close a
+ * picker has, with no Close in the footer. A cover closes from its title row
+ * either way. */
+export type ReportModalProps = ReportModalBase &
+  (
+    | {
+        closeAt?: "footer"
+        /** What a card's safe button says; "Close" unless given. */
+        closeLabel?: string
+        safeRef?: Ref<HTMLButtonElement>
+      }
+    | { closeAt: "corner"; closeLabel?: never; safeRef?: never }
+  )
 
 export type ModalProps =
   | ConfirmModalProps

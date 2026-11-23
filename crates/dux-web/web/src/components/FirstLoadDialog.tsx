@@ -78,6 +78,8 @@ function FirstLoad({ open, onClosed }: { open: boolean; onClosed: () => void }) 
         },
       ]
     : [
+        // The approved order: Close, then the primary that ends the row.
+        { label: "Close", tone: "plain", onSelect: () => closeFirstLoad() },
         {
           label: "Open full notes",
           tone: "primary",
@@ -103,6 +105,9 @@ function FirstLoad({ open, onClosed }: { open: boolean; onClosed: () => void }) 
       // the browser's Back must not be what closes it. Opened from the menu, it
       // is an ordinary dialog and Back closes it.
       historyEntry={state.automatic !== true}
+      // The approved design: a corner close and only the screen's own buttons
+      // in the footer, where a report would otherwise end with a Close.
+      closeAt="corner"
       size="w700"
       title={
         phone ? (
