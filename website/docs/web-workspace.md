@@ -610,6 +610,8 @@ The flap takes no room from the terminal, so theater does not take it away: it l
 
 The flap does sit over the first lines of the terminal, though. The button at the right end of the top bar folds it up into the band so those lines are readable, and brings it back on the next tap. The phone remembers the choice for every agent and terminal, and keeps it across reloads. While the flap is folded, everything on it is folded with it, the `⋯` menu included, so the agent/terminals switch's working and needs-you colors are out of sight until you show the flap again. Folding hides the flap only: the top bar stays, because hiding it is theater's job. Entering theater still needs the flap (its first button), and leaving theater with the flap folded lands with the flap still folded.
 
+![The same phone agent screen with the action flap folded away: the top bar still names the agent and carries the button that shows the flap again, and the terminal's first lines read in full right under it.](/screens/phone-flap-folded.png)
+
 ### Typing on a phone
 
 An **accessory bar** sits above the soft keyboard with the keys a phone keyboard lacks: Esc, Tab, a sticky Ctrl and Alt latch, arrow keys, PgUp/PgDn, and a dedicated **⇧↵** key for the soft newline. Touch targets are sized generously. The soft keyboard is handled by the browser shrinking the layout, so the bar sits flush on top of it, and there is no fullscreen mode to fight with.
