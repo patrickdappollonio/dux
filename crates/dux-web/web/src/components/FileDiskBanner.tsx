@@ -2,6 +2,7 @@ import { CircleAlert, RotateCw, Trash2, X } from "lucide-react"
 
 import { Notice, type NoticeAction } from "@/components/Notice"
 import type { DiskState } from "@/lib/editorBuffers"
+import { chip, prose, renderProse } from "@/lib/prose"
 
 interface FileDiskBannerProps {
   // Which rung this is. "fresh" renders nothing, so the caller can hand the
@@ -56,19 +57,15 @@ export function FileDiskBanner({
     <Notice shape="strip" tone="warning" icon={deleted ? Trash2 : CircleAlert} actions={actions}>
       {deleted ? (
         <>
-          <span className="font-mono break-all">{path}</span> was deleted on
-          disk. {dirty ? "Your unsaved edits are still here." : "The text here is the last copy the editor read."}
+          {renderProse(prose`${chip(path)} was deleted on disk. `)}
+          {dirty ? "Your unsaved edits are still here." : "The text here is the last copy the editor read."}
         </>
       ) : paused ? (
-        <>
-          <span className="font-mono break-all">{path}</span> changed on
-          disk. A selection is active here, so the reload is paused.
-        </>
+        renderProse(
+          prose`${chip(path)} changed on disk. A selection is active here, so the reload is paused.`,
+        )
       ) : (
-        <>
-          <span className="font-mono break-all">{path}</span> changed on
-          disk, and you have unsaved edits here.
-        </>
+        renderProse(prose`${chip(path)} changed on disk, and you have unsaved edits here.`)
       )}
     </Notice>
   )

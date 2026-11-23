@@ -69,9 +69,10 @@ const ALLOWED: { file: string; mark: Mark; contains: string; reason: string }[] 
   { file: "lib/docs.ts", mark: "resume-link", contains: "DOCS_AGENT_TABS_RESUME =", reason: "the address's definition, on the line with its #how-resume-works anchor" },
   { file: "lib/docs.ts", mark: "resume-link", contains: "How resume works", reason: "the comment naming the docs section" },
   { file: "components/StoppedAgentParts.tsx", mark: "start-button", contains: "<StartAgentButton", reason: "the thin band above the dock: one line, not a card, deliberately sharing only the Start button and the run output" },
-  { file: "components/StoppedAgentParts.tsx", mark: "not-running-sentence", contains: "isn&rsquo;t running.", reason: "the band's own one-line sentence" },
-  { file: "components/StoppedAgentParts.tsx", mark: "not-running-sentence", contains: "isn&rsquo;t running.", reason: "the sentence of the title it hands NotRunningCard" },
-  { file: "components/DormantTabCard.tsx", mark: "not-running-sentence", contains: "isn&rsquo;t running.", reason: "the sentence of the title it hands NotRunningCard" },
+  { file: "components/StoppedAgentParts.tsx", mark: "not-running-sentence", contains: "slotTab ? renderProse(prose`${chip(slotTab.provider)} isn’t running.`)", reason: "the band's own one-line sentence" },
+  { file: "components/StoppedAgentParts.tsx", mark: "not-running-sentence", contains: "renderProse(prose`${chip(tab.provider)} isn’t running.`)", reason: "the sentence of the title it hands NotRunningCard" },
+  { file: "components/DormantTabCard.tsx", mark: "not-running-sentence", contains: "isn’t running.`)", reason: "the sentence of the title it hands NotRunningCard" },
+  { file: "components/DormantTabSurface.tsx", mark: "not-running-sentence", contains: "isn’t running.`)", reason: "the sentence of the title it hands NotRunningCard" },
 ]
 
 function unallowed(findings: Finding[]): { rest: Finding[]; unused: string[] } {

@@ -2002,7 +2002,7 @@ function ChangesList({
             size="section"
             icon={<Search />}
             title="No matching files"
-            description={<>No changed file matches “{query.trim()}”.</>}
+            description={<>No changed file matches <InlineCode>{query.trim()}</InlineCode>.</>}
           />
         ) : null}
         {items.length > 0 ? (

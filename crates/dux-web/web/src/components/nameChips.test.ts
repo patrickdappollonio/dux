@@ -1,10 +1,13 @@
-// Every variable a modal shows (a branch, a path, a file, a command, an agent,
-// project or terminal name, a pull request number) renders through the one
-// `InlineCode` chip, and the chip replaces the quotes that used to delimit it.
-// This guard reads the source of every dialog and of the copy builders dialogs
-// render, and fails on the two shapes the drift takes: a quote opened right
-// before an interpolation, and a hand-rolled monospace span standing in for the
-// chip. Toasts and the terminal UI are out of scope.
+// Every name a sentence on screen carries (a branch, a path, a file, a command,
+// an agent, project, terminal or provider name, a pull request number) renders
+// through the one `InlineCode` chip, and the chip replaces the quotes that used
+// to delimit it. This guard reads the source of every component, banners, bands
+// and cards included, and of the copy builders that build prose, and fails on
+// the two shapes the drift takes: a quote opened right before an interpolation,
+// and a hand-rolled monospace span standing in for the chip. The terminal UI is
+// out of scope. It reads text, not the program: a name drawn in a span with no
+// monospace class, or a sentence assembled from strings in a module that does
+// not import the prose helpers, is invisible to it.
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -29,18 +32,15 @@ const PROSE_IMPORT = /from\s+["'](?:\.\/prose|@\/lib\/prose)["']/
 const DIALOG_IMPORT =
   /from\s+["']@\/components\/(?:modal|ui\/(?:alert-)?dialog)["']/
 
-// Which files the guard reads, by rule rather than by list: every dialog under
-// components/ (subdirectories included), found by its name or by the dialog
-// primitive it imports, and every file under components/ or lib/ that builds
-// prose. The prose helpers themselves are the definition of a chip, not a user
-// of one.
+// Which files the guard reads, by rule rather than by list: every file under
+// components/ (subdirectories included), which is where a dialog, a banner, a
+// band, a card or an empty state is written, and every file under lib/ that
+// builds prose. The prose helpers themselves are the definition of a chip, not
+// a user of one, and neither is the chip's own file.
 function isScanned(name: string, source: string): boolean {
   if (!/\.tsx?$/.test(name) || name.includes(".test.")) return false
-  if (name === "lib/prose.tsx") return false
-  const isDialog =
-    (name.startsWith("components/") && /Dialog[^/]*\.tsx$/.test(name)) ||
-    DIALOG_IMPORT.test(source)
-  return isDialog || PROSE_IMPORT.test(source)
+  if (name === "lib/prose.tsx" || name === "components/ui/inline-code.tsx") return false
+  return name.startsWith("components/") || PROSE_IMPORT.test(source)
 }
 
 function scannedFiles(): { name: string; source: string }[] {
@@ -159,6 +159,53 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     line: '<span className="flex min-w-0 items-baseline gap-1 font-mono text-[11.5px] text-dux-standalone">',
     reason: "A standalone agent row's folder on its second line: part of a list row, not a name in a sentence.",
   },
+  // The files below are not dialogs: the surfaces around them. Each line is
+  // something other than a name in a sentence.
+  {
+    file: "components/AgentVitalsTooltip.tsx",
+    line: '<span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">',
+    reason: "The provider's tag beside the agent's name in the vitals card's heading: a tag standing alone, not a name in a sentence.",
+  },
+  {
+    file: "components/ChangedFiles.tsx",
+    line: 'const el = list.querySelector<HTMLElement>(`[data-item-kind="${kind}"]`)',
+    reason: "A DOM attribute selector, not copy.",
+  },
+  {
+    file: "components/ChangedFiles.tsx",
+    line: '<span className={cn("font-mono text-xs text-muted-foreground", ROW_FIGURE)}>',
+    reason: "A changed-files row's file count: a figure in a list row, not a name.",
+  },
+  {
+    file: "components/ChangedFiles.tsx",
+    line: '<span className={cn("font-mono text-xs text-dux-diff-excluded", ROW_FIGURE)}>',
+    reason: "A changed-files row's \"Excl\" marker: constant words in a list row, not a name.",
+  },
+  {
+    file: "components/ChangedFiles.tsx",
+    line: '<span className={cn("font-mono text-xs", ROW_FIGURE)}>',
+    reason: "A changed-files row's added and deleted line counts: figures in a list row, not names.",
+  },
+  {
+    file: "components/ViewportDebug.tsx",
+    line: '`--dux-app-top "${vars.getPropertyValue("--dux-app-top").trim()}" --dux-app-safe-top "${vars.getPropertyValue("--dux-app-safe-top").trim()}"`,',
+    reason: "The viewport debug overlay's own readout of CSS values: a developer tool, not a sentence about a name.",
+  },
+  {
+    file: "components/ViewportDebug.tsx",
+    line: "const els = Array.from(document.querySelectorAll(`[data-debug-box='${name}']`)).filter(",
+    reason: "A DOM attribute selector, not copy.",
+  },
+  {
+    file: "components/macrosDraft.ts",
+    line: '// A copy placed right after the original, under the first free "<name> copy",',
+    reason: "A comment describing a naming pattern, not text on screen.",
+  },
+  {
+    file: "components/macrosDraft.ts",
+    line: '// "<name> copy 2", … so the draft stays valid. The copy of an untitled macro',
+    reason: "A comment describing a naming pattern, not text on screen.",
+  },
   // The files below are scanned because they build toast prose, not because
   // they are dialogs; each line is something other than a name in a sentence.
   {
@@ -263,10 +310,10 @@ describe("the name-delimiter detector", () => {
   })
 })
 
-describe("every name a modal shows is the shared chip", () => {
+describe("every name a sentence shows is the shared chip", () => {
   const files = scannedFiles()
 
-  it("scans the dialogs and the copy they render", () => {
+  it("scans every component and the copy builders", () => {
     const names = files.map((f) => f.name)
     expect(files.length).toBeGreaterThan(30)
     expect(names).toContain("components/DeleteSessionDialog.tsx")
@@ -274,43 +321,26 @@ describe("every name a modal shows is the shared chip", () => {
     expect(names).toContain("lib/addProjectWarning.ts")
     expect(names).toContain("components/createAgentDialogView.ts")
     expect(names).toContain("components/CloneProjectDialog.tsx")
+    // The surfaces that are not dialogs.
+    expect(names).toContain("components/FileDiskBanner.tsx")
+    expect(names).toContain("components/StoppedAgentParts.tsx")
+    expect(names).toContain("components/DormantTabCard.tsx")
     // Who a guarded dialog names, and the sentences it names them in.
     expect(names).toContain("components/AttachedSection.tsx")
     expect(names).toContain("lib/attached.ts")
   })
 
-  it("finds dialogs and copy builders by rule", () => {
+  it("finds components and copy builders by rule", () => {
     expect(isScanned("components/terminal/SomeDialog.tsx", "")).toBe(true)
+    // A banner, a band or a card is not a dialog and is read all the same.
+    expect(isScanned("components/FileDiskBanner.tsx", "")).toBe(true)
+    expect(isScanned("components/ui/notice.tsx", "")).toBe(true)
     expect(isScanned("lib/newCopy.ts", 'import { chip } from "./prose"')).toBe(true)
     expect(isScanned("lib/newCopy.ts", 'import { chip } from "@/lib/prose"')).toBe(true)
     expect(isScanned("lib/unrelated.ts", 'import { x } from "./y"')).toBe(false)
-    // A modal that is not named like one is still found by what it renders.
-    expect(
-      isScanned(
-        "components/terminal/TakeOverCard.tsx",
-        'import { Dialog, DialogContent } from "@/components/ui/dialog"',
-      ),
-    ).toBe(true)
-    expect(
-      isScanned(
-        "components/ConfirmThing.tsx",
-        'import {\n  AlertDialog,\n} from "@/components/ui/alert-dialog"',
-      ),
-    ).toBe(true)
-    expect(
-      isScanned(
-        "components/terminal/Chooser.tsx",
-        'import { Modal, useModalLifetime } from "@/components/modal"',
-      ),
-    ).toBe(true)
-    expect(
-      isScanned("components/Other.tsx", 'import { x } from "@/components/ui/dialog-ish"'),
-    ).toBe(false)
-    expect(
-      isScanned("components/Other.tsx", 'import { x } from "@/components/modal-ish"'),
-    ).toBe(false)
     expect(isScanned("components/SomeDialog.test.tsx", "")).toBe(false)
     expect(isScanned("lib/prose.tsx", "")).toBe(false)
+    expect(isScanned("components/ui/inline-code.tsx", "")).toBe(false)
   })
 
   it("has no quote delimiting a name and no hand-rolled chip", () => {
@@ -387,6 +417,11 @@ function dialogLibModules(): { name: string; source: string }[] {
 // Paths in templates that are not dialog copy: URLs, keys and file names
 // handed to APIs, never shown in a dialog body. Each names why.
 const PLAIN_PATH_ALLOWED: { file: string; line: string; reason: string }[] = [
+  {
+    file: "components/ChangedFiles.tsx",
+    line: "aria-label={`Actions for ${file.path}`}",
+    reason: "An aria-label, which the chip rule leaves out: a screen reader hears no chip.",
+  },
   {
     file: "components/EditorStatusBar.tsx",
     line: "aria-label={`Copy path ${path}`}",
