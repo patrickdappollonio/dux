@@ -89,6 +89,7 @@ export function MobileActionFlap({
       <div
         ref={ref}
         data-testid="mobile-action-flap"
+        data-toast-clear
         // One pixel above the pane (the clip's top plus the bleed) is the one
         // pixel that makes it a flap rather than a box: the body starts ON the
         // band's bottom hairline, so the fill covers that line for the flap's own

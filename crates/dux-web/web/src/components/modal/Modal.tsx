@@ -442,6 +442,7 @@ function ModalParts(
       <div
         ref={header}
         data-slot="modal-header"
+        data-toast-clear={cover ? "" : undefined}
         className={
           cover
             ? "flex min-h-14 shrink-0 items-center gap-1 border-b py-2 pr-2 pl-4"

@@ -2032,7 +2032,10 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           (pointer-coarse:min-h-14.25). On a phone the painted controls take
           the 40px floor, and the explorer toggle always renders there, so
           the row is constant too. */}
-      <div className="flex min-h-12.25 items-center gap-2 pointer-coarse:min-h-14.25 border-b px-3 py-2">
+      <div
+        data-toast-clear
+        className="flex min-h-12.25 items-center gap-2 pointer-coarse:min-h-14.25 border-b px-3 py-2"
+      >
         {standalone && (
           // The phone's Up control, the same generic Back every phone screen
           // leads with, and as quiet as theirs: it navigates rather than acts,

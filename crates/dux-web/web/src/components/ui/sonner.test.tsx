@@ -687,7 +687,8 @@ describe("Toaster placement", () => {
 
   it("clears the notch at the top, on both of sonner's own breakpoints", () => {
     const placement = toastPlacement(true)
-    const top = "calc(env(safe-area-inset-top) + 1rem)"
+    // Below the top chrome when the page has any, measured as toasts arrive.
+    const top = "var(--dux-toast-top, calc(env(safe-area-inset-top) + 1rem))"
     expect(placement.offset).toEqual({ top })
     // sonner swaps to its mobile variables at 600px, which is not the app's
     // 768px shell breakpoint: both have to say the same thing.
@@ -714,11 +715,63 @@ describe("Toaster placement", () => {
     await raiseOne()
     expect(toasterEl().getAttribute("data-y-position")).toBe("top")
     expect(toasterEl().style.getPropertyValue("--offset-top")).toBe(
-      "calc(env(safe-area-inset-top) + 1rem)",
+      "var(--dux-toast-top, calc(env(safe-area-inset-top) + 1rem))",
     )
     expect(toasterEl().style.getPropertyValue("--mobile-offset-top")).toBe(
-      "calc(env(safe-area-inset-top) + 1rem)",
+      "var(--dux-toast-top, calc(env(safe-area-inset-top) + 1rem))",
     )
+  })
+
+  it("starts a phone toast below the top chrome on screen, so its buttons stay reachable", async () => {
+    const box = (top: number, bottom: number) => () =>
+      ({ top, bottom, left: 0, right: 390, width: 390, height: bottom - top, x: 0, y: top }) as DOMRect
+    const header = document.createElement("header")
+    header.setAttribute("data-toast-clear", "")
+    header.getBoundingClientRect = box(0, 56)
+    // A folded flap is still in the page, out of reach.
+    const folded = document.createElement("div")
+    folded.setAttribute("data-toast-clear", "")
+    folded.setAttribute("inert", "")
+    folded.getBoundingClientRect = box(0, 120)
+    document.body.append(header, folded)
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("64px"))
+      header.remove()
+      window.dispatchEvent(new Event("resize"))
+      // With no chrome at the top (theater), the toasts go back to the top.
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe(""))
+    } finally {
+      header.remove()
+      folded.remove()
+    }
+  })
+
+  it("starts a phone toast below a covering modal's title row, not the page's chrome under it", async () => {
+    const box = (top: number, bottom: number) => () =>
+      ({ top, bottom, left: 0, right: 390, width: 390, height: bottom - top, x: 0, y: top }) as DOMRect
+    const flap = document.createElement("div")
+    flap.setAttribute("data-toast-clear", "")
+    flap.getBoundingClientRect = box(86, 136)
+    const cover = document.createElement("div")
+    cover.setAttribute("data-slot", "dialog-content")
+    cover.setAttribute("data-presentation", "cover")
+    const title = document.createElement("div")
+    title.setAttribute("data-toast-clear", "")
+    title.getBoundingClientRect = box(0, 57)
+    cover.append(title)
+    document.body.append(flap, cover)
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("65px"))
+    } finally {
+      flap.remove()
+      cover.remove()
+    }
   })
 
   it("dismisses a phone toast on an upward swipe", async () => {

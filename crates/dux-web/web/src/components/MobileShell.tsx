@@ -88,7 +88,7 @@ function HomeScreen() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
+      <header data-toast-clear className="flex shrink-0 items-center gap-2 border-b px-3 py-3">
         <span className="relative shrink-0">
           <img src="/dux-logo.png" alt="dux" className="size-8 rounded-lg" />
           <ConnDot className="absolute -right-0.5 -bottom-0.5 ring-2 ring-background" />
@@ -170,7 +170,7 @@ function AgentlessTerminalScreen({
   return (
     <div data-debug-box="pane-screen" className="flex h-full min-h-0 flex-col overflow-hidden">
       <TheaterChrome hidden={chromeHidden}>
-        <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+        <header data-toast-clear className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
           {/* Up to the hub, by name: a relative history step walks out of the
             * app whenever this screen is the entry the browser opened on. */}
           <Button
@@ -365,7 +365,7 @@ function TerminalHeader({
   flapToggleStill,
 }: TerminalHeaderProps) {
   return (
-    <header className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+    <header data-toast-clear className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
       <Button
         variant="ghost"
         size="lg"
@@ -589,7 +589,7 @@ function AgentTerminalScreen({
 function ChangesScreen() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+      <header data-toast-clear className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
         {/* Up from changes is the agent it belongs to, not a history step: a
           * deep link straight to the changes screen pushed nothing. */}
         <Button

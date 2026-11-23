@@ -29,9 +29,55 @@ export const TOAST_SWIPE_DIRECTIONS_TOP: ToasterProps["swipeDirections"] = [
 /// switches to its mobile variables at its own 600px query, which says nothing
 /// about the shell (a phone can be shown the computer layout), and the safe-area
 /// inset is added here, since the toaster is fixed and sits outside the shell
-/// that pads for the notch.
-const TOP_INSET = "calc(env(safe-area-inset-top) + 1rem)"
+/// that pads for the notch. On the phone the stack starts below the top chrome
+/// on screen when there is any (see `useClearTopChrome`).
+const TOAST_TOP_VAR = "--dux-toast-top"
+const TOAST_CHROME_GAP = 8
+const TOAST_CHROME_POLL_MS = 250
+const TOP_INSET = `var(${TOAST_TOP_VAR}, calc(env(safe-area-inset-top) + 1rem))`
 const BOTTOM_INSET = "calc(env(safe-area-inset-bottom) + 2.5rem)"
+
+/// The phone's top chrome a toast must not cover: its header row, and the flap
+/// of actions hanging under it. Each marks itself with this attribute.
+const TOP_CHROME = "[data-toast-clear]"
+const COVER = '[data-slot="dialog-content"][data-presentation="cover"]:not([data-closed])'
+
+/// Keeps the phone's toasts below the top chrome on screen: the screens' headers
+/// differ in height, the flap folds away, and theater takes the header away,
+/// when the toasts go back to the top. Measured when a toast arrives, on a
+/// resize, and a few times a second while one is up, since the chrome changes
+/// under a toast with no event the toaster hears.
+function useClearTopChrome(section: React.RefObject<HTMLElement | null>, active: boolean): void {
+  useEffect(() => {
+    const el = section.current
+    if (!active || !el) return
+    const measure = () => {
+      if (el.querySelector("[data-sonner-toast]") === null) return
+      let bottom = 0
+      // A modal covering the screen hides the page's chrome: only its own
+      // title row is on screen then.
+      const cover = [...document.querySelectorAll<HTMLElement>(COVER)].at(-1)
+      for (const chrome of (cover ?? document).querySelectorAll<HTMLElement>(TOP_CHROME)) {
+        if (chrome.closest("[inert]")) continue
+        const box = chrome.getBoundingClientRect()
+        if (box.height > 0 && box.top < window.innerHeight / 2) bottom = Math.max(bottom, box.bottom)
+      }
+      if (bottom > 0) el.style.setProperty(TOAST_TOP_VAR, `${Math.ceil(bottom) + TOAST_CHROME_GAP}px`)
+      else el.style.removeProperty(TOAST_TOP_VAR)
+    }
+    measure()
+    const arrivals = new MutationObserver(measure)
+    arrivals.observe(el, { childList: true, subtree: true })
+    window.addEventListener("resize", measure)
+    const poll = setInterval(measure, TOAST_CHROME_POLL_MS)
+    return () => {
+      clearInterval(poll)
+      arrivals.disconnect()
+      window.removeEventListener("resize", measure)
+      el.style.removeProperty(TOAST_TOP_VAR)
+    }
+  }, [section, active])
+}
 
 export function toastPlacement(isMobile: boolean): {
   position: NonNullable<ToasterProps["position"]>
@@ -297,6 +343,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
   //   task so sonner's handler reads the released state rather than the
   //   pressed one. A finger is left to sonner, whose tap expands the stack.
   const sectionRef = useRef<HTMLElement>(null)
+  useClearTopChrome(sectionRef, isMobile)
   useEffect(() => {
     const section = sectionRef.current
     if (!section) return
