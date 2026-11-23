@@ -332,9 +332,14 @@ driver, seed and helpers:
 ```bash
 checks/run.sh                 # every check
 checks/run.sh one-driver      # just one
+checks/run.sh --reseed        # put the workspace back to the seed first
 ```
 
-Run it after a web UI change. See [checks/README.md](checks/README.md) for what
+It builds the release binary from this checkout and restarts the preview with
+`./up.sh --restart` whenever the container runs any other binary or is not in
+screenshot mode, so every verdict is about the working tree; it needs the
+`dux-preview` image to exist already and never builds or pulls one. Run it
+after a web UI change. See [checks/README.md](checks/README.md) for what
 each check protects, how to read a failure, how to add one, and the rule for
 keeping it in step with the product.
 
