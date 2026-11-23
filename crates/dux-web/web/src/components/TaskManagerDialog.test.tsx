@@ -1067,6 +1067,18 @@ describe("TaskManagerDialog long names", () => {
       setLayoutChoice(null)
     }
   })
+
+  it("counts one process in the singular on a stacked row", async () => {
+    vi.stubGlobal("innerWidth", 600)
+    setLayoutChoice("computer")
+    try {
+      seed()
+      render(<TaskManagerDialog />)
+      await screen.findByText("1.2% · 48.3 MiB · 1 proc")
+    } finally {
+      setLayoutChoice(null)
+    }
+  })
 })
 
 describe("TaskManagerDialog stop-all confirm", () => {

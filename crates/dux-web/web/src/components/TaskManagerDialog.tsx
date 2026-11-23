@@ -617,7 +617,7 @@ function MobileRow({
               {row.kind === "dux" ? <DuxBadge /> : null}
             </div>
             <div className="truncate text-xs text-muted-foreground tabular-nums">
-              {cpu} · {mem} · {procs} procs
+              {cpu} · {mem} · {procs} {row.stats?.process_count === 1 ? "proc" : "procs"}
             </div>
           </div>
         </div>

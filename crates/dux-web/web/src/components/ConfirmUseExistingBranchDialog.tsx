@@ -9,8 +9,9 @@ import {
 // Consent before a new agent attaches to an existing branch's history. The
 // server refuses an unconfirmed create whose name matches a branch and returns
 // a confirmable conflict; the store opens this dialog with the branch name and
-// location. Confirm re-creates with `use_existing_branch: true`, Cancel
-// abandons the create. Cancel is the default focus.
+// location. Confirm re-creates with `use_existing_branch: true`; Cancel goes
+// back to the New agent form, with the name still typed, when the question was
+// raised over it, and otherwise abandons the create. Cancel is the default focus.
 export function ConfirmUseExistingBranchDialog() {
   const { existingBranchTarget } = useDux()
   const name = existingBranchTarget?.name ?? ""
