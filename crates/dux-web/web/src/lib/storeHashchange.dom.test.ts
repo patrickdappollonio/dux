@@ -238,6 +238,20 @@ describe("a plain hash anchor drives the router", () => {
     expect(opens()).toBe(atStart + 1)
   })
 
+  it("counts pressing another open tab's pill as a file opened", async () => {
+    const mod = await import("./store")
+    const root = { kind: "agent", sessionId: "s2" } as const
+    mod.editorOpenFile(root, "a.ts", { pin: true })
+    mod.editorOpenFile(root, "b.ts", { pin: true })
+    const tabs = mod.getSnapshot().editorTabs[Object.keys(mod.getSnapshot().editorTabs).find((k) => k.includes("s2"))!]
+    const first = tabs.tabs.find((t) => t.path === "a.ts")!
+    const before = mod.getSnapshot().editorFileOpens
+    mod.editorActivateTab(root, first.id)
+    expect(mod.getSnapshot().editorFileOpens).toBe(before + 1)
+    mod.editorActivateTab(root, first.id)
+    expect(mod.getSnapshot().editorFileOpens).toBe(before + 1)
+  })
+
   it("the standalone editor's Up control pushes the agent's Changes screen, never stepping back", async () => {
     window.location.hash = "#/editor/agent/s1/file/a.ts"
     const mod = await import("./store")

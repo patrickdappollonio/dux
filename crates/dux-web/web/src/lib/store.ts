@@ -6699,7 +6699,16 @@ function editorMode(
 }
 
 export function editorActivateTab(root: EditorRoot, tabId: string): void {
-  setEditorTabsFor(root, editorActivateTabPure(editorTabsFor(root), tabId))
+  const prev = editorTabsFor(root)
+  const next = editorActivateTabPure(prev, tabId)
+  // Pressing another open tab's pill brings a file to the front like an open.
+  setEditorTabsFor(
+    root,
+    next,
+    next.activeId !== prev.activeId
+      ? { editorFileOpens: state.editorFileOpens + 1 }
+      : {},
+  )
 }
 
 // Promote a tab to permanent: double-click on the row/pill, or the tab's first

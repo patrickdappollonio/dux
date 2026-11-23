@@ -590,13 +590,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     if (fileOpen) panel.collapse()
     else toggleExplorer()
   }
-  // A file opening, by tab or in place of the preview tab, rather than the
-  // open file being renamed or moved, which keeps its tab.
-  const activeTabId = activeTab?.id ?? null
+  // Follows a file being opened (the store's counter), not every change of
+  // the front tab: closing the front tab or moving the open file brings a
+  // neighbour forward without anybody opening a file, and must not hide a tree
+  // the user is working in. Showing again when the last file closes is the
+  // change of `noFileOpen`.
+  const noFileOpen = activeTab === null
   useEffect(() => {
-    fitExplorerToFile(activeTabId !== null)
+    fitExplorerToFile(!noFileOpen)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, editorFileOpens, isMobile])
+  }, [noFileOpen, editorFileOpens, isMobile])
 
   // The phone layout's explorer follows the open file and writes nothing to
   // storage, so the computer layout's own state is put back on returning to
