@@ -440,6 +440,36 @@ describe("WorktreesDialog", () => {
     expect(screen.getByRole("heading").textContent).toBe("Worktrees in globex")
   })
 
+  it("drops the pick and the typed name when the project it shows changes", () => {
+    seed([entry({ worktree_path: "/wt/acme-one" })], {
+      spine: {
+        projects: [
+          { id: "p1", name: "acme" },
+          { id: "p2", name: "globex" },
+        ],
+        sessions: [],
+      },
+    } as unknown as Partial<DuxState>)
+    const { rerender } = render(<WorktreesDialog />)
+    fireEvent.click(screen.getByRole("button", { name: /acme-one/ }))
+    fireEvent.change(screen.getByPlaceholderText("Display name"), {
+      target: { value: "typed-name" },
+    })
+
+    mockState = {
+      ...mockState,
+      attachWorktreeTarget: "p2",
+      attachWorktreeEntries: [entry({ worktree_path: "/wt/globex-two" })],
+    } as DuxState
+    rerender(<WorktreesDialog />)
+    expect(screen.queryByPlaceholderText("Display name")).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: /globex-two/ }))
+    expect(
+      (screen.getByPlaceholderText("Display name") as HTMLInputElement).value,
+    ).toBe("globex-two")
+  })
+
   it("offers no branch checkbox for a detached worktree", () => {
     // There is no branch to delete, so offering the choice would be a lie and
     // the request must not ask for one.
