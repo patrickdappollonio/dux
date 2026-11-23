@@ -38,7 +38,9 @@ const WRITTEN_WORKTREES = new Set(["fix-login-redirect", "add-rate-limits"])
 const CHECK_BRANCH_PREFIX = "checks-"
 const CONFIG_FILE = "/data/dux/config.toml"
 const CONFIG_BACKUP = "/data/checks-config.toml.orig"
+// Tabs each seeded agent has; an agent not named here has its one first tab.
 const TAB_COUNTS = { "refactor-cache": 3 }
+const tabsSeeded = (title) => TAB_COUNTS[title] ?? 1
 
 function load(name) {
   const file = path.join(caseDir, `${name}.js`)
@@ -94,11 +96,14 @@ async function workspaceProblem() {
       .map((t) => `${s.title}'s ${t.provider} tab${t.last_run_verdict ? ` (${JSON.stringify(t.last_run_verdict)})` : ""}`),
   )
   if (dormant.length) return `${dormant.join(", ")} ha${dormant.length > 1 ? "ve" : "s"} no process`
-  for (const [title, count] of Object.entries(TAB_COUNTS)) {
-    const has = sessions.find((s) => s.title === title).tabs.length
-    if (has !== count) return `${title} has ${has} tabs rather than ${count}`
+  for (const s of sessions) {
+    if (s.tabs.length !== tabsSeeded(s.title)) {
+      return `${s.title} has ${s.tabs.length} tabs rather than ${tabsSeeded(s.title)}`
+    }
   }
   const terminals = (await lib.get("/api/v1/workspace")).terminals || []
+  const docked = terminals.find((t) => t.owner.kind === "session")
+  if (docked) return `an agent has a terminal of its own (${docked.id}), which no seed makes`
   for (const kind of ["project", "standalone"]) {
     if (!terminals.some((t) => t.owner.kind === kind)) return `there is no ${kind} terminal`
   }
@@ -130,6 +135,18 @@ async function backToSeed() {
     if (lib.SIDEBAR_ORDER.includes(title)) continue
     await lib.api("DELETE", `/api/v1/sessions/${session.id}?delete_worktree=true&force_connected=true`)
     console.log(`removed the agent ${title}, which no seed makes`)
+  }
+  for (const s of await lib.get("/api/v1/sessions")) {
+    for (const tab of s.tabs.slice(tabsSeeded(s.title))) {
+      await lib.api("DELETE", `/api/v1/sessions/${s.id}/tabs/${tab.id}?force_connected=true`)
+      console.log(`closed ${s.title}'s extra ${tab.provider} tab, which no seed makes`)
+    }
+  }
+  for (const t of (await lib.get("/api/v1/workspace")).terminals || []) {
+    if (t.owner.kind !== "session") continue
+    const id = t.owner.session_id ?? t.owner.sessionId
+    await lib.api("DELETE", `/api/v1/sessions/${id}/terminals/${t.id}?force_connected=true`)
+    console.log(`closed the terminal ${t.id} of an agent, which no seed makes`)
   }
   const undone = lib
     .containerSh(

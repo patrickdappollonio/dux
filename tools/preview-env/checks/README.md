@@ -68,11 +68,12 @@ of its own as well, so name both:
 - **The workspace.** Before the first check, the runner asks whether the
   workspace is the seeded one and carries nothing a check left behind: the six
   seeded agents and no others, every tab running, `refactor-cache` with its
-  three tabs, the folder agent's folder present, both terminals up, no agent
+  three tabs and every other agent its one, no terminal docked under an agent,
+  the folder agent's folder present, both terminals up, no agent
   with a commit of its own, no branch named `checks-…` in the project, and no
   copy of the config file a check set aside. If it is, the run starts at once.
   If not, it says why, puts back what a check can leave (it deletes the extra
-  agents with their working copies, the `checks-…` branches and the agents' own
+  agents with their working copies, closes their extra tabs and docked terminals, the `checks-…` branches and the agents' own
   commits, and restores the config file) and runs the scenes' seed
   (`../screens/seed.js`) without the pull-request step, which takes about half
   a minute. `--reseed` does all of that whatever the workspace looks like.
