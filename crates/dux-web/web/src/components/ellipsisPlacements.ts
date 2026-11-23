@@ -11,8 +11,10 @@
  * - `banner`: a strip's flush trailing control, at the strip's height token.
  * - `floating`: a round 40px button on the flap or the floating pill. These two
  *   fly as one object, so this box never changes.
- * - `tab-pill`: inside an agent tab's pill, which is shorter than 40px on a phone.
- * - `dock-pill`: inside a terminal dock pill, which keeps its natural height.
+ * - `tab-pill`: inside a tab strip's pill (`TabPill`), which is shorter than
+ *   40px on a phone.
+ * - `dock-pill`: the same box as `tab-pill`, since the dock's pills are the tab
+ *   strip's.
  *
  * Under a coarse pointer, and on a phone, every placement reaches the 40px
  * floor on the axis where its neighbours could take a stray tap; the pills keep
@@ -73,6 +75,16 @@ export const HEADER_BOX = {
  */
 export const BANNER_STRIP_HEIGHT = "h-9 pointer-coarse:h-10"
 
+// A phone gets 32px high and the full 44px wide (its horizontal
+// neighbour is the next tab), fitting inside the pill's 36px height;
+// a 44px square would force the pill back to 44px. A tablet keeps the 20px
+// box and an invisible 10px margin takes the tap area to 40px. Its left 10px
+// lie over the pill's own label or pin, so a tap there opens the menu rather
+// than selecting the tab.
+const PILL_BOX =
+  "relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:h-8 max-md:w-11 md:pointer-coarse:after:block"
+const PILL_REVEAL_CAP = "[--reveal-cap:--spacing(8)] max-md:max-w-none"
+
 export const BOX = {
   toolbar: "shrink-0 max-md:size-10 pointer-coarse:size-10",
   // The strip's height token, and the touch floor in width on a coarse pointer.
@@ -81,18 +93,8 @@ export const BOX = {
   // beside it sit the strip's own link and its edge.
   banner: `${BANNER_STRIP_HEIGHT} w-9 rounded-none text-current pointer-coarse:w-10`,
   floating: "size-10 shrink-0 rounded-full",
-  // A phone gets 32px high and the full 44px wide (its horizontal
-  // neighbour is the next tab), fitting inside the pill's 36px height;
-  // a 44px square would force the pill back to 44px. A tablet keeps the 20px
-  // box and an invisible 10px margin takes the tap area to 40px. Its left 10px
-  // lie over the pill's own label or pin, so a tap there opens the menu rather
-  // than selecting the tab.
-  "tab-pill":
-    "relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:h-8 max-md:w-11 md:pointer-coarse:after:block",
-  // The dock's pill does not shrink on a phone, so a finger gets a full 40px
-  // square; a tablet keeps the 20px box and the invisible margin.
-  "dock-pill":
-    "relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:pointer-coarse:size-10 md:pointer-coarse:after:block",
+  "tab-pill": PILL_BOX,
+  "dock-pill": PILL_BOX,
 } as const
 
 /** The banner's control box, shared with the banner's previous and next buttons. */
@@ -102,6 +104,6 @@ export const BANNER_CONTROL_BOX = BOX.banner
 // slot opens exactly as wide as what it holds. Only a row and a pill reveal.
 export const REVEAL_CAP: Record<"row" | PillPlacement, string> = {
   row: "[--reveal-cap:--spacing(10)]",
-  "tab-pill": "[--reveal-cap:--spacing(8)] max-md:max-w-none",
-  "dock-pill": "[--reveal-cap:--spacing(8)] max-md:max-w-none",
+  "tab-pill": PILL_REVEAL_CAP,
+  "dock-pill": PILL_REVEAL_CAP,
 }

@@ -64,6 +64,7 @@ function installBootStubs() {
 }
 installBootStubs()
 const { AgentTabsStrip } = await import("./AgentTabsStrip")
+const { DockStrip } = await import("./DockStrip")
 const { agentRowKey, registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function session(): SessionView {
@@ -456,7 +457,7 @@ describe("AgentTabsStrip phone height", () => {
   // 2px taller than the 41px it was.
   it("pads the strip 3px a side, the ring's reach, so the scroller never cuts it", () => {
     render(<AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />)
-    const strip = screen.getAllByRole("tab")[0].parentElement
+    const strip = screen.getByRole("tablist").parentElement
     expect(strip?.className).toContain("max-md:py-0.75")
     expect(strip?.className).not.toContain("max-md:py-0.5")
   })
@@ -505,7 +506,7 @@ describe("AgentTabsStrip on a touch tablet", () => {
     for (const pill of screen.getAllByRole("tab")) {
       expect(pill.className).toContain("md:pointer-coarse:min-h-9")
     }
-    const strip = screen.getAllByRole("tab")[0].parentElement
+    const strip = screen.getByRole("tablist").parentElement
     expect(strip?.className).toContain("md:pointer-coarse:gap-2")
   })
 
@@ -570,8 +571,58 @@ describe("AgentTabsStrip on a touch tablet", () => {
     expect(group.className).toContain("md:pointer-coarse:gap-4")
     // And the + clear of the last pill's ⋯.
     expect(group.className).toContain("md:pointer-coarse:ml-0.5")
-    const strip = screen.getAllByRole("tab")[0].parentElement!
+    const strip = screen.getByRole("tablist").parentElement!
     expect(strip.className).toContain("md:pointer-coarse:pr-4.5")
+  })
+})
+
+// The agent's strip and the terminal dock stack in one pane, so on a computer,
+// a tablet, and a phone with a mouse or a finger they must come out the same
+// size. jsdom cannot evaluate media queries; equal classes are equal boxes in
+// all four cases, and a browser measures them.
+describe("the agent and dock strips", () => {
+  it("draw their strips, pills, pill menus and + from one box", () => {
+    const spine = mockState.spine as unknown as Record<string, unknown>
+    mockState = { ...mockState, spine: { ...spine, sessions: [session()] } } as unknown as DuxState
+    render(
+      <>
+        <AgentTabsStrip session={session()} activeTabId="s1" maxTabs={20} />
+        <DockStrip
+          sessionId="s1"
+          terminals={[
+            {
+              id: "t1",
+              owner: { kind: "session", session_id: "s1" },
+              label: "Terminal 1",
+              has_output: true,
+              working: false,
+              typing: false,
+              foreground_cmd: null,
+              sort_order: 1,
+              created_at: "",
+              updated_at: "",
+            },
+          ]}
+          activeTerminal="t1"
+        />
+      </>,
+    )
+    const agent = screen.getByRole("tablist", { name: "Agent tabs" })
+    const dock = screen.getByRole("tablist", { name: "Terminals" })
+    const pairs: Array<[HTMLElement, HTMLElement]> = [
+      [agent.parentElement!, dock.parentElement!],
+      [agent, dock],
+      [within(agent).getAllByRole("tab")[0], within(dock).getAllByRole("tab")[0]],
+      [screen.getAllByLabelText("Tab actions")[0], screen.getByLabelText("Terminal actions")],
+      [
+        screen.getAllByLabelText("Tab actions")[0].parentElement!,
+        screen.getByLabelText("Terminal actions").parentElement!,
+      ],
+      [screen.getByLabelText("New tab"), screen.getByLabelText("New terminal")],
+    ]
+    for (const [a, d] of pairs) {
+      expect(Array.from(d.classList).sort()).toEqual(Array.from(a.classList).sort())
+    }
   })
 })
 
@@ -680,8 +731,9 @@ describe("keyboard focus on the strip", () => {
       keyboard.mockRestore()
     }
     expect(scroll).toHaveBeenCalledTimes(1)
-    expect(pill.parentElement!.className).toContain("py-1.25")
-    expect(pill.parentElement!.className).toContain("scroll-px-2")
+    const strip = screen.getByRole("tablist").parentElement!
+    expect(strip.className).toContain("py-1.25")
+    expect(strip.className).toContain("scroll-px-2")
   })
 })
 

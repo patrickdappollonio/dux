@@ -9,10 +9,15 @@ import {
   X,
 } from "lucide-react"
 
-import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
+import {
+  TAB_STRIP_BUTTON_DISABLED_TAP_AREA,
+  TabPill,
+  TabStrip,
+  TabStripButton,
+} from "@/components/TabStrip"
 import { AttentionDot } from "@/components/AttentionDot"
 import {
   DropdownMenu,
@@ -51,20 +56,12 @@ import {
   useDux,
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
-import { REVEAL_ROW } from "@/lib/hoverReveal"
-import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import type { RowBlock } from "@/lib/paneCover"
-import { cn } from "@/lib/utils"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
 const FIRST_TAB_HINT =
   "The agent's first tab: the one that starts when you open a stopped agent."
-
-// A disabled + or chooser takes no pointer events, so its own tablet tap margin
-// is dead; the wrapper that explains it carries the same 8px a side instead.
-const DISABLED_TAP_AREA =
-  "relative after:absolute after:-inset-2 after:hidden md:pointer-coarse:after:block"
 
 // The provider-tab strip at the top of the center pane; whether it shows is the
 // caller's decision. All tabs render uniformly: clicking a
@@ -116,20 +113,19 @@ export function AgentTabsStrip({
           : `New ${defaultProvider} tab`
 
   return (
-    // `max-md:py-0.75` trims the strip's own vertical padding to go with the
-    // shorter phone pill below: shrinking the pill alone would leave the strip
-    // the same height. It stays at 3px, the reach of a focus ring, because the
-    // scroller clips anything past it.
-    //
-    // A finger at desktop width (a tablet) gets 8px between pills, so one
-    // pill's ⋯ tap margin stays clear of the next pill, and an 18px end: the
-    // pane divider's touch band reaches 10px into this strip, and the
-    // chooser's tap margin takes the other 8.
-    <div
-      ref={attachStrip}
-      data-toast-clear
-      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 max-md:py-0.75 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+    <TabStrip
+      label="Agent tabs"
+      besidePaneDivider
+      stripRef={attachStrip}
+      trailing={
+        <AddTabControls
+          disabled={disabled}
+          newTabHint={newTabHint}
+          providers={providers}
+          defaultProvider={defaultProvider}
+          sessionId={session.id}
+        />
+      }
     >
       <SortableStrip
         ids={tabs.map((t) => t.id)}
@@ -137,7 +133,7 @@ export function AgentTabsStrip({
         disabled={block !== null}
       >
         {tabs.map((tab, i) => (
-          <TabPill
+          <AgentTabPill
             key={tab.id}
             session={session}
             tab={tab}
@@ -149,6 +145,25 @@ export function AgentTabsStrip({
           />
         ))}
       </SortableStrip>
+    </TabStrip>
+  )
+}
+
+function AddTabControls({
+  disabled,
+  newTabHint,
+  providers,
+  defaultProvider,
+  sessionId,
+}: {
+  disabled: boolean
+  newTabHint: string
+  providers: string[]
+  defaultProvider: string
+  sessionId: string
+}) {
+  return (
+    <>
       {/* Split "+" control: the main button quick-adds the project default
           provider, the adjacent caret opens a menu to pick another configured
           one. The gap between the halves is the misclick-safe spacing. On a
@@ -160,40 +175,25 @@ export function AgentTabsStrip({
         <ExplainedWhenDisabled
           disabled={disabled}
           hint={newTabHint}
-          disabledClassName={DISABLED_TAP_AREA}
+          disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
         >
-          <button
-            type="button"
+          <TabStripButton
             aria-label="New tab"
             disabled={disabled}
-            onClick={() => addTab(session.id)}
-            // `max-md:h-9 max-md:w-11` rather than `max-md:size-11`: the strip's
-            // height relaxation is VERTICAL only (see the pill below), so this
-            // keeps its full 44px WIDTH, where its neighbour is the provider
-            // caret and a stray sideways tap would add the wrong provider.
-            // On a tablet the box stays 24px and an invisible margin takes the
-            // tap area to 40px.
-            className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
+            onClick={() => addTab(sessionId)}
           >
             <Plus className="size-4" />
-          </button>
+          </TabStripButton>
         </ExplainedWhenDisabled>
         <ExplainedWhenDisabled
           disabled={disabled}
           hint={disabled ? newTabHint : null}
-          disabledClassName={DISABLED_TAP_AREA}
+          disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
         >
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <button
-                  type="button"
-                  aria-label="Choose provider for new tab"
-                  disabled={disabled}
-                  // Height relaxed, width kept, and the same tablet tap margin:
-                  // same reasoning as the "+" beside it.
-                  className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
-                />
+                <TabStripButton aria-label="Choose provider for new tab" disabled={disabled} />
               }
             >
               <ChevronDown className="size-3.5" />
@@ -202,7 +202,7 @@ export function AgentTabsStrip({
               {providers.map((p) => {
                 const isDefault = p === defaultProvider
                 return (
-                  <DropdownMenuItem key={p} onClick={() => addTab(session.id, p)}>
+                  <DropdownMenuItem key={p} onClick={() => addTab(sessionId, p)}>
                     {isDefault ? <Check /> : <Bot />}
                     {p}
                     {isDefault ? (
@@ -217,11 +217,11 @@ export function AgentTabsStrip({
           </DropdownMenu>
         </ExplainedWhenDisabled>
       </div>
-    </div>
+    </>
   )
 }
 
-function TabPill({
+function AgentTabPill({
   session,
   tab,
   label,
@@ -242,7 +242,7 @@ function TabPill({
 }) {
   const changesBlocked = block !== null
   const device = useRowDriverLabel({ sessionId: session.id })
-  const { setNodeRef, style, listeners, isDragging } = usePillSort(tab.id)
+  const sort = usePillSort(tab.id)
   // No successor means no slot to hand on, which is the one close the server
   // refuses. Answered from the tab list rather than from slot-ness, because
   // "this is the first tab" and "this is the only tab" are different facts and
@@ -254,76 +254,37 @@ function TabPill({
   }
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
+    <TabPill
       data-cue-key={tab.id}
-      {...listeners}
-      role="tab"
-      aria-selected={active}
-      tabIndex={0}
-      onClick={select}
-      onKeyDown={(e) => {
-        // Only a press on the pill itself: Enter and Space from the ⋯ trigger
-        // and its menu items bubble here too (through the menu's portal), and
-        // must not select the tab or start one resting on the idle screen.
-        if (e.target !== e.currentTarget) return
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          select()
-        }
-        focusAdjacentTab(e)
-      }}
-      // `max-md:min-h-9` (36px) relaxes the 40px touch-target floor on the
-      // vertical axis only. The neighbours there are the mobile header, whose
-      // controls end at its bottom edge, and the PTY, where a mis-tap costs a
-      // keyboard you dismiss or a click the app ignores. Horizontally the pill
-      // keeps its size, because its neighbours are other tabs and landing on
-      // the wrong one is a real mis-tap. A tablet gets the same 36px for the
-      // same reasons, with the strip's own padding kept, so the ⋯ tap area
-      // inside, which overshoots the pill by 2px, stays inside the strip.
-      className={cn(
-        // `max-md:py-0` goes with it: the pill's own 4px padding would sit on
-        // top of the 32px ⋯ hit area inside and overshoot the 36px again.
-        "flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors max-md:min-h-9 max-md:py-0 md:pointer-coarse:min-h-9",
-        REVEAL_ROW,
-        isDragging && "relative z-10 shadow-lg",
-        active
-          ? "border-border bg-background text-foreground"
-          : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {/* The same glyph cue as the sidebar, on the pill's own ladder: typing
-          and needs-you outrank working, so either one stands the cue down.
-          Every stop finishes the bounce at rest and eases the glyph back to
-          full; the attention dot is a separate element beside it, so it
-          appears at once. */}
-      <WorkingGlyph
-        icon={Bot}
-        working={tab.working && !tab.typing && !tab.needs_attention}
-        className="size-3.5"
-      />
-      {/* Cyan attention dot on the flagged tab's pill (a permission prompt or a
-          finished turn on this specific tab). */}
-      {tab.needs_attention && <AttentionDot />}
-      <span className="max-w-40 truncate">{label}</span>
-      {/* The pin marks the tab that starts and resumes the agent, in the quiet
-          text color. It follows the slot when the slot passes on. */}
-      {pinned ? (
-        <SimpleTooltip content={FIRST_TAB_HINT}>
-          <span role="img" aria-label={FIRST_TAB_HINT} className="shrink-0 text-muted-foreground">
-            <Pin className="size-3" aria-hidden />
-          </span>
-        </SimpleTooltip>
-      ) : null}
-      {/* The shared reveal, also on mouse focus in the pill. The phone keeps
-          the slot's width open for its 44px trigger. */}
-      <DropdownMenu>
-        <EllipsisMenuTrigger
-          placement="tab-pill"
-          reveal="hover-or-focus"
-          aria-label="Tab actions"
+      active={active}
+      sort={sort}
+      onSelect={select}
+      // The same glyph cue as the sidebar, on the pill's own ladder: typing and
+      // needs-you outrank working, so either one stands the cue down.
+      icon={
+        <WorkingGlyph
+          icon={Bot}
+          working={tab.working && !tab.typing && !tab.needs_attention}
+          className="size-3.5"
         />
+      }
+      // A permission prompt or a finished turn on this specific tab.
+      badge={tab.needs_attention ? <AttentionDot /> : null}
+      label={label}
+      // The pin marks the tab that starts and resumes the agent, in the quiet
+      // text color. It follows the slot when the slot passes on.
+      marker={
+        pinned ? (
+          <SimpleTooltip content={FIRST_TAB_HINT}>
+            <span role="img" aria-label={FIRST_TAB_HINT} className="shrink-0 text-muted-foreground">
+              <Pin className="size-3" aria-hidden />
+            </span>
+          </SimpleTooltip>
+        ) : null
+      }
+      menu={{
+        label: "Tab actions",
+        content: (
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
             {block !== null ? (
               <DropdownMenuGroup>
@@ -408,7 +369,8 @@ function TabPill({
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
-        </DropdownMenu>
-    </div>
+        ),
+      }}
+    />
   )
 }

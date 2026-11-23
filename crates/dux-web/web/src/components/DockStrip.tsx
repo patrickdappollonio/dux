@@ -1,12 +1,16 @@
 import { Plus, SquareTerminal, X } from "lucide-react"
 
-import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
+import {
+  TAB_STRIP_BUTTON_DISABLED_TAP_AREA,
+  TabPill,
+  TabStrip,
+  TabStripButton,
+} from "@/components/TabStrip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import {
-  DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -31,16 +35,7 @@ import {
 } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
 import { terminalTitle } from "@/lib/terminals"
-import { REVEAL_ROW } from "@/lib/hoverReveal"
-import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
-import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
-
-// The strip's icon buttons: the tab strip's own, at one height token. A phone
-// lifts the box to the 40px floor; a tablet keeps the 24px box and an invisible
-// 8px margin a side takes the tap area to 40px, as the tab strip's + does.
-const STRIP_ICON_BUTTON =
-  "relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:pointer-coarse:size-10 md:pointer-coarse:after:block"
 
 // An agent's terminal dock strip: one pill per terminal of the agent, in the
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
@@ -73,16 +68,20 @@ export function DockStrip({
   const block = useAgentChangeBlockById(sessionId)
   const device = useRowDriverLabel({ sessionId })
   return (
-    // A tablet gets the tab strip's spacing: 8px between pills, so one pill's ⋯
-    // tap margin stays clear of the next pill, and an 18px end, since the pane
-    // divider's touch band reaches 10px into the strip and the last layout
-    // control's tap margin takes the other 8.
-    <div
-      ref={attachStrip}
+    <TabStrip
+      label="Terminals"
+      besidePaneDivider
+      stripRef={attachStrip}
       data-testid="dock-strip"
-      data-toast-clear
-      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+      trailing={
+        <DockControls
+          sessionId={sessionId}
+          block={block}
+          device={device}
+          layout={layout}
+          onLayoutAction={onLayoutAction}
+        />
+      }
     >
       <SortableStrip
         ids={ids}
@@ -101,24 +100,40 @@ export function DockStrip({
           />
         ))}
       </SortableStrip>
+    </TabStrip>
+  )
+}
+
+function DockControls({
+  sessionId,
+  block,
+  device,
+  layout,
+  onLayoutAction,
+}: {
+  sessionId: string
+  block: RowBlock | null
+  device: string | null
+  layout?: ComputerLayout
+  onLayoutAction?: (action: LayoutAction) => void
+}) {
+  return (
+    <>
       <ExplainedWhenDisabled
         disabled={block !== null}
         hint={block === null ? "New terminal" : addToAgentBlockHint(block, device)}
-        // The disabled button's own tap margin is dead, so its wrapper carries
-        // the same one, 2px shorter on the left where it holds the button's margin.
-        disabledClassName="relative after:absolute after:-inset-y-2 after:-right-2 after:-left-1.5 after:hidden md:pointer-coarse:after:block"
+        // 2px more on a tablet keeps the +'s tap area off the last pill's ⋯,
+        // whose own reaches 1px past its pill.
+        className="md:pointer-coarse:ml-0.5"
+        disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
       >
-        <button
-          type="button"
+        <TabStripButton
           aria-label="New terminal"
           disabled={block !== null}
           onClick={() => createTerminal(sessionId)}
-          // 2px more on a tablet keeps its tap area off the last pill's ⋯,
-          // whose own reaches 1px past its pill.
-          className={cn(STRIP_ICON_BUTTON, "md:pointer-coarse:ml-0.5")}
         >
           <Plus className="size-4" />
-        </button>
+        </TabStripButton>
       </ExplainedWhenDisabled>
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
@@ -127,19 +142,17 @@ export function DockStrip({
         <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2 md:pointer-coarse:gap-4">
           {layoutControls(layout).map((control) => (
             <SimpleTooltip key={control.action} content={control.label}>
-              <button
-                type="button"
+              <TabStripButton
                 aria-label={control.label}
                 onClick={() => onLayoutAction(control.action)}
-                className={STRIP_ICON_BUTTON}
               >
                 <control.icon className="size-3.5" />
-              </button>
+              </TabStripButton>
             </SimpleTooltip>
           ))}
         </div>
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -159,77 +172,54 @@ function DockPill({
   /** Why nothing here may change the agent, or null when it may. */
   block: RowBlock | null
 }) {
-  const { setNodeRef, style, listeners, isDragging } = usePillSort(terminal.id)
+  const sort = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
   const device = useRowDriverLabel({ sessionId })
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
+    <TabPill
       data-cue-key={terminal.id}
-      {...listeners}
-      role="tab"
-      aria-selected={active}
-      tabIndex={0}
-      onClick={select}
-      onKeyDown={(e) => {
-        // Only a press on the pill itself: Enter and Space from the ⋯ and its
-        // menu bubble here too.
-        if (e.target !== e.currentTarget) return
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          select()
-        }
-        focusAdjacentTab(e)
-      }}
-      className={cn(
-        // 36px on a tablet, the tab strip's pill height.
-        "flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors md:pointer-coarse:min-h-9",
-        REVEAL_ROW,
-        isDragging && "relative z-10 shadow-lg",
-        active
-          ? "border-border bg-background text-foreground"
-          : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {/* The tab strip's glyph on the terminal row's ladder: typing stands the
-          cue down, and a terminal never needs you. */}
-      <WorkingGlyph
-        icon={SquareTerminal}
-        working={terminal.working && !terminal.typing}
-        className="size-3.5"
-      />
-      <span className="max-w-40 truncate">{label}</span>
-      {/* The tab pill's reveal. */}
-      {withMenu ? (
-          <DropdownMenu>
-            <EllipsisMenuTrigger
-              placement="dock-pill"
-              reveal="hover-or-focus"
-              aria-label="Terminal actions"
-            />
-            <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-              {/* This terminal's own actions only: the input rows and the editor
-                  live in the pane's top menu. Neutral, like every destructive
-                  item; the confirm is the danger signal. */}
-              {block !== null ? (
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                    {agentChangeBlockReason(block, device)}
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                </DropdownMenuGroup>
-              ) : null}
-              <DropdownMenuItem
-                disabled={block !== null}
-                onClick={() => openDeleteTerminal(terminal.id)}
-              >
-                <X />
-                Close terminal…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-      ) : null}
-    </div>
+      active={active}
+      sort={sort}
+      onSelect={select}
+      // The tab strip's glyph on the terminal row's ladder: typing stands the
+      // cue down, and a terminal never needs you.
+      icon={
+        <WorkingGlyph
+          icon={SquareTerminal}
+          working={terminal.working && !terminal.typing}
+          className="size-3.5"
+        />
+      }
+      label={label}
+      menu={
+        withMenu
+          ? {
+              label: "Terminal actions",
+              content: (
+                <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+                  {/* This terminal's own actions only: the input rows and the editor
+                      live in the pane's top menu. Neutral, like every destructive
+                      item; the confirm is the danger signal. */}
+                  {block !== null ? (
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel className="max-w-60 whitespace-normal">
+                        {agentChangeBlockReason(block, device)}
+                      </DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                    </DropdownMenuGroup>
+                  ) : null}
+                  <DropdownMenuItem
+                    disabled={block !== null}
+                    onClick={() => openDeleteTerminal(terminal.id)}
+                  >
+                    <X />
+                    Close terminal…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              ),
+            }
+          : undefined
+      }
+    />
   )
 }

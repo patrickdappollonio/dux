@@ -160,6 +160,18 @@ describe("EditorTabsStrip", () => {
     expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
   })
 
+  // A key the pill does not cancel goes on to press the focused ✕, which is
+  // what a browser does with Enter or Space on a button.
+  it.each(["Enter", " "])("closes a tab, and selects nothing, on %j on its focused ✕", (key) => {
+    seed("s1", [tab({ id: "t1" }), tab({ id: "t2", path: "b.ts" })], "t2")
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
+    const close = screen.getByLabelText("Close a.ts")
+    act(() => close.focus())
+    if (fireEvent.keyDown(close, { key })) fireEvent.click(close)
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
+    expect(editorActivateTabMock).not.toHaveBeenCalled()
+  })
+
   it("strip container is horizontally scrollable", () => {
     seed("s1", [tab({ id: "t1" })], "t1")
     const { container } = render(<EditorTabsStrip root={agentRoot("s1")} />)
@@ -167,16 +179,16 @@ describe("EditorTabsStrip", () => {
     expect(strip.className).toContain("overflow-x-auto")
   })
 
-  it("phone pills are 34px tall, a deliberate touch-floor deviation", () => {
-    // NOT the 40px touch floor, a settled product decision for this surface.
-    // The close button keeps a larger-than-visual hit area (max-md:size-8 fits
-    // inside the 34px pill without adding height).
+  it("phone pills are 36px tall, the tab strips' shared touch-floor deviation", () => {
+    // The tab strips' shared pill height, below the 40px touch floor. The close
+    // button keeps a larger-than-visual hit area (max-md:size-8 fits inside the
+    // 36px pill without adding height).
     seed("s1", [tab({ id: "t1" })], "t1")
     render(<EditorTabsStrip root={agentRoot("s1")} />)
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
-    expect(pill.className).toContain("max-md:min-h-8.5")
+    expect(pill.className).toContain("max-md:min-h-9")
     // py-0 on the phone: the 32px close-button hit area already fills the
-    // 34px pill; keeping py-1 would push the rendered height to 42px.
+    // pill; keeping py-1 would push the rendered height to 42px.
     expect(pill.className).toContain("max-md:py-0")
     expect(pill.className).not.toContain("max-md:min-h-10")
     const closeBtn = screen.getByLabelText("Close a.ts")
@@ -205,10 +217,11 @@ describe("EditorTabsStrip", () => {
     // The margin never reaches left over the tab's own label.
     expect(classes).not.toContain("after:-inset-2.5")
     expect(classes).not.toContain("after:-left-2.5")
-    // The phone's 32px ✕ needs no margin, and the pill keeps its height.
+    // The phone's 32px ✕ needs no margin.
     expect(classes).not.toContain("pointer-coarse:after:block")
+    // The tablet pill is the other strips' 36px, so the 40px area fits the strip.
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
-    expect(pill.className).not.toMatch(/pointer-coarse:min-h/)
+    expect(pill.className).toContain("md:pointer-coarse:min-h-9")
   })
 
   it("renders nothing when the session has no tabs", () => {
@@ -239,8 +252,9 @@ describe("keyboard focus on the strip", () => {
       keyboard.mockRestore()
     }
     expect(scroll).toHaveBeenCalledTimes(1)
-    expect(pill.parentElement!.className).toContain("py-1.25")
-    expect(pill.parentElement!.className).toContain("scroll-px-2")
+    const strip = screen.getByRole("tablist").parentElement!
+    expect(strip.className).toContain("py-1.25")
+    expect(strip.className).toContain("scroll-px-2")
   })
 })
 
