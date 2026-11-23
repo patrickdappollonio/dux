@@ -3,7 +3,10 @@
 // way out of that question goes back to the form with the name still typed.
 
 const PROJECT = "demo-api"
-const EXISTING_BRANCH = "login-session-cookie"
+const REPO = `/repos/${PROJECT}`
+// Made for this check and deleted after it. The runner treats any branch named
+// "checks-…" as a leftover and deletes it at the start of a run.
+const EXISTING_BRANCH = "checks-existing-branch"
 const HELD_NAME = "checks-held-create"
 
 const isCreate = (request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/sessions"
@@ -24,12 +27,12 @@ async function nameValue(H, dev) {
   return { top, value: top && top.fields[0] ? top.fields[0].value : null }
 }
 
-// No agent may be left behind under either name: the workspace the scenes are
-// shot against holds exactly the seeded ones.
+// No agent may be left behind under either name, nor its working copy: the
+// workspace the scenes are shot against holds exactly the seeded ones.
 async function removeStray(H) {
   for (const name of [HELD_NAME, EXISTING_BRANCH]) {
     const stray = (await H.lib.agents())[name]
-    if (stray) await H.lib.api("DELETE", `/api/v1/sessions/${stray.id}?force_connected=true`)
+    if (stray) await H.lib.api("DELETE", `/api/v1/sessions/${stray.id}?delete_worktree=true&force_connected=true`)
   }
 }
 
@@ -37,10 +40,15 @@ module.exports = {
   protects:
     "New agent: with the create held, three Enters send exactly one POST /api/v1/sessions; an existing branch's name raises \"Attach to existing branch?\", and Cancel, Escape and the browser's Back each return to the form with the name kept.",
   async run(ctx, H) {
-    ctx.after(() => removeStray(H))
-    H.lib.containerSh(
-      `git -C /repos/${PROJECT} rev-parse --verify --quiet refs/heads/${EXISTING_BRANCH} >/dev/null || git -C /repos/${PROJECT} branch ${EXISTING_BRANCH}`,
+    ctx.after(() =>
+      H.lib.containerSh(
+        `if git -C ${REPO} rev-parse --verify --quiet refs/heads/${EXISTING_BRANCH} >/dev/null; then git -C ${REPO} branch -q -D -- ${EXISTING_BRANCH}; fi`,
+      ),
     )
+    // Run first (clean-ups run newest first): an agent on the branch would keep it
+    // checked out.
+    ctx.after(() => removeStray(H))
+    H.lib.containerSh(`git -C ${REPO} branch -- ${EXISTING_BRANCH}`)
 
     // Held: the create is caught and never answered, so the form stays busy.
     const held = await H.device(ctx, "computer")
@@ -56,6 +64,7 @@ module.exports = {
     ctx.after(() => Promise.all(creates.map((r) => r.abort().catch(() => {}))))
     await openForm(H, held)
     await held.page.keyboard.type(HELD_NAME)
+    // Three Enters at a person's pace, each a separate press.
     for (let i = 0; i < 3; i++) {
       await held.page.keyboard.press("Enter")
       await H.sleep(150)
@@ -63,6 +72,8 @@ module.exports = {
     await H.until(() => creates.length > 0, "the form to send its create", { timeout: 3000 }).catch(() =>
       H.fail("three Enters in the New agent form sent no create at all"),
     )
+    // A wait for nothing more to happen: long enough for a second create to have
+    // left, had the form sent one.
     await H.sleep(700)
     H.expect(creates.length === 1, `three Enters while the create was held should send exactly one POST /api/v1/sessions; ${creates.length} were sent`)
 

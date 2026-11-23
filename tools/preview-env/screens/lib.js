@@ -142,13 +142,17 @@ function launchArgs(width, height, { scale = 2, finePointer = false } = {}) {
 
 // One browser, with no page of its own yet. `scale` and `finePointer` are for the
 // check suite, which wants a cheaper 1x render and a computer that has a mouse.
-async function launch({ mobile = false, width, height, scale = 2, finePointer = false } = {}) {
+// `ownSignals` is for a caller that handles Ctrl-C itself and closes the browser
+// once its own clean-up has run; otherwise puppeteer kills the browser and ends
+// the process on the signal, before any clean-up.
+async function launch({ mobile = false, width, height, scale = 2, finePointer = false, ownSignals = false } = {}) {
   const preset = mobile ? PHONE : DESKTOP
   return puppeteer().launch({
     executablePath: process.env.CHROME,
     headless: "new",
     defaultViewport: null,
     args: launchArgs(width || preset.width, height || preset.height, { scale, finePointer }),
+    ...(ownSignals ? { handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false } : {}),
   })
 }
 

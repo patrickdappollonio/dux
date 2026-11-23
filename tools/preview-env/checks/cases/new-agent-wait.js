@@ -4,8 +4,11 @@
 // and a warning naming the wait; a late failed answer replaces that warning.
 
 const DUX_HOME = "/data/dux"
+const CONFIG = `${DUX_HOME}/config.toml`
+// The config file as it was before this check, copied aside before it changes
+// anything; the runner puts it back at the start of a run if it is still here.
+const BACKUP = "/data/checks-config.toml.orig"
 const KEY = "server.new_agent_request_timeout_seconds"
-const DEFAULT_SECONDS = 30
 const WAIT_SECONDS = 3
 const PROJECT = "demo-api"
 const NAME = "checks-slow-create"
@@ -13,14 +16,24 @@ const NAME = "checks-slow-create"
 const isCreate = (request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/sessions"
 const isBootstrap = (response) => new URL(response.url()).pathname === "/api/v1/bootstrap"
 
+const publishedWait = async (H) => (await H.lib.get("/api/v1/bootstrap")).new_agent_request_timeout_seconds
+
+async function waitPublished(H, seconds) {
+  await H.until(async () => (await publishedWait(H)) === seconds, `the server to publish ${KEY} = ${seconds}`, { timeout: 10000 })
+}
+
 // `dux config set` has the running dux reload, and fails when it does not.
 async function setWait(H, seconds) {
   H.lib.containerSh(`DUX_HOME=${DUX_HOME} dux config set ${KEY} ${seconds}`)
-  await H.until(
-    async () => (await H.lib.get("/api/v1/bootstrap")).new_agent_request_timeout_seconds === seconds,
-    `the server to publish ${KEY} = ${seconds}`,
-    { timeout: 10000 },
-  )
+  await waitPublished(H, seconds)
+}
+
+// The config file back byte for byte, and the running dux reloaded onto it.
+async function restoreConfig(H, seconds) {
+  const restored = H.lib.containerSh(`if [ -e ${BACKUP} ]; then cp ${BACKUP} ${CONFIG} && rm ${BACKUP} && echo restored; fi`)
+  if (!restored.trim()) return
+  await H.lib.api("POST", "/api/v1/config/reload")
+  await waitPublished(H, seconds)
 }
 
 // The Create button's state and the text of every toast about this agent, read
@@ -46,12 +59,11 @@ async function formState(page) {
 }
 
 module.exports = {
-  // The config reloads raise a status that pages opened in the next 30 seconds
-  // are handed again.
-  raisesServerStatuses: true,
   protects: `New agent: after a config reload sets ${KEY} to ${WAIT_SECONDS} on an open page, a held create frees the form after ${WAIT_SECONDS} seconds with the name kept and a warning naming ${WAIT_SECONDS} seconds, and a late 502 replaces that warning with one saying it is not known whether the agent was created.`,
   async run(ctx, H) {
-    ctx.after(() => setWait(H, DEFAULT_SECONDS))
+    const before = await publishedWait(H)
+    ctx.after(() => restoreConfig(H, before))
+    H.lib.containerSh(`test -e ${BACKUP} || cp ${CONFIG} ${BACKUP}`)
 
     const dev = await H.device(ctx, "computer")
     const creates = []
