@@ -98,11 +98,12 @@ function actionButton(action: NotifyAction): ReactNode {
     {
       variant: "outline",
       className: "h-10 shrink-0",
-      onClick: (event: MouseEvent<HTMLButtonElement>) => {
+      // Optional, since a press made from code carries no event.
+      onClick: (event?: MouseEvent<HTMLButtonElement>) => {
         // The toaster gives focus back to what had it before the toast once
         // focus leaves the toast. Leaving before the action runs keeps that
         // from pulling focus out of a dialog the action opens.
-        event.currentTarget.blur()
+        event?.currentTarget.blur()
         action.onClick()
       },
     },
