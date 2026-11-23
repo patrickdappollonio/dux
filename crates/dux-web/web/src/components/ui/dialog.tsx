@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { useFocusFallback } from "@/lib/pageControl"
+import { isInPage } from "@/lib/pageLayer"
 import { XIcon } from "lucide-react"
 
 // Every dialog closes on the browser's Back, the way its Cancel does
@@ -84,11 +85,11 @@ const COVER_POPUP =
 // base-ui's focus trap does not stop the page behind focusing itself (a
 // terminal that mounts again across a layout switch focuses its input), and the
 // next key would then go there. A focus that lands behind the open popup is
-// sent back to where it was inside. Behind is the page, or a layer this popup
-// is nested in (the editor overlay under its own dialogs); a layer of its own
-// (its focus guards, a menu it opened) or one opened over it is not. While
-// another popup is open over this one, base-ui marks this one inert, and
-// holding focus is that one's job.
+// sent back to where it was inside. Behind is the app's page, or a layer this
+// popup is nested in (the editor overlay under its own dialogs); a layer drawn
+// over the page (the offline cover, the sign-in gate, a toast) is not, nor is
+// anything of the popup's own. While another popup is open over this one,
+// base-ui marks this one inert, and holding focus is that one's job.
 function holdFocusInside(popup: HTMLElement): () => void {
   let last: HTMLElement | null = null
   const onFocusIn = (event: FocusEvent) => {
@@ -102,7 +103,8 @@ function holdFocusInside(popup: HTMLElement): () => void {
     const own = popup.closest("[data-base-ui-portal]")
     if (own?.contains(target)) return
     const layer = target.closest("[data-base-ui-portal]")
-    if (layer !== null && !layer.contains(popup)) return
+    const behind = layer === null ? isInPage(target) : layer.contains(popup)
+    if (!behind) return
     const back = last !== null && last.isConnected && popup.contains(last) ? last : popup
     back.focus({ preventScroll: true })
   }

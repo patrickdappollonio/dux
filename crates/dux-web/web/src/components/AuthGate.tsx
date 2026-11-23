@@ -17,6 +17,7 @@ import type { AuthStatus } from "@/lib/authApi"
 import { assertNever } from "@/lib/assertNever"
 import { useAuthPhase, type AuthPhase } from "@/lib/authGate"
 import { GATE_LAYER_ATTR } from "@/lib/gateLayer"
+import { PAGE_LAYER_ATTR } from "@/lib/pageLayer"
 
 // The root of the page: the app, and over it whatever page the sign-in gate
 // needs (the login, blocked, broken, unreachable or stuck page, or the cover
@@ -228,6 +229,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       {everOpen ? (
         <div
           data-testid="app-shell"
+          {...{ [PAGE_LAYER_ATTR]: "" }}
           inert={!open}
           aria-hidden={open ? undefined : true}
           style={open ? undefined : { visibility: "hidden" }}

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { FolderPlus } from "lucide-react"
 
+import { PAGE_LAYER_ATTR } from "@/lib/pageLayer"
 import { agentRowKey, registerPaneCover } from "@/lib/paneCover"
 import { chip } from "@/lib/prose"
 
@@ -810,7 +811,9 @@ describe("focus taken by the page behind an open modal", () => {
   function Page({ remounted }: { remounted: boolean }) {
     return (
       <>
-        {remounted ? <button type="button">behind</button> : null}
+        <div {...{ [PAGE_LAYER_ATTR]: "" }}>
+          {remounted ? <button type="button">behind</button> : null}
+        </div>
         <Sample kind="form">
           <input aria-label="first" />
           <input aria-label="second" />
@@ -826,6 +829,18 @@ describe("focus taken by the page behind an open modal", () => {
     view.rerender(<Page remounted />)
     act(() => screen.getByText("behind").focus())
     expect(document.activeElement).toBe(screen.getByLabelText("second"))
+  })
+
+  // The offline cover, the sign-in gate and the toasts are drawn over the
+  // modal, outside the page it covers.
+  it("stays on a layer drawn over the modal", async () => {
+    render(<Page remounted={false} />)
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("first")))
+    const above = document.createElement("button")
+    document.body.appendChild(above)
+    act(() => above.focus())
+    expect(document.activeElement).toBe(above)
+    above.remove()
   })
 })
 
