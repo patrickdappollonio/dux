@@ -412,7 +412,8 @@ describe("store write actions route to REST", () => {
     expect(mod.getSnapshot().createAgentCopyChanges).toBe(false)
     mod.submitNameDialog("feat")
     await vi.waitFor(() => expect(actionCalls.length).toBe(1))
-    expect(actionCalls[0].url).toBe("/api/v1/sessions")
+    // Followed as an operation, so the form hears at once whether it started.
+    expect(actionCalls[0].url).toBe("/api/v1/sessions?operation=1")
     expect(actionCalls[0].body).toEqual({
       kind: "new",
       project_id: "p1",
