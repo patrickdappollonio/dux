@@ -46,8 +46,9 @@ export function Modal(props: ModalProps) {
     if (!open) setAsked(null)
   }
   const placeFocus = useRef<(() => HTMLElement | null) | null>(null)
-  // A Back that arrived while busy, answered once the modal is free.
-  const backWaits = useRef(false)
+  // A Back that arrived while busy, answered once the modal is free: a way out,
+  // or with no history entry of its own the step's Back.
+  const backWaits = useRef<"leave" | "step" | null>(null)
   // Why the row the modal's action changes may not be changed from here.
   const [rowReason, setRowReason] = useState<string | null>(null)
   // The last control focused in the form outside its footer, where Keep
@@ -58,7 +59,7 @@ export function Modal(props: ModalProps) {
   /** Takes a way out, and says whether the modal is closing. */
   const leave = (reason: ModalCloseReason): boolean => {
     if (busy) {
-      if (reason === "back") backWaits.current = true
+      if (reason === "back") backWaits.current = "leave"
       return false
     }
     if (asked !== null) {
@@ -83,10 +84,12 @@ export function Modal(props: ModalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, vanished])
   useEffect(() => {
-    if (!open) backWaits.current = false
-    if (!open || busy || !backWaits.current) return
-    backWaits.current = false
-    leave("back")
+    if (!open) backWaits.current = null
+    const waiting = backWaits.current
+    if (!open || busy || waiting === null) return
+    backWaits.current = null
+    if (waiting === "leave") leave("back")
+    else if (props.kind !== "confirm") props.back?.onSelect()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, busy])
 
@@ -112,7 +115,8 @@ export function Modal(props: ModalProps) {
         onBackStep={() => {
           const back = frame?.back
           if (!back) return false
-          if (!busy) back.onSelect()
+          if (busy) backWaits.current = "step"
+          else back.onSelect()
           return true
         }}
         onOpenChangeComplete={(now) => {

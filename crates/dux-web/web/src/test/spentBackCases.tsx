@@ -11,12 +11,13 @@ import { Modal } from "@/components/modal"
 import type { BrowserHistory } from "./browserHistory"
 
 export function describeSpentBack(browser: BrowserHistory): void {
-  function Stepped({ onClose }: { onClose: () => void }) {
+  function Stepped({ onClose, busy = false }: { onClose: () => void; busy?: boolean }) {
     const [editing, setEditing] = useState(true)
     return (
       <Modal
         kind="form"
         open
+        busy={busy}
         onClose={onClose}
         title={editing ? "Edit macro" : "Macros"}
         step={editing ? "edit" : "list"}
@@ -48,6 +49,25 @@ export function describeSpentBack(browser: BrowserHistory): void {
       act(() => browser.back())
       await waitFor(() => expect(screen.queryByRole("dialog", { name: "Macros" })).not.toBeNull())
       await waitFor(() => expect(browser.index).toBe(page))
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it("goes back the step once it is no longer busy", async () => {
+      Object.defineProperty(navigator, "userActivation", {
+        configurable: true,
+        value: { isActive: false },
+      })
+      const onClose = vi.fn()
+      const page = browser.index
+      const view = render(<Stepped onClose={onClose} busy />)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      act(() => browser.back())
+      await waitFor(() => expect(browser.index).toBe(page))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(screen.queryByRole("dialog", { name: "Edit macro" })).not.toBeNull()
+      view.rerender(<Stepped onClose={onClose} />)
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Macros" })).not.toBeNull())
+      expect(browser.index).toBe(page)
       expect(onClose).not.toHaveBeenCalled()
     })
   })
