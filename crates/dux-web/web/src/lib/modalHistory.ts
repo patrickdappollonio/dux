@@ -12,6 +12,12 @@ export interface OpenModal {
   // offering is abandoned, nothing is saved, confirmed or submitted. True when
   // the modal answered some other way and stays open, keeping its entry.
   close: () => boolean | void
+  // Asked instead when Back arrives while the modal has no entry of its own:
+  // true when it took the Back as a step back inside it (a cover's editor
+  // returning to its list) and stays open, so the page goes back onto the entry
+  // Back left. A modal that has no step to go back to is not closed by a Back
+  // it has no entry for.
+  step: () => boolean
   // Set once the modal has lost its entry for good: Back closed it, or the page
   // moved under it. A spent modal that is still open is never given a new one.
   // One still open after Back is busy, and keeps being asked to close until it
@@ -25,8 +31,11 @@ let listener: (() => void) | null = null
 
 // Register an open modal. Returns the call that unregisters it, to be made
 // whenever it closes, however it closes.
-export function registerModal(close: () => boolean | void): () => void {
-  const modal: OpenModal = { id: nextId++, close, spent: false }
+export function registerModal(
+  close: () => boolean | void,
+  step: () => boolean = () => false,
+): () => void {
+  const modal: OpenModal = { id: nextId++, close, step, spent: false }
   modals = [...modals, modal]
   listener?.()
   return () => {

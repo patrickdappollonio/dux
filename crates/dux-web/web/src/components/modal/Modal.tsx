@@ -100,6 +100,13 @@ export function Modal(props: ModalProps) {
           if (reason === null || !leave(reason)) details.cancel()
         }}
         onBack={() => !leave("back")}
+        // With no entry of its own, Back is taken only as the step's own Back.
+        onBackStep={() => {
+          const back = frame?.back
+          if (!back) return false
+          if (!busy) back.onSelect()
+          return true
+        }}
         onOpenChangeComplete={(now) => {
           if (!now) props.onClosed?.()
         }}

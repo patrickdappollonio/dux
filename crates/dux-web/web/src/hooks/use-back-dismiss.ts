@@ -30,7 +30,9 @@ interface RootOpenProps<Details extends { isCanceled: boolean }, Actions extends
 //
 // `onBack`, when given, answers Back in place of the imperative close: true
 // says the Root stays open on purpose and keeps its history entry, false that
-// the caller is closing it.
+// the caller is closing it. `onBackStep` answers a Back that arrives while the
+// Root has no entry (it opened with no user activation): true when it went
+// back a step inside and stays open.
 export function useBackDismiss<
   Details extends { isCanceled: boolean },
   Actions extends Closable,
@@ -38,6 +40,7 @@ export function useBackDismiss<
   props: RootOpenProps<Details, Actions>,
   enabled = true,
   onBack?: () => boolean,
+  onBackStep?: () => boolean,
 ): {
   actionsRef: RefObject<Actions | null>
   onOpenChange: (open: boolean, details: Details) => void
@@ -52,8 +55,10 @@ export function useBackDismiss<
   const isOpen = open ?? uncontrolledOpen
   // Read when Back arrives, so a new function each render registers nothing anew.
   const answer = useRef(onBack)
+  const stepAnswer = useRef(onBackStep)
   useEffect(() => {
     answer.current = onBack
+    stepAnswer.current = onBackStep
   })
 
   useEffect(() => {
@@ -66,7 +71,7 @@ export function useBackDismiss<
       // The Back still counts, so the close is asked again until it lands; the
       // registration's own end, when the modal finally closes, stops asking.
       retry ??= setInterval(() => actionsRef.current?.close(), DISMISS_RETRY_MS)
-    })
+    }, () => stepAnswer.current?.() ?? false)
     return () => {
       if (retry !== null) clearInterval(retry)
       unregister()

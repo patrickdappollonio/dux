@@ -4176,7 +4176,7 @@ function onTraversal(): void {
   landedAt = { key: navigationApi()?.currentEntry?.key ?? null, hash: currentHash(), moves: cursorMoves }
   if (pendingTraversal !== null) landTraversal()
   else if (stepOffRetiredEntry()) return
-  else if (!leaveModalEntries()) applyUrlRoute()
+  else if (!leaveModalEntries() && !stepBackInModalWithoutEntry()) applyUrlRoute()
   rememberEntryIndex()
 }
 
@@ -4339,6 +4339,33 @@ function leaveModalEntries(): boolean {
   return returnToModalEntries(kept) || stayed
 }
 
+// A Back while the modal on top has no entry of its own (it opened with no
+// user activation, so none could be pushed) moves the browser off the page's
+// own entry. A modal that takes it as a step back inside (a cover's editor
+// returning to its list) stays open, and the browser goes forward again onto
+// the entry Back left, by its key, so the page under it never moves. Returns
+// true when it did.
+function stepBackInModalWithoutEntry(): boolean {
+  const nav = navigationApi()
+  const here = nav?.currentEntry
+  const left = lastEntryKey
+  if (!nav || !here || left === null || lastEntryIndex === null) return false
+  if (here.index >= lastEntryIndex) return false
+  const top = openModals().at(-1)
+  if (top === undefined || !top.spent || !top.step()) return false
+  // The Back is still finishing in a browser that runs traversals as tasks,
+  // and a traversal started meanwhile would be refused.
+  const attempt = () => {
+    if (nav.transition) {
+      nav.transition.finished.then(attempt, attempt)
+      return
+    }
+    if (!traverseExactly(nav, left, { newerIntent: false }, applyUrlRoute)) applyUrlRoute()
+  }
+  attempt()
+  return true
+}
+
 // Back left the entries of modals that stayed open on purpose. The browser goes
 // forward onto the top one again, by its key, so the next Back is theirs too.
 function returnToModalEntries(kept: readonly ModalEntry[]): boolean {
@@ -4446,11 +4473,15 @@ function retireModalEntries(entries: readonly ModalEntry[]): void {
 // a retired modal entry knows which way the user was going. Recorded after
 // every push and every traversal.
 let lastEntryIndex: number | null = null
+let lastEntryKey: string | null = null
 
 function rememberEntryIndex(): void {
   const nav = navigationApi()
   const here = nav?.currentEntry
-  if (here) lastEntryIndex = here.index
+  if (here) {
+    lastEntryIndex = here.index
+    lastEntryKey = here.key
+  }
   for (const entry of nav?.entries() ?? []) knownEntryKeys.add(entry.key)
 }
 

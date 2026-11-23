@@ -19,13 +19,19 @@ import { XIcon } from "lucide-react"
 // control that opened the menu it came from (`useFocusFallback`).
 //
 // `onBack` answers Back itself, for a dialog that may stay open and keep its
-// entry (`useBackDismiss`).
+// entry, and `onBackStep` a Back that arrives while it has none
+// (`useBackDismiss`).
 function Dialog({
   historyEntry = true,
   onBack,
+  onBackStep,
   ...props
-}: DialogPrimitive.Root.Props & { historyEntry?: boolean; onBack?: () => boolean }) {
-  const back = useBackDismiss(props, historyEntry, onBack)
+}: DialogPrimitive.Root.Props & {
+  historyEntry?: boolean
+  onBack?: () => boolean
+  onBackStep?: () => boolean
+}) {
+  const back = useBackDismiss(props, historyEntry, onBack, onBackStep)
   const onOpenChangeComplete = useFocusFallback(props.open, props.onOpenChangeComplete)
   return (
     <DialogPrimitive.Root
