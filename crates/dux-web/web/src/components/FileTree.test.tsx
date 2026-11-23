@@ -229,7 +229,7 @@ describe("FileTree", () => {
       />,
     )
     const row = await screen.findByText("__error__")
-    expect(screen.queryByText("Failed to load.")).toBeNull()
+    expect(screen.queryByText("Failed to load. Retry")).toBeNull()
     fireEvent.click(row)
     expect(onOpen).toHaveBeenCalledWith("__error__")
   })
@@ -398,8 +398,10 @@ describe("FileTree", () => {
         onOpen={() => {}}
       />,
     )
-    await screen.findByText("Failed to load.")
-    const retry = screen.getByRole("button", { name: "Retry" })
+    // The whole row is one button that says what failed and what a press does,
+    // and is exactly as tall as the tree's own row (28px with a mouse).
+    const retry = await screen.findByRole("button", { name: "Failed to load. Retry" })
+    expect((retry as HTMLElement).style.height).toBe("28px")
     expect(badCalls).toBe(1)
 
     // Give any (undesired) automatic retry loop a chance to fire.
@@ -1244,7 +1246,7 @@ describe("FileTree", () => {
         await new Promise((r) => setTimeout(r, 20))
       })
       expect(screen.getByText("a.ts")).toBeTruthy()
-      expect(screen.queryByText("Failed to load.")).toBeNull()
+      expect(screen.queryByText("Failed to load. Retry")).toBeNull()
     })
 
     it("reports the loaded dirs up and answers with the nonce it was given", async () => {

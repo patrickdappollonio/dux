@@ -618,7 +618,8 @@ const FileRow = memo(function FileRow({
         <div role="gridcell" className="shrink-0 px-2">
           <SimpleTooltip content={refreshError}>
             <RetryButton
-              size="row"
+              size="quiet"
+              warning
               label="Couldn't refresh · Retry"
               tabIndex={inTabOrder ? undefined : -1}
               onRetry={(event) => {
@@ -2197,14 +2198,7 @@ function changesBodyInstead(
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
-        <Button
-          variant="outline"
-          onClick={() => refreshChanges()}
-          className={TOUCH_MIN_HEIGHT}
-        >
-          <RefreshCw />
-          Refresh
-        </Button>
+        <RetryButton label="Refresh" onRetry={() => refreshChanges()} />
       </EmptyContent>
     </Empty>
   )

@@ -696,23 +696,20 @@ export function FileTree({
               </li>
             ) : row.kind === "error" ? (
               <li key={row.path}>
-                <div
-                  className="flex items-center gap-1 py-1 pr-1 text-destructive"
+                {/* The whole row is the button, and it is exactly the row's
+                    height: the tree's rows are fixed and laid out by the
+                    virtualizer, so nothing here may be taller. */}
+                <RetryButton
+                  size="fill"
+                  label="Failed to load. Retry"
                   style={{
                     paddingLeft: `${row.depth * 0.75 + 0.25}rem`,
                     height: rowHeight,
                   }}
-                >
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    Failed to load.
-                  </span>
-                  <RetryButton
-                    size="row"
-                    onRetry={() =>
-                      fetchDir(row.path.slice(0, -"/__error__".length))
-                    }
-                  />
-                </div>
+                  onRetry={() =>
+                    fetchDir(row.path.slice(0, -"/__error__".length))
+                  }
+                />
               </li>
             ) : (
               <li key={row.path}>

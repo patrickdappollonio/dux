@@ -3,7 +3,7 @@ import { Search } from "lucide-react"
 
 type SearchFieldInputProps = Omit<
   React.ComponentProps<"input">,
-  "type" | "className" | "style" | "value" | "onChange" | "placeholder" | "aria-label" | "ref"
+  "type" | "className" | "style" | "value" | "onChange" | "placeholder" | "aria-label" | "aria-labelledby" | "ref"
 >
 
 export interface SearchFieldProps extends SearchFieldInputProps {
@@ -25,7 +25,8 @@ export interface SearchFieldProps extends SearchFieldInputProps {
  *
  * It types immediately, with no engage step. The input is plain text and never
  * a search-type input: that clears itself on Escape in a way a dialog around it
- * cannot see, and Chromium draws a clear button of its own in it.
+ * cannot see, and Chromium draws a clear button of its own in it. It says what
+ * a search-type input would (a search role, the Search key) by attributes.
  */
 export function SearchField({
   value,
@@ -44,6 +45,11 @@ export function SearchField({
     <label className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50 max-md:min-h-10 pointer-coarse:min-h-10">
       <Search aria-hidden className="size-4 shrink-0 text-muted-foreground" />
       <input
+        // Announced as a search field and asks a phone keyboard for its Search
+        // key, as a search-type input does. A caller's own role (the language
+        // picker's combobox) replaces the first.
+        role="searchbox"
+        enterKeyHint="search"
         {...inputProps}
         ref={inputRef}
         type="text"

@@ -25,6 +25,17 @@ describe("SearchField", () => {
     expect((screen.getByLabelText("Search things") as HTMLInputElement).type).toBe("text")
   })
 
+  it("is announced as a search field and asks a phone keyboard for its Search key", () => {
+    render(<Harness />)
+    expect(screen.getByRole("searchbox", { name: "Search things" }).getAttribute("enterkeyhint")).toBe("search")
+  })
+
+  it("lets a caller's own role replace the search role and keeps the Search key", () => {
+    render(<Harness role="combobox" />)
+    const field = screen.getByRole("combobox", { name: "Search things" })
+    expect(field.getAttribute("enterkeyhint")).toBe("search")
+  })
+
   it("lifts to 40px at phone width and under a coarse pointer", () => {
     render(<Harness />)
     const box = screen.getByLabelText("Search things").parentElement!

@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
+import { SimpleTooltip } from "@/components/SimpleTooltip"
+
 import { FailedLoad, RetryButton } from "./retry-button"
 
 afterEach(cleanup)
@@ -25,6 +27,27 @@ describe("RetryButton", () => {
     expect(screen.getByRole("button").className).toContain("pointer-coarse:min-h-10")
   })
 
+  it("receives a wrapper's trigger props and ref, so a tooltip around it opens", async () => {
+    render(
+      <SimpleTooltip content="the server said no" delay={0}>
+        <RetryButton onRetry={() => {}} />
+      </SimpleTooltip>,
+    )
+    const button = screen.getByRole("button", { name: "Retry" })
+    expect(button.getAttribute("data-slot")).toBe("tooltip-trigger")
+    fireEvent.focus(button)
+    expect(await screen.findByText("the server said no")).toBeTruthy()
+  })
+
+  it("still repeats the load when a wrapper hands it a click of its own", () => {
+    const onRetry = vi.fn()
+    const own = vi.fn()
+    render(<RetryButton onRetry={onRetry} onClick={own} />)
+    fireEvent.click(screen.getByRole("button"))
+    expect(own).toHaveBeenCalledTimes(1)
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
   it("takes no press while disabled", () => {
     const onRetry = vi.fn()
     render(<RetryButton onRetry={onRetry} disabled />)
@@ -38,6 +61,9 @@ describe("FailedLoad", () => {
     const onRetry = vi.fn()
     render(<FailedLoad message="Failed to fetch" onRetry={onRetry} />)
     expect(screen.getByText("Failed to fetch")).toBeTruthy()
+    // Only the sentence is red, never the button's own text.
+    expect(screen.getByText("Failed to fetch").className).toContain("text-destructive")
+    expect(screen.getByRole("button", { name: "Retry" }).closest(".text-destructive")).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Retry" }))
     expect(onRetry).toHaveBeenCalledTimes(1)
   })

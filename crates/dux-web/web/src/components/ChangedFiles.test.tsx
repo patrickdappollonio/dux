@@ -645,7 +645,7 @@ describe("the Changes pane header in a quiet state", () => {
     render(<ChangedFiles />)
     const classes = screen.getByRole("button", { name: "Refresh" }).className.split(/\s+/)
     expect(classes).toContain("pointer-coarse:min-h-10")
-    expect(classes).toContain("max-md:pointer-coarse:min-h-11")
+    expect(classes).toContain("max-md:min-h-10")
   })
 
   it("carries the editor's reason onto its folded menu items", async () => {
