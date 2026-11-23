@@ -46,6 +46,28 @@ const COVER = '[data-slot="dialog-content"][data-presentation="cover"]:not([data
 /// hang from it: a card's 1rem padding between two rows.
 const TOAST_CHROME_JOIN = 16
 
+/// The least room under the chrome a phone toast is read in: its 16px padding
+/// and 1px border on each side, its 40px action button (which fits two lines
+/// of text beside it), and the 1rem it keeps above the bottom inset. With
+/// less (a landscape phone with the keyboard up) the stack goes back to the
+/// top and covers the chrome for the moment it is up, since a toast cut off
+/// at the bottom of the screen cannot be read or pressed at all.
+export const TOAST_MIN_ROOM_PX = 34 + 40 + 16
+
+/// Where the phone's stack starts, in pixels from the top of the visible
+/// screen, given where the chrome hanging from the top ends: a gap below it,
+/// or null (the top, clear of the notch) when there is no chrome or the room
+/// left under it is shorter than `TOAST_MIN_ROOM_PX`.
+export function phoneToastTop(
+  chromeBottom: number,
+  viewportHeight: number,
+  bottomInset: number,
+): number | null {
+  if (chromeBottom <= 0) return null
+  const top = Math.ceil(chromeBottom) + TOAST_CHROME_GAP
+  return viewportHeight - top - bottomInset >= TOAST_MIN_ROOM_PX ? top : null
+}
+
 /// Keeps the phone's toasts below the top chrome on screen: the screens' headers
 /// differ in height, the flap folds away, and theater takes the header away,
 /// when the toasts go back to the top. Measured when a toast arrives, on a
@@ -63,7 +85,7 @@ function useClearTopChrome(section: React.RefObject<HTMLElement | null>, active:
     const notch = document.createElement("div")
     notch.setAttribute("aria-hidden", "true")
     notch.style.cssText =
-      "position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top);visibility:hidden;pointer-events:none"
+      "position:fixed;top:0;left:0;width:0;height:0;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);visibility:hidden;pointer-events:none"
     document.body.append(notch)
     let poll: ReturnType<typeof setInterval> | undefined
     const measure = () => {
@@ -81,14 +103,16 @@ function useClearTopChrome(section: React.RefObject<HTMLElement | null>, active:
         .map((chrome) => chrome.getBoundingClientRect())
         .filter((box) => box.height > 0 && box.bottom > 0)
         .sort((a, b) => a.top - b.top)
-      let edge = notch.getBoundingClientRect().height
+      const insets = getComputedStyle(notch)
+      let edge = parseFloat(insets.paddingTop) || 0
       let bottom = 0
       for (const box of boxes) {
         if (box.top > edge + (bottom > 0 ? TOAST_CHROME_JOIN : 1)) break
         bottom = Math.max(bottom, box.bottom)
         edge = bottom
       }
-      if (bottom > 0) el.style.setProperty(TOAST_TOP_VAR, `${Math.ceil(bottom) + TOAST_CHROME_GAP}px`)
+      const top = phoneToastTop(bottom, window.innerHeight, parseFloat(insets.paddingBottom) || 0)
+      if (top !== null) el.style.setProperty(TOAST_TOP_VAR, `${top}px`)
       else el.style.removeProperty(TOAST_TOP_VAR)
     }
     measure()
@@ -306,8 +330,10 @@ export const VISIBLE_TOASTS_MOBILE = 3
 /// above the bottom inset from where the stack starts (`TOP_INSET`, repeated
 /// here because the class is read from source): the text gets that less the
 /// toast's own 16px padding and 1px border on each side, since the icon and any
-/// button sit beside the text rather than above it. A computer keeps the short
-/// cap, where a wheel scrolls the rest.
+/// button sit beside the text rather than above it. A toast with a button is
+/// therefore at least the button's 40px tall inside, which the cap leaves room
+/// for because the stack starts under the chrome only while `TOAST_MIN_ROOM_PX`
+/// fits there. A computer keeps the short cap, where a wheel scrolls the rest.
 function toastTextCap(isMobile: boolean): string {
   return isMobile
     ? "max-h-[min(calc(75dvh-34px),calc(100dvh-var(--dux-toast-top,calc(env(safe-area-inset-top)+1rem))-env(safe-area-inset-bottom)-1rem-34px))]"

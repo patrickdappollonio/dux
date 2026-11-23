@@ -4,6 +4,8 @@ import { toast } from "sonner"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
 import {
+  phoneToastTop,
+  TOAST_MIN_ROOM_PX,
   TOAST_SWIPE_DIRECTIONS,
   TOAST_SWIPE_DIRECTIONS_TOP,
   Toaster,
@@ -169,12 +171,10 @@ describe("Toaster height cap", () => {
   // A phone lets the text run to 75% of the visible screen less the toast's own
   // padding and border (16px + 1px on each side), and never further than the
   // screen left below where the stack starts. A computer keeps the short cap.
-  const phoneCap =
-    "max-h-[min(calc(75dvh-34px),calc(100dvh-var(--dux-toast-top,calc(env(safe-area-inset-top)+1rem))-env(safe-area-inset-bottom)-1rem-34px))]"
   it.each([
-    { shell: "a phone", width: 390, cap: phoneCap, not: "max-h-[min(12rem,40vh)]" },
-    { shell: "a computer", width: 1280, cap: "max-h-[min(12rem,40vh)]", not: phoneCap },
-  ])("caps the text's height on $shell and scrolls it inside the toast, leaving a finger's drag to the swipe", async ({ width, cap, not }) => {
+    { shell: "a phone", width: 390, cap: (c: string) => c.includes("var(--dux-toast-top") },
+    { shell: "a computer", width: 1280, cap: (c: string) => c === "max-h-[min(12rem,40vh)]" },
+  ])("caps the text's height on $shell and scrolls it inside the toast, leaving a finger's drag to the swipe", async ({ width, cap }) => {
     window.innerWidth = width
     render(<Toaster />)
     act(() => {
@@ -184,9 +184,9 @@ describe("Toaster height cap", () => {
     const title = text.closest("[data-title]") as HTMLElement
     expect(title).toBeTruthy()
     expect(title.className).toContain("overflow-y-auto")
-    const classes = title.className.split(/\s+/)
-    expect(classes).toContain(cap)
-    expect(classes).not.toContain(not)
+    const caps = title.className.split(/\s+/).filter((c) => c.startsWith("max-h-"))
+    expect(caps).toHaveLength(1)
+    expect(cap(caps[0])).toBe(true)
     // A scroll container hands every touch pan to the browser, which cancels
     // the pointer stream sonner's swipe reads, whatever the toast itself says
     // (measured in Chromium). jsdom computes no touch-action, so the class that
@@ -792,11 +792,11 @@ describe("Toaster placement", () => {
 
   it("clears every row hanging from the top, however short the screen", async () => {
     const originalHeight = window.innerHeight
-    // A landscape phone with the keyboard up: the flap starts below the middle.
-    window.innerHeight = 160
+    // A landscape phone: the flap starts below the middle.
+    window.innerHeight = 250
     // The header, a tab strip under it, a card's 16px padding, and the flap
     // overlapping the row above it by a pixel.
-    const remove = chrome([0, 44], [44, 84], [100, 120], [119, 151])
+    const remove = chrome([0, 44], [44, 84], [100, 130], [129, 151])
     try {
       renderAtWidth(390)
       await raiseOne()
@@ -806,6 +806,38 @@ describe("Toaster placement", () => {
       remove()
       window.innerHeight = originalHeight
     }
+  })
+
+  it("puts a phone toast at the top when the room under the chrome is too short to read it in", async () => {
+    const originalHeight = window.innerHeight
+    // A landscape phone with the keyboard up.
+    window.innerHeight = 150
+    const remove = chrome([0, 44], [44, 84], [86, 136])
+    try {
+      renderAtWidth(390)
+      await raiseOne()
+      const section = toasterEl().parentElement!
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe(""))
+      window.innerHeight = 400
+      window.dispatchEvent(new Event("resize"))
+      await waitFor(() => expect(section.style.getPropertyValue("--dux-toast-top")).toBe("144px"))
+    } finally {
+      remove()
+      window.innerHeight = originalHeight
+    }
+  })
+
+  // The stack starts a gap below the chrome while a toast with a button still
+  // fits under it, and at the top otherwise.
+  it.each([
+    { chrome: 0, height: 800, inset: 0, top: null },
+    { chrome: 56, height: 800, inset: 0, top: 64 },
+    { chrome: 55.2, height: 800, inset: 0, top: 64 },
+    { chrome: 136, height: 136 + 8 + TOAST_MIN_ROOM_PX, inset: 0, top: 144 },
+    { chrome: 136, height: 136 + 8 + TOAST_MIN_ROOM_PX - 1, inset: 0, top: null },
+    { chrome: 136, height: 136 + 8 + TOAST_MIN_ROOM_PX, inset: 20, top: null },
+  ])("starts a phone stack under $chrome px of chrome on a $height px screen at $top", ({ chrome, height, inset, top }) => {
+    expect(phoneToastTop(chrome, height, inset)).toBe(top)
   })
 
   it("ignores marked chrome that does not hang from the top", async () => {
