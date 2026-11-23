@@ -1,7 +1,9 @@
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+
+import { sourceFilesUnder, withoutComments } from "@/test/sourceFiles"
 
 // An error sentence in red is the `ErrorLine` component. This guard reads every
 // source file under `src` (tests and the `ui` primitives excluded) and finds
@@ -23,49 +25,6 @@ import { describe, expect, it } from "vitest"
 //   rest of its line; a template literal is read as one string, `${}` and all.
 
 const root = fileURLToPath(new URL("../", import.meta.url))
-
-function sourcesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) return e.name === "node_modules" || e.name === "ui" ? [] : sourcesUnder(p)
-    return /\.tsx?$/.test(e.name) && !/\.test\.|\.d\.ts$/.test(e.name) ? [p] : []
-  })
-}
-
-// The source with its comments blanked out and every line kept, so a comment
-// start inside a string is not a comment and what follows it is still code.
-// A quote ends at the end of its line, so a JSX apostrophe cannot swallow code.
-export function withoutComments(source: string): string {
-  let out = ""
-  let i = 0
-  let quote: string | null = null
-  while (i < source.length) {
-    const c = source[i]
-    const next = source[i + 1]
-    if (quote !== null) {
-      out += c
-      if (c === "\\" && next !== undefined && next !== "\n") {
-        out += next
-        i += 2
-        continue
-      }
-      if (c === quote || (c === "\n" && quote !== "`")) quote = null
-      i++
-    } else if (c === "/" && next === "/") {
-      while (i < source.length && source[i] !== "\n") i++
-    } else if (c === "/" && next === "*") {
-      const end = source.indexOf("*/", i + 2)
-      const stop = end === -1 ? source.length : end + 2
-      out += source.slice(i, stop).replace(/[^\n]/g, " ")
-      i = stop
-    } else {
-      if (c === '"' || c === "'" || c === "`") quote = c
-      out += c
-      i++
-    }
-  }
-  return out
-}
 
 const BARE = /(?<![:\w/-])text-destructive(?![\w/-])/
 
@@ -134,7 +93,7 @@ export function unmatched(found: { file: string; line: string }[], allowed: Allo
 
 describe("no hand-written red error sentence", () => {
   it("keeps every red sentence in ErrorLine unless that occurrence is allowed with its own reason", () => {
-    const found = sourcesUnder(root).flatMap((p) =>
+    const found = sourceFilesUnder(root, ["ui"]).flatMap((p) =>
       redLines(readFileSync(p, "utf8")).map((line) => ({ file: relative(root, p), line })),
     )
     const { unexplained, stale } = unmatched(found, ALLOWED)

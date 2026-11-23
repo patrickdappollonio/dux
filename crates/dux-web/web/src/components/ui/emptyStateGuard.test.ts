@@ -1,9 +1,10 @@
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
 import { classGroupsOf } from "@/test/classGroups"
+import { sourceFilesUnder } from "@/test/sourceFiles"
 
 // A surface with nothing to show says so through the shared `EmptyState`, which
 // decides its padding, type and colour. This guard reads every source file under
@@ -23,14 +24,6 @@ import { classGroupsOf } from "@/test/classGroups"
 // set from a stylesheet or a style attribute, or an empty state drawn without
 // muted text or without centring. Lines that wait or failed are not empty states
 // and are allowed below by exact occurrence; so is anything else with the look.
-
-function sourcesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) return e.name === "node_modules" ? [] : sourcesUnder(p)
-    return /\.tsx?$/.test(e.name) && !/\.test\.|\.d\.ts$/.test(e.name) ? [p] : []
-  })
-}
 
 const root = fileURLToPath(new URL("../../", import.meta.url))
 
@@ -96,7 +89,7 @@ function unallowed(findings: Finding[]): { rest: Finding[]; unused: string[] } {
 describe("empty states go through the shared EmptyState", () => {
   it("finds no hand-built empty state in any folder under src", () => {
     const files = Object.fromEntries(
-      sourcesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
+      sourceFilesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
     )
     const { rest, unused } = unallowed(findHandBuiltEmptyStates(files))
     expect(

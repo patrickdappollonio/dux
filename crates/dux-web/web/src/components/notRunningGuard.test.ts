@@ -1,8 +1,9 @@
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
+import { sourceFilesUnder } from "@/test/sourceFiles"
 
 // A card saying an agent or one of its tabs is not running is the shared
 // `NotRunningCard`, which owns its layout, the resume docs link and the Start
@@ -21,14 +22,6 @@ import { describe, expect, it } from "vitest"
 // allowed for one reason is not checked for the others it does not name. A
 // caller that hands the shared card its own title says the sentence, so each
 // such caller is allowed by exact occurrence below.
-
-function sourcesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) return e.name === "node_modules" ? [] : sourcesUnder(p)
-    return /\.tsx?$/.test(e.name) && !/\.test\.|\.d\.ts$/.test(e.name) ? [p] : []
-  })
-}
 
 const root = fileURLToPath(new URL("../", import.meta.url))
 
@@ -93,7 +86,7 @@ function unallowed(findings: Finding[]): { rest: Finding[]; unused: string[] } {
 describe("a not-running card is the shared NotRunningCard", () => {
   it("finds no hand-built one in any folder under src", () => {
     const files = Object.fromEntries(
-      sourcesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
+      sourceFilesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
     )
     const { rest, unused } = unallowed(findHandBuiltCards(files))
     expect(

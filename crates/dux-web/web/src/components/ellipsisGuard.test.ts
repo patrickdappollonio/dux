@@ -1,7 +1,9 @@
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+
+import { filesUnder, withoutCommentsLineStrings } from "@/test/sourceFiles"
 
 // A hand-built `⋯` trigger drifts from the others in size, border, reveal and
 // touch floor, so the dots glyph is reached by the shared trigger alone.
@@ -33,17 +35,10 @@ const LITERAL_GLYPH = new RegExp(
   "i",
 )
 
-/** `src` without its comments, so a comment naming the glyph is not a use of it. */
-function withoutComments(src: string): string {
-  return src.replace(
-    /(["'`])(?:\\.|(?!\1)[^\\\n])*\1|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
-    (m) => (m.startsWith("/") ? " " : m),
-  )
-}
 
 /** Why `src` reaches the dots glyph or draws one by hand, or null if it does not. */
 export function glyphUse(src: string): string | null {
-  const code = withoutComments(src)
+  const code = withoutCommentsLineStrings(src)
   // Every `from "lucide-react…"` and `import("lucide-react…")` and `require(…)`.
   const sources = [
     ...code.matchAll(
@@ -76,18 +71,10 @@ export function glyphUse(src: string): string | null {
 }
 
 describe("no hand-built ⋯ trigger (guard)", () => {
-  const walk = (dir: string): string[] =>
-    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-      e.isDirectory()
-        ? walk(join(dir, e.name))
-        : /\.(?:[cm]?[jt]sx?)$/.test(e.name)
-          ? [join(dir, e.name)]
-          : [],
-    )
-
   it("reaches the ellipsis glyph in no file but the shared trigger", () => {
     const root = fileURLToPath(new URL("../", import.meta.url))
-    const offenders = walk(root)
+    const offenders = filesUnder(root)
+      .filter((f) => /\.(?:[cm]?[jt]sx?)$/.test(f))
       .map((f) => [relative(root, f), glyphUse(readFileSync(f, "utf8"))] as const)
       .filter(([f, why]) => why !== null && !(f in ALLOWED) && f !== "components/ellipsisGuard.test.ts")
       .map(([f, why]) => `${f} ${why}`)

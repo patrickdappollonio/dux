@@ -8,19 +8,14 @@
 // out of scope. It reads text, not the program: a name drawn in a span with no
 // monospace class, or a sentence assembled from strings in a module that does
 // not import the prose helpers, is invisible to it.
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-const srcDir = fileURLToPath(new URL("../", import.meta.url))
+import { filesUnder } from "@/test/sourceFiles"
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry)
-    return statSync(path).isDirectory() ? walk(path) : [path]
-  })
-}
+const srcDir = fileURLToPath(new URL("../", import.meta.url))
 
 // A file that builds prose imports the prose helpers; that is how a copy
 // builder is recognised, so a new one is scanned the day it is written.
@@ -44,7 +39,7 @@ function isScanned(name: string, source: string): boolean {
 }
 
 function scannedFiles(): { name: string; source: string }[] {
-  return [...walk(join(srcDir, "components")), ...walk(join(srcDir, "lib"))]
+  return [...filesUnder(join(srcDir, "components")), ...filesUnder(join(srcDir, "lib"))]
     .map((path) => ({
       name: relative(srcDir, path),
       source: readFileSync(path, "utf-8"),
@@ -400,7 +395,7 @@ function plainPathTemplates(source: string): string[] {
 
 // The lib modules the dialogs import, found from their import lines.
 function dialogLibModules(): { name: string; source: string }[] {
-  const dialogs = [...walk(join(srcDir, "components"))]
+  const dialogs = [...filesUnder(join(srcDir, "components"))]
     .map((path) => ({ name: relative(srcDir, path), source: readFileSync(path, "utf-8") }))
     .filter(
       ({ name, source }) =>

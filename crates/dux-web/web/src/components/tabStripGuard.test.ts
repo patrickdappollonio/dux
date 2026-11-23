@@ -11,19 +11,14 @@
 // (`bg-muted/25`, an inline style); a strip or pill drawn with no tab role and
 // no strip classes at all; a re-export or wrapper of `TabPill` that is itself
 // clean; files outside `src/`; and test files, which it skips.
-import { readdirSync, readFileSync, statSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-const srcDir = fileURLToPath(new URL("../", import.meta.url))
+import { filesUnder, withoutCommentsLineStrings } from "@/test/sourceFiles"
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry)
-    return statSync(path).isDirectory() ? walk(path) : [path]
-  })
-}
+const srcDir = fileURLToPath(new URL("../", import.meta.url))
 
 /** Each occurrence that may stand, by file and its exact text, with its reason. */
 const ALLOWED: Array<{ file: string; occurrence: string; reason: string }> = [
@@ -35,14 +30,6 @@ const ALLOWED: Array<{ file: string; occurrence: string; reason: string }> = [
     reason: "the shared strip's container",
   },
 ]
-
-/** `src` without its comments, so a comment naming a role or a class is not a use. */
-function withoutComments(src: string): string {
-  return src.replace(
-    /(["'`])(?:\\.|(?!\1)[^\\\n])*\1|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
-    (m) => (m.startsWith("/") ? " " : m),
-  )
-}
 
 const ROLE_PATTERNS = [
   // A JSX attribute in any spelling: `role="tab"`, `role={"tab"}`,
@@ -92,7 +79,7 @@ function stripContainers(code: string): number {
 
 /** Every tab, tab list or strip container `src` writes, as its exact text. */
 export function stripOccurrences(src: string): string[] {
-  const code = withoutComments(src)
+  const code = withoutCommentsLineStrings(src)
   const found: string[] = []
   for (const pattern of ROLE_PATTERNS) {
     for (const m of code.matchAll(pattern)) found.push(m[0])
@@ -101,7 +88,7 @@ export function stripOccurrences(src: string): string[] {
   return found
 }
 
-const sources = walk(srcDir)
+const sources = filesUnder(srcDir)
   .filter((path) => /\.tsx?$/.test(path) && !/\.test\.tsx?$/.test(path))
   .map((path) => ({ file: relative(srcDir, path), text: readFileSync(path, "utf8") }))
 

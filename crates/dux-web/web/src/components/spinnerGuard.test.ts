@@ -1,7 +1,9 @@
-import { readdirSync, readFileSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+
+import { sourceFilesUnder, withoutComments } from "@/test/sourceFiles"
 
 // A loading indicator is the `Spinner` component (components/Spinner.tsx), in
 // its glyph or its ring kind: a second spinner is a second place to forget
@@ -55,52 +57,6 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
 ]
 
-// The source with every comment blanked and its line breaks kept, so a line
-// number still points at the same line. Strings are skipped whole, so a `//`
-// inside one is not taken for a comment.
-function withoutComments(source: string): string {
-  let out = ""
-  let i = 0
-  while (i < source.length) {
-    const c = source[i]
-    if (c === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") i++
-      continue
-    }
-    if (c === "/" && source[i + 1] === "*") {
-      const end = source.indexOf("*/", i + 2)
-      const stop = end < 0 ? source.length : end + 2
-      out += source.slice(i, stop).replace(/[^\n]/g, " ")
-      i = stop
-      continue
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1
-      while (j < source.length && source[j] !== c) {
-        if (source[j] === "\\") j++
-        // A quote that never closes on its line is an apostrophe in JSX text.
-        else if (c !== "`" && source[j] === "\n") break
-        j++
-      }
-      const stop = source[j] === c ? j + 1 : i + 1
-      out += source.slice(i, stop)
-      i = stop
-      continue
-    }
-    out += c
-    i++
-  }
-  return out
-}
-
-function sourcesUnder(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-    const p = join(dir, e.name)
-    if (e.isDirectory()) return e.name === "node_modules" ? [] : sourcesUnder(p)
-    return /\.tsx?$/.test(e.name) && !/\.test\.|\.d\.ts$/.test(e.name) ? [p] : []
-  })
-}
-
 function findSpinners(files: Record<string, string>): { file: string; line: string; what: string }[] {
   const out: { file: string; line: string; what: string }[] = []
   for (const [file, source] of Object.entries(files)) {
@@ -115,7 +71,7 @@ function findSpinners(files: Record<string, string>): { file: string; line: stri
 
 describe("guard: one loading indicator", () => {
   const files = Object.fromEntries(
-    sourcesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
+    sourceFilesUnder(root).map((p) => [relative(root, p), readFileSync(p, "utf8")]),
   )
 
   it("draws every spinner through Spinner unless that occurrence is allowed with its reason", () => {

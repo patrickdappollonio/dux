@@ -14,19 +14,14 @@
 //   - anything in a test file.
 // And it cannot hold a number to "only goes down": the counts live in this
 // file, so raising one is allowed, as a one-line change a reviewer sees.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { dirname, join, normalize, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-const srcDir = fileURLToPath(new URL("../../", import.meta.url))
+import { filesUnder } from "@/test/sourceFiles"
 
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry)
-    return statSync(path).isDirectory() ? walk(path) : [path]
-  })
-}
+const srcDir = fileURLToPath(new URL("../../", import.meta.url))
 
 /** The modules a modal can be built from, by the path an import reaches, and
  * the names in each that open one. "*" is every name the module exports. */
@@ -352,7 +347,7 @@ describe("the detector", () => {
 
 describe("a modal is built with the Modal component", () => {
   const found = new Map<string, ModalMarks>()
-  for (const path of walk(srcDir)) {
+  for (const path of filesUnder(srcDir)) {
     const name = relative(srcDir, path).split("\\").join("/")
     if (!isGuarded(name)) continue
     const source = readFileSync(path, "utf-8")

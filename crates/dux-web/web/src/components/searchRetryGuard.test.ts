@@ -20,62 +20,14 @@
 //
 // Every exemption is one exact occurrence with a count, so an entry that no
 // longer matches, or that matches more places than it was written for, fails.
-import { readdirSync, readFileSync, statSync } from "node:fs"
-import { join, relative } from "node:path"
+import { readFileSync } from "node:fs"
+import { relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
+import { filesUnder, withoutComments } from "@/test/sourceFiles"
+
 const srcDir = fileURLToPath(new URL("../", import.meta.url))
-
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((entry) => {
-    const path = join(dir, entry)
-    return statSync(path).isDirectory() ? walk(path) : [path]
-  })
-}
-
-// Source with its comments blanked to spaces (lengths kept), strings left.
-function withoutComments(source: string): string {
-  let out = ""
-  let i = 0
-  while (i < source.length) {
-    const c = source[i]
-    if (c === "/" && source[i + 1] === "/") {
-      while (i < source.length && source[i] !== "\n") {
-        out += " "
-        i++
-      }
-      continue
-    }
-    if (c === "/" && source[i + 1] === "*") {
-      const end = source.indexOf("*/", i + 2)
-      const stop = end < 0 ? source.length : end + 2
-      out += source.slice(i, stop).replace(/[^\n]/g, " ")
-      i = stop
-      continue
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1
-      while (j < source.length && source[j] !== c) {
-        if (source[j] === "\\") j++
-        // A quote that never closes on its line is an apostrophe in JSX text.
-        if (c !== "`" && source[j] === "\n") break
-        j++
-      }
-      if (source[j] === c) {
-        out += source.slice(i, j + 1)
-        i = j + 1
-      } else {
-        out += c
-        i++
-      }
-      continue
-    }
-    out += c
-    i++
-  }
-  return out
-}
 
 interface Hit {
   file: string
@@ -181,7 +133,7 @@ function judge(hits: Hit[]): { rest: Hit[]; wrongCount: string[] } {
 describe("one search field and one retry control", () => {
   it("has no hand-built copy in any file under src", () => {
     const files = Object.fromEntries(
-      walk(srcDir)
+      filesUnder(srcDir)
         .filter((f) => /\.tsx?$/.test(f) && !/\.test\.|\.d\.ts$/.test(f))
         .map((f) => [relative(srcDir, f), readFileSync(f, "utf8")]),
     )
