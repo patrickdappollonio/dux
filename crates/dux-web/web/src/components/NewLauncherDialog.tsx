@@ -1,6 +1,7 @@
 import { Bot, ChevronRight } from "lucide-react"
 import { Fragment, useMemo, useState, type KeyboardEvent } from "react"
 
+import { IconTile } from "@/components/IconTile"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, ModalGroupHeading, useModalLifetime } from "@/components/modal"
 import { RowStateWord } from "@/components/RowStateWord"
@@ -217,14 +218,9 @@ function LauncherRowButton({
         FOCUS_RING,
       )}
     >
-      <span
-        className={cn(
-          "flex shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted text-foreground/90",
-          phone ? "size-10" : "size-9",
-        )}
-      >
-        <Icon className={phone ? "size-5" : "size-[18px]"} />
-      </span>
+      <IconTile size={phone ? "lg" : "md"} use="action">
+        <Icon />
+      </IconTile>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className={cn("font-medium", phone ? "text-[15px]" : "text-sm")}>
           {row.title}

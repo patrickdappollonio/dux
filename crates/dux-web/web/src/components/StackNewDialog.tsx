@@ -2,6 +2,7 @@ import { Bot, Plus, SquareTerminal } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { useState, type ReactNode } from "react"
 
+import { IconTile } from "@/components/IconTile"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { Button } from "@/components/ui/button"
@@ -152,9 +153,9 @@ function NewRow({
         FOCUS_RING,
       )}
     >
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted text-foreground/90">
-        <Icon className="size-[18px]" />
-      </span>
+      <IconTile size="md" use="action">
+        <Icon />
+      </IconTile>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="text-sm font-medium">{title}</span>
         <span className="text-[12.5px] leading-snug text-muted-foreground">{excerpt}</span>
