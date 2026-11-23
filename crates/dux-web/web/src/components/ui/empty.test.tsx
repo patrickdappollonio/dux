@@ -49,4 +49,17 @@ describe("EmptyState", () => {
     rerender(<EmptyState size="compact" title="No match." announce />)
     expect(screen.getByRole("status").textContent).toBe("No match.")
   })
+
+  // A script or a reader copying the text must not get two sentences welded.
+  it("keeps its paragraphs apart in the text it holds", () => {
+    const { container } = render(
+      <EmptyState
+        size="page"
+        icon={<svg />}
+        title="No changes"
+        description={["First sentence.", "Second sentence."]}
+      />,
+    )
+    expect(container.textContent).toContain("First sentence. Second sentence.")
+  })
 })

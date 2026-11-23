@@ -24,7 +24,7 @@ describe("NotRunningCard", () => {
       />,
     )
     const link = screen.getByRole("link", { name: /how resume works/i })
-    expect(link.closest("p")?.textContent).toMatch(
+    expect(link.closest("[data-slot=not-running-details]")?.textContent).toMatch(
       /^Start picks up its last conversation\. How resume works/,
     )
     fireEvent.click(screen.getByRole("button", { name: "Start" }))
@@ -45,5 +45,23 @@ describe("NotRunningCard", () => {
     rerender(<NotRunningCard {...props} output={["boom", "bang"]} />)
     expect(screen.getByText("Last output")).toBeTruthy()
     expect(container.querySelector("pre")?.textContent).toBe("boom\nbang")
+  })
+
+  // A caller's title may hold a block; it must not sit inside a paragraph, and
+  // the sentences stay apart in the card's text.
+  it("keeps a block title out of a paragraph and its sentences apart", () => {
+    const { container } = render(
+      <NotRunningCard
+        icon="none"
+        title={<div>claude isn’t running.</div>}
+        subtitle="It stopped."
+        details="Start picks up its last conversation."
+        start={{ sessionId: "s1", onStart: () => {}, label: "Start" }}
+      />,
+    )
+    expect(container.querySelector("p div")).toBeNull()
+    expect(container.textContent).toContain(
+      "claude isn’t running. It stopped. Start picks up its last conversation.",
+    )
   })
 })

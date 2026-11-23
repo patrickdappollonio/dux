@@ -271,7 +271,12 @@ function MacroCommand({
           conflict, so the primitive's max-h-72 would survive beside it
           and which one wins would be stylesheet-order luck. */}
       <CommandList className="max-h-[none] min-h-0">
-        <CommandEmpty>No matching macros.</CommandEmpty>
+        {/* The list's own empty slot keeps showing and hiding it as the
+            filter changes; the slot's padding and text are the shared
+            line's. */}
+        <CommandEmpty className="p-0">
+          <EmptyState size="compact" title="No matching macros." />
+        </CommandEmpty>
         <CommandGroup>
           {macros.map((macro) => (
             <MacroRow

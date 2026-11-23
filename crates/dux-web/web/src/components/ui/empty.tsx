@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { Fragment, type ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
@@ -12,8 +12,12 @@ import { cn } from "@/lib/utils"
 //   else in it.
 // - `section` takes only its own height, for the place a list would be inside
 //   a pane that has other things in it.
-// - `compact` is one quiet sentence and no icon, for a list inside a dialog or
-//   a menu, where an icon tile and a heading would outweigh the list itself.
+// - `compact` is one quiet sentence and no icon, for a list that sits in a
+//   dialog, a menu, a popover or the sidebar, where an icon tile and a heading
+//   would outweigh the list itself.
+//
+// A `page` one never puts content where it cannot be reached: it centres what
+// fits, and what does not fit starts at the top and scrolls.
 type RoomyEmptyState = {
   size: "page" | "section"
   /** A lucide glyph; drawn in a tile and hidden from a screen reader. */
@@ -21,15 +25,24 @@ type RoomyEmptyState = {
   title: ReactNode
   /** One paragraph, or several drawn one under another. */
   description?: ReactNode | readonly ReactNode[]
-  /** Buttons, laid out in a row that wraps. */
-  actions?: ReactNode
-  /** A status region, for an empty state that appears while the user types. */
-  announce?: boolean
-}
+} & (
+  | {
+      /** Buttons, laid out in a row that wraps. */
+      actions?: ReactNode
+      announce?: false
+    }
+  | {
+      /** A status region, for an empty state that appears while the user
+       * types. Not with buttons: a status region would announce them. */
+      announce: true
+      actions?: never
+    }
+)
 
 type CompactEmptyState = {
   size: "compact"
   title: ReactNode
+  /** A status region, for an empty state that appears while the user types. */
   announce?: boolean
 }
 
@@ -60,29 +73,42 @@ export function EmptyState(props: EmptyStateProps) {
       data-slot="empty"
       role={role}
       className={cn(
-        "flex w-full min-w-0 flex-col items-center justify-center gap-4 p-6 text-center text-balance",
-        size === "page" && "h-full min-h-0 flex-1",
+        // No `justify-center`: it would push content that does not fit out
+        // above the top of a scroller, where nothing can reach it. The auto
+        // margins of the block inside centre it only while there is room.
+        "flex w-full min-w-0 flex-col items-center p-6 text-center text-balance",
+        size === "page" && "h-full min-h-0 flex-1 overflow-y-auto",
       )}
     >
-      <div className="flex max-w-sm flex-col items-center gap-2">
+      <div className="my-auto flex w-full flex-col items-center gap-4">
         <div
-          aria-hidden
-          className="mb-2 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+          data-slot="empty-header"
+          className="flex max-w-sm flex-col items-center gap-2"
         >
-          {icon}
-        </div>
-        <div className="font-heading text-sm font-medium tracking-tight">{title}</div>
-        {paragraphs.map((paragraph, index) => (
-          <div key={index} className="text-sm/relaxed text-muted-foreground">
-            {paragraph}
+          <div
+            aria-hidden
+            className="mb-2 flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+          >
+            {icon}
           </div>
-        ))}
-      </div>
-      {actions ? (
-        <div className="flex w-full max-w-sm min-w-0 flex-row flex-wrap items-center justify-center gap-4 text-sm">
-          {actions}
+          <div className="font-heading text-sm font-medium tracking-tight">{title}</div>
+          {paragraphs.map((paragraph, index) => (
+            // The space is collapsed on screen between blocks; it keeps the
+            // sentences apart in the text a script or a reader copies out.
+            <Fragment key={index}>
+              {" "}
+              <div className="text-sm/relaxed text-muted-foreground [&_a]:underline [&_a]:underline-offset-4 [&_a:hover]:text-primary">
+                {paragraph}
+              </div>
+            </Fragment>
+          ))}
         </div>
-      ) : null}
+        {actions ? (
+          <div className="flex w-full max-w-sm min-w-0 flex-row flex-wrap items-center justify-center gap-4 text-sm">
+            {actions}
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }

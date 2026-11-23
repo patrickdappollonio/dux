@@ -37,7 +37,7 @@ module.exports = {
       selector: '[role="menu"] *',
       what: "the reason at the head of the menu",
     })
-    const pane = await boxOf(page, ['[data-testid="changes-pane"]'])
+    const pane = await boxOf(page, ['#changes-pane'])
     const menu = await steadyBox(() => boxOf(page, ['[role="menu"]']), {
       what: "the Changes pane's menu",
     })
@@ -45,7 +45,7 @@ module.exports = {
     // folder under it, which sit lower than the menu, so the frame holds both.
     // The header block rather than the whole empty state, which fills the pane.
     const sentence = await boxOf(page, [
-      '[data-testid="changes-pane"] [data-slot="empty-header"]',
+      '#changes-pane [data-slot="empty-header"]',
     ])
     const bottom = Math.max(menu.y + menu.height, sentence.y + sentence.height) + 16
     return {

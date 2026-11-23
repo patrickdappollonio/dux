@@ -48,47 +48,68 @@ export function NotRunningCard({
   return (
     <div
       data-testid={testId}
-      className="flex h-full w-full select-none flex-col items-center justify-center gap-3 overflow-hidden px-6 text-center"
+      // overflow-y-auto: a card that does not fit its pane scrolls, so Start
+      // stays reachable. py-6 keeps the Start button's focus ring inside the
+      // scroller, which would otherwise cut it along the bottom edge. The auto
+      // margins of the block inside centre it only while there is room, since
+      // `justify-center` would push an overflowing card out above the top.
+      className="flex h-full w-full select-none flex-col items-center overflow-x-hidden overflow-y-auto px-6 py-6 text-center"
     >
-      {icon === "none" ? null : (
-        <img
-          src="/dux-logo.png"
-          alt=""
-          aria-hidden
-          className={cn("object-contain opacity-70", ICON_SIZE[icon])}
-        />
-      )}
-      <div className="max-w-md space-y-2">
-        <p className="text-sm font-medium">{title}</p>
-        {subtitle ? <p className="text-sm text-muted-foreground">{subtitle}</p> : null}
-        {output && output.length > 0 ? (
-          <div className="space-y-1 text-left">
-            <p className="text-xs font-medium text-muted-foreground">Last output</p>
-            <RunOutput lines={output} where="card" />
-          </div>
-        ) : null}
-        <p className="text-sm text-muted-foreground">
-          {details}{" "}
-          <a
-            href={DOCS_AGENT_TABS_RESUME}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary underline underline-offset-2"
+      <div className="my-auto flex w-full flex-col items-center gap-3">
+        {icon === "none" ? null : (
+          <img
+            src="/dux-logo.png"
+            alt=""
+            aria-hidden
+            className={cn("object-contain opacity-70", ICON_SIZE[icon])}
+          />
+        )}
+        {/* Blocks, not paragraphs: a title or the details may carry what a
+          * paragraph cannot hold. The spaces between them collapse on screen
+          * and keep the sentences apart in the text a script copies out. */}
+        <div className="max-w-md space-y-2">
+          <div className="text-sm font-medium">{title}</div>
+          {subtitle ? (
+            <>
+              {" "}
+              <div className="text-sm text-muted-foreground">{subtitle}</div>
+            </>
+          ) : null}
+          {output && output.length > 0 ? (
+            <>
+              {" "}
+              <div className="space-y-1 text-left">
+                <p className="text-xs font-medium text-muted-foreground">Last output</p>
+                <RunOutput lines={output} where="card" />
+              </div>
+            </>
+          ) : null}{" "}
+          <div
+            data-slot="not-running-details"
+            className="text-sm text-muted-foreground"
           >
-            How resume works&nbsp;&rarr;
-          </a>
-        </p>
+            {details}{" "}
+            <a
+              href={DOCS_AGENT_TABS_RESUME}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary underline underline-offset-2"
+            >
+              How resume works&nbsp;&rarr;
+            </a>
+          </div>
+        </div>
+        {/* The touch floor, at the take-over card's height idiom: that card is
+          * the nearest analogue, a full-pane card with one primary act, so
+          * matching it keeps the two the same size under a finger. */}
+        <StartAgentButton
+          sessionId={start.sessionId}
+          onStart={start.onStart}
+          className="max-md:min-h-11 pointer-coarse:min-h-11"
+        >
+          {start.label}
+        </StartAgentButton>
       </div>
-      {/* The touch floor, at the take-over card's height idiom: that card is
-        * the nearest analogue, a full-pane card with one primary act, so
-        * matching it keeps the two the same size under a finger. */}
-      <StartAgentButton
-        sessionId={start.sessionId}
-        onStart={start.onStart}
-        className="max-md:min-h-11 pointer-coarse:min-h-11"
-      >
-        {start.label}
-      </StartAgentButton>
     </div>
   )
 }

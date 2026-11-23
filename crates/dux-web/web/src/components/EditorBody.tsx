@@ -2782,7 +2782,9 @@ export function EditorContentPane(props: EditorContentPaneProps) {
   const { root, tab, image, onImageDims } = props
   if (tab === null) {
     return (
-      <CenteredPane>Select a file from the tree to view or edit it.</CenteredPane>
+      <div className="flex h-full items-center justify-center">
+        <EmptyState size="compact" title="Select a file from the tree to view or edit it." />
+      </div>
     )
   }
   // Images have no text buffer and win even if stale state says "diff".
