@@ -10556,7 +10556,10 @@ export function setAsidePreferencesDraft(
           // The toaster gives focus back to what had it before the toast the
           // moment focus leaves the toast. Leaving now, before the dialog
           // opens, keeps it from taking the dialog's focus back to the page.
-          if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+          if (typeof document !== "undefined") {
+            const pressed = document.activeElement
+            if (pressed instanceof HTMLElement) pressed.blur()
+          }
           openCustomizeWebapp()
         },
       },
