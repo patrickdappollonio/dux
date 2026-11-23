@@ -87,6 +87,10 @@ export interface NotifyOptions {
 export interface NotifyAction {
   label: string
   onClick: () => void
+  /** The action opens a dialog that takes focus. The button lets go of focus
+   * before the action runs; otherwise it keeps it, so an action that leaves
+   * the toast up leaves a keyboard user on the toast. */
+  opensDialog?: boolean
 }
 
 // The shared button rather than sonner's own, so the action carries the app's
@@ -103,7 +107,7 @@ function actionButton(action: NotifyAction): ReactNode {
         // The toaster gives focus back to what had it before the toast once
         // focus leaves the toast. Leaving before the action runs keeps that
         // from pulling focus out of a dialog the action opens.
-        event?.currentTarget.blur()
+        if (action.opensDialog === true) event?.currentTarget.blur()
         action.onClick()
       },
     },

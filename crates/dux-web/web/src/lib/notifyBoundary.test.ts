@@ -78,6 +78,8 @@ const SONNER_TEST_IMPORTERS = [
   // The raiser's own test: it installs the sonner spy that every assertion in
   // it reads. This is the module under test's dependency, not a bypass.
   "lib/notify.test.ts",
+  // The raiser's action button, drawn from what it hands the toaster.
+  "lib/notifyAction.test.tsx",
   // The store's REST-error, macro and engine-status toast routing.
   "lib/restActionsStore.test.ts",
   "lib/storeMacros.test.ts",

@@ -9539,7 +9539,7 @@ export function setAsideMacrosDraft(edit: MacrosEdit, changes: number): void {
     {
       id: MACROS_SET_ASIDE_ID,
       sticky: true,
-      action: { label: "Restore", onClick: restoreSetAsideMacros },
+      action: { label: "Restore", onClick: restoreSetAsideMacros, opensDialog: true },
     },
   )
 }
@@ -10699,6 +10699,7 @@ export function setAsidePreferencesDraft(
       action: {
         label: "Restore",
         onClick: () => openCustomizeWebapp(),
+        opensDialog: true,
       },
     },
   )
