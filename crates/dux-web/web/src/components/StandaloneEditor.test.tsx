@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import type { DuxState } from "@/lib/store"
 import {
   EXPLORER_DEFAULT_SIZE_PX,
+  EXPLORER_LAYOUT_KEY,
   EXPLORER_MIN_SIZE_PX,
 } from "@/lib/editorLayout"
 import { agentRoot, rootKey } from "@/lib/editorRoot"
@@ -688,5 +689,63 @@ describe("the standalone editor tab and who drives the agent", () => {
     await mountDrivenBy(undefined)
     expect(screen.queryByText(/^Read-only/)).toBeNull()
     expect(screen.getByRole("button", { name: /new file/i }).hasAttribute("disabled")).toBe(false)
+  })
+})
+
+// The phone layout gives an open file the whole width.
+describe("the phone's explorer", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    installBootStubs()
+    vi.stubGlobal("innerWidth", 390)
+    window.dispatchEvent(new Event("resize"))
+    const { clearRootDrafts } = await import("@/lib/editorDrafts")
+    clearRootDrafts(rootKey(agentRoot(SESSION)))
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    window.dispatchEvent(new Event("resize"))
+  })
+
+  async function mount(fileOpen: boolean, storedCollapsed: boolean) {
+    localStorage.setItem(EXPLORER_LAYOUT_KEY, JSON.stringify({ px: 300, collapsed: storedCollapsed }))
+    await seedState(
+      fileOpen
+        ? {}
+        : { editorTabs: { [rootKey(agentRoot(SESSION))]: { tabs: [], activeId: null } } },
+    )
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    return render(<StandaloneEditorShell />)
+  }
+  const stored = () => JSON.parse(localStorage.getItem(EXPLORER_LAYOUT_KEY)!).collapsed
+
+  it("is shown while no file is open, without storing that for the computer", async () => {
+    await mount(false, true)
+    expect(await screen.findByRole("button", { name: /hide the file explorer/i })).toBeTruthy()
+    expect(stored()).toBe(true)
+  })
+
+  it("is hidden while a file is open, without storing that for the computer", async () => {
+    await mount(true, false)
+    expect(await screen.findByRole("button", { name: /show the file explorer/i })).toBeTruthy()
+    expect(stored()).toBe(false)
+  })
+
+  // The panel library reports a collapse to the toggle from the browser's
+  // layout pass, which jsdom does not run; the panel's own size says it.
+  it("hides when a file is picked from the tree", async () => {
+    const { fileApi } = await import("@/lib/fileApi")
+    vi.mocked(fileApi.tree).mockResolvedValue({
+      dir: "",
+      entries: [{ name: "b.ts", path: "b.ts", is_dir: false, is_symlink: false, expandable: false }],
+    })
+    await mount(false, false)
+    const explorer = screen.getByTestId("editor-explorer")
+    expect(explorer.style.flexGrow).not.toBe("0")
+    fireEvent.click(await screen.findByText("b.ts"))
+    await waitFor(() => expect(explorer.style.flexGrow).toBe("0"))
+    expect(stored()).toBe(false)
   })
 })
