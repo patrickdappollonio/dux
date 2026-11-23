@@ -10,22 +10,22 @@ import { Modal } from "@/components/modal"
 
 import type { BrowserHistory } from "./browserHistory"
 
-function Stepped({ onClose }: { onClose: () => void }) {
-  const [editing, setEditing] = useState(true)
-  return (
-    <Modal
-      kind="form"
-      open
-      onClose={onClose}
-      title={editing ? "Edit macro" : "Macros"}
-      step={editing ? "edit" : "list"}
-      back={editing ? { label: "all macros", onSelect: () => setEditing(false) } : undefined}
-      submit={{ label: "Save", tone: "primary", onSelect: () => {} }}
-    />
-  )
-}
-
 export function describeSpentBack(browser: BrowserHistory): void {
+  function Stepped({ onClose }: { onClose: () => void }) {
+    const [editing, setEditing] = useState(true)
+    return (
+      <Modal
+        kind="form"
+        open
+        onClose={onClose}
+        title={editing ? "Edit macro" : "Macros"}
+        step={editing ? "edit" : "list"}
+        back={editing ? { label: "all macros", onSelect: () => setEditing(false) } : undefined}
+        submit={{ label: "Save", tone: "primary", onSelect: () => {} }}
+      />
+    )
+  }
+
   // Macros reopened by itself after a failed save: no user activation, so no
   // entry could be pushed for it.
   describe("Back from a step of a modal with no history entry", () => {
