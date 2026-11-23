@@ -17,6 +17,9 @@ interface DeleteEntryDialogProps {
   blockedBySave?: boolean
   /** The entry has left the tree: the dialog closes itself. */
   vanished?: boolean
+  /** Why this page may not write here now (another device drives the row),
+   * or null: the dialog's own action is disabled with it. */
+  writeBlocked?: string | null
   onClose: () => void
   onConfirm: () => void
 }
@@ -27,6 +30,7 @@ export function DeleteEntryDialog({
   target,
   blockedBySave = false,
   vanished = false,
+  writeBlocked = null,
   onClose,
   onConfirm,
 }: DeleteEntryDialogProps) {
@@ -48,9 +52,9 @@ export function DeleteEntryDialog({
       confirm={{
         label: "Delete",
         tone: "destructive",
-        disabledReason: blockedBySave
-          ? "Wait for the save to finish before deleting it."
-          : null,
+        disabledReason:
+          writeBlocked ??
+          (blockedBySave ? "Wait for the save to finish before deleting it." : null),
         onSelect: onConfirm,
       }}
     >

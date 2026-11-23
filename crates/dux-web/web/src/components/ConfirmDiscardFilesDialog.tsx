@@ -36,6 +36,8 @@ const EMPTY_SUMMARY = {
 
 interface Props {
   open: boolean
+  // The agent whose working copy the discard writes to.
+  sessionId: string
   // The checked paths, which may name a file that has already left the list.
   paths: string[]
   // The live unstaged files. The rows the dialog opens on are taken from
@@ -57,6 +59,7 @@ interface Props {
 // is no longer what is there.
 export function ConfirmDiscardFilesDialog({
   open,
+  sessionId,
   paths,
   unstaged,
   onCancel,
@@ -209,6 +212,7 @@ export function ConfirmDiscardFilesDialog({
       // than lingering with copy about files that are no longer there.
       vanished={targets.length + leftOut.length === 0}
       onClose={onCancel}
+      row={{ sessionId }}
       title={`Discard changes to ${formatRegularCount(
         targets.reduce((sum, f) => sum + changedFileCount(f), 0),
         "file",

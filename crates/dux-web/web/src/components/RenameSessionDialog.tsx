@@ -100,6 +100,7 @@ export function RenameSessionDialog() {
       // An agent removed while the dialog is open closes it.
       vanished={isOpen && session === undefined}
       onClose={closeRename}
+      row={renameTarget === null ? null : { sessionId: renameTarget }}
       title="Rename agent"
       description={
         branchNamed

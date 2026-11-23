@@ -33,6 +33,8 @@ const { ConfirmDeleteTerminalDialog } = await import(
   "./ConfirmDeleteTerminalDialog"
 )
 const store = await import("@/lib/store")
+const { RowReasonContext } = await import("@/components/modal/rowReason")
+const { useRowChangeReason } = await import("@/hooks/use-agent-active-elsewhere")
 const { registerPaneCover, resetPaneCovers } = await import("@/lib/paneCover")
 
 function term(overrides: Partial<TerminalView>): TerminalView {
@@ -160,7 +162,11 @@ describe("ConfirmDeleteTerminalDialog", () => {
     seedProjectTerminal(term({}))
     registerPaneCover("term-1", "card", { row: "terminal:term-1", driver: "nobody" })
     vi.mocked(store.deleteTerminal).mockClear()
-    render(<ConfirmDeleteTerminalDialog />)
+    render(
+      <RowReasonContext.Provider value={useRowChangeReason}>
+        <ConfirmDeleteTerminalDialog />
+      </RowReasonContext.Provider>,
+    )
     const button = screen.getByRole("button", { name: "Close terminal" }) as HTMLButtonElement
     expect(button.disabled).toBe(true)
     fireEvent.click(button)

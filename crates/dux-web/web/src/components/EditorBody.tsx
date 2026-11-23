@@ -2411,12 +2411,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           declarations above). */}
       <NewEntryDialog
         target={newEntryTarget}
+        writeBlocked={writeBlocked}
         vanished={newEntryTarget === goneEntryTarget}
         onClose={() => setNewEntryTarget(null)}
         onSubmit={handleNewEntrySubmit}
       />
       <RenameEntryDialog
         target={renameEntryTarget}
+        writeBlocked={writeBlocked}
         isDirty={
           renameEntryTarget !== null &&
           hasDirtyUnderPath(
@@ -2431,6 +2433,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       <MoveEntryDialog
         root={root}
         target={moveEntryTarget}
+        writeBlocked={writeBlocked}
         isDirty={
           moveEntryTarget !== null &&
           hasDirtyUnderPath(
@@ -2510,6 +2513,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       />
       <DeleteEntryDialog
         target={deleteEntryTarget}
+        writeBlocked={writeBlocked}
         blockedBySave={
           deleteEntryTarget !== null && savingPaths.has(deleteEntryTarget.path)
         }

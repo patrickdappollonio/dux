@@ -47,6 +47,7 @@ export function ConfirmForceStopAgentDialog() {
       open={forceStopAgentTarget !== null}
       vanished={session === undefined}
       onClose={closeForceStopAgent}
+      row={forceStopAgentTarget === null ? null : { sessionId: forceStopAgentTarget }}
       title="Force stop agent?"
       description={renderProse(forceStopConfirmProse(label))}
       cancelLabel="Cancel"

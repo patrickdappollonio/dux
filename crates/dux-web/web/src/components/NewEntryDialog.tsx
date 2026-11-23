@@ -14,6 +14,9 @@ interface NewEntryDialogProps {
   target: NewEntryTarget | null
   /** The folder to create in has left the tree: the dialog closes itself. */
   vanished?: boolean
+  /** Why this page may not write here now (another device drives the row),
+   * or null: the dialog's own action is disabled with it. */
+  writeBlocked?: string | null
   onClose: () => void
   // Resolves (or rejects, e.g. server 400) once the create request settles.
   onSubmit: (name: string) => Promise<void>
@@ -25,6 +28,7 @@ interface NewEntryDialogProps {
 export function NewEntryDialog({
   target,
   vanished,
+  writeBlocked,
   onClose,
   onSubmit,
 }: NewEntryDialogProps) {
@@ -34,6 +38,7 @@ export function NewEntryDialog({
       key={life.epoch}
       target={target}
       vanished={vanished}
+      writeBlocked={writeBlocked}
       onClose={onClose}
       onClosed={life.onClosed}
       onSubmit={onSubmit}
@@ -44,6 +49,7 @@ export function NewEntryDialog({
 function NewEntryDialogBody({
   target,
   vanished = false,
+  writeBlocked = null,
   onClose,
   onClosed,
   onSubmit,
@@ -88,7 +94,7 @@ function NewEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason: validation.ok ? null : validation.error,
+        disabledReason: writeBlocked ?? (validation.ok ? null : validation.error),
       }}
     >
       <Input

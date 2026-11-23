@@ -131,7 +131,15 @@ interface ModalBase {
    * the modal once it is false. */
   busy?: boolean
   finalFocus?: RefObject<HTMLElement | null> | (() => HTMLElement | boolean)
+  /** The agent's or the terminal's row the modal's own action (a confirm's
+   * confirm, a form's submit) changes. While this device may not change that
+   * row, the action is disabled with the reason the agent's menu gives. */
+  row?: ModalRow | null
 }
+
+/** A row of the agents list, by its agent, or by a project or standalone
+ * terminal. */
+export type ModalRow = { sessionId: string } | { terminalId: string }
 
 interface ModalFrame {
   /** The way back to the step before this one. */

@@ -2385,6 +2385,7 @@ export const ChangedFiles = memo(function ChangedFiles() {
         // Never over a body that replaced the list, even for the one render
         // before the effect above closes it.
         open={discarding && !listReplaced}
+        sessionId={sessionId}
         paths={discardPaths}
         unstaged={actionable.unstaged}
         onCancel={closeDiscardMany}

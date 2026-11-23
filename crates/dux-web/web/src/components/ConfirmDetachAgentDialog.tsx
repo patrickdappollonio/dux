@@ -52,6 +52,7 @@ export function ConfirmDetachAgentDialog() {
       open={stopAgentTarget !== null}
       vanished={session === undefined}
       onClose={closeStopAgent}
+      row={stopAgentTarget === null ? null : { sessionId: stopAgentTarget }}
       title="Detach agent?"
       description={renderProse(
         detachConfirmProse(label, shutdownGraceSeconds(bootstrap), liveTabs),

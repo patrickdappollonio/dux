@@ -4,6 +4,8 @@ import './index.css'
 import App from './App.tsx'
 import { AuthGate } from './components/AuthGate.tsx'
 import { RootErrorBoundary } from './components/RootErrorBoundary.tsx'
+import { RowReasonContext } from './components/modal/rowReason.ts'
+import { useRowChangeReason } from './hooks/use-agent-active-elsewhere.ts'
 import { watchComposition } from './lib/clipboard.ts'
 import { answerOpenedTabs } from './lib/openerPage.ts'
 import { installShellLayoutAttribute } from './lib/shellLayout.ts'
@@ -30,9 +32,12 @@ createRoot(document.getElementById('root')!).render(
     {/* The last resort for a render error no inner boundary caught. */}
     <RootErrorBoundary>
       {/* The sign-in gate decides whether the app or a sign-in page is on screen. */}
-      <AuthGate>
-        <App />
-      </AuthGate>
+      {/* Every modal whose action changes a row asks this whether it may. */}
+      <RowReasonContext.Provider value={useRowChangeReason}>
+        <AuthGate>
+          <App />
+        </AuthGate>
+      </RowReasonContext.Provider>
     </RootErrorBoundary>
   </StrictMode>,
 )

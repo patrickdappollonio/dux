@@ -1,5 +1,5 @@
 import { ChevronLeft, Search, X } from "lucide-react"
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
 
 import { ConfirmDiscardEditsDialog } from "@/components/ConfirmDiscardEditsDialog"
 import { Button } from "@/components/ui/button"
@@ -26,7 +26,8 @@ import {
   modalPresentation,
 } from "./layout"
 import { ModalDoors, ModalFooter, type SafeButton } from "./ModalFooter"
-import type { ModalAction, ModalCloseReason, ModalProps, ModalSearch } from "./types"
+import { RowReasonContext } from "./rowReason"
+import type { ModalAction, ModalCloseReason, ModalProps, ModalRow, ModalSearch } from "./types"
 
 /** Every modal in the web UI. The caller hands over its kind and its parts;
  * the kind decides how it is presented, focused, laid out and closed. */
@@ -47,6 +48,8 @@ export function Modal(props: ModalProps) {
   const placeFocus = useRef<(() => HTMLElement | null) | null>(null)
   // A Back that arrived while busy, answered once the modal is free.
   const backWaits = useRef(false)
+  // Why the row the modal's action changes may not be changed from here.
+  const [rowReason, setRowReason] = useState<string | null>(null)
   // The last control focused in the form outside its footer, where Keep
   // editing gives focus back: the Cancel that raised the question is not where
   // the person was.
@@ -89,8 +92,13 @@ export function Modal(props: ModalProps) {
 
   const presentation = modalPresentation(kind, phone)
   const frame = kind === "confirm" ? null : props
+  const parts = withRowReason(props, rowReason)
+  const useReason = useContext(RowReasonContext)
   return (
     <>
+      {props.row && useReason ? (
+        <RowChangeReason row={props.row} useReason={useReason} onReason={setRowReason} />
+      ) : null}
       <Dialog
         open={open}
         onOpenChange={(next, details) => {
@@ -138,7 +146,7 @@ export function Modal(props: ModalProps) {
           )}
         >
           <ModalParts
-            {...props}
+            {...parts}
             phone={phone}
             leave={leave}
             onFocusTarget={(target) => {
@@ -164,6 +172,37 @@ export function Modal(props: ModalProps) {
       ) : null}
     </>
   )
+}
+
+// Asks the row's answer in a component of its own, mounted only for a modal
+// that names a row, so a modal that names none asks nothing.
+function RowChangeReason({
+  row,
+  useReason,
+  onReason,
+}: {
+  row: ModalRow
+  useReason: (row: ModalRow) => string | null
+  onReason: (reason: string | null) => void
+}): null {
+  const reason = useReason(row)
+  useLayoutEffect(() => onReason(reason), [reason, onReason])
+  useLayoutEffect(() => () => onReason(null), [onReason])
+  return null
+}
+
+// The modal's own action, disabled with the row's reason while it has one.
+function withRowReason(props: ModalProps, reason: string | null): ModalProps {
+  if (reason === null) return props
+  switch (props.kind) {
+    case "confirm":
+      return { ...props, confirm: { ...props.confirm, disabledReason: reason } }
+    case "form":
+      return { ...props, submit: { ...props.submit, disabledReason: reason } }
+    case "picker":
+    case "report":
+      return props
+  }
 }
 
 function footerActions(props: ModalProps): readonly ModalAction[] {

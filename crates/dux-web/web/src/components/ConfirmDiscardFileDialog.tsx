@@ -59,6 +59,7 @@ export function ConfirmDiscardFileDialog() {
       // a stale path whose restore-versus-DELETE copy may now be wrong.
       vanished={live === undefined}
       onClose={closeDiscard}
+      row={discardTarget && { sessionId: discardTarget.sessionId }}
       title={
         kind === "directory" ? (
           <>

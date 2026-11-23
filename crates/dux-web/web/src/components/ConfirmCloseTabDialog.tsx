@@ -71,6 +71,7 @@ export function ConfirmCloseTabDialog() {
       open={closeTabTarget !== null}
       vanished={tab === undefined}
       onClose={closeCloseTab}
+      row={closeTabTarget && { sessionId: closeTabTarget.sessionId }}
       title="Close tab?"
       description={
         <>

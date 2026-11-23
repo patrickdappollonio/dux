@@ -44,6 +44,7 @@ export function ConfirmStopTabDialog() {
       open={stopTabTarget !== null}
       vanished={tab === undefined}
       onClose={closeStopTab}
+      row={stopTabTarget && { sessionId: stopTabTarget.sessionId }}
       title="Stop tab?"
       description={
         <>

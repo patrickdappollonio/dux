@@ -65,6 +65,7 @@ function ChangeProviderForm({ open, onClosed }: { open: boolean; onClosed: () =>
       // by contrast, deliberately keeps it open.
       vanished={open && session === undefined}
       onClose={closeChangeProvider}
+      row={targetId === null ? null : { sessionId: targetId }}
       onClosed={onClosed}
       title={
         session ? (

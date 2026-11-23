@@ -41,6 +41,7 @@ export function ConfirmForceReconnectDialog() {
       open={forceReconnectTarget !== null}
       vanished={session === undefined}
       onClose={closeForceReconnect}
+      row={forceReconnectTarget === null ? null : { sessionId: forceReconnectTarget }}
       title={
         <>
           Force recreate {name ? <InlineCode>{name}</InlineCode> : "agent"}?

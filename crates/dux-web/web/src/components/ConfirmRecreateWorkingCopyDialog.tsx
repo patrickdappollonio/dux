@@ -76,6 +76,7 @@ export function ConfirmRecreateWorkingCopyDialog() {
       open={recreateWorkingCopyTarget !== null}
       vanished={!present}
       onClose={closeRecreateWorkingCopy}
+      row={recreateWorkingCopyTarget === null ? null : { sessionId: recreateWorkingCopyTarget }}
       title="Recreate working copy?"
       description={
         managed && view ? (

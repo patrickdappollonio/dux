@@ -3,7 +3,6 @@ import { guardedConfirmAction } from "@/components/guardedConfirmAction"
 import { Modal } from "@/components/modal"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
 import { InlineCode } from "@/components/ui/inline-code"
-import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import {
   closeDeleteTerminal,
   deleteTerminal,
@@ -38,14 +37,10 @@ export function ConfirmDeleteTerminalDialog() {
   // Terminal 1?"); the running command appears in the warning body instead,
   // avoiding the redundant "Close vim?" + "vim is running…" phrasing.
   const title = terminal?.label ?? ""
-  // Closing changes the row the terminal belongs to, so the confirm is
-  // disabled, with the reason, while this device does not drive that row.
-  const partChangeReason = usePartChangeReason()
+  // Closing changes the row the terminal belongs to: its agent's, or its own.
   const sessionId = terminal ? ownerSessionId(ownerRefFromWire(terminal.owner)) : null
-  const drivenHint =
-    terminal === undefined
-      ? null
-      : partChangeReason(sessionId !== null ? { sessionId } : { terminalId: terminal.id })
+  const row =
+    terminal === undefined ? null : sessionId !== null ? { sessionId } : { terminalId: terminal.id }
   const foreground = terminal ? terminalForeground(terminal) : null
 
   async function handleConfirm() {
@@ -74,6 +69,7 @@ export function ConfirmDeleteTerminalDialog() {
       open={deleteTerminalTarget !== null}
       vanished={terminal === undefined}
       onClose={closeDeleteTerminal}
+      row={row}
       title={
         <>
           Close <InlineCode>{title}</InlineCode>?
@@ -85,7 +81,6 @@ export function ConfirmDeleteTerminalDialog() {
         verb: "Close terminal",
         blockers,
         pending,
-        drivenHint,
         onConfirm: () => void handleConfirm(),
       })}
     >

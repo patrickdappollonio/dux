@@ -231,6 +231,24 @@ export function changeBlockReason(
   }
 }
 
+/// Why this page may not change one row right now, in words, or null when it
+/// may. Selective, so it re-renders when the answer moves and not on every
+/// store change.
+export function useRowChangeReason(
+  part: { sessionId: string } | { terminalId: string } | null,
+): string | null {
+  useRowWatch(null)
+  const sessionId = part !== null && "sessionId" in part ? part.sessionId : null
+  const terminalId = part !== null && "terminalId" in part ? part.terminalId : null
+  return useDuxSelector((state) => {
+    const row = sessionId !== null ? { sessionId } : terminalId !== null ? { terminalId } : null
+    if (row === null) return null
+    const block = partChangeBlock(state, row)
+    if (block === null) return null
+    return changeBlockReason(block, "sessionId" in row ? "agent" : "terminal", rowDriverLabel(state, row))
+  })
+}
+
 /// Why this page may not change the row a part belongs to, in words, or null
 /// when it may.
 export function usePartChangeReason(): (

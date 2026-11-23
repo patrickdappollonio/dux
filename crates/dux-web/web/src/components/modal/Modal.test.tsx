@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { FolderPlus } from "lucide-react"
 
+import { agentRowKey, registerPaneCover } from "@/lib/paneCover"
 import { chip } from "@/lib/prose"
 
 import { installBrowserHistory } from "@/test/browserHistory"
@@ -18,7 +19,10 @@ await import("@/lib/store")
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 
+import { useRowChangeReason } from "@/hooks/use-agent-active-elsewhere"
+
 import { Modal, useModalLifetime } from "./index"
+import { RowReasonContext } from "./rowReason"
 import { closeReasonFrom } from "./closeReason"
 import type { ModalAction, ModalKind } from "./types"
 
@@ -817,6 +821,44 @@ describe("a modal opened inside another dialog", () => {
     fireEvent.mouseUp(own, { button: 0 })
     fireEvent.click(own, { button: 0 })
     expect(onClose).toHaveBeenCalledWith("outside")
+  })
+})
+
+// Another device takes the row over while a confirm about it is open.
+describe("a modal whose action changes a row", () => {
+  it("disables the action with the reason while another device drives the row", async () => {
+    render(
+      <RowReasonContext.Provider value={useRowChangeReason}>
+        <Modal
+          kind="confirm"
+          open
+          onClose={() => {}}
+          title="Close tab?"
+          historyEntry={false}
+          cancelLabel="Cancel"
+          confirm={{ label: "Close tab", tone: "destructive", onSelect: () => {} }}
+          row={{ sessionId: "s1" }}
+        />
+      </RowReasonContext.Provider>,
+    )
+    const action = () => screen.getByRole("button", { name: "Close tab" }) as HTMLButtonElement
+    expect(action().disabled).toBe(false)
+    let retire = () => {}
+    act(() => {
+      retire = registerPaneCover("pty-1", "card", {
+        row: agentRowKey("s1"),
+        driver: "other",
+        device: "Firefox on Linux",
+      })
+    })
+    expect(action().disabled).toBe(true)
+    fireEvent.click(action().parentElement!)
+    expect(
+      (await screen.findAllByText(/^This agent is active on Firefox on Linux, so actions that modify it are disabled/))
+        .length,
+    ).toBeGreaterThan(0)
+    act(() => retire())
+    expect(action().disabled).toBe(false)
   })
 })
 

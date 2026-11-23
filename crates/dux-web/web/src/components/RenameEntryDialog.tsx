@@ -17,6 +17,9 @@ interface RenameEntryDialogProps {
   isDirty: boolean
   /** The entry has left the tree: the dialog closes itself. */
   vanished?: boolean
+  /** Why this page may not write here now (another device drives the row),
+   * or null: the dialog's own action is disabled with it. */
+  writeBlocked?: string | null
   onClose: () => void
   onSubmit: (newName: string) => Promise<void>
 }
@@ -34,6 +37,7 @@ export function RenameEntryDialog({
   target,
   isDirty,
   vanished,
+  writeBlocked,
   onClose,
   onSubmit,
 }: RenameEntryDialogProps) {
@@ -45,6 +49,7 @@ export function RenameEntryDialog({
       target={target}
       isDirty={isDirty}
       vanished={vanished}
+      writeBlocked={writeBlocked}
       onClose={onClose}
       onClosed={life.onClosed}
       onSubmit={onSubmit}
@@ -56,6 +61,7 @@ function RenameEntryDialogBody({
   target,
   isDirty: liveDirty,
   vanished = false,
+  writeBlocked = null,
   onClose,
   onClosed,
   onSubmit,
@@ -97,7 +103,8 @@ function RenameEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
+        disabledReason:
+          writeBlocked ?? (isDirty ? dirtyRefusal : validation.ok ? null : validation.error),
       }}
     >
       <Input

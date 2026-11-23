@@ -24,6 +24,9 @@ interface MoveEntryDialogProps {
   isDirty: boolean
   /** The entry has left the tree: the dialog closes itself. */
   vanished?: boolean
+  /** Why this page may not write here now (another device drives the row),
+   * or null: the dialog's own action is disabled with it. */
+  writeBlocked?: string | null
   onClose: () => void
   onSubmit: (destDir: string) => Promise<void>
 }
@@ -96,6 +99,7 @@ function MoveEntryDialogBody({
   target: liveTarget,
   isDirty: liveDirty,
   vanished = false,
+  writeBlocked = null,
   onClose,
   onClosed,
   onSubmit,
@@ -166,7 +170,8 @@ function MoveEntryDialogBody({
         tone: "primary",
         onSelect: submit,
         busy: submitting,
-        disabledReason: isDirty ? dirtyRefusal : validation.ok ? null : validation.error,
+        disabledReason:
+          writeBlocked ?? (isDirty ? dirtyRefusal : validation.ok ? null : validation.error),
       }}
     >
       {/* Where the browse currently sits, and where the entry would land. */}
