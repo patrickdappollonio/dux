@@ -357,12 +357,7 @@ function RowIcon({ kind }: { kind: TaskRowKind }) {
 // paired with that color everywhere else means "needs attention", which this never is.
 function DuxBadge() {
   return (
-    <Badge
-      variant="outline"
-      className="border-cyan-100/30 bg-cyan-100/10 text-cyan-100"
-    >
-      this process
-    </Badge>
+    <Badge variant="self">this process</Badge>
   )
 }
 

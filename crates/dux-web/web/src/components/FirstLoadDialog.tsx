@@ -1,5 +1,6 @@
 import { FolderGit2, ExternalLink } from "lucide-react"
 
+import { Badge } from "@/components/ui/badge"
 import { IconTile } from "@/components/IconTile"
 import {
   Modal,
@@ -228,9 +229,7 @@ function whatsNewTitle(state: FirstLoadDialogState): string {
 function VersionChip({ state }: { state: FirstLoadDialogState }) {
   return (
     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">
-        What&apos;s new in
-      </span>
+      <Badge variant="secondary">What&apos;s new in</Badge>
       <span className="font-mono">{state.notes?.version ?? ""}</span>
     </span>
   )
