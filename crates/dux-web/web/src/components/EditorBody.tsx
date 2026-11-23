@@ -598,6 +598,21 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, editorFileOpens, isMobile])
 
+  // The phone layout's explorer follows the open file and writes nothing to
+  // storage, so the computer layout's own state is put back on returning to
+  // it. A layout effect, so this lands before the next layout report could be
+  // stored over it.
+  const computerCollapsedRef = useRef(storedExplorer?.collapsed ?? false)
+  const wasMobileRef = useRef(isMobile)
+  useLayoutEffect(() => {
+    const wasMobile = wasMobileRef.current
+    wasMobileRef.current = isMobile
+    const panel = explorerPanelRef.current
+    if (!wasMobile || isMobile || !panel) return
+    if (computerCollapsedRef.current) panel.collapse()
+    else panel.resize(explorerExpandTarget(lastExpandedExplorerPxRef.current))
+  }, [isMobile])
+
   // Covers the one gap the mount layout has: the library ignores a
   // defaultLayout whose keys do not cover every panel, so the explorer could
   // otherwise mount expanded on a phone. A no-op when the layout landed, since
@@ -2115,6 +2130,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               lastExpandedExplorerPxRef.current,
             )
             if (remembered === null) return
+            computerCollapsedRef.current = remembered.collapsed
             lastExpandedExplorerPxRef.current = remembered.px
             writeExplorerLayout(remembered.px, remembered.collapsed)
           }}

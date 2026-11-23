@@ -41,7 +41,7 @@ That tab is nothing but the editor, full-viewport, and its header reads **Editor
 
 The standalone tab works on phones, best-effort:
 
-- The file explorer is shown while no file is open and hides when you open one, so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard. Nothing about the explorer on a phone is remembered, so the width and collapsed state you left on a computer stay as they were.
+- The file explorer is shown while no file is open and hides when you open one, so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard. Nothing about the explorer on a phone is remembered: back in the computer layout, it comes back at the width and collapsed state you left it in there.
 - The header keeps the **‹** Back button, the explorer toggle, the name of what the editor is rooted at and **Save**.
 - The File/Diff switch (on changed files), the preview toggle, the syntax language and, when dux is opened at a local address, **Open local editor** fold into one `⋯` menu at the end of the row.
 - The status bar keeps the file's path, the unsaved-changes dot, the read-only badge where it applies, the cursor position, and an image's pixel dimensions.

@@ -744,6 +744,25 @@ describe("the phone's explorer", () => {
     await waitFor(() => expect(explorerHidden()).toBe(true))
   })
 
+  it.each([
+    { fileOpen: true, collapsed: false },
+    { fileOpen: false, collapsed: true },
+  ])("comes back as the computer left it when the layout returns to the computer's (%o)", async ({ fileOpen, collapsed }) => {
+    vi.stubGlobal("innerWidth", 1280)
+    window.dispatchEvent(new Event("resize"))
+    await mount(fileOpen, collapsed)
+    const stored = localStorage.getItem(EXPLORER_LAYOUT_KEY)
+    await waitFor(() => expect(explorerHidden()).toBe(collapsed))
+    for (const width of [390, 1280]) {
+      vi.stubGlobal("innerWidth", width)
+      act(() => {
+        window.dispatchEvent(new Event("resize"))
+      })
+      await waitFor(() => expect(explorerHidden()).toBe(width === 390 ? fileOpen : collapsed))
+    }
+    expect(localStorage.getItem(EXPLORER_LAYOUT_KEY)).toBe(stored)
+  })
+
   // The tab keeps its id through a rename and through a preview tab replaced
   // in place; only the second is a file being opened.
   async function openTreeThen(change: (tab: { id: string; path: string }) => Partial<DuxState>) {
