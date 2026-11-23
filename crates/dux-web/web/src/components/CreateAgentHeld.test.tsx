@@ -8,7 +8,8 @@ import { installBrowserHistory } from "@/test/browserHistory"
 // real store and a history with the Navigation API.
 installBrowserHistory()
 
-// The Changes pane's own wait, set short to show the create does not follow it.
+// The Changes pane's own wait, set short to show the create does not follow it
+// but its own setting, published below at something other than its default.
 vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/connectionTiming")>()),
   changesRequestTimeoutMs: () => 60,
@@ -59,6 +60,7 @@ vi.spyOn(console, "warn").mockImplementation(() => {})
 const store = await import("@/lib/store")
 const { CreateAgentDialog } = await import("./CreateAgentDialog")
 const { ConfirmUseExistingBranchDialog } = await import("./ConfirmUseExistingBranchDialog")
+const { publishConnectionTiming } = await import("@/lib/connectionTiming")
 
 function Both() {
   return (
@@ -98,11 +100,13 @@ async function openForm() {
 }
 
 // The create's deadline is passed on a fake clock rather than sat out.
-const DEADLINE_MS = 30_000
+const DEADLINE_SECONDS = 45
+const DEADLINE_MS = DEADLINE_SECONDS * 1000
 const passDeadline = () => act(() => vi.advanceTimersByTime(DEADLINE_MS))
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
+  publishConnectionTiming({ new_agent_request_timeout_seconds: DEADLINE_SECONDS })
   held.length = 0
   unreached.length = 0
   warnings.length = 0
@@ -145,7 +149,7 @@ describe("the New agent form with its create unanswered", () => {
     expect(posts()).toBe(1)
   })
 
-  it("is freed with the name kept and says so once 30 seconds have passed", async () => {
+  it("is freed with the name kept and says so once its configured wait has passed", async () => {
     await openForm()
     fireEvent.click(createButton())
     await waitFor(() => expect(createButton().getAttribute("aria-busy")).toBe("true"))
@@ -157,6 +161,7 @@ describe("the New agent form with its create unanswered", () => {
     expect(nameField().value).toBe("feature-old")
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toMatch(/has not answered/)
+    expect(warnings[0]).toMatch(/after 45 seconds/)
     expect(warnings[0]).toMatch(/may still appear/)
   })
 

@@ -25,12 +25,13 @@ use serde::Serialize;
 use crate::config::{
     CapabilitiesConfig, ClipboardPassthroughMode, ComposeBarMode, Config, DEFAULT_AGENT_TABS_MAX,
     DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS, DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
-    DEFAULT_HEARTBEAT_SECONDS, DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
-    DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS, DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS,
-    DEFAULT_UPLOAD_DIRECTORY, ExtendedKeysMode, LOG_VIEWER_LINES_MAX, MAX_AGENT_TABS_MAX,
-    MAX_LOG_KEEP, MAX_PR_HISTORY_BRANCHES_PER_CYCLE, MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS,
-    MAX_PR_POLL_INTERVAL_SECONDS, MAX_PR_SETTLED_RECHECK_SECONDS, MAX_SHUTDOWN_TIMEOUT_SECONDS,
-    MIN_PR_POLL_INTERVAL_SECONDS, TailscaleMode, WebDragDropPaste,
+    DEFAULT_HEARTBEAT_SECONDS, DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_PTY_SEND_TIMEOUT_SECONDS, DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
+    DEFAULT_RECONNECT_BACKOFF_CAP_SECONDS, DEFAULT_UPLOAD_DIRECTORY, ExtendedKeysMode,
+    LOG_VIEWER_LINES_MAX, MAX_AGENT_TABS_MAX, MAX_LOG_KEEP, MAX_PR_HISTORY_BRANCHES_PER_CYCLE,
+    MAX_PR_POLL_INACTIVE_INTERVAL_SECONDS, MAX_PR_POLL_INTERVAL_SECONDS,
+    MAX_PR_SETTLED_RECHECK_SECONDS, MAX_SHUTDOWN_TIMEOUT_SECONDS, MIN_PR_POLL_INTERVAL_SECONDS,
+    TailscaleMode, WebDragDropPaste,
 };
 use crate::flat_list::FlatSortMode;
 use crate::term_identity::TerminalIdentityMode;
@@ -522,6 +523,16 @@ pub(crate) const MAX_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 600;
 pub(crate) fn effective_changes_request_timeout_seconds(configured: u32) -> u32 {
     nonzero_or(configured, DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS)
         .min(MAX_CHANGES_REQUEST_TIMEOUT_SECONDS)
+}
+
+/// The longest the web UI's New agent form waits for the server's first answer.
+pub(crate) const MAX_NEW_AGENT_REQUEST_TIMEOUT_SECONDS: u32 = 600;
+
+/// `[server] new_agent_request_timeout_seconds`: `0` means the default, and
+/// above [`MAX_NEW_AGENT_REQUEST_TIMEOUT_SECONDS`] is that ceiling.
+pub(crate) fn effective_new_agent_request_timeout_seconds(configured: u32) -> u32 {
+    nonzero_or(configured, DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS)
+        .min(MAX_NEW_AGENT_REQUEST_TIMEOUT_SECONDS)
 }
 
 /// The longest `[server] title` dux shows, in characters.
@@ -1112,6 +1123,20 @@ fn server_timing_and_identity_corrections(found: &mut Corrections, config: &Conf
             )
         },
     );
+    let new_agent = server.new_agent_request_timeout_seconds;
+    found.note(
+        &["server", "new_agent_request_timeout_seconds"],
+        &json(&new_agent),
+        json(&effective_new_agent_request_timeout_seconds(new_agent)),
+        &|| {
+            numbered(
+                u64::from(new_agent),
+                u64::from(effective_new_agent_request_timeout_seconds(new_agent)),
+                u64::from(MAX_NEW_AGENT_REQUEST_TIMEOUT_SECONDS),
+                "0 means the default",
+            )
+        },
+    );
     let deadline = server.heartbeat_deadline_seconds;
     found.note(
         &["server", "heartbeat_deadline_seconds"],
@@ -1391,6 +1416,10 @@ mod tests {
             crate::config::DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS
         );
         assert_eq!(
+            effective_new_agent_request_timeout_seconds(0),
+            crate::config::DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS
+        );
+        assert_eq!(
             effective_pty_send_timeout_seconds(0),
             crate::config::DEFAULT_PTY_SEND_TIMEOUT_SECONDS
         );
@@ -1401,6 +1430,12 @@ mod tests {
     fn the_changes_request_deadline_caps_at_ten_minutes() {
         assert_eq!(effective_changes_request_timeout_seconds(86_400), 600);
         assert_eq!(effective_changes_request_timeout_seconds(12), 12);
+    }
+
+    #[test]
+    fn the_new_agent_request_deadline_caps_at_ten_minutes() {
+        assert_eq!(effective_new_agent_request_timeout_seconds(86_400), 600);
+        assert_eq!(effective_new_agent_request_timeout_seconds(12), 12);
     }
 
     #[test]
@@ -1417,7 +1452,8 @@ mod tests {
     #[test]
     fn the_bootstrap_sends_every_timing_as_dux_uses_it() {
         let raw = "[server]\nheartbeat_seconds = 0\nheartbeat_deadline_seconds = 5\n\
-                   changes_request_timeout_seconds = 0\n";
+                   changes_request_timeout_seconds = 0\n\
+                   new_agent_request_timeout_seconds = 0\n";
         assert_eq!(
             used_at(raw, &["server", "heartbeat_seconds"]),
             Some(serde_json::json!(15))
@@ -1428,6 +1464,10 @@ mod tests {
         );
         assert_eq!(
             used_at(raw, &["server", "changes_request_timeout_seconds"]),
+            Some(serde_json::json!(30))
+        );
+        assert_eq!(
+            used_at(raw, &["server", "new_agent_request_timeout_seconds"]),
             Some(serde_json::json!(30))
         );
     }

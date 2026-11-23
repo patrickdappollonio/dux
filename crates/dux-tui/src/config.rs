@@ -1596,6 +1596,25 @@ fn config_schema() -> Vec<ConfigEntry> {
             value_fn: |c| FieldValue::Usize(u32_to_usize(c.server.changes_request_timeout_seconds)),
         },
         ConfigEntry::Field {
+            key: "new_agent_request_timeout_seconds",
+            comment: Some(CommentSource::Static(
+                "# How long the web UI's New agent form waits for the server to answer\n\
+                 # Create: either the agent has started being created, or it was refused.\n\
+                 # This bounds that first answer only, not the creation itself, which can\n\
+                 # take as long as it needs once it has started. When it passes, the form\n\
+                 # is freed with what you typed still in it and a warning says the server\n\
+                 # has not answered; the agent may still appear in the list, so look there\n\
+                 # before creating it again. Too small and a slow server gets a second\n\
+                 # create it did not need; too large and a stalled connection keeps the\n\
+                 # form waiting. 0 means the default; values above 600 are treated as 600.\n\
+                 # Default 30.\n\
+                 # A config reload applies this to every open browser tab right away.",
+            )),
+            value_fn: |c| {
+                FieldValue::Usize(u32_to_usize(c.server.new_agent_request_timeout_seconds))
+            },
+        },
+        ConfigEntry::Field {
             key: "heartbeat_seconds",
             comment: Some(CommentSource::Static(
                 "# How often a browser tab you are looking at checks that its terminal\n\
@@ -3615,6 +3634,7 @@ mod tests {
         assert!(rendered.contains("reconnect_attempts = 8"));
         assert!(rendered.contains("reconnect_attempt_timeout_seconds = 10"));
         assert!(rendered.contains("changes_request_timeout_seconds = 30"));
+        assert!(rendered.contains("new_agent_request_timeout_seconds = 30"));
         assert!(rendered.contains("agent_tabs_max = 20"));
         assert!(rendered.contains("title = \"dux\""));
         // Assert the active key (not a commented-out line) so a regression that
@@ -4075,6 +4095,7 @@ name = "test"
         config.server.reconnect_attempts = 46;
         config.server.reconnect_attempt_timeout_seconds = 47;
         config.server.changes_request_timeout_seconds = 48;
+        config.server.new_agent_request_timeout_seconds = 49;
         let rendered = render_config_default(&config);
         let parsed: Config = toml::from_str(&rendered).expect("config should parse");
         assert_eq!(parsed.server.replay_wait_seconds, 41);
@@ -4085,6 +4106,7 @@ name = "test"
         assert_eq!(parsed.server.reconnect_attempts, 46);
         assert_eq!(parsed.server.reconnect_attempt_timeout_seconds, 47);
         assert_eq!(parsed.server.changes_request_timeout_seconds, 48);
+        assert_eq!(parsed.server.new_agent_request_timeout_seconds, 49);
     }
 
     #[test]

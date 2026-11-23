@@ -626,7 +626,7 @@ The details:
 
 ### Browser timing
 
-All seven of these describe what the *browser* does. A config reload applies them, and an
+All eight of these describe what the *browser* does. A config reload applies them, and an
 open tab picks them up on its own within a moment, so you do not have to refresh the page.
 
 | Key | Default | What it does |
@@ -636,6 +636,7 @@ open tab picks them up on its own within a moment, so you do not have to refresh
 | `reconnect_attempts` | `8` | How many attempts in a row before the browser stops and says so. |
 | `reconnect_attempt_timeout_seconds` | `10` | How long one attempt may sit without connecting. |
 | `changes_request_timeout_seconds` | `30` | How long the Changes pane waits for the changed-files list. |
+| `new_agent_request_timeout_seconds` | `30` | How long the New agent form waits for the server to answer Create. |
 | `heartbeat_seconds` | `15` | How often a visible tab checks its terminal connection is alive. |
 | `heartbeat_deadline_seconds` | `30` | How long the browser waits for the answer to that check. |
 
@@ -659,6 +660,12 @@ open tab picks them up on its own within a moment, so you do not have to refresh
   would sit on "Loading changes" forever. The list for a worktree with tens of thousands of
   changed files can run to several megabytes, so too low and a slow connection never
   finishes loading it. `0` means the default, and anything above `600` is treated as `600`.
+- **`new_agent_request_timeout_seconds`**: bounds the server's first answer to Create (the
+  agent has started being created, or it was refused), not the creation itself, which takes
+  as long as it needs once it has started. Past it the form is freed with what you typed
+  still in it and a warning says the server has not answered; the agent may still appear in
+  the list, so look there before creating it again. `0` means the default, and anything
+  above `600` is treated as `600`.
 - **`heartbeat_seconds`**: a Wi-Fi to cellular handoff can leave a connection that looks
   open and answers nothing, and this is what notices.
 - **`heartbeat_deadline_seconds`**: counted in time the page is on screen. It must be

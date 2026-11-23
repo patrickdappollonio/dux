@@ -407,6 +407,13 @@ pub(crate) const DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS: u32 = 10;
 /// worktree with tens of thousands of changed files is megabytes.
 pub(crate) const DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS: u32 = 30;
 
+/// Default deadline, in seconds, on the web UI's New agent form waiting for the
+/// server's first answer to its create (the create starting, or a refusal).
+/// Past it the form is freed with what was typed and a warning says the server
+/// has not answered. It bounds that one answer, not the creation, which runs on
+/// as an operation once started.
+pub(crate) const DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS: u32 = 30;
+
 /// Default interval, in seconds, at which a visible page asks its terminal
 /// connection to prove it is really alive. The WebSocket-level ping the server
 /// sends is send-only with no deadline, so it cannot detect the half-open
@@ -1238,6 +1245,12 @@ pub struct ServerConfig {
     /// shows. Default 30. The browser treats 0 as the default and caps it at
     /// ten minutes. Browser-side, hot-reloadable.
     pub changes_request_timeout_seconds: u32,
+    /// How long, in seconds, the New agent form waits for the server's first
+    /// answer to its create before freeing the form and warning that the
+    /// server has not answered. Default 30. It bounds that answer, not the
+    /// creation itself. The browser treats 0 as the default and caps it at
+    /// ten minutes. Browser-side, hot-reloadable.
+    pub new_agent_request_timeout_seconds: u32,
     /// How often, in seconds, a visible page checks that its terminal
     /// connection is really alive. Default 15.
     ///
@@ -2497,6 +2510,7 @@ impl Default for ServerConfig {
             reconnect_attempts: DEFAULT_RECONNECT_ATTEMPTS,
             reconnect_attempt_timeout_seconds: DEFAULT_RECONNECT_ATTEMPT_TIMEOUT_SECONDS,
             changes_request_timeout_seconds: DEFAULT_CHANGES_REQUEST_TIMEOUT_SECONDS,
+            new_agent_request_timeout_seconds: DEFAULT_NEW_AGENT_REQUEST_TIMEOUT_SECONDS,
             heartbeat_seconds: DEFAULT_HEARTBEAT_SECONDS,
             heartbeat_deadline_seconds: DEFAULT_HEARTBEAT_DEADLINE_SECONDS,
             pty_send_timeout_seconds: DEFAULT_PTY_SEND_TIMEOUT_SECONDS,
@@ -10280,6 +10294,7 @@ mod server_restart_split_tests {
         next.reconnect_attempts += 1;
         next.reconnect_attempt_timeout_seconds += 1;
         next.changes_request_timeout_seconds += 1;
+        next.new_agent_request_timeout_seconds += 1;
         next.heartbeat_seconds += 1;
         next.heartbeat_deadline_seconds += 1;
         next.pty_send_timeout_seconds += 1;

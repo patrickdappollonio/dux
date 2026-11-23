@@ -204,6 +204,9 @@ export interface Bootstrap {
   /** Mirrors `config.server.changes_request_timeout_seconds`: how long the
    * Changes pane waits for one changed-files request before giving it up. */
   changes_request_timeout_seconds?: number
+  /** Mirrors `config.server.new_agent_request_timeout_seconds`: how long the
+   * New agent form waits for the server's first answer to its create. */
+  new_agent_request_timeout_seconds?: number
   /** Mirrors `config.server.heartbeat_seconds`: how often a visible page checks
    * its terminal connection is really alive. */
   heartbeat_seconds?: number

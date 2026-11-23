@@ -10,6 +10,7 @@ import {
   DEFAULT_REPLAY_WAIT_SECONDS,
   heartbeatDeadlineMs,
   heartbeatPeriodMs,
+  newAgentRequestTimeoutMs,
   publishConnectionTiming,
   reconnectAttemptBudget,
   reconnectAttemptTimeoutMs,
@@ -93,6 +94,13 @@ describe("a published document", () => {
     expect(changesRequestTimeoutMs()).toBe(30_000)
     publishConnectionTiming({ changes_request_timeout_seconds: 12 })
     expect(changesRequestTimeoutMs()).toBe(12_000)
+  })
+
+  it("reads the New agent form's wait, defaulting to thirty seconds", () => {
+    publishConnectionTiming(undefined)
+    expect(newAgentRequestTimeoutMs()).toBe(30_000)
+    publishConnectionTiming({ new_agent_request_timeout_seconds: 12 })
+    expect(newAgentRequestTimeoutMs()).toBe(12_000)
   })
 
   it("falls back on a changes request deadline that is no answer at all", () => {
