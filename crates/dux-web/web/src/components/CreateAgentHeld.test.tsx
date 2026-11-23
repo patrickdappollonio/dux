@@ -17,6 +17,7 @@ vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
 const warnings: string[] = []
 const warningIds: Array<string | undefined> = []
 const errors: string[] = []
+const errorIds: Array<string | undefined> = []
 vi.mock("@/lib/notify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/notify")>()
   return {
@@ -28,16 +29,22 @@ vi.mock("@/lib/notify", async (importOriginal) => {
     },
     notifyError: (...args: Parameters<typeof actual.notifyError>) => {
       errors.push(actual.noticeText(args[0]))
+      errorIds.push(args[1]?.id)
       actual.notifyError(...args)
     },
   }
 })
 
-// Each create is held until the test answers it.
+// Each create is held until the test answers it, or fails it as a fetch that
+// never reached the server.
 const held: Array<(response: Response) => void> = []
+const unreached: Array<() => void> = []
 const fetchMock = vi.fn((url: string, init?: RequestInit) => {
   if (String(url).includes("/api/v1/sessions") && init?.method === "POST") {
-    return new Promise<Response>((resolve) => held.push(resolve))
+    return new Promise<Response>((resolve, reject) => {
+      held.push(resolve)
+      unreached.push(() => reject(new TypeError("Failed to fetch")))
+    })
   }
   return Promise.reject(new Error("offline test"))
 })
@@ -71,6 +78,7 @@ const refused = () =>
     status: 400,
     headers: { "content-type": "text/plain" },
   })
+const gateway = () => new Response("<html>Bad Gateway</html>", { status: 502 })
 const started = () =>
   new Response(JSON.stringify({ id: "op-1" }), {
     status: 202,
@@ -91,9 +99,11 @@ const passDeadline = () => act(() => vi.advanceTimersByTime(DEADLINE_MS))
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
   held.length = 0
+  unreached.length = 0
   warnings.length = 0
   warningIds.length = 0
   errors.length = 0
+  errorIds.length = 0
   fetchMock.mockClear()
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
 })
@@ -155,6 +165,64 @@ describe("the New agent form with its create unanswered", () => {
     expect(warnings).toHaveLength(2)
     expect(warningIds[0]).toBeDefined()
     expect(warningIds[1]).toBe(warningIds[0])
+  })
+
+  it("keeps one warning per agent, so another agent's does not replace it", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    fireEvent.change(nameField(), { target: { value: "feature-new" } })
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(2))
+    passDeadline()
+    expect(warnings).toHaveLength(2)
+    expect(warningIds[1]).not.toBe(warningIds[0])
+  })
+
+  it("keeps one warning per create when no name was typed", async () => {
+    await openForm()
+    fireEvent.change(nameField(), { target: { value: "" } })
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(2))
+    passDeadline()
+    expect(warnings).toHaveLength(2)
+    expect(warningIds[1]).not.toBe(warningIds[0])
+  })
+
+  it.each([
+    ["a gateway error", (i: number) => act(() => held[i](gateway()))],
+    ["a fetch that never reached the server", (i: number) => act(() => unreached[i]())],
+  ] as const)(
+    "says the outcome is not known on %s after the wait, in place of its warning",
+    async (_answer, answer) => {
+      await openForm()
+      fireEvent.click(createButton())
+      await waitFor(() => expect(posts()).toBe(1))
+      passDeadline()
+      answer(0)
+      await waitFor(() => expect(warnings).toHaveLength(2))
+      expect(errors).toHaveLength(0)
+      expect(warnings[1]).not.toMatch(/was not created/)
+      expect(warnings[1]).toMatch(/not known whether the agent feature-old was created/)
+      expect(warnings[1]).toMatch(/look there before creating it again/)
+      expect(warnings[1]).not.toMatch(/html/i)
+      expect(warningIds[1]).toBe(warningIds[0])
+    },
+  )
+
+  it("replaces its warning with a refusal that comes after the wait", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    act(() => held[0](refused()))
+    await waitFor(() => expect(errors).toHaveLength(1))
+    expect(errors[0]).toMatch(/feature-old was not created/)
+    expect(errorIds[0]).toBe(warningIds[0])
   })
 
   it.each([

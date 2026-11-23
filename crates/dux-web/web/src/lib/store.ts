@@ -8729,6 +8729,8 @@ export function confirmCreateWithExistingBranch(): void {
 // `NEW_AGENT_CREATE_DEADLINE_MS` frees the form and is forgotten: its late
 // answer opens no question and closes nothing.
 let newAgentCreate: object | null = null
+// Numbers the creates sent with no name, which have nothing else to key on.
+let unnamedNewAgentCreates = 0
 
 /// How long the New agent form waits for the server's first answer to its
 /// create (the create starting, or a refusal) before it frees the form and says
@@ -8751,6 +8753,12 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     return true
   }
   setState({ createAgentSubmitting: true })
+  // One toast per agent asked for: the deadline's warning, and whatever the
+  // late answer then says in its place.
+  const toastId =
+    name === ""
+      ? `new-agent-create:${projectId}:#${String(++unnamedNewAgentCreates)}`
+      : `new-agent-create:${projectId}:${name}`
   const wait = NEW_AGENT_CREATE_DEADLINE_MS
   const deadline = setTimeout(() => {
     if (newAgentCreate !== create) return
@@ -8758,11 +8766,10 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     if (stillOpen()) setState({ createAgentSubmitting: false })
     const agent = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
     // Not sticky: nothing is lost (the form keeps what was typed) and the list
-    // is where the outcome shows, whatever the toast's window. One id per
-    // project, so a second unanswered create replaces this rather than stacking.
+    // is where the outcome shows, whatever the toast's window.
     notifyWarning(
       prose`The server has not answered the request to create ${agent} after ${String(Math.round(wait / 1000))} seconds. The agent may still appear in the list, so look there before creating it again.`,
-      { id: `new-agent-create-unanswered:${projectId}` },
+      { id: toastId },
     )
   }, wait)
   sessionsApi
@@ -8780,7 +8787,7 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
         const current = answered()
         const conflict = existingBranchConflict(e)
         if (!current) {
-          toastForgottenCreateRefusal(name, e, conflict)
+          toastForgottenCreateAnswer(name, e, conflict, toastId)
           return
         }
         if (conflict) {
@@ -8801,26 +8808,47 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     )
 }
 
-// A refusal of a create the form no longer waits for (another create replaced
-// it, or its deadline passed) opens no question and closes nothing, so this
-// toast is the only word the user gets that the agent will not appear.
-function toastForgottenCreateRefusal(
+// The failed answer to a create the form no longer waits for (another create
+// replaced it, or its deadline passed) opens no question and closes nothing,
+// so this toast is the only word the user gets of how it ended.
+function toastForgottenCreateAnswer(
   name: string,
   e: unknown,
   conflict: ExistingBranchConflict | null,
+  id: string,
 ): void {
   if (conflict) {
     notifyError(
       prose`The agent ${chip(conflict.name)} was not created, because a branch of that name already exists. Creating it again from New agent will offer to attach to that branch.`,
+      { id },
     )
     return
   }
-  const status = e instanceof SessionsApiError ? e.status : undefined
+  const status = errorStatus(e)
   // The status stream already says these to this connection.
   if (status === 409 || status === 422) return
+  const lower = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
+  // Only dux refusing the request says the agent was not created. A fetch that
+  // never reached it, or a 5xx (a gateway's included), says nothing either way.
+  if (status === undefined || status < 400 || status >= 500) {
+    const why =
+      status === undefined || status === 0
+        ? "The server could not be reached."
+        : `The server answered with an error (HTTP ${String(status)}).`
+    notifyWarning(
+      prose`It is not known whether ${lower} was created. ${why} The agent may still appear in the list, so look there before creating it again.`,
+      { id },
+    )
+    return
+  }
   const agent = name === "" ? prose`The agent` : prose`The agent ${chip(name)}`
   const reason = e instanceof Error && e.message !== "" ? e.message : "The server refused it."
-  notifyError(prose`${agent} was not created. ${reason}`)
+  notifyError(prose`${agent} was not created. ${reason}`, { id })
+}
+
+function errorStatus(e: unknown): number | undefined {
+  if (e instanceof SessionsApiError || e instanceof AttachedError) return e.status
+  return undefined
 }
 
 export function closeExistingBranch(): void {
