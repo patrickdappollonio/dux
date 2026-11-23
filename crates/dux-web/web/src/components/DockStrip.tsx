@@ -1,13 +1,16 @@
 import { Plus, SquareTerminal, X } from "lucide-react"
 
-import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
-import { TabPill, TabStrip } from "@/components/TabStrip"
+import {
+  TAB_STRIP_BUTTON_DISABLED_TAP_AREA,
+  TabPill,
+  TabStrip,
+  TabStripButton,
+} from "@/components/TabStrip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import {
-  DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
@@ -32,15 +35,7 @@ import {
 } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
 import { terminalTitle } from "@/lib/terminals"
-import { focusAdjacentTab } from "@/lib/tabFocusScroll"
-import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
-
-// The strip's icon buttons: the tab strip's own, at one height token. A phone
-// lifts the box to the 40px floor; a tablet keeps the 24px box and an invisible
-// 8px margin a side takes the tap area to 40px, as the tab strip's + does.
-const STRIP_ICON_BUTTON =
-  "relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:pointer-coarse:size-10 md:pointer-coarse:after:block"
 
 // An agent's terminal dock strip: one pill per terminal of the agent, in the
 // dock's order, the same pills the provider tab strip draws. A pill's glyph
@@ -74,6 +69,8 @@ export function DockStrip({
   const device = useRowDriverLabel({ sessionId })
   return (
     <TabStrip
+      label="Terminals"
+      besidePaneDivider
       stripRef={attachStrip}
       data-testid="dock-strip"
       trailing={
@@ -125,21 +122,18 @@ function DockControls({
       <ExplainedWhenDisabled
         disabled={block !== null}
         hint={block === null ? "New terminal" : addToAgentBlockHint(block, device)}
-        // The disabled button's own tap margin is dead, so its wrapper carries
-        // the same one, 2px shorter on the left where it holds the button's margin.
-        disabledClassName="relative after:absolute after:-inset-y-2 after:-right-2 after:-left-1.5 after:hidden md:pointer-coarse:after:block"
+        // 2px more on a tablet keeps the +'s tap area off the last pill's ⋯,
+        // whose own reaches 1px past its pill.
+        className="md:pointer-coarse:ml-0.5"
+        disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
       >
-        <button
-          type="button"
+        <TabStripButton
           aria-label="New terminal"
           disabled={block !== null}
           onClick={() => createTerminal(sessionId)}
-          // 2px more on a tablet keeps its tap area off the last pill's ⋯,
-          // whose own reaches 1px past its pill.
-          className={cn(STRIP_ICON_BUTTON, "md:pointer-coarse:ml-0.5")}
         >
           <Plus className="size-4" />
-        </button>
+        </TabStripButton>
       </ExplainedWhenDisabled>
       {/* The layout controls sit at the strip's far end, apart from the + by
           the free space between, so a press meant for one cannot land on the
@@ -148,14 +142,12 @@ function DockControls({
         <div className="ml-auto flex shrink-0 items-center gap-0.5 pl-2 md:pointer-coarse:gap-4">
           {layoutControls(layout).map((control) => (
             <SimpleTooltip key={control.action} content={control.label}>
-              <button
-                type="button"
+              <TabStripButton
                 aria-label={control.label}
                 onClick={() => onLayoutAction(control.action)}
-                className={STRIP_ICON_BUTTON}
               >
                 <control.icon className="size-3.5" />
-              </button>
+              </TabStripButton>
             </SimpleTooltip>
           ))}
         </div>
@@ -188,17 +180,7 @@ function DockPill({
       data-cue-key={terminal.id}
       active={active}
       sort={sort}
-      onClick={select}
-      onKeyDown={(e) => {
-        // Only a press on the pill itself: Enter and Space from the ⋯ and its
-        // menu bubble here too.
-        if (e.target !== e.currentTarget) return
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          select()
-        }
-        focusAdjacentTab(e)
-      }}
+      onSelect={select}
       // The tab strip's glyph on the terminal row's ladder: typing stands the
       // cue down, and a terminal never needs you.
       icon={
@@ -210,35 +192,33 @@ function DockPill({
       }
       label={label}
       menu={
-        withMenu ? (
-          <DropdownMenu>
-            <EllipsisMenuTrigger
-              placement="dock-pill"
-              reveal="hover-or-focus"
-              aria-label="Terminal actions"
-            />
-            <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
-              {/* This terminal's own actions only: the input rows and the editor
-                  live in the pane's top menu. Neutral, like every destructive
-                  item; the confirm is the danger signal. */}
-              {block !== null ? (
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel className="max-w-60 whitespace-normal">
-                    {agentChangeBlockReason(block, device)}
-                  </DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                </DropdownMenuGroup>
-              ) : null}
-              <DropdownMenuItem
-                disabled={block !== null}
-                onClick={() => openDeleteTerminal(terminal.id)}
-              >
-                <X />
-                Close terminal…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null
+        withMenu
+          ? {
+              label: "Terminal actions",
+              content: (
+                <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
+                  {/* This terminal's own actions only: the input rows and the editor
+                      live in the pane's top menu. Neutral, like every destructive
+                      item; the confirm is the danger signal. */}
+                  {block !== null ? (
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel className="max-w-60 whitespace-normal">
+                        {agentChangeBlockReason(block, device)}
+                      </DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                    </DropdownMenuGroup>
+                  ) : null}
+                  <DropdownMenuItem
+                    disabled={block !== null}
+                    onClick={() => openDeleteTerminal(terminal.id)}
+                  >
+                    <X />
+                    Close terminal…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              ),
+            }
+          : undefined
       }
     />
   )

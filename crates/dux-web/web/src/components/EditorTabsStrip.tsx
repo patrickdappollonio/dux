@@ -13,7 +13,6 @@ import {
   useDux,
 } from "@/lib/store"
 import { rootKey, type EditorRoot } from "@/lib/editorRoot"
-import { focusAdjacentTab } from "@/lib/tabFocusScroll"
 
 // The code-editor tab strip: editor tabs are pure client state (see
 // lib/editorTabs.ts), not server-sourced. Renders only when the session has at least one tab; with
@@ -34,7 +33,9 @@ export function EditorTabsStrip({ root }: { root: EditorRoot }) {
   }
 
   return (
-    <TabStrip>
+    // The editor fills its overlay or its browser tab, so no pane divider meets
+    // the strip's end.
+    <TabStrip label="Open files" besidePaneDivider={false}>
       {tabs.map((tab) => (
         <EditorTabPill
           key={tab.id}
@@ -68,17 +69,10 @@ function EditorTabPill({
     <SimpleTooltip content={tab.path}>
       <TabPill
         active={active}
-        onClick={onActivate}
+        onSelect={onActivate}
         onDoubleClick={onPin}
         onAuxClick={(e) => {
           if (e.button === 1) onClose()
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            onActivate()
-          }
-          focusAdjacentTab(e)
         }}
         icon={<FileTreeIcon kind={fileIconKind(tab.path)} />}
         label={basename}

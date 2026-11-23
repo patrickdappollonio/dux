@@ -134,12 +134,15 @@ describe("DockStrip", () => {
     expect(screen.getAllByLabelText("Terminal actions")).toHaveLength(1)
   })
 
-  it("lifts every control on the strip to the touch floor under a finger at phone width", () => {
+  // The agent tab strip's phone sizes: 44px wide, where the neighbours are
+  // other controls and pills, and short enough to keep the 36px pill and the
+  // strip as tall as the agent's.
+  it("keeps every control's 44px width at phone width while fitting the strip's height", () => {
     render(strip([terminal("t1", 1)]))
     for (const label of ["New terminal", "Hide terminals", "Maximize terminal", "Terminal actions"]) {
       const classes = Array.from(screen.getByLabelText(label).classList)
-      expect(classes, label).toContain("max-md:pointer-coarse:size-10")
-      expect(classes, `${label} keeps its box on a tablet`).not.toContain("pointer-coarse:size-10")
+      expect(classes, label).toContain("max-md:w-11")
+      expect(classes, label).not.toContain("max-md:pointer-coarse:size-10")
     }
   })
 
@@ -319,7 +322,9 @@ describe("DockStrip on a touch tablet", () => {
   it("keeps the tap areas apart and the last one clear of the pane divider", () => {
     render(strip([terminal("t1", 1)]))
     // The + clear of the last pill's ⋯.
-    expect(screen.getByLabelText("New terminal").className).toContain("md:pointer-coarse:ml-0.5")
+    expect(screen.getByLabelText("New terminal").parentElement!.className).toContain(
+      "md:pointer-coarse:ml-0.5",
+    )
     const group = screen.getByLabelText("Hide terminals").parentElement!
     expect(group.className).toContain("md:pointer-coarse:gap-4")
     expect(screen.getByTestId("dock-strip").className).toContain("md:pointer-coarse:pr-4.5")

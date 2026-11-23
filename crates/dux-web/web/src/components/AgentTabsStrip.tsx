@@ -9,11 +9,15 @@ import {
   X,
 } from "lucide-react"
 
-import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
-import { TabPill, TabStrip } from "@/components/TabStrip"
+import {
+  TAB_STRIP_BUTTON_DISABLED_TAP_AREA,
+  TabPill,
+  TabStrip,
+  TabStripButton,
+} from "@/components/TabStrip"
 import { AttentionDot } from "@/components/AttentionDot"
 import {
   DropdownMenu,
@@ -52,18 +56,12 @@ import {
   useDux,
 } from "@/lib/store"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
-import { focusAdjacentTab } from "@/lib/tabFocusScroll"
 import type { RowBlock } from "@/lib/paneCover"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import type { AgentTabView, SessionView } from "@/lib/types"
 
 const FIRST_TAB_HINT =
   "The agent's first tab: the one that starts when you open a stopped agent."
-
-// A disabled + or chooser takes no pointer events, so its own tablet tap margin
-// is dead; the wrapper that explains it carries the same 8px a side instead.
-const DISABLED_TAP_AREA =
-  "relative after:absolute after:-inset-2 after:hidden md:pointer-coarse:after:block"
 
 // The provider-tab strip at the top of the center pane; whether it shows is the
 // caller's decision. All tabs render uniformly: clicking a
@@ -116,6 +114,8 @@ export function AgentTabsStrip({
 
   return (
     <TabStrip
+      label="Agent tabs"
+      besidePaneDivider
       stripRef={attachStrip}
       trailing={
         <AddTabControls
@@ -175,40 +175,25 @@ function AddTabControls({
         <ExplainedWhenDisabled
           disabled={disabled}
           hint={newTabHint}
-          disabledClassName={DISABLED_TAP_AREA}
+          disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
         >
-          <button
-            type="button"
+          <TabStripButton
             aria-label="New tab"
             disabled={disabled}
             onClick={() => addTab(sessionId)}
-            // `max-md:h-9 max-md:w-11` rather than `max-md:size-11`: the strip's
-            // height relaxation is VERTICAL only (see `TabPill`), so this
-            // keeps its full 44px WIDTH, where its neighbour is the provider
-            // caret and a stray sideways tap would add the wrong provider.
-            // On a tablet the box stays 24px and an invisible margin takes the
-            // tap area to 40px.
-            className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
           >
             <Plus className="size-4" />
-          </button>
+          </TabStripButton>
         </ExplainedWhenDisabled>
         <ExplainedWhenDisabled
           disabled={disabled}
           hint={disabled ? newTabHint : null}
-          disabledClassName={DISABLED_TAP_AREA}
+          disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
         >
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <button
-                  type="button"
-                  aria-label="Choose provider for new tab"
-                  disabled={disabled}
-                  // Height relaxed, width kept, and the same tablet tap margin:
-                  // same reasoning as the "+" beside it.
-                  className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors after:absolute after:-inset-2 after:hidden hover:bg-background hover:text-foreground disabled:pointer-events-none disabled:opacity-40 max-md:h-9 max-md:w-11 md:pointer-coarse:after:block"
-                />
+                <TabStripButton aria-label="Choose provider for new tab" disabled={disabled} />
               }
             >
               <ChevronDown className="size-3.5" />
@@ -273,18 +258,7 @@ function AgentTabPill({
       data-cue-key={tab.id}
       active={active}
       sort={sort}
-      onClick={select}
-      onKeyDown={(e) => {
-        // Only a press on the pill itself: Enter and Space from the ⋯ trigger
-        // and its menu items bubble here too (through the menu's portal), and
-        // must not select the tab or start one resting on the idle screen.
-        if (e.target !== e.currentTarget) return
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          select()
-        }
-        focusAdjacentTab(e)
-      }}
+      onSelect={select}
       // The same glyph cue as the sidebar, on the pill's own ladder: typing and
       // needs-you outrank working, so either one stands the cue down.
       icon={
@@ -308,13 +282,9 @@ function AgentTabPill({
           </SimpleTooltip>
         ) : null
       }
-      menu={
-        <DropdownMenu>
-          <EllipsisMenuTrigger
-            placement="tab-pill"
-            reveal="hover-or-focus"
-            aria-label="Tab actions"
-          />
+      menu={{
+        label: "Tab actions",
+        content: (
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
             {block !== null ? (
               <DropdownMenuGroup>
@@ -399,8 +369,8 @@ function AgentTabPill({
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>
-        </DropdownMenu>
-      }
+        ),
+      }}
     />
   )
 }

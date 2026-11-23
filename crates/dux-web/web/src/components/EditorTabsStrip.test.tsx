@@ -160,6 +160,18 @@ describe("EditorTabsStrip", () => {
     expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
   })
 
+  // A key the pill does not cancel goes on to press the focused ✕, which is
+  // what a browser does with Enter or Space on a button.
+  it.each(["Enter", " "])("closes a tab, and selects nothing, on %j on its focused ✕", (key) => {
+    seed("s1", [tab({ id: "t1" }), tab({ id: "t2", path: "b.ts" })], "t2")
+    render(<EditorTabsStrip root={agentRoot("s1")} />)
+    const close = screen.getByLabelText("Close a.ts")
+    act(() => close.focus())
+    if (fireEvent.keyDown(close, { key })) fireEvent.click(close)
+    expect(editorCloseTabMock).toHaveBeenCalledWith(agentRoot("s1"), "t1")
+    expect(editorActivateTabMock).not.toHaveBeenCalled()
+  })
+
   it("strip container is horizontally scrollable", () => {
     seed("s1", [tab({ id: "t1" })], "t1")
     const { container } = render(<EditorTabsStrip root={agentRoot("s1")} />)
@@ -168,9 +180,9 @@ describe("EditorTabsStrip", () => {
   })
 
   it("phone pills are 36px tall, the tab strips' shared touch-floor deviation", () => {
-    // NOT the 40px touch floor, a settled product decision for the tab strips,
-    // whose pill this is. The close button keeps a larger-than-visual hit area
-    // (max-md:size-8 fits inside the 36px pill without adding height).
+    // The tab strips' shared pill height, below the 40px touch floor. The close
+    // button keeps a larger-than-visual hit area (max-md:size-8 fits inside the
+    // 36px pill without adding height).
     seed("s1", [tab({ id: "t1" })], "t1")
     render(<EditorTabsStrip root={agentRoot("s1")} />)
     const pill = screen.getByText("a.ts").closest('[role="tab"]') as HTMLElement
@@ -240,8 +252,9 @@ describe("keyboard focus on the strip", () => {
       keyboard.mockRestore()
     }
     expect(scroll).toHaveBeenCalledTimes(1)
-    expect(pill.parentElement!.className).toContain("py-1.25")
-    expect(pill.parentElement!.className).toContain("scroll-px-2")
+    const strip = screen.getByRole("tablist").parentElement!
+    expect(strip.className).toContain("py-1.25")
+    expect(strip.className).toContain("scroll-px-2")
   })
 })
 
