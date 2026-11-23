@@ -81,6 +81,16 @@ function releaseTraversals(): void {
   for (const run of held) run()
 }
 
+// How each held `traverseTo` fails when a navigation of the user's own
+// aborts it, as a browser rejects its promise.
+const traversalAborts = new Map<() => void, () => void>()
+
+function abortHeldTraversals(): void {
+  const held = traversals
+  traversals = []
+  for (const run of held) traversalAborts.get(run)?.()
+}
+
 // Each entry's Navigation API key: one per slot, kept by a replace and new on
 // a push, as the API defines it.
 let entryKeys: string[]
@@ -162,7 +172,7 @@ const fakeNavigation = {
       calls.reject = reject
     })
     committed.catch(() => {})
-    queueTraversal(() => {
+    const run = () => {
       const target = entryKeys.indexOf(key)
       if (target < 0) {
         calls.reject(new Error("InvalidStateError"))
@@ -171,7 +181,9 @@ const fakeNavigation = {
       if (target < DUX_ENTRY_INDEX) leftApp = true
       else if (target !== index) landOn(target)
       calls.resolve()
-    })
+    }
+    traversalAborts.set(run, () => calls.reject(new Error("AbortError")))
+    queueTraversal(run)
     return { committed, finished: committed }
   },
 }
@@ -1205,6 +1217,85 @@ describe("moving in pushes, and Back unwinds exactly", () => {
       expect(asked).toBe(2)
       expect(index).toBe(2)
       expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
+    // The return onto the entry of a modal that stayed open is in flight, and
+    // another navigation lands first (an in-page link): the screen follows the
+    // address, and the modal, whose entry the browser no longer holds, goes on
+    // with none.
+    it("follows a navigation that lands while a modal's return is in flight", async () => {
+      const mod = await loadStore("", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.selectSession("s2")
+      const modals = await import("./modalHistory")
+      let asked = 0
+      modals.registerModal(() => {
+        asked += 1
+        return true
+      })
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s2", "#/agent/s2"])
+      deferTraversal = true
+      history.back()
+      traversals.shift()?.()
+      expect(asked).toBe(1)
+      expect(traversals.length).toBe(1)
+      popstateTo("#/agent/s1")
+      releaseTraversals()
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s2", "#/agent/s1"])
+      expect(index).toBe(3)
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+      history.back()
+      await settle()
+      expect(asked).toBe(1)
+      expect(index).toBe(2)
+      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+    })
+
+    // The same return, aborted by the user's own Back.
+    it("follows the user's Back that aborts a modal's return", async () => {
+      const mod = await loadStore("", [
+        { id: "s1", project_id: "p1" },
+        { id: "s2", project_id: "p1" },
+      ])
+      mod.selectSession("s1")
+      mod.selectSession("s2")
+      const modals = await import("./modalHistory")
+      let asked = 0
+      modals.registerModal(() => {
+        asked += 1
+        return true
+      })
+      await settle()
+      expect(index).toBe(4)
+      deferTraversal = true
+      history.back()
+      traversals.shift()?.()
+      expect(index).toBe(3)
+      const held = traversals
+      traversals = []
+      landOn(2)
+      traversals = held
+      abortHeldTraversals()
+      deferTraversal = false
+      await settle()
+      expect(asked).toBe(1)
+      expect(index).toBe(2)
+      expect(loc.hash).toBe("#/agent/s1")
+      expect(mod.getSnapshot().selectedSessionId).toBe("s1")
+      expect(entries).toEqual([OUTSIDE_ENTRY, "/", "#/agent/s1", "#/agent/s2", "#/agent/s2"])
+      history.forward()
+      await settle()
+      expect(index).toBe(3)
+      expect(mod.getSnapshot().selectedSessionId).toBe("s2")
+      // The modal's old entry is not a stop any more.
+      history.forward()
+      await settle()
+      expect(index).toBe(3)
+      expect(asked).toBe(1)
     })
 
     it("hands a closing menu's entry to the dialog it opened", async () => {

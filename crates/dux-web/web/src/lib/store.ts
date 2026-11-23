@@ -3966,12 +3966,14 @@ let fallbackWrite = false
 // keeps its mode, so the landing runs it as one, with its step back onto an
 // entry that already names the destination. `then` is a move waiting for the
 // landing that state does not hold (a fragment navigation, a reload). `stay`
-// says the landing is back onto the page on screen, which never moved (the
-// return onto a modal's own entry): there is no route to apply there, and
-// applying it could write the address and take that entry away again.
+// is the return onto a modal's own entry, `navKey`: landing there is back onto
+// the page on screen, which never moved, so there is no route to apply, and
+// applying it could write the address and take that entry away again. A
+// landing anywhere else is another navigation, and `lost` says the return
+// will not arrive.
 interface PendingTraversal {
   newerIntent: boolean
-  stay?: boolean
+  stay?: { navKey: string; lost: () => void }
   fallback?: { mode: "replace" | "push" | undefined }
   then?: () => void
 }
@@ -4186,6 +4188,15 @@ function onTraversal(): void {
   walkingPastTo = null
   cursorMoves += 1
   landedAt = { key: navigationApi()?.currentEntry?.key ?? null, hash: currentHash(), moves: cursorMoves }
+  const pending = pendingTraversal
+  if (pending?.stay && arrivedAt !== pending.stay.navKey) {
+    pending.stay.lost()
+    if (pending.newerIntent) pending.stay = undefined
+    else {
+      pendingTraversal = null
+      scheduleModalReconcile()
+    }
+  }
   if (pendingTraversal !== null) landTraversal()
   else if (stepOffRetiredEntry()) return
   else if (!leaveModalEntries() && !stepBackInModalWithoutEntry()) applyUrlRoute()
@@ -4409,7 +4420,8 @@ function returnToModalEntries(kept: readonly ModalEntry[]): boolean {
       nav.transition.finished.then(attempt, attempt)
       return
     }
-    if (!listed() || !traverseExactly(nav, top.navKey, { newerIntent: false, stay: true }, giveUp)) {
+    const pending = { newerIntent: false, stay: { navKey: top.navKey, lost: giveUp } }
+    if (!listed() || !traverseExactly(nav, top.navKey, pending, giveUp)) {
       giveUp()
       scheduleModalReconcile()
     }
