@@ -132,9 +132,11 @@ export function Modal(props: ModalProps) {
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
           // A field's own Enter (or a text area's Ctrl/Cmd-Enter) runs the
           // caller's submit, which the footer's gate never sees: while the
-          // modal or its submit is busy, it runs nothing.
+          // modal or its submit is busy, or its row may not be changed from
+          // here, it runs nothing.
           onKeyDownCapture={(event) => {
-            if (!busy && !(kind === "form" && props.submit.busy === true)) return
+            const held = busy || rowReason !== null || (kind === "form" && props.submit.busy === true)
+            if (!held) return
             if (event.key !== "Enter" || !submitsOnEnter(event.target, event)) return
             if (event.target.closest('[data-slot="dialog-content"]') !== event.currentTarget) return
             event.preventDefault()

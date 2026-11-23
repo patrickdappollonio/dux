@@ -920,6 +920,46 @@ describe("a modal whose action changes a row", () => {
   })
 })
 
+describe("a form whose action changes a row", () => {
+  it("runs no submit from Enter in a field while another device drives the row", () => {
+    const submitted = vi.fn()
+    render(
+      <RowReasonContext.Provider value={useRowChangeReason}>
+        <Modal
+          kind="form"
+          open
+          onClose={() => {}}
+          title="Rename agent"
+          historyEntry={false}
+          submit={save}
+          row={{ sessionId: "s2" }}
+        >
+          <input
+            aria-label="name"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submitted()
+            }}
+          />
+        </Modal>
+      </RowReasonContext.Provider>,
+    )
+    const field = screen.getByLabelText("name")
+    fireEvent.keyDown(field, { key: "Enter" })
+    expect(submitted).toHaveBeenCalledTimes(1)
+    let retire = () => {}
+    act(() => {
+      retire = registerPaneCover("pty-2", "card", {
+        row: agentRowKey("s2"),
+        driver: "other",
+        device: "Firefox on Linux",
+      })
+    })
+    fireEvent.keyDown(field, { key: "Enter" })
+    expect(submitted).toHaveBeenCalledTimes(1)
+    act(() => retire())
+  })
+})
+
 describe("a destructive confirm", () => {
   it("greys the page behind it, and a plain one does not", () => {
     const overlay = () => document.querySelector('[data-slot="dialog-overlay"]')!
