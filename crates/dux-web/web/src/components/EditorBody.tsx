@@ -2176,7 +2176,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   neighbour on the row. Under a finger the bar ends 10px short
                   of its right edge, where the divider's touch band reaches
                   into this panel, so the `⋯` sits clear of it. */}
-              <div className="flex items-center gap-2 border-b p-2 pointer-coarse:pr-2.5">
+              <div data-toast-clear className="flex items-center gap-2 border-b p-2 pointer-coarse:pr-2.5">
                 <div className="relative flex-1">
                   <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                   <Input

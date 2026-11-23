@@ -724,6 +724,13 @@ describe("the phone's explorer", () => {
     expect(await screen.findByRole("button", { name: /hide the file explorer/i })).toBeTruthy()
   })
 
+  // Its bar of buttons sits flush under the header, so a toast starts below it.
+  it("marks its bar as chrome a toast clears", async () => {
+    await mount(false, true)
+    const search = await screen.findByPlaceholderText("Search files…")
+    expect(search.closest("[data-toast-clear]")).not.toBeNull()
+  })
+
   it("is hidden while a file is open", async () => {
     await mount(true, false)
     expect(await screen.findByRole("button", { name: /show the file explorer/i })).toBeTruthy()

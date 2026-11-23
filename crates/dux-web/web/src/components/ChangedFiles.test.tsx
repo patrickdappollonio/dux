@@ -320,6 +320,8 @@ describe("the Changes pane while no branch is checked out", () => {
     expect(
       notice.compareDocumentPosition(filter) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy()
+    // Flush under the header, so a phone's toasts start below it too.
+    expect(notice.hasAttribute("data-toast-clear")).toBe(true)
   })
 
   it("is absent while a branch is checked out", () => {

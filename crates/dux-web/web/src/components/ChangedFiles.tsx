@@ -2409,6 +2409,7 @@ function NoBranchCheckedOut({ branch }: { branch: string }) {
     <div
       role="status"
       data-testid="no-branch-checked-out"
+      data-toast-clear
       className="-mt-4 flex min-h-9 shrink-0 items-start gap-2 border-b border-dux-warning/30 bg-dux-warning/10 px-3 py-2 text-sm text-dux-warning"
     >
       <GitBranch className="mt-0.5 size-4 shrink-0" aria-hidden />

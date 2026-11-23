@@ -49,6 +49,7 @@ export function FileDiskBanner({
       // A live region: the banner appears without the user having done
       // anything, so a screen reader has to be told.
       role="status"
+      data-toast-clear
       className="flex shrink-0 flex-wrap items-center gap-2 border-b border-dux-warning/40 bg-dux-warning/10 px-3 py-2 text-sm"
     >
       {deleted ? (
