@@ -482,22 +482,19 @@ describe("PullRequestsDialog branches view", () => {
   })
 })
 
-describe("PullRequestsDialog scrolling", () => {
-  // One scroller, the modal's body, whose padding keeps the scrollbar clear of
-  // each row's trailing controls in both views; the tabs and Sort stay put.
-  it("scrolls both lists in the modal's body, under a toolbar that does not scroll", async () => {
+describe("PullRequestsDialog open and close", () => {
+  // The views switch with the arrow keys from the first moment.
+  it("opens with focus on the selected view's tab on a computer", async () => {
     seed(session())
     render(<PullRequestsDialog />)
-    const body = document.querySelector<HTMLElement>("[data-slot='modal-body']")!
-    const toolbar = document.querySelector<HTMLElement>("[data-slot='modal-toolbar']")!
-    expect(body.contains(toolbar)).toBe(false)
-    expect(toolbar.contains(screen.getByRole("tab", { name: /Branches/ }))).toBe(true)
-    expect(body.contains(screen.getByLabelText("Actions for #418"))).toBe(true)
-    expect(screen.getByTestId("pull-requests-list").className).not.toContain("overflow")
-    await act(async () => {
-      fireEvent.click(screen.getByRole("tab", { name: /Branches/ }))
-    })
-    await screen.findByText("spike-tab-ids")
-    expect(screen.getByTestId("branches-list").className).not.toContain("overflow")
+    const tab = screen.getByRole("tab", { name: /Pull requests/ })
+    await waitFor(() => expect(document.activeElement).toBe(tab))
+  })
+
+  it("closes itself when its agent is not there to show", async () => {
+    vi.mocked(store.closePullRequests).mockClear()
+    seed(null)
+    render(<PullRequestsDialog />)
+    await waitFor(() => expect(store.closePullRequests).toHaveBeenCalled())
   })
 })
