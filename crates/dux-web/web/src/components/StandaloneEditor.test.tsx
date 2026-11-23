@@ -766,8 +766,9 @@ describe("the phone's explorer", () => {
   })
 
   it("stays open when the open file is renamed", async () => {
+    // The rerender's act flushes the explorer effect, so a collapse would
+    // already show.
     await openTreeThen(() => tabs("src/renamed.ts"))
-    await new Promise((resolve) => setTimeout(resolve, 20))
     expect(explorerHidden()).toBe(false)
   })
 

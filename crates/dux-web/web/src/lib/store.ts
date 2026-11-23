@@ -1016,9 +1016,10 @@ export interface DuxState {
   // so only the namespaced key keeps two editors apart. A root absent here has
   // no tabs (not yet opened, or cleared when its target vanished).
   editorTabs: Record<string, EditorTabsState>
-  // Counts every ask to open a file in an editor, one already open included,
-  // so the phone's editor can hide its explorer on an open that changes no tab
-  // (a preview tab replaced in place) and not on a rename, which keeps its tab.
+  // Counts the files opened or brought to the front in an editor, so the
+  // phone's editor can hide its explorer on a preview tab replaced in place,
+  // which keeps its tab id. A landing on the file already in front (a dialog
+  // closing lands the route again) and a rename count nothing.
   editorFileOpens: number
   // The tab pending the dirty-close confirmation (destructive-confirm
   // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
@@ -6638,10 +6639,14 @@ export function editorTabsFor(root: EditorRoot): EditorTabsState {
 // is an unselective `useSyncExternalStore`, so every consumer re-renders on
 // every `setState`, and a no-op dispatch on each keystroke would fan out a
 // global re-render for nothing.
-function setEditorTabsFor(root: EditorRoot, next: EditorTabsState): void {
+function setEditorTabsFor(
+  root: EditorRoot,
+  next: EditorTabsState,
+  also: Partial<DuxState> = {},
+): void {
   const key = rootKey(root)
   if (state.editorTabs[key] === next) return
-  setState({ editorTabs: { ...state.editorTabs, [key]: next } })
+  setState({ ...also, editorTabs: { ...state.editorTabs, [key]: next } })
   // A tab that no longer exists takes its cached draft with it (per-tab
   // discard confirmed, a deleted file closing its tabs, a rename collision),
   // whether or not an EditorBody is mounted at the time. And the unload
@@ -6666,15 +6671,19 @@ export function editorOpenFile(
   // its no-intent semantics.
   const mode =
     opts.mode !== undefined ? editorMode(root, opts.mode, path) : undefined
+  const prev = editorTabsFor(root)
+  const next = editorOpenFilePure(prev, path, {
+    mode,
+    pin: opts.pin,
+    newId: () => newClientId(),
+  })
+  const wasInFront = prev.tabs.find((t) => t.id === prev.activeId)
+  const opened = wasInFront?.id !== next.activeId || wasInFront?.path !== path
   setEditorTabsFor(
     root,
-    editorOpenFilePure(editorTabsFor(root), path, {
-      mode,
-      pin: opts.pin,
-      newId: () => newClientId(),
-    }),
+    next,
+    opened ? { editorFileOpens: state.editorFileOpens + 1 } : {},
   )
-  setState({ editorFileOpens: state.editorFileOpens + 1 })
 }
 
 // The mode a tab may actually open in. Two coercions, both to "file", and both

@@ -208,6 +208,36 @@ describe("a plain hash anchor drives the router", () => {
     })
   })
 
+  // The phone's explorer hides on this signal, and closing any dialog lands
+  // the route again on the address it was already on.
+  it("counts a file opened, and not a landing on the open file or a rename of it", async () => {
+    window.location.hash = "#/editor/agent/s1/file/a.ts"
+    const mod = await import("./store")
+    await vi.waitFor(() => {
+      expect(mod.getSnapshot().editorRoute).toMatchObject({ path: "a.ts" })
+    })
+    const opens = () => mod.getSnapshot().editorFileOpens
+    const atStart = opens()
+    expect(atStart).toBeGreaterThan(0)
+
+    history.pushState(null, "", "#/editor/agent/s1/file/a.ts")
+    // Registered after the store's own listener, so it runs after the landing.
+    const landed = new Promise((resolve) => {
+      window.addEventListener("popstate", resolve, { once: true })
+    })
+    history.back()
+    await landed
+    expect(opens()).toBe(atStart)
+
+    const root = { kind: "agent", sessionId: "s1" } as const
+    mod.editorRenameTabPaths(root, "a.ts", "renamed.ts")
+    mod.editorOpenFile(root, "renamed.ts", { mode: "file" })
+    expect(opens()).toBe(atStart)
+
+    mod.editorOpenFile(root, "b.ts")
+    expect(opens()).toBe(atStart + 1)
+  })
+
   it("the standalone editor's Up control pushes the agent's Changes screen, never stepping back", async () => {
     window.location.hash = "#/editor/agent/s1/file/a.ts"
     const mod = await import("./store")
