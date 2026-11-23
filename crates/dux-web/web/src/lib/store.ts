@@ -8852,7 +8852,7 @@ function toastForgottenCreateAnswer(
       status === 0
         ? "The server could not be reached."
         : status !== undefined
-          ? `The server answered with an error (HTTP ${String(status)}).`
+          ? (serverReason(e) ?? `The server answered with an error (HTTP ${String(status)}).`)
           : e instanceof Error && e.message !== ""
             ? e.message
             : "No answer came back."
@@ -8865,6 +8865,22 @@ function toastForgottenCreateAnswer(
   const agent = name === "" ? prose`The agent` : prose`The agent ${chip(name)}`
   const reason = e instanceof Error && e.message !== "" ? e.message : "The server refused it."
   notifyError(prose`${agent} was not created. ${reason}`, { id })
+}
+
+// The longest error answer read out as dux's own words. Its refusals are a
+// sentence or two; anything longer is somebody else's page.
+const SERVER_REASON_MAX_CHARS = 300
+
+// dux's own error answer, which is a plain-text sentence, read as one between
+// the toast's own (some start lowercase and end with no stop), or null for an
+// empty answer, a JSON body, or a proxy's HTML page.
+function serverReason(e: unknown): string | null {
+  if (!(e instanceof SessionsApiError) || e.body !== null) return null
+  const text = e.message.trim()
+  if (text === "" || text === `request failed (${String(e.status)})`) return null
+  if (text.startsWith("<") || [...text].length > SERVER_REASON_MAX_CHARS) return null
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1)
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`
 }
 
 export function closeExistingBranch(): void {

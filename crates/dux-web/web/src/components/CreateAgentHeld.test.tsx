@@ -214,6 +214,27 @@ describe("the New agent form with its create unanswered", () => {
     },
   )
 
+  it("names the server's own reason for an error that comes after the wait", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(posts()).toBe(1))
+    passDeadline()
+    act(() =>
+      held[0](
+        new Response("the change was made, but its operation record did not come back with the reply", {
+          status: 500,
+          headers: { "content-type": "text/plain" },
+        }),
+      ),
+    )
+    await waitFor(() => expect(warnings).toHaveLength(2))
+    expect(warnings[1]).toMatch(/not known whether the agent feature-old was created/)
+    expect(warnings[1]).toContain(
+      "created. The change was made, but its operation record did not come back with the reply. The agent may",
+    )
+    expect(warnings[1]).not.toMatch(/HTTP 500/)
+  })
+
   it("replaces its warning with a refusal that comes after the wait", async () => {
     await openForm()
     fireEvent.click(createButton())
