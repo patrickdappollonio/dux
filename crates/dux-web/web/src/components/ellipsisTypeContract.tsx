@@ -13,9 +13,9 @@ export function EllipsisTypeContract() {
       {/* @ts-expect-error a pill's box is its own, roomy or not */}
       <EllipsisMenuTrigger placement="tab-pill" fit="roomy" aria-label="Pill" />
       {/* @ts-expect-error a pill's box is its own, slim or not */}
-      <EllipsisMenuTrigger placement="dock-pill" fit="slim" aria-label="Pill" />
+      <EllipsisMenuTrigger placement="tab-pill" fit="slim" aria-label="Pill" />
       {/* @ts-expect-error a pill is not left out of the computer layout */}
-      <EllipsisMenuTrigger placement="dock-pill" phoneOnly aria-label="Pill" />
+      <EllipsisMenuTrigger placement="tab-pill" phoneOnly aria-label="Pill" />
       {/* @ts-expect-error a row's fits are alternatives, never two at once */}
       <EllipsisMenuTrigger placement="row" fit={["slim", "roomy"]} aria-label="Row" />
       {/* @ts-expect-error a header is roomy or it is not; slim and compact are a row's */}

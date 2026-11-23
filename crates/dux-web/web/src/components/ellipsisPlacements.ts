@@ -12,9 +12,7 @@
  * - `floating`: a round 40px button on the flap or the floating pill. These two
  *   fly as one object, so this box never changes.
  * - `tab-pill`: inside a tab strip's pill (`TabPill`), which is shorter than
- *   40px on a phone.
- * - `dock-pill`: the same box as `tab-pill`, since the dock's pills are the tab
- *   strip's.
+ *   40px on a phone. Every strip's pills are `TabPill`, the dock's included.
  *
  * Under a coarse pointer, and on a phone, every placement reaches the 40px
  * floor on the axis where its neighbours could take a stray tap; the pills keep
@@ -28,12 +26,11 @@ export type EllipsisPlacement =
   | "banner"
   | "floating"
   | "tab-pill"
-  | "dock-pill"
 
-export type PillPlacement = "tab-pill" | "dock-pill"
+export type PillPlacement = "tab-pill"
 
 export function isPillPlacement(p: EllipsisPlacement): p is PillPlacement {
-  return p === "tab-pill" || p === "dock-pill"
+  return p === "tab-pill"
 }
 
 /**
@@ -94,7 +91,6 @@ export const BOX = {
   banner: `${BANNER_STRIP_HEIGHT} w-9 rounded-none text-current pointer-coarse:w-10`,
   floating: "size-10 shrink-0 rounded-full",
   "tab-pill": PILL_BOX,
-  "dock-pill": PILL_BOX,
 } as const
 
 /** The banner's control box, shared with the banner's previous and next buttons. */
@@ -105,5 +101,4 @@ export const BANNER_CONTROL_BOX = BOX.banner
 export const REVEAL_CAP: Record<"row" | PillPlacement, string> = {
   row: "[--reveal-cap:--spacing(10)]",
   "tab-pill": PILL_REVEAL_CAP,
-  "dock-pill": PILL_REVEAL_CAP,
 }
