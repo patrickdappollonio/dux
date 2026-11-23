@@ -20,7 +20,6 @@ import {
   ArrowUpToLine,
   ChevronRight,
   Copy,
-  Ellipsis,
   Plus,
   Search,
   SquareSlash,
@@ -28,6 +27,7 @@ import {
 } from "lucide-react"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -64,7 +64,6 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
   Empty,
@@ -957,18 +956,7 @@ function MacroFields({
             className={CONTROL_HEIGHT}
           />
           <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  size="icon"
-                  aria-label={`Actions for ${name}`}
-                  className="shrink-0 max-md:size-10 pointer-coarse:size-10"
-                />
-              }
-            >
-              <Ellipsis />
-            </DropdownMenuTrigger>
+            <EllipsisMenuTrigger placement="header" aria-label={`Actions for ${name}`} />
             <DropdownMenuContent
               align="end"
               finalFocus={() => {

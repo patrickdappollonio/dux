@@ -1,7 +1,7 @@
 import { useCallback, type ComponentProps, type ReactNode, type Ref } from "react"
 
 import type { usePillSort } from "@/hooks/use-pill-sort"
-import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
+import { REVEAL_ROW } from "@/lib/hoverReveal"
 import { scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 
@@ -70,7 +70,7 @@ export function TabPill({
   /** An editor preview tab's label. */
   italic?: boolean
   marker?: ReactNode
-  /** Revealed on hover and focus, always under a finger. */
+  /** The pill's `⋯` menu, its trigger revealing itself on hover and focus. */
   menu?: ReactNode
   trailing?: ReactNode
 }) {
@@ -117,18 +117,7 @@ export function TabPill({
         {label}
       </span>
       {marker}
-      {menu != null ? (
-        // The phone keeps the slot's width open for its 44px trigger.
-        <div
-          className={cn(
-            HOVER_REVEAL,
-            "[--reveal-cap:--spacing(8)] max-md:max-w-none",
-            REVEALED_ON_ANY_FOCUS,
-          )}
-        >
-          {menu}
-        </div>
-      ) : null}
+      {menu}
       {trailing}
     </div>
   )

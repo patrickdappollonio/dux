@@ -21,7 +21,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Ellipsis,
   ExternalLink,
   Eye,
   EyeOff,
@@ -32,6 +31,8 @@ import {
   Unlink,
 } from "lucide-react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
+import { ROW_BOX } from "@/components/ellipsisPlacements"
 import { Modal, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import {
@@ -76,22 +77,13 @@ import {
   showPullRequest,
   useDux,
 } from "@/lib/store"
-import { ALWAYS_REVEALED_ON_TOUCH } from "@/lib/touchReveal"
+import { REVEAL_ROW } from "@/lib/hoverReveal"
 import type { PrBranchesView, PrKeyView, PrView, SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 // The toolbar's one height token: the view switch and the Sort control sit
 // side by side at it, lifted to the touch floor on a coarse pointer.
 const HEADER_HEIGHT = "h-9 pointer-coarse:h-10"
-// A row's own controls (the grip, the `⋯`, Show again): compact beside a
-// mouse, the 40px floor under a finger.
-const ROW_CONTROL = "size-8 pointer-coarse:size-10"
-// The grip and the `⋯` on a phone under a finger: narrower, keeping the floor
-// in height, so a phone-width row leaves its title a readable width. Narrowing
-// is safe on that axis because the grip sits between the screen's edge and the
-// row's text, and the `⋯` between the text and the screen's edge, none of which
-// takes a tap; above and below they are the rows' own full-height controls.
-const ROW_CONTROL_NARROW = "max-md:pointer-coarse:w-7"
 // A view tab fills its list beside a mouse and takes the 40px floor under a
 // finger. The selected one is a filled segment in the foreground tone, which
 // the primitive's own faint tint does not read as on this dialog's surface.
@@ -502,7 +494,7 @@ function SortablePrRow({
       ref={setNodeRef}
       style={style}
       className={cn(
-        "group/pr-row flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50",
+        REVEAL_ROW, "flex items-center gap-2 rounded-lg px-1 py-1.5 hover:bg-muted/50",
         isDragging && "z-10 bg-muted shadow-lg",
       )}
     >
@@ -514,8 +506,7 @@ function SortablePrRow({
         aria-label={`Drag ${prName(pr)}`}
         className={cn(
           "flex shrink-0 cursor-grab touch-manipulation items-center justify-center rounded-md text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
-          ROW_CONTROL,
-          ROW_CONTROL_NARROW,
+          ROW_BOX.slim,
         )}
       >
         <GripVertical className="size-4" />
@@ -542,27 +533,12 @@ function RowMenu({
   const action = prRowAction(pr)
   return (
     <DropdownMenu>
-      {/* Reveals on hover or focus, stays while its menu is open, and is
-        * always there under a finger, which has no hover. */}
-      <div
-        className={cn(
-          "flex shrink-0 items-center transition-opacity duration-200 motion-reduce:transition-none md:opacity-0 md:group-hover/pr-row:opacity-100 md:group-focus-within/pr-row:opacity-100 md:has-[[data-popup-open]]:opacity-100",
-          ALWAYS_REVEALED_ON_TOUCH,
-        )}
-      >
-        <DropdownMenuTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Actions for ${prName(pr)}`}
-              className={cn(ROW_CONTROL, ROW_CONTROL_NARROW)}
-            />
-          }
-        >
-          <Ellipsis />
-        </DropdownMenuTrigger>
-      </div>
+      <EllipsisMenuTrigger
+        placement="row"
+        reveal="hover-or-focus"
+        fit="slim"
+        aria-label={`Actions for ${prName(pr)}`}
+      />
       <DropdownMenuContent align="end">
         <DropdownMenuItem
           render={<a href={pr.url} target="_blank" rel="noopener noreferrer" />}
@@ -630,7 +606,7 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
               <li key={pr.url} className="flex items-center gap-2 rounded-lg px-1 py-1.5">
                 {/* Stands in for the grip, so hidden rows line up with the
                   * shown ones above. */}
-                <span aria-hidden className={cn("shrink-0", ROW_CONTROL, ROW_CONTROL_NARROW)} />
+                <span aria-hidden className={ROW_BOX.slim} />
                 {/* Show again goes under the text once the two no longer fit
                   * side by side, rather than squeezing the title. */}
                 <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">

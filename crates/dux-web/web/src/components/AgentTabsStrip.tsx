@@ -3,13 +3,13 @@ import {
   Check,
   ChevronDown,
   CircleStop,
-  Ellipsis,
   Pin,
   Plus,
   Replace,
   X,
 } from "lucide-react"
 
+import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
@@ -310,26 +310,11 @@ function AgentTabPill({
       }
       menu={
         <DropdownMenu>
-          <DropdownMenuTrigger
-            render={
-              <button
-                type="button"
-                aria-label="Tab actions"
-                onClick={(e) => e.stopPropagation()}
-                // `max-md:h-8 max-md:w-11` keeps the full 44px width (its
-                // horizontal neighbour is the next tab) while fitting inside the
-                // pill's 36px height; `max-md:size-11` here would have forced
-                // the pill back to 44px and undone the shorter strip. A tablet
-                // keeps the 20px box and an invisible 10px margin takes the tap
-                // area to 40px. Its left 10px lie over the pill's own label or
-                // pin, so a tap there opens the menu rather than selecting the
-                // tab.
-                className="relative flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground after:absolute after:-inset-2.5 after:hidden hover:text-foreground max-md:h-8 max-md:w-11 md:pointer-coarse:after:block"
-              />
-            }
-          >
-            <Ellipsis className="size-3.5" />
-          </DropdownMenuTrigger>
+          <EllipsisMenuTrigger
+            placement="tab-pill"
+            reveal="hover-or-focus"
+            aria-label="Tab actions"
+          />
           <DropdownMenuContent align="start" onClick={(e) => e.stopPropagation()}>
             {block !== null ? (
               <DropdownMenuGroup>
