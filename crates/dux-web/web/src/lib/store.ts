@@ -8861,11 +8861,22 @@ function toastForgottenCreateAnswer(
   const refused =
     e instanceof AttachedError || (status !== undefined && status >= 400 && status < 500)
   if (!refused) {
+    // A reason that came with a 5xx is said as what the server answered, with
+    // no claim either way about the agent: a gateway's short text is not dux's
+    // word, and dux's own may say the change was made.
+    const reason = status !== undefined && status >= 500 ? serverReason(e) : null
+    if (reason !== null && status !== undefined) {
+      notifyWarning(
+        prose`The server answered the request to create ${lower} with an error (HTTP ${String(status)}): ${reason} Look in the list before creating it again.`,
+        { id },
+      )
+      return
+    }
     const why =
       status === 0
         ? "The server could not be reached."
         : status !== undefined
-          ? (serverReason(e) ?? `The server answered with an error (HTTP ${String(status)}).`)
+          ? `The server answered with an error (HTTP ${String(status)}).`
           : e instanceof Error && e.message !== ""
             ? e.message
             : "No answer came back."
@@ -8884,9 +8895,10 @@ function toastForgottenCreateAnswer(
 // sentence or two; anything longer is somebody else's page.
 const SERVER_REASON_MAX_CHARS = 300
 
-// dux's own error answer, which is a plain-text sentence, read as one between
-// the toast's own (some start lowercase and end with no stop), or null for an
-// empty answer, a JSON body, or a proxy's HTML page.
+// A short plain-text error answer read as a sentence between the toast's own
+// (some start lowercase and end with no stop), or null for an empty answer, a
+// JSON body, or an HTML page. It may be dux's or a proxy's, so callers say
+// "the server answered" and never speak for either.
 function serverReason(e: unknown): string | null {
   if (!(e instanceof SessionsApiError) || e.body !== null) return null
   const text = e.message.trim()
