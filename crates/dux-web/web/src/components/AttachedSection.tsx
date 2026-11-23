@@ -11,7 +11,10 @@ import { useDux } from "@/lib/store"
 
 // The parts every guarded confirmation shares (see `useAttachedOverride`).
 
-/** Who the server named, listed under the dialog's body. Nothing until then. */
+/** Who the server named, listed under the dialog's body. Nothing until then.
+ * It appears only after the user pressed the action and the server refused,
+ * while focus moves to Cancel, so it is one alert region: the reason is read,
+ * not just the button focus lands on. */
 export function AttachedSection({
   blockers,
 }: {
@@ -27,7 +30,7 @@ export function AttachedSection({
     { lead: attachedLeadProse(), entries: entries.filter((entry) => !entry.driving) },
   ]
   return (
-    <div className="space-y-2 text-sm">
+    <div role="alert" className="space-y-2 text-sm">
       {groups.map(({ lead, entries }, group) =>
         entries.length === 0 ? null : (
           <div key={group} className="space-y-1">

@@ -3,6 +3,7 @@ import { Info, Loader2 } from "lucide-react"
 import { lazy, Suspense, useRef, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
@@ -70,11 +71,7 @@ function ConfigEditorForm({
           onReload={() => openConfigEditor()}
         />
       ) : null}
-      {error ? (
-        <p className="max-h-24 overflow-y-auto font-mono text-sm break-words whitespace-pre-wrap text-destructive">
-          {error}
-        </p>
-      ) : null}
+      <ErrorLine shape="log">{error}</ErrorLine>
       <Notice shape="box" tone="info" announce="static" icon={Info}>
         <span>
           Saving writes <InlineCode>config.toml</InlineCode> to disk but
@@ -160,7 +157,9 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
           // Load failed (no content). Never render an editable, Save-enabled
           // editor here: saving its blank content would overwrite the real
           // config.toml. Show the error and a Retry instead.
-          <p className="py-8 text-center text-sm text-destructive">{error}</p>
+          <div className="py-8 text-center">
+            <ErrorLine>{error}</ErrorLine>
+          </div>
         ) : (
           <ConfigEditorForm text={text} setText={setText} error={error} conflict={conflict} />
         )}

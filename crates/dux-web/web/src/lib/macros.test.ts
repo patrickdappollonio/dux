@@ -97,6 +97,8 @@ describe("validateMacros", () => {
     const macros = [macro("dup", "agent"), macro(" dup ", "both")]
     expect(problem(macros)).toBe('Duplicate macro name: "dup".')
     expect(validateMacros(macros)?.index).toBe(1)
+    expect(validateMacros(macros)?.field).toBe("name")
+    expect(validateMacros([macro("a", "agent", "")])?.field).toBe("text")
   })
 
   it("rejects empty text", () => {

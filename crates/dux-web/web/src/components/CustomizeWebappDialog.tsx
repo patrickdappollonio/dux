@@ -19,6 +19,7 @@ import {
 } from "@/lib/notify"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
+import { ErrorLine } from "@/components/ErrorLine"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useModalLifetime, type ModalCloseReason } from "@/components/modal"
 import {
@@ -877,11 +878,7 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(confirm) => onDraft({ ...draft, confirm })}
           />
-          {error ? (
-            <p role="alert" className="text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
+          <ErrorLine size="xs">{error}</ErrorLine>
         </div>
       ) : null}
     </div>

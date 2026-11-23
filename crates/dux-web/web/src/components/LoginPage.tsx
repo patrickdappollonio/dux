@@ -4,6 +4,7 @@ import { ShieldAlert } from "lucide-react"
 import { RetryButton } from "@/components/ui/retry-button"
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { Input } from "@/components/ui/input"
@@ -226,11 +227,7 @@ export function LoginPage({
           onChange={(e) => setPassword(e.target.value)}
           className="h-10"
         />
-        {message ? (
-          <p id={`${fieldId}-error`} role="alert" className="text-sm text-destructive">
-            {message}
-          </p>
-        ) : null}
+        <ErrorLine id={`${fieldId}-error`}>{message}</ErrorLine>
         {failure?.kind === "rate_limited" ? (
           <p className="text-sm text-muted-foreground">
             {countdownText(retryAt === null && secondsLeft === null ? null : secondsLeft)}

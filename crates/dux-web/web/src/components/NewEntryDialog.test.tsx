@@ -39,7 +39,12 @@ describe("NewEntryDialog", () => {
     )
     const input = screen.getByPlaceholderText("example.ts")
     fireEvent.change(input, { target: { value: "a/b" } })
-    expect(screen.getByText(/cannot contain a slash/i)).toBeTruthy()
+    const line = screen.getByText(/cannot contain a slash/i)
+    expect(line).toBeTruthy()
+    // Read with the field, not shouted over each keystroke.
+    expect(input.getAttribute("aria-invalid")).toBe("true")
+    expect(input.getAttribute("aria-describedby")).toBe(line.id)
+    expect(screen.queryByRole("alert")).toBeNull()
     const create = screen.getByRole("button", { name: /create/i })
     expect(create.hasAttribute("disabled")).toBe(true)
   })

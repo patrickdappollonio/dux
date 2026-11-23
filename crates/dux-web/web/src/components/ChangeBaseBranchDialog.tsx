@@ -1,6 +1,7 @@
 import { GitBranch, TriangleAlert } from "lucide-react"
 import { Fragment, useMemo, useState, type ReactNode } from "react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
@@ -129,7 +130,9 @@ function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void 
             Fetching origin and listing the branches…
           </p>
         ) : listing.kind === "failed" ? (
-          <p className="px-2 py-4 text-sm text-destructive">{listing.message}</p>
+          <div className="px-2 py-4">
+            <ErrorLine>{listing.message}</ErrorLine>
+          </div>
         ) : filtered.length === 0 ? (
           <EmptyState
             size="compact"

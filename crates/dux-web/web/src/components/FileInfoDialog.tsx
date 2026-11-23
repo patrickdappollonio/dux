@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { Loader2 } from "lucide-react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { InfoRow } from "@/components/InfoRow"
 import { Modal, useModalLifetime } from "@/components/modal"
@@ -119,7 +120,7 @@ function FileInfoPanel({
       }
     >
       {error !== null ? (
-        <p className="text-sm text-destructive">{error}</p>
+        <ErrorLine>{error}</ErrorLine>
       ) : info === null ? (
         <div className="flex items-center justify-center py-6 text-muted-foreground">
           <Loader2 className="size-4 motion-safe:animate-spin" />

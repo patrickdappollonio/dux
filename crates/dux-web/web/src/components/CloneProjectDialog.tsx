@@ -4,6 +4,7 @@ import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -164,11 +165,7 @@ function CloneProjectForm({ open, onClosed }: { open: boolean; onClosed: () => v
           onToggle={toggleCloneProjectRandomize}
         />
       )}
-      {form.error && (
-        <p role="alert" className="text-destructive text-sm">
-          {form.error}
-        </p>
-      )}
+      <ErrorLine>{form.error}</ErrorLine>
       {pr?.hasProjects && (
         <div className="flex justify-start">
           <Button
