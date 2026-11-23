@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
@@ -485,9 +486,9 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
       ) : null}
       {shownProblem && items.length > 0 ? (
         <div className="flex items-center gap-3">
-          <p className="min-w-0 flex-1 text-xs text-destructive">
-            {renderProse(shownProblem.message)}
-          </p>
+          <div className="min-w-0 flex-1">
+            <ErrorLine announce="status">{renderProse(shownProblem.message)}</ErrorLine>
+          </div>
           {problemOnScreen ? null : (
             <Button
               variant="link"

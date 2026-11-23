@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { GitBranch, TriangleAlert } from "lucide-react"
 import { Fragment, useMemo, useState, type ReactNode } from "react"
 
@@ -128,7 +129,9 @@ function BranchPicker({ open, onClosed }: { open: boolean; onClosed: () => void 
             Fetching origin and listing the branches…
           </p>
         ) : listing.kind === "failed" ? (
-          <p className="px-2 py-4 text-sm text-destructive">{listing.message}</p>
+          <div className="px-2 py-4">
+            <ErrorLine>{listing.message}</ErrorLine>
+          </div>
         ) : filtered.length === 0 ? (
           <p className="px-2 py-4 text-sm text-muted-foreground">
             {query.trim() === "" ? (

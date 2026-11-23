@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useRef, type KeyboardEvent } from "react"
 
 import {
@@ -164,11 +165,7 @@ function CloneProjectForm({ open, onClosed }: { open: boolean; onClosed: () => v
           onToggle={toggleCloneProjectRandomize}
         />
       )}
-      {form.error && (
-        <p role="alert" className="text-destructive text-sm">
-          {form.error}
-        </p>
-      )}
+      <ErrorLine>{form.error}</ErrorLine>
       {pr?.hasProjects && (
         <div className="flex justify-start">
           <Button

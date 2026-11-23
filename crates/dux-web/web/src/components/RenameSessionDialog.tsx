@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 
@@ -163,11 +164,7 @@ export function RenameSessionDialog() {
           </p>
         </div>
       )}
-      {blocked !== null && (
-        <p className="text-xs text-destructive" role="alert">
-          {blocked}
-        </p>
-      )}
+      <ErrorLine>{blocked}</ErrorLine>
     </Modal>
   )
 }

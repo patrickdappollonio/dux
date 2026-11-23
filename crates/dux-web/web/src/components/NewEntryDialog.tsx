@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
@@ -111,7 +112,7 @@ function NewEntryDialogBody({
         }}
       />
       {name.length > 0 && !validation.ok && (
-        <p className="text-sm text-destructive">{validation.error}</p>
+        <ErrorLine announce="status">{validation.error}</ErrorLine>
       )}
     </Modal>
   )

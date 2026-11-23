@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import {
   DndContext,
@@ -728,9 +729,7 @@ function BranchesView({
   const listed = new Set(rows.flatMap((branch) => [branch.name, ...branch.former_names]))
   return (
     <div data-testid="branches-list" className={LIST}>
-      {branches.error ? (
-        <p className="text-xs text-destructive">{branches.error}</p>
-      ) : null}
+      <ErrorLine>{branches.error}</ErrorLine>
       <ul className="flex flex-col gap-1">
         {rows.map((branch) => {
           const seen = branch.first_seen_at ? formatFirstSeen(branch.first_seen_at) : null

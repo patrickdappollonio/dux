@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { FolderGit2, ExternalLink } from "lucide-react"
 
 import {
@@ -248,7 +249,7 @@ function WhatsNewContent({ state }: { state: FirstLoadDialogState }) {
         </p>
       ) : state.error !== null ? (
         // A real error in the body, not just a toast that may have auto-cleared.
-        <p className="text-sm text-destructive">{state.error}</p>
+        <ErrorLine>{state.error}</ErrorLine>
       ) : notes && !hasRenderableBody(notes) ? (
         // The release exists but its body held nothing the server-side parser
         // could read as prose or feature titles, which leaves the dialog a title,

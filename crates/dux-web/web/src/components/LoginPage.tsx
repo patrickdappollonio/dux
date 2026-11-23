@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import { ShieldAlert } from "lucide-react"
 
@@ -225,11 +226,7 @@ export function LoginPage({
           onChange={(e) => setPassword(e.target.value)}
           className="h-10"
         />
-        {message ? (
-          <p id={`${fieldId}-error`} role="alert" className="text-sm text-destructive">
-            {message}
-          </p>
-        ) : null}
+        <ErrorLine id={`${fieldId}-error`}>{message}</ErrorLine>
         {failure?.kind === "rate_limited" ? (
           <p className="text-sm text-muted-foreground">
             {countdownText(retryAt === null && secondsLeft === null ? null : secondsLeft)}

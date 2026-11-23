@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState } from "react"
 import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
 
@@ -242,20 +243,16 @@ function MoveEntryDialogBody({
       </ScrollArea>
 
       {isDirty ? (
-        <p className="text-sm text-destructive">{dirtyRefusal}</p>
+        <ErrorLine announce="status">{dirtyRefusal}</ErrorLine>
       ) : (
         !validation.ok && (
           // "It is already here" is the state every move dialog OPENS in, so it
           // reads as a hint; everything else really is wrong and reads as such.
-          <p
-            className={
-              dir === parentDir(target.path)
-                ? "text-sm text-muted-foreground"
-                : "text-sm text-destructive"
-            }
-          >
-            {validation.error}
-          </p>
+          dir === parentDir(target.path) ? (
+            <p className="text-sm text-muted-foreground">{validation.error}</p>
+          ) : (
+            <ErrorLine announce="status">{validation.error}</ErrorLine>
+          )
         )
       )}
     </Modal>

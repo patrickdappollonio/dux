@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
@@ -121,10 +122,10 @@ function RenameEntryDialogBody({
         }}
       />
       {isDirty ? (
-        <p className="text-sm text-destructive">{dirtyRefusal}</p>
+        <ErrorLine announce="status">{dirtyRefusal}</ErrorLine>
       ) : (
         name.length > 0 &&
-        !validation.ok && <p className="text-sm text-destructive">{validation.error}</p>
+        !validation.ok && <ErrorLine announce="status">{validation.error}</ErrorLine>
       )}
     </Modal>
   )

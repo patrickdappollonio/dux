@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { Button } from "@/components/ui/button"
 import {
   AgentNameInput,
@@ -157,15 +158,7 @@ function PrReferenceFields({
         aria-invalid={error !== null}
         aria-describedby={error ? "create-agent-pr-error" : undefined}
       />
-      {error && (
-        <p
-          id="create-agent-pr-error"
-          role="alert"
-          className="text-destructive text-sm"
-        >
-          {error}
-        </p>
-      )}
+      <ErrorLine id="create-agent-pr-error">{error}</ErrorLine>
       {dialog.showProjectPicker && (
         <div className="flex justify-start">
           <Button

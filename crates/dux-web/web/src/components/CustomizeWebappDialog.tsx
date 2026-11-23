@@ -1,3 +1,4 @@
+import { ErrorLine } from "@/components/ErrorLine"
 import { Fragment, useEffect, useRef, useState } from "react"
 import type { KeyboardEvent, RefObject } from "react"
 import {
@@ -883,11 +884,7 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(confirm) => onDraft({ ...draft, confirm })}
           />
-          {error ? (
-            <p role="alert" className="text-xs text-destructive">
-              {error}
-            </p>
-          ) : null}
+          <ErrorLine>{error}</ErrorLine>
         </div>
       ) : null}
     </div>
