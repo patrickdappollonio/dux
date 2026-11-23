@@ -12,7 +12,14 @@
 // failure behind it is the sign-out's echo. Dropped, not queued, so signing in
 // does not replay a burst of stale errors.
 
-import { cloneElement, createElement, Fragment, isValidElement, type ReactNode } from "react"
+import {
+  cloneElement,
+  createElement,
+  Fragment,
+  isValidElement,
+  type MouseEvent,
+  type ReactNode,
+} from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -88,7 +95,17 @@ export interface NotifyAction {
 function actionButton(action: NotifyAction): ReactNode {
   return createElement(
     Button,
-    { variant: "outline", className: "h-10 shrink-0", onClick: action.onClick },
+    {
+      variant: "outline",
+      className: "h-10 shrink-0",
+      onClick: (event: MouseEvent<HTMLButtonElement>) => {
+        // The toaster gives focus back to what had it before the toast once
+        // focus leaves the toast. Leaving before the action runs keeps that
+        // from pulling focus out of a dialog the action opens.
+        event.currentTarget.blur()
+        action.onClick()
+      },
+    },
     action.label,
   )
 }
