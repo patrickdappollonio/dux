@@ -265,6 +265,16 @@ pub fn box_count_failures<'a>(
     ]
 }
 
+/// The branch check's answer, as both dialogs show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchesChecked {
+    /// The sentence.
+    pub prose: Prose,
+    /// Whether the count the sentence was made from is not zero, which is
+    /// what both dialogs warn on.
+    pub loses_commits: bool,
+}
+
 /// What git answered about the branches the boxes offer (`current`, the
 /// first box's, when there is one, and `others`), said before anything is
 /// ticked: whether deleting them would lose work that exists nowhere else.
@@ -289,7 +299,7 @@ pub fn branches_checked_prose(
     others: &[&str],
     others_lost: &UnpushedAnswer,
     both_lost: &UnpushedAnswer,
-) -> Result<Option<Prose>, Prose> {
+) -> Result<Option<BranchesChecked>, Prose> {
     let offered: Vec<&str> = current.into_iter().chain(others.iter().copied()).collect();
     if offered.is_empty() {
         return Ok(None);
@@ -335,7 +345,10 @@ pub fn branches_checked_prose(
         if no_remote {
             prose.push_text(" is also on another branch, and this repository has no remote");
         }
-        return Ok(Some(prose));
+        return Ok(Some(BranchesChecked {
+            prose,
+            loses_commits: false,
+        }));
     }
     let holds = |lost: &UnpushedAnswer| matches!(lost, Ok(lost) if lost.count > 0);
     let mut holding: Vec<&str> = current
@@ -363,7 +376,10 @@ pub fn branches_checked_prose(
         (true, true) => " is on no other branch, and this repository has no remote",
         (true, false) => " are on no other branch, and this repository has no remote",
     });
-    Ok(Some(prose))
+    Ok(Some(BranchesChecked {
+        prose,
+        loses_commits: true,
+    }))
 }
 
 /// What the branch boxes say when git could not be asked about them.

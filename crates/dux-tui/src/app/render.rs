@@ -13384,13 +13384,20 @@ impl App {
                         &offer.both_unpushed,
                     );
                     lines.extend(match answer {
-                        Ok(Some(answer)) => self.indented_prose_lines(
-                            &Prose::new()
-                                .text(format!("{} ", self.glyphs().check))
-                                .then(answer),
-                            Style::default().fg(self.theme.success_fg),
-                            inner_width,
-                        ),
+                        // Quiet when nothing would be lost and a warning
+                        // when commits would, as the web's pill says it.
+                        Ok(Some(answer)) => {
+                            let (glyph, style) = if answer.loses_commits {
+                                (self.glyphs().warning, warning)
+                            } else {
+                                (self.glyphs().check, quiet)
+                            };
+                            self.indented_prose_lines(
+                                &Prose::new().text(format!("{glyph} ")).then(answer.prose),
+                                style,
+                                inner_width,
+                            )
+                        }
                         Ok(None) => Vec::new(),
                         Err(failed) => self.indented_prose_lines(&failed, warning, inner_width),
                     });
@@ -29369,6 +29376,64 @@ mod tests {
         assert!(screen.contains("aren't pushed anywhere"), "{screen}");
         assert!(screen.contains("Also delete the branch"), "{screen}");
         assert!(!screen.contains("Looking for unpushed work"), "{screen}");
+    }
+
+    /// The branch check's answer is quiet when deleting the branches would
+    /// lose nothing and a warning when it would lose commits, ticked or not:
+    /// the glyph says which as well as the colour, and nothing is green.
+    #[test]
+    fn the_branch_check_answer_is_quiet_with_nothing_to_lose_and_warns_on_a_loss() {
+        let unpushed = |count| {
+            Ok(dux_core::git::UnpushedCommits {
+                count,
+                has_remote_refs: true,
+            })
+        };
+        for (count, words, loses) in [(0, "No unpushed work on", false), (2, "2 commits on", true)]
+        {
+            let mut app = test_app(default_bindings());
+            app.prompt = delete_agent_prompt_with(
+                crate::app::DeleteBranchOffer::answered(dux_core::branch_history::BranchOffer {
+                    current_name: "feature".to_string(),
+                    current: Some(dux_core::branch_history::OfferedBranch {
+                        name: "feature".to_string(),
+                        oid: "a".repeat(40),
+                        origin: dux_core::branch_history::BranchOrigin::Dux,
+                    }),
+                    current_unpushed: unpushed(count),
+                    others: Vec::new(),
+                    others_unpushed: unpushed(0),
+                    both_unpushed: unpushed(count),
+                    newly_seen: Vec::new(),
+                    uncommitted_files: Ok(0),
+                    protected: Vec::new(),
+                }),
+                dux_core::engine::WorktreeOnDelete::Remove,
+            );
+            let (glyph, fg) = if loses {
+                (app.glyphs().warning, app.theme.warning_fg)
+            } else {
+                (app.glyphs().check, app.theme.hint_desc_fg)
+            };
+            let buf = render_to_buffer(&mut app);
+            let row = (0..buf.area.height)
+                .find(|&y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(words)
+                })
+                .unwrap_or_else(|| panic!("no line says {words:?}"));
+            let x = (0..buf.area.width)
+                .find(|&x| buf[(x, row)].symbol() == glyph)
+                .unwrap_or_else(|| panic!("{words:?} has no {glyph:?} glyph"));
+            assert_eq!(buf[(x, row)].fg, fg, "{words:?}: the glyph's colour");
+            assert_eq!(buf[(x + 2, row)].fg, fg, "{words:?}: the words' colour");
+            assert!(
+                (0..buf.area.width).all(|x| buf[(x, row)].fg != app.theme.success_fg),
+                "{words:?} is painted green"
+            );
+        }
     }
 
     /// On the project's own branch no box is offered, so the answer spot stays

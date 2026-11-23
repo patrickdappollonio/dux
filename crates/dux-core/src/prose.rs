@@ -472,7 +472,7 @@ mod tests {
                 )
                 .map_or_else(
                     |failed| failed,
-                    |said| said.expect("a fixture case says something"),
+                    |said| said.expect("a fixture case says something").prose,
                 )
             }
             "delete_branches_check_failed" => {
@@ -637,6 +637,45 @@ mod tests {
                 merged(&prose.to_json()),
                 merged(&case["segments"]),
                 "{what}: the terminal UI's segments differ from the fixture"
+            );
+        }
+    }
+
+    /// Whether the branch check warns is read off the answer, never off its
+    /// words, and the browser's `prose.test.tsx` pins its twin to the same
+    /// `loses_commits` in the fixture.
+    #[test]
+    fn the_two_surfaces_agree_on_which_branch_checks_lose_commits() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/prose_cross_language.json");
+        let raw = std::fs::read_to_string(&path).expect("fixture must be readable");
+        let fixture: Value = serde_json::from_str(&raw).expect("fixture must parse");
+        let cases: Vec<&Value> = fixture["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .filter(|case| case.get("loses_commits").is_some())
+            .collect();
+        assert!(cases.len() >= 2, "the fixture has lost its loss cases");
+        for case in cases {
+            let args = &case["args"];
+            let lost = |key: &str| fixture_unpushed(&args[key]).expect(key);
+            let others = strings(&args["others"]);
+            let others: Vec<&str> = others.iter().map(String::as_str).collect();
+            let answer = crate::delete_agent_prose::branches_checked_prose(
+                args["current"].as_str(),
+                &lost("current_lost"),
+                &others,
+                &lost("others_lost"),
+                &lost("both_lost"),
+            )
+            .expect("a counted answer")
+            .expect("an offered branch");
+            assert_eq!(
+                answer.loses_commits,
+                case["loses_commits"].as_bool().expect("a bool"),
+                "{}",
+                case["what"]
             );
         }
     }
