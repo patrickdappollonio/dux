@@ -267,19 +267,21 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
       >
         {/* Desktop: the table. */}
         {isMobile ? null : (
-          <table className="w-full border-collapse text-sm">
+          <table className="w-full table-fixed border-collapse text-sm">
             <thead>
-              {/* Each number column is as wide as the widest value it can
-                  hold ("4194304", "9999", "1234.5%", "1023.9 MiB"), so the
-                  width the name is left does not move as the numbers change,
-                  and a name at the edge is not cut and whole by turns. */}
+              {/* Each column but the name's is as wide as the widest value it
+                  can hold ("4194304", "9999", "12800.0%" on a machine with
+                  128 cores, "1023.9 MiB", the Force stop button), and the
+                  fixed layout keeps it at that width whatever the rows hold,
+                  so the width the name is left does not move as the numbers
+                  change, and a name at the edge is not cut and whole by turns. */}
               <tr className="text-[10px] tracking-wide text-muted-foreground uppercase">
                 <th className="py-1 pr-2 text-left font-medium">Name</th>
                 <th className="w-[4.5rem] py-1 pr-2 text-right font-medium">PID</th>
                 <th className="w-14 py-1 pr-2 text-right font-medium">Procs</th>
-                <th className="w-[4.5rem] py-1 pr-2 text-right font-medium">CPU</th>
+                <th className="w-20 py-1 pr-2 text-right font-medium">CPU</th>
                 <th className="w-24 py-1 pr-2 text-right font-medium">Memory</th>
-                <th className="py-1" />
+                <th className="w-28 py-1" />
               </tr>
             </thead>
             <tbody>
