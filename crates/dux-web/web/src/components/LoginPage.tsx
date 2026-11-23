@@ -3,6 +3,7 @@ import { ShieldAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { Notice } from "@/components/Notice"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
@@ -59,27 +60,19 @@ const REASON: Record<SignOutReason, string> = {
 // loopback, not on the tailnet, not over HTTPS. An unknown answer shows
 // nothing rather than a warning that may be false.
 function PlainHttpWarning() {
-  const id = useId()
   return (
-    <div
-      role="note"
+    <Notice
+      shape="box"
+      tone="danger"
+      icon={ShieldAlert}
+      title="This connection is not encrypted"
       data-testid="login-insecure-warning"
-      aria-labelledby={id}
-      className="flex gap-3 rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm"
     >
-      <ShieldAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-      <div className="flex flex-col gap-1">
-        <p id={id} className="font-medium text-destructive">
-          This connection is not encrypted
-        </p>
-        <p className="text-muted-foreground">
-          You reached dux over plain HTTP. Anyone on the network between you and
-          it can read the password as you type it, take the session cookie after
-          you sign in, and change this page before it reaches you. Reach dux over
-          HTTPS or your tailnet instead if you can.
-        </p>
-      </div>
-    </div>
+      You reached dux over plain HTTP. Anyone on the network between you and
+      it can read the password as you type it, take the session cookie after
+      you sign in, and change this page before it reaches you. Reach dux over
+      HTTPS or your tailnet instead if you can.
+    </Notice>
   )
 }
 

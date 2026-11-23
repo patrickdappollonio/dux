@@ -4,6 +4,7 @@ import {
   Ban,
   FolderPlus,
 } from "lucide-react"
+import { Notice } from "@/components/Notice"
 import { notifyError } from "@/lib/notify"
 
 import { GlyphSpinner } from "@/components/GlyphSpinner"
@@ -190,44 +191,34 @@ function InspectionMessages({
   return (
     <>
       {init ? (
-        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-            <div className="grid gap-1 text-sm">
-              <span>{init.message}</span>
-              <span className="text-xs text-muted-foreground">
-                {renderProse(init.noteProse)}
-              </span>
-            </div>
+        <Notice shape="box" tone="warning" icon={AlertTriangle}>
+          <div className="grid gap-1">
+            <span>{init.message}</span>
+            <span className="text-xs text-muted-foreground">
+              {renderProse(init.noteProse)}
+            </span>
           </div>
-        </div>
+        </Notice>
       ) : null}
       {blocked ? (
-        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
-          <div className="flex items-start gap-2">
-            <Ban className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-            <span className="text-sm">{renderProse(blocked.messageProse)}</span>
-          </div>
-        </div>
+        <Notice shape="box" tone="warning" icon={Ban}>
+          {renderProse(blocked.messageProse)}
+        </Notice>
       ) : null}
       {noCommits ? (
-        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-            <div className="grid gap-1 text-sm">
-              <span>{noCommits.message}</span>
-              <span className="text-xs text-muted-foreground">
-                {noCommits.note}
-              </span>
-            </div>
+        <Notice shape="box" tone="warning" icon={AlertTriangle}>
+          <div className="grid gap-1">
+            <span>{noCommits.message}</span>
+            <span className="text-xs text-muted-foreground">
+              {noCommits.note}
+            </span>
           </div>
-        </div>
+        </Notice>
       ) : null}
       {branch ? (
-        <div className="grid gap-2 rounded-md border border-dux-warning/40 bg-dux-warning/10 p-3">
-          <div className="flex items-start gap-2">
-            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-dux-warning" />
-            <div className="grid gap-1 text-sm">
+        <Notice shape="box" tone="warning" icon={AlertTriangle}>
+          <div className="grid gap-2">
+            <div className="grid gap-1">
               <span>{renderProse(branch.messageProse)}</span>
               {/* Warning tone only when worktrees will NOT branch from the
                   default; the same tone as the panel's own warning glyph. */}
@@ -247,18 +238,18 @@ function InspectionMessages({
                 </span>
               ) : null}
             </div>
+            {branch.canCheckoutDefault && branch.defaultBranch ? (
+              <CheckboxRow
+                id="add-project-checkout-default"
+                checked={checkoutDefault}
+                onCheckedChange={setCheckoutDefault}
+              >
+                Check out <InlineCode>{branch.defaultBranch}</InlineCode> before
+                adding
+              </CheckboxRow>
+            ) : null}
           </div>
-          {branch.canCheckoutDefault && branch.defaultBranch ? (
-            <CheckboxRow
-              id="add-project-checkout-default"
-              checked={checkoutDefault}
-              onCheckedChange={setCheckoutDefault}
-            >
-              Check out <InlineCode>{branch.defaultBranch}</InlineCode> before
-              adding
-            </CheckboxRow>
-          ) : null}
-        </div>
+        </Notice>
       ) : null}
     </>
   )

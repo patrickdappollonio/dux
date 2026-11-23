@@ -1,10 +1,11 @@
-import { Info, Loader2, TriangleAlert } from "lucide-react"
+import { Info, Loader2 } from "lucide-react"
 
 import { lazy, Suspense, useRef, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { Notice } from "@/components/Notice"
+import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
-import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
 import { chip } from "@/lib/prose"
 import {
@@ -62,38 +63,26 @@ function ConfigEditorForm({
         // The file changed on disk since it was opened, and nothing was saved.
         // A choice, not an error: reloading discards these edits, so "Keep
         // editing" has focus and the reload is styled as the destructive one.
-        <div
-          role="alert"
-          className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
-        >
-          <div className="flex items-start gap-2">
-            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-            <span>{conflict}</span>
-          </div>
-          <div className="flex justify-end gap-3">
-            <Button variant="outline" autoFocus onClick={dismissConfigEditorConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
-              Keep editing
-            </Button>
-            <Button variant="destructive" onClick={() => openConfigEditor()} className="max-md:min-h-10 pointer-coarse:min-h-10">
-              Reload the file
-            </Button>
-          </div>
-        </div>
+        <StaleSaveNotice
+          message={conflict}
+          reloadLabel="Reload the file"
+          onKeepEditing={dismissConfigEditorConflict}
+          onReload={() => openConfigEditor()}
+        />
       ) : null}
       {error ? (
         <p className="max-h-24 overflow-y-auto font-mono text-sm break-words whitespace-pre-wrap text-destructive">
           {error}
         </p>
       ) : null}
-      <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-        <Info className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <Notice shape="box" tone="info" icon={Info}>
         <span>
           Saving writes <InlineCode>config.toml</InlineCode> to disk but
           does not apply it. Run <span className="font-medium">Reload config</span>{" "}
           from the app menu&rsquo;s <span className="font-medium">Configuration</span>{" "}
           submenu to apply your changes.
         </span>
-      </div>
+      </Notice>
     </>
   )
 }

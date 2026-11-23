@@ -152,17 +152,17 @@ describe("LoginPage", () => {
 
   it("warns, clearly, that a plain HTTP connection can be read", () => {
     render(<LoginPage status={status({ transport_encrypted: false })} reason="required" />)
-    const warning = screen.getByRole("note", { name: "This connection is not encrypted" })
+    const warning = screen.getByRole("alert", { name: "This connection is not encrypted" })
     expect(warning.textContent).toContain("read the password as you type it")
     expect(warning.textContent).toContain("session cookie")
   })
 
   it("shows no transport warning on an encrypted connection, or when the server did not say", () => {
     render(<LoginPage status={status({ transport_encrypted: true })} reason="required" />)
-    expect(screen.queryByRole("note")).toBeNull()
+    expect(screen.queryByRole("alert")).toBeNull()
     cleanup()
     render(<LoginPage status={status({ transport_encrypted: null })} reason="required" />)
-    expect(screen.queryByRole("note")).toBeNull()
+    expect(screen.queryByRole("alert")).toBeNull()
   })
 
   it.each([

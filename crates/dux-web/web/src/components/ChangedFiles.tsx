@@ -82,6 +82,7 @@ import {
   supportsBranchGit,
 } from "@/lib/agentWorkspace"
 import { Input } from "@/components/ui/input"
+import { Notice } from "@/components/Notice"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
@@ -2401,26 +2402,21 @@ export const ChangedFiles = memo(function ChangedFiles() {
 
 // Heads the pane while the agent's working copy has no branch checked out,
 // sitting flush under the header: `-mt-4` takes back the card's gap between
-// the header and the content, for this strip only. The tint is the pull
-// request banner's, in the warning tone. The branch chip wraps like the words
+// the header and the content, for this strip only. The branch chip wraps like the words
 // around it, so a long name breaks inside the strip rather than overflowing it.
 function NoBranchCheckedOut({ branch }: { branch: string }) {
   return (
-    <div
-      role="status"
+    <Notice
+      shape="strip"
+      tone="warning"
+      icon={GitBranch}
+      title="No branch checked out"
+      placement="-mt-4"
       data-testid="no-branch-checked-out"
-      data-toast-clear
-      className="-mt-4 flex min-h-9 shrink-0 items-start gap-2 border-b border-dux-warning/30 bg-dux-warning/10 px-3 py-2 text-sm text-dux-warning"
     >
-      <GitBranch className="mt-0.5 size-4 shrink-0" aria-hidden />
-      <div className="min-w-0">
-        <div className="font-semibold">No branch checked out</div>
-        <div className="mt-0.5 text-foreground/80">
-          dux keeps showing <InlineCode>{branch}</InlineCode> until one is checked
-          out again.
-        </div>
-      </div>
-    </div>
+      dux keeps showing <InlineCode>{branch}</InlineCode> until one is checked
+      out again.
+    </Notice>
   )
 }
 
