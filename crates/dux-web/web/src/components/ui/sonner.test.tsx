@@ -796,10 +796,11 @@ describe("Toaster placement", () => {
     return () => els.forEach((el) => el.remove())
   }
 
-  it("clears every row hanging from the top, however short the screen", async () => {
+  it("starts the stack below the chrome when exactly the room a toast needs is left", async () => {
     const originalHeight = window.innerHeight
-    // A landscape phone: the flap starts below the middle.
-    window.innerHeight = 250
+    // The stack starts at 159px (an 8px gap below the flap's bottom, 151px);
+    // the screen leaves exactly the least room a toast needs under it.
+    window.innerHeight = 159 + TOAST_MIN_ROOM_PX
     // The header, a tab strip under it, a card's 16px padding, and the flap
     // overlapping the row above it by a pixel.
     const remove = chrome([0, 44], [44, 84], [100, 130], [129, 151])
