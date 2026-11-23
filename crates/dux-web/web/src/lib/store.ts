@@ -122,7 +122,7 @@ import {
   reviewCopyAgreement,
   reviewCopyBlocksSubmit,
 } from "./cloneProjectPr"
-import { publishConnectionTiming } from "./connectionTiming"
+import { changesRequestTimeoutMs, publishConnectionTiming } from "./connectionTiming"
 import { clearServerValidated, noteServerValidated } from "./serverValidated"
 import { registerPageLifecycle } from "./pageLifecycle"
 import { leftoverDeleteReport, worktreeDeleteReport } from "./worktreeDelete"
@@ -8723,13 +8723,38 @@ export function confirmCreateWithExistingBranch(): void {
 // first answer comes back before the agent exists: the form closes once the
 // create has started, and stays, with what was typed, when the name is an
 // existing branch's and the question goes up over it.
+//
+// The create still out, if any. A create the server has not answered within
+// the request deadline (`changesRequestTimeoutMs`, the one wait dux gives a
+// single request before saying it has not answered) frees the form and is
+// forgotten: its late answer opens no question and closes nothing.
+let newAgentCreate: object | null = null
+
 function submitNewAgent(projectId: string, name: string, copyChanges: boolean): void {
   // One create at a time: a second press before the first is answered would
   // send the same create again.
   if (state.createAgentSubmitting) return
   const form = state.createAgentTarget
   const stillOpen = () => state.createAgentTarget === form
+  const create = {}
+  newAgentCreate = create
+  const answered = () => {
+    clearTimeout(deadline)
+    if (newAgentCreate !== create) return false
+    newAgentCreate = null
+    return true
+  }
   setState({ createAgentSubmitting: true })
+  const wait = changesRequestTimeoutMs()
+  const deadline = setTimeout(() => {
+    if (newAgentCreate !== create) return
+    newAgentCreate = null
+    if (stillOpen()) setState({ createAgentSubmitting: false })
+    const agent = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
+    notifyWarning(
+      prose`The server has not answered the request to create ${agent} after ${String(Math.round(wait / 1000))} seconds. The agent may still appear in the list, so look there before creating it again.`,
+    )
+  }, wait)
   sessionsApi
     .createFollowed({
       kind: "new",
@@ -8739,11 +8764,13 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     })
     .then(
       () => {
-        if (stillOpen()) closeCreateAgent()
+        if (answered() && stillOpen()) closeCreateAgent()
       },
       (e) => {
+        const current = answered()
         const conflict = existingBranchConflict(e)
         if (conflict) {
+          if (!current) return
           setState({
             ...(stillOpen() ? { createAgentSubmitting: false } : {}),
             existingBranchTarget: {
@@ -8755,7 +8782,7 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
           })
           return
         }
-        if (stillOpen()) closeCreateAgent()
+        if (current && stillOpen()) closeCreateAgent()
         toastCreateError(e, "Could not create the agent.")
       },
     )

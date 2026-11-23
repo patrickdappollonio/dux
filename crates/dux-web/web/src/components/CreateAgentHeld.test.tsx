@@ -1,12 +1,31 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import { installBrowserHistory } from "@/test/browserHistory"
 
 // The New agent form while the server has not yet answered its create, on the
 // real store and a history with the Navigation API.
 installBrowserHistory()
+
+// A short wait for the server, so the test does not sit out the real one.
+const WAIT_MS = 60
+vi.mock("@/lib/connectionTiming", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/connectionTiming")>()),
+  changesRequestTimeoutMs: () => WAIT_MS,
+}))
+
+const warnings: string[] = []
+vi.mock("@/lib/notify", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/notify")>()
+  return {
+    ...actual,
+    notifyWarning: (...args: Parameters<typeof actual.notifyWarning>) => {
+      warnings.push(actual.noticeText(args[0]))
+      actual.notifyWarning(...args)
+    },
+  }
+})
 
 // Each create is held until the test answers it.
 const held: Array<(response: Response) => void> = []
@@ -33,7 +52,19 @@ function Both() {
 }
 
 const form = () => screen.queryByRole("dialog", { name: /^New agent/, hidden: true })
+const question = () => screen.queryByRole("dialog", { name: /Attach to existing branch/ })
 const nameField = () => screen.getByPlaceholderText("Branch name (optional)") as HTMLInputElement
+const createButton = () => within(form()!).getByRole("button", { name: /Create agent/ })
+const conflict = () =>
+  new Response(JSON.stringify({ existing_branch: { name: "feature-old", location: "local" } }), {
+    status: 409,
+    headers: { "content-type": "application/json" },
+  })
+const started = () =>
+  new Response(JSON.stringify({ id: "op-1" }), {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  })
 
 async function openForm() {
   render(<Both />)
@@ -44,6 +75,7 @@ async function openForm() {
 
 beforeEach(() => {
   held.length = 0
+  warnings.length = 0
   fetchMock.mockClear()
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
 })
@@ -74,5 +106,30 @@ describe("the New agent form with its create unanswered", () => {
     })
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(posts()).toBe(1)
+  })
+
+  it("is freed with the name kept and says so once the wait has passed", async () => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(createButton().getAttribute("aria-busy")).toBe("true"))
+    await waitFor(() => expect(createButton().getAttribute("aria-busy")).toBeNull())
+    expect(nameField().value).toBe("feature-old")
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/has not answered/)
+    expect(warnings[0]).toMatch(/may still appear/)
+  })
+
+  it.each([
+    ["a refusal over an existing branch", conflict],
+    ["the create starting", started],
+  ] as const)("opens nothing and closes nothing on %s after the wait", async (_answer, answer) => {
+    await openForm()
+    fireEvent.click(createButton())
+    await waitFor(() => expect(warnings).toHaveLength(1))
+    act(() => held[0](answer()))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(question()).toBeNull()
+    expect(form()).not.toBeNull()
+    expect(nameField().value).toBe("feature-old")
   })
 })
