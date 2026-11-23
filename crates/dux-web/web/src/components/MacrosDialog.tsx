@@ -83,7 +83,7 @@ import {
   savedMacrosEdit,
   validateMacros,
 } from "@/lib/macros"
-import { chip, proseText, renderProse, type Prose } from "@/lib/prose"
+import { chip, renderProse, type Prose } from "@/lib/prose"
 import { matchCharRanges } from "@/lib/searchMatch"
 import {
   closeMacrosDialog,
@@ -496,7 +496,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
 
   const saveHint = loading
     ? "The macros are still loading."
-    : ((problem ? proseText(problem.message) : null) ??
+    : ((problem ? problem.message : null) ??
       (changes === 0 ? "Nothing has changed since the macros were saved." : null))
   // With nothing to keep or lose, the way out says Close.
   const quiet = items.length === 0 && changes === 0

@@ -5,6 +5,7 @@ import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
+import { renderProse } from "@/lib/prose"
 
 export interface RenameEntryTarget {
   path: string
@@ -129,7 +130,7 @@ function RenameEntryDialogBody({
       ) : (
         refused && (
           <ErrorLine announce="silent" id="rename-entry-error">
-            {validation.error}
+            {renderProse(validation.error)}
           </ErrorLine>
         )
       )}

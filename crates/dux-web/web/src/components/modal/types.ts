@@ -33,8 +33,9 @@ interface ActionBase {
   label: string
   tone: ModalTone
   icon?: LucideIcon
-  /** Non-null disables the action and is what its hint says. */
-  disabledReason?: string | null
+  /** Non-null disables the action and is what its hint says; prose draws a
+   * name in it as the chip. */
+  disabledReason?: string | Prose | null
 }
 
 /** One footer button, as data: the modal draws it, sizes it and places it. */

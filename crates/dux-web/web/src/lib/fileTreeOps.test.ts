@@ -9,6 +9,7 @@ import {
   targetDirForCreate,
   validateEntryName,
 } from "@/lib/fileTreeOps"
+import { proseText, quotedChip } from "@/lib/prose"
 
 describe("targetDirForCreate", () => {
   it("targets the parent dir for a file row", () => {
@@ -81,6 +82,18 @@ describe("validateEntryName", () => {
     expect(validateEntryName(".git").ok).toBe(false)
     expect(validateEntryName(".GIT").ok).toBe(false)
     expect(validateEntryName(".Git").ok).toBe(false)
+  })
+
+  it("names the refused name as a chip, in the words the plain text always had", () => {
+    for (const [name, words] of [
+      ["..", '".." is not a valid name.'],
+      [".Git", '".Git" is reserved.'],
+    ] as const) {
+      const result = validateEntryName(name)
+      if (result.ok) throw new Error(`${name} was accepted`)
+      expect(result.error).toContainEqual(quotedChip(name))
+      expect(proseText(result.error)).toBe(words)
+    }
   })
 
   it("rejects a name containing a NUL byte", () => {

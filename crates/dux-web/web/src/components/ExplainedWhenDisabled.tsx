@@ -7,6 +7,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { FOCUS_RING } from "@/lib/focusRing"
+import { proseText, renderProse, type Prose } from "@/lib/prose"
 import { cn } from "@/lib/utils"
 
 // A control's hint that stays readable while it is disabled: a disabled button
@@ -23,8 +24,8 @@ export function ExplainedWhenDisabled({
   children,
 }: {
   disabled: boolean
-  /** Null shows no hint at all. */
-  hint: string | null
+  /** Null shows no hint at all. Prose draws a name in it as the chip. */
+  hint: string | Prose | null
   /** The wrapper's own classes, such as a rounding that matches the control. */
   className?: string
   /** Added while disabled, such as the tap area the control's own cannot give. */
@@ -45,8 +46,9 @@ export function ExplainedWhenDisabled({
   const open = !stateChanged && (hovered || tapped)
   // The text stops following the hint once the tooltip closes, so its fade
   // still says what it said while open.
+  // Compared by its words: a prose hint is a new array on every render.
   const [shown, setShown] = useState(hint)
-  if (open && shown !== hint) setShown(hint)
+  if (open && hintWords(shown) !== hintWords(hint)) setShown(hint)
 
   const wrapperRef = useRef<HTMLSpanElement | null>(null)
   // Whether focus is in here, kept through the blur the browser gives a button
@@ -103,10 +105,18 @@ export function ExplainedWhenDisabled({
         >
           {children}
         </TooltipTrigger>
-        <TooltipContent side="top">{open ? hint : shown}</TooltipContent>
+        <TooltipContent side="top">{drawHint(open ? hint : shown)}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   )
+}
+
+function hintWords(hint: string | Prose | null): string | null {
+  return hint === null || typeof hint === "string" ? hint : proseText(hint)
+}
+
+function drawHint(hint: string | Prose | null) {
+  return hint === null || typeof hint === "string" ? hint : renderProse(hint)
 }
 
 function isDisabled(el: EventTarget): boolean {

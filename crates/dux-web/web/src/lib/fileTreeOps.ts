@@ -1,6 +1,8 @@
 // Pure helpers for the file tree's file-management flows. The server remains the authority on
 // containment; validation here is UX only, rejecting a bad name before a round trip.
 
+import { prose, quotedChip, type Prose } from "@/lib/prose"
+
 // The directory a create (New File / New Folder) should target, given the
 // right-clicked context.
 export type CreateContext =
@@ -74,23 +76,24 @@ const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/
 
 // Validate a single path segment typed into New File/New Folder/Rename; a full path is never
 // valid here. Rejects empty, slashes, "." and "..", control chars, and a case-insensitive ".git".
+// The refusal is prose, so a name it repeats is drawn as the chip.
 export function validateEntryName(
   name: string,
-): { ok: true } | { ok: false; error: string } {
+): { ok: true } | { ok: false; error: Prose } {
   if (name.trim().length === 0) {
-    return { ok: false, error: "Name cannot be empty." }
+    return { ok: false, error: ["Name cannot be empty."] }
   }
   if (name.includes("/") || name.includes("\\")) {
-    return { ok: false, error: "Name cannot contain a slash." }
+    return { ok: false, error: ["Name cannot contain a slash."] }
   }
   if (name === "." || name === "..") {
-    return { ok: false, error: `"${name}" is not a valid name.` }
+    return { ok: false, error: prose`${quotedChip(name)} is not a valid name.` }
   }
   if (CONTROL_CHAR_RE.test(name)) {
-    return { ok: false, error: "Name cannot contain control characters." }
+    return { ok: false, error: ["Name cannot contain control characters."] }
   }
   if (name.toLowerCase() === ".git") {
-    return { ok: false, error: '"' + name + '" is reserved.' }
+    return { ok: false, error: prose`${quotedChip(name)} is reserved.` }
   }
   return { ok: true }
 }
