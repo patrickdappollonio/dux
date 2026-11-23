@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { AttachedBlocker } from "@/lib/attached"
@@ -8,6 +8,7 @@ vi.mock("@/lib/store", () => ({ useDux: () => ({ spine: null }) }))
 
 const { AttachedSection } = await import("./AttachedSection")
 const { guardedConfirmAction } = await import("./guardedConfirmAction")
+const { useAttachedOverride } = await import("@/hooks/use-attached-override")
 
 function blocker(key: string, driving: boolean): AttachedBlocker {
   return {
@@ -60,5 +61,34 @@ describe("a guarded dialog told who is in the way", () => {
     expect(
       guardedConfirmAction({ ...base, blockers: [tui] }).disabledReason,
     ).toBe("The dux TUI is driving this right now. Take it over on this device first.")
+  })
+})
+
+describe("the refusal after a destructive press", () => {
+  function Harness({ refuse }: { refuse: AttachedBlocker[] | null }) {
+    const { blockers, cancelRef, confirm } = useAttachedOverride(true, "agent-1")
+    return (
+      <div>
+        <button onClick={() => void confirm(async () => refuse)}>Delete</button>
+        <button ref={cancelRef}>Cancel</button>
+        <AttachedSection blockers={blockers} />
+      </div>
+    )
+  }
+
+  it("is told to a screen reader, because it appears after the user acted", async () => {
+    render(<Harness refuse={[blocker("b", false)]} />)
+    expect(screen.queryByRole("alert")).toBeNull()
+    await act(async () => {
+      fireEvent.click(screen.getByText("Delete"))
+    })
+    const alert = screen.getByRole("alert")
+    expect(alert.textContent).toMatch(/watching tab/)
+    expect(document.activeElement).toBe(screen.getByText("Cancel"))
+  })
+
+  it("is not an alert before anything was sent: nothing is listed", () => {
+    render(<AttachedSection blockers={null} />)
+    expect(screen.queryByRole("alert")).toBeNull()
   })
 })

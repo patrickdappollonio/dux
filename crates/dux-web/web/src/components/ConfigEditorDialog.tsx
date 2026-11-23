@@ -1,9 +1,9 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { Info, Loader2 } from "lucide-react"
 
 import { lazy, Suspense, useRef, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"

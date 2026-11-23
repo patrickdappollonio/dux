@@ -1,7 +1,7 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState } from "react"
 import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -243,15 +243,17 @@ function MoveEntryDialogBody({
       </ScrollArea>
 
       {isDirty ? (
-        <ErrorLine announce="status">{dirtyRefusal}</ErrorLine>
+        // There when the dialog opens on a dirty file: standing, not announced.
+        <p className="text-sm text-destructive">{dirtyRefusal}</p>
       ) : (
         !validation.ok && (
           // "It is already here" is the state every move dialog OPENS in, so it
-          // reads as a hint; everything else really is wrong and reads as such.
+          // reads as a hint; everything else really is wrong and reads as such,
+          // and follows the user's choice of folder, so it is announced.
           dir === parentDir(target.path) ? (
             <p className="text-sm text-muted-foreground">{validation.error}</p>
           ) : (
-            <ErrorLine announce="status">{validation.error}</ErrorLine>
+            <ErrorLine>{validation.error}</ErrorLine>
           )
         )
       )}

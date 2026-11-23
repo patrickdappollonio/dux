@@ -1,7 +1,7 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { GitBranch, TriangleAlert } from "lucide-react"
 import { Fragment, useMemo, useState, type ReactNode } from "react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { GlyphSpinner } from "@/components/GlyphSpinner"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"

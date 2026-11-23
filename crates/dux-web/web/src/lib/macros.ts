@@ -83,10 +83,11 @@ export const MACRO_SURFACE_OPTIONS: {
 ]
 
 // Why the macro editor's list cannot be saved: the sentence, naming the macro
-// as a chip, and the index of the macro at fault.
+// as a chip, the index of the macro at fault and which of its fields to fix.
 export interface MacroProblem {
   message: Prose
   index: number
+  field: "name" | "text" | "surface"
 }
 
 // A client-side validation error for the macro editor, or null when the set is
@@ -97,16 +98,16 @@ export function validateMacros(macros: MacroView[]): MacroProblem | null {
   const seen = new Set<string>()
   for (const [index, macro] of macros.entries()) {
     const name = macro.name.trim()
-    if (name === "") return { message: prose`Every macro needs a name.`, index }
+    if (name === "") return { message: prose`Every macro needs a name.`, index, field: "name" }
     if (seen.has(name)) {
-      return { message: prose`Duplicate macro name: ${quotedChip(name)}.`, index }
+      return { message: prose`Duplicate macro name: ${quotedChip(name)}.`, index, field: "name" }
     }
     seen.add(name)
     if (macro.text === "") {
-      return { message: prose`Macro ${quotedChip(name)} needs some text.`, index }
+      return { message: prose`Macro ${quotedChip(name)} needs some text.`, index, field: "text" }
     }
     if (!isMacroSurface(macro.surface)) {
-      return { message: prose`Macro ${quotedChip(name)} has an unknown surface.`, index }
+      return { message: prose`Macro ${quotedChip(name)} has an unknown surface.`, index, field: "surface" }
     }
   }
   return null

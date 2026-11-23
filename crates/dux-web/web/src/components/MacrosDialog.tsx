@@ -1,4 +1,3 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState } from "react"
 import type { CSSProperties, KeyboardEvent, ReactNode, RefObject } from "react"
 import { Radio } from "@base-ui/react/radio"
@@ -29,6 +28,7 @@ import {
 } from "lucide-react"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
+import { ErrorLine } from "@/components/ErrorLine"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -119,6 +119,8 @@ const FILTERS: { value: MacroFilter; label: string }[] = [
 
 // The one height token of the controls that sit together (search, New, the
 // filter, the name field and its `⋯`): 32px for a mouse, 40px under a finger.
+// What the invalid name or text field names in aria-describedby.
+const MACRO_PROBLEM_ID = "macro-problem"
 const CONTROL_HEIGHT = "h-8 max-md:h-10 pointer-coarse:h-10"
 
 // Each mark one unbreakable box, which an ellipsis hides whole, so a hidden
@@ -370,6 +372,7 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     <MacroFields
       key={selected.key}
       macro={selected}
+      problemField={shownProblem?.key === selected.key ? shownProblem.field : null}
       phone={phone}
       first={items[0]?.key === selected.key}
       nameRef={nameRef}
@@ -487,7 +490,12 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
       {shownProblem && items.length > 0 ? (
         <div className="flex items-center gap-3">
           <div className="min-w-0 flex-1">
-            <ErrorLine announce="status">{renderProse(shownProblem.message)}</ErrorLine>
+            {/* Follows typing: silent as a live region. When the macro at fault
+                is on screen its field is marked invalid and described by this
+                line; otherwise "Show the macro" is the way to it. */}
+            <ErrorLine announce="silent" size="xs" id={MACRO_PROBLEM_ID}>
+              {renderProse(shownProblem.message)}
+            </ErrorLine>
           </div>
           {problemOnScreen ? null : (
             <Button
@@ -663,13 +671,15 @@ function useWholeRowsHeight(
 function visibleProblem(
   items: DraftMacro[],
   touched: ReadonlySet<number>,
-): { message: Prose; key: number } | null {
+): { message: Prose; key: number; field: "name" | "text" | "surface" } | null {
   const shown = items.filter(
     (item) =>
       item.origin !== null || touched.has(item.key) || item.name !== "" || item.text !== "",
   )
   const found = validateMacros(draftToMacros(shown))
-  return found === null ? null : { message: found.message, key: shown[found.index].key }
+  return found === null
+    ? null
+    : { message: found.message, key: shown[found.index].key, field: found.field }
 }
 
 // What an empty list says: a search found nothing, or the filter lists no
@@ -921,6 +931,7 @@ function MacroRow({
 // is shown, and its text. Every keystroke changes only the draft.
 function MacroFields({
   macro,
+  problemField,
   phone,
   first,
   nameRef,
@@ -930,6 +941,8 @@ function MacroFields({
   onDelete,
 }: {
   macro: DraftMacro
+  // The field the shown problem is about, when it is about this macro.
+  problemField: "name" | "text" | "surface" | null
   phone: boolean
   first: boolean
   nameRef: RefObject<HTMLInputElement | null>
@@ -955,6 +968,8 @@ function MacroFields({
             value={macro.name}
             onChange={(e) => onChange({ name: e.target.value })}
             placeholder="Review"
+            aria-invalid={problemField === "name"}
+            aria-describedby={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
             className={CONTROL_HEIGHT}
           />
           <DropdownMenu>
@@ -1032,6 +1047,8 @@ function MacroFields({
           value={macro.text}
           onChange={(e) => onChange({ text: e.target.value })}
           placeholder="review this code for bugs"
+          aria-invalid={problemField === "text"}
+          aria-describedby={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
           className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
         />
         <p className="text-xs text-muted-foreground">

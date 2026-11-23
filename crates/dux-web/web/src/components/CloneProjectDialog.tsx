@@ -1,10 +1,10 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useRef, type KeyboardEvent } from "react"
 
 import {
   AgentNameInput,
   RandomizeNameCheckbox,
 } from "@/components/AgentNameFields"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"

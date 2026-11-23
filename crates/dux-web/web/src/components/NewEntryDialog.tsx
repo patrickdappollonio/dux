@@ -1,6 +1,6 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useState } from "react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Input } from "@/components/ui/input"
@@ -67,6 +67,9 @@ function NewEntryDialogBody({
 
   const validation = validateEntryName(name)
   const canSubmit = name.trim().length > 0 && validation.ok && !submitting
+  // A refusal that follows typing: silent as a live region, and read with the
+  // field it is about.
+  const refused = name.length > 0 && !validation.ok
 
   function submit(): void {
     if (!canSubmit) return
@@ -103,7 +106,8 @@ function NewEntryDialogBody({
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder={place.kind === "file" ? "example.ts" : "components"}
-        aria-invalid={name.length > 0 && !validation.ok}
+        aria-invalid={refused}
+        aria-describedby={refused ? "new-entry-error" : undefined}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault()
@@ -111,8 +115,10 @@ function NewEntryDialogBody({
           }
         }}
       />
-      {name.length > 0 && !validation.ok && (
-        <ErrorLine announce="status">{validation.error}</ErrorLine>
+      {refused && (
+        <ErrorLine announce="silent" id="new-entry-error">
+          {validation.error}
+        </ErrorLine>
       )}
     </Modal>
   )

@@ -1,4 +1,3 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import {
   DndContext,
@@ -33,6 +32,7 @@ import {
   Unlink,
 } from "lucide-react"
 
+import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import {
@@ -716,10 +716,12 @@ function BranchesView({
   const find = (key: PrKeyView) => lookup(prs, key)
   const isHidden = (key: PrKeyView) => lookup(hidden, key) !== undefined
   if (!branches.data) {
-    return (
-      <p className="py-6 text-center text-sm text-muted-foreground">
-        {branches.error ?? "Reading the branches…"}
-      </p>
+    return branches.error ? (
+      <div className="py-6 text-center">
+        <ErrorLine>{branches.error}</ErrorLine>
+      </div>
+    ) : (
+      <p className="py-6 text-center text-sm text-muted-foreground">Reading the branches…</p>
     )
   }
   // The server's order: the branch checked out now first, then newest first.
@@ -729,7 +731,7 @@ function BranchesView({
   const listed = new Set(rows.flatMap((branch) => [branch.name, ...branch.former_names]))
   return (
     <div data-testid="branches-list" className={LIST}>
-      <ErrorLine>{branches.error}</ErrorLine>
+      <ErrorLine size="xs">{branches.error}</ErrorLine>
       <ul className="flex flex-col gap-1">
         {rows.map((branch) => {
           const seen = branch.first_seen_at ? formatFirstSeen(branch.first_seen_at) : null

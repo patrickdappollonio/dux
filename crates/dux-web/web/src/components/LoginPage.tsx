@@ -1,9 +1,9 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import { ShieldAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { Input } from "@/components/ui/input"

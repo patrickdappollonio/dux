@@ -1,4 +1,3 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { Button } from "@/components/ui/button"
 import {
   AgentNameInput,
@@ -6,6 +5,7 @@ import {
 } from "@/components/AgentNameFields"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import { ErrorLine } from "@/components/ErrorLine"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"

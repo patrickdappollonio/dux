@@ -1,4 +1,3 @@
-import { ErrorLine } from "@/components/ErrorLine"
 import { Fragment, useEffect, useRef, useState } from "react"
 import type { KeyboardEvent, RefObject } from "react"
 import {
@@ -21,6 +20,7 @@ import {
 } from "@/lib/notify"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
+import { ErrorLine } from "@/components/ErrorLine"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useModalLifetime, type ModalCloseReason } from "@/components/modal"
 import {
@@ -884,7 +884,7 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(confirm) => onDraft({ ...draft, confirm })}
           />
-          <ErrorLine>{error}</ErrorLine>
+          <ErrorLine size="xs">{error}</ErrorLine>
         </div>
       ) : null}
     </div>
