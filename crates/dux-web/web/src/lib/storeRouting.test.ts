@@ -1182,6 +1182,31 @@ describe("moving in pushes, and Back unwinds exactly", () => {
       expect(mod.getSnapshot().selectedSessionId).toBe("s1")
     })
 
+    // Going forward onto the modal's entry again returns to the page it never
+    // left: an address the page would write differently (home as "#/") must
+    // not be rewritten there, which would take the entry away under the modal.
+    it("keeps the entry of a modal that stayed open on an address it would write differently", async () => {
+      const mod = await loadStore("#/", [{ id: "s1", project_id: "p1" }])
+      const modals = await import("./modalHistory")
+      let asked = 0
+      modals.registerModal(() => {
+        asked += 1
+        return true
+      })
+      await settle()
+      expect(entries).toEqual([OUTSIDE_ENTRY, "#/", "#/"])
+      history.back()
+      await settle()
+      await settle()
+      expect(asked).toBe(1)
+      expect(index).toBe(2)
+      history.back()
+      await settle()
+      expect(asked).toBe(2)
+      expect(index).toBe(2)
+      expect(mod.getSnapshot().selectedTarget).toBeNull()
+    })
+
     it("hands a closing menu's entry to the dialog it opened", async () => {
       // A menu item that opens a dialog closes the menu in the same commit.
       const mod = await loadStore("", [{ id: "s1", project_id: "p1" }])

@@ -3965,9 +3965,13 @@ let fallbackWrite = false
 // overwrite it. `fallback` says that write is a fallback's (`fallBackTo`) and
 // keeps its mode, so the landing runs it as one, with its step back onto an
 // entry that already names the destination. `then` is a move waiting for the
-// landing that state does not hold (a fragment navigation, a reload).
+// landing that state does not hold (a fragment navigation, a reload). `stay`
+// says the landing is back onto the page on screen, which never moved (the
+// return onto a modal's own entry): there is no route to apply there, and
+// applying it could write the address and take that entry away again.
 interface PendingTraversal {
   newerIntent: boolean
+  stay?: boolean
   fallback?: { mode: "replace" | "push" | undefined }
   then?: () => void
 }
@@ -4143,8 +4147,9 @@ function landTraversal(): void {
   // Modal entries wait for a pending traversal; this is where they stop.
   scheduleModalReconcile()
   const fallback = pending?.fallback
-  if (!pending?.newerIntent) applyUrlRoute()
-  else if (fallback) fallBackTo(() => syncUrl(fallback.mode))
+  if (!pending?.newerIntent) {
+    if (!pending?.stay) applyUrlRoute()
+  } else if (fallback) fallBackTo(() => syncUrl(fallback.mode))
   else writeNewerIntent()
   pending?.then?.()
 }
@@ -4404,7 +4409,7 @@ function returnToModalEntries(kept: readonly ModalEntry[]): boolean {
       nav.transition.finished.then(attempt, attempt)
       return
     }
-    if (!listed() || !traverseExactly(nav, top.navKey, { newerIntent: false }, giveUp)) {
+    if (!listed() || !traverseExactly(nav, top.navKey, { newerIntent: false, stay: true }, giveUp)) {
       giveUp()
       scheduleModalReconcile()
     }
