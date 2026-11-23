@@ -34,7 +34,8 @@ module.exports = {
     })
     await sleep(800)
     await expectVisible(page, '[data-testid="stack-layout-pill"]', "the floating layout pill")
-    await expectVisible(page, '[role="separator"][aria-orientation="horizontal"]', "the divider")
+    // The line itself is 1px, under the guard's minimum, so the grip stands for it.
+    await expectVisible(page, '[data-testid="dock-divider-grip"]', "the divider's grip")
     return { x: 0, y: 0, width: 1440, height: 900 }
   },
 }
