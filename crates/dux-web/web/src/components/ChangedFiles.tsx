@@ -17,7 +17,6 @@ import {
   ChevronRight,
   FileCode2,
   GitCommitVertical,
-  Loader2,
   Minus,
   FolderOpen,
   GitBranch,
@@ -38,6 +37,7 @@ import { notifyError, notifyInfo } from "@/lib/notify"
 import { EDITOR_TAB_REL } from "@/lib/openerPage"
 import { leftOutNotice } from "@/lib/discardOutcome"
 import { git } from "@/lib/git"
+import { LoadingSentence, Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
@@ -1296,7 +1296,7 @@ function BulkToolbar({
         >
           <span className="truncate">{groupDigits(ticked)} selected</span>
           {busy !== null ? (
-            <Loader2 className="motion-safe:animate-spin" />
+            <Spinner kind="ring" size="md" />
           ) : (
             <ChevronDown />
           )}
@@ -1325,7 +1325,7 @@ function BulkToolbar({
                 }
                 onClick={() => onRunBulk("stage")}
               >
-                {busy === "stage" ? <Loader2 className="motion-safe:animate-spin" /> : <Plus />}
+                {busy === "stage" ? <Spinner kind="ring" size="md" /> : <Plus />}
                 Stage {groupDigits(counts.unstaged)}
               </DropdownMenuItem>
             ) : null}
@@ -1336,7 +1336,7 @@ function BulkToolbar({
                 aria-describedby={blocked ? writeReasonId : undefined}
                 onClick={() => onRunBulk("unstage")}
               >
-                {busy === "unstage" ? <Loader2 className="motion-safe:animate-spin" /> : <Minus />}
+                {busy === "unstage" ? <Spinner kind="ring" size="md" /> : <Minus />}
                 Unstage {groupDigits(counts.staged)}
               </DropdownMenuItem>
             ) : null}
@@ -1360,7 +1360,7 @@ function BulkToolbar({
                   }
                   onClick={onDiscard}
                 >
-                  {busy === "discard" ? <Loader2 className="motion-safe:animate-spin" /> : <Undo2 />}
+                  {busy === "discard" ? <Spinner kind="ring" size="md" /> : <Undo2 />}
                   Discard {groupDigits(counts.discard)}…
                 </DropdownMenuItem>
               </DropdownMenuGroup>
@@ -1463,8 +1463,9 @@ function LoadingRow({ depth, grid }: { depth: number; grid: GridRowProps }) {
       style={depthIndent(depth)}
     >
       <div role="gridcell" className="flex items-center gap-2">
-        <Loader2 aria-hidden className="size-4 shrink-0 motion-safe:animate-spin" />
-        <span role="status">Loading…</span>
+        <LoadingSentence spinner="ring" size="sm" announce>
+          Loading…
+        </LoadingSentence>
       </div>
     </div>
   )
@@ -2132,7 +2133,7 @@ function changesBodyInstead(
     return (
       <EmptyState
         size="page"
-        icon={<Loader2 className="animate-spin" />}
+        icon={<Spinner kind="ring" size="md" />}
         title="Loading changes…"
         description="Fetching this session's changes."
       />

@@ -7,8 +7,9 @@ import {
   useEffect,
   useLayoutEffect,
 } from "react"
-import { ChevronRight, Loader2 } from "lucide-react"
+import { ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Spinner } from "@/components/Spinner"
 import { FailedLoad, RetryButton } from "@/components/ui/retry-button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { EmptyState } from "@/components/ui/empty"
@@ -583,7 +584,7 @@ export function FileTree({
       >
         {!rootState || rootState.status === "loading" ? (
           <div className="flex items-center justify-center py-4 text-muted-foreground">
-            <Loader2 className="size-4 motion-safe:animate-spin" />
+            <Spinner kind="ring" size="md" />
           </div>
         ) : rootState.status === "error" ? (
           <FailedLoad message={rootState.message} onRetry={() => fetchDir("")} />
@@ -634,7 +635,7 @@ export function FileTree({
                     }
                   >
                     {row.state === "loading" ? (
-                      <Loader2 className="size-3.5 shrink-0 text-muted-foreground motion-safe:animate-spin" />
+                      <Spinner kind="ring" size="sm" tone="muted" />
                     ) : (
                       <ChevronRight
                         className={cn(
@@ -689,7 +690,9 @@ export function FileTree({
                     height: rowHeight,
                   }}
                 >
-                  <Loader2 className="size-3.5 shrink-0 motion-safe:animate-spin" />
+                  {/* The spinner stands in the tree's 14px chevron column, so
+                      it lines up with the chevrons of the rows above. */}
+                  <Spinner kind="ring" size="sm" />
                   <span className="text-sm">Loading…</span>
                 </div>
               </li>

@@ -1,6 +1,7 @@
 // The text spinner's frames and slot class, in a module with no React import
 // so the font-asset tests (terminalFonts.test.ts) can read the frames without
-// mounting a component. The component is components/GlyphSpinner.tsx.
+// mounting a component. The component is the glyph kind of
+// components/Spinner.tsx.
 
 /// The six arc frames (U+25DC-U+25E1), matching the dux TUI's `SPINNER_FRAMES`
 /// (crates/dux-tui/src/theme.rs) and dux-core's status-line spinner, so the

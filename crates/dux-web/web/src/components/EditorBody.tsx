@@ -19,7 +19,6 @@ import {
   FileType,
   GitCompare,
   Laptop,
-  Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -121,6 +120,7 @@ import { rowKeyOfTarget } from "@/lib/paneCover"
 import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
 import { FailedLoad } from "@/components/ui/retry-button"
@@ -935,7 +935,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
         <Suspense
           fallback={
             <div className="flex h-full items-center justify-center text-muted-foreground">
-              <Loader2 className="size-5 motion-safe:animate-spin" />
+              <Spinner kind="ring" size="lg" />
             </div>
           }
         >
@@ -1774,7 +1774,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           aria-busy={isSaving}
           onClick={save}
         >
-          {isSaving ? <Loader2 className="motion-safe:animate-spin" /> : <Save />}
+          {isSaving ? <Spinner kind="ring" size="md" /> : <Save />}
           Save
         </Button>
       </ExplainedWhenDisabled>
@@ -2223,7 +2223,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   <div className="p-1">
                     {searchLoading ? (
                       <div className="flex items-center justify-center py-4 text-muted-foreground">
-                        <Loader2 className="size-4 motion-safe:animate-spin" />
+                        <Spinner kind="ring" size="md" />
                       </div>
                     ) : filtered.length === 0 ? (
                       <EmptyState size="compact" title="No files match." />
@@ -2918,7 +2918,7 @@ function FileContentPane({
 function LoadingPane() {
   return (
     <div className="flex h-full items-center justify-center text-muted-foreground">
-      <Loader2 className="size-5 motion-safe:animate-spin" />
+      <Spinner kind="ring" size="lg" />
     </div>
   )
 }

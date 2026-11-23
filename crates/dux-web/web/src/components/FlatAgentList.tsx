@@ -28,6 +28,7 @@ import {
 import type { ComponentProps, CSSProperties, ReactNode } from "react"
 import { useCallback, useRef, useState } from "react"
 
+import { Badge } from "@/components/ui/badge"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AgentVitalsTooltip } from "@/components/AgentVitalsTooltip"
 import { MatchHighlight } from "@/components/MatchHighlight"
@@ -612,7 +613,9 @@ function QuietTail({
         {/* Right after the word; right edges carry controls only. The Inactive
             divider deliberately gains NO button beside it: there is no such
             thing as creating a dormant agent. */}
-        <span className={SECTION_COUNT_PILL}>{sessions.length}</span>
+        <Badge variant="muted" size="sm">
+          {sessions.length}
+        </Badge>
       </button>
       {open ? (
         <div className="mt-1 flex flex-col gap-1">
@@ -690,11 +693,6 @@ const SORT_KEYS: FlatSortKey[] = ["active", "updated", "created", "name", "manua
 // One height token for every control in the list's header, set explicitly rather
 // than inherited, and lifted to the 40px floor where a finger is the pointer.
 const HEADER_CONTROL_SIZING = "h-7 max-md:min-h-10 pointer-coarse:min-h-10"
-
-// The Inactive divider's counter pill. It sits right after the section word,
-// and right edges carry controls only.
-const SECTION_COUNT_PILL =
-  "rounded-full bg-muted px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-muted-foreground"
 
 function SortControl() {
   const agentSort = agentSortValue(useDux())

@@ -1,7 +1,7 @@
 import { FolderGit2 } from "lucide-react"
 import type { CSSProperties } from "react"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { ModalGroupHeading } from "@/components/modal"
 import { useScrollEdges } from "@/hooks/use-scroll-edges"
 import { INSET_FOCUS_RING } from "@/lib/focusRing"
@@ -64,7 +64,7 @@ export function ProjectShortcutList({
             className={`flex items-center justify-center ${expectedRows === null ? ROWS_HEIGHT : ROWS_HEIGHT_FOR_COUNT}`}
             style={expectedRows === null ? undefined : ({ "--rows": expectedRows } as CSSProperties)}
           >
-            <GlyphSpinner className="text-muted-foreground" />
+            <Spinner kind="glyph" size="text" tone="muted" />
           </div>
         </div>
         {/* The caption's line, kept until the server's words arrive. */}

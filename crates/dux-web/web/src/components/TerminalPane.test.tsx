@@ -1468,7 +1468,7 @@ describe("TerminalPane take-over is a fresh attach", () => {
     const spinner = label.parentElement?.querySelector(
       `.${GLYPH_SPINNER_CLASS}`,
     ) as HTMLElement
-    expect(spinner, "the cover renders the shared GlyphSpinner").toBeTruthy()
+    expect(spinner, "the cover renders the shared glyph spinner").toBeTruthy()
     expect(SPINNER_FRAMES).toContain(spinner.textContent)
   })
 

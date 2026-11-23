@@ -1,6 +1,7 @@
 import type * as React from "react"
-import { Ellipsis, Loader2 } from "lucide-react"
+import { Ellipsis } from "lucide-react"
 
+import { Spinner } from "@/components/Spinner"
 import { Button } from "@/components/ui/button"
 import { DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import {
@@ -87,7 +88,7 @@ export function EllipsisMenuTrigger({
       }
     : onClick
   const icon = busy ? (
-    <Loader2 className={cn("motion-safe:animate-spin", iconClass)} />
+    <Spinner kind="ring" size={pill ? "sm" : "md"} />
   ) : (
     <Ellipsis className={iconClass} />
   )

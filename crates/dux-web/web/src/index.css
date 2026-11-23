@@ -345,8 +345,8 @@ input, textarea, .allow-select, .xterm, .xterm * { user-select: text; }
     18% { opacity: 1; }
 }
 
-/* The text spinner's slot (components/GlyphSpinner.tsx), which cycles six arc
-   frames, U+25DC-U+25E1.
+/* The text spinner's slot (the glyph kind of components/Spinner.tsx), which
+   cycles six arc frames, U+25DC-U+25E1.
 
    MEASURED: none of the UI font (Geist), "Dux Mono" (Roboto Mono) or "Dux
    Blocks" carries a single one of those six code points, so the browser drew

@@ -1,6 +1,6 @@
 import { CornerLeftUp, Folder, FolderGit2, FolderOpen } from "lucide-react"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { ModalGroupHeading } from "@/components/modal"
 import { Badge } from "@/components/ui/badge"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -13,10 +13,10 @@ import type { DirEntryView } from "@/lib/types"
  * from the surrounding prose. */
 export function FolderPill({ name }: { name: string }) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 font-mono text-xs">
+    <Badge variant="framed" mono className="min-w-0 shrink">
       <Folder className="size-3 shrink-0 text-muted-foreground" />
       <span className="truncate">{name}</span>
-    </span>
+    </Badge>
   )
 }
 
@@ -69,7 +69,7 @@ export function FolderBrowseList({
             shrinkable ? "h-full min-h-32" : "h-[50dvh] md:h-80"
           }`}
         >
-          <GlyphSpinner className="text-lg text-muted-foreground" />
+          <Spinner kind="glyph" size="lg" tone="muted" />
         </div>
       ) : (
         <div className="flex flex-col">

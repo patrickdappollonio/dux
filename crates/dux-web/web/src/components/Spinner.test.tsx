@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { act, cleanup, render } from "@testing-library/react"
+import { act, cleanup, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { GlyphSpinner } from "./GlyphSpinner"
+import { LoadingSentence, Spinner } from "@/components/Spinner"
 import {
   GLYPH_SPINNER_CLASS,
   SPINNER_FRAMES,
@@ -14,9 +14,7 @@ import { DUX_MONO_FILL_FAMILY } from "@/lib/terminalFont"
 import { REDUCED_MOTION_QUERY } from "@/hooks/use-reduced-motion"
 import { stubMatchMedia, type MatchMediaStub } from "@/test/matchMedia"
 
-afterEach(() => {
-  cleanup()
-})
+afterEach(cleanup)
 
 // The `.glyph-spinner` declaration block, comments stripped first. Asserting
 // against the raw file would let the whole rule be commented out with every
@@ -33,7 +31,27 @@ function slotRule(): string {
   return (match as RegExpExecArray)[1]
 }
 
-describe("GlyphSpinner", () => {
+describe("Spinner", () => {
+  it("turns its ring only where motion is allowed, and says nothing to a screen reader", () => {
+    const { container } = render(<Spinner kind="ring" size="md" />)
+    const svg = container.querySelector("svg") as SVGElement
+    expect(svg.getAttribute("class")).toContain("motion-safe:animate-spin")
+    expect(svg.getAttribute("class")).not.toMatch(/(^|\s)animate-spin/)
+    expect(svg.getAttribute("aria-hidden")).toBe("true")
+  })
+
+  it("takes the surrounding text's colour when no tone is named", () => {
+    // A spinner on a filled button must not come out grey because its caller
+    // left the tone out.
+    const ring = render(<Spinner kind="ring" size="md" />).container.querySelector("svg")
+    const glyph = render(<Spinner kind="glyph" size="text" />).container.querySelector("span")
+    for (const el of [ring, glyph]) {
+      expect(el?.getAttribute("class")).not.toMatch(/(^|\s)text-(muted-foreground|primary)\b/)
+    }
+  })
+})
+
+describe("Spinner, glyph kind", () => {
   let media: MatchMediaStub
 
   beforeEach(() => {
@@ -46,20 +64,11 @@ describe("GlyphSpinner", () => {
   })
 
   it("renders one arc frame inside the shared fixed-width slot", () => {
-    const { container } = render(<GlyphSpinner />)
+    const { container } = render(<Spinner kind="glyph" size="text" />)
     const span = container.querySelector("span") as HTMLSpanElement
     expect(span.className.split(/\s+/)).toContain(GLYPH_SPINNER_CLASS)
     expect(SPINNER_FRAMES).toContain(span.textContent)
-    // Decorative: the label beside it carries the meaning.
     expect(span.getAttribute("aria-hidden")).toBe("true")
-  })
-
-  it("keeps a caller's classes without losing the slot class", () => {
-    const { container } = render(<GlyphSpinner className="text-primary" />)
-    const span = container.querySelector("span") as HTMLSpanElement
-    const classes = span.className.split(/\s+/)
-    expect(classes).toContain(GLYPH_SPINNER_CLASS)
-    expect(classes).toContain("text-primary")
   })
 
   it("pins the slot to a fixed width so the label cannot shift as frames cycle", () => {
@@ -85,9 +94,9 @@ describe("GlyphSpinner", () => {
     expect(list).toContain("monospace")
   })
 
-  it("advances a frame per tick of the TUI's cadence", () => {
+  it("advances a frame per tick of the status line's cadence", () => {
     vi.useFakeTimers()
-    const { container } = render(<GlyphSpinner />)
+    const { container } = render(<Spinner kind="glyph" size="text" />)
     const span = container.querySelector("span") as HTMLSpanElement
     const first = span.textContent
     act(() => {
@@ -103,7 +112,7 @@ describe("GlyphSpinner", () => {
   it("holds a single frame under prefers-reduced-motion", () => {
     vi.useFakeTimers()
     media.set(REDUCED_MOTION_QUERY, true)
-    const { container } = render(<GlyphSpinner />)
+    const { container } = render(<Spinner kind="glyph" size="text" />)
     const span = container.querySelector("span") as HTMLSpanElement
     expect(span.textContent).toBe(SPINNER_FRAMES[0])
     act(() => {
@@ -115,7 +124,7 @@ describe("GlyphSpinner", () => {
 
   it("stops cycling when the preference flips on mid-spin", () => {
     vi.useFakeTimers()
-    const { container } = render(<GlyphSpinner />)
+    const { container } = render(<Spinner kind="glyph" size="text" />)
     const span = container.querySelector("span") as HTMLSpanElement
     act(() => {
       vi.advanceTimersByTime(SPINNER_FRAME_MS)
@@ -128,5 +137,22 @@ describe("GlyphSpinner", () => {
       vi.advanceTimersByTime(SPINNER_FRAME_MS * 10)
     })
     expect(span.textContent).toBe(SPINNER_FRAMES[0])
+  })
+})
+
+describe("LoadingSentence", () => {
+  it("makes its sentence a live region only when asked", () => {
+    render(
+      <>
+        <LoadingSentence spinner="ring" size="sm" announce>
+          Loading A…
+        </LoadingSentence>
+        <LoadingSentence spinner="glyph" size="sm">
+          Loading B…
+        </LoadingSentence>
+      </>,
+    )
+    expect(screen.getByRole("status").textContent).toBe("Loading A…")
+    expect(screen.getAllByRole("status")).toHaveLength(1)
   })
 })

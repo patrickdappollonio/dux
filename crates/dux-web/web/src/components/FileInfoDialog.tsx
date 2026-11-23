@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
-import { Loader2 } from "lucide-react"
 
+import { Spinner } from "@/components/Spinner"
 import { ErrorLine } from "@/components/ErrorLine"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { InfoRow } from "@/components/InfoRow"
@@ -123,7 +123,7 @@ function FileInfoPanel({
         <ErrorLine>{error}</ErrorLine>
       ) : info === null ? (
         <div className="flex items-center justify-center py-6 text-muted-foreground">
-          <Loader2 className="size-4 motion-safe:animate-spin" />
+          <Spinner kind="ring" size="md" />
         </div>
       ) : (
         <dl className="flex flex-col gap-2">

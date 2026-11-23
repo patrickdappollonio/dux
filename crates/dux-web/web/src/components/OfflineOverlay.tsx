@@ -1,7 +1,8 @@
-import { Loader2, RefreshCw } from "lucide-react"
+import { RefreshCw } from "lucide-react"
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 
+import { Spinner } from "@/components/Spinner"
 import { Button } from "@/components/ui/button"
 import type { ReconnectPlanEvent } from "@/lib/reconnectingSocket"
 import { reconnect, useDux } from "@/lib/store"
@@ -154,10 +155,7 @@ export function OfflineOverlay() {
           className="mb-1.5 flex items-center justify-center gap-2 text-lg font-semibold"
         >
           {face.spinner ? (
-            <Loader2
-              className="size-4 animate-spin text-muted-foreground"
-              aria-hidden
-            />
+            <Spinner kind="ring" size="md" tone="muted" />
           ) : null}
           {face.title}
         </h1>

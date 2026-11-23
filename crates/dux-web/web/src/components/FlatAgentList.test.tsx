@@ -1211,7 +1211,7 @@ describe("FlatAgentList section counters", () => {
   it("keeps the Inactive count in its pill", () => {
     render(<FlatAgentList handlers={handlers} />)
     const pill = screen.getByText("Inactive").nextElementSibling as HTMLElement
-    expect(pill.className).toContain("rounded-full")
+    expect(pill.getAttribute("data-slot")).toBe("badge")
     expect(pill.className).not.toContain("ml-auto")
   })
 })

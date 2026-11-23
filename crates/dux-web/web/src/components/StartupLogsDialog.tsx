@@ -1,4 +1,4 @@
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { Notice } from "@/components/Notice"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -39,7 +39,7 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
     </Notice>
   ) : !hasLogs && startupLogsLoading ? (
     <div className="flex h-64 items-center justify-center">
-      <GlyphSpinner className="text-lg text-muted-foreground" />
+      <Spinner kind="glyph" size="lg" tone="muted" />
     </div>
   ) : !hasLogs ? (
     // The spinner's box, so the dialog keeps its height when there are no logs.
@@ -79,7 +79,7 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
           </pre>
           {startupLogsLoading ? (
             <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-              <GlyphSpinner className="text-lg text-muted-foreground" />
+              <Spinner kind="glyph" size="lg" tone="muted" />
             </div>
           ) : null}
         </div>

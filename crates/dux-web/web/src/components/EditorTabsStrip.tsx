@@ -3,6 +3,7 @@ import { X } from "lucide-react"
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { TabPill, TabStrip } from "@/components/TabStrip"
+import { UnsavedDot } from "@/components/UnsavedDot"
 import { fileIconKind } from "@/lib/fileIcons"
 import type { EditorTab } from "@/lib/editorTabs"
 import {
@@ -78,18 +79,7 @@ function EditorTabPill({
         label={basename}
         italic={tab.preview}
         // Always shows the close ✕; the dot appears beside it when dirty.
-        marker={
-          tab.dirty && (
-            <>
-              <SimpleTooltip content="Unsaved changes">
-                <span className="shrink-0 text-primary" aria-hidden="true">
-                  ●
-                </span>
-              </SimpleTooltip>
-              <span className="sr-only">unsaved changes</span>
-            </>
-          )
-        }
+        marker={tab.dirty && <UnsavedDot />}
         trailing={
           <button
             type="button"

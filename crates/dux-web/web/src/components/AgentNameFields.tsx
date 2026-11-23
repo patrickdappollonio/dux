@@ -5,7 +5,7 @@
 
 import type { ChangeEvent, KeyboardEvent } from "react"
 
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { Input } from "@/components/ui/input"
 import { sanitizeAgentName } from "@/lib/agentName"
@@ -69,7 +69,9 @@ export function AgentNameInput({
         autoFocus={autoFocus}
       />
       {generating && (
-        <GlyphSpinner className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <span className="absolute right-3 top-1/2 flex -translate-y-1/2">
+          <Spinner kind="glyph" size="text" tone="muted" />
+        </span>
       )}
     </div>
   )

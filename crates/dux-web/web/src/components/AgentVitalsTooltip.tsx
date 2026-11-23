@@ -1,6 +1,7 @@
 import { Circle } from "lucide-react"
 import { Fragment } from "react"
 
+import { Badge } from "@/components/ui/badge"
 import { buildAgentVitals } from "@/lib/agentVitals"
 import type { SessionView } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -24,9 +25,9 @@ export function AgentVitalsTooltip({
     <div className="flex w-64 flex-col gap-1.5 text-xs">
       <div className="flex items-center gap-1.5">
         <span className="truncate font-medium text-sm">{vitals.name}</span>
-        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        <Badge variant="muted" size="sm" mono>
           {vitals.provider}
-        </span>
+        </Badge>
       </div>
       <div className="flex items-center gap-1.5 text-muted-foreground">
         <Circle className={cn("size-2 shrink-0 fill-current", vitals.statusColorClass)} />

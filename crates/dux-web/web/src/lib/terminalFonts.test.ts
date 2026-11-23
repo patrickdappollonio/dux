@@ -332,10 +332,13 @@ describe("Dux Mono Fill subset contents", () => {
     }
   })
 
-  it("carries every frame of the UI's glyph spinner", () => {
-    // `.glyph-spinner` (index.css) names this face first precisely because no
-    // other bundled face and no UI font has these six arcs; a recut that drops
-    // one puts the spinner back on a substituted glyph from an unknown face.
+  it("carries every frame of the arc spinner, U+25DC to U+25E1", () => {
+    // The terminal UI spins with these six arcs, so the web terminal and the
+    // screenshot tool draw them from this face whenever a dux runs inside one.
+    // The web's own glyph spinner (`.glyph-spinner` in index.css) names this
+    // face first because no other bundled face and no UI font has them. A
+    // recut that drops one puts either spinner on a substituted glyph from an
+    // unknown face.
     for (const frame of SPINNER_FRAMES) {
       const cp = frame.codePointAt(0) as number
       expect(coverage.has(cp), `U+${cp.toString(16).toUpperCase()}`).toBe(true)

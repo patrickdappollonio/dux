@@ -1,5 +1,4 @@
-import { Loader2 } from "lucide-react"
-
+import { Spinner } from "@/components/Spinner"
 import { RouteNotFoundScreen } from "@/components/RouteNotFoundScreen"
 import { EditorBody } from "@/components/EditorBody"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -57,7 +56,7 @@ export function StandaloneEditorShell() {
       ) : editorTarget === null ? (
         // Booting: the spine has not resolved the deep link yet.
         <div className="flex h-full items-center justify-center text-muted-foreground">
-          <Loader2 className="size-5 motion-safe:animate-spin" />
+          <Spinner kind="ring" size="lg" />
         </div>
       ) : (
         // The body's own header names what this editor is rooted at.

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
-import { Check, CircleAlert, Loader2 } from "lucide-react"
+import { Check, CircleAlert } from "lucide-react"
+import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
 import { WorktreeFilesNote } from "@/components/WorktreeFilesNote"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -345,7 +346,9 @@ function BranchCheckPill({ check }: { check: BranchCheck }) {
   const [icon, prose, tone] =
     check.state === "pending"
       ? [
-          <Loader2 className="mt-px size-3.5 shrink-0 motion-safe:animate-spin" />,
+          <span className="mt-px flex">
+            <Spinner kind="ring" size="sm" />
+          </span>,
           branchesCheckingProse(),
           QUIET_PILL,
         ]

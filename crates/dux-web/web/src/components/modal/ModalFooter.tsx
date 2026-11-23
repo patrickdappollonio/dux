@@ -1,7 +1,7 @@
 import type { CSSProperties, MouseEvent, ReactNode, Ref } from "react"
 
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
-import { GlyphSpinner } from "@/components/GlyphSpinner"
+import { Spinner } from "@/components/Spinner"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
@@ -45,7 +45,7 @@ function ActionButton({
   const Icon = action.icon
   const content = (
     <>
-      {busy ? <GlyphSpinner /> : Icon ? <Icon /> : null}
+      {busy ? <Spinner kind="glyph" size="text" /> : Icon ? <Icon /> : null}
       {action.label}
     </>
   )

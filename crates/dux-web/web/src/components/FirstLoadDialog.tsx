@@ -1,5 +1,7 @@
 import { FolderGit2, ExternalLink } from "lucide-react"
 
+import { Badge } from "@/components/ui/badge"
+import { IconTile } from "@/components/IconTile"
 import { ErrorLine } from "@/components/ErrorLine"
 import {
   Modal,
@@ -113,9 +115,9 @@ function FirstLoad({ open, onClosed }: { open: boolean; onClosed: () => void }) 
       title={
         phone ? (
           <span data-slot="first-load-masthead" className="flex items-center gap-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
+            <IconTile size="md" use="display">
               <img src="/dux-logo.png" alt="" aria-hidden className="size-7 object-contain" />
-            </span>
+            </IconTile>
             <span className="min-w-0">{title}</span>
           </span>
         ) : (
@@ -198,12 +200,9 @@ function WelcomeContent({ welcome }: { welcome: WelcomeScreenView | undefined })
       <ol className="mt-1 flex flex-col gap-3">
         {welcome.steps.map((step) => (
           <li key={step.number} className="flex gap-3">
-            <span
-              aria-hidden
-              className="flex size-6 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium text-foreground"
-            >
+            <IconTile size="sm" use="display">
               {step.number}
-            </span>
+            </IconTile>
             <span className="flex min-w-0 flex-col gap-0.5">
               <span className="text-sm font-medium text-foreground">
                 {step.title}
@@ -231,9 +230,7 @@ function whatsNewTitle(state: FirstLoadDialogState): string {
 function VersionChip({ state }: { state: FirstLoadDialogState }) {
   return (
     <span className="flex items-center gap-2 text-xs text-muted-foreground">
-      <span className="rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">
-        What&apos;s new in
-      </span>
+      <Badge variant="secondary">What&apos;s new in</Badge>
       <span className="font-mono">{state.notes?.version ?? ""}</span>
     </span>
   )

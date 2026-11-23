@@ -31,6 +31,7 @@ import {
   Unlink,
 } from "lucide-react"
 
+import { Badge } from "@/components/ui/badge"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ROW_BOX } from "@/components/ellipsisPlacements"
 import { ErrorLine } from "@/components/ErrorLine"
@@ -384,11 +385,6 @@ function PullRequestsView({
 // between the scrollbar and the rows' trailing controls.
 const LIST = "flex flex-col gap-1"
 
-// A small, muted label beside a name (Attached, Current, a count): it says
-// something about the row without competing with the title for attention.
-const QUIET_TAG =
-  "inline-flex h-4 shrink-0 items-center rounded-sm bg-muted px-1.5 text-[11px] leading-none font-normal text-muted-foreground tabular-nums"
-
 function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
   const tone = prIconClass(pr.state)
   const origin = prOrigin(pr)
@@ -411,9 +407,13 @@ function PrRowText({ pr, muted = false }: { pr: PrView; muted?: boolean }) {
           {(pr.attached ?? pr.overridden) ? (
             // On a phone the details already say "attached by you" when that
             // is all it is, and the title needs the width more.
-            <span className={cn(QUIET_TAG, origin?.kind === "attached" && "max-md:hidden")}>
+            <Badge
+              variant="muted"
+              size="sm"
+              className={origin?.kind === "attached" ? "max-md:hidden" : undefined}
+            >
               Attached
-            </span>
+            </Badge>
           ) : null}
         </span>
         {/* One line, whatever the width: the branch name is what gives way,
@@ -603,7 +603,9 @@ function HiddenSection({ sessionId, hidden }: { sessionId: string; hidden: PrVie
       >
         <ChevronRight className="size-4 transition-transform group-data-[panel-open]/hidden:rotate-90 motion-reduce:transition-none" />
         Hidden
-        <span className={QUIET_TAG}>{hidden.length}</span>
+        <Badge variant="muted" size="sm">
+          {hidden.length}
+        </Badge>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <ul className="flex flex-col gap-1">
@@ -725,7 +727,11 @@ function BranchesView({
                   <span data-slot="branch-name" className="truncate font-medium">
                     {branch.name}
                   </span>
-                  {branch.current ? <span className={QUIET_TAG}>Current</span> : null}
+                  {branch.current ? (
+                    <Badge variant="muted" size="sm">
+                      Current
+                    </Badge>
+                  ) : null}
                 </span>
                 <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
                   {seen ? <span>first seen {seen}</span> : null}
