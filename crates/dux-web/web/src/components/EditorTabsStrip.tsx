@@ -36,6 +36,7 @@ export function EditorTabsStrip({ root }: { root: EditorRoot }) {
 
   return (
     <div
+      data-toast-clear
       onFocus={(e) => scrollFocusedTabIntoView(e.target)}
       className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2"
     >

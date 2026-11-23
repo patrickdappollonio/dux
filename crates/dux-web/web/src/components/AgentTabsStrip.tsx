@@ -127,6 +127,7 @@ export function AgentTabsStrip({
     // chooser's tap margin takes the other 8.
     <div
       ref={attachStrip}
+      data-toast-clear
       onFocus={(e) => scrollFocusedTabIntoView(e.target)}
       className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 max-md:py-0.75 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
     >

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 import {
@@ -719,18 +719,61 @@ describe("the phone's explorer", () => {
     const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
     return render(<StandaloneEditorShell />)
   }
-  const stored = () => JSON.parse(localStorage.getItem(EXPLORER_LAYOUT_KEY)!).collapsed
-
-  it("is shown while no file is open, without storing that for the computer", async () => {
+  it("is shown while no file is open", async () => {
     await mount(false, true)
     expect(await screen.findByRole("button", { name: /hide the file explorer/i })).toBeTruthy()
-    expect(stored()).toBe(true)
   })
 
-  it("is hidden while a file is open, without storing that for the computer", async () => {
+  it("is hidden while a file is open", async () => {
     await mount(true, false)
     expect(await screen.findByRole("button", { name: /show the file explorer/i })).toBeTruthy()
-    expect(stored()).toBe(false)
+  })
+
+  const explorerHidden = () => screen.getByTestId("editor-explorer").style.flexGrow === "0"
+
+  it("hides when the layout switches to the phone's with a file open", async () => {
+    vi.stubGlobal("innerWidth", 1280)
+    window.dispatchEvent(new Event("resize"))
+    await mount(true, false)
+    await screen.findByRole("button", { name: /hide the file explorer/i })
+    expect(explorerHidden()).toBe(false)
+    vi.stubGlobal("innerWidth", 390)
+    act(() => {
+      window.dispatchEvent(new Event("resize"))
+    })
+    await waitFor(() => expect(explorerHidden()).toBe(true))
+  })
+
+  // The tab keeps its id through a rename and through a preview tab replaced
+  // in place; only the second is a file being opened.
+  async function openTreeThen(change: (tab: { id: string; path: string }) => Partial<DuxState>) {
+    const { StandaloneEditorShell } = await import("@/components/StandaloneEditor")
+    const { rerender } = await mount(true, false)
+    fireEvent.click(await screen.findByRole("button", { name: /show the file explorer/i }))
+    await waitFor(() => expect(explorerHidden()).toBe(false))
+    act(() => {
+      baseState(change({ id: "t1", path: PATH }))
+      rerender(<StandaloneEditorShell />)
+    })
+  }
+  const tabs = (path: string): Partial<DuxState> => ({
+    editorTabs: {
+      [rootKey(agentRoot(SESSION))]: {
+        tabs: [{ id: "t1", path, dirty: false, preview: true, mode: "file" }],
+        activeId: "t1",
+      },
+    },
+  })
+
+  it("stays open when the open file is renamed", async () => {
+    await openTreeThen(() => tabs("src/renamed.ts"))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(explorerHidden()).toBe(false)
+  })
+
+  it("hides when a file opens in place of the preview tab", async () => {
+    await openTreeThen(() => ({ ...tabs("src/other.ts"), editorFileOpens: mockState.editorFileOpens + 1 }))
+    await waitFor(() => expect(explorerHidden()).toBe(true))
   })
 
   // The panel library reports a collapse to the toggle from the browser's
@@ -746,6 +789,5 @@ describe("the phone's explorer", () => {
     expect(explorer.style.flexGrow).not.toBe("0")
     fireEvent.click(await screen.findByText("b.ts"))
     await waitFor(() => expect(explorer.style.flexGrow).toBe("0"))
-    expect(stored()).toBe(false)
   })
 })

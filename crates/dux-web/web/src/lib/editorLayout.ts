@@ -127,6 +127,19 @@ export function nextExpandedExplorerPx(
   return px
 }
 
+// What a layout report leaves remembered, or null when nothing is: the phone
+// layout's explorer follows the open file, at the phone's own width, so neither
+// is the computer layout's to remember.
+export function explorerLayoutAfterReport(
+  phone: boolean,
+  collapsed: boolean,
+  reportedPx: number | null | undefined,
+  lastExpandedPx: number | null,
+): { px: number | null; collapsed: boolean } | null {
+  if (phone) return null
+  return { px: nextExpandedExplorerPx(reportedPx, lastExpandedPx), collapsed }
+}
+
 // What the toggle passes to `panel.resize()` when opening a collapsed explorer,
 // as a string with its unit. Not `panel.expand()`, which falls back to minSize
 // when no in-memory expand size exists, opening the explorer at its minimum.

@@ -398,7 +398,7 @@ describe("MacrosDialog closing", () => {
 })
 
 describe("MacrosDialog editor", () => {
-  it("opens on the macro it was asked to select", () => {
+  it("opens on the macro edits set aside were left on", () => {
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(screen.getByLabelText("Name")).toHaveProperty("value", "Deploy")
@@ -587,7 +587,7 @@ describe("MacrosDialog on a phone", () => {
     expect(saveMacrosMock).not.toHaveBeenCalled()
   })
 
-  it("opens straight on the macro it was asked to select", () => {
+  it("opens straight on the macro edits set aside were left on", () => {
     phone = true
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
@@ -730,7 +730,7 @@ describe("MacrosDialog brings the selected macro into view", () => {
     delete (Element.prototype as Partial<Element>).scrollIntoView
   })
 
-  it("when it opens on a macro it was asked to select", () => {
+  it("when it opens on the macro edits set aside were left on", () => {
     seed(seedMacros, { select: 2 })
     render(<MacrosDialog />)
     expect(scrolled).toContain(row("Deploy"))
@@ -789,7 +789,7 @@ describe("MacrosDialog focus on a phone", () => {
     const { openMacrosDialog } = await import("@/lib/store")
     const { rerender } = render(<button>Run a macro</button>)
     const trigger = screen.getByRole("button", { name: "Run a macro" })
-    openMacrosDialog(null, () => trigger)
+    openMacrosDialog(() => trigger)
     seed(seedMacros)
     rerender(
       <>

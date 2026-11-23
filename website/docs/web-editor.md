@@ -41,7 +41,7 @@ That tab is nothing but the editor, full-viewport, and its header reads **Editor
 
 The standalone tab works on phones, best-effort:
 
-- The file explorer is shown while no file is open and hides when you open one, so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard.
+- The file explorer is shown while no file is open and hides when you open one, so the file gets the width (the header's toggle reopens it at a phone-sized width), and the editor stays above the soft keyboard. Nothing about the explorer on a phone is remembered, so the width and collapsed state you left on a computer stay as they were.
 - The header keeps the **‹** Back button, the explorer toggle, the name of what the editor is rooted at and **Save**.
 - The File/Diff switch (on changed files), the preview toggle, the syntax language and, when dux is opened at a local address, **Open local editor** fold into one `⋯` menu at the end of the row.
 - The status bar keeps the file's path, the unsaved-changes dot, the read-only badge where it applies, the cursor position, and an image's pixel dimensions.
@@ -92,7 +92,7 @@ The overlay is two panes.
 
 The header names what the editor is rooted at (**Editor for** the agent, or the terminal and where it lives) and carries the view toggles, **Save** and **Close**.
 
-Drag the divider to resize the explorer pane, or collapse it with the toggle at the left end of the header. Your width (in pixels) and collapsed state are remembered in the browser, so the editor reopens the way you left it in the overlay and in its own tab alike. On a phone the explorer follows the open file instead, and that is not remembered.
+Drag the divider to resize the explorer pane, or collapse it with the toggle at the left end of the header. Your width (in pixels) and collapsed state are remembered in the browser, so the editor reopens the way you left it in the overlay and in its own tab alike.
 
 Save with the button or with `Ctrl+S` / `Cmd+S`. A toast confirms the write, and creating, renaming, moving and deleting each confirm with a toast naming what happened, or say plainly when something went wrong.
 

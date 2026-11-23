@@ -96,7 +96,7 @@ async function retryBlockedCopy(
   notifyError(refusedMessage(source), {
     id,
     sticky: true,
-    action: { label: "Show text", onClick: () => showCopyText({ source, text }) },
+    action: { label: "Show text", onClick: () => showCopyText({ source, text }), opensDialog: true },
   })
 }
 

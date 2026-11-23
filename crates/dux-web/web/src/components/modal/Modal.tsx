@@ -502,9 +502,14 @@ function ModalParts(
         ) : null}
         {cover ? null : description}
       </div>
-      {coverAbove && description ? <div className="shrink-0 px-4 pt-3">{description}</div> : null}
+      {coverAbove && description ? (
+        <div data-toast-clear className="shrink-0 px-4 pt-3">
+          {description}
+        </div>
+      ) : null}
       {hasSearch ? (
         <div
+          data-toast-clear={cover ? "" : undefined}
           className={
             cover
               ? cn("shrink-0 border-b px-4 pb-3", description ? "pt-2" : "pt-3")
@@ -517,6 +522,7 @@ function ModalParts(
       {frame?.toolbar ? (
         <div
           data-slot="modal-toolbar"
+          data-toast-clear={cover ? "" : undefined}
           className={cover ? "shrink-0 border-b px-4 py-2" : "shrink-0 px-4 pb-3"}
         >
           {frame.toolbar}

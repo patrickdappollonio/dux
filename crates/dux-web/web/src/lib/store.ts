@@ -1016,6 +1016,10 @@ export interface DuxState {
   // so only the namespaced key keeps two editors apart. A root absent here has
   // no tabs (not yet opened, or cleared when its target vanished).
   editorTabs: Record<string, EditorTabsState>
+  // Counts every ask to open a file in an editor, one already open included,
+  // so the phone's editor can hide its explorer on an open that changes no tab
+  // (a preview tab replaced in place) and not on a rename, which keeps its tab.
+  editorFileOpens: number
   // The tab pending the dirty-close confirmation (destructive-confirm
   // pattern), or null. Closing a NON-dirty tab skips this and closes directly.
   editorCloseTabTarget: { root: EditorRoot; tabId: string } | null
@@ -1331,6 +1335,7 @@ let state: DuxState = {
   editorRoute: null,
   standaloneEditor: bootIsStandaloneEditor(),
   editorTabs: {},
+  editorFileOpens: 0,
   editorCloseTabTarget: null,
   editorTargetGone: null,
   changes: emptyChanges(),
@@ -6669,6 +6674,7 @@ export function editorOpenFile(
       newId: () => newClientId(),
     }),
   )
+  setState({ editorFileOpens: state.editorFileOpens + 1 })
 }
 
 // The mode a tab may actually open in. Two coercions, both to "file", and both
@@ -8729,6 +8735,8 @@ export function confirmCreateWithExistingBranch(): void {
 // `NEW_AGENT_CREATE_DEADLINE_MS` frees the form and is forgotten: its late
 // answer opens no question and closes nothing.
 let newAgentCreate: object | null = null
+// Numbers the creates sent with no name, which have nothing else to key on.
+let unnamedNewAgentCreates = 0
 
 /// How long the New agent form waits for the server's first answer to its
 /// create (the create starting, or a refusal) before it frees the form and says
@@ -8751,6 +8759,12 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     return true
   }
   setState({ createAgentSubmitting: true })
+  // One toast per agent asked for: the deadline's warning, and whatever the
+  // late answer then says in its place.
+  const toastId =
+    name === ""
+      ? `new-agent-create:${projectId}:#${String(++unnamedNewAgentCreates)}`
+      : `new-agent-create:${projectId}:${name}`
   const wait = NEW_AGENT_CREATE_DEADLINE_MS
   const deadline = setTimeout(() => {
     if (newAgentCreate !== create) return
@@ -8758,11 +8772,10 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     if (stillOpen()) setState({ createAgentSubmitting: false })
     const agent = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
     // Not sticky: nothing is lost (the form keeps what was typed) and the list
-    // is where the outcome shows, whatever the toast's window. One id per
-    // project, so a second unanswered create replaces this rather than stacking.
+    // is where the outcome shows, whatever the toast's window.
     notifyWarning(
       prose`The server has not answered the request to create ${agent} after ${String(Math.round(wait / 1000))} seconds. The agent may still appear in the list, so look there before creating it again.`,
-      { id: `new-agent-create-unanswered:${projectId}` },
+      { id: toastId },
     )
   }, wait)
   sessionsApi
@@ -8780,7 +8793,7 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
         const current = answered()
         const conflict = existingBranchConflict(e)
         if (!current) {
-          toastForgottenCreateRefusal(name, e, conflict)
+          toastForgottenCreateAnswer(name, e, conflict, toastId)
           return
         }
         if (conflict) {
@@ -8801,26 +8814,48 @@ function submitNewAgent(projectId: string, name: string, copyChanges: boolean): 
     )
 }
 
-// A refusal of a create the form no longer waits for (another create replaced
-// it, or its deadline passed) opens no question and closes nothing, so this
-// toast is the only word the user gets that the agent will not appear.
-function toastForgottenCreateRefusal(
+// The failed answer to a create the form no longer waits for (another create
+// replaced it, or its deadline passed) opens no question and closes nothing,
+// so this toast is the only word the user gets of how it ended.
+function toastForgottenCreateAnswer(
   name: string,
   e: unknown,
   conflict: ExistingBranchConflict | null,
+  id: string,
 ): void {
   if (conflict) {
     notifyError(
       prose`The agent ${chip(conflict.name)} was not created, because a branch of that name already exists. Creating it again from New agent will offer to attach to that branch.`,
+      { id },
     )
     return
   }
   const status = e instanceof SessionsApiError ? e.status : undefined
   // The status stream already says these to this connection.
   if (status === 409 || status === 422) return
+  const lower = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
+  // Only dux refusing the request says the agent was not created. A fetch that
+  // never reached it, or a 5xx (a gateway's included), says nothing either way.
+  const refused =
+    e instanceof AttachedError || (status !== undefined && status >= 400 && status < 500)
+  if (!refused) {
+    const why =
+      status === 0
+        ? "The server could not be reached."
+        : status !== undefined
+          ? `The server answered with an error (HTTP ${String(status)}).`
+          : e instanceof Error && e.message !== ""
+            ? e.message
+            : "No answer came back."
+    notifyWarning(
+      prose`It is not known whether ${lower} was created. ${why} The agent may still appear in the list, so look there before creating it again.`,
+      { id },
+    )
+    return
+  }
   const agent = name === "" ? prose`The agent` : prose`The agent ${chip(name)}`
   const reason = e instanceof Error && e.message !== "" ? e.message : "The server refused it."
-  notifyError(prose`${agent} was not created. ${reason}`)
+  notifyError(prose`${agent} was not created. ${reason}`, { id })
 }
 
 export function closeExistingBranch(): void {
@@ -9456,9 +9491,8 @@ let macrosReturnFocus: (() => HTMLElement | null) | null = null
 // Open the macro-editor dialog, on the edits a Back set aside when there are
 // any, else on the saved list (copied, so edits never touch the bootstrap).
 // Runs in the click/palette handler that opens the dialog, never an effect.
-// `select` names the macro it opens on; `returnFocus` where focus goes on close.
+// `returnFocus` says where focus goes on close.
 export function openMacrosDialog(
-  select: string | null = null,
   returnFocus: (() => HTMLElement | null) | null = null,
 ): void {
   const opener = lastPageControl()
@@ -9466,18 +9500,14 @@ export function openMacrosDialog(
     returnFocus ?? (() => (opener?.isConnected ? opener : null))
   const setAside = macrosSetAside
   if (setAside !== null) {
-    const index = setAside.macros.findIndex((macro) => macro.name === select)
-    reopenMacrosDialog(
-      index === -1 ? setAside : { ...setAside, selected: index },
-      null,
-    )
+    reopenMacrosDialog(setAside, null)
     return
   }
   const bootstrap = state.bootstrap
   setState({
     macrosDialogOpen: true,
     macrosDraft: bootstrap
-      ? savedMacrosEdit(bootstrap.macros, bootstrap.macros_version ?? null, select)
+      ? savedMacrosEdit(bootstrap.macros, bootstrap.macros_version ?? null)
       : null,
     macrosConflict: null,
     macrosDraftEpoch: state.macrosDraftEpoch + 1,
