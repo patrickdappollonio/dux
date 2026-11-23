@@ -3,6 +3,7 @@ import { Ellipsis, Plus, SquareTerminal, X } from "lucide-react"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SortableStrip } from "@/components/SortableStrip"
+import { TabPill, TabStrip } from "@/components/TabStrip"
 import { WorkingGlyph } from "@/components/WorkingGlyph"
 import {
   DropdownMenu,
@@ -31,8 +32,7 @@ import {
 } from "@/lib/store"
 import type { RowBlock } from "@/lib/paneCover"
 import { terminalTitle } from "@/lib/terminals"
-import { HOVER_REVEAL, REVEAL_ROW, REVEALED_ON_ANY_FOCUS } from "@/lib/hoverReveal"
-import { focusAdjacentTab, scrollFocusedTabIntoView } from "@/lib/tabFocusScroll"
+import { focusAdjacentTab } from "@/lib/tabFocusScroll"
 import { cn } from "@/lib/utils"
 import type { TerminalView } from "@/lib/types"
 
@@ -73,16 +73,18 @@ export function DockStrip({
   const block = useAgentChangeBlockById(sessionId)
   const device = useRowDriverLabel({ sessionId })
   return (
-    // A tablet gets the tab strip's spacing: 8px between pills, so one pill's ⋯
-    // tap margin stays clear of the next pill, and an 18px end, since the pane
-    // divider's touch band reaches 10px into the strip and the last layout
-    // control's tap margin takes the other 8.
-    <div
-      ref={attachStrip}
+    <TabStrip
+      stripRef={attachStrip}
       data-testid="dock-strip"
-      data-toast-clear
-      onFocus={(e) => scrollFocusedTabIntoView(e.target)}
-      className="flex items-center gap-1 overflow-x-auto border-b bg-muted/30 px-2 py-1.25 scroll-px-2 md:pointer-coarse:gap-2 md:pointer-coarse:pr-4.5"
+      trailing={
+        <DockControls
+          sessionId={sessionId}
+          block={block}
+          device={device}
+          layout={layout}
+          onLayoutAction={onLayoutAction}
+        />
+      }
     >
       <SortableStrip
         ids={ids}
@@ -101,6 +103,25 @@ export function DockStrip({
           />
         ))}
       </SortableStrip>
+    </TabStrip>
+  )
+}
+
+function DockControls({
+  sessionId,
+  block,
+  device,
+  layout,
+  onLayoutAction,
+}: {
+  sessionId: string
+  block: RowBlock | null
+  device: string | null
+  layout?: ComputerLayout
+  onLayoutAction?: (action: LayoutAction) => void
+}) {
+  return (
+    <>
       <ExplainedWhenDisabled
         disabled={block !== null}
         hint={block === null ? "New terminal" : addToAgentBlockHint(block, device)}
@@ -139,7 +160,7 @@ export function DockStrip({
           ))}
         </div>
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -159,18 +180,14 @@ function DockPill({
   /** Why nothing here may change the agent, or null when it may. */
   block: RowBlock | null
 }) {
-  const { setNodeRef, style, listeners, isDragging } = usePillSort(terminal.id)
+  const sort = usePillSort(terminal.id)
   const select = () => selectTerminal(terminal.id, { kind: "session", sessionId })
   const device = useRowDriverLabel({ sessionId })
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
+    <TabPill
       data-cue-key={terminal.id}
-      {...listeners}
-      role="tab"
-      aria-selected={active}
-      tabIndex={0}
+      active={active}
+      sort={sort}
       onClick={select}
       onKeyDown={(e) => {
         // Only a press on the pill itself: Enter and Space from the ⋯ and its
@@ -182,33 +199,18 @@ function DockPill({
         }
         focusAdjacentTab(e)
       }}
-      className={cn(
-        // 36px on a tablet, the tab strip's pill height.
-        "flex shrink-0 cursor-pointer touch-manipulation select-none [-webkit-touch-callout:none] items-center gap-1.5 rounded-md border px-2 py-1 text-sm transition-colors md:pointer-coarse:min-h-9",
-        REVEAL_ROW,
-        isDragging && "relative z-10 shadow-lg",
-        active
-          ? "border-border bg-background text-foreground"
-          : "border-transparent bg-muted text-muted-foreground hover:text-foreground",
-      )}
-    >
-      {/* The tab strip's glyph on the terminal row's ladder: typing stands the
-          cue down, and a terminal never needs you. */}
-      <WorkingGlyph
-        icon={SquareTerminal}
-        working={terminal.working && !terminal.typing}
-        className="size-3.5"
-      />
-      <span className="max-w-40 truncate">{label}</span>
-      {/* The tab pill's reveal. */}
-      {withMenu ? (
-        <div
-          className={cn(
-            HOVER_REVEAL,
-            "[--reveal-cap:--spacing(8)]",
-            REVEALED_ON_ANY_FOCUS,
-          )}
-        >
+      // The tab strip's glyph on the terminal row's ladder: typing stands the
+      // cue down, and a terminal never needs you.
+      icon={
+        <WorkingGlyph
+          icon={SquareTerminal}
+          working={terminal.working && !terminal.typing}
+          className="size-3.5"
+        />
+      }
+      label={label}
+      menu={
+        withMenu ? (
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -246,8 +248,8 @@ function DockPill({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
-      ) : null}
-    </div>
+        ) : null
+      }
+    />
   )
 }
