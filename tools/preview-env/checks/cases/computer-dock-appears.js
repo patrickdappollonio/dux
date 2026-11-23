@@ -1,7 +1,8 @@
 // A dock that appears under an agent already on screen, or on the agent the
 // page moves to, used to replace the centre pane with a "dux needs a reload"
 // card and log "Invalid 1 panel layout". The terminal is added through the
-// API, as another device or the command line would add it. The move crashed
+// API rather than the page's own controls, the first one as the command line
+// would and the last as the page driving the row would. The move crashed
 // only when the browser had last left the docked agent with its terminal
 // folded away or alone on screen (a stored layout of "agent" or "terminal");
 // a fresh browser or a stored split never did, so the check seeds that memory.
@@ -13,6 +14,20 @@ const WITH = "add-rate-limits"
 // its terminal: a second terminal box on screen beside the agent's.
 const dockShown = () =>
   [...document.querySelectorAll('[data-testid="terminal-container"]')].filter((el) => el.getBoundingClientRect().height > 0).length >= 2
+
+// The id a page names on its terminal sockets (`?page=`), which a request
+// carries in `x-dux-page` to be the page that drives the row. Listening starts
+// before the page loads, so its first socket is seen.
+async function watchPageSeat(dev) {
+  const seats = new Set()
+  const cdp = await dev.page.createCDPSession()
+  await cdp.send("Network.enable")
+  cdp.on("Network.webSocketCreated", ({ url }) => {
+    const m = /[?&]page=([A-Za-z0-9_-]+)/.exec(url)
+    if (m) seats.add(m[1])
+  })
+  return seats
+}
 
 // A person's click on an agent's name in the sidebar list.
 async function clickRow(dev, title, expectRow) {
@@ -88,6 +103,8 @@ module.exports = {
     }
 
     // Moving to an agent whose dock is there from the start, with no reload.
+    // Each of these devices claimed both rows on its way, so each is closed
+    // once it has been judged, leaving the last device the only one there.
     for (const layout of ["agent", "terminal"]) {
       const dev = await leftAs(layout)
       const logged = watch(dev)
@@ -95,15 +112,26 @@ module.exports = {
       await H.drive(dev)
       await clickRow(dev, WITH, H.expect)
       await settled(dev, logged, `${WITH} (last left in the ${layout} layout) after ${WITHOUT}`)
+      await dev.context.close()
     }
+    await H.until(async () => {
+      const sessions = await H.lib.get("/api/v1/sessions")
+      return !sessions.some((s) => (s.id === plain || s.id === docked) && s.tabs.some((t) => t.input_owner))
+    }, "the closed devices to let go of both agents' rows", { timeout: 8000 })
 
-    // Back on the agent without a terminal, then giving it its first one.
+    // Back on the agent without a terminal, then giving it its first one, as
+    // the page that drives it: nobody else holds the row, so nothing is forced.
     const dev = await H.device(ctx, "computer")
     const logged = watch(dev)
+    const seats = await watchPageSeat(dev)
     await H.goto(dev, H.agentHash(plain))
     await H.drive(dev)
-    // The earlier devices of this check still hold the row, so the add goes ahead over them.
-    await H.lib.api("POST", `/api/v1/sessions/${plain}/terminals?force_connected=true`)
+    H.expect(seats.size === 1, `the page should name one id on its terminal sockets; it named ${seats.size}`)
+    const res = await fetch(`${H.lib.BASE}/api/v1/sessions/${plain}/terminals`, {
+      method: "POST",
+      headers: { "x-dux-page": [...seats][0] },
+    })
+    H.expect(res.ok, `the page driving ${WITHOUT} should be let open its first terminal; the server answered ${res.status} ${(await res.text()).slice(0, 200)}`)
     await settled(dev, logged, `${WITHOUT} once its first terminal opens`)
   },
 }
