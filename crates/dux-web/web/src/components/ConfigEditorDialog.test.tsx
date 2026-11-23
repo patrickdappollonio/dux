@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -24,8 +24,12 @@ vi.mock("@/lib/store", async (importOriginal) => {
 // Mocking the module makes the lazy import() resolve to this stub, so the test
 // proves the Suspense boundary actually mounts the editor once the chunk lands.
 vi.mock("@/components/CodeEditor", () => ({
-  default: ({ value }: { value: string }) => (
-    <div data-testid="code-editor">{value}</div>
+  default: ({ value, onChange }: { value: string; onChange: (text: string) => void }) => (
+    <textarea
+      data-testid="code-editor"
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    />
   ),
 }))
 
@@ -81,21 +85,37 @@ describe("ConfigEditorDialog", () => {
     ).toHaveLength(2)
     // findBy waits out the Suspense boundary: the editor arrives only after
     // the lazy chunk resolves, which is the behavior this test pins.
-    const editor = await screen.findByTestId("code-editor")
-    expect(editor.textContent).toContain("[server]")
+    const editor = (await screen.findByTestId("code-editor")) as HTMLTextAreaElement
+    expect(editor.value).toContain("[server]")
   })
 
-  it("leaves focus where the open put it when the config arrives", async () => {
+  // Enter on a focused Cancel would close the editor the moment it opened.
+  it("opens with focus on no button, and leaves it there when the config arrives", async () => {
     seed({ configEditorOpen: true, configEditorLoading: true })
     const { rerender } = render(<ConfigEditorDialog />)
-    const cancel = await screen.findByRole("button", { name: "Cancel" })
-    // A form with no field to type in yet opens on its Cancel.
-    await waitFor(() => expect(document.activeElement).toBe(cancel))
+    const dialog = await screen.findByRole("dialog")
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
+    const opened = document.activeElement
+    expect(opened?.tagName).not.toBe("BUTTON")
     seed({ configEditorOpen: true, configEditorContent: "[ui]\n" })
     rerender(<ConfigEditorDialog />)
     await screen.findByTestId("code-editor")
     await new Promise((r) => setTimeout(r, 50))
-    expect(document.activeElement).toBe(cancel)
+    expect(document.activeElement).toBe(opened)
+  })
+
+  it("asks before Escape throws away what was typed", async () => {
+    const store = await import("@/lib/store")
+    vi.mocked(store.closeConfigEditor).mockClear()
+    seed({ configEditorOpen: true, configEditorContent: "[ui]\n" })
+    render(<ConfigEditorDialog />)
+    const editor = await screen.findByTestId("code-editor")
+    fireEvent.change(editor, { target: { value: "[ui]\ntheme = 1\n" } })
+    fireEvent.keyDown(editor, { key: "Escape" })
+    expect(await screen.findByText("Discard unsaved changes?")).toBeTruthy()
+    expect(store.closeConfigEditor).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }))
+    expect(store.closeConfigEditor).toHaveBeenCalled()
   })
 
   it("takes no Save while the file is loading", () => {
