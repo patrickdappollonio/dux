@@ -249,6 +249,11 @@ export const sessionsApi = {
   // a `SessionView` is always what came back.
   create: (body: CreateSessionBody) =>
     request<SessionView | AcceptedOperation>("POST", "/api/v1/sessions", body),
+  // The same create followed as an operation: the answer comes as soon as the
+  // create is dispatched (202), or refused before anything started, rather
+  // than once the agent exists. Its outcome arrives on the events socket.
+  createFollowed: (body: CreateSessionBody) =>
+    request<AcceptedOperation>("POST", "/api/v1/sessions?operation=1", body),
   // Ask which project a typed pull-request reference belongs to. A read: it
   // starts nothing, so a refusal (unreadable text, a bare number, a host dux
   // may not ask about) comes back as a 400 with the reason rather than a toast.

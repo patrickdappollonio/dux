@@ -915,6 +915,11 @@ export interface DuxState {
   // A resolve is in flight, so the dialog's Create button shows it is working
   // and cannot be pressed twice.
   createAgentPrResolving: boolean
+  // A new agent's create is out and the server has not said yet whether it
+  // started or why not, so the form stays up, busy, until it does: a name that
+  // is an existing branch's is asked about over the form, which keeps what was
+  // typed and its own history entry.
+  createAgentSubmitting: boolean
   // A field-level refusal shown under the reference input, or null. Used for
   // the refusals dux can make WITHOUT asking the server: today that is a bare
   // number with no project chosen, which names no repository, so there is
@@ -1308,6 +1313,7 @@ let state: DuxState = {
   newAgentPickerOnlyIds: null,
   pendingPrReference: null,
   createAgentPrResolving: false,
+  createAgentSubmitting: false,
   createAgentPrError: null,
   createAgentReviewCopy: null,
   createAgentPrRequestId: null,
@@ -8505,6 +8511,7 @@ function openNameDialog(target: CreateAgentTarget): void {
     createAgentPrInput:
       target.kind === "pr" ? (state.pendingPrReference ?? "") : "",
     createAgentPrResolving: false,
+    createAgentSubmitting: false,
     createAgentPrError: null,
     // Retargeting the dialog retires whatever resolve was out for the previous
     // one: its answer is about a question this dialog is no longer asking.
@@ -8523,6 +8530,7 @@ export function closeCreateAgent(): void {
     createAgentNamePending: false,
     createAgentPrInput: "",
     createAgentPrResolving: false,
+    createAgentSubmitting: false,
     createAgentPrError: null,
     createAgentReviewCopy: null,
     // Closing retires the resolve. The reply cannot be recalled, so it has to
@@ -8675,7 +8683,48 @@ export function confirmCreateWithExistingBranch(): void {
   const target = state.existingBranchTarget
   if (!target) return
   setState({ existingBranchTarget: null })
+  // The form it was asked over is done with: the create goes ahead.
+  if (state.createAgentTarget?.kind === "new") closeCreateAgent()
   createAgent(target.projectId, target.name, target.copyChanges, true)
+}
+
+// The New agent form's own create, followed as an operation so the server's
+// first answer comes back before the agent exists: the form closes once the
+// create has started, and stays, with what was typed, when the name is an
+// existing branch's and the question goes up over it.
+function submitNewAgent(projectId: string, name: string, copyChanges: boolean): void {
+  const form = state.createAgentTarget
+  const stillOpen = () => state.createAgentTarget === form
+  setState({ createAgentSubmitting: true })
+  sessionsApi
+    .createFollowed({
+      kind: "new",
+      project_id: projectId,
+      name,
+      copy_uncommitted_changes: copyChanges,
+    })
+    .then(
+      () => {
+        if (stillOpen()) closeCreateAgent()
+      },
+      (e) => {
+        const conflict = existingBranchConflict(e)
+        if (conflict) {
+          setState({
+            ...(stillOpen() ? { createAgentSubmitting: false } : {}),
+            existingBranchTarget: {
+              projectId,
+              name,
+              copyChanges,
+              location: conflict.location,
+            },
+          })
+          return
+        }
+        if (stillOpen()) closeCreateAgent()
+        toastCreateError(e, "Could not create the agent.")
+      },
+    )
 }
 
 export function closeExistingBranch(): void {
@@ -9105,7 +9154,8 @@ export function submitNameDialog(name: string): void {
   if (!target) return
   if (target.kind === "new") {
     armCreateFocus({ kind: "project", projectId: target.projectId })
-    createAgent(target.projectId, name, state.createAgentCopyChanges)
+    submitNewAgent(target.projectId, name, state.createAgentCopyChanges)
+    return
   } else if (target.kind === "fork") {
     // A fork lands in the same project as its source session; resolve it so the
     // focus diff is scoped to that project. If the source vanished from the

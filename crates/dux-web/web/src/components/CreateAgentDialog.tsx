@@ -16,6 +16,7 @@ import {
 import type { CreateAgentDialogView } from "@/components/createAgentDialogView"
 import {
   closeCreateAgent,
+  closeExistingBranch,
   openNewAgentPicker,
   setCreateAgentDraft,
   setCreateAgentPrInput,
@@ -38,6 +39,7 @@ export function CreateAgentDialog() {
   const createAgentNamePending = useHeldWhileClosed(open, live.createAgentNamePending)
   const createAgentPrInput = useHeldWhileClosed(open, live.createAgentPrInput)
   const createAgentPrResolving = useHeldWhileClosed(open, live.createAgentPrResolving)
+  const createAgentSubmitting = useHeldWhileClosed(open, live.createAgentSubmitting)
   const createAgentPrError = useHeldWhileClosed(open, live.createAgentPrError)
   const createAgentReviewCopy = useHeldWhileClosed(open, live.createAgentReviewCopy)
   const spine = useHeldWhileClosed(open, live.spine)
@@ -60,6 +62,14 @@ export function CreateAgentDialog() {
       kind="form"
       open={open && dialog.open}
       onClose={closeCreateAgent}
+      // While the server's question about an existing branch is up over the
+      // form, every way out of the form, Back included, answers that question
+      // instead, and the form stays with what was typed.
+      beforeClose={() => {
+        if (live.existingBranchTarget === null) return "close"
+        closeExistingBranch()
+        return "stay"
+      }}
       // Reopened by the server's answer rather than by a click, in which case it
       // takes no history entry for the browser's Back.
       historyEntry={createAgentReviewCopy === null}
@@ -69,7 +79,7 @@ export function CreateAgentDialog() {
         label: createAgentPrResolving ? "Finding the project…" : dialog.submitLabel,
         tone: "primary",
         onSelect: handleSubmit,
-        busy: createAgentPrResolving,
+        busy: createAgentPrResolving || createAgentSubmitting,
         disabledReason: form.submitRefusal,
       }}
     >
