@@ -3299,7 +3299,13 @@ describe("the file tree follows what the agent writes", () => {
     rootEntries = [entry("src-old", true), entry("notes.md", false)]
     fireEvent(window, new Event("focus"))
     await waitFor(() => expect(screen.queryByText("src")).toBeNull())
-    expect(screen.getByRole("button", { name: /^delete$/i })).toBeTruthy()
+    // A close lands well within this wait, so the confirm must outlast it.
+    await expect(
+      waitFor(
+        () => expect(screen.queryByRole("button", { name: /^delete$/i })).toBeNull(),
+        { timeout: 300 },
+      ),
+    ).rejects.toThrow()
 
     rootEntries = [entry("notes.md", false)]
     fireEvent(window, new Event("focus"))
