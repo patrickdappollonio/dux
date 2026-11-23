@@ -22,7 +22,6 @@ import {
   Copy,
   Ellipsis,
   Plus,
-  Search,
   SquareSlash,
   Trash2,
   TriangleAlert,
@@ -56,6 +55,7 @@ import {
   type DraftMacro,
   type MacroFilter,
 } from "@/components/macrosDraft"
+import { SearchField } from "@/components/ui/search-field"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -403,22 +403,12 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   const listHead = (
     <>
       <div className="flex items-center gap-2">
-        <div
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 rounded-md border border-input bg-input/30 px-3 transition-colors has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-3 has-[input:focus-visible]:ring-ring/50",
-            CONTROL_HEIGHT,
-          )}
-        >
-          <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => narrow(event.target.value, filter)}
-            placeholder="Search macros"
-            aria-label="Search macros"
-            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+        <SearchField
+          inputRef={searchRef}
+          value={query}
+          onChange={(value) => narrow(value, filter)}
+          label="Search macros"
+        />
         <Button variant="outline" className={cn("shrink-0", CONTROL_HEIGHT)} onClick={addNew}>
           <Plus />
           New

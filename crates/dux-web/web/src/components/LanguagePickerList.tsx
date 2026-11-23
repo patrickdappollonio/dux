@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react"
-import { CheckIcon, Code2, SearchIcon, Wand2 } from "lucide-react"
+import { CheckIcon, Code2, Wand2 } from "lucide-react"
 
 import { MatchHighlight } from "@/components/MatchHighlight"
-import { InputGroup, InputGroupAddon } from "@/components/ui/input-group"
+import { SearchField } from "@/components/ui/search-field"
 import { matchLanguageChoices, type LanguageChoice } from "@/lib/editorLanguage"
 import { matchCharRanges } from "@/lib/searchMatch"
 import { cn } from "@/lib/utils"
@@ -215,37 +215,25 @@ export function LanguagePickerList({
       onMouseDown={keepFieldFocus}
     >
       <div className="p-1 pb-0">
-        {/* 40px for a finger and on a phone, the touch floor; the compact
-            32px only for a fine pointer at desktop width. */}
-        <InputGroup className="h-8! max-md:h-10! pointer-coarse:h-10! rounded-lg! border-input/30 bg-input/30 shadow-none! *:data-[slot=input-group-addon]:pl-2!">
-          <input
-            ref={fieldRef}
-            role="combobox"
-            aria-label="Search languages"
-            aria-expanded="true"
-            aria-controls={listId}
-            aria-autocomplete="list"
-            aria-activedescendant={activeId}
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            placeholder="Search languages…"
-            // Focused on open on every pointer and layout, a phone included,
-            // where it brings the soft keyboard up at once.
-            autoFocus
-            value={search}
-            onChange={(event) => changeSearch(event.target.value)}
-            onKeyDown={onKeyDown}
-            // text-base on phones so iOS Safari does not zoom the page when
-            // the field focuses (the Input primitive's convention).
-            // Fills the box's height, so a tap on its top or bottom band
-            // still lands in the field.
-            className="h-full w-full self-stretch bg-transparent text-base outline-hidden md:text-sm"
-          />
-          <InputGroupAddon>
-            <SearchIcon className="size-4 shrink-0 opacity-50" />
-          </InputGroupAddon>
-        </InputGroup>
+        <SearchField
+          inputRef={fieldRef}
+          role="combobox"
+          label="Search languages"
+          placeholder="Search languages…"
+          aria-expanded="true"
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={activeId}
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          // Focused on open on every pointer and layout, a phone included,
+          // where it brings the soft keyboard up at once.
+          autoFocus
+          value={search}
+          onChange={changeSearch}
+          onKeyDown={onKeyDown}
+        />
       </div>
       <div
         ref={scrollerRef}

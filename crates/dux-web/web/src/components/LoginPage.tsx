@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react"
 import { ShieldAlert } from "lucide-react"
 
+import { RetryButton } from "@/components/ui/retry-button"
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
@@ -252,20 +253,18 @@ export function LoginPage({
 
 // Every gate page's way out. It always asks afresh, so a request still hanging
 // from before cannot hold it, and it comes back enabled however that ends.
-function RetryButton({ label }: { label: string }) {
+function GateRetry({ label }: { label: string }) {
   const [busy, setBusy] = useState(false)
   return (
-    <Button
-      variant="outline"
-      className="h-10"
+    <RetryButton
+      size="page"
+      label={label}
       disabled={busy}
-      onClick={() => {
+      onRetry={() => {
         setBusy(true)
         void retryAuthGate().finally(() => setBusy(false))
       }}
-    >
-      {label}
-    </Button>
+    />
   )
 }
 
@@ -284,7 +283,7 @@ export function BlockedPage() {
         address there and reload the config; dux also adds an address on its own
         after too many failed sign-ins.
       </p>
-      <RetryButton label="Try again" />
+      <GateRetry label="Try again" />
     </Shell>
   )
 }
@@ -307,7 +306,7 @@ export function BrokenPage({ detail }: { detail: string }) {
           {detail}
         </pre>
       ) : null}
-      <RetryButton label="Try again" />
+      <GateRetry label="Try again" />
     </Shell>
   )
 }
@@ -322,7 +321,7 @@ export function UnreachablePage({ timedOut }: { timedOut: boolean }) {
         Check that dux is still running and that this device can reach it, then
         retry.
       </p>
-      <RetryButton label="Retry" />
+      <GateRetry label="Retry" />
     </Shell>
   )
 }
@@ -338,7 +337,7 @@ export function StuckPage() {
         restarted. Try again, and if this keeps happening, check{" "}
         <InlineCode>dux.log</InlineCode>.
       </p>
-      <RetryButton label="Try again" />
+      <GateRetry label="Try again" />
     </Shell>
   )
 }
@@ -364,7 +363,7 @@ export function OtherDuxPage() {
 export function NotDuxPage() {
   return (
     <Shell title="Something that isn't dux is answering at this address." logo={inlineLogo}>
-      <RetryButton label="Reconnect" />
+      <GateRetry label="Reconnect" />
     </Shell>
   )
 }

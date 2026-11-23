@@ -28,7 +28,6 @@ import {
   RotateCw,
   Save,
   SaveAll,
-  Search,
   SquareTerminal,
   X,
 } from "lucide-react"
@@ -124,6 +123,8 @@ import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
+import { FailedLoad } from "@/components/ui/retry-button"
+import { SearchField } from "@/components/ui/search-field"
 import { Popover, PopoverContent } from "@/components/ui/popover"
 import { useObjectUrl } from "@/hooks/use-object-url"
 import { useSearchPick } from "@/hooks/use-search-pick"
@@ -187,7 +188,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
 import {
   ResizableHandle,
   ResizablePanel,
@@ -2180,16 +2180,13 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
                   of its right edge, where the divider's touch band reaches
                   into this panel, so the `⋯` sits clear of it. */}
               <div data-toast-clear className="flex items-center gap-2 border-b p-2 pointer-coarse:pr-2.5">
-                <div className="relative flex-1">
-                  <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search files…"
-                    {...searchPick.fieldProps}
-                    className="h-8 pl-7 text-sm"
-                  />
-                </div>
+                <SearchField
+                  value={search}
+                  onChange={setSearch}
+                  label="Search files"
+                  placeholder="Search files…"
+                  {...searchPick.fieldProps}
+                />
                 {/* Its own name while it works, the reason while this page
                     may not write, on a wrapper that is always there so the
                     button never remounts when that changes. */}
@@ -2957,13 +2954,7 @@ function ErrorPane({
   onRetry: () => void
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-      {message}
-      <Button size="sm" variant="outline" onClick={onRetry}>
-        <RotateCw />
-        Retry
-      </Button>
-    </div>
+    <FailedLoad layout="center" message={message} onRetry={onRetry} />
   )
 }
 
@@ -2989,25 +2980,15 @@ function ImagePreviewPane({
   const [attempt, setAttempt] = useState(0)
   if (failed) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-sm text-destructive">
-        <span>
-          This image could not be loaded. One possibility is that it exceeds
-          the server&rsquo;s raw-file size cap.
-        </span>
-        {/* Mirrors the file-error arm's manual Retry. */}
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            setFailed(false)
-            onDims(null)
-            setAttempt((a) => a + 1)
-          }}
-        >
-          <RotateCw />
-          Retry
-        </Button>
-      </div>
+      <FailedLoad
+        layout="center"
+        message="This image could not be loaded. One possibility is that it exceeds the server’s raw-file size cap."
+        onRetry={() => {
+          setFailed(false)
+          onDims(null)
+          setAttempt((a) => a + 1)
+        }}
+      />
     )
   }
   return (

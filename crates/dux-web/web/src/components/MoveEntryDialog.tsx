@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react"
-import { ChevronRight, CornerLeftUp, Loader2, RotateCw } from "lucide-react"
+import { ChevronRight, CornerLeftUp, Loader2 } from "lucide-react"
 
 import { FileTreeIcon } from "@/components/FileTreeIcon"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
+import { FailedLoad } from "@/components/ui/retry-button"
 import { InlineCode } from "@/components/ui/inline-code"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { dirIconKind } from "@/lib/fileIcons"
@@ -207,17 +208,10 @@ function MoveEntryDialogBody({
               <Loader2 className="size-4 motion-safe:animate-spin" />
             </div>
           ) : state.status === "error" ? (
-            <div className="flex flex-col items-start gap-1 px-2 py-2">
-              <p className="text-sm text-destructive">{state.message}</p>
-              <button
-                type="button"
-                onClick={() => setReloadNonce((n) => n + 1)}
-                className="flex items-center gap-1 rounded px-1 py-0.5 text-sm text-muted-foreground hover:bg-muted max-md:min-h-10 pointer-coarse:min-h-10"
-              >
-                <RotateCw className="size-3.5" />
-                Retry
-              </button>
-            </div>
+            <FailedLoad
+              message={state.message}
+              onRetry={() => setReloadNonce((n) => n + 1)}
+            />
           ) : folders.length === 0 ? (
             <p className="px-2 py-2 text-sm text-muted-foreground">
               No folders here. This folder can still be the destination.

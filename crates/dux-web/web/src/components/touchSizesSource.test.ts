@@ -94,7 +94,6 @@ describe("controls that had no touch size at all", () => {
     ["MacroPopover.tsx", "onClick={openDialog}", "<PopoverPrimitive.Close", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "const HEADER_CONTROL_SIZING", "const", BUTTON_FLOOR],
     ["FlatAgentList.tsx", "aria-expanded={open}", "<button", BUTTON_FLOOR],
-    ["FlatAgentList.tsx", "<Search className", "<div", BUTTON_FLOOR],
   ]
   for (const [file, marker, tag, classes] of cases) {
     it(`${file} ${marker}`, () => {
