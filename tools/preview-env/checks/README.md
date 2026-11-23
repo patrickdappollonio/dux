@@ -83,7 +83,10 @@ of its own as well, so name both:
 - **Stopping it.** Ctrl-C (or a SIGTERM, or a crash of the runner) closes the
   check's pages, runs its clean-up and closes the browsers, which removes their
   temporary profiles, before leaving. A second Ctrl-C leaves at once; whatever
-  that leaves behind is put back at the start of the next run.
+  that leaves in the workspace is put back at the start of the next run. A
+  runner killed outright (SIGKILL) can do none of this: the workspace is still
+  repaired by the next run, but its headless browsers keep running, with their
+  profiles in `/tmp/puppeteer_dev_chrome_profile-*`, until you stop them.
 
 Each check puts back what it changed, so runs go back to back with no clean-up
 (`new-agent-wait`, for one, puts the config file back byte for byte, pass or

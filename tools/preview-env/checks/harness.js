@@ -673,7 +673,7 @@ async function paneState(page) {
     const covered = /Attaching…|Reconnecting…|Launching terminal…|Connection lost\./.test(text)
     const terminal = document.querySelector('[data-testid="terminal-container"]')
     return {
-      card: button ? (card ? card.textContent.replace(/\s+/g, " ").trim().slice(0, 160) : "Take over") : null,
+      card: button ? (card ? card.innerText.replace(/\s+/g, " ").trim().slice(0, 160) : "Take over") : null,
       covered,
       terminal: Boolean(terminal && shown(terminal)),
     }
