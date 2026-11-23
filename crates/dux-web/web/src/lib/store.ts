@@ -8830,17 +8830,23 @@ function toastForgottenCreateAnswer(
     )
     return
   }
-  const status = errorStatus(e)
+  const status = e instanceof SessionsApiError ? e.status : undefined
   // The status stream already says these to this connection.
   if (status === 409 || status === 422) return
   const lower = name === "" ? prose`the agent` : prose`the agent ${chip(name)}`
   // Only dux refusing the request says the agent was not created. A fetch that
   // never reached it, or a 5xx (a gateway's included), says nothing either way.
-  if (status === undefined || status < 400 || status >= 500) {
+  const refused =
+    e instanceof AttachedError || (status !== undefined && status >= 400 && status < 500)
+  if (!refused) {
     const why =
-      status === undefined || status === 0
+      status === 0
         ? "The server could not be reached."
-        : `The server answered with an error (HTTP ${String(status)}).`
+        : status !== undefined
+          ? `The server answered with an error (HTTP ${String(status)}).`
+          : e instanceof Error && e.message !== ""
+            ? e.message
+            : "No answer came back."
     notifyWarning(
       prose`It is not known whether ${lower} was created. ${why} The agent may still appear in the list, so look there before creating it again.`,
       { id },
@@ -8850,11 +8856,6 @@ function toastForgottenCreateAnswer(
   const agent = name === "" ? prose`The agent` : prose`The agent ${chip(name)}`
   const reason = e instanceof Error && e.message !== "" ? e.message : "The server refused it."
   notifyError(prose`${agent} was not created. ${reason}`, { id })
-}
-
-function errorStatus(e: unknown): number | undefined {
-  if (e instanceof SessionsApiError || e instanceof AttachedError) return e.status
-  return undefined
 }
 
 export function closeExistingBranch(): void {
