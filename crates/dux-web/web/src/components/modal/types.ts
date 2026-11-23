@@ -136,6 +136,8 @@ interface ModalBase {
 interface ModalFrame {
   /** The way back to the step before this one. */
   back?: { label: string; onSelect: () => void }
+  /** The Back button's element, for a caller that puts focus on it. */
+  backRef?: Ref<HTMLButtonElement>
   /** Names the step on screen; a change of step is focused as an open is. */
   step?: string
   /** What takes focus on open in place of the kind's own choice. Under a

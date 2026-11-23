@@ -1118,6 +1118,8 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
 
   const coarsePointer = useIsCoarsePointer()
   const searchRef = useRef<HTMLInputElement | null>(null)
+  // The title row's Back, which the modal draws on the phone's second step.
+  const backRef = useRef<HTMLButtonElement | null>(null)
   const navEls = useRef(new Map<View, HTMLButtonElement>())
   const rowEls = useRef(new Map<string, HTMLDivElement>())
   // The row that takes focus once a reset or an undo has removed the button
@@ -1637,16 +1639,13 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     )
 
   const inTopic = phone && step === "topic"
-  // The title row's Back, which the modal draws on the phone's second step.
-  const backButton = () =>
-    document.querySelector<HTMLElement>('button[aria-label="Back to all topics"]')
 
   // What takes focus when the modal opens or changes step. With a mouse the
   // search, to type into at once; under a finger a topic, since a focused
   // field would raise the soft keyboard over the dialog. On a phone's second
   // step the way back, and back on the topics the topic that was left.
   const initialFocus = (): HTMLElement | null => {
-    if (inTopic) return backButton()
+    if (inTopic) return backRef.current
     if (!phone && coarsePointer) return navEls.current.get(start.topic ?? "look") ?? null
     return (phone && leftTopic.current ? navEls.current.get(view) : null) ?? searchRef.current
   }
@@ -1719,7 +1718,7 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
       finalFocus={() => {
         if (!resetAllDone.current) return true
         resetAllDone.current = false
-        return (phone ? backButton() : navEls.current.get("changed")) ?? true
+        return (phone ? backRef.current : navEls.current.get("changed")) ?? true
       }}
     />
   )
@@ -1734,6 +1733,7 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
           }
           step={inTopic ? "topic" : "topics"}
           back={inTopic ? { label: "all topics", onSelect: toTopics } : undefined}
+          backRef={backRef}
           toolbar={inTopic ? undefined : searchBox}
           footerNote={partialNotice ?? undefined}
         >

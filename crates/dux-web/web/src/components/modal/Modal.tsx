@@ -366,6 +366,7 @@ function ModalParts(
           // Quieter than the modal's actions: it navigates. On a card it is
           // 32px, as its only neighbour is the corner close across the header.
           <Button
+            ref={frame?.backRef}
             variant="ghost"
             size={cover ? "icon" : "sm"}
             aria-label={`Back to ${back.label}`}

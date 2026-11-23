@@ -689,6 +689,22 @@ describe("the footer", () => {
     expect(popup().contains(screen.getByText("Sort"))).toBe(true)
   })
 
+  it("hands the caller its Back", () => {
+    const back = { current: null as HTMLButtonElement | null }
+    render(
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        back={{ label: "all things", onSelect: () => {} }}
+        backRef={back}
+      />,
+    )
+    expect(back.current).toBe(screen.getByRole("button", { name: "Back to all things" }))
+  })
+
   it("hands the caller its safe button", () => {
     const safe = { current: null as HTMLButtonElement | null }
     render(

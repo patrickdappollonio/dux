@@ -10550,7 +10550,16 @@ export function setAsidePreferencesDraft(
     {
       id: PREFERENCES_SET_ASIDE_ID,
       sticky: true,
-      action: { label: "Restore", onClick: () => openCustomizeWebapp() },
+      action: {
+        label: "Restore",
+        onClick: () => {
+          // The toaster gives focus back to what had it before the toast the
+          // moment focus leaves the toast. Leaving now, before the dialog
+          // opens, keeps it from taking the dialog's focus back to the page.
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+          openCustomizeWebapp()
+        },
+      },
     },
   )
 }
