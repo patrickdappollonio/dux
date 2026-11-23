@@ -302,12 +302,16 @@ export const VISIBLE_TOASTS_MOBILE = 3
 
 /// How tall a toast's text may grow before it scrolls inside the toast. A phone
 /// lets the WHOLE toast reach 75% of the visible screen (`dvh`, so the soft
-/// keyboard and the browser's own bars are taken off): the text gets that less
-/// the toast's own 16px padding and 1px border on each side, since the icon and
-/// any button sit beside the text rather than above it. A computer keeps the
-/// short cap, where a wheel scrolls the rest.
+/// keyboard and the browser's own bars are taken off), and never past 1rem
+/// above the bottom inset from where the stack starts (`TOP_INSET`, repeated
+/// here because the class is read from source): the text gets that less the
+/// toast's own 16px padding and 1px border on each side, since the icon and any
+/// button sit beside the text rather than above it. A computer keeps the short
+/// cap, where a wheel scrolls the rest.
 function toastTextCap(isMobile: boolean): string {
-  return isMobile ? "max-h-[calc(75dvh-34px)]" : "max-h-[min(12rem,40vh)]"
+  return isMobile
+    ? "max-h-[min(calc(75dvh-34px),calc(100dvh-var(--dux-toast-top,calc(env(safe-area-inset-top)+1rem))-env(safe-area-inset-bottom)-1rem-34px))]"
+    : "max-h-[min(12rem,40vh)]"
 }
 
 const Toaster = ({ ...props }: ToasterProps) => {

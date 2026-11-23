@@ -167,11 +167,13 @@ describe("Toaster height cap", () => {
   })
 
   // A phone lets the text run to 75% of the visible screen less the toast's own
-  // padding and border (16px + 1px on each side), so the whole toast stays
-  // within 75%. A computer keeps the short cap.
+  // padding and border (16px + 1px on each side), and never further than the
+  // screen left below where the stack starts. A computer keeps the short cap.
+  const phoneCap =
+    "max-h-[min(calc(75dvh-34px),calc(100dvh-var(--dux-toast-top,calc(env(safe-area-inset-top)+1rem))-env(safe-area-inset-bottom)-1rem-34px))]"
   it.each([
-    { shell: "a phone", width: 390, cap: "max-h-[calc(75dvh-34px)]", not: "max-h-[min(12rem,40vh)]" },
-    { shell: "a computer", width: 1280, cap: "max-h-[min(12rem,40vh)]", not: "max-h-[calc(75dvh-34px)]" },
+    { shell: "a phone", width: 390, cap: phoneCap, not: "max-h-[min(12rem,40vh)]" },
+    { shell: "a computer", width: 1280, cap: "max-h-[min(12rem,40vh)]", not: phoneCap },
   ])("caps the text's height on $shell and scrolls it inside the toast, leaving a finger's drag to the swipe", async ({ width, cap, not }) => {
     window.innerWidth = width
     render(<Toaster />)
