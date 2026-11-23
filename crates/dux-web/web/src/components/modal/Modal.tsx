@@ -130,6 +130,16 @@ export function Modal(props: ModalProps) {
           // False leaves focus where it is; true would move it to the popup's
           // first control. Only a popup whose parts have not mounted gets that.
           initialFocus={() => (placeFocus.current === null ? true : (placeFocus.current() ?? false))}
+          // A field's own Enter (or a text area's Ctrl/Cmd-Enter) runs the
+          // caller's submit, which the footer's gate never sees: while the
+          // modal or its submit is busy, it runs nothing.
+          onKeyDownCapture={(event) => {
+            if (!busy && !(kind === "form" && props.submit.busy === true)) return
+            if (event.key !== "Enter" || !submitsOnEnter(event.target, event)) return
+            if (event.target.closest('[data-slot="dialog-content"]') !== event.currentTarget) return
+            event.preventDefault()
+            event.stopPropagation()
+          }}
           onFocus={(event) => {
             const target = event.target
             if (target.closest('[data-slot="modal-footer"]') === null) editing.current = target
@@ -172,6 +182,16 @@ export function Modal(props: ModalProps) {
       ) : null}
     </>
   )
+}
+
+// Whether Enter on this element can be a submit: in a field, or with Ctrl or Cmd
+// in a text area, where a plain Enter is a line break.
+function submitsOnEnter(
+  target: EventTarget,
+  keys: { ctrlKey: boolean; metaKey: boolean },
+): target is HTMLElement {
+  if (target instanceof HTMLTextAreaElement) return keys.ctrlKey || keys.metaKey
+  return target instanceof HTMLInputElement
 }
 
 // Asks the row's answer in a component of its own, mounted only for a modal

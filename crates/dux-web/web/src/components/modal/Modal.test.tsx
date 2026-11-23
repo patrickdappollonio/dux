@@ -1173,6 +1173,25 @@ describe("a busy modal", () => {
     expect(pressed).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ["the modal", { busy: true, submit: save }],
+    ["its submit", { submit: { ...save, busy: true } }],
+  ] as const)("runs no submit from Enter in a field while %s is busy", (_what, props) => {
+    const submitted = vi.fn()
+    render(
+      <Modal kind="form" open onClose={() => {}} title="Sample" historyEntry={false} {...props}>
+        <input
+          aria-label="name"
+          onKeyDown={(event) => {
+            if (event.key === "Enter") submitted()
+          }}
+        />
+      </Modal>,
+    )
+    fireEvent.keyDown(screen.getByLabelText("name"), { key: "Enter" })
+    expect(submitted).not.toHaveBeenCalled()
+  })
+
   // A disabled button would drop the focus it holds to the page.
   it("shows and announces that its ways out do nothing, and keeps them focusable", () => {
     for (const kind of ["form", "picker"] as const) {

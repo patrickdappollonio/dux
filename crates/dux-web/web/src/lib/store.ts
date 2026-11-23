@@ -8724,6 +8724,9 @@ export function confirmCreateWithExistingBranch(): void {
 // create has started, and stays, with what was typed, when the name is an
 // existing branch's and the question goes up over it.
 function submitNewAgent(projectId: string, name: string, copyChanges: boolean): void {
+  // One create at a time: a second press before the first is answered would
+  // send the same create again.
+  if (state.createAgentSubmitting) return
   const form = state.createAgentTarget
   const stillOpen = () => state.createAgentTarget === form
   setState({ createAgentSubmitting: true })
