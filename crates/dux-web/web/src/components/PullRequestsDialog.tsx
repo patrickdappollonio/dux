@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import {
   DndContext,
   MouseSensor,
@@ -125,7 +125,22 @@ function PullRequests({ open, onClosed }: { open: boolean; onClosed: () => void 
   const session = live ?? last
   const [view, setView] = useState<View>("prs")
   const branches = useBranches(targetId, session?.pr_revision ?? 0)
-  if (session === undefined) return null
+  // Focused on open, so the arrow keys switch the views from the first moment.
+  const prsTab = useRef<HTMLButtonElement | null>(null)
+  if (session === undefined) {
+    // The agent was gone before the dialog opened; it closes as it would had
+    // the agent left while it was open.
+    return (
+      <Modal
+        kind="report"
+        open={open}
+        vanished
+        onClose={closePullRequests}
+        onClosed={onClosed}
+        title="Pull requests"
+      />
+    )
+  }
   const name = sessionLabel(session)
   const visible = sessionPrs(session)
   const hidden = session.prs_hidden ?? []
@@ -143,6 +158,7 @@ function PullRequests({ open, onClosed }: { open: boolean; onClosed: () => void 
       // Hung from its top, so a view whose list is shorter or longer grows the
       // card downward instead of moving its header.
       anchor="top"
+      initialFocus={prsTab}
       title="Pull requests"
       description={
         // Both views' sentences share one cell, the other one unseen, so
@@ -178,7 +194,7 @@ function PullRequests({ open, onClosed }: { open: boolean; onClosed: () => void 
             {/* Under a finger the list drops its inset so each trigger reaches
                 the 40px floor while the list stays at Sort's height. */}
             <TabsList className="w-full group-data-horizontal/tabs:h-9 pointer-coarse:p-0 pointer-coarse:group-data-horizontal/tabs:h-10">
-              <TabsTrigger value="prs" className={VIEW_TRIGGER}>
+              <TabsTrigger value="prs" ref={prsTab} className={VIEW_TRIGGER}>
                 <GitPullRequest />
                 Pull requests
                 <span className="tabular-nums opacity-70">{visible.length}</span>

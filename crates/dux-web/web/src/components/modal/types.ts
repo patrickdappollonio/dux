@@ -144,6 +144,8 @@ export type ModalRow = { sessionId: string } | { terminalId: string }
 interface ModalFrame {
   /** The way back to the step before this one. */
   back?: { label: string; onSelect: () => void }
+  /** The Back button's element, for a caller that puts focus on it. */
+  backRef?: Ref<HTMLButtonElement>
   /** Names the step on screen; a change of step is focused as an open is. */
   step?: string
   /** What takes focus on open in place of the kind's own choice. Under a
@@ -186,16 +188,27 @@ export interface PickerModalProps extends ModalBase, ModalFrame {
   doors?: readonly [ModalDoor, ...ModalDoor[]]
 }
 
-export interface ReportModalProps extends ModalBase, ModalFrame {
+interface ReportModalBase extends ModalBase, ModalFrame {
   kind: "report"
   /** In reading order. A destructive one starts the footer's row, apart from
    * the Close that ends it. */
   actions?: readonly ModalAction[]
   footerNote?: ReactNode
-  /** What a card's safe button says; "Close" unless given. */
-  closeLabel?: string
-  safeRef?: Ref<HTMLButtonElement>
 }
+
+/** Where a card's way out is: a Close ending its footer, or the corner close a
+ * picker has, with no Close in the footer. A cover closes from its title row
+ * either way. */
+export type ReportModalProps = ReportModalBase &
+  (
+    | {
+        closeAt?: "footer"
+        /** What a card's safe button says; "Close" unless given. */
+        closeLabel?: string
+        safeRef?: Ref<HTMLButtonElement>
+      }
+    | { closeAt: "corner"; closeLabel?: never; safeRef?: never }
+  )
 
 export type ModalProps =
   | ConfirmModalProps

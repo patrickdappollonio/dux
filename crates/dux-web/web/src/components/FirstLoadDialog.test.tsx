@@ -116,6 +116,11 @@ function footer(): HTMLElement {
   return el as HTMLElement
 }
 
+/** The footer's buttons and links, by name, in the order they are drawn. */
+function footerControls(): string[] {
+  return [...footer().querySelectorAll("button, a")].map((el) => el.textContent ?? "")
+}
+
 /** The numbered-steps list, so a query for "Add a project" as a STEP TITLE
  *  cannot also match the primary button of the same name. */
 function steps(): HTMLElement {
@@ -211,8 +216,11 @@ describe("FirstLoadDialog", () => {
       // The primary is the filled one; the link button is outlined.
       expect(add.className).toContain("bg-primary")
       expect(site.className).toContain("border-border")
-      // And nothing else: two buttons per screen, per the approved design.
-      expect(within(footer()).queryByText(/open full notes/i)).toBeNull()
+      // And nothing else: two buttons in the footer, the website first, and
+      // the way out is the corner close, per the approved design.
+      expect(footerControls()).toEqual(["Visit the website", "Add a project"])
+      const close = screen.getByRole("button", { name: "Close" })
+      expect(footer().contains(close)).toBe(false)
     })
 
     it("closes the dialog and opens the project picker from the primary action", () => {
@@ -290,9 +298,10 @@ describe("FirstLoadDialog", () => {
       })
       expect(open.getAttribute("href")).toBe(NOTES.html_url)
       expect(open.className).toContain("bg-primary")
-      expect(
-        within(footer()).getByRole("button", { name: /^close$/i }),
-      ).toBeTruthy()
+      // Close first and the primary last, as before the dialog moved, with
+      // the corner close beside them.
+      expect(footerControls()).toEqual(["Close", "Open full notes"])
+      expect(screen.getAllByRole("button", { name: "Close" })).toHaveLength(2)
       // The welcome screen's buttons must not leak in.
       expect(within(footer()).queryByText(/add a project/i)).toBeNull()
       // The footer names where the primary goes.

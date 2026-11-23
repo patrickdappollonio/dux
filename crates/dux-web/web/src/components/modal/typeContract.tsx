@@ -39,6 +39,11 @@ export function ModalTypeContract() {
       <Modal kind="picker" {...common} doors={[]} />
       {/* @ts-expect-error unsaved edits without what discarding leaves as it was */}
       <Modal kind="form" {...common} submit={act} unsavedEdits={{ holder: "It has", changes: 1 }} />
+      <Modal kind="report" {...common} closeAt="corner" />
+      {/* @ts-expect-error a report closed from the corner has no footer Close to name */}
+      <Modal kind="report" {...common} closeAt="corner" closeLabel="Done" />
+      {/* @ts-expect-error only a report says where its close is */}
+      <Modal kind="form" {...common} submit={act} closeAt="corner" />
       {/* @ts-expect-error only a form has edits to lose */}
       <Modal kind="report" {...common} unsavedEdits={null} />
       <Modal

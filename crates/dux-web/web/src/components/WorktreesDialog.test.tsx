@@ -401,6 +401,45 @@ describe("WorktreesDialog", () => {
     expect(deleteProjectWorktree).toHaveBeenCalledWith("p1", "/wt/messy", false)
   })
 
+  // The answer belongs to the worktree it was given for: a confirmation that
+  // moves to another row before the last close finished starts at the default.
+  it("starts the next worktree's confirmation at the default, whatever the last one was given", () => {
+    const first = entry({ worktree_path: "/wt/messy", branch_name: "messy", branch: "messy" })
+    const second = entry({ worktree_path: "/wt/tidy", branch_name: "tidy", branch: "tidy" })
+    seed([first, second], {
+      deleteWorktreeTarget: { projectId: "p1", entry: first },
+    } as unknown as Partial<DuxState>)
+    const { rerender } = render(<WorktreesDialog />)
+    fireEvent.click(screen.getByRole("checkbox", { name: /also delete the branch messy/i, hidden: true }))
+    seed([first, second], {
+      deleteWorktreeTarget: { projectId: "p1", entry: second },
+    } as unknown as Partial<DuxState>)
+    rerender(<WorktreesDialog />)
+    const box = screen.getByRole("checkbox", { name: /also delete the branch tidy/i, hidden: true })
+    expect(box.getAttribute("aria-checked")).toBe("true")
+    fireEvent.click(screen.getByRole("button", { name: "Delete worktree", hidden: true }))
+    expect(deleteProjectWorktree).toHaveBeenCalledWith("p1", "/wt/tidy", true)
+  })
+
+  // The store names the project the dialog is about; a dialog that kept the
+  // one it opened on would list one project's worktrees under another's name.
+  it("follows the project the store names while it is open", () => {
+    seed([entry()], {
+      spine: {
+        projects: [
+          { id: "p1", name: "acme" },
+          { id: "p2", name: "globex" },
+        ],
+        sessions: [],
+      },
+    } as unknown as Partial<DuxState>)
+    const { rerender } = render(<WorktreesDialog />)
+    expect(screen.getByRole("heading").textContent).toBe("Worktrees in acme")
+    mockState = { ...mockState, attachWorktreeTarget: "p2" } as DuxState
+    rerender(<WorktreesDialog />)
+    expect(screen.getByRole("heading").textContent).toBe("Worktrees in globex")
+  })
+
   it("offers no branch checkbox for a detached worktree", () => {
     // There is no branch to delete, so offering the choice would be a lie and
     // the request must not ask for one.
@@ -556,6 +595,24 @@ describe("WorktreesDialog", () => {
         )
       },
     )
+
+    it("starts the next folder's confirmation at its own default", () => {
+      const stuck = leftover()
+      const other = leftover({ path: "/wt/acme/other" })
+      seed([], {
+        attachWorktreeLeftovers: [stuck, other],
+        deleteLeftoverTarget: { projectId: "p1", folder: stuck },
+      } as Partial<DuxState>)
+      const { rerender } = render(<WorktreesDialog />)
+      fireEvent.click(branchBox())
+      expect(branchBox().getAttribute("aria-checked")).toBe("false")
+      mockState = {
+        ...mockState,
+        deleteLeftoverTarget: { projectId: "p1", folder: other },
+      } as DuxState
+      rerender(<WorktreesDialog />)
+      expect(branchBox().getAttribute("aria-checked")).toBe("true")
+    })
 
     it("leaves a branch that predates its agent unticked, warns, and keeps it", () => {
       confirmFor(leftover({ branch_provenance: "attached" }))

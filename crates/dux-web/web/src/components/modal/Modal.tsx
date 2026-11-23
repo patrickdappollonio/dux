@@ -243,6 +243,8 @@ function ModalParts(
   const back = frame?.back
   const step = frame?.step
   const callerSafeRef = kind === "picker" ? undefined : props.safeRef
+  // A computer's picker, and a report that asks for it, close from the corner.
+  const corner = !cover && (kind === "picker" || (kind === "report" && props.closeAt === "corner"))
   const target = () => {
     const popup = header.current?.closest<HTMLElement>('[data-slot="dialog-content"]')
     if (!popup) return null
@@ -369,7 +371,7 @@ function ModalParts(
       ? props.cancelLabel
       : kind === "form"
         ? (props.cancelLabel ?? "Cancel")
-        : kind === "report" && !cover
+        : kind === "report" && !cover && !corner
           ? (props.closeLabel ?? "Close")
           : null
   const safe: SafeButton | null =
@@ -419,6 +421,7 @@ function ModalParts(
           // Quieter than the modal's actions: it navigates. On a card it is
           // 32px, as its only neighbour is the corner close across the header.
           <Button
+            ref={frame?.backRef}
             variant="ghost"
             size={cover ? "icon" : "sm"}
             aria-label={`Back to ${back.label}`}
@@ -437,11 +440,11 @@ function ModalParts(
           </Button>
         ) : null}
         <DialogTitle
-          className={cn("leading-snug", cover ? "min-w-0 flex-1" : kind === "picker" && "pr-8")}
+          className={cn("leading-snug", cover ? "min-w-0 flex-1" : corner && "pr-8")}
         >
           {props.title}
         </DialogTitle>
-        {cover || kind === "picker" ? (
+        {cover || corner ? (
           // The card's 28px box keeps its place; at phone width and under a
           // coarse pointer an invisible margin widens its tap area to 40px.
           <Button

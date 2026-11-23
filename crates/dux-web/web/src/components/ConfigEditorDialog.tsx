@@ -1,11 +1,12 @@
 import { Info, Loader2, TriangleAlert } from "lucide-react"
 
-import { lazy, Suspense, useState } from "react"
+import { lazy, Suspense, useRef, useState } from "react"
 
 import { ChunkBoundary } from "@/components/ChunkBoundary"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { Button } from "@/components/ui/button"
 import { InlineCode } from "@/components/ui/inline-code"
+import { chip } from "@/lib/prose"
 import {
   closeConfigEditor,
   dismissConfigEditorConflict,
@@ -127,6 +128,9 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
     if (!loading) setText(content)
   }
   const loadFailed = !loading && error !== null && !content
+  // What takes focus on open: the body, which no key acts on. A form with no
+  // field yet would otherwise open on its Cancel, and Enter would close it.
+  const bodyRef = useRef<HTMLDivElement | null>(null)
 
   return (
     <Modal
@@ -135,6 +139,12 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
       onClose={closeConfigEditor}
       onClosed={onClosed}
       size="4xl"
+      initialFocus={bodyRef}
+      unsavedEdits={{
+        changes: !loading && !loadFailed && text !== content ? 1 : 0,
+        holder: "The config file has",
+        leaves: [chip("config.toml")],
+      }}
       title={
         <>
           Edit <InlineCode>config.toml</InlineCode>
@@ -152,18 +162,20 @@ function ConfigEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
             }
       }
     >
-      {loading ? (
-        <p className="py-12 text-center text-sm text-muted-foreground">
-          Loading config.toml…
-        </p>
-      ) : loadFailed ? (
-        // Load failed (no content). Never render an editable, Save-enabled
-        // editor here: saving its blank content would overwrite the real
-        // config.toml. Show the error and a Retry instead.
-        <p className="py-8 text-center text-sm text-destructive">{error}</p>
-      ) : (
-        <ConfigEditorForm text={text} setText={setText} error={error} conflict={conflict} />
-      )}
+      <div ref={bodyRef} tabIndex={-1} className="flex min-h-0 flex-1 flex-col gap-4 outline-none">
+        {loading ? (
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            Loading config.toml…
+          </p>
+        ) : loadFailed ? (
+          // Load failed (no content). Never render an editable, Save-enabled
+          // editor here: saving its blank content would overwrite the real
+          // config.toml. Show the error and a Retry instead.
+          <p className="py-8 text-center text-sm text-destructive">{error}</p>
+        ) : (
+          <ConfigEditorForm text={text} setText={setText} error={error} conflict={conflict} />
+        )}
+      </div>
     </Modal>
   )
 }

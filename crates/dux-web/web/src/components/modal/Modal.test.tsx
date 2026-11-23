@@ -208,6 +208,33 @@ describe("the way out the modal draws", () => {
     expect(closeButtons()).toHaveLength(1)
     expect(footer()!.contains(closeButtons()[0])).toBe(true)
   })
+
+  it("gives a report whose close is the corner that close alone, and focuses it on a computer", async () => {
+    const onClose = vi.fn()
+    const report = (
+      <Modal
+        kind="report"
+        open
+        onClose={onClose}
+        title="Sample"
+        historyEntry={false}
+        closeAt="corner"
+        actions={[save]}
+      />
+    )
+    render(report)
+    expect(closeButtons()).toHaveLength(1)
+    expect(footer()!.contains(closeButtons()[0])).toBe(false)
+    expect(footer()!.querySelectorAll("button")).toHaveLength(1)
+    await waitFor(() => expect(document.activeElement).toBe(closeButtons()[0]))
+    fireEvent.click(closeButtons()[0])
+    expect(onClose).toHaveBeenCalledWith("close-control")
+    cleanup()
+    at(PHONE)
+    render(report)
+    expect(closeButtons()).toHaveLength(1)
+    expect(closeButtons()[0].closest('[data-slot="modal-header"]')).not.toBeNull()
+  })
 })
 
 // The popup places focus a moment after it mounts, so each of these waits.
@@ -666,6 +693,22 @@ describe("the footer", () => {
     expect(body.contains(screen.getByText("row"))).toBe(true)
     expect(body.contains(screen.getByText("Sort"))).toBe(false)
     expect(popup().contains(screen.getByText("Sort"))).toBe(true)
+  })
+
+  it("hands the caller its Back", () => {
+    const back = { current: null as HTMLButtonElement | null }
+    render(
+      <Modal
+        kind="picker"
+        open
+        onClose={() => {}}
+        title="Sample"
+        historyEntry={false}
+        back={{ label: "all things", onSelect: () => {} }}
+        backRef={back}
+      />,
+    )
+    expect(back.current).toBe(screen.getByRole("button", { name: "Back to all things" }))
   })
 
   it("hands the caller its safe button", () => {
