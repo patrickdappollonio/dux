@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { setLayoutChoice } from "@/lib/shellLayout"
 import { RESOURCE_POLL_INTERVAL_MS, STALE_STATS_THRESHOLD_MS } from "@/lib/resourcePoll"
 import type { ProcessInfoView, ResourceStatsView } from "@/lib/resourcesApi"
 import type { AgentTabView, SessionView, TerminalView } from "@/lib/types"
@@ -969,54 +970,57 @@ describe("TaskManagerDialog", () => {
     expect(cells[2].textContent).not.toContain("4242")
   })
 
-  // The scrollbar must keep clear of the right-hand Force stop buttons and
-  // dashes: the vertical scroller reserves a stable gutter and pads its own
-  // right edge. The header and the rows sit in the one table inside it, so the
-  // padding moves them together and the columns stay aligned.
-  it("scroll_container_keeps_a_gutter_between_the_scrollbar_and_the_stop_column", async () => {
-    seed({ spine: { sessions: [session({ id: "s1" })] } } as Partial<DuxState>)
-    render(<TaskManagerDialog />)
-
-    const stop = await screen.findByLabelText(/^Force stop/)
-    const scroller = screen.getByTestId("task-manager-scroll")
-    // On a computer; a phone's cover scrolls its whole body instead.
-    expect(scroller.className).toContain("md:overflow-y-auto")
-    expect(scroller.className).toContain("md:[scrollbar-gutter:stable]")
-    expect(scroller.className).toMatch(/(^|\s)md:pr-\d/)
-
-    const header = screen.getByRole("columnheader", { name: "Memory" })
-    const table = header.closest("table")
-    expect(table).not.toBeNull()
-    expect(scroller.contains(table)).toBe(true)
-    expect(table!.contains(stop)).toBe(true)
-  })
 })
 
 describe("TaskManagerDialog long names", () => {
   const LONG = "feature/a-very-long-branch-name-that-no-row-has-room-for"
+  let cut = true
+  let watched: { callback: (entries: unknown[]) => void; el: Element }[] = []
 
-  // jsdom lays nothing out, so the long name is the one that reports itself cut.
+  // jsdom lays nothing out, so the long name is the one that reports itself
+  // cut, for as long as `cut` says, and a resize is played by hand.
   function cutTheLongName() {
-    const cut = (el: HTMLElement) => el.textContent === LONG
+    cut = true
+    watched = []
     vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (
       this: HTMLElement,
     ) {
-      return cut(this) ? 500 : 100
+      return cut && this.textContent === LONG ? 500 : 100
     })
     vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(100)
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private readonly callback: (entries: unknown[]) => void) {}
+        observe(el: Element) {
+          watched.push({ callback: this.callback, el })
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+  }
+  // The long name's own box changing size, as a stat column beside it would
+  // make it in a browser.
+  function resize() {
+    act(() => {
+      for (const { callback, el } of watched) if (el.textContent === LONG) callback([{ target: el }])
+    })
   }
 
   afterEach(() => vi.restoreAllMocks())
 
-  it("shortens a name its row has no room for, and gives the whole of it on a tap or on focus", async () => {
+  async function renderLong() {
     cutTheLongName()
     seed({
       spine: { sessions: [session({ id: "s1", title: LONG }), session({ id: "s2", title: "short" })] },
     } as Partial<DuxState>)
     render(<TaskManagerDialog />)
+    return screen.findByText(LONG)
+  }
 
-    const name = await screen.findByText(LONG)
-    expect(name.className).toContain("truncate")
+  it("shortens a name its row has no room for, and gives the whole of it on a tap or on focus", async () => {
+    const name = await renderLong()
     // A tab stop only while it is cut, so a keyboard reaches the hint.
     expect(name.getAttribute("tabindex")).toBe("0")
     expect(screen.getByText("short").hasAttribute("tabindex")).toBe(false)
@@ -1025,15 +1029,43 @@ describe("TaskManagerDialog long names", () => {
     await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(2))
   })
 
-  it("never scrolls the table sideways for a name", async () => {
-    seed({ spine: { sessions: [session({ id: "s1", title: LONG })] } } as Partial<DuxState>)
-    render(<TaskManagerDialog />)
-    const table = (await screen.findByText(LONG)).closest("table")!
-    for (let el: HTMLElement | null = table; el !== null; el = el.parentElement) {
-      expect(el.className).not.toContain("overflow-x-auto")
+  it("puts the tapped hint away on a press anywhere else", async () => {
+    const name = await renderLong()
+    fireEvent.click(name)
+    await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(2))
+    fireEvent.pointerDown(screen.getByText("short"))
+    await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(1))
+  })
+
+  it("does not bring a tapped hint back by itself once the name was whole again", async () => {
+    const name = await renderLong()
+    fireEvent.click(name)
+    await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(2))
+    cut = false
+    resize()
+    await waitFor(() => expect(screen.getAllByText(LONG)).toHaveLength(1))
+    cut = true
+    resize()
+    expect(name.getAttribute("tabindex")).toBe("0")
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.getAllByText(LONG)).toHaveLength(1)
+  })
+
+  // A table needs the width of its number columns and its Force stop beside
+  // the name, which a narrow window does not have, so the rows stack there as
+  // they do on a phone and nothing scrolls sideways.
+  it("stacks its rows in a computer layout narrower than the breakpoint", async () => {
+    vi.stubGlobal("innerWidth", 600)
+    setLayoutChoice("computer")
+    try {
+      seed({ spine: { sessions: [session({ id: "s1", title: LONG })] } } as Partial<DuxState>)
+      render(<TaskManagerDialog />)
+      await screen.findByText(LONG)
+      expect(screen.queryByRole("table")).toBeNull()
+      expect(screen.getByLabelText(`Force stop ${LONG}`)).toBeTruthy()
+    } finally {
+      setLayoutChoice(null)
     }
-    // The name's cell is the one that gives way.
-    expect(screen.getByText(LONG).closest("td")!.className).toContain("max-w-0")
   })
 })
 

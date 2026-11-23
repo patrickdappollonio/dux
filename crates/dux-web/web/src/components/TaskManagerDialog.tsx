@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { usePartChangeReason } from "@/hooks/use-agent-active-elsewhere"
 import { useAttachedOverride } from "@/hooks/use-attached-override"
-import { useIsMobile } from "@/hooks/use-mobile"
+import { useIsMobile, useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { useIsTruncated } from "@/hooks/use-truncated"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { formatRegularCount } from "@/lib/formatRegularCount"
@@ -81,8 +81,11 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
   const state = useDux()
   const { spine } = state
   // ONE layout renders at a time, not two hidden behind CSS: rendering both would
-  // duplicate every row, and every Stop control, in the DOM.
-  const isMobile = useIsMobile()
+  // duplicate every row, and every Stop control, in the DOM. A computer layout
+  // in a window narrower than the breakpoint has no room for the table's
+  // columns beside a name either, so it stacks the rows as a phone does.
+  const phone = useIsMobile()
+  const isMobile = useIsNarrowComputerLayout() || phone
   const [stats, setStats] = useState<ResourceStatsView[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   // When the last poll succeeded, or `null` before the first sample. A failing
@@ -266,12 +269,16 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
         {isMobile ? null : (
           <table className="w-full border-collapse text-sm">
             <thead>
+              {/* Each number column is as wide as the widest value it can
+                  hold ("4194304", "9999", "1234.5%", "1023.9 MiB"), so the
+                  width the name is left does not move as the numbers change,
+                  and a name at the edge is not cut and whole by turns. */}
               <tr className="text-[10px] tracking-wide text-muted-foreground uppercase">
                 <th className="py-1 pr-2 text-left font-medium">Name</th>
-                <th className="py-1 pr-2 text-right font-medium">PID</th>
-                <th className="py-1 pr-2 text-right font-medium">Procs</th>
-                <th className="py-1 pr-2 text-right font-medium">CPU</th>
-                <th className="py-1 pr-2 text-right font-medium">Memory</th>
+                <th className="w-[4.5rem] py-1 pr-2 text-right font-medium">PID</th>
+                <th className="w-14 py-1 pr-2 text-right font-medium">Procs</th>
+                <th className="w-[4.5rem] py-1 pr-2 text-right font-medium">CPU</th>
+                <th className="w-24 py-1 pr-2 text-right font-medium">Memory</th>
                 <th className="py-1" />
               </tr>
             </thead>
@@ -421,6 +428,10 @@ function ShortenedName({ name, className }: { name: string; className?: string }
   const { ref, truncated } = useIsTruncated<HTMLSpanElement>(name)
   const [hovered, setHovered] = useState(false)
   const [tapped, setTapped] = useState(false)
+  // A tap asked for the hint of a name that was cut; once it is whole the
+  // hint has nothing to add, and it must not come back by itself if the
+  // name is cut again.
+  if (tapped && !truncated) setTapped(false)
   return (
     <SimpleTooltip
       content={name}
