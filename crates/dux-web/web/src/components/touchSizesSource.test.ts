@@ -57,6 +57,7 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
         ["max-md:min-h-10", "pointer-coarse:min-h-10"],
         ["max-md:min-h-11", "pointer-coarse:min-h-11"],
         ["max-md:size-10", "pointer-coarse:size-10"],
+        ["max-md:size-11", "pointer-coarse:size-11"],
       ]) {
         for (const cls of classStringsWith(src, narrow)) {
           expect(cls, `${narrow} without ${coarse}`).toContain(coarse)

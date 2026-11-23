@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight, GitPullRequest } from "lucide-react"
 
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
-import { BANNER_CONTROL_BOX } from "@/components/ellipsisPlacements"
+import { BANNER_CONTROL_BOX, BANNER_STRIP_HEIGHT as STRIP_HEIGHT } from "@/components/ellipsisPlacements"
 import { PrListMenuItems } from "@/components/PrListMenu"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { Button } from "@/components/ui/button"
@@ -20,11 +20,6 @@ import {
 } from "@/lib/pr"
 import { cn } from "@/lib/utils"
 import type { PrKeyView, PrView } from "@/lib/types"
-
-// The strip's one height token. The counter and the three controls carry it
-// too, so they sit flush with the strip and with each other; on a coarse
-// pointer the whole strip grows to the 40px touch floor with them.
-const STRIP_HEIGHT = "h-9 pointer-coarse:h-10"
 
 // A slim, one-line PR info strip mirroring the TUI's PR banner lane
 // (`render_pr_banner`): a state-colored surface carrying the PR icon, its

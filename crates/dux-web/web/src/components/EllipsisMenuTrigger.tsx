@@ -12,9 +12,12 @@ import { cn } from "@/lib/utils"
 
 import {
   BOX,
-  IS_PILL,
+  HEADER_BOX,
+  isPillPlacement,
   REVEAL_CAP,
-  type EllipsisPlacement,
+  ROW_BOX,
+  type PillPlacement,
+  type RowFit,
 } from "./ellipsisPlacements"
 
 type TriggerProps = Omit<
@@ -22,49 +25,59 @@ type TriggerProps = Omit<
   "render" | "className" | "style" | "children"
 >
 
+type Reveal = "hover" | "hover-or-focus"
+
+/**
+ * What a placement may ask for, one shape per placement so that a choice that
+ * means nothing there is a compile error (`ellipsisTypeContract.tsx` pins it).
+ * `reveal` is for a trigger inside a row or pill whose ancestor carries
+ * `REVEAL_ROW`, and only those two place it so; `fit` is a row's, see
+ * `ROW_BOX`; `phoneOnly` is a header's.
+ */
+type Placement =
+  | { placement: "row"; reveal?: Reveal; fit?: RowFit }
+  | { placement: PillPlacement; reveal?: Reveal }
+  | { placement: "header"; fit?: "roomy"; phoneOnly?: boolean }
+  | { placement: "toolbar" | "banner" | "floating" }
+
+// A union member that does not name a key still has to refuse it, or a caller
+// could pass it to a placement that has no such choice.
+type Refused<T> = T extends unknown
+  ? T & { [K in Exclude<"reveal" | "fit" | "phoneOnly", keyof T>]?: never }
+  : never
+
 /**
  * The one `⋯` that opens a menu. It goes inside a `DropdownMenu`, where a
  * `DropdownMenuTrigger` would, and may itself be the child of a tooltip.
  *
- * `reveal` is `always` (painted, the default) or, for a trigger inside a row or
- * pill whose ancestor carries `REVEAL_ROW`, one of two hover reveals: both take
- * no room while idle, open on hover or keyboard focus in the row, stay open
- * while their menu is, and are always there under a finger. `hover-or-focus`
- * also opens on mouse focus anywhere in the row; `hover` does not, for a row
- * whose menu hands focus back to its trigger and would strand it open.
+ * Without `reveal` it is painted. With one of the two hover reveals it takes no
+ * room while idle, opens on hover or keyboard focus in the row, stays open
+ * while its menu is, and is always there under a finger. `hover-or-focus` also
+ * opens on mouse focus anywhere in the row; `hover` does not, for a row whose
+ * menu hands focus back to its trigger and would strand it open.
  *
- * `roomy` keeps a phone's 44px box for a pane whose neighbours already have it,
- * so the controls of one cluster share a height. `slim` narrows a row's `⋯` on a
- * phone under a finger, keeping the 40px floor in height, for a row whose title
- * needs the width: it sits between the row's text and the screen's edge, and
- * above and below are the rows' own full-height controls.
- *
- * `phoneOnly` leaves it out of the computer layout, for a fold that exists only
- * where the controls beside it do not fit.
+ * `phoneOnly` leaves a header's out of the computer layout, for a fold that
+ * exists only where the controls beside it do not fit.
  *
  * `busy` swaps the dots for a spinner, takes no press, and holds a hover reveal
  * open so the spinner outlives the menu.
  */
 export function EllipsisMenuTrigger({
-  placement,
-  reveal = "always",
   busy = false,
-  phoneOnly = false,
-  roomy = false,
-  slim = false,
   "aria-label": ariaLabel,
   onClick,
-  ...props
-}: TriggerProps & {
-  placement: EllipsisPlacement
-  reveal?: "always" | "hover" | "hover-or-focus"
-  roomy?: boolean
-  slim?: boolean
-  busy?: boolean
-  phoneOnly?: boolean
-  "aria-label": string
-}) {
-  const pill = IS_PILL(placement)
+  ...rest
+}: TriggerProps &
+  Refused<Placement> & {
+    busy?: boolean
+    "aria-label": string
+  }) {
+  const { placement, reveal, fit, phoneOnly, ...props } = rest as typeof rest & {
+    reveal?: Reveal
+    fit?: RowFit
+    phoneOnly?: boolean
+  }
+  const pill = isPillPlacement(placement)
   const iconClass = pill ? "size-3.5" : undefined
   const handleClick = pill
     ? (e: React.MouseEvent<HTMLElement>) => {
@@ -78,6 +91,13 @@ export function EllipsisMenuTrigger({
   ) : (
     <Ellipsis className={iconClass} />
   )
+  const box = pill
+    ? BOX[placement]
+    : placement === "row"
+      ? ROW_BOX[fit ?? "standard"]
+      : placement === "header"
+        ? cn(HEADER_BOX[fit === "roomy" ? "roomy" : "standard"], phoneOnly && "md:hidden")
+        : BOX[placement]
   const trigger = (
     <DropdownMenuTrigger
       {...props}
@@ -87,17 +107,12 @@ export function EllipsisMenuTrigger({
       aria-label={ariaLabel}
       render={
         pill ? (
-          <button type="button" className={BOX[placement]} />
+          <button type="button" className={box} />
         ) : (
           <Button
             variant={placement === "header" ? "outline" : "ghost"}
             size={placement === "toolbar" ? "icon-sm" : "icon"}
-            className={cn(
-              BOX[placement],
-              roomy && "max-md:size-11 max-md:pointer-coarse:size-11",
-              slim && "max-md:pointer-coarse:w-7",
-              phoneOnly && "md:hidden",
-            )}
+            className={box}
           />
         )
       }
@@ -105,7 +120,7 @@ export function EllipsisMenuTrigger({
       {icon}
     </DropdownMenuTrigger>
   )
-  if (reveal === "always") return trigger
+  if (!reveal || !(pill || placement === "row")) return trigger
   return (
     <div
       className={cn(

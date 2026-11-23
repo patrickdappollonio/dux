@@ -407,6 +407,7 @@ function AgentFlatRow({
           <EllipsisMenuTrigger
             placement="row"
             reveal="hover-or-focus"
+            fit="compact"
             aria-label="Session actions"
           />
           {/* THE PANE'S ONE MENU, at the row's anchor. The same body the
@@ -552,6 +553,7 @@ function TerminalFlatRow({
         <EllipsisMenuTrigger
           placement="row"
           reveal="hover-or-focus"
+          fit="compact"
           aria-label="Terminal actions"
         />
         {/* THE PANE'S ONE MENU, at the row's anchor: the same body the desktop

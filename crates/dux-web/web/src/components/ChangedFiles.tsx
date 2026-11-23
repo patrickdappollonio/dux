@@ -655,7 +655,7 @@ const FileRow = memo(function FileRow({
           <EllipsisMenuTrigger
             placement="row"
             reveal="hover"
-            roomy
+            fit="roomy"
             busy={busy}
             tabIndex={inTabOrder ? undefined : -1}
             aria-label={`Actions for ${file.path}`}
@@ -1088,7 +1088,7 @@ function ChangesHeader({
           <EllipsisMenuTrigger
             ref={triggerRef}
             placement="header"
-            roomy
+            fit="roomy"
             aria-label="Changes actions"
           />
           <DropdownMenuContent align="end">
