@@ -1,8 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react"
-import { TriangleAlert } from "lucide-react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
-import { Button } from "@/components/ui/button"
+import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Textarea } from "@/components/ui/textarea"
 import { useIsCoarsePointer } from "@/hooks/use-coarse-pointer"
 import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
@@ -104,33 +103,13 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
       {conflict ? (
         // The table changed after the dialog read it and nothing was saved.
         // Reloading throws these edits away, so "Keep editing" has focus.
-        <div
-          role="alert"
-          className="flex flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm"
-        >
-          <div className="flex items-start gap-2">
-            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-            <span>{conflict}</span>
-          </div>
-          <div className="flex justify-end gap-3">
-            <Button
-              ref={keepEditing}
-              variant="outline"
-              autoFocus
-              onClick={dismissGlobalEnvConflict}
-              className="max-md:min-h-10 pointer-coarse:min-h-10"
-            >
-              Keep editing
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void reloadGlobalEnvDraft()}
-              className="max-md:min-h-10 pointer-coarse:min-h-10"
-            >
-              Reload the environment
-            </Button>
-          </div>
-        </div>
+        <StaleSaveNotice
+          message={conflict}
+          reloadLabel="Reload the environment"
+          onKeepEditing={dismissGlobalEnvConflict}
+          onReload={() => void reloadGlobalEnvDraft()}
+          keepEditingRef={keepEditing}
+        />
       ) : null}
     </Modal>
   )

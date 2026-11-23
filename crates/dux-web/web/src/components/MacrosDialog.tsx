@@ -25,7 +25,6 @@ import {
   Search,
   SquareSlash,
   Trash2,
-  TriangleAlert,
 } from "lucide-react"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
@@ -56,6 +55,7 @@ import {
   type DraftMacro,
   type MacroFilter,
 } from "@/components/macrosDraft"
+import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -475,7 +475,14 @@ function MacrosEditor({ open, onClosed }: { open: boolean; onClosed: () => void 
   const hasNotices = Boolean(macrosConflict) || (shownProblem !== null && items.length > 0)
   const notices = hasNotices ? (
     <div className="flex shrink-0 flex-col gap-2">
-      {macrosConflict ? <StaleSaveNotice message={macrosConflict} /> : null}
+      {macrosConflict ? (
+        <StaleSaveNotice
+          message={macrosConflict}
+          reloadLabel="Reload macros"
+          onKeepEditing={dismissMacrosConflict}
+          onReload={() => void reloadMacrosDraft()}
+        />
+      ) : null}
       {shownProblem && items.length > 0 ? (
         <div className="flex items-center gap-3">
           <p className="min-w-0 flex-1 text-xs text-destructive">
@@ -1080,27 +1087,3 @@ function ConfirmDeleteMacro({
   )
 }
 
-// A save the server refused because the list changed after the dialog read it.
-// Reloading throws these edits away, so "Keep editing" has focus.
-function StaleSaveNotice({ message }: { message: string }) {
-  return (
-    <div
-      role="alert"
-      data-stale-save=""
-      className="flex shrink-0 flex-col gap-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-foreground"
-    >
-      <div className="flex items-start gap-2">
-        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
-        <span>{message}</span>
-      </div>
-      <div className="flex justify-end gap-3">
-        <Button variant="outline" autoFocus onClick={dismissMacrosConflict} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          Keep editing
-        </Button>
-        <Button variant="destructive" onClick={() => void reloadMacrosDraft()} className="max-md:min-h-10 pointer-coarse:min-h-10">
-          Reload macros
-        </Button>
-      </div>
-    </div>
-  )
-}

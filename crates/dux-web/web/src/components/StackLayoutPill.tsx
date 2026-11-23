@@ -64,8 +64,8 @@ export function StackLayoutPill({
 function placementStyle(placement: LayoutPillPlacement): React.CSSProperties {
   switch (placement.kind) {
     case "divider":
-      // The divider is 8px, so its middle is 4px below where it starts.
-      return { top: `calc(${placement.agentPercent}% + 4px)`, transform: "translateY(-50%)" }
+      // The divider is 1px, so its middle is half a pixel below where it starts.
+      return { top: `calc(${placement.agentPercent}% + 0.5px)`, transform: "translateY(-50%)" }
     case "bottom":
       return { bottom: "12px" }
     case "top":

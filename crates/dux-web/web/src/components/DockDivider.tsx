@@ -1,33 +1,27 @@
 import { ResizableHandle } from "@/components/ui/resizable"
 
-// The divider between an agent and its terminal dock: an 8px grab band that
-// paints nothing itself, carrying a 1px line and a centred grip pill. With the
-// strips hidden it is all the dock shows of itself while folded away.
+// The divider between an agent and its terminal dock: the shared 1px handle,
+// which is itself the line like the Changes pane's and the sidebar's, with a
+// grip pill over its middle. With the strips hidden it is all the dock shows of
+// itself while folded away.
 //
-// The band takes the shared grab behaviour (stacking, cursor, touch handling,
-// focus ring) from the Changes divider's handle, but not its paint: a filled
-// 8px band read as a grey slab rather than a border, and its first column
-// covered the sidebar's edge line. So the element is transparent in every state
-// and the line and grip light up on hover and while held instead.
+// The grab band is not painted. It is the handle's `::after`, grown to the
+// shared minimums (10px, 20px on a coarse pointer), so the hit area is no
+// smaller than when the handle was 8px tall; an 8px handle left the page
+// background showing between the two terminals as a band of its own.
 export function DockDivider({ disabled }: { disabled: boolean }) {
   return (
     <ResizableHandle
       disabled={disabled}
-      className="group/divider bg-transparent hover:bg-transparent data-[dux-held=true]:bg-transparent aria-[orientation=horizontal]:h-2"
+      // Starts one pixel in: the sidebar's edge line stands in the center
+      // pane's first column (it is pinned 1px past the sidebar), so a line
+      // from the very edge would paint over it.
+      className="group/divider ml-px aria-[orientation=horizontal]:w-[calc(100%-1px)] aria-[orientation=horizontal]:after:h-2.5 pointer-coarse:aria-[orientation=horizontal]:after:h-5"
     >
-      {/* Starts one pixel in: the sidebar's edge line stands in the center
-        * pane's first column (it is pinned 1px past the sidebar), so a line
-        * from the very edge would paint over it. */}
-      <span
-        aria-hidden
-        data-testid="dock-divider-line"
-        className="pointer-events-none absolute top-1/2 right-0 left-px h-px bg-border group-hover/divider:bg-ring group-data-[dux-held=true]/divider:bg-ring"
-      />
-      {/* 2px to 7px of the 8px band, so its middle is the line's middle. */}
       <span
         aria-hidden
         data-testid="dock-divider-grip"
-        className="pointer-events-none absolute top-0.5 left-1/2 h-[5px] w-8 -translate-x-1/2 rounded-full bg-muted-foreground/50 group-hover/divider:bg-muted-foreground group-data-[dux-held=true]/divider:bg-muted-foreground"
+        className="pointer-events-none absolute top-1/2 left-1/2 h-[5px] w-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-muted-foreground/50 group-hover/divider:bg-muted-foreground group-data-[dux-held=true]/divider:bg-muted-foreground"
       />
     </ResizableHandle>
   )

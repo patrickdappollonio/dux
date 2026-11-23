@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { KeyRound, ShieldAlert } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
+import { Notice } from "@/components/Notice"
 import { InlineCode } from "@/components/ui/inline-code"
 import { postDismissNoAuthWarning } from "@/lib/authActions"
 import type { AuthStatus } from "@/lib/authApi"
@@ -21,11 +21,6 @@ import { openCustomizeWebapp } from "@/lib/store"
 // meant to be annoying until the owner either sets a password or says, once,
 // that they mean it ("Don't show again", which writes
 // `disable_no_auth_warning = true`).
-
-// On a coarse pointer every banner button meets the 40px floor whatever the
-// width; with a mouse the default height stands, because the only neighbours
-// are the banner's own text and the other button, a gap-2 away.
-const BANNER_BUTTON = "pointer-coarse:min-h-11"
 
 const APP_TOP_VAR = "--dux-app-top"
 const APP_SAFE_TOP_VAR = "--dux-app-safe-top"
@@ -49,80 +44,49 @@ function NoPasswordBanner({ canSetFirst }: { canSetFirst: boolean }) {
     }
   }
   return (
-    <div
-      role="alert"
+    <Notice
+      shape="banner"
+      tone="danger"
+      emphasis="strong"
+      icon={ShieldAlert}
+      lead="No password: anyone who can reach this address can use dux."
       data-testid="no-auth-banner"
-      className="flex flex-col gap-2 border-b border-destructive/60 bg-destructive/20 px-4 py-2.5 text-sm text-foreground md:flex-row md:items-center md:gap-4"
+      actions={[
+        { label: "Dismiss", onSelect: () => dismissBanner("no_auth") },
+        {
+          label: "Don't show again",
+          onSelect: () => void never(),
+          disabled: busy,
+          testId: "no-auth-banner-never",
+        },
+      ]}
     >
-      <ShieldAlert className="hidden size-5 shrink-0 text-destructive md:block" aria-hidden />
-      <p className="min-w-0 flex-1">
-        <strong className="font-semibold text-destructive">
-          No password: anyone who can reach this address can use dux.
-        </strong>{" "}
-        They can run commands as you, read and change your files, and drive every
-        agent. {canSetFirst ? "Set one in Preferences, or run " : "Set one by running "}
-        <InlineCode>dux config set server.auth.password</InlineCode> on the machine
-        dux runs on.
-      </p>
-      <div className="flex shrink-0 gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          className={BANNER_BUTTON}
-          onClick={() => dismissBanner("no_auth")}
-        >
-          Dismiss
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          data-testid="no-auth-banner-never"
-          className={BANNER_BUTTON}
-          onClick={() => void never()}
-        >
-          Don&apos;t show again
-        </Button>
-      </div>
-    </div>
+      They can run commands as you, read and change your files, and drive every
+      agent. {canSetFirst ? "Set one in Preferences, or run " : "Set one by running "}
+      <InlineCode>dux config set server.auth.password</InlineCode> on the machine
+      dux runs on.
+    </Notice>
   )
 }
 
 function WeakPasswordBanner() {
   return (
-    <div
-      role="status"
+    <Notice
+      shape="banner"
+      tone="neutral"
+      icon={KeyRound}
+      iconTone="danger"
+      lead="The dux password is weaker than the minimum it asks for."
       data-testid="weak-password-banner"
-      className="flex flex-col gap-2 border-b border-border bg-card px-4 py-2.5 text-sm text-card-foreground md:flex-row md:items-center md:gap-4"
+      actions={[
+        { label: "Dismiss", onSelect: () => dismissBanner("weak") },
+        { label: "Change it in Preferences…", onSelect: () => openCustomizeWebapp("network") },
+      ]}
     >
-      <KeyRound className="hidden size-5 shrink-0 text-destructive md:block" aria-hidden />
-      <p className="min-w-0 flex-1">
-        <strong className="font-semibold">
-          The dux password is weaker than the minimum it asks for.
-        </strong>{" "}
-        It still signs you in, but anyone who sees your config file can try to
-        guess it offline, and blocking addresses does not slow that down. Change it
-        to a long, unique one.
-      </p>
-      <div className="flex shrink-0 gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          className={BANNER_BUTTON}
-          onClick={() => dismissBanner("weak")}
-        >
-          Dismiss
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className={BANNER_BUTTON}
-          onClick={() => openCustomizeWebapp("network")}
-        >
-          Change it in Preferences…
-        </Button>
-      </div>
-    </div>
+      It still signs you in, but anyone who sees your config file can try to
+      guess it offline, and blocking addresses does not slow that down. Change it
+      to a long, unique one.
+    </Notice>
   )
 }
 

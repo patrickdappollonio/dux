@@ -1040,7 +1040,7 @@ describe("TerminalArea dock", () => {
     const pill = () => screen.getByTestId("stack-layout-pill")
     mockState = dockState({ layout: "split" })
     const { rerender } = render(<TerminalArea />)
-    expect((await screen.findByTestId("stack-layout-pill")).style.top).toMatch(/^calc\(\d+% \+ 4px\)$/)
+    expect((await screen.findByTestId("stack-layout-pill")).style.top).toMatch(/^calc\(\d+% \+ 0\.5px\)$/)
     mockState = dockState({ layout: "agent" })
     rerender(<TerminalArea />)
     expect(pill().style.bottom).toBe("12px")

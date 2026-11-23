@@ -79,14 +79,8 @@ describe("every narrow-screen touch size has its coarse-pointer twin", () => {
 
 describe("controls that had no touch size at all", () => {
   const cases: [string, string, string, string[]][] = [
-    ["MacrosDialog.tsx", "onClick={dismissMacrosConflict}", "<Button", BUTTON_FLOOR],
-    ["MacrosDialog.tsx", "onClick={() => void reloadMacrosDraft()}", "<Button", BUTTON_FLOOR],
     ["MacrosDialog.tsx", "aria-label={`Actions for ${name}`}", "<Button", ["max-md:size-10", "pointer-coarse:size-10"]],
     ["MacrosDialog.tsx", "onClick={() => showProblem(shownProblem.key)}", "<Button", BUTTON_FLOOR],
-    ["GlobalEnvDialog.tsx", "onClick={dismissGlobalEnvConflict}", "<Button", BUTTON_FLOOR],
-    ["GlobalEnvDialog.tsx", "onClick={() => void reloadGlobalEnvDraft()}", "<Button", BUTTON_FLOOR],
-    ["ConfigEditorDialog.tsx", "onClick={dismissConfigEditorConflict}", "<Button", BUTTON_FLOOR],
-    ["ConfigEditorDialog.tsx", "openConfigEditor()}", "<Button", BUTTON_FLOOR],
     ["OfflineOverlay.tsx", "onClick={reconnect}", "<Button", BUTTON_FLOOR],
     ["ChunkBoundary.tsx", "onClick={() => location.reload()}", "<Button", BUTTON_FLOOR],
     ["terminal/partPieces.tsx", "plainBounce(props.ptyRef.current", "<Button", BUTTON_FLOOR],
