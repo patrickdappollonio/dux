@@ -1,4 +1,4 @@
-import { useId, useState } from "react"
+import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -45,7 +45,6 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
   const saving = useHeldWhileClosed(open, savingNow)
   const edit = envEdit(project?.env ?? {}, opened, text)
   const leftOutNote = envLeftOutNote(edit.leftOut)
-  const noteId = useId()
   // On a phone the text takes the height the covering dialog leaves.
   const phone = useIsMobile()
 
@@ -101,7 +100,7 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
         height={phone ? "fill" : "content"}
         control="single"
         spokenName="Environment variables"
-        describedBy={leftOutNote ? noteId : undefined}
+        notes={[{ words: leftOutNote }]}
       >
         {(field) => (
           <Textarea
@@ -113,11 +112,6 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
           />
         )}
       </FormGroup>
-      {leftOutNote ? (
-        <p id={noteId} className="text-sm text-muted-foreground">
-          {leftOutNote}
-        </p>
-      ) : null}
     </Modal>
   )
 }

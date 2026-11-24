@@ -2,6 +2,7 @@
 // each line under a directive is a compile error, and a directive with no error
 // under it is one. Nothing imports this file, so none of it reaches the bundle.
 import { FormGroup, FormSection } from "./form-group"
+import { AgentNameInput } from "@/components/AgentNameFields"
 import { Input } from "./input"
 import { Switch } from "./switch"
 import { Textarea } from "./textarea"
@@ -43,6 +44,13 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       <FormGroup layout="side" control="named" label="Text">
         {/* @ts-expect-error a text area is a single control, so a press on its label reaches it */}
         {(field) => <Textarea {...field} />}
+      </FormGroup>
+      <FormGroup layout="stacked" control="single" spokenName="Agent name">
+        {(field) => <AgentNameInput field={field} value="" onChange={() => {}} onSubmit={() => {}} generating={false} autoFocus={false} />}
+      </FormGroup>
+      <FormGroup layout="side" control="named" label="Name">
+        {/* @ts-expect-error a wrapper around a text box refuses a named control's wiring */}
+        {(field) => <AgentNameInput field={field} value="" onChange={() => {}} onSubmit={() => {}} generating={false} autoFocus={false} />}
       </FormGroup>
       {/* @ts-expect-error a field with no visible label has no "(optional)" to draw */}
       <FormGroup layout="stacked" control="single" spokenName="Name" optional>

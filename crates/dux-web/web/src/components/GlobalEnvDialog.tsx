@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { StaleSaveNotice } from "@/components/StaleSaveNotice"
@@ -49,7 +49,6 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
   const coarse = useIsCoarsePointer()
   const edit = envEdit(seeded.saved, seeded.text, text)
   const leftOutNote = envLeftOutNote(edit.leftOut)
-  const noteId = useId()
   // On a phone the text takes the height the covering dialog leaves.
   const phone = useIsMobile()
 
@@ -102,7 +101,7 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
         height={phone ? "fill" : "content"}
         control="single"
         spokenName="Environment variables"
-        describedBy={leftOutNote ? noteId : undefined}
+        notes={[{ words: leftOutNote }]}
       >
         {(wiring) => (
           <Textarea
@@ -115,11 +114,6 @@ function GlobalEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void
           />
         )}
       </FormGroup>
-      {leftOutNote ? (
-        <p id={noteId} className="text-sm text-muted-foreground">
-          {leftOutNote}
-        </p>
-      ) : null}
       {conflict ? (
         // The table changed after the dialog read it and nothing was saved.
         // Reloading throws these edits away, so "Keep editing" has focus.

@@ -7,7 +7,7 @@ import type { ChangeEvent, KeyboardEvent } from "react"
 
 import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import type { FieldWiring } from "@/components/ui/form-group"
+import type { TextBoxWiring } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { sanitizeAgentName } from "@/lib/agentName"
 
@@ -22,7 +22,7 @@ interface AgentNameInputProps {
   generating: boolean
   autoFocus: boolean
   /** The `FormGroup` wiring that names the input and reads its help and error with it. */
-  field: FieldWiring
+  field: TextBoxWiring
 }
 
 export function AgentNameInput({

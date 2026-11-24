@@ -112,6 +112,31 @@ describe("GlobalEnvDialog", () => {
     expect(note?.textContent).toMatch(/Save leaves it out/)
   })
 
+  it("keeps the same box, with its focus and what was typed, when the layout flips between computer and phone", () => {
+    const { rerender } = render(<GlobalEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "FOO=1\nBAR=2" } })
+    env.focus()
+    phone = true
+    rerender(<GlobalEnvDialog />)
+    expect(screen.getByRole("textbox", { name: "Environment variables" })).toBe(env)
+    expect(document.activeElement).toBe(env)
+    phone = false
+    rerender(<GlobalEnvDialog />)
+    expect(screen.getByRole("textbox", { name: "Environment variables" })).toBe(env)
+    expect(document.activeElement).toBe(env)
+  })
+
+  it("draws the note about lines Save leaves out as the form's own 12px note under the box", () => {
+    render(<GlobalEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")!
+    expect(note.className).toContain("text-xs")
+    expect(note.className).not.toContain("text-sm")
+    expect(note.closest("[data-form-layout]")?.contains(env)).toBe(true)
+  })
+
   it("closes at once when nothing was changed", () => {
     render(<GlobalEnvDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))

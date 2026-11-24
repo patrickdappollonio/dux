@@ -24,12 +24,15 @@ export interface FieldWiring {
 }
 
 /** The wiring of a control its words name but a press on them leaves alone.
- * An `<input>` or a `<textarea>` refuses it: their `capture` and `rows` take
- * other types, so a text box, which a press on its label must reach, does not compile. */
+ * An `<input>` or a `<textarea>` refuses it, and so does a wrapper typed `TextBoxWiring`;
+ * a wrapper typed `FieldWiring` takes it, and only the development check sees a text box there. */
 export interface NamedWiring extends FieldWiring {
   capture?: "a named control is not a text box"
   rows?: "a named control is not a text box"
 }
+
+/** What a wrapper around a text box takes: `FieldWiring` that a "named" field's does not fit. */
+export type TextBoxWiring = FieldWiring & { rows?: number }
 
 // "single" is one control a `<label>` points at, so a press on the words
 // reaches it; "named" is one control named by the words' id, which a press
@@ -212,21 +215,19 @@ export function FormGroup<C extends FieldControl>(props: FormGroupProps<C>) {
     ) : (
       labelLine
     )
-  // With nothing on its row and no height to take, the control is a direct
-  // child of the column, so its own width classes behave as they would alone.
-  const row =
-    before != null || after != null || fill ? (
-      <div
-        data-form-control
-        className={cn("flex min-w-0 gap-2", fill ? "flex-1 items-stretch" : "items-center")}
-      >
-        {before}
-        {controlEl}
-        {after}
-      </div>
-    ) : (
-      controlEl
-    )
+  // Always drawn so the control keeps its place in the tree; with nothing on it and no
+  // height to take it is `display: contents`, which makes no box to change the layout.
+  const rowed = before != null || after != null || fill
+  const row = (
+    <div
+      data-form-control={rowed ? "" : undefined}
+      className={rowed ? cn("flex min-w-0 gap-2", fill ? "flex-1 items-stretch" : "items-center") : "contents"}
+    >
+      {before}
+      {controlEl}
+      {after}
+    </div>
+  )
   return (
     <div
       ref={box}
@@ -241,6 +242,16 @@ export function FormGroup<C extends FieldControl>(props: FormGroupProps<C>) {
         {errorEl}
       </div>
     </div>
+  )
+}
+
+/** A line of a dialog that also describes a field (its `id` in the field's `describedBy`),
+ * in the size and colour of the field's own help. */
+export function HelpLine({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <p id={id} className={FIELD_HELP_TEXT}>
+      {children}
+    </p>
   )
 }
 
@@ -372,6 +383,12 @@ function unwired(root: HTMLElement, field: FieldWiring): string[] {
     missing.push("aria-describedby")
   }
   if (field["aria-invalid"] !== undefined && el.getAttribute("aria-invalid") !== "true") missing.push("aria-invalid")
+  if (
+    (el.getAttribute("aria-label") ?? undefined) !== field["aria-label"] ||
+    (el.getAttribute("aria-labelledby") ?? undefined) !== field["aria-labelledby"]
+  ) {
+    missing.push("its name")
+  }
   return missing
 }
 

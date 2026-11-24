@@ -270,6 +270,22 @@ describe("CustomizeWebappDialog", () => {
     expect(screen.getByText(/never auto-clear/i)).toBeTruthy()
   })
 
+  it("keeps a row's control element, with its focus, when an edit adds the row's changed mark and reset button", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    for (const [label, value] of [
+      ["Instance name", "other"],
+      ["Status message auto-clear", "42"],
+    ]) {
+      const control = field(label)
+      control.focus()
+      fireEvent.change(control, { target: { value } })
+      expect(screen.getByRole("button", { name: new RegExp(`^Reset ${label}`) }), label).toBeTruthy()
+      expect(field(label), label).toBe(control)
+      expect(document.activeElement, label).toBe(control)
+    }
+  })
+
   it("renders a select for enum settings", () => {
     seed()
     render(<CustomizeWebappDialog />)

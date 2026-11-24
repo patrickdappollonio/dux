@@ -42,7 +42,7 @@ import {
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SearchField } from "@/components/ui/search-field"
-import { FormGroup, FormSection, type FieldWiring, type NoteLine } from "@/components/ui/form-group"
+import { FormGroup, FormSection, type FieldWiring, type NoteLine, type TextBoxWiring } from "@/components/ui/form-group"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
@@ -195,7 +195,7 @@ function NumberControl({
   onChange,
   disabled,
 }: {
-  field: FieldWiring
+  field: TextBoxWiring
   min: number
   max: number
   unit?: string

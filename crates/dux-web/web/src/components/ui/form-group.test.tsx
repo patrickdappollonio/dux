@@ -453,6 +453,88 @@ describe("FormGroup", () => {
     expect(gap("Regular")).toContain("gap-2")
   })
 
+  // Each choice a caller can flip while the field is on screen. The control must stay
+  // the same element, with focus, or a keyboard, a caret and an undo history are lost.
+  const FLIPS: { name: string; stacked: boolean; props: (on: boolean) => Record<string, unknown>; phone?: boolean }[] = [
+    { name: "height", stacked: true, props: (on) => ({ height: on ? "fill" : "content" }) },
+    { name: "density", stacked: true, props: (on) => ({ density: on ? "compact" : "regular" }) },
+    { name: "help", stacked: true, props: (on) => ({ help: on ? "Help." : undefined }) },
+    { name: "notes", stacked: true, props: (on) => ({ notes: on ? [{ words: "Note." }] : undefined }) },
+    { name: "error", stacked: true, props: (on) => ({ error: on ? "Refused." : null }) },
+    { name: "changed mark", stacked: true, props: (on) => ({ changed: on ? "Changed:" : null }) },
+    { name: "a control before it", stacked: true, props: (on) => ({ before: on ? <button>Undo</button> : null }) },
+    { name: "a control after it", stacked: true, props: (on) => ({ after: on ? <button>More</button> : null }) },
+    { name: "help (side)", stacked: false, props: (on) => ({ help: on ? "Help." : undefined }) },
+    { name: "notes (side)", stacked: false, props: (on) => ({ notes: on ? [{ words: "Note." }] : undefined }) },
+    { name: "error (side)", stacked: false, props: (on) => ({ error: on ? "Refused." : null }) },
+    { name: "changed mark (side)", stacked: false, props: (on) => ({ changed: on ? "Changed:" : null }) },
+    { name: "a control before it (side)", stacked: false, props: (on) => ({ before: on ? <button>Undo</button> : null }) },
+    { name: "width (side)", stacked: false, props: (on) => ({ width: on ? "wide" : "compact" }) },
+  ]
+  for (const flip of FLIPS) {
+    it(`keeps the control element and its focus when ${flip.name} changes`, () => {
+      const draw = (on: boolean) => (
+        <FormGroup
+          layout={flip.stacked ? "stacked" : "side"}
+          control="single"
+          label="Text"
+          {...(flip.props(on) as object)}
+        >
+          {(field) => <Textarea {...field} />}
+        </FormGroup>
+      )
+      const { rerender } = render(draw(false))
+      const box = screen.getByRole("textbox")
+      box.focus()
+      rerender(draw(true))
+      expect(screen.getByRole("textbox")).toBe(box)
+      expect(document.activeElement).toBe(box)
+      rerender(draw(false))
+      expect(screen.getByRole("textbox")).toBe(box)
+      expect(document.activeElement).toBe(box)
+    })
+  }
+
+  it("keeps the control element and its focus when the layout turns a wide side field stacked on a phone", () => {
+    const draw = () => (
+      <FormGroup layout="side" width="wide" control="single" label="Text" notes={[{ words: "Note." }]}>
+        {(field) => <Textarea {...field} />}
+      </FormGroup>
+    )
+    const { rerender } = render(draw())
+    const box = screen.getByRole("textbox")
+    box.focus()
+    phone = true
+    rerender(draw())
+    expect(box.closest("[data-form-layout]")?.getAttribute("data-form-layout")).toBe("stacked")
+    expect(screen.getByRole("textbox")).toBe(box)
+    expect(document.activeElement).toBe(box)
+  })
+
+  it("says so when a control carries a name other than the one the group gave it", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    render(
+      <FormGroup layout="stacked" control="single" label="Name">
+        {(field) => <Input {...field} aria-label="Something else" />}
+      </FormGroup>,
+    )
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("name"))
+    error.mockClear()
+    render(
+      <FormGroup layout="stacked" control="single" spokenName="Name">
+        {(field) => <Input {...field} aria-label="Something else" />}
+      </FormGroup>,
+    )
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("name"))
+    error.mockClear()
+    render(
+      <FormGroup layout="stacked" control="single" label="Name">
+        {(field) => <Input {...field} aria-labelledby="elsewhere" />}
+      </FormGroup>,
+    )
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("name"))
+  })
+
   it("says so when a caller leaves the wiring off its control", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {})
     render(
