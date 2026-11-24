@@ -45,7 +45,7 @@ export function TerminalNotFound({
   const { spine } = useDux()
   const newTerminal = ownerExists(owner, spine) ? newTerminalFor(owner) : null
   // A terminal of an agent's joins the agent's row, so it waits while another
-  // device drives that row, as every New terminal on the agent's pane does.
+  // device drives that row, as every New terminal tab on the agent's pane does.
   const agent =
     owner.kind === "session"
       ? spine?.sessions.find((s) => s.id === owner.sessionId)

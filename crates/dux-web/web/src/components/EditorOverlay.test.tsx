@@ -4261,6 +4261,8 @@ describe("a file that is not plain UTF-8", () => {
       "This file is being reopened in another encoding. Choose an encoding once it has finished."
     const RELOADING =
       "This file is being reloaded from disk. Choose an encoding once it has finished."
+    const CHECKING =
+      "This file is being checked against the disk. Choose an encoding once it has finished."
     await mountWithTab(PATH)
     await loaded("café\n")
     const { acquireLane, laneKey } = await import("@/lib/editorLane")
@@ -4287,7 +4289,7 @@ describe("a file that is not plain UTF-8", () => {
       ["convert", SAVING],
       ["reopen", REOPENING],
       ["reload", RELOADING],
-      ["freshness", RELOADING],
+      ["freshness", CHECKING],
     ] as const
     for (const [op, sentence] of cases) {
       const release = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), op)!

@@ -138,7 +138,7 @@ Clicking a row still opens its diff; only the checkbox selects. On a phone the d
 
 ## Commit, push, pull
 
-The changes pane's header carries two controls: an **Editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone, where it shows the icon alone), and a `⋯` menu. In a pane too narrow for the title and the button, the button moves into the `⋯` as **Open editor**. To open a shell for that agent, use **New tab…** in the centre pane's header or **New terminal in the worktree** (**in the folder**, for a standalone agent) in the agent's `⋯` menu. The header's `⋯` menu holds the rest:
+The changes pane's header carries two controls: an **Editor** button that takes you straight to the editor for the agent whose changes you are looking at (in the page on a computer, in the editor's own tab on a phone, where it shows the icon alone), and a `⋯` menu. In a pane too narrow for the title and the button, the button moves into the `⋯` as **Open editor**. To open a shell for that agent, use **New tab…** in the centre pane's header or **New terminal tab in the worktree** (**in the folder**, for a standalone agent) in the agent's `⋯` menu. The header's `⋯` menu holds the rest:
 
 - **Commit…** opens a dialog for a multi-line message and commits **only the staged files**. It is disabled until something is staged, with a line under it saying so, and `Cmd/Ctrl+Enter` submits.
 - **Push** and **Pull** are one click each, with a progress toast that reports back to the browser tab you triggered them from.
