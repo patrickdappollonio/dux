@@ -15,7 +15,7 @@ const AFTER_LIFT_MS = 600
 
 // A phone short enough that the card covers most of the tree, so a row's own
 // place on screen is under the card once it opens.
-const PHONE_HEIGHT = 500
+const PHONE_HEIGHT = 340
 
 // Every visible row of the tree, by name and the middle of its box.
 function treeRows(page) {
@@ -102,12 +102,19 @@ module.exports = {
     H.expect(probe.backdrop, "the card should have a backdrop behind it for a tap outside to land on")
     await closeCard(H, dev)
 
-    // The opening touch chooses nothing: a row whose middle is inside one of
-    // the card's items, so the finger is over that item when the card opens.
-    const under = rows.find((row) => probe.items.some((item) => row.y > item.top + 4 && row.y < item.bottom - 4))
+    // The opening touch chooses nothing: the same row is pressed again, at a
+    // point of its own box that lies inside one of the card's items, so the
+    // finger is over that item when the card opens. The same row, because
+    // every kind of row has a menu of its own length and the card measured
+    // above is this row's.
+    const first = rows[0]
+    let under = null
+    for (let y = first.y - first.height / 2 + 2; y <= first.y + first.height / 2 - 2 && !under; y++) {
+      if (probe.items.some((item) => y > item.top + 4 && y < item.bottom - 4)) under = { name: first.name, x: first.x, y }
+    }
     H.expect(
       under,
-      `some row of the tree should lie under an item of the card (items at ${JSON.stringify(probe.items.map((i) => [Math.round(i.top), Math.round(i.bottom)]))}); the rows are at ${JSON.stringify(rows.map((r) => Math.round(r.y)))}`,
+      `some point of ${first.name}'s row (${Math.round(first.y - first.height / 2)}-${Math.round(first.y + first.height / 2)}) should lie under an item of its card (items at ${JSON.stringify(probe.items.map((i) => [Math.round(i.top), Math.round(i.bottom)]))})`,
     )
     finger = await holdOn(H, dev, under)
     await waitForCard(H, dev, `a long press on ${under.name} to open its menu`)
@@ -154,10 +161,12 @@ module.exports = {
     await H.press(dev, { name: "^Cancel$", selector: "button", within: H.DIALOG })
     await H.waitForNoDialog(dev, "the New file dialog on Cancel")
 
-    // Another device takes the agent over: the card says why its writes are off.
+    // Another device drives the agent: the card says why its writes are off.
+    // The phone's editor holds no terminal of the agent, so the row is free and
+    // the other device claims it by arriving; there is no card to take over.
     const other = await H.device(ctx, "computer", { userAgent: H.OTHER_DEVICE_UA })
     await H.goto(other, H.agentHash(await H.agentId(AGENT)))
-    await H.takeOver(other)
+    await H.drive(other)
     await H.waitFor(dev.page, () => document.body.innerText.includes("is active on"), `the editor to say the agent is active on ${OTHER}`, { timeout: 8000 })
 
     finger = await holdOn(H, dev, rows[0])
