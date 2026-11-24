@@ -112,7 +112,8 @@ const setChangesPaneVisibility = vi.mocked(store.setChangesPaneVisibility)
 const setAsidePreferencesDraft = vi.mocked(store.setAsidePreferencesDraft)
 const openConfigEditor = vi.mocked(store.openConfigEditor)
 const { openModals } = await import("@/lib/modalHistory")
-const { SETTING_TOPICS, allSettingDescriptors } = await import("@/lib/settingsDescriptors")
+const { SETTING_TOPICS, allSettingDescriptors, topicSettings } = await import("@/lib/settingsDescriptors")
+const { rowMeta, zeroText } = await import("@/components/preferencesModel")
 const { configApi } = await import("@/lib/configApi")
 const toggleGithubIntegration = vi.mocked(configApi.toggleGithubIntegration)
 const setTailscaleMode = vi.mocked(configApi.setTailscaleMode)
@@ -1115,7 +1116,7 @@ describe("CustomizeWebappDialog search", () => {
     expect(screen.queryByLabelText("Always show tab strip")).toBeNull()
     // The key may wrap after a dot or an underscore, so the lit run can be
     // drawn in pieces; together they are the words searched.
-    const key = [...document.querySelectorAll("span.font-mono")].find(
+    const key = [...document.querySelectorAll(".font-mono")].find(
       (el) => el.textContent === "ui.tab_reaches_agent",
     )!
     expect([...key.querySelectorAll("mark")].map((m) => m.textContent).join("")).toBe(
@@ -1632,5 +1633,138 @@ describe("CustomizeWebappDialog edge rows", () => {
     await waitFor(() => expect(closeCustomizeWebapp).toHaveBeenCalled())
     expect(setInstanceIdentity).toHaveBeenCalledWith({ title: "" })
     expect(saveSettings).not.toHaveBeenCalled()
+  })
+})
+
+describe("CustomizeWebappDialog rows as fields", () => {
+  const follows = (a: string, b: string, text: string) => text.indexOf(a) >= 0 && text.indexOf(a) < text.indexOf(b)
+  const plain = (words: string) => words.replace(/`/g, "")
+  // What describes `el`, in order, read as the words it points at.
+  const descriptions = (el: Element) =>
+    (el.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((id) => document.getElementById(id)?.textContent ?? `<missing ${id}>`)
+  // The drawn words that name `el`: the elements its aria-labelledby names, else its labels.
+  const namers = (el: Element): Element[] => {
+    const by = (el.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)
+    if (by.length > 0) return by.map((id) => document.getElementById(id)!).filter(Boolean)
+    return [...((el as HTMLInputElement).labels ?? [])]
+  }
+  // Each setting row's control in turn, its topic shown first.
+  const eachControl = (visit: (d: ReturnType<typeof allSettingDescriptors>[number], control: HTMLElement) => void) => {
+    for (const t of SETTING_TOPICS) {
+      topic(t.label)
+      for (const d of topicSettings(t.id)) {
+        if (d.control.kind === "password") continue
+        const control =
+          d.control.kind === "favicon" ? screen.getByRole("group", { name: d.label }) : screen.getByLabelText(d.label)
+        visit(d, control)
+      }
+    }
+  }
+
+  it("names every setting but the swatches by its label", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    for (const t of SETTING_TOPICS) {
+      topic(t.label)
+      for (const d of topicSettings(t.id)) {
+        if (d.control.kind === "password" || d.control.kind === "favicon") continue
+        expect(screen.getByLabelText(d.label).closest("[data-setting-row]")?.getAttribute("data-setting-row")).toBe(d.key)
+      }
+    }
+  })
+
+  it("draws a row's words in order: the changed mark, the label, the help, the zero line, the unsaved line, the key and where it applies", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    const d = allSettingDescriptors().find((x) => x.label === "Status message auto-clear")!
+    fireEvent.change(field(d.label), { target: { value: "9" } })
+    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "auto-clear" } })
+    const text = screen.getByLabelText(d.label).closest("[data-setting-row]")!.textContent!
+    const words = [
+      "Changed from default:",
+      d.label,
+      plain(d.description).slice(0, 30),
+      zeroText(d)!,
+      "Not saved yet. Saved: 6",
+      d.key,
+      rowMeta(d, true, true).map((part) => part.text).join(" · "),
+    ]
+    for (let i = 1; i < words.length; i++) expect(follows(words[i - 1], words[i], text), `${words[i - 1]} before ${words[i]}`).toBe(true)
+  })
+
+  it("lights the searched words in a row's label", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "font" } })
+    const row = screen.getByLabelText("Terminal font size").closest("[data-setting-row]")!
+    const label = row.querySelector('label, [id$="label"]')!
+    expect(label.textContent).toBe("Terminal font size")
+    expect([...label.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["font"])
+  })
+
+  it("leaves a switch, a select and a number alone when their words are pressed, and puts a text field's words on the field", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    const words = (label: string) => {
+      const row = screen.getByLabelText(label).closest("[data-setting-row]")!
+      return [...row.querySelectorAll("label, span, p, div")].filter((el) => el.textContent === label).at(-1)!
+    }
+    topic("Typing and touch")
+    const copy = screen.getByLabelText("Copy on select")
+    fireEvent.click(words("Copy on select"))
+    expect(copy.getAttribute("aria-checked")).toBe("true")
+    topic("Attention and messages")
+    expect((words("Status message auto-clear") as HTMLLabelElement).control ?? null).toBeNull()
+    topic("Sign-in and network")
+    fireEvent.click(words("Bind your Tailscale address"))
+    expect(screen.getByLabelText("Bind your Tailscale address").getAttribute("aria-expanded")).toBe("false")
+    topic("Appearance")
+    const name = screen.getByLabelText("Instance name")
+    expect((words("Instance name") as HTMLLabelElement).control).toBe(name)
+  })
+
+  it("ties every setting's control to the label drawn in its row", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    eachControl((d, control) => {
+      const row = control.closest("[data-setting-row]")!
+      const by = namers(control)
+      expect(by.map((el) => el.textContent), d.label).toEqual([d.label])
+      expect(row.contains(by[0]), d.label).toBe(true)
+    })
+  })
+
+  it("reads each setting's help, then its notes, with its control", () => {
+    seed({ tailscale_mode: "no", tailscale_forced_no: true })
+    render(<CustomizeWebappDialog />)
+    eachControl((d, control) => {
+      const read = descriptions(control)
+      const row = control.closest("[data-setting-row]")!.textContent!
+      expect(read[0] && row.includes(read[0]), d.label).toBe(true)
+      const zero = zeroText(d)
+      if (zero) expect(read, d.label).toContain(zero)
+      const changed = row.includes("Changed from default:")
+      expect(read.at(-1), d.label).toBe(rowMeta(d, changed, false).map((p) => p.text).join(" · "))
+    })
+    topic("Sign-in and network")
+    expect(descriptions(screen.getByLabelText("Bind your Tailscale address"))[0]).toContain("--no-tailscale")
+  })
+
+  it("reads an unsaved edit's line with its control", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    fireEvent.change(field("Status message auto-clear"), { target: { value: "9" } })
+    const read = descriptions(screen.getByLabelText("Status message auto-clear"))
+    expect(read.some((line) => line.startsWith("Not saved yet. Saved: 6")), read.join(" | ")).toBe(true)
+  })
+
+  it("names the favicon swatches as one group", () => {
+    seed()
+    render(<CustomizeWebappDialog />)
+    const group = screen.getByRole("group", { name: "Favicon" })
+    expect(within(group).getByRole("button", { name: "Original" })).toBeTruthy()
   })
 })

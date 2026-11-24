@@ -5,6 +5,7 @@ import { Radio } from "@base-ui/react/radio"
 import { RadioGroup } from "@base-ui/react/radio-group"
 
 import { Input } from "./input"
+import { Switch } from "./switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./select"
 import { Textarea } from "./textarea"
 
@@ -15,7 +16,7 @@ vi.mock("@/hooks/use-mobile", () => ({
   useIsMobile: () => phone,
 }))
 
-const { FormGroup } = await import("./form-group")
+const { FormGroup, FormSection } = await import("./form-group")
 const { CheckboxRow } = await import("@/components/CheckboxRow")
 
 afterEach(() => {
@@ -371,6 +372,44 @@ describe("FormGroup", () => {
     expect(follows(stack, screen.getByText("Stack error."))).toBe(true)
   })
 
+  it("names an inert control by its words, and a press on the words leaves it alone", () => {
+    render(
+      <FormGroup layout="side" control="inert" label="Copy on select" help="Help.">
+        {(field) => <Switch {...field} defaultChecked />}
+      </FormGroup>,
+    )
+    const toggle = screen.getByRole("switch", { name: "Copy on select" })
+    expect(descriptions(toggle)).toEqual(["Help."])
+    fireEvent.click(screen.getByText("Copy on select"))
+    expect(toggle.getAttribute("aria-checked")).toBe("true")
+  })
+
+  it("draws a code note in monospace and reads it with the field", () => {
+    render(
+      <FormGroup layout="side" control="single" label="Port" notes={[{ words: "server.port", code: true }]}>
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+    )
+    expect(descriptions(screen.getByRole("textbox", { name: "Port" }))).toEqual(["server.port"])
+    expect(screen.getByText("server.port").className).toContain("font-mono")
+  })
+
+  it("sets a compact stacked field's label closer to its control than a regular one's", () => {
+    render(
+      <>
+        <FormGroup layout="stacked" density="compact" control="single" label="Close">
+          {(field) => <Input {...field} />}
+        </FormGroup>
+        <FormGroup layout="stacked" control="single" label="Regular">
+          {(field) => <Input {...field} />}
+        </FormGroup>
+      </>,
+    )
+    const gap = (name: string) => screen.getByRole("textbox", { name }).closest("[data-form-layout]")!.className
+    expect(gap("Close")).toContain("gap-1")
+    expect(gap("Regular")).toContain("gap-2")
+  })
+
   it("says so when a caller leaves the wiring off its control", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {})
     render(
@@ -394,5 +433,27 @@ describe("CheckboxRow", () => {
     expect(descriptions(box)).toEqual(["Only for this project."])
     fireEvent.click(screen.getByText("Also delete the branch"))
     expect(onChange).toHaveBeenCalledWith(true, expect.anything())
+  })
+})
+
+describe("FormSection", () => {
+  it("names its fields' group by its title and reads its words, then its error, with the group", () => {
+    render(
+      <FormSection title="Password" help="Help." notes={[{ words: "Note." }]} error="Refused." errorAnnounce="alert">
+        <FormGroup layout="stacked" density="compact" control="single" label="New password">
+          {(field) => <Input {...field} />}
+        </FormGroup>
+      </FormSection>,
+    )
+    const group = screen.getByRole("group", { name: "Password" })
+    expect(descriptions(group)).toEqual(["Help.", "Note.", "Refused."])
+    expect(group.contains(screen.getByRole("textbox", { name: "New password" }))).toBe(true)
+    expect(group.contains(screen.getByRole("alert"))).toBe(true)
+  })
+
+  it("draws its words alone, with no group, when it has no fields", () => {
+    render(<FormSection title="Password" help="Set from the command line." />)
+    expect(screen.queryByRole("group")).toBeNull()
+    expect(screen.getByText("Set from the command line.")).toBeTruthy()
   })
 })
