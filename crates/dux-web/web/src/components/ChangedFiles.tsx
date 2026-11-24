@@ -42,7 +42,7 @@ import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
-import { MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
+import { MenuGroupReason, MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
 import { useMenuReason } from "@/hooks/use-menu-reason"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
@@ -656,35 +656,42 @@ const FileRow = memo(function FileRow({
           />
           {menuMounted ? (
             <DropdownMenuContent side="bottom" align="end">
-              {/* Said once, at the top, for the writes it greys out, which
-                * name it as their description. Edit stays: the editor opens
-                * read-only. */}
-              <MenuReasonsHead reasons={[writeReason]} />
-              {/* Open in the editor. Skipped for deleted files (nothing on
-                  disk to edit) and for a folded folder (a directory is not a
-                  file to edit). */}
+              {/* Edit stays: the editor opens read-only. Open in the editor is
+                * skipped for deleted files (nothing on disk to edit) and for a
+                * folded folder (a directory is not a file to edit). */}
               {showEdit && (
                 <DropdownMenuItem onClick={() => onEdit(file.path)}>
                   <Pencil />
                   Edit
                 </DropdownMenuItem>
               )}
+              {/* The writes that follow are the ones the reason greys out, so it
+                * sits at their head, below Edit, and each names it as its
+                * description. */}
               {showStageAction && (
-                <DropdownMenuItem
-                  disabled={writeBlocked !== null}
-                  aria-describedby={writeReason.describedBy}
-                  onClick={() => void runAction()}
-                >
-                  {action === "stage" ? <Plus /> : <Minus />}
-                  {action === "stage" ? "Stage" : "Unstage"}
-                </DropdownMenuItem>
+                <>
+                  <MenuGroupReason reasons={[writeReason]} apart={showEdit} />
+                  <DropdownMenuItem
+                    disabled={writeBlocked !== null}
+                    aria-describedby={writeReason.describedBy}
+                    onClick={() => void runAction()}
+                  >
+                    {action === "stage" ? <Plus /> : <Minus />}
+                    {action === "stage" ? "Stage" : "Unstage"}
+                  </DropdownMenuItem>
+                </>
               )}
               {/* Discard, on unstaged rows only. Destructive, so the trailing "…"
                 * and the confirm dialog carry the danger and the item itself
-                * stays neutral. */}
+                * stays neutral. With no Stage above it, the reason heads the
+                * group here instead. */}
               {showDiscard && (
                 <>
-                  <DropdownMenuSeparator />
+                  {showStageAction ? (
+                    <DropdownMenuSeparator />
+                  ) : (
+                    <MenuGroupReason reasons={[writeReason]} apart={showEdit} />
+                  )}
                   <DropdownMenuItem
                     disabled={writeBlocked !== null}
                     aria-describedby={writeReason.describedBy}
@@ -1010,15 +1017,15 @@ function ChangesHeader({
     gitBlocked ?? (changeBlock === null ? null : agentChangeBlockReason(changeBlock, driver))
   // Every git item carries the one reason line as its description, so a
   // screen reader hears why on the item itself while sighted readers see it
-  // once at the head of the menu rather than repeated under each row.
+  // once, over the git items, rather than repeated under each row.
   const blocked = writeBlocked !== null
   // Folded, the editor and terminal items carry their own reason the same way.
-  // A gone directory greys both kinds of item with one sentence, which the
-  // menu then says once, at its head, for all of them.
+  // A gone directory greys both kinds of item, and the git items, with one
+  // sentence, which the menu then says once, at its head, for all of them.
   const editorReason = folded ? editorBlocked : null
   const terminalReason = folded ? terminalBlocked : null
-  // Said once, at the head, when it is the editor's reason too; otherwise it
-  // is New terminal's alone and said beneath it.
+  // Said with the editor's when it is the same sentence; otherwise it is New
+  // terminal's alone and said beneath it.
   const terminalReasonOwn = terminalReason !== null && terminalReason !== editorReason
   const gitReasonShared = editorReason !== null && writeBlocked === editorReason
   const editorLine = useMenuReason(editorReason)
@@ -1080,9 +1087,14 @@ function ChangesHeader({
             aria-label="Changes actions"
           />
           <DropdownMenuContent align="end">
-            <MenuReasonsHead reasons={[editorLine, gitLine]} />
+            {/* One sentence for everything above the Hide row (a directory that
+              is gone) is said once at the very top. Otherwise each sentence sits
+              over its own items: the editor's over the folded buttons, the git
+              one over the git items, wherever they fall. */}
+            {gitReasonShared ? <MenuReasonsHead reasons={[editorLine]} /> : null}
             {folded ? (
               <>
+                {gitReasonShared ? null : <MenuGroupReason reasons={[editorLine]} />}
                 {/* The header's two buttons, doing what they do there: the
                   * in-page editor on a computer, the standalone editor's
                   * address on a phone, and neither for a directory that is
@@ -1142,6 +1154,14 @@ function ChangesHeader({
               * pane back on its own within that cadence. Reopening the pane
               * or reselecting the agent asks too, which is what the quiet
               * sentences' "reopen this panel" promises. */}
+            {/* The git items are the whole menu above Hide when nothing is
+              folded in, so their reason is the menu's one line at the top;
+              under the folded buttons it heads its own group instead. */}
+            {folded ? (
+              <MenuGroupReason reasons={[gitLine]} />
+            ) : (
+              <MenuReasonsHead reasons={[gitLine]} />
+            )}
             <DropdownMenuItem
               onClick={() => openCommit(sessionId)}
               disabled={blocked || stagedCount === 0}

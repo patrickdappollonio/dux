@@ -151,6 +151,28 @@ describe("LauncherCorner", () => {
     ).toBeTruthy()
   })
 
+  it("ties the entries that wait for a project to the lead sentence, and leaves the rest alone", async () => {
+    seed({ projects: 0, sessions: 0 })
+    render(<LauncherCorner />)
+    await openMenu()
+    const lead = screen.getByText("Add a project first, then start agents on it.")
+    expect(lead.id).not.toBe("")
+    const describedBy = (title: string) => entry(title)!.getAttribute("aria-describedby")
+    expect(describedBy("New agent from PR…")).toBe(lead.id)
+    expect(describedBy("New agent from existing worktree…")).toBe(lead.id)
+    // Waiting for an agent is a different thing the lead does not say.
+    expect(describedBy("New terminal for an agent…")).toBeNull()
+    expect(describedBy("Add project…")).toBeNull()
+  })
+
+  it("names nothing when the workspace has a project", async () => {
+    render(<LauncherCorner />)
+    await openMenu()
+    for (const item of screen.getAllByRole("menuitem")) {
+      expect(item.hasAttribute("aria-describedby")).toBe(false)
+    }
+  })
+
   it("leaves the from-PR entry out where gh is not available", async () => {
     state.current = { ...state.current, bootstrap: { gh_available: false } }
     render(<LauncherCorner />)

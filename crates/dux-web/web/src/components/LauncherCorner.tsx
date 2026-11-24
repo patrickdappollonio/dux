@@ -1,5 +1,5 @@
 import { ChevronDown, Plus } from "lucide-react"
-import { Fragment } from "react"
+import { Fragment, useId } from "react"
 
 import { Button } from "@/components/ui/button"
 import { ButtonGroup, ButtonGroupSeparator } from "@/components/ui/button-group"
@@ -38,6 +38,10 @@ export function LauncherCorner({ className }: { className?: string }) {
   const { primary, menu } = launcherCornerModel(
     newLauncherModel({ ghAvailable, projectCount, agentCount }),
   )
+  // The lead sentence's id, named by every row that is greyed for want of a
+  // project, so a screen reader hears it on the row. The lead and those rows
+  // both exist exactly when the workspace has no project.
+  const leadId = useId()
   return (
     // size="sm" is the one height token for both halves. On a computer they
     // are 28px tall, the per-axis exemption: the corner has no other control
@@ -76,12 +80,12 @@ export function LauncherCorner({ className }: { className?: string }) {
               <DropdownMenuGroup>
                 <DropdownMenuLabel>{group.title}</DropdownMenuLabel>
                 {group.lead ? (
-                  <p className="px-1.5 pb-1 text-xs text-foreground">
+                  <p id={leadId} className="px-1.5 pb-1 text-xs text-foreground">
                     {group.lead}
                   </p>
                 ) : null}
                 {group.rows.map((row) => (
-                  <LauncherMenuEntry key={row.id} row={row} />
+                  <LauncherMenuEntry key={row.id} row={row} leadId={leadId} />
                 ))}
               </DropdownMenuGroup>
             </Fragment>
@@ -92,12 +96,13 @@ export function LauncherCorner({ className }: { className?: string }) {
   )
 }
 
-function LauncherMenuEntry({ row }: { row: NewLauncherRow }) {
+function LauncherMenuEntry({ row, leadId }: { row: NewLauncherRow; leadId: string }) {
   const Icon = row.icon
   return (
     <DropdownMenuItem
       data-row-id={row.id}
       disabled={row.disabled}
+      aria-describedby={row.waitingFor === "project" ? leadId : undefined}
       onClick={() => run(row)}
       className="items-start gap-2.5 py-1.5"
     >

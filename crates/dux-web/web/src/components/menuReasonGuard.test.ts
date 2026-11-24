@@ -10,19 +10,32 @@ import { sourceFilesUnder, withoutComments } from "@/test/sourceFiles"
 // This guard reads every source file under `src` (tests excluded), comments
 // dropped, and fails on the three marks a hand-built reason leaves:
 //
-// - a menu label given anything (`<DropdownMenuLabel id=…` or `className=…`,
-//   the same for `ContextMenuLabel`): a group heading is written bare, and a
-//   label with an id or a width was a reason;
+// - a menu label given an `id`, a `className` or a `style` (`<DropdownMenuLabel
+//   id=…`, the same for `ContextMenuLabel`): a group heading is written bare or
+//   with `inset`, a `key` or a data attribute, and a label with an id or a
+//   width was a reason;
 // - a menu group label reached directly (`GroupLabel`) outside the menu
 //   primitives and `MenuReason.tsx`;
 // - a menu item, submenu trigger, checkbox or radio item whose
 //   `aria-describedby` does not name a reason's `describedBy`.
 //
-// It reads text, not the program. It cannot see a description passed in a
-// spread (`{...props}`), a reason drawn as a plain `<div>` or `<p>` that no
-// item names, or an identifier called `describedBy` that holds something else.
-// A comment start in an unusual place (a regular expression holding a quote or
-// `//`) can hide the rest of its line.
+// What it cannot see, and what covers it instead:
+//
+// - a reason drawn as a plain `<div>` or `<p>`: it is only caught when an item
+//   names its id by hand, which is the third mark. One that no item names
+//   looks like any other paragraph in a menu. The launcher's lead sentence is
+//   such a paragraph, and the one allowed here;
+// - a description passed in a spread (`{...props}`), or an identifier called
+//   `describedBy` that holds something else;
+// - a reason made and never placed: no check here, because none is needed. A
+//   handle's `describedBy` stays empty until a `MenuReason` line that says it
+//   is drawn (use-menu-reason.ts, pinned in MenuReason.test.tsx), so an item
+//   cannot point at an id that was never drawn;
+// - where a reason sits, which the rendered-order tests in MenuReason.test.tsx
+//   pin for the shared pieces and the call sites' own tests for each menu.
+//
+// It reads text, not the program. A comment start in an unusual place (a
+// regular expression holding a quote or `//`) can hide the rest of its line.
 
 const root = fileURLToPath(new URL("../", import.meta.url))
 
@@ -34,7 +47,9 @@ interface Finding {
   text: string
 }
 
-const LABEL_WITH_PROPS = /<(?:DropdownMenu|ContextMenu)Label\s+[\w{]/g
+const LABEL = /<(?:DropdownMenu|ContextMenu)Label\b/g
+// What makes a label a reason rather than a heading.
+const REASON_ATTRIBUTES = new Set(["id", "className", "style"])
 const GROUP_LABEL = /\bGroupLabel\b/g
 const ITEM_TAG = /<(?:DropdownMenu|ContextMenu)(?:Item|SubTrigger|CheckboxItem|RadioItem)\b/g
 
@@ -55,6 +70,43 @@ function openingTag(source: string, start: number): string {
     else if (c === ">" && depth === 0) return source.slice(start, i + 1)
   }
   return source.slice(start)
+}
+
+// The attribute names of an opening tag, skipping each value (a quoted string,
+// or a braced expression that may hold quotes and braces of its own).
+function attributeNames(tag: string): string[] {
+  const names: string[] = []
+  let i = tag.search(/[\s>/]/)
+  while (i >= 0 && i < tag.length) {
+    while (i < tag.length && /\s/.test(tag[i]!)) i++
+    if (i >= tag.length || tag[i] === ">" || tag[i] === "/") break
+    if (tag[i] === "{") {
+      i = skipBraces(tag, i)
+      continue
+    }
+    const start = i
+    while (i < tag.length && !/[\s=>/]/.test(tag[i]!)) i++
+    names.push(tag.slice(start, i))
+    if (tag[i] !== "=") continue
+    i++
+    if (tag[i] === "{") i = skipBraces(tag, i)
+    else if (tag[i] === '"' || tag[i] === "'") i = tag.indexOf(tag[i]!, i + 1) + 1 || tag.length
+  }
+  return names
+}
+
+function skipBraces(tag: string, at: number): number {
+  let depth = 0
+  let quote: string | null = null
+  for (let i = at; i < tag.length; i++) {
+    const c = tag[i]!
+    if (quote !== null) {
+      if (c === quote) quote = null
+    } else if (c === '"' || c === "'" || c === "`") quote = c
+    else if (c === "{") depth++
+    else if (c === "}" && --depth === 0) return i + 1
+  }
+  return tag.length
 }
 
 // The braced expression after `aria-describedby=` in a tag, or the quoted value.
@@ -85,8 +137,10 @@ export function findHandBuiltReasons(files: Record<string, string>): Finding[] {
   for (const [file, raw] of Object.entries(files)) {
     const source = withoutComments(raw)
     const lineAt = (i: number) => source.slice(source.lastIndexOf("\n", i) + 1, source.indexOf("\n", i)).trim()
-    for (const m of source.matchAll(LABEL_WITH_PROPS)) {
-      out.push({ file, mark: "label-with-props", text: lineAt(m.index) })
+    for (const m of source.matchAll(LABEL)) {
+      if (attributeNames(openingTag(source, m.index)).some((n) => REASON_ATTRIBUTES.has(n))) {
+        out.push({ file, mark: "label-with-props", text: lineAt(m.index) })
+      }
     }
     for (const m of source.matchAll(GROUP_LABEL)) {
       out.push({ file, mark: "group-label", text: lineAt(m.index) })
@@ -104,6 +158,7 @@ export function findHandBuiltReasons(files: Record<string, string>): Finding[] {
 
 // One entry per exact occurrence. An entry that matches nothing fails the suite.
 const ALLOWED: { file: string; mark: Mark; contains: string; reason: string }[] = [
+  { file: "components/LauncherCorner.tsx", mark: "hand-wired-description", contains: "leadId", reason: "the launcher's lead sentence: its words and place are fixed by the launcher tenet, so it stays a paragraph and the greyed entries name it" },
   { file: "components/MenuReason.tsx", mark: "group-label", contains: "<MenuPrimitive.GroupLabel", reason: "the shared reason line itself" },
   { file: "components/MenuReason.tsx", mark: "group-label", contains: "</MenuPrimitive.GroupLabel>", reason: "its closing tag" },
   { file: "components/ui/dropdown-menu.tsx", mark: "group-label", contains: "MenuPrimitive.GroupLabel.Props", reason: "the primitive's heading part" },
@@ -148,6 +203,8 @@ describe("a disabled menu item's reason is the shared MenuReason", () => {
       "three.tsx": `<Menu.GroupLabel id={id}>{why}</Menu.GroupLabel>`,
       "four.tsx": `<DropdownMenuItem\n  onClick={() => go()}\n  aria-describedby={blocked ? reasonId : undefined}\n>Go</DropdownMenuItem>`,
       "five.tsx": `<DropdownMenuSubTrigger aria-describedby="why">More</DropdownMenuSubTrigger>`,
+      "six.tsx": `<DropdownMenuLabel inset id={id}>{why}</DropdownMenuLabel>`,
+      "seven.tsx": `<DropdownMenuLabel style={{ maxWidth: 200 }}>{why}</DropdownMenuLabel>`,
     }
     const hit = new Set(findHandBuiltReasons(cases).map((f) => f.file))
     expect([...hit].sort()).toEqual(Object.keys(cases).sort())
@@ -156,6 +213,7 @@ describe("a disabled menu item's reason is the shared MenuReason", () => {
   it("passes a heading and a described item", () => {
     const fine = {
       "ok.tsx": `<DropdownMenuLabel>{MENU_GROUP_LABELS.running}</DropdownMenuLabel>\n<DropdownMenuItem disabled={x} aria-describedby={reason.describedBy} onClick={() => go()}>Go</DropdownMenuItem>`,
+      "heading.tsx": `<DropdownMenuLabel inset>Tabs</DropdownMenuLabel>\n<DropdownMenuLabel key={group.id} data-group={group.id}>{group.title}</DropdownMenuLabel>\n<ContextMenuLabel inset={wide} {...rest}>More</ContextMenuLabel>`,
     }
     expect(findHandBuiltReasons(fine)).toEqual([])
   })

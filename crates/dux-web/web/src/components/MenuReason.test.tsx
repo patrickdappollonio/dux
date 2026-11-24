@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { installBrowserHistory } from "@/test/browserHistory"
+import { menuLayout, separatorProblems } from "@/test/menuLayout"
 
 // An open menu closes on Back through the store, so the real store is loaded
 // over a history that has an entry for it.
@@ -13,12 +14,13 @@ vi.stubGlobal(
 )
 await import("@/lib/store")
 
-import { MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
+import { MenuGroupReason, MenuItemReason, MenuReasonsHead } from "@/components/MenuReason"
 import { useMenuReason } from "@/hooks/use-menu-reason"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
@@ -98,6 +100,181 @@ describe("a disabled menu item's reason", () => {
     expect(reasons()).toEqual([])
     expect(menu.querySelector('[role="separator"]')).toBeNull()
     expect(menu.firstElementChild).toBe(item("Commit…"))
+  })
+})
+
+// Where a reason sits is what it covers, read from the rendered order and not
+// from classes: the whole menu is one line first, a group is a line directly
+// above its first item, and one item's reason is directly beneath it.
+describe("where a reason sits", () => {
+  const WHOLE = "Everything here is read-only."
+  const GROUP = "Nothing is staged."
+  const ITEM = "No branch to push."
+  const OTHER_GROUP = "No repository."
+
+  function Placed({
+    whole = null,
+    group = null,
+    other = null,
+    item = null,
+    leadingRow = true,
+  }: {
+    whole?: string | null
+    group?: string | null
+    other?: string | null
+    item?: string | null
+    leadingRow?: boolean
+  }) {
+    const wholeReason = useMenuReason(whole)
+    const groupReason = useMenuReason(group)
+    const otherReason = useMenuReason(other)
+    const itemReason = useMenuReason(item)
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger>open</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <MenuReasonsHead reasons={[wholeReason]} />
+          {leadingRow ? <DropdownMenuItem>Open</DropdownMenuItem> : null}
+          <MenuGroupReason reasons={[groupReason]} apart={leadingRow} />
+          <DropdownMenuItem disabled={group !== null} aria-describedby={groupReason.describedBy}>
+            Commit
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={group !== null} aria-describedby={groupReason.describedBy}>
+            Push
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <MenuGroupReason reasons={[otherReason]} />
+          <DropdownMenuItem disabled={other !== null} aria-describedby={otherReason.describedBy}>
+            Pull
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={item !== null} aria-describedby={itemReason.describedBy}>
+            Refresh
+          </DropdownMenuItem>
+          <MenuItemReason reason={itemReason} />
+          <DropdownMenuItem>Hide</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
+  async function layoutOf(ui: React.ReactElement) {
+    render(ui)
+    return menuLayout(await open())
+  }
+
+  it("puts a whole-menu reason first, set apart from the rows", async () => {
+    const layout = await layoutOf(<Placed whole={WHOLE} />)
+    expect(layout.slice(0, 3)).toEqual([`reason: ${WHOLE}`, "---", "Open"])
+    expect(separatorProblems(layout)).toEqual([])
+  })
+
+  it("puts a group's reason directly above the first item it greys, beneath what is live", async () => {
+    const layout = await layoutOf(<Placed group={GROUP} />)
+    const at = layout.indexOf(`reason: ${GROUP}`)
+    expect(layout.slice(at - 2, at + 3)).toEqual(["Open", "---", `reason: ${GROUP}`, "Commit", "Push"])
+    expect(layout[0]).toBe("Open")
+    expect(separatorProblems(layout)).toEqual([])
+  })
+
+  it("puts an item's reason directly beneath that item", async () => {
+    const layout = await layoutOf(<Placed item={ITEM} />)
+    const at = layout.indexOf("Refresh")
+    expect(layout.slice(at, at + 3)).toEqual(["Refresh", `reason: ${ITEM}`, "Hide"])
+  })
+
+  it("puts two different sentences each over its own items", async () => {
+    const layout = await layoutOf(<Placed group={GROUP} other={OTHER_GROUP} />)
+    expect(layout).toEqual([
+      "Open",
+      "---",
+      `reason: ${GROUP}`,
+      "Commit",
+      "Push",
+      "---",
+      `reason: ${OTHER_GROUP}`,
+      "Pull",
+      "Refresh",
+      "Hide",
+    ])
+  })
+
+  it("never starts on a rule when a group's reason is the first thing", async () => {
+    const layout = await layoutOf(<Placed group={GROUP} leadingRow={false} />)
+    expect(layout[0]).toBe(`reason: ${GROUP}`)
+    expect(separatorProblems(layout)).toEqual([])
+  })
+
+  it("leaves no stray rule in any mix of reasons", async () => {
+    const states: Parameters<typeof Placed>[0][] = []
+    for (const whole of [null, WHOLE]) {
+      for (const group of [null, GROUP]) {
+        for (const other of [null, OTHER_GROUP]) {
+          for (const item of [null, ITEM]) {
+            for (const leadingRow of [true, false]) {
+              states.push({ whole, group, other, item, leadingRow })
+            }
+          }
+        }
+      }
+    }
+    for (const state of states) {
+      const { unmount } = render(<Placed {...state} />)
+      const layout = menuLayout(await open())
+      expect(separatorProblems(layout), JSON.stringify(state)).toEqual([])
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
+      unmount()
+    }
+  })
+})
+
+// A reason is a handle and a line, and the two cannot come apart.
+describe("a reason's handle and its line", () => {
+  function Unplaced() {
+    const reason = useMenuReason(SHARED)
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger>open</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem disabled aria-describedby={reason.describedBy}>
+            Commit…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
+  it("leaves an item describing nothing when its reason is never drawn", async () => {
+    render(<Unplaced />)
+    await open()
+    expect(reasons()).toEqual([])
+    expect(item("Commit…").hasAttribute("aria-describedby")).toBe(false)
+  })
+
+  function Twice() {
+    const first = useMenuReason(SHARED)
+    const second = useMenuReason(SHARED)
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger>open</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <MenuReasonsHead reasons={[first, second]} />
+          <DropdownMenuItem disabled aria-describedby={first.describedBy}>
+            Commit…
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled aria-describedby={second.describedBy}>
+            Push
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    )
+  }
+
+  it("says one sentence once however many handles carry it, and each item names that line", async () => {
+    render(<Twice />)
+    await open()
+    expect(reasons().map((r) => r.textContent)).toEqual([SHARED])
+    expect(description(item("Commit…"))).toBe(SHARED)
+    expect(description(item("Push"))).toBe(SHARED)
   })
 })
 
