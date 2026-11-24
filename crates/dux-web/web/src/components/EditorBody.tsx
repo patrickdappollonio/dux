@@ -47,7 +47,7 @@ import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
-import { laneKey, useLaneBusy, type LaneOp } from "@/lib/editorLane"
+import { laneKey, useLaneBusy } from "@/lib/editorLane"
 import {
   dismissNotice,
   encodingNotices,
