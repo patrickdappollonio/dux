@@ -35,7 +35,6 @@ const OWNERS: Record<string, string> = {
 /** Files whose fields have not moved onto `FormGroup` yet: how many hand-written
  * labels each holds, and the step of the move that takes them. */
 const STILL_TO_MOVE: Record<string, { labels: number; step: string }> = {
-  "components/CustomizeWebappDialog.tsx": { labels: 5, step: "2: the Preferences row" },
   "components/ChangeProviderDialog.tsx": { labels: 1, step: "3: dialog by dialog" },
   "components/CloneProjectDialog.tsx": { labels: 3, step: "3: dialog by dialog" },
   "components/LoginPage.tsx": { labels: 1, step: "3: dialog by dialog" },
@@ -47,6 +46,7 @@ const STILL_TO_MOVE: Record<string, { labels: number; step: string }> = {
 const NOT_FIELDS: Record<string, { count: number; reason: string }> = {
   "components/ChangedFiles.tsx": { count: 1, reason: "the hidden words `Select <path>` that name a changed-file row's checkbox, which takes the row's leading slot and cannot be a `CheckboxRow`" },
   "components/ProjectList.tsx": { count: 1, reason: "the project's name in its row, which is also the name of the row's button; the row is a list item, not a field" },
+  "components/CustomizeWebappDialog.tsx": { count: 1, reason: "the title of the browser-permission line under Desktop notifications: a sentence and a button named by its own words, no field" },
   "components/ChunkBoundary.tsx": { count: 1, reason: "the heading of the error card" },
   "components/FirstLoadDialog.tsx": { count: 1, reason: "the title of one step of the welcome list" },
   "components/MobileShell.tsx": { count: 1, reason: "the title of the Changes screen's header" },
@@ -55,7 +55,7 @@ const NOT_FIELDS: Record<string, { count: number; reason: string }> = {
   "components/terminal/partPieces.tsx": { count: 1, reason: "the headline of the file-drop overlay" },
 }
 
-const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|CHECK_LABEL_TEXT)\b/
+const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|FIELD_CODE_TEXT|CHECK_LABEL_TEXT)\b/
 
 /** The whole opening tag that starts at `at` (`code[at]` is its `<`): it ends at the
  * first `>` outside a quote, a `{…}` expression and a template, so an arrow

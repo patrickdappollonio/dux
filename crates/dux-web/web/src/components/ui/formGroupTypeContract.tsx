@@ -1,7 +1,7 @@
 // What a caller of `FormGroup` cannot write, checked by `tsc -b` in the build:
 // each line under a directive is a compile error, and a directive with no error
 // under it is one. Nothing imports this file, so none of it reaches the bundle.
-import { FormGroup } from "./form-group"
+import { FormGroup, FormSection } from "./form-group"
 
 export function FormGroupTypeContract({ name }: { name: string | undefined }) {
   const words: string | false | null = name === undefined ? null : name
@@ -19,6 +19,29 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       <FormGroup layout="stacked" height="fill" control="single" label="Text">
         {(field) => <textarea {...field} />}
       </FormGroup>
+      <FormGroup layout="side" control="inert" label="Copy" notes={[{ words: "ui.copy", code: true }]}>
+        {(field) => <button type="button" {...field} />}
+      </FormGroup>
+      <FormGroup layout="stacked" density="compact" control="single" label="New password">
+        {(field) => <input {...field} />}
+      </FormGroup>
+      <FormSection title="Password" help="Help." notes={[{ words: "Note." }]}>
+        <input />
+      </FormSection>
+      {/* @ts-expect-error a density is a stacked field's choice */}
+      <FormGroup layout="side" density="compact" control="single" label="Name">
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a code note has no tone of its own */}
+      <FormGroup layout="side" control="single" label="Name" notes={[{ words: "x", code: true, tone: "warning" }]}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a section has a title */}
+      <FormSection help="Help." />
+      {/* @ts-expect-error a title that may be missing leaves the group nameless */}
+      <FormSection title={name} />
+      {/* @ts-expect-error a caller-chosen class */}
+      <FormSection title="Password" className="gap-1" />
       {/* @ts-expect-error a field with neither a label nor a spoken name has no name */}
       <FormGroup layout="stacked" control="single">
         {(field) => <input {...field} />}

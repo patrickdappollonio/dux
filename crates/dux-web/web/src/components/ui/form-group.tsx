@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, type ReactElement, type ReactNode } from "react"
 
 import { ErrorLine, type ErrorLineAnnounce } from "@/components/ErrorLine"
-import { FIELD_HELP_TEXT, FIELD_LABEL_TEXT, FIELD_WARNING_TEXT } from "@/components/ui/form-text"
+import { FIELD_CODE_TEXT, FIELD_HELP_TEXT, FIELD_LABEL_TEXT, FIELD_WARNING_TEXT } from "@/components/ui/form-text"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
@@ -20,27 +20,27 @@ export interface FieldWiring {
 // The compiler cannot see an empty string, so the group reports one when drawn.
 type FieldName = { label: ReactElement | string; spokenName?: never } | { spokenName: string; label?: never }
 
-// One line about the current value. A "warning" one reads as the warning it is.
-export interface NoteLine {
-  words: ReactNode
-  tone?: "warning"
-}
+// One line about the current value. A "warning" one reads as the warning it is;
+// a "code" one is a config key, monospace and broken anywhere it must wrap.
+export type NoteLine = { words: ReactNode; tone?: "warning"; code?: never } | { words: ReactNode; code: true; tone?: never }
 
 // The layout decides where the note lines and the error go, never the width of
 // the screen. "side" keeps all of a field's words (label, help, notes, error)
 // in one block beside the control, and on a phone a "wide" control goes under
 // that whole block, so the notes are above it. "stacked" draws the label and
 // help, then the control, then the notes and the error under it; "fill" makes
-// the group and its control take the height left in a column.
+// the group and its control take the height left in a column, and "compact"
+// sets the label 4px above its control instead of 8px, for the fields of a `FormSection`.
 type FieldLayout =
-  | { layout: "side"; width?: "compact" | "wide"; height?: never }
-  | { layout: "stacked"; height?: "content" | "fill"; width?: never }
+  | { layout: "side"; width?: "compact" | "wide"; height?: never; density?: never }
+  | { layout: "stacked"; height?: "content" | "fill"; density?: "regular" | "compact"; width?: never }
 
 export type FormGroupProps = FieldName &
   FieldLayout & {
-    // "single" is one control a `<label>` points at; "group" is a set of
-    // controls (a radio group) named by the label's id.
-    control: "single" | "group"
+    // "single" is one control a `<label>` points at, so a press on the words
+    // reaches it; "inert" is one control named by the words' id, which a press
+    // leaves alone; "group" is a set of controls (a radio group) named by that id.
+    control: "single" | "inert" | "group"
     help?: ReactNode
     // About the current value (a scope, what the chosen option means), a line
     // each, in order, after the help. A line with no words is not drawn.
@@ -68,9 +68,7 @@ export function FormGroup(props: FormGroupProps) {
   const id = `${base}control`
   const labelId = `${base}label`
   const helpId = help != null ? `${base}help` : undefined
-  const noteLines = (notes ?? []).flatMap((line, i) =>
-    line.words == null || line.words === false || line.words === "" ? [] : [{ ...line, id: `${base}note${i}` }],
-  )
+  const noteLines = drawnNotes(notes, base)
   const hasError = error != null && error !== false && error !== ""
   const errorId = hasError ? `${base}error` : undefined
   const spoken = props.spokenName !== undefined
@@ -79,7 +77,7 @@ export function FormGroup(props: FormGroupProps) {
   const field: FieldWiring = {
     id: control === "single" ? id : undefined,
     "aria-label": spoken ? props.spokenName : undefined,
-    "aria-labelledby": control === "group" && !spoken ? labelId : undefined,
+    "aria-labelledby": control !== "single" && !spoken ? labelId : undefined,
     "aria-describedby": [helpId, ...noteLines.map((line) => line.id), errorId, describedBy].filter(Boolean).join(" ") || undefined,
     "aria-invalid": invalid || hasError ? true : undefined,
   }
@@ -114,17 +112,21 @@ export function FormGroup(props: FormGroupProps) {
       {props.label}
     </label>
   ) : (
-    <span id={labelId} onClick={focusGroup} className={cn(FIELD_LABEL_TEXT, "min-w-0")}>
+    <span id={labelId} onClick={control === "group" ? focusGroup : undefined} className={cn(FIELD_LABEL_TEXT, "min-w-0")}>
       {props.label}
     </span>
   )
-  // Not `UnsavedDot`: that is the editor's "unsaved edits" glyph with a
-  // tooltip; this is a small dot that says in words the value differs from its default.
+  // Not `UnsavedDot` (the editor's glyph, with a tooltip): this dot says in words the value
+  // differs from its default. A side field's label always sits in this row, as wide as its words.
   const labelLine =
-    labelEl !== null && changed ? (
+    labelEl !== null && (changed || props.layout === "side") ? (
       <div className="flex items-center gap-1.5">
-        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
-        <span className="sr-only">{changed}</span>
+        {changed ? (
+          <>
+            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
+            <span className="sr-only">{changed}</span>
+          </>
+        ) : null}
         {labelEl}
       </div>
     ) : (
@@ -135,16 +137,7 @@ export function FormGroup(props: FormGroupProps) {
       {help}
     </div>
   ) : null
-  const noteEl =
-    noteLines.length > 0 ? (
-      <>
-        {noteLines.map((line) => (
-          <div key={line.id} id={line.id} className={line.tone === "warning" ? FIELD_WARNING_TEXT : FIELD_HELP_TEXT}>
-            {line.words}
-          </div>
-        ))}
-      </>
-    ) : null
+  const noteEl = <NoteLines lines={noteLines} />
   const errorEl = (
     <ErrorLine announce={errorAnnounce} size="xs" id={errorId}>
       {hasError ? error : null}
@@ -168,7 +161,7 @@ export function FormGroup(props: FormGroupProps) {
         </div>
         <div data-form-control className={cn("flex items-center gap-1", stacked ? "w-full" : "shrink-0")}>
           {before}
-          {controlEl}
+          <div className={cn(stacked && "min-w-0 flex-1")}>{controlEl}</div>
           {after}
         </div>
       </div>
@@ -201,7 +194,11 @@ export function FormGroup(props: FormGroupProps) {
       controlEl
     )
   return (
-    <div ref={box} data-form-layout="stacked" className={cn("flex flex-col gap-2", fill && "min-h-0 flex-1")}>
+    <div
+      ref={box}
+      data-form-layout="stacked"
+      className={cn("flex flex-col", props.density === "compact" ? "gap-1" : "gap-2", fill && "min-h-0 flex-1")}
+    >
       {header}
       <div className={cn("flex flex-col gap-1.5", fill && "flex-1")}>
         {row}
@@ -210,6 +207,84 @@ export function FormGroup(props: FormGroupProps) {
       </div>
     </div>
   )
+}
+
+/** A title over a group of fields: its words, then the fields, which a screen
+ * reader hears as one group named by the title and described by its words. */
+export function FormSection({
+  title,
+  help,
+  notes,
+  error,
+  errorAnnounce = "silent",
+  children,
+}: {
+  title: ReactElement | string
+  help?: ReactNode
+  notes?: readonly NoteLine[]
+  error?: ReactNode
+  errorAnnounce?: ErrorLineAnnounce
+  // The fields, each a `FormGroup`; with none, the words stand alone.
+  children?: ReactNode
+}) {
+  const base = useId()
+  const titleId = `${base}title`
+  const helpId = help != null ? `${base}help` : undefined
+  const noteLines = drawnNotes(notes, base)
+  const hasError = error != null && error !== false && error !== ""
+  const errorId = hasError ? `${base}error` : undefined
+  const fields = children != null && children !== false
+  const errorEl = (
+    <ErrorLine announce={errorAnnounce} size="xs" id={errorId}>
+      {hasError ? error : null}
+    </ErrorLine>
+  )
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <span id={titleId} className={FIELD_LABEL_TEXT}>
+          {title}
+        </span>
+        {helpId ? (
+          <div id={helpId} className={FIELD_HELP_TEXT}>
+            {help}
+          </div>
+        ) : null}
+        <NoteLines lines={noteLines} />
+        {fields ? null : errorEl}
+      </div>
+      {fields ? (
+        <div
+          role="group"
+          aria-labelledby={titleId}
+          aria-describedby={[helpId, ...noteLines.map((line) => line.id), errorId].filter(Boolean).join(" ") || undefined}
+          className="flex flex-col gap-3"
+        >
+          {children}
+          {errorEl}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// The note lines that have words, each with the id that describes a control by it.
+function drawnNotes(notes: readonly NoteLine[] | undefined, base: string) {
+  return (notes ?? []).flatMap((line, i) =>
+    line.words == null || line.words === false || line.words === "" ? [] : [{ ...line, id: `${base}note${i}` }],
+  )
+}
+
+function NoteLines({ lines }: { lines: ReturnType<typeof drawnNotes> }) {
+  return lines.map((line) => (
+    <div
+      key={line.id}
+      id={line.id}
+      className={line.code ? FIELD_CODE_TEXT : line.tone === "warning" ? FIELD_WARNING_TEXT : FIELD_HELP_TEXT}
+    >
+      {line.words}
+    </div>
+  ))
 }
 
 // The parts of the wiring the control under `root` does not carry. It is found

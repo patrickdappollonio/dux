@@ -19,7 +19,6 @@ import {
 } from "@/lib/notify"
 
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
-import { ErrorLine } from "@/components/ErrorLine"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useModalLifetime, type ModalCloseReason } from "@/components/modal"
 import {
@@ -43,6 +42,7 @@ import {
 import { MatchHighlight } from "@/components/MatchHighlight"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { SearchField } from "@/components/ui/search-field"
+import { FormGroup, FormSection, type FieldWiring, type NoteLine } from "@/components/ui/form-group"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
@@ -118,10 +118,6 @@ const SWATCHES: { value: string; label: string; href: string }[] = [
   })),
 ]
 
-function rowId(d: SettingDescriptor): string {
-  return `setting-${d.key.replace(/\./g, "-")}`
-}
-
 // A config key wraps after a dot or an underscore, never inside a word.
 function ConfigKey({ text, words }: { text: string; words: string[] }) {
   const ranges = matchCharRanges(text, words)
@@ -143,51 +139,36 @@ function ConfigKey({ text, words }: { text: string; words: string[] }) {
   })
 }
 
-// Under a row's prose: its config key while a search runs, so a key typed from
+// A row's last lines: its config key while a search runs, so a key typed from
 // `config.toml` shows why the row matched, then where the setting applies.
 // Only what the search reads is lit.
-function RowFooter({
-  d,
-  words,
-  meta,
-}: {
-  d: SettingDescriptor
-  words: string[]
-  meta: ReturnType<typeof rowMeta>
-}) {
-  return (
-    <>
-      {words.length > 0 ? (
-        <span className="font-mono text-xs break-words text-muted-foreground">
-          <ConfigKey text={d.key} words={words} />
-        </span>
-      ) : null}
-      <p className="text-xs text-muted-foreground">
-        {meta.map((part, i) => (
-          <Fragment key={part.text}>
-            {i > 0 ? " · " : null}
-            <MatchHighlight
-              text={part.text}
-              ranges={part.searched ? matchCharRanges(part.text, words) : []}
-            />
-          </Fragment>
-        ))}
-      </p>
-    </>
-  )
+function footerNotes(d: SettingDescriptor, words: string[], meta: ReturnType<typeof rowMeta>): NoteLine[] {
+  return [
+    ...(words.length > 0 ? [{ words: <ConfigKey text={d.key} words={words} />, code: true } as const] : []),
+    {
+      words: meta.map((part, i) => (
+        <Fragment key={part.text}>
+          {i > 0 ? " · " : null}
+          <MatchHighlight text={part.text} ranges={part.searched ? matchCharRanges(part.text, words) : []} />
+        </Fragment>
+      )),
+    },
+  ]
 }
 
 function FaviconControl({
+  field,
   value,
   onChange,
   disabled,
 }: {
+  field: FieldWiring
   value: string
   onChange: (v: string) => void
   disabled: boolean
 }) {
   return (
-    <div className="flex max-w-[15.5rem] flex-wrap gap-2">
+    <div role="group" {...field} className="flex max-w-[15.5rem] flex-wrap gap-2">
       {SWATCHES.map((swatch) => {
         const selected = swatch.value === value
         return (
@@ -227,8 +208,7 @@ function clampToControl(n: number, min: number, max: number): number {
 // Save, never per keystroke, so typing 16 into a field whose minimum is 8 can
 // pass through 1. Local text keeps an empty field without committing it as zero.
 function NumberControl({
-  id,
-  label,
+  field,
   min,
   max,
   unit,
@@ -236,8 +216,7 @@ function NumberControl({
   onChange,
   disabled,
 }: {
-  id: string
-  label: string
+  field: FieldWiring
   min: number
   max: number
   unit?: string
@@ -256,9 +235,8 @@ function NumberControl({
   return (
     <div className="flex items-center gap-2">
     <Input
-      id={id}
+      {...field}
       type="number"
-      aria-label={label}
       min={min}
       max={max}
       value={text}
@@ -346,24 +324,24 @@ function saveConfirmation(
 
 function SettingControl({
   d,
+  field,
   value,
   onChange,
   disabled,
   availableProviders,
 }: {
   d: SettingDescriptor
+  field: FieldWiring
   value: SettingValue
   onChange: (v: SettingValue, typed?: number) => void
   disabled: boolean
   availableProviders: string[]
 }) {
-  const id = rowId(d)
   switch (d.control.kind) {
     case "bool":
       return (
         <Switch
-          id={id}
-          aria-label={d.label}
+          {...field}
           checked={value as boolean}
           onCheckedChange={(v) => onChange(v)}
           disabled={disabled}
@@ -372,8 +350,7 @@ function SettingControl({
     case "number":
       return (
         <NumberControl
-          id={id}
-          label={d.label}
+          field={field}
           min={d.control.min}
           max={d.control.max}
           unit={d.control.unit}
@@ -389,7 +366,7 @@ function SettingControl({
           onValueChange={(v) => onChange(v as string)}
           disabled={disabled}
         >
-          <SelectTrigger id={id} aria-label={d.label}>
+          <SelectTrigger {...field}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -411,7 +388,7 @@ function SettingControl({
           onValueChange={(v) => onChange(v as string)}
           disabled={disabled}
         >
-          <SelectTrigger id={id} aria-label={d.label}>
+          <SelectTrigger {...field}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -427,8 +404,7 @@ function SettingControl({
     case "text":
       return (
         <Input
-          id={id}
-          aria-label={d.label}
+          {...field}
           value={value as string}
           maxLength={d.control.maxLen}
           placeholder={String(d.default)}
@@ -440,6 +416,7 @@ function SettingControl({
     case "favicon":
       return (
         <FaviconControl
+          field={field}
           value={value as string}
           onChange={onChange}
           disabled={disabled}
@@ -537,7 +514,6 @@ function SettingRow({
   lock,
   availableProviders,
   words,
-  phone,
   rowRef,
 }: {
   d: SettingDescriptor
@@ -559,104 +535,82 @@ function SettingRow({
   availableProviders: string[]
   /** The search's words, lit wherever they occur; empty when not searching. */
   words: string[]
-  phone: boolean
   rowRef: (el: HTMLDivElement | null) => void
 }) {
-  const id = rowId(d)
-  const labelText = <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
-  const labelEl =
-    d.control.kind === "text" || d.control.kind === "favicon" ? (
-      <label htmlFor={id} className="text-sm font-medium">
-        {labelText}
-      </label>
-    ) : (
-      <span id={`${id}-label`} className="text-sm font-medium">
-        {labelText}
-      </span>
-    )
   const zero = zeroText(d)
-  // On a phone a field or the swatches take the row's whole width below the
-  // prose; every other control stays beside it.
-  const stacked = phone && (d.control.kind === "text" || d.control.kind === "favicon")
+  // A field or the swatches take the row's whole width below its words on a
+  // phone; a press on a switch's, a select's or a number's words does nothing.
+  const wide = d.control.kind === "text" || d.control.kind === "favicon"
+  const notes: NoteLine[] = [
+    { words: zero ? <MatchHighlight text={zero} ranges={matchCharRanges(zero, words)} /> : null },
+    saved === null
+      ? { words: null }
+      : savedMoved
+        ? {
+            words: `Not saved yet. The saved value changed to ${valueText(d, saved)} since this edit was made.`,
+            tone: "warning",
+          }
+        : { words: `Not saved yet. Saved: ${valueText(d, saved)}` },
+    ...footerNotes(d, words, meta),
+  ]
   return (
-    <div
-      ref={rowRef}
-      data-setting-row={d.key}
-      className={cn("flex gap-3 border-b py-3", stacked ? "flex-col" : "items-start")}
-    >
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <div className="flex items-center gap-1.5">
-          {changed ? (
-            <>
-              <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-primary" />
-              <span className="sr-only">Changed from default:</span>
-            </>
-          ) : null}
-          {labelEl}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {renderInlineCode(lock ?? d.description, words)}
-        </p>
-        {zero ? (
-          <p className="text-xs text-muted-foreground">
-            <MatchHighlight text={zero} ranges={matchCharRanges(zero, words)} />
-          </p>
-        ) : null}
-        {saved !== null ? (
-          <p className={cn("text-xs", savedMoved ? "text-dux-warning" : "text-muted-foreground")}>
-            {savedMoved
-              ? `Not saved yet. The saved value changed to ${valueText(d, saved)} since this edit was made.`
-              : `Not saved yet. Saved: ${valueText(d, saved)}`}
-          </p>
-        ) : null}
-        <RowFooter d={d} words={words} meta={meta} />
-      </div>
-      <div
-        data-setting-control
-        className={cn("flex items-center gap-1", stacked ? "w-full" : "shrink-0")}
+    <div ref={rowRef} data-setting-row={d.key} className="border-b py-3">
+      <FormGroup
+        layout="side"
+        width={wide ? "wide" : "compact"}
+        control={d.control.kind === "favicon" ? "group" : d.control.kind === "text" ? "single" : "inert"}
+        label={<MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />}
+        changed={changed ? "Changed from default:" : null}
+        help={renderInlineCode(lock ?? d.description, words)}
+        notes={notes}
+        before={
+          <>
+            {changed ? (
+              <SimpleTooltip content="Reset to default">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  data-reset
+                  aria-label={`Reset ${d.label} to ${defaultValueText(d)}`}
+                  disabled={disabled}
+                  className={cn("shrink-0", RESET_SIZE)}
+                  onClick={onReset}
+                >
+                  <RotateCcw />
+                </Button>
+              </SimpleTooltip>
+            ) : null}
+            {saved !== null ? (
+              <SimpleTooltip content="Put back the saved value">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  data-undo
+                  aria-label={`Put ${d.label} back to its saved value, ${valueText(d, saved)}`}
+                  disabled={disabled}
+                  className={cn("shrink-0", RESET_SIZE)}
+                  onClick={onUndo}
+                >
+                  <Undo2 />
+                </Button>
+              </SimpleTooltip>
+            ) : null}
+          </>
+        }
       >
-        {changed ? (
-          <SimpleTooltip content="Reset to default">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              data-reset
-              aria-label={`Reset ${d.label} to ${defaultValueText(d)}`}
-              disabled={disabled}
-              className={cn("shrink-0", RESET_SIZE)}
-              onClick={onReset}
-            >
-              <RotateCcw />
-            </Button>
-          </SimpleTooltip>
-        ) : null}
-        {saved !== null ? (
-          <SimpleTooltip content="Put back the saved value">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              data-undo
-              aria-label={`Put ${d.label} back to its saved value, ${valueText(d, saved)}`}
-              disabled={disabled}
-              className={cn("shrink-0", RESET_SIZE)}
-              onClick={onUndo}
-            >
-              <Undo2 />
-            </Button>
-          </SimpleTooltip>
-        ) : null}
-        <div className={cn(stacked && "min-w-0 flex-1")}>
+        {(field) => (
           <SettingControl
             d={d}
+            field={field}
             value={value}
             onChange={onChange}
             disabled={disabled}
             availableProviders={availableProviders}
           />
-        </div>
-      </div>
+        )}
+      </FormGroup>
     </div>
   )
 }
@@ -743,14 +697,12 @@ function StrengthMeter({ strength, minScore }: { strength: Strength; minScore: n
 const PASSWORD_FIELD_CLASS = "w-full md:w-64"
 
 function PasswordField({
-  id,
   label,
   value,
   autoComplete,
   disabled,
   onChange,
 }: {
-  id: string
   label: string
   value: string
   autoComplete: string
@@ -758,20 +710,19 @@ function PasswordField({
   onChange: (v: string) => void
 }) {
   return (
-    <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-xs font-medium">
-        {label}
-      </label>
-      <Input
-        id={id}
-        type="password"
-        autoComplete={autoComplete}
-        value={value}
-        disabled={disabled}
-        className={PASSWORD_FIELD_CLASS}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </div>
+    <FormGroup layout="stacked" density="compact" control="single" label={label}>
+      {(field) => (
+        <Input
+          {...field}
+          type="password"
+          autoComplete={autoComplete}
+          value={value}
+          disabled={disabled}
+          className={PASSWORD_FIELD_CLASS}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </FormGroup>
   )
 }
 
@@ -821,80 +772,65 @@ function PasswordSettingRow({
   /** The row's small line: where it applies, and its topic where shown. */
   meta: ReturnType<typeof rowMeta>
 }) {
-  const id = rowId(d)
   const editable =
     status !== null && (status.password_set || status.can_set_first_password)
   const mins = status ? passwordMinimums(status) : null
   return (
-    <div data-setting-row={d.key} className="flex flex-col gap-3 border-b py-3">
-      <div className="flex flex-col gap-1">
-        <span id={`${id}-label`} className="text-sm font-medium">
-          <MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />
-        </span>
-        <p className="text-xs text-muted-foreground">
-          {renderInlineCode(d.description, words)}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {renderInlineCode(passwordNote(status), words)}
-        </p>
-        <RowFooter d={d} words={words} meta={meta} />
-      </div>
-      {editable && mins ? (
-        <div className="flex flex-col gap-3">
-          {status.password_set ? (
+    <div data-setting-row={d.key} className="border-b py-3">
+      <FormSection
+        title={<MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />}
+        help={renderInlineCode(d.description, words)}
+        notes={[{ words: renderInlineCode(passwordNote(status), words) }, ...footerNotes(d, words, meta)]}
+        errorAnnounce="alert"
+        error={error === null ? null : error.ownWording ? renderInlineCode(error.message) : error.message}
+      >
+        {editable && mins ? (
+          <>
+            {status.password_set ? (
+              <PasswordField
+                label="Current password"
+                value={draft.current}
+                autoComplete="current-password"
+                disabled={disabled}
+                onChange={(current) => onDraft({ ...draft, current })}
+              />
+            ) : null}
             <PasswordField
-              id={`${id}-current`}
-              label="Current password"
-              value={draft.current}
-              autoComplete="current-password"
+              label="New password"
+              value={draft.next}
+              autoComplete="new-password"
               disabled={disabled}
-              onChange={(current) => onDraft({ ...draft, current })}
+              onChange={(next) => onDraft({ ...draft, next })}
             />
-          ) : null}
-          <PasswordField
-            id={`${id}-new`}
-            label="New password"
-            value={draft.next}
-            autoComplete="new-password"
-            disabled={disabled}
-            onChange={(next) => onDraft({ ...draft, next })}
-          />
-          {draft.next !== "" && reading.strength !== null ? (
-            <div className="md:w-64">
-              <StrengthMeter strength={reading.strength} minScore={mins.score} />
-            </div>
-          ) : null}
-          {draft.next !== "" && reading.failed ? (
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span>The strength meter did not load. Save still works.</span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="pointer-coarse:min-h-11"
-                onClick={reading.retry}
-              >
-                Load the strength meter again
-              </Button>
-            </div>
-          ) : null}
-          <PasswordField
-            id={`${id}-confirm`}
-            label="New password again"
-            value={draft.confirm}
-            autoComplete="new-password"
-            disabled={disabled}
-            onChange={(confirm) => onDraft({ ...draft, confirm })}
-          />
-          <ErrorLine size="xs">
-            {error === null
-              ? null
-              : error.ownWording
-                ? renderInlineCode(error.message)
-                : error.message}
-          </ErrorLine>
-        </div>
-      ) : null}
+            {draft.next !== "" && reading.strength !== null ? (
+              <div className="md:w-64">
+                <StrengthMeter strength={reading.strength} minScore={mins.score} />
+              </div>
+            ) : null}
+            {draft.next !== "" && reading.failed ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>The strength meter did not load. Save still works.</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="pointer-coarse:min-h-11"
+                  onClick={reading.retry}
+                >
+                  Load the strength meter again
+                </Button>
+              </div>
+            ) : null}
+            <PasswordField
+              label="New password again"
+              value={draft.confirm}
+              autoComplete="new-password"
+              disabled={disabled}
+              onChange={(confirm) => onDraft({ ...draft, confirm })}
+            />
+          </>
+        ) : null}
+      </FormSection>
     </div>
   )
 }
@@ -1230,7 +1166,7 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
     ;(
       row?.querySelector<HTMLElement>(after.prefer) ??
       row?.querySelector<HTMLElement>(
-        '[data-setting-control] :is(button, input, [role="switch"], [role="combobox"])',
+        '[data-form-control] :is(button, input, [role="switch"], [role="combobox"])',
       )
     )?.focus()
   })
@@ -1478,7 +1414,6 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
             lock={lockOn(d)}
             availableProviders={bootstrap?.available_providers ?? []}
             words={words}
-            phone={phone}
             rowRef={(el) => {
               if (el) rowEls.current.set(d.key, el)
               else rowEls.current.delete(d.key)
