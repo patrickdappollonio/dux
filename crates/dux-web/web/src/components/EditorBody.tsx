@@ -16,16 +16,13 @@ import {
   FileCode2,
   FilePlus,
   FileText,
-  FileType,
   GitCompare,
   Laptop,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
   RefreshCw,
-  RotateCw,
   Save,
-  SaveAll,
   SquareTerminal,
   X,
 } from "lucide-react"
@@ -51,12 +48,10 @@ import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
 import { laneKey, useLaneBusy, type LaneOp } from "@/lib/editorLane"
-import { assertNever } from "@/lib/assertNever"
 import {
-  REOPEN_CHOICES,
-  SAVE_CHOICES,
   dismissNotice,
   encodingNotices,
+  encodingBusyReason,
   encodingLabel,
   noticeDismissed,
   sameSaveEncoding,
@@ -122,7 +117,7 @@ import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useMenuReason } from "@/hooks/use-menu-reason"
-import { MenuGroupReason, MenuItemReason } from "@/components/MenuReason"
+import { EncodingMenuRows } from "@/components/EncodingMenuRows"
 import { Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
@@ -1587,81 +1582,16 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
       else requestReopen(encoding)
     }
     return (
-      <>
-        <MenuGroupReason reasons={[busyEncodingReason]} />
-        <DropdownMenuSub>
-          {/* Not while this tab is saving: the save's answer is about the text
-              it sent, and a reopen would put a different decoding under it. */}
-          <DropdownMenuSubTrigger
-            disabled={fileBusy}
-            aria-describedby={busyEncodingReason.describedBy}
-          >
-            <RotateCw />
-            Reopen with encoding
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-            {REOPEN_CHOICES.map((choice) => (
-              <DropdownMenuItem
-                key={choice.encoding}
-                aria-current={
-                  choice.encoding === current.encoding ? "true" : undefined
-                }
-                onClick={() => reopen(choice.encoding)}
-              >
-                <FileType />
-                {choice.label}
-                {choice.encoding === current.encoding && (
-                  <Check className="ml-auto" />
-                )}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        {!inDiff && !hardReadOnly && (
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger
-              disabled={fileBusy || writeBlocked !== null}
-              aria-describedby={
-                [busyEncodingReason.describedBy, readOnlyEncodingReason.describedBy]
-                  .filter(Boolean)
-                  .join(" ") || undefined
-              }
-            >
-              <SaveAll />
-              Save with encoding
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
-              {SAVE_CHOICES.map((choice) => {
-                const isCurrent = sameSaveEncoding(choice, current)
-                return (
-                  <DropdownMenuItem
-                    key={`${choice.encoding}:${choice.bom}`}
-                    aria-current={isCurrent ? "true" : undefined}
-                    // A file its encoding cannot write back unchanged can be
-                    // converted, never saved again in that same encoding.
-                    // The current encoding and mark is never a row to act
-                    // on: it is not a conversion, and not an edit either, so
-                    // a save from it would only rewrite untouched bytes (the
-                    // line endings, say) for nothing.
-                    disabled={isCurrent}
-                    onClick={() =>
-                      saveWithEncoding({
-                        encoding: choice.encoding,
-                        bom: choice.bom,
-                      })
-                    }
-                  >
-                    <FileType />
-                    {choice.label}
-                    {isCurrent && <Check className="ml-auto" />}
-                  </DropdownMenuItem>
-                )
-              })}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-        )}
-        {!inDiff && !hardReadOnly && <MenuItemReason reason={readOnlyEncodingReason} />}
-      </>
+      <EncodingMenuRows
+        busy={busyEncodingReason}
+        readOnly={readOnlyEncodingReason}
+        fileBusy={fileBusy}
+        writeBlocked={writeBlocked !== null}
+        canSave={!inDiff && !hardReadOnly}
+        current={current}
+        onReopen={reopen}
+        onSave={saveWithEncoding}
+      />
     )
   }
 
@@ -2720,21 +2650,6 @@ function contentForPreview(
     return buffer?.diff?.modified ?? ""
   }
   return buffer?.draft ?? ""
-}
-
-function encodingBusyReason(op: LaneOp): string {
-  switch (op) {
-    case "save":
-    case "convert":
-      return "This file is being saved. Choose an encoding once the save has finished."
-    case "reopen":
-      return "This file is being reopened in another encoding. Choose an encoding once it has finished."
-    case "reload":
-    case "freshness":
-      return "This file is being reloaded from disk. Choose an encoding once it has finished."
-    default:
-      return assertNever(op)
-  }
 }
 
 function tabIsSaving(savingTabId: string | null, tab: EditorTab | null): boolean {
