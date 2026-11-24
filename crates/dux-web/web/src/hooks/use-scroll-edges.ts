@@ -47,32 +47,24 @@ function keepIfSame(prev: ScrollEdges, next: ScrollEdges): ScrollEdges {
 }
 
 /**
- * Tracks whether a scroll container has content hidden above and below it.
+ * Tracks whether `node`, a scroll container, has content hidden above and
+ * below it.
  *
- * The callback ref goes on the scroll container. The answer is re-measured on
- * a scroll, on the container changing size, and on any of its direct children
- * changing size or being added or removed, which is how rows arriving or a
- * section opening grows the content without the container itself resizing.
- * There is no polling. A missing `ResizeObserver` (jsdom) is supported: the
- * hook then answers from scrolls and child-list changes alone.
+ * The answer is read before the first paint with `node` in place, and
+ * re-measured on a scroll, on the container changing size, and on any of its
+ * direct children changing size or being added or removed, which is how rows
+ * arriving or a section opening grows the content without the container itself
+ * resizing. There is no polling. A missing `ResizeObserver` (jsdom) is
+ * supported: the hook then answers from scrolls and child-list changes alone.
  */
-export function useScrollEdges<T extends HTMLElement = HTMLElement>(): ScrollEdges & {
-  ref: (node: T | null) => void
-} {
-  const [node, setNode] = React.useState<T | null>(null)
+export function useScrollEdgesOf(node: HTMLElement | null): ScrollEdges {
   const [edges, setEdges] = React.useState<ScrollEdges>(NO_EDGES)
 
-  // The first answer is read as the node attaches, when its children are
-  // already in place; the effect below only subscribes to changes.
-  const ref = React.useCallback((next: T | null) => {
-    setNode(next)
-    setEdges((prev) => keepIfSame(prev, next === null ? NO_EDGES : readEdges(next)))
-  }, [])
-
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     if (node === null) return
     const el = node
     const measure = () => setEdges((prev) => keepIfSame(prev, readEdges(el)))
+    measure()
 
     const resize =
       typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null
@@ -96,5 +88,14 @@ export function useScrollEdges<T extends HTMLElement = HTMLElement>(): ScrollEdg
     }
   }, [node])
 
-  return { ref, ...edges }
+  return node === null ? NO_EDGES : edges
+}
+
+/** `useScrollEdgesOf` for a container this component renders: the callback
+ * ref goes on the scroll container. */
+export function useScrollEdges<T extends HTMLElement = HTMLElement>(): ScrollEdges & {
+  ref: (node: T | null) => void
+} {
+  const [node, setNode] = React.useState<T | null>(null)
+  return { ref: setNode, ...useScrollEdgesOf(node) }
 }

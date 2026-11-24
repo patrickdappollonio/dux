@@ -3,7 +3,7 @@ import type { CSSProperties } from "react"
 
 import { Spinner } from "@/components/Spinner"
 import { ModalGroupHeading } from "@/components/modal"
-import { useScrollEdges } from "@/hooks/use-scroll-edges"
+import { ScrollList } from "@/components/ui/scroll-list"
 import { INSET_FOCUS_RING } from "@/lib/focusRing"
 import type {
   ProjectShortcutListView,
@@ -25,17 +25,17 @@ import type {
  * nothing; from the `md` breakpoint up it trails the folder on the same line.
  *
  * The rows scroll under their heading once there are more than fit, and the
- * edge with rows hidden past it fades out (`.dux-list-fade`, the agents list's
- * own cue), so a list cut at a row boundary still says there is more.
+ * edge with rows hidden past it fades out (a `ScrollList`, as every list's
+ * does), so a list cut at a row boundary still says there is more.
  *
  * Until the server answers (`list` null) it holds the room the rows will take,
  * so the dialog does not change height under the pointer when they arrive:
  * one row per project the app already knows of, up to the cap, or the whole
  * cap while it knows of none yet.
  */
-// The rows' cap, and the room they are given while they load. A row is 2.25rem
-// with a fine pointer and 2.75rem (its 44px floor) on a phone or under a finger.
-const ROWS_MAX_HEIGHT = "max-h-[8.75rem] max-md:max-h-[9.625rem] pointer-coarse:max-h-[9.625rem]"
+// The room the rows are given while they load: the cap of the list's `peek`
+// height. A row is 2.25rem with a fine pointer and 2.75rem (its 44px floor) on
+// a phone or under a finger.
 const ROWS_HEIGHT = "h-[8.75rem] max-md:h-[9.625rem] pointer-coarse:h-[9.625rem]"
 const ROWS_HEIGHT_FOR_COUNT =
   "h-[min(calc(var(--rows)*2.25rem),8.75rem)] max-md:h-[min(calc(var(--rows)*2.75rem),9.625rem)] pointer-coarse:h-[min(calc(var(--rows)*2.75rem),9.625rem)]"
@@ -54,7 +54,6 @@ export function ProjectShortcutList({
   pickedProjectId: string | null
   onPick: (row: ProjectShortcutView) => void
 }) {
-  const { ref, moreAbove, moreBelow } = useScrollEdges<HTMLDivElement>()
   if (list === null) {
     return (
       <div data-project-shortcuts-pending="" className="flex shrink-0 flex-col gap-1.5">
@@ -84,13 +83,7 @@ export function ProjectShortcutList({
             little under four compact rows with a fine pointer, so the next
             row peeks; a taller two-line row can move the cut, and the fade is
             what says more rows follow wherever it lands. */}
-        <div
-          ref={ref}
-          data-project-shortcut-rows
-          data-more-above={moreAbove ? "" : undefined}
-          data-more-below={moreBelow ? "" : undefined}
-          className={`dux-list-fade flex flex-col overflow-y-auto ${ROWS_MAX_HEIGHT}`}
-        >
+        <ScrollList scroll="own" height="peek" scrollbar="native">
           {list.rows.map((row) => (
             <button
               key={row.project_id}
@@ -126,7 +119,7 @@ export function ProjectShortcutList({
               </span>
             </button>
           ))}
-        </div>
+        </ScrollList>
       </div>
       <p className="text-xs text-muted-foreground">{list.caption}</p>
     </div>

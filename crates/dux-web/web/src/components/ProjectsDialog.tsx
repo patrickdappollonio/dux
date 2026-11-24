@@ -6,6 +6,7 @@ import { ProjectRows } from "@/components/ProjectList"
 import { useProjectSearch, type ProjectListRow } from "@/components/projectSearch"
 import { ProjectMenuItems } from "@/components/ProjectMenuItems"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
+import { ScrollList } from "@/components/ui/scroll-list"
 import { formatRegularCount } from "@/lib/formatRegularCount"
 import { PROJECT_FOLDER_MISSING } from "@/lib/projects"
 import {
@@ -126,11 +127,13 @@ function ProjectsBody({ open, onClosed }: { open: boolean; onClosed: () => void 
       steadyHeight
       doors={[{ label: "Add a new project…", icon: FolderPlus, onSelect: openAddProject }]}
     >
-      <ProjectRows
-        search={search}
-        heading="Choose a project"
-        menu={(id) => <ProjectMenuItems id={id} onLeave={closeProjects} />}
-      />
+      <ScrollList scroll="enclosing">
+        <ProjectRows
+          search={search}
+          heading="Choose a project"
+          menu={(id) => <ProjectMenuItems id={id} onLeave={closeProjects} />}
+        />
+      </ScrollList>
     </Modal>
   )
 }
