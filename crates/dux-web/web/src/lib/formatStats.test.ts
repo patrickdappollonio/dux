@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
 import { formatBytes, formatCpu } from "./formatStats"
@@ -36,22 +40,29 @@ describe("formatBytes", () => {
 })
 
 describe("formatCpu", () => {
-  it("formats_cpu_one_decimal", () => {
-    expect(formatCpu(0)).toBe("0.0%")
-    expect(formatCpu(3.44)).toBe("3.4%")
-    expect(formatCpu(12.15)).toBe("12.2%")
+  // The other half of `the_shared_cpu_figure_fixture_holds` in dux-core's
+  // resource_stats.rs: the terminal UI and the browser print the same string for the same
+  // sample, rounding edges included.
+  const fixture = JSON.parse(
+    readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../../dux-core/tests/fixtures/cpu_percent_cross_language.json",
+      ),
+      "utf8",
+    ),
+  ) as { cases: { what: string; sample: number; text: string }[] }
+
+  it("has not lost its cases", () => {
+    expect(fixture.cases.length).toBeGreaterThanOrEqual(12)
   })
 
-  it("prints_a_small_load_as_less_than_a_tenth_and_only_zero_as_zero", () => {
-    // The same cases as `small_cpu_prints_as_less_than_a_tenth_and_only_zero_prints_zero`
-    // in dux-core, so the two surfaces cannot drift.
-    expect(formatCpu(0)).toBe("0.0%")
-    expect(formatCpu(0.04)).toBe("<0.1%")
-    expect(formatCpu(0.0001)).toBe("<0.1%")
-    expect(formatCpu(0.05)).toBe("0.1%")
-    expect(formatCpu(1.84)).toBe("1.8%")
-    expect(formatCpu(100)).toBe("100.0%")
-  })
+  it.each(fixture.cases.map((c) => [c.what, c.sample, c.text] as const))(
+    "prints %s as the terminal UI does",
+    (_what, sample, text) => {
+      expect(formatCpu(sample)).toBe(text)
+    },
+  )
 
   it("formats_cpu_above_one_hundred_percent", () => {
     // Sampling noise can nudge a figure past 100%. Nothing may clamp it.

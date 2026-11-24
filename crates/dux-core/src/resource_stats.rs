@@ -12,7 +12,11 @@
 //! Every CPU figure is a share of the whole machine, in the cores dux can use:
 //! 100% means all of them fully busy. `sysinfo` reports percent of one core, so
 //! the collector divides by the core count once, per process, and every row,
-//! child and the total scale together.
+//! child and the total scale together. The figures are not clamped: a tree can
+//! legitimately read past 100% when the core count undercounts what it runs on
+//! (the standard library rounds a fractional CPU quota down, so a tree under a
+//! 1.5-core quota can read 150%, and short bursts under a quota can go over
+//! too), besides plain sampling noise.
 //!
 //! Callers must sample from a background thread: a self-baselining sample sleeps
 //! for [`sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`]. The TUI samples from its
@@ -38,10 +42,43 @@ pub struct ResourceCollector {
     /// When the last refresh happened, or `None` before the first sample. Drives
     /// the self-baselining decision (see [`STALE_BASELINE`]).
     last_refresh: Option<Instant>,
-    /// How many cores the figures are a share of: what the standard library's
-    /// available parallelism reports, so under a CPU limit they are shares of
-    /// what dux was given.
+    /// How many cores the figures are a share of, from [`usable_cores`].
     cores: usize,
+}
+
+/// The number of cores the figures are a share of, from the best source that
+/// answers.
+///
+/// 1. The standard library's available parallelism: the cores this process may
+///    run on after CPU affinity and a cgroup quota (a fractional quota is
+///    rounded down), so under a limit the figures are shares of what dux was
+///    given rather than of the host.
+/// 2. The CPUs `sysinfo` sees: the logical CPUs the operating system lists,
+///    ignoring any limit. It is the host's size, an overcount under a quota,
+///    which beats pretending the machine has one core.
+/// 3. One, only when neither can say, which makes the figures percent of one
+///    core.
+fn usable_cores() -> usize {
+    pick_cores(
+        std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZero::get),
+        || {
+            let mut sys = sysinfo::System::new();
+            sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+            sys.cpus().len()
+        },
+    )
+}
+
+/// The order of [`usable_cores`] over the sources' answers: the first non-zero
+/// one wins, `sysinfo` is asked only when the standard library could not say,
+/// and one is the floor. Pure so the order is tested without the host.
+fn pick_cores(parallelism: Option<usize>, sysinfo_cpus: impl FnOnce() -> usize) -> usize {
+    parallelism
+        .filter(|&n| n > 0)
+        .or_else(|| Some(sysinfo_cpus()).filter(|&n| n > 0))
+        .unwrap_or(1)
 }
 
 /// A process's CPU as a share of the whole machine, from `sysinfo`'s percent of
@@ -53,14 +90,52 @@ fn machine_share(percent_of_one_core: f32, cores: usize) -> f32 {
 
 /// A CPU figure as one decimal and a percent sign. A figure above zero that
 /// would round to `0.0` prints as `<0.1%`, so a small load never reads as none;
-/// exactly zero prints `0.0%`. The browser's `formatCpu` keeps the same cases.
+/// exactly zero prints `0.0%`.
+///
+/// The figure is rounded from its shortest decimal spelling (`0.15`, as the
+/// browser receives it in JSON), half up on that text, and never from the
+/// binary value, whose exact expansion would round `0.15` and `0.25` the other
+/// way from what the browser can see. The browser's `formatCpu` runs the same
+/// steps on the same text, and `cpu_percent_cross_language.json` pins them.
 pub fn format_cpu_percent(percent: f32) -> String {
-    let text = format!("{percent:.1}");
-    if percent > 0.0 && text == "0.0" {
-        "<0.1%".to_string()
-    } else {
-        format!("{text}%")
+    if !percent.is_finite() || percent <= 0.0 {
+        return format!("{percent:.1}%");
     }
+    if percent < 0.05 {
+        return "<0.1%".to_string();
+    }
+    format!("{}%", round_decimal_to_tenth(&percent.to_string()))
+}
+
+/// Rounds a plain positive decimal such as `12.15` to one decimal place, half
+/// up, working on the digits so no binary value is involved: `12.15` is
+/// `12.2`, `0.25` is `0.3`. The input has no exponent (`f32`'s `Display`
+/// never writes one).
+fn round_decimal_to_tenth(decimal: &str) -> String {
+    let (whole, fraction) = decimal.split_once('.').unwrap_or((decimal, ""));
+    let mut fraction = fraction.bytes().chain(std::iter::repeat(b'0'));
+    let tenth = fraction.next().unwrap_or(b'0');
+    let round_up = fraction.next().unwrap_or(b'0') >= b'5';
+    let mut digits: Vec<u8> = whole.bytes().chain(std::iter::once(tenth)).collect();
+    if round_up {
+        let mut at = digits.len();
+        loop {
+            if at == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            at -= 1;
+            if digits[at] == b'9' {
+                digits[at] = b'0';
+            } else {
+                digits[at] += 1;
+                break;
+            }
+        }
+    }
+    let last = digits.pop().unwrap_or(b'0');
+    let whole = String::from_utf8_lossy(&digits);
+    format!("{whole}.{}", char::from(last))
 }
 
 impl Default for ResourceCollector {
@@ -89,7 +164,7 @@ impl ResourceCollector {
         Self {
             sys: sysinfo::System::new(),
             last_refresh: None,
-            cores: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            cores: usable_cores(),
         }
     }
 
@@ -449,16 +524,36 @@ mod tests {
         );
     }
 
-    /// A load above zero never reads as none; exactly zero reads as zero. The
-    /// browser's `formatCpu` test pins the same cases.
+    /// The terminal UI and the browser print every sample the same. Both read
+    /// this fixture; `formatStats.test.ts` is the other half.
     #[test]
-    fn small_cpu_prints_as_less_than_a_tenth_and_only_zero_prints_zero() {
-        assert_eq!(format_cpu_percent(0.0), "0.0%");
-        assert_eq!(format_cpu_percent(0.04), "<0.1%");
-        assert_eq!(format_cpu_percent(0.0001), "<0.1%");
-        assert_eq!(format_cpu_percent(0.05), "0.1%");
-        assert_eq!(format_cpu_percent(1.84), "1.8%");
-        assert_eq!(format_cpu_percent(100.0), "100.0%");
+    fn the_shared_cpu_figure_fixture_holds() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/cpu_percent_cross_language.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let parsed: serde_json::Value = serde_json::from_str(&source).expect("valid JSON");
+        let cases = parsed["cases"].as_array().expect("a cases array");
+        assert!(cases.len() >= 12, "the fixture has lost its cases");
+        for case in cases {
+            // Parsed from the JSON text the way the wire form is: as the f32
+            // the engine holds.
+            let sample: f32 = case["sample"].to_string().parse().expect("a number");
+            assert_eq!(
+                format_cpu_percent(sample),
+                case["text"].as_str().expect("text"),
+                "{}",
+                case["what"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_core_count_prefers_parallelism_then_sysinfo_then_one() {
+        assert_eq!(pick_cores(Some(6), || panic!("not asked")), 6);
+        assert_eq!(pick_cores(None, || 12), 12);
+        assert_eq!(pick_cores(Some(0), || 12), 12);
+        assert_eq!(pick_cores(None, || 0), 1);
     }
 
     /// A back-to-back sample (a small gap) must NOT re-establish the CPU

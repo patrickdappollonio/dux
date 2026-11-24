@@ -24,8 +24,10 @@ export interface ResourceStatsView {
   /** Human-readable description from core. Display only; never parse it. */
   label: string
   pid: number | null
-  /** May exceed 100: a multi-threaded tree across cores legitimately does.
-   * Never clamp it. */
+  /** A share of the whole machine: 100 is every core dux can use fully busy. It can read past
+   * 100, because the core count undercounts what the tree runs on (a fractional CPU quota is
+   * rounded down to whole cores, and short bursts under a quota can go over), besides plain
+   * sampling noise. Never clamp it. */
   cpu_percent: number
   rss_bytes: number
   process_count: number

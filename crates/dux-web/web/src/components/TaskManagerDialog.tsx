@@ -271,8 +271,8 @@ function TaskManager({ open, onClosed }: { open: boolean; onClosed: () => void }
           <table className="w-full table-fixed border-collapse text-sm">
             <thead>
               {/* Each column but the name's is as wide as the widest value it
-                  can hold ("4194304", "9999", "12800.0%" on a machine with
-                  128 cores, "1023.9 MiB", the Force stop button), and the
+                  can hold ("4194304", "9999", "100.0%" or a figure past it
+                  such as "150.0%", "1023.9 MiB", the Force stop button), and the
                   fixed layout keeps it at that width whatever the rows hold,
                   so the width the name is left does not move as the numbers
                   change, and a name at the edge is not cut and whole by turns. */}

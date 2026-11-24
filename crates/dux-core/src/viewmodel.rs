@@ -1325,8 +1325,9 @@ pub struct ResourceStatsView {
     /// The root process's id, when the row has one.
     pub pid: Option<u32>,
     /// A percentage of the whole machine, in the cores dux can use: 100 is
-    /// every core fully busy. Sampling noise can nudge it past 100, so no
-    /// surface may clamp it.
+    /// every core fully busy. It can read past 100 (a fractional CPU quota is
+    /// rounded down to whole cores, short bursts under a quota go over, and
+    /// sampling adds noise), so no surface may clamp it.
     pub cpu_percent: f32,
     /// The resident memory of the whole tree, in bytes.
     pub rss_bytes: u64,

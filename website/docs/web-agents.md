@@ -369,7 +369,8 @@ and every terminal (companion, project and standalone), with its CPU, memory, an
 count. Expand any row to see the child processes underneath. It also shows a row for dux
 itself and a total. CPU is a share of the whole machine: 100% means every core dux can use
 is fully busy (under a CPU limit, such as a container's, those are the cores it was given),
-and a figure above zero but too small to show reads `<0.1%`. A name too long for its row is
+and a figure above zero but too small to show reads `<0.1%`. Under a fractional limit
+(1.5 cores, say) dux counts whole cores, so a figure can read past 100%. A name too long for its row is
 shortened with an ellipsis: hover it,
 move keyboard focus onto it, or tap it to read the whole name.
 

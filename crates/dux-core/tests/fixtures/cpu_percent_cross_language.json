@@ -1,0 +1,20 @@
+{
+  "comment": "Each sample is the figure as it travels in JSON (the shortest decimal of the f32 the engine holds); text is what the terminal UI and the browser both print for it: one decimal rounded half up on that decimal, <0.1% for a figure above zero that would read 0.0.",
+  "cases": [
+    { "what": "half-way, 0.15 rounds up", "sample": 0.15, "text": "0.2%" },
+    { "what": "half-way, 0.25 rounds up", "sample": 0.25, "text": "0.3%" },
+    { "what": "half-way, 1.45 rounds up", "sample": 1.45, "text": "1.5%" },
+    { "what": "half-way, 12.15 rounds up", "sample": 12.15, "text": "12.2%" },
+    { "what": "exactly zero", "sample": 0.0, "text": "0.0%" },
+    { "what": "a hair above zero", "sample": 0.0001, "text": "<0.1%" },
+    { "what": "just under the first tenth", "sample": 0.04, "text": "<0.1%" },
+    { "what": "the first tenth's half-way point", "sample": 0.05, "text": "0.1%" },
+    { "what": "rounds down", "sample": 1.84, "text": "1.8%" },
+    { "what": "an ordinary figure", "sample": 3.44, "text": "3.4%" },
+    { "what": "a carry into the whole part", "sample": 9.96, "text": "10.0%" },
+    { "what": "a carry through nines", "sample": 99.97, "text": "100.0%" },
+    { "what": "a whole number", "sample": 100.0, "text": "100.0%" },
+    { "what": "past 100 is not clamped", "sample": 129.52382, "text": "129.5%" },
+    { "what": "several cores past 100", "sample": 780.0, "text": "780.0%" }
+  ]
+}
