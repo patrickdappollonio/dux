@@ -2725,6 +2725,38 @@ describe("the Changes pane while this page does not drive the agent", () => {
     expect(separatorProblems(layout)).toEqual([])
   })
 
+  // Two causes grey Commit: the row's reason wins, and the nothing-staged
+  // sentence is not said beside it.
+  it("says nothing is staged beneath Commit, and gives way to the row's reason", async () => {
+    const NOTHING = "Nothing is staged yet. Stage a file to commit it."
+    mockState = withFiles([], [["a.ts", "M"]])
+    const first = render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const layout = menuLayout(await screen.findByRole("menu"))
+    expect(layout.slice(0, 2)).toEqual(["Commit…", `reason: ${NOTHING}`])
+    const commit = itemOf(within(screen.getByRole("menu")), "Commit…")
+    expect(commit.getAttribute("aria-disabled")).toBe("true")
+    expect(reasonOf(commit)).toBe(NOTHING)
+    first.unmount()
+    cleanup()
+
+    mockState = withFiles([["staged.ts", "M"]], [])
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const enabled = menuLayout(await screen.findByRole("menu"))
+    expect(enabled).not.toContain(`reason: ${NOTHING}`)
+    expect(itemOf(within(screen.getByRole("menu")), "Commit…").hasAttribute("aria-describedby")).toBe(false)
+    cleanup()
+
+    mockState = withFiles([], [["a.ts", "M"]])
+    driveElsewhere()
+    render(<ChangedFiles />)
+    fireEvent.click(screen.getByLabelText("Changes actions"))
+    const both = menuLayout(await screen.findByRole("menu"))
+    expect(both).not.toContain(`reason: ${NOTHING}`)
+    expect(reasonOf(itemOf(within(screen.getByRole("menu")), "Commit…"))).toBe(OTHER)
+  })
+
   it("greys out the selection's verbs but keeps selecting", () => {
     mockState = withFiles([["staged.ts", "M"]], [["a.ts", "M"], ["b.ts", "M"]])
     driveElsewhere()

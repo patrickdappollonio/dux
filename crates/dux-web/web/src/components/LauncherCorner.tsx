@@ -20,8 +20,14 @@ import {
   selectProjectCount,
   type NewLauncherRow,
 } from "@/lib/creationMenus"
+import { MenuItemReason } from "@/components/MenuReason"
+import { useMenuReason, type MenuReasonHandle } from "@/hooks/use-menu-reason"
 import { openAgentTerminalPicker, useDuxSelector } from "@/lib/store"
 import { cn } from "@/lib/utils"
+
+// Said beneath "New terminal for an agent…" while a confirmed zero agents greys it.
+const NO_AGENTS_REASON =
+  "There are no agents yet. Create an agent first, then open a terminal for it."
 
 // The launcher corner on every surface: the desktop sidebar's footer and the
 // mobile hub's bottom bar render this one component. One filled split button:
@@ -42,6 +48,11 @@ export function LauncherCorner({ className }: { className?: string }) {
   // project, so a screen reader hears it on the row. The lead and those rows
   // both exist exactly when the workspace has no project.
   const leadId = useId()
+  const noAgents = useMenuReason(
+    menu.some((group) => group.rows.some((row) => row.waitingFor === "agent"))
+      ? NO_AGENTS_REASON
+      : null,
+  )
   return (
     // size="sm" is the one height token for both halves. On a computer they
     // are 28px tall, the per-axis exemption: the corner has no other control
@@ -85,7 +96,10 @@ export function LauncherCorner({ className }: { className?: string }) {
                   </p>
                 ) : null}
                 {group.rows.map((row) => (
-                  <LauncherMenuEntry key={row.id} row={row} leadId={leadId} />
+                  <Fragment key={row.id}>
+                    <LauncherMenuEntry row={row} leadId={leadId} noAgents={noAgents} />
+                    {row.waitingFor === "agent" ? <MenuItemReason reason={noAgents} /> : null}
+                  </Fragment>
                 ))}
               </DropdownMenuGroup>
             </Fragment>
@@ -96,13 +110,27 @@ export function LauncherCorner({ className }: { className?: string }) {
   )
 }
 
-function LauncherMenuEntry({ row, leadId }: { row: NewLauncherRow; leadId: string }) {
+function LauncherMenuEntry({
+  row,
+  leadId,
+  noAgents,
+}: {
+  row: NewLauncherRow
+  leadId: string
+  noAgents: MenuReasonHandle
+}) {
   const Icon = row.icon
   return (
     <DropdownMenuItem
       data-row-id={row.id}
       disabled={row.disabled}
-      aria-describedby={row.waitingFor === "project" ? leadId : undefined}
+      aria-describedby={
+        row.waitingFor === "project"
+          ? leadId
+          : row.waitingFor === "agent"
+            ? noAgents.describedBy
+            : undefined
+      }
       onClick={() => run(row)}
       className="items-start gap-2.5 py-1.5"
     >

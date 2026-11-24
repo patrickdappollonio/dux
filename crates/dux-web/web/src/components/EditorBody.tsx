@@ -296,9 +296,6 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     changeBlock === null
       ? null
       : editorReadOnlyReason(changeBlock, root.kind === "agent" ? "agent" : "terminal", driver)
-  // The standing read-only line's own sentence, said beneath "Save with
-  // encoding" in the encoding menu, which that item is greyed by.
-  const saveEncodingReason = useMenuReason(writeBlocked)
   const tabsState = editorTabs[key]
   const tabs = useMemo(() => tabsState?.tabs ?? [], [tabsState])
   const activeTab = tabs.find((t) => t.id === tabsState?.activeId) ?? null
@@ -831,6 +828,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     activeTab === null ? null : laneKey(key, activeTab.path),
   )
   const fileBusy = laneOp !== undefined
+  // Said beneath "Save with encoding" in the encoding menu, which both greys:
+  // the standing read-only line's sentence, or, for a writable file, the one
+  // saying a save is out. The read-only sentence wins when both hold, since it
+  // outlasts the save. Another operation on the lane (a reopen, a reload) greys
+  // the item too but is not a save, so it says nothing.
+  const saveEncodingReason = useMenuReason(
+    writeBlocked ??
+      (laneOp === "save" || laneOp === "convert" ? SAVE_IN_FLIGHT_REASON : null),
+  )
 
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
@@ -2707,6 +2713,9 @@ function contentForPreview(
   }
   return buffer?.draft ?? ""
 }
+
+const SAVE_IN_FLIGHT_REASON =
+  "This file is being saved. Choose an encoding once the save has finished."
 
 function tabIsSaving(savingTabId: string | null, tab: EditorTab | null): boolean {
   return savingTabId !== null && savingTabId === tab?.id

@@ -160,9 +160,40 @@ describe("LauncherCorner", () => {
     const describedBy = (title: string) => entry(title)!.getAttribute("aria-describedby")
     expect(describedBy("New agent from PR…")).toBe(lead.id)
     expect(describedBy("New agent from existing worktree…")).toBe(lead.id)
-    // Waiting for an agent is a different thing the lead does not say.
-    expect(describedBy("New terminal for an agent…")).toBeNull()
+    // Waiting for an agent is a different thing the lead does not say: this
+    // row is described by its own no-agents line, which is another element.
+    const agentLine = document.getElementById(describedBy("New terminal for an agent…") ?? "")
+    expect(agentLine?.textContent).toBe(
+      "There are no agents yet. Create an agent first, then open a terminal for it.",
+    )
+    expect(agentLine).not.toBe(lead)
     expect(describedBy("Add project…")).toBeNull()
+  })
+
+  it("says there are no agents beneath New terminal for an agent, on a confirmed zero only", async () => {
+    const SENTENCE = "There are no agents yet. Create an agent first, then open a terminal for it."
+    seed({ projects: 1, sessions: 0 })
+    render(<LauncherCorner />)
+    await openMenu()
+    const item = entry("New terminal for an agent…")!
+    expect(item.getAttribute("aria-disabled")).toBe("true")
+    const why = document.getElementById(item.getAttribute("aria-describedby") ?? "")
+    expect(why?.textContent).toBe(SENTENCE)
+    expect(item.nextElementSibling?.contains(why ?? null)).toBe(true)
+    expect(screen.getAllByText(SENTENCE)).toHaveLength(1)
+    cleanup()
+
+    // A spine that has not arrived is not a zero.
+    state.current = { bootstrap: { gh_available: true }, spine: null }
+    render(<LauncherCorner />)
+    await openMenu()
+    expect(screen.queryByText(SENTENCE)).toBeNull()
+    cleanup()
+
+    seed()
+    render(<LauncherCorner />)
+    await openMenu()
+    expect(screen.queryByText(SENTENCE)).toBeNull()
   })
 
   it("names nothing when the workspace has a project", async () => {

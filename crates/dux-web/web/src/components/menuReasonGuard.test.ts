@@ -24,7 +24,8 @@ import { sourceFilesUnder, withoutComments } from "@/test/sourceFiles"
 // - a reason drawn as a plain `<div>` or `<p>`: it is only caught when an item
 //   names its id by hand, which is the third mark. One that no item names
 //   looks like any other paragraph in a menu. The launcher's lead sentence is
-//   such a paragraph, and the one allowed here;
+//   such a paragraph, and its entries name it in one expression beside a
+//   reason's `describedBy`, which this reads as a reason, so it is not listed;
 // - a description passed in a spread (`{...props}`), or an identifier called
 //   `describedBy` that holds something else;
 // - a reason made and never placed: no check here, because none is needed. A
@@ -158,7 +159,6 @@ export function findHandBuiltReasons(files: Record<string, string>): Finding[] {
 
 // One entry per exact occurrence. An entry that matches nothing fails the suite.
 const ALLOWED: { file: string; mark: Mark; contains: string; reason: string }[] = [
-  { file: "components/LauncherCorner.tsx", mark: "hand-wired-description", contains: "leadId", reason: "the launcher's lead sentence: its words and place are fixed by the launcher tenet, so it stays a paragraph and the greyed entries name it" },
   { file: "components/MenuReason.tsx", mark: "group-label", contains: "<MenuPrimitive.GroupLabel", reason: "the shared reason line itself" },
   { file: "components/MenuReason.tsx", mark: "group-label", contains: "</MenuPrimitive.GroupLabel>", reason: "its closing tag" },
   { file: "components/ui/dropdown-menu.tsx", mark: "group-label", contains: "MenuPrimitive.GroupLabel.Props", reason: "the primitive's heading part" },

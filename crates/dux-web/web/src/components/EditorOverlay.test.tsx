@@ -4254,6 +4254,42 @@ describe("a file that is not plain UTF-8", () => {
     expect((await encodingButton()).textContent).toContain("Windows-1252")
   })
 
+  // Two causes grey the item: the read-only sentence is said ahead of the
+  // save's, and with neither the item says nothing.
+  it("says a save is out beneath Save with encoding only while one is", async () => {
+    const SAVING = "This file is being saved. Choose an encoding once the save has finished."
+    await mountWithTab(PATH)
+    await loaded("café\n")
+    const { acquireLane, laneKey } = await import("@/lib/editorLane")
+    const item = async () => {
+      fireEvent.click(await encodingButton())
+      return (await screen.findByRole("menuitem", { name: /save with encoding/i })) as HTMLElement
+    }
+    const idle = await item()
+    expect(idle.getAttribute("aria-disabled")).not.toBe("true")
+    expect(idle.hasAttribute("aria-describedby")).toBe(false)
+    expect(document.querySelector('[data-slot="menu-reason"]')).toBeNull()
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+
+    const release = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), "save")!
+    const busy = await item()
+    expect(busy.getAttribute("aria-disabled")).toBe("true")
+    const why = document.getElementById(busy.getAttribute("aria-describedby") ?? "")
+    expect(why?.textContent).toBe(SAVING)
+    expect(busy.nextElementSibling?.contains(why ?? null)).toBe(true)
+    release()
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+
+    // A reopen greys the item too, but is not a save: no sentence about one.
+    const releaseReopen = acquireLane(laneKey(rootKey(agentRoot(SESSION)), PATH), "reopen")!
+    const reopening = await item()
+    expect(reopening.getAttribute("aria-disabled")).toBe("true")
+    expect(document.querySelector('[data-slot="menu-reason"]')).toBeNull()
+    releaseReopen()
+  })
+
   it("converts the file with Save with encoding, and the item then says UTF-8", async () => {
     await mountWithTab(PATH)
     await loaded("café\n")

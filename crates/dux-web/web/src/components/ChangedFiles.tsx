@@ -989,6 +989,11 @@ function ChangesHeader({
   const gitReasonShared = editorReason !== null && writeBlocked === editorReason
   const editorLine = useMenuReason(editorReason)
   const gitLine = useMenuReason(blocked && !gitReasonShared ? writeBlocked : null)
+  // Nothing staged greys Commit alone. A write block is the stronger cause and
+  // is already said above the git items, so this stands down for it.
+  const commitLine = useMenuReason(
+    !blocked && stagedCount === 0 ? NOTHING_STAGED : null,
+  )
   const describedBy = blocked
     ? gitReasonShared
       ? editorLine.describedBy
@@ -1103,11 +1108,12 @@ function ChangesHeader({
             <DropdownMenuItem
               onClick={() => openCommit(sessionId)}
               disabled={blocked || stagedCount === 0}
-              aria-describedby={describedBy}
+              aria-describedby={describedBy ?? commitLine.describedBy}
             >
               <GitCommitVertical />
               Commit…
             </DropdownMenuItem>
+            <MenuItemReason reason={commitLine} />
             {branchGit ? (
               <>
                 <DropdownMenuItem
@@ -1173,6 +1179,9 @@ interface BulkToolbarProps {
   // Why every verb is greyed out, said once at the head of the menu, or null.
   writeBlocked: string | null
 }
+
+// Why Commit in the pane's ⋯ menu is disabled when no file is staged.
+const NOTHING_STAGED = "Nothing is staged yet. Stage a file to commit it."
 
 // Why a bulk verb is disabled when every selected row is one it would leave
 // out, rather than a click that silently does nothing.
