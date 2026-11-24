@@ -1,0 +1,4 @@
+{
+  "comment": "Server sentences the browser draws with their backticked spans as chips. The browser matches the first one by its whole text, so a Rust test and a browser test both hold it to what the server sends.",
+  "password_edit_refusal": "The web password cannot be set, changed or removed from the config editor, so nothing was written. Change it from Preferences, which asks for the current password, or with `dux config set server.auth.password` on the machine dux runs on, and keep password_hash as it is in this edit."
+}

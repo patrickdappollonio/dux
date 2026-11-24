@@ -6,7 +6,7 @@
 // (`authErrors.ts`), never as the body the server sent.
 
 import { apiFetch, isAuthInterruption } from "./apiFetch"
-import { count, readErrorBody, refusalSentence, str } from "./authErrors"
+import { count, isOwnWording, readErrorBody, refusalSentence, str } from "./authErrors"
 import { getConnectionId } from "./connection"
 import { reconnectAttemptTimeoutMs } from "./connectionTiming"
 import { isDeadline, withDeadline } from "./deadline"
@@ -63,7 +63,14 @@ export type PasswordAnswer =
   | { kind: "signed_out" }
   | { kind: "unreachable"; timedOut: boolean }
   /** `score` is the server's 0-4 strength result when it sent one. */
-  | { kind: "refused"; message: string; score: number | null }
+  | {
+      kind: "refused"
+      message: string
+      score: number | null
+      /** Present when the sentence is dux's own fixed wording, so its backticks may be drawn
+       * as chips (`isOwnWording`). */
+      ownWording?: true
+    }
 
 export async function postPassword(change: {
   current?: string
@@ -94,6 +101,7 @@ export async function postPassword(change: {
       resp.headers.get("retry-after"),
     ),
     score: count(err.json.score),
+    ...(isOwnWording(err) ? { ownWording: true as const } : {}),
   }
 }
 

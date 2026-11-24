@@ -10,6 +10,8 @@ import { StaleSaveNotice } from "@/components/StaleSaveNotice"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { ListLine } from "@/components/ui/empty"
 import { InlineCode } from "@/components/ui/inline-code"
+import { PASSWORD_EDIT_REFUSAL } from "@/lib/configApi"
+import { renderInlineCode } from "@/lib/inlineMarkdown"
 import { chip } from "@/lib/prose"
 import {
   closeConfigEditor,
@@ -67,13 +69,18 @@ function ConfigEditorForm({
         // A choice, not an error: reloading discards these edits, so "Keep
         // editing" has focus and the reload is styled as the destructive one.
         <StaleSaveNotice
-          message={conflict}
+          // dux's own fixed refusal: its backticks mark `dux config set`, drawn as a chip.
+          message={renderInlineCode(conflict)}
           reloadLabel="Reload the file"
           onKeepEditing={dismissConfigEditorConflict}
           onReload={() => openConfigEditor()}
         />
       ) : null}
-      <ErrorLine shape="log">{error}</ErrorLine>
+      {/* The one refusal of dux's own wording that can land here is the password one, matched
+          whole; a parse error, which echoes the person's own lines, is shown as it came. */}
+      <ErrorLine shape="log">
+        {error === PASSWORD_EDIT_REFUSAL ? renderInlineCode(error) : error}
+      </ErrorLine>
       <Notice shape="box" tone="info" announce="static" icon={Info}>
         <span>
           Saving writes <InlineCode>config.toml</InlineCode> to disk but

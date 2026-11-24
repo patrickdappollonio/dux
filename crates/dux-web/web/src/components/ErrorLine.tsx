@@ -1,7 +1,5 @@
 import type { ReactNode } from "react"
 
-import { renderMarked } from "@/lib/prose"
-
 // The red sentence under a field, or in a dialog's body, that says an action
 // failed or an input is refused. It is a sentence, not a framed notice (that is
 // `Notice`), and there is no prop for a class or a style: the colour is fixed
@@ -26,10 +24,6 @@ import { renderMarked } from "@/lib/prose"
 //
 // `size` matches the neighbouring text: "sm" is the default, "xs" for rows
 // whose other text is `text-xs`.
-//
-// A sentence of dux's own words that marks a command or a setting with
-// backticks (a refusal the server wrote) is drawn with the chip and without
-// them (`renderMarked`). The log shape is a parser's own text, shown as it came.
 //
 // With no words the component renders nothing, so a caller can hand it its
 // error as it is.
@@ -66,7 +60,7 @@ export function ErrorLine({
           : `${text} text-destructive`
       }
     >
-      {shape === "log" ? children : markChildren(children)}
+      {children}
     </p>
   )
 }
@@ -74,12 +68,4 @@ export function ErrorLine({
 function isEmpty(children: ReactNode): boolean {
   if (Array.isArray(children)) return children.every(isEmpty)
   return children == null || children === false || children === ""
-}
-
-function markChildren(children: ReactNode): ReactNode {
-  if (typeof children === "string") return renderMarked(children)
-  if (Array.isArray(children)) {
-    return children.map((child) => (typeof child === "string" ? renderMarked(child) : child))
-  }
-  return children
 }

@@ -125,6 +125,16 @@ function looksLikeJson(text: string): boolean {
   return text.startsWith("{") || text.startsWith("[")
 }
 
+/// Whether a refusal's sentence is dux's own fixed wording, whose backticks are its markup
+/// for a command or a setting, so the place showing it may draw them as chips
+/// (`renderInlineCode`). Only `first_password_not_here`: its sentence is fixed words, and
+/// the reason it may append about the route is a fixed sentence too. The password-policy
+/// refusal is left out because it repeats the policy problems, which can echo text from
+/// the person's config.toml.
+export function isOwnWording(body: ErrorBody): boolean {
+  return body.json.error === "first_password_not_here"
+}
+
 /// The sentence for a refusal of `action` ("sign out", "change the password").
 export function refusalSentence(
   status: number,

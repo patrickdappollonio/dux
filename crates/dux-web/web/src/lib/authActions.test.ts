@@ -114,6 +114,21 @@ describe("postPassword", () => {
     })
   })
 
+  it("marks the first-password refusal as dux's own wording, and no other", async () => {
+    reply = async () =>
+      json(403, { error: "first_password_not_here", message: "Use `dux config set x`." })
+    const { a } = await load()
+    expect(await a.postPassword({ next: "a first password here" })).toEqual({
+      kind: "refused",
+      message: "Use `dux config set x`.",
+      score: null,
+      ownWording: true,
+    })
+    reply = async () => json(400, { message: "the policy is invalid (bad `x`)" })
+    const answer = await a.postPassword({ next: "a first password here" })
+    expect(answer).not.toHaveProperty("ownWording")
+  })
+
   it("reads a password stored but not in force as its own answer, never a success", async () => {
     reply = async () =>
       json(409, { error: "password_not_in_force", message: "Saved, but not in force: x." })

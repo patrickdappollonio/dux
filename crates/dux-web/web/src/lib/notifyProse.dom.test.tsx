@@ -64,6 +64,28 @@ describe("names in a toast", () => {
     expect(toastEl().textContent).toContain('Plain words about "main".')
   })
 
+  it("shows a file name whose backticks pair up exactly as typed", async () => {
+    render(<Toaster />)
+    const text = "refusing to rename, destination already exists: /w/a`b`c.txt"
+    act(() => {
+      notifyError(text, { id: "rename" })
+    })
+    await waitFor(() => toastEl())
+    expect(chips(toastEl())).toEqual([])
+    expect(toastEl().textContent).toContain(text)
+  })
+
+  it("shows a parser's error text exactly as typed, backticks and all", async () => {
+    render(<Toaster />)
+    const text = "Config reload failed: TOML parse error at line 3, key = `x`, expected `\"`, `'`"
+    act(() => {
+      notifyError(text, { id: "reload" })
+    })
+    await waitFor(() => toastEl())
+    expect(chips(toastEl())).toEqual([])
+    expect(toastEl().textContent).toContain(text)
+  })
+
   it("chips the names of a spinner too", async () => {
     render(<Toaster />)
     act(() => {

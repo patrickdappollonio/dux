@@ -1,5 +1,5 @@
 import { TriangleAlert } from "lucide-react"
-import type { Ref } from "react"
+import type { ReactNode, Ref } from "react"
 
 import { Notice } from "@/components/Notice"
 
@@ -13,7 +13,7 @@ export function StaleSaveNotice({
   onReload,
   keepEditingRef,
 }: {
-  message: string
+  message: ReactNode
   reloadLabel: string
   onKeepEditing: () => void
   onReload: () => void

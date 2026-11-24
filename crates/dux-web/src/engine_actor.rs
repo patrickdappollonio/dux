@@ -11109,6 +11109,24 @@ mod tests {
             .expect("a bind equal to the running host and port is no host change");
     }
 
+    /// The browser draws this sentence's backticked command as a chip by
+    /// matching the whole text (`configApi.ts`); its test reads the same
+    /// fixture, so a rewording here fails both until they move together.
+    #[test]
+    fn the_password_edit_refusal_is_the_sentence_the_browser_matches() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../dux-core/tests/fixtures/fixed_sentences_cross_language.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let parsed: serde_json::Value = serde_json::from_str(&source).expect("valid JSON");
+        assert_eq!(
+            parsed["password_edit_refusal"]
+                .as_str()
+                .expect("a sentence"),
+            PASSWORD_EDIT_REFUSAL
+        );
+    }
+
     /// A save that carries no proof of what it read is refused: the raw editor
     /// is its only client, and it always has one.
     #[tokio::test]

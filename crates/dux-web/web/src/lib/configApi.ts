@@ -10,6 +10,14 @@ import { getConnectionId } from "./connection"
 import type { SettingValue } from "./settingsDescriptors"
 import type { MacroView } from "./types"
 
+/// The refusal of a raw save that would set, change or clear the web password: dux's own
+/// fixed sentence, which marks a command with backticks. It reaches the editor as plain text
+/// beside parse errors, so the editor tells it by the whole sentence; a mismatch (the server
+/// reworded it) only shows it as it came. `fixed_sentences_cross_language.json` pins it to
+/// the server's constant.
+export const PASSWORD_EDIT_REFUSAL =
+  "The web password cannot be set, changed or removed from the config editor, so nothing was written. Change it from Preferences, which asks for the current password, or with `dux config set server.auth.password` on the machine dux runs on, and keep password_hash as it is in this edit."
+
 /// A refusal whose body is the 409 `config_changed` answer becomes a
 /// `ConfigChangedError`; anything else is passed through as it was.
 function asConfigChanged(e: unknown): unknown {

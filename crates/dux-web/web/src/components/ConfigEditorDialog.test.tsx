@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
+import { PASSWORD_EDIT_REFUSAL } from "@/lib/configApi"
 
 // Override `useDux` (seeded config-editor state) and spy the actions, while
 // every other store export stays intact.
@@ -160,6 +161,26 @@ describe("ConfigEditorDialog conflict", () => {
     expect(store.dismissConfigEditorConflict).toHaveBeenCalled()
     reload.click()
     expect(store.openConfigEditor).toHaveBeenCalled()
+  })
+  it("draws dux's password refusal with its command as a chip, and a parse error as typed", () => {
+    seed({
+      configEditorOpen: true,
+      configEditorContent: "[ui]\n",
+      configEditorError: PASSWORD_EDIT_REFUSAL,
+    } as Partial<DuxState>)
+    const { unmount } = render(<ConfigEditorDialog />)
+    expect(
+      [...document.querySelectorAll("[data-slot='inline-code']")].map((c) => c.textContent),
+    ).toContain("dux config set server.auth.password")
+    unmount()
+    const parseError = "TOML parse error at line 2, key = `x`, expected `\"`"
+    seed({
+      configEditorOpen: true,
+      configEditorContent: "[ui]\n",
+      configEditorError: parseError,
+    } as Partial<DuxState>)
+    render(<ConfigEditorDialog />)
+    expect(document.body.textContent).toContain(parseError)
   })
   it("draws the command in the refusal as a chip, with its words and no backticks", () => {
     const refusal =

@@ -7,7 +7,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { FOCUS_RING } from "@/lib/focusRing"
-import { proseText, renderMarked, renderProse, type Prose } from "@/lib/prose"
+import { proseText, renderProse, type Prose } from "@/lib/prose"
 import { cn } from "@/lib/utils"
 
 // A control's hint that stays readable while it is disabled: a disabled button
@@ -116,8 +116,7 @@ function hintWords(hint: string | Prose | null): string | null {
 }
 
 function drawHint(hint: string | Prose | null) {
-  if (hint === null) return null
-  return typeof hint === "string" ? renderMarked(hint) : renderProse(hint)
+  return hint === null || typeof hint === "string" ? hint : renderProse(hint)
 }
 
 function isDisabled(el: EventTarget): boolean {

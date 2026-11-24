@@ -789,6 +789,14 @@ function passwordNote(status: AuthStatus | null): string {
   return firstPasswordUnavailable(status.required_reason)
 }
 
+// A refused password change as the row shows it. `ownWording` says the sentence is dux's
+// own fixed refusal, whose backticks mark a command and are drawn as chips; every other
+// message is shown exactly as it came.
+interface PasswordError {
+  message: string
+  ownWording: boolean
+}
+
 // The one row that is not a `SettingRow`, sent through its own write target by
 // Save. Which fields show is the server's answer, read again on every opening.
 function PasswordSettingRow({
@@ -807,7 +815,7 @@ function PasswordSettingRow({
   draft: PasswordDraft
   onDraft: (next: PasswordDraft) => void
   reading: StrengthReading
-  error: string | null
+  error: PasswordError | null
   disabled: boolean
   words: string[]
   /** The row's small line: where it applies, and its topic where shown. */
@@ -878,7 +886,13 @@ function PasswordSettingRow({
             disabled={disabled}
             onChange={(confirm) => onDraft({ ...draft, confirm })}
           />
-          <ErrorLine size="xs">{error}</ErrorLine>
+          <ErrorLine size="xs">
+            {error === null
+              ? null
+              : error.ownWording
+                ? renderInlineCode(error.message)
+                : error.message}
+          </ErrorLine>
         </div>
       ) : null}
     </div>
@@ -1084,7 +1098,7 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
   const authPhase = useAuthPhase()
   const authStatus = authPhase.kind === "open" ? authPhase.status : null
   const [passwordDraft, setPasswordDraft] = useState<PasswordDraft>(EMPTY_PASSWORD_DRAFT)
-  const [passwordError, setPasswordError] = useState<string | null>(null)
+  const [passwordError, setPasswordError] = useState<PasswordError | null>(null)
   const strengthReading = usePasswordStrength(passwordDraft.next)
   // Opening Preferences reads the sign-in status again, so the row shows what
   // the server says now (a password set from the CLI a moment ago included).
@@ -1123,8 +1137,8 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
 
   // A password error stops or ends a Save, and it is said on the password row,
   // so the row is brought on screen: the search cleared and its topic shown.
-  const showPasswordError = (message: string) => {
-    setPasswordError(message)
+  const showPasswordError = (message: string, ownWording = false) => {
+    setPasswordError({ message, ownWording })
     setQuery("")
     setView("network")
     if (phone) setStep("topic")
@@ -1255,7 +1269,7 @@ function PreferencesForm({ open, onClosed }: { open: boolean; onClosed: () => vo
         notifyWarning(storedNotInForceSentence(answer.message), { sticky: true })
         return false
       case "refused":
-        showPasswordError(answer.message)
+        showPasswordError(answer.message, answer.ownWording === true)
         return false
       case "signed_out":
         reportUnauthorized()

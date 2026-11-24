@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { ConfigChangedError, configApi } from "./configApi"
+import { ConfigChangedError, configApi, PASSWORD_EDIT_REFUSAL } from "./configApi"
 
 // The CustomizeWebappDialog test mocks the store wholesale, so this is the one
 // place the REAL client → wire shape is pinned: a swapped field, wrong path, or
@@ -9,6 +13,20 @@ import { ConfigChangedError, configApi } from "./configApi"
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+it("matches the password refusal the server sends, word for word", () => {
+  // The other half of `the_password_edit_refusal_is_the_sentence_the_browser_matches`.
+  const fixture = JSON.parse(
+    readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../../../dux-core/tests/fixtures/fixed_sentences_cross_language.json",
+      ),
+      "utf8",
+    ),
+  ) as { password_edit_refusal: string }
+  expect(PASSWORD_EDIT_REFUSAL).toBe(fixture.password_edit_refusal)
 })
 
 function stubFetchOk(): ReturnType<typeof vi.fn> {

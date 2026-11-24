@@ -39,8 +39,13 @@ export function inlineCodeDisplayText(text: string): string {
     .join("")
 }
 
-// Renders single-backtick-delimited spans as <code> elements. Deliberately not a markdown
-// parser: no bold, no italic, no links, and no dependency for it. Setting descriptions and
+// Renders single-backtick-delimited spans as <code> elements. The one backtick-to-chip
+// converter in the browser, for text whose backticks are dux's own markup: copy it ships
+// (setting descriptions, dialog notes) and the fixed sentences it words the same way every
+// time. A place asks for it by calling it; no shared component applies it to the text it is
+// handed, because text that echoes something a person typed (a file name, a parser's
+// message) has backticks that are not dux's, and nothing in the string tells them apart.
+// Deliberately not a markdown parser: no bold, no italic, no links, and no dependency for it. Setting descriptions and
 // dialog copy are adapted from config.toml comments that use backticks for inline code, which
 // as plain text left the literal backtick characters visible in the UI.
 //

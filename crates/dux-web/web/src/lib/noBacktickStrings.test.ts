@@ -3,20 +3,21 @@ import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
-// A toast never shows a literal backtick.
+// A string the browser writes holds a backtick only where it is dux's own fixed copy
+// drawn through `renderInlineCode`, or code.
 //
-// The browser's toasts (raised through `lib/notify.ts`) draw a finished string
-// with its backticked spans as chips (`renderMarked`), but a status built from
-// parts is the way to name a thing: a name in a toast the browser raises itself
-// is a `Prose` name, which `notify` draws as the `InlineCode` chip. The server's statuses carry their names the same way,
-// and the Rust side has its own guard for them
-// (`crates/dux-core/tests/status_messages_carry_no_backticks.rs`).
+// The browser's toasts (raised through `lib/notify.ts`) and its other shared pieces draw a
+// plain string exactly as it arrives, so a backtick in one shows verbatim. A name in a toast
+// the browser raises itself is a `Prose` name, which `notify` draws as the `InlineCode`
+// chip. The server's statuses carry their names the same way, and the Rust side has its own
+// guard for them (`crates/dux-core/tests/status_messages_carry_no_backticks.rs`).
 //
 // This reads every production source file under src/ and fails on a quoted
 // string ('…' or "…") holding a backtick, or an escaped backtick inside a
 // template literal, that is not in ALLOWED with its reason. Most such strings
-// are code, or copy rendered through `renderInlineCode`, which turns a
-// backticked span into the chip.
+// are code, or dux's own fixed copy (a setting's description, a sentence the server
+// words the same way every time) that a place asks `renderInlineCode` to draw with the
+// backticked span as the chip. Text relayed from elsewhere is never in that list.
 //
 // WHAT IT CANNOT SEE. It is a small tokenizer, not a TypeScript parser: it
 // knows comments, quoted strings and template literals (with `${}` nesting),
@@ -117,11 +118,6 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "renderInlineCode putting back an unpaired backtick it did not consume.",
   },
   {
-    file: "lib/prose.tsx",
-    line: 'const parts = text.split("`")',
-    reason: "markedProse itself, splitting on the delimiter it turns into chips.",
-  },
-  {
     file: "lib/termselect.ts",
     line: "export const DEFAULT_WORD_SEPARATORS = \" ()[]{}',\\\"`\"",
     reason: "The terminal's word separators: a backtick ends a word on a double-click.",
@@ -142,6 +138,11 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
     reason: "The Preferences password row's note, drawn through renderInlineCode, which chips the span.",
   },
   {
+    file: "lib/configApi.ts",
+    line: '"The web password cannot be set, changed or removed from the config editor, so nothing was written. Change it from Preferences, which asks for the current password, or with `dux config set server.auth.password` on the machine dux runs on, and keep password_hash as it is in this edit."',
+    reason: "dux's own fixed refusal, matched whole and drawn through renderInlineCode by the config editor.",
+  },
+  {
     file: "lib/settingsDescriptors.ts",
     line: '"Asked of every browser that reaches dux from where `[server.auth] require` says it applies. dux keeps only an Argon2 hash in `config.toml`; anyone who can read that file can still try to guess the password offline, so use a long one you use nowhere else. Changing it signs every browser out, this one included.",',
     reason: "A setting's description, drawn through renderInlineCode in the Settings dialog.",
@@ -158,7 +159,7 @@ const ALLOWED: { file: string; line: string; reason: string }[] = [
   },
 ]
 
-describe("no toast text is written with a backtick", () => {
+describe("a browser-written string holds a backtick only as dux's own fixed copy or code", () => {
   const hits = walk(srcDir)
     .map((path) => ({ name: relative(srcDir, path), path }))
     .filter(({ name }) => isProduction(name) && !name.startsWith("test/") && name !== "testSetup.ts")
@@ -170,7 +171,7 @@ describe("no toast text is written with a backtick", () => {
     const unexplained = hits.filter(
       (hit) => !ALLOWED.some((allowed) => allowed.file === hit.file && allowed.line === hit.line),
     )
-    expect(unexplained, "a backtick in a string shows verbatim in a toast; pass the name as Prose").toEqual([])
+    expect(unexplained, "a backtick in a string shows verbatim wherever it is shown; pass a name as Prose, or allow dux's own fixed copy with its reason").toEqual([])
   })
 
   it("keeps no allowance for a line that is gone", () => {
