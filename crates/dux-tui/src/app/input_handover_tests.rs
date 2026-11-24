@@ -955,6 +955,22 @@ mod dialogs_and_take_over {
         );
         assert_every_cut_matches(setup, &pieces.concat(), &want);
     }
+
+    /// A paste begun in the read that carries the take-over key, its line
+    /// break cut across two reads, arrives as one paste whose line breaks
+    /// are the program's, however the reads cut it.
+    #[test]
+    fn a_paste_after_the_take_over_key_arrives_whole_however_the_reads_cut_it() {
+        let setup = Setup {
+            driver: Driver::Browser,
+            ..MAXIMIZED
+        };
+        let take_over = default_key(Action::FocusAgent);
+        let pieces: &[&[u8]] = &[&take_over, b"\x1b[200~a\r", b"\nb\x1b[201~"];
+        let want = assert_burst_matches_paced(setup, pieces);
+        assert_eq!(want.received, "a\rb");
+        assert_every_cut_matches(setup, &pieces.concat(), &want);
+    }
 }
 
 /// The maximized pane's reader stopping for a reason other than a key it

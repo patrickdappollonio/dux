@@ -4192,7 +4192,7 @@ impl App {
         bytes.extend_from_slice(tail);
         self.raw_input_buf.clear();
         self.raw_input_parser.clear();
-        self.raw_paste.in_bracket = false;
+        self.raw_paste = super::RawPaste::default();
         self.terminal_input.give_back(&bytes);
     }
 
