@@ -2,6 +2,7 @@ import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup } from "@/components/ui/form-group"
 import { Textarea } from "@/components/ui/textarea"
 import { chip, prose } from "@/lib/prose"
 import {
@@ -95,20 +96,25 @@ function AgentStartupCommandForm({ open, onClosed }: { open: boolean; onClosed: 
         leaves: prose`the startup command of project ${chip(projectName)}`,
       }}
     >
-      <Textarea
-        value={startup}
-        onChange={(e) => setStartup(e.target.value)}
-        onKeyDown={(e) => {
-          // Plain Enter inserts a newline (a startup command can be multi-line);
-          // Cmd/Ctrl-Enter saves, matching the common textarea submit convention.
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault()
-            void handleSave()
-          }
-        }}
-        placeholder="npm run dev"
-        className="min-h-16 font-mono"
-      />
+      <FormGroup layout="stacked" control="single" spokenName="Startup command">
+        {(field) => (
+          <Textarea
+            {...field}
+            value={startup}
+            onChange={(e) => setStartup(e.target.value)}
+            onKeyDown={(e) => {
+              // Plain Enter inserts a newline (a startup command can be multi-line);
+              // Cmd/Ctrl-Enter saves, matching the common textarea submit convention.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                void handleSave()
+              }
+            }}
+            placeholder="npm run dev"
+            className="min-h-16 font-mono"
+          />
+        )}
+      </FormGroup>
     </Modal>
   )
 }

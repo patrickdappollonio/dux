@@ -3,6 +3,7 @@ import { Notice } from "@/components/Notice"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { EmptyState } from "@/components/ui/empty"
+import { FormGroup } from "@/components/ui/form-group"
 import {
   Select,
   SelectContent,
@@ -52,21 +53,25 @@ function StartupLogsBody({ open, emptyMessage }: { open: boolean; emptyMessage: 
     </div>
   ) : (
     <div className="grid gap-3">
-      <Select
-        value={startupLogsSelected?.name ?? startupLogsEntries[0]?.name ?? ""}
-        onValueChange={(name) => name && selectStartupLog(name)}
-      >
-        <SelectTrigger className="w-full font-mono">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {startupLogsEntries.map((entry) => (
-            <SelectItem key={entry.name} value={entry.name} className="font-mono">
-              {entry.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <FormGroup layout="stacked" control="single" spokenName="Log file">
+        {(field) => (
+          <Select
+            value={startupLogsSelected?.name ?? startupLogsEntries[0]?.name ?? ""}
+            onValueChange={(name) => name && selectStartupLog(name)}
+          >
+            <SelectTrigger {...field} className="w-full font-mono">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {startupLogsEntries.map((entry) => (
+                <SelectItem key={entry.name} value={entry.name} className="font-mono">
+                  {entry.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </FormGroup>
 
       <ScrollArea className="h-[50vh] rounded-md border md:h-96">
         {/* The relative positioning anchors the in-flight spinner over the

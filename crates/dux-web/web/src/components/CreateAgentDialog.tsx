@@ -5,8 +5,8 @@ import {
 } from "@/components/AgentNameFields"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { CheckboxRow } from "@/components/CheckboxRow"
-import { ErrorLine } from "@/components/ErrorLine"
 import { ReviewCopyQuestion } from "@/components/ReviewCopyQuestion"
+import { FormGroup, type FieldWiring } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { renderProse } from "@/lib/prose"
 import type { KeyboardEvent } from "react"
@@ -90,18 +90,13 @@ export function CreateAgentDialog() {
         error={createAgentPrError}
         onSubmit={handleSubmit}
       />
-      <AgentNameInput
+      <BranchNameField
+        dialog={dialog}
         value={createAgentDraft}
-        onChange={setCreateAgentDraft}
-        onSubmit={handleSubmit}
-        placeholder={dialog.namePlaceholder}
         invalid={form.invalidName}
         generating={createAgentNamePending}
-        autoFocus={false}
+        onSubmit={handleSubmit}
       />
-      <p className="text-xs text-muted-foreground">
-        Any name git accepts for a branch. This becomes the branch name.
-      </p>
       <AgentOptions
         showCopyChanges={dialog.showCopyChanges}
         randomize={createAgentRandomize}
@@ -133,6 +128,58 @@ function chooseExistingProject(reference: string): void {
   openNewAgentPicker("from_pr")
 }
 
+const BRANCH_RULES = "Any name git accepts for a branch. This becomes the branch name."
+
+// The branch name, alone in the dialog unless a pull request's box is above it:
+// alone it is bare, named for a screen reader; beside that box both are labelled.
+function BranchNameField({
+  dialog,
+  value,
+  invalid,
+  generating,
+  onSubmit,
+}: {
+  dialog: CreateAgentDialogView
+  value: string
+  invalid: boolean
+  generating: boolean
+  onSubmit: () => void
+}) {
+  const input = (field: FieldWiring, placeholder?: string) => (
+    <AgentNameInput
+      field={field}
+      value={value}
+      onChange={setCreateAgentDraft}
+      onSubmit={onSubmit}
+      placeholder={placeholder}
+      generating={generating}
+      autoFocus={false}
+    />
+  )
+  return dialog.showPrFields ? (
+    <FormGroup
+      layout="stacked"
+      control="single"
+      label="Branch name"
+      optional={dialog.nameOptional || undefined}
+      notes={[{ words: BRANCH_RULES }]}
+      invalid={invalid}
+    >
+      {(field) => input(field)}
+    </FormGroup>
+  ) : (
+    <FormGroup
+      layout="stacked"
+      control="single"
+      spokenName={dialog.nameOptional ? "Branch name (optional)" : "Branch name"}
+      help={BRANCH_RULES}
+      invalid={invalid}
+    >
+      {(field) => input(field, dialog.nameOptional ? "Branch name (optional)" : "Branch name")}
+    </FormGroup>
+  )
+}
+
 interface PrReferenceFieldsProps {
   dialog: CreateAgentDialogView
   value: string
@@ -149,16 +196,17 @@ function PrReferenceFields({
   if (!dialog.showPrFields) return null
   return (
     <>
-      <Input
-        value={value}
-        onChange={(event) => setCreateAgentPrInput(event.target.value)}
-        onKeyDown={(event) => handleEnter(event, onSubmit)}
-        placeholder={dialog.prPlaceholder}
-        aria-label="GitHub pull request"
-        aria-invalid={error !== null}
-        aria-describedby={error ? "create-agent-pr-error" : undefined}
-      />
-      <ErrorLine id="create-agent-pr-error">{error}</ErrorLine>
+      <FormGroup layout="stacked" control="single" label="GitHub pull request" error={error} errorAnnounce="alert">
+        {(field) => (
+          <Input
+            {...field}
+            value={value}
+            onChange={(event) => setCreateAgentPrInput(event.target.value)}
+            onKeyDown={(event) => handleEnter(event, onSubmit)}
+            placeholder={dialog.prPlaceholder}
+          />
+        )}
+      </FormGroup>
       {dialog.showProjectPicker && (
         <div className="flex justify-start">
           <Button

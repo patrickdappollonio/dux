@@ -470,6 +470,16 @@ describe("WorktreesDialog", () => {
     ).toBe("globex-two")
   })
 
+  it("names the display-name box for a screen reader and reads what it takes with it", () => {
+    seed([entry({ worktree_path: "/wt/acme-one" })])
+    render(<WorktreesDialog />)
+    fireEvent.click(screen.getByRole("button", { name: /acme-one/ }))
+    const box = screen.getByRole("textbox", { name: "Display name" })
+    expect(document.getElementById(box.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "Display name only: the branch already exists. Any name git accepts for a branch.",
+    )
+  })
+
   it("offers no branch checkbox for a detached worktree", () => {
     // There is no branch to delete, so offering the choice would be a lie and
     // the request must not ask for one.

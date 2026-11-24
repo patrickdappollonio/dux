@@ -92,7 +92,7 @@ describe("AddProjectDialog picker", () => {
     // echoed there as a read-only field. Both the header and the footer now
     // render the path in a field, so it appears more than once by display
     // value (proving the footer echo showed up, not just the header).
-    expect(screen.getByPlaceholderText("Project name (optional)")).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: "Project name (optional)" })).toBeTruthy()
     expect(
       screen.getAllByDisplayValue("/home/u/notes").length,
     ).toBeGreaterThan(1)
@@ -117,7 +117,9 @@ describe("AddProjectDialog picker", () => {
     render(<AddProjectDialog />)
     fireEvent.click(screen.getByText("Use this folder").closest("button")!)
     const [browse, chosen] = screen.getAllByDisplayValue("/home/u/notes")
-    const sizing = (el: HTMLElement) => Array.from(el.classList).filter((c) => /^(basis-|flex-1$|grow)/.test(c))
+    // The sizing sits on the box around the field, the item of the row or column.
+    const sizing = (el: HTMLElement) =>
+      Array.from(el.closest("[data-form-layout]")!.parentElement!.classList).filter((c) => /^(basis-|flex-1$|grow)/.test(c))
     expect(sizing(chosen)).toEqual([])
     expect(sizing(browse)).toEqual(["flex-1", "basis-56"])
   })
@@ -305,6 +307,24 @@ describe("AddProjectDialog picker", () => {
     expect(
       screen.queryByText(/dux will\s+initialize a git repository/i),
     ).toBeNull()
+  })
+
+  it("labels the project name, and names the folder boxes and the new folder's name for a screen reader", () => {
+    seed()
+    render(<AddProjectDialog />)
+    expect((screen.getByRole("textbox", { name: "Current folder" }) as HTMLInputElement).value).toBe("/home/u/notes")
+    fireEvent.click(screen.getByText("Use this folder").closest("button")!)
+    const name = screen.getByRole("textbox", { name: "Project name (optional)" }) as HTMLInputElement
+    expect((screen.getByText(/^Project name/, { selector: "label" }) as HTMLLabelElement).control).toBe(name)
+    expect(name.placeholder).toBe("")
+    const chosen = screen.getByRole("textbox", { name: "Chosen folder" }) as HTMLInputElement
+    expect(chosen.value).toBe("/home/u/notes")
+    // A read-out of the choice made above, announced as read only and out of the tab order,
+    // so the one box a person fills in is the project name.
+    expect(chosen.readOnly).toBe(true)
+    expect(chosen.tabIndex).toBe(-1)
+    fireEvent.click(screen.getByRole("button", { name: /new folder/i }))
+    expect(screen.getByRole("textbox", { name: "New folder name" })).toBeTruthy()
   })
 
   it("Escape in the New-folder editor cancels the editor without closing the dialog", () => {

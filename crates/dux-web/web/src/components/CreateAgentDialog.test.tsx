@@ -103,6 +103,7 @@ describe("CreateAgentDialog", () => {
       screen.getByText("quacky-mallard", { selector: "code" }),
     ).toBeTruthy()
     expect(screen.getByPlaceholderText("Branch name")).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: "Branch name" })).toBeTruthy()
     expect(
       (screen.getByRole("button", { name: "Fork agent" }) as HTMLButtonElement)
         .disabled,
@@ -122,6 +123,27 @@ describe("CreateAgentDialog", () => {
       "That repository is not open.",
     )
     expect(screen.getByText("or choose an existing project")).toBeTruthy()
+  })
+
+  it("names its one box for a screen reader and reads the branch rules with it", async () => {
+    seed({ kind: "new", projectId: "p1" })
+    render(<CreateAgentDialog />)
+    const name = screen.getByRole("textbox", { name: "Branch name (optional)" })
+    expect(screen.queryByText("Branch name (optional)")).toBeNull()
+    expect(document.getElementById(name.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "Any name git accepts for a branch. This becomes the branch name.",
+    )
+  })
+
+  it("labels both boxes over a pull request, and reads its refusal with the pull request's", async () => {
+    seed({ kind: "pr", projectId: null }, { createAgentPrError: "That repository is not open." })
+    render(<CreateAgentDialog />)
+    const pr = screen.getByRole("textbox", { name: "GitHub pull request" })
+    expect((screen.getByText("GitHub pull request") as HTMLLabelElement).control).toBe(pr)
+    expect(pr.getAttribute("aria-invalid")).toBe("true")
+    expect(document.getElementById(pr.getAttribute("aria-describedby")!)?.textContent).toBe("That repository is not open.")
+    const name = screen.getByRole("textbox", { name: "Branch name (optional)" }) as HTMLInputElement
+    expect(name.placeholder).toBe("")
   })
 
   it("holds Create back until the review copy box is ticked", async () => {

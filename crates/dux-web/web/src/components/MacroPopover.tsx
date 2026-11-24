@@ -262,8 +262,8 @@ function MacroCommand({
   return (
     // min-h-0 lets the Command column shrink when the popup hits its
     // viewport cap, so the list below scrolls instead of pushing the
-    // Edit-macros footer off screen.
-    <Command className="min-h-0">
+    // Edit-macros footer off screen. `label` is the search box's name.
+    <Command className="min-h-0" label="Search macros">
       {/* No autofocus in the sheet: menus never pop the soft keyboard
           on open, and this now presents as one of them; tapping the
           field summons the keyboard. Desktop keeps type-immediately

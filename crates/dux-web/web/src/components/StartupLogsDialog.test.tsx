@@ -99,6 +99,11 @@ afterEach(() => {
 })
 
 describe("StartupLogsDialog", () => {
+  it("names its one select by what it picks, with no label drawn", () => {
+    renderOpen({ startupLogsTarget: "s1", startupLogsScope: "agent", ...ONE_RUN })
+    expect(screen.getByRole("combobox", { name: "Log file" })).toBeTruthy()
+  })
+
   it("names the AGENT in agent scope", () => {
     renderOpen({ startupLogsTarget: "s1", startupLogsScope: "agent", ...ONE_RUN })
     expect(screen.getByRole("heading").textContent).toBe(

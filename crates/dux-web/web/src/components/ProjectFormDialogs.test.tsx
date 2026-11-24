@@ -99,9 +99,14 @@ afterEach(() => {
 })
 
 describe.each([
-  ["the agent's environment", AgentEnvDialog, "KEY=VALUE"],
-  ["the agent's startup command", AgentStartupCommandDialog, "npm run dev"],
-])("%s", (_name, Dialog, placeholder) => {
+  ["the agent's environment", AgentEnvDialog, "KEY=VALUE", "Environment variables"],
+  ["the agent's startup command", AgentStartupCommandDialog, "npm run dev", "Startup command"],
+])("%s", (_name, Dialog, placeholder, spoken) => {
+  it("names its one box by what it takes, with no label drawn", () => {
+    render(<Dialog />)
+    expect(screen.getByRole("textbox", { name: spoken })).toBe(screen.getByPlaceholderText(placeholder))
+  })
+
   it("puts the caret in the text under a mouse", async () => {
     render(<Dialog />)
     await waitFor(() =>
@@ -142,6 +147,14 @@ describe("project settings", () => {
     mockState = { ...mockState, spine: { ...mockState.spine!, projects: [{ ...project, env: {} }] } } as DuxState
     render(<ProjectSettingsDialog />)
     const env = screen.getByRole("textbox", { name: "Environment" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
+    expect(note?.textContent).toMatch(/Save leaves it out/)
+  })
+
+  it("reads the note about lines Save leaves out with the agent's environment", () => {
+    render(<AgentEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
     fireEvent.change(env, { target: { value: "not a variable" } })
     const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
     expect(note?.textContent).toMatch(/Save leaves it out/)

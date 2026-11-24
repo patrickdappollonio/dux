@@ -7,6 +7,7 @@ import type { ChangeEvent, KeyboardEvent } from "react"
 
 import { Spinner } from "@/components/Spinner"
 import { CheckboxRow } from "@/components/CheckboxRow"
+import type { TextBoxWiring } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { sanitizeAgentName } from "@/lib/agentName"
 
@@ -15,14 +16,13 @@ interface AgentNameInputProps {
   /** Receives the raw text; the store sanitizes it. */
   onChange: (raw: string) => void
   onSubmit: () => void
-  placeholder: string
-  invalid: boolean
+  /** What the input shows while empty; left out where a label says what it takes. */
+  placeholder?: string
   /** A generated name is on its way: the field waits and shows the spinner. */
   generating: boolean
   autoFocus: boolean
-  ariaLabel?: string
-  /** The id of the line under the field that says what it takes, or why not. */
-  describedBy?: string
+  /** The `FormGroup` wiring that names the input and reads its help and error with it. */
+  field: TextBoxWiring
 }
 
 export function AgentNameInput({
@@ -30,11 +30,9 @@ export function AgentNameInput({
   onChange,
   onSubmit,
   placeholder,
-  invalid,
   generating,
   autoFocus,
-  ariaLabel,
-  describedBy,
+  field,
 }: AgentNameInputProps) {
   function handleChange(event: ChangeEvent<HTMLInputElement>): void {
     const input = event.target
@@ -58,13 +56,11 @@ export function AgentNameInput({
   return (
     <div className="relative">
       <Input
+        {...field}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         placeholder={placeholder}
-        aria-label={ariaLabel}
-        aria-describedby={describedBy}
-        aria-invalid={invalid}
         disabled={generating}
         autoFocus={autoFocus}
       />

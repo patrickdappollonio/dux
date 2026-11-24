@@ -1,8 +1,8 @@
 import { useState } from "react"
 
-import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
 import { renderProse } from "@/lib/prose"
@@ -110,30 +110,29 @@ function RenameEntryDialogBody({
       }}
       writeBlocked={writeBlocked}
     >
-      <Input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onFocus={(e) => e.currentTarget.select()}
-        disabled={isDirty}
-        aria-invalid={refused}
-        aria-describedby={refused ? "rename-entry-error" : undefined}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault()
-            submit()
-          }
-        }}
-      />
-      {isDirty ? (
-        // There when the dialog opens on a dirty file: standing, not announced.
-        <p className="text-sm text-destructive">{dirtyRefusal}</p>
-      ) : (
-        refused && (
-          <ErrorLine announce="silent" id="rename-entry-error">
-            {renderProse(validation.error)}
-          </ErrorLine>
-        )
-      )}
+      <FormGroup
+        layout="stacked"
+        control="single"
+        spokenName="New name"
+        // Standing when the dialog opens on a dirty file, so silent rather than announced.
+        error={isDirty ? dirtyRefusal : refused ? renderProse(validation.error) : null}
+      >
+        {(field) => (
+          <Input
+            {...field}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            disabled={isDirty}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
+        )}
+      </FormGroup>
     </Modal>
   )
 }

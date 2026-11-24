@@ -11,7 +11,8 @@ export interface CreateAgentDialogView {
   // The project or agent it names is a chip; a generic fallback noun is prose.
   title: Prose
   description: string
-  namePlaceholder: string
+  // Whether the branch name may be left empty (a fork must name its branch).
+  nameOptional: boolean
   showPrFields: boolean
   prPlaceholder: string
   showProjectPicker: boolean
@@ -42,7 +43,7 @@ function closedDialogView(): CreateAgentDialogView {
     kind: "closed",
     title: ["New agent"],
     description: "",
-    namePlaceholder: "Branch name (optional)",
+    nameOptional: true,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -61,7 +62,7 @@ function newDialogView(
     title: ["New agent in ", ...projectNamed(spine, target.projectId)],
     description:
       "Creates a git worktree + branch and launches the agent. Tick “Use randomized pet name” to autofill a generated name.",
-    namePlaceholder: "Branch name (optional)",
+    nameOptional: true,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -81,7 +82,7 @@ function forkDialogView(
     title: ["Fork ", session ? chip(sessionLabel(session)) : "agent"],
     description:
       "Forks the agent into a new git worktree + branch (copying its uncommitted and untracked files) and launches a fresh session.",
-    namePlaceholder: "Branch name",
+    nameOptional: false,
     showPrFields: false,
     prPlaceholder: "",
     showProjectPicker: false,
@@ -104,7 +105,7 @@ function prDialogView(
     ],
     description:
       "Fetches the PR's head branch into a new git worktree and launches the agent. Paste a PR URL or enter a PR number. Leave the name blank to use the PR's branch name.",
-    namePlaceholder: "Branch name (optional)",
+    nameOptional: true,
     showPrFields: true,
     prPlaceholder: "PR URL, #123, or 123",
     showProjectPicker: false,
@@ -120,7 +121,7 @@ function referenceFirstPrDialogView(): CreateAgentDialogView {
     title: ["New agent from PR"],
     description:
       "Paste a pull request link, or type owner/repo#123. dux finds the project that repository is open in, fetches the PR's head branch into a new git worktree and launches the agent. Leave the name blank to use the PR's branch name.",
-    namePlaceholder: "Branch name (optional)",
+    nameOptional: true,
     showPrFields: true,
     prPlaceholder: "Pull request link, or owner/repo#123",
     showProjectPicker: true,

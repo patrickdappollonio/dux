@@ -14,6 +14,7 @@ import {
   useRowDriverLabel,
 } from "@/hooks/use-agent-active-elsewhere"
 import { defaultProviderForSession } from "@/lib/agentTabs"
+import { workspacePlace } from "@/lib/agentWorkspace"
 import { DEFAULT_AGENT_TABS_MAX } from "@/lib/bootstrapApi"
 import { FOCUS_RING } from "@/lib/focusRing"
 import { addTab, createTerminal, useDux } from "@/lib/store"
@@ -78,6 +79,7 @@ export function StackNewDialog({
   const changesBlocked = block !== null
   const underCard = block === "other" || block === "nobody"
   const provider = defaultProviderForSession(spine, session)
+  const place = workspacePlace(session.workspace)
   const cap = bootstrap?.agent_tabs_max ?? DEFAULT_AGENT_TABS_MAX
   // Held while the close animates: the tab a press adds is in flight by then.
   const tabDisabled = useHeldWhileClosed(
@@ -100,7 +102,7 @@ export function StackNewDialog({
       description={
         block !== null
           ? addToAgentBlockHint(block, device)
-          : "Another tab works in the same worktree; a terminal opens in its dock."
+          : `Another tab works in the same ${place}; a terminal opens in its dock.`
       }
     >
       <div className="flex flex-col gap-0.5">
@@ -118,7 +120,7 @@ export function StackNewDialog({
         <NewRow
           icon={SquareTerminal}
           title="New terminal tab"
-          excerpt="Opens a shell in this agent's worktree, in its dock."
+          excerpt={`Opens a shell in this agent's ${place}, in its dock.`}
           disabled={changesBlocked}
           onActivate={() => run(() => createTerminal(session.id))}
         />

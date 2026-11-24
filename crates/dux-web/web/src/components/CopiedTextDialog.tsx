@@ -1,6 +1,7 @@
 import { useRef } from "react"
 
 import { Modal, useHeldWhileClosed } from "@/components/modal"
+import { FormGroup } from "@/components/ui/form-group"
 import { InlineCode } from "@/components/ui/inline-code"
 import { Textarea } from "@/components/ui/textarea"
 import { closeCopyText, useCopyText } from "@/lib/agentCopy"
@@ -25,14 +26,18 @@ export function CopiedTextDialog() {
       title={<>Text copied from {view ? <InlineCode>{view.source}</InlineCode> : "a pane"}</>}
       description="Your browser would not let dux put this on your clipboard. It is selected below: copy it with your keyboard, or press and hold it on a touch screen."
     >
-      <Textarea
-        ref={text}
-        aria-label="Copied text"
-        readOnly
-        value={view?.text ?? ""}
-        onFocus={(event) => event.currentTarget.select()}
-        className="max-h-[50dvh] overflow-auto font-mono"
-      />
+      <FormGroup layout="stacked" control="single" spokenName="Copied text">
+        {(field) => (
+          <Textarea
+            {...field}
+            ref={text}
+            readOnly
+            value={view?.text ?? ""}
+            onFocus={(event) => event.currentTarget.select()}
+            className="max-h-[50dvh] overflow-auto font-mono"
+          />
+        )}
+      </FormGroup>
     </Modal>
   )
 }

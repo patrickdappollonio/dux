@@ -1,9 +1,11 @@
-// Every labelled field is drawn by `FormGroup` (a checkbox's by `CheckboxRow`),
-// so its label and help look alike and are tied to the control. This guard
-// reads the web UI's source and fails on a `<label>`, an `htmlFor`, a `span`, `p`,
-// `div` or `legend` another element names in `aria-labelledby`, or one drawn in
-// the label's classes written out, anywhere else, and on the shared looks used
-// outside the two.
+// Every field is drawn by `FormGroup` (a checkbox's by `CheckboxRow`), so its
+// label and help look alike and are tied to the control, and a field with no
+// label drawn is still named. This guard reads the web UI's source and fails on
+// a `<label>`, an `htmlFor`, a `span`, `p`, `div` or `legend` another element
+// names in `aria-labelledby`, or one drawn in the label's classes written out,
+// anywhere else; on the shared looks used outside the two; and on a text box,
+// select, switch, checkbox or radio group outside `components/ui/` that does not
+// take a form group's wiring.
 // It reads text, not the program, so it cannot see:
 //
 // - a label that is a component of its own (`<Title id={…}>`) rather than a `span`,
@@ -11,7 +13,8 @@
 //   differently (the match is on the expression's text);
 // - words over a control tied to nothing at all, in a class string of their own
 //   (the label look is only seen when its classes are the label's and no others);
-// - a field named only by its placeholder or an `aria-label`;
+// - a control that is a component of its own other than the agent-name box, or
+//   one that takes the wiring and drops it (the form group says so in development);
 // - a `<label>` built at run time (`createElement("label")`, `const Tag = "label"`);
 // - test files, which it skips.
 import { readFileSync } from "node:fs"
@@ -32,17 +35,9 @@ const OWNERS: Record<string, string> = {
     "the search box is a label around its input, so a press anywhere in the box lands in it; it is named by its own `label` prop",
 }
 
-/** Files whose fields have not moved onto `FormGroup` yet: how many hand-written
- * labels each holds, and the step of the move that takes them. */
-const STILL_TO_MOVE: Record<string, { labels: number; step: string }> = {
-  "components/ChangeProviderDialog.tsx": { labels: 1, step: "3: dialog by dialog" },
-  "components/CloneProjectDialog.tsx": { labels: 3, step: "3: dialog by dialog" },
-  "components/LoginPage.tsx": { labels: 1, step: "3: dialog by dialog" },
-}
-
 /** Text that matches the label's shape and is not one: how many such elements each
- * file holds, and why none is a field's label. Pinned by count, like the files
- * still to move, so a new one in a listed file is looked at. */
+ * file holds, and why none is a field's label. Pinned by count, so a new one in a
+ * listed file is looked at. */
 const NOT_FIELDS: Record<string, { count: number; reason: string }> = {
   "components/ChangedFiles.tsx": { count: 1, reason: "the hidden words `Select <path>` that name a changed-file row's checkbox, which takes the row's leading slot and cannot be a `CheckboxRow`" },
   "components/ProjectList.tsx": { count: 1, reason: "the project's name in its row, which is also the name of the row's button; the row is a list item, not a field" },
@@ -55,7 +50,28 @@ const NOT_FIELDS: Record<string, { count: number; reason: string }> = {
   "components/terminal/partPieces.tsx": { count: 1, reason: "the headline of the file-drop overlay" },
 }
 
-const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|FIELD_CODE_TEXT|CHECK_LABEL_TEXT)\b/
+/** Controls outside a form group: how many each file holds, and why each is not a
+ * field a form group draws. Pinned by count, like the text above. */
+const NOT_WIRED: Record<string, { count: number; reason: string }> = {
+  "components/CheckboxRow.tsx": { count: 1, reason: "the row's own box, named by the words beside it" },
+  "components/ChangedFiles.tsx": { count: 1, reason: "a changed file's selection box in the row's leading slot, named by the row's hidden words (listed above)" },
+  "components/ComposeBar.tsx": { count: 1, reason: "the typing surface under a terminal, named Message: it sends keystrokes to the terminal rather than holding a dialog's value" },
+  "components/LoginPage.tsx": { count: 1, reason: "the hidden user name a password manager files the password under, outside the tab order and the accessibility tree" },
+  "components/MacroPopover.tsx": { count: 1, reason: "the macro menu's search, a command-list input named by the list's own label, whose arrow keys move through the list" },
+  "hooks/use-file-picker.tsx": { count: 1, reason: "the hidden file input a picker button opens" },
+}
+
+const CONTROL_TAGS = "Input|Textarea|textarea|input|select|SelectTrigger|Switch|Checkbox|RadioGroup|AgentNameInput|CommandInput"
+
+/** The controls in `code` that take no form group's wiring: the wiring spread on
+ * them, handed to them whole (`field={…}`), or read from it part by part. */
+export function unwiredControls(code: string): string[] {
+  return tags(code, CONTROL_TAGS)
+    .map((t) => t.text)
+    .filter((t) => !/\{\.\.\.(?:field|wiring)\b|\bfield=\{|\bfield\[/.test(t))
+}
+
+const SHARED_LOOKS = /\b(?:FIELD_LABEL_TEXT|FIELD_HELP_TEXT|FIELD_WARNING_TEXT|FIELD_CODE_TEXT|FIELD_OPTIONAL_TEXT)\b/
 
 /** The whole opening tag that starts at `at` (`code[at]` is its `<`): it ends at the
  * first `>` outside a quote, a `{…}` expression and a template, so an arrow
@@ -152,23 +168,54 @@ function code(file: string): string {
 }
 
 describe("every labelled field is a FormGroup (guard)", () => {
-  it("finds no hand-written label outside the form group, the checkbox row, the files still to move and the listed non-fields", () => {
+  it("finds no hand-written label outside the form group, the checkbox row and the listed non-fields", () => {
     const offenders: string[] = []
-    const counts: Record<string, number> = {}
     const notFields: Record<string, { count: number; reason: string }> = {}
     for (const file of shipped()) {
       if (file in OWNERS) continue
       const found = handWrittenLabels(code(file))
       if (found.length === 0) continue
       if (file in NOT_FIELDS) notFields[file] = { count: found.length, reason: NOT_FIELDS[file].reason }
-      else if (file in STILL_TO_MOVE) counts[file] = found.length
       else offenders.push(...found.map((tag) => `${file}: ${tag.replace(/\s+/g, " ").slice(0, 100)}`))
     }
     expect(offenders, "draw a labelled field with FormGroup").toEqual([])
-    // A listed file pins its count: a new label there fails as one in a new
-    // file does, and a file that moved is taken off the list.
-    expect(counts).toEqual(Object.fromEntries(Object.entries(STILL_TO_MOVE).map(([f, e]) => [f, e.labels])))
+    // A listed file pins its count: a new label there fails as one in a new file does.
     expect(notFields).toEqual(NOT_FIELDS)
+  })
+
+  it("finds every control outside the shared pieces drawn by a form group, but the listed ones", () => {
+    const offenders: string[] = []
+    const listed: Record<string, { count: number; reason: string }> = {}
+    for (const file of shipped()) {
+      if (file.startsWith("components/ui/")) continue
+      const found = unwiredControls(code(file))
+      if (found.length === 0) continue
+      if (file in NOT_WIRED) listed[file] = { count: found.length, reason: NOT_WIRED[file].reason }
+      else offenders.push(...found.map((tag) => `${file}: ${tag.replace(/\s+/g, " ").slice(0, 100)}`))
+    }
+    expect(offenders, "draw the field with FormGroup, so it is named and its help is read with it").toEqual([])
+    expect(listed).toEqual(NOT_WIRED)
+  })
+
+  it("sees a control that takes no wiring, however it is named", () => {
+    for (const src of [
+      '<Input value={name} placeholder="Name" />',
+      '<Textarea aria-label="Commit message" />',
+      "<SelectTrigger className={cn(a)}>",
+      '<AgentNameInput value={v} placeholder="Agent name" />',
+      '<input type="text" onChange={() => go()} />',
+    ]) {
+      expect(unwiredControls(src), src).toHaveLength(1)
+    }
+    for (const src of [
+      "<Input {...field} value={name} />",
+      "<Textarea {...wiring} ref={field} />",
+      "<AgentNameInput field={field} value={v} />",
+      '<RadioGroup aria-labelledby={field["aria-labelledby"]} />',
+      "<Inputs />",
+    ]) {
+      expect(unwiredControls(src), src).toHaveLength(0)
+    }
   })
 
   it("keeps the shared label and help looks to the form group and the checkbox row", () => {

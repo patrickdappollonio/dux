@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import type { DuxState } from "@/lib/store"
 
@@ -15,6 +15,13 @@ vi.mock("@/lib/store", async (importOriginal) => {
     closeAgentEnv: vi.fn(),
   }
 })
+
+let phone = false
+vi.mock("@/hooks/use-mobile", () => ({
+  MOBILE_BREAKPOINT: 768,
+  isMobileViewport: () => phone,
+  useIsMobile: () => phone,
+}))
 
 function installBootStubs() {
   const mem = new Map<string, string>()
@@ -63,6 +70,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  phone = false
   vi.unstubAllGlobals()
 })
 
@@ -91,5 +99,32 @@ describe("AgentEnvDialog", () => {
     render(<AgentEnvDialog />)
     expect(screen.queryByText(/Environment:/)).toBeNull()
     expect(closeAgentEnv).toHaveBeenCalled()
+  })
+
+  it("keeps the same box, with its focus and what was typed, when the layout flips between computer and phone", () => {
+    seed("s1", [session], [project])
+    const { rerender } = render(<AgentEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "FOO=1" } })
+    env.focus()
+    phone = true
+    rerender(<AgentEnvDialog />)
+    expect(screen.getByRole("textbox", { name: "Environment variables" })).toBe(env)
+    expect(document.activeElement).toBe(env)
+    phone = false
+    rerender(<AgentEnvDialog />)
+    expect(screen.getByRole("textbox", { name: "Environment variables" })).toBe(env)
+    expect(document.activeElement).toBe(env)
+  })
+
+  it("draws the note about lines Save leaves out as the form's own 12px note, read with the box", () => {
+    seed("s1", [session], [project])
+    render(<AgentEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")!
+    expect(note.textContent).toMatch(/Save leaves it out/)
+    expect(note.className).toContain("text-xs")
+    expect(note.className).not.toContain("text-sm")
   })
 })
