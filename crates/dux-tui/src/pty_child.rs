@@ -20,6 +20,16 @@ pub(crate) fn child_dir() -> Option<PathBuf> {
     std::env::var_os(CHILD_DIR_ENV).map(PathBuf::from)
 }
 
+/// What the child's standard input is. Its controlling terminal is the
+/// pseudo-terminal either way.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ChildStdin {
+    Terminal,
+    DevNull,
+    /// A pipe whose writer has already closed.
+    ClosedPipe,
+}
+
 pub(crate) struct PtyChild {
     pub(crate) dir: tempfile::TempDir,
     client: PtyClient,
@@ -29,12 +39,22 @@ impl PtyChild {
     /// Start `test` (its full path) as a child, with `setup` written to
     /// `<dir>/setup`, and wait for it to create `<dir>/ready`.
     pub(crate) fn start(test: &str, setup: &str) -> Self {
+        Self::start_with_stdin(test, setup, ChildStdin::Terminal)
+    }
+
+    /// [`PtyChild::start`] with `stdin` as the child's standard input.
+    pub(crate) fn start_with_stdin(test: &str, setup: &str, stdin: ChildStdin) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("setup"), setup).expect("setup file");
         let exe = std::env::current_exe().expect("test binary");
+        let (pipe_in, redirect) = match stdin {
+            ChildStdin::Terminal => ("", ""),
+            ChildStdin::DevNull => ("", " < /dev/null"),
+            ChildStdin::ClosedPipe => (": | ", ""),
+        };
         let command = format!(
-            "{CHILD_DIR_ENV}='{}' exec '{}' --exact {test} --include-ignored --nocapture \
-             --test-threads=1",
+            "{pipe_in}{CHILD_DIR_ENV}='{}' exec '{}' --exact {test} --include-ignored --nocapture \
+             --test-threads=1{redirect}",
             dir.path().display(),
             exe.display()
         );

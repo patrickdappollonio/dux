@@ -77,6 +77,13 @@ pub(super) const TOGGLE: &[u8] = b"\x07";
 /// come back, everything dux wrote before it has too.
 const END_OF_CASE: &[u8] = b"<end of case>";
 
+/// How long a case watches the input poll with nothing typed, and the most
+/// polls a poll that waits can make in that time. The shortest wait is 33ms,
+/// so a waiting poll makes at most four; one that skips its wait makes
+/// thousands.
+const WAIT_CHECK: Duration = Duration::from_millis(120);
+const MOST_POLLS_IN_WAIT_CHECK: usize = 10;
+
 /// Where a case ended: what the program received, and the state of the
 /// interface that decides where the next key goes.
 #[derive(Debug, PartialEq, Eq)]
@@ -127,6 +134,38 @@ impl Rig {
         self.keyboard.write_all(bytes).expect("type into dux");
     }
 
+    /// The terminal's input ends: every read from now on returns nothing.
+    fn hang_up(&mut self) {
+        self.keyboard
+            .shutdown(std::net::Shutdown::Write)
+            .expect("end the terminal's input");
+    }
+
+    /// How many input polls the run loop makes in `interval` with nothing
+    /// more typed.
+    fn polls_in(&mut self, interval: Duration) -> usize {
+        let ends = Instant::now() + interval;
+        let mut polls = 0;
+        while Instant::now() < ends {
+            assert!(
+                !self.app.poll_run_input_from(self.terminal.as_fd()),
+                "the app asked to exit"
+            );
+            polls += 1;
+        }
+        polls
+    }
+
+    /// Panic unless the run loop's input poll waits when nothing more is
+    /// typed.
+    fn assert_poll_waits(&mut self) {
+        let polls = self.polls_in(WAIT_CHECK);
+        assert!(
+            polls <= MOST_POLLS_IN_WAIT_CHECK,
+            "{polls} input polls in {WAIT_CHECK:?} with nothing typed: a poll skipped its wait"
+        );
+    }
+
     fn draw(&mut self) {
         let app = &mut self.app;
         self.screen
@@ -169,7 +208,10 @@ impl Rig {
         panic!("input never settled");
     }
 
-    pub(super) fn outcome(self) -> Outcome {
+    /// Where the case ended, once the poll has been seen to wait: every case
+    /// checks that what it left behind does not make the loop spin.
+    pub(super) fn outcome(mut self) -> Outcome {
+        self.assert_poll_waits();
         if let Some(client) = self.app.selected_terminal_surface_client() {
             client.write_bytes(END_OF_CASE).expect("mark the end");
         } else {
@@ -432,6 +474,143 @@ mod resize {
     }
 }
 
+/// Every reader waits out its poll's timeout when nothing it can act on has
+/// arrived: idle, holding the start of a key, a character or a paste whose
+/// rest has not come, or reading a terminal whose input has ended. A poll that
+/// skips its wait turns the whole run loop, the background web server's
+/// servicing included, as fast as the processor allows.
+mod waiting {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Reader {
+        Windowed,
+        Maximized,
+        Debugger,
+    }
+
+    const READERS: [Reader; 3] = [Reader::Windowed, Reader::Maximized, Reader::Debugger];
+
+    /// Input whose rest has not arrived: Alt-Shift-O and Alt-[ as a classic
+    /// terminal sends them, or the start of a longer key; the first byte of a
+    /// three-byte character; a bracketed paste whose end marker has not come.
+    const UNFINISHED: [&[u8]; 4] = [b"\x1bO", b"\x1b[", b"\xe6", b"\x1b[200~abc"];
+
+    const INTERVAL: Duration = Duration::from_millis(400);
+
+    /// The most polls in [`INTERVAL`] from a poll that waits at least 33ms.
+    const MOST_POLLS: usize = 25;
+
+    fn rig(reader: Reader) -> Rig {
+        match reader {
+            Reader::Windowed => Rig::new(WINDOWED),
+            Reader::Maximized => Rig::new(MAXIMIZED),
+            Reader::Debugger => {
+                let mut rig = Rig::new(WINDOWED);
+                rig.app.prompt = PromptState::DebugInput {
+                    lines: Vec::new(),
+                    scroll_offset: 0,
+                };
+                rig
+            }
+        }
+    }
+
+    fn assert_waits(rig: &mut Rig, what: &str) {
+        let polls = rig.polls_in(INTERVAL);
+        assert!(
+            polls <= MOST_POLLS,
+            "{what}: {polls} input polls in {INTERVAL:?}"
+        );
+    }
+
+    #[test]
+    fn an_idle_reader_waits() {
+        for reader in READERS {
+            assert_waits(&mut rig(reader), &format!("{reader:?}, idle"));
+        }
+    }
+
+    #[test]
+    fn a_reader_holding_unfinished_input_waits() {
+        for reader in READERS {
+            for unfinished in UNFINISHED {
+                let mut rig = rig(reader);
+                rig.type_bytes(unfinished);
+                assert_waits(&mut rig, &format!("{reader:?}, holding {unfinished:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_reader_whose_terminal_has_ended_waits() {
+        for reader in READERS {
+            for typed in [&b""[..], b"\x1b["] {
+                let mut rig = rig(reader);
+                rig.type_bytes(typed);
+                rig.hang_up();
+                assert_waits(&mut rig, &format!("{reader:?}, ended after {typed:?}"));
+            }
+        }
+    }
+
+    /// A lone Escape that ends a read of [`READ_SIZE`](crate::terminal_input::READ_SIZE)
+    /// bytes is held for the next read, as crossterm holds it, however long
+    /// that read takes: with the next byte it is Alt-x.
+    #[test]
+    fn a_lone_escape_ending_a_full_read_waits_for_the_next_read() {
+        let mut typed = vec![b'a'; crate::terminal_input::READ_SIZE - 1];
+        typed.push(0x1b);
+        let mut rig = Rig::new(WINDOWED);
+        rig.type_bytes(&typed);
+        rig.turn();
+        assert_waits(&mut rig, "holding the Escape that ends a full read");
+        assert_eq!(rig.app.terminal_input.begun_sequence(), b"\x1b");
+        rig.type_bytes(b"x");
+        rig.settle();
+        let received = rig.outcome().received;
+        assert!(received.ends_with("a\x1bx"), "{:?}", &received[1000..]);
+    }
+
+    /// The status screen's turn reads what is ready and returns: the serve
+    /// loop that calls it does the waiting.
+    #[test]
+    fn the_status_screen_s_turn_returns_with_unfinished_input_or_an_ended_terminal() {
+        use crate::server_screen::{ScreenKeys, read_screen_keys};
+
+        let _turn = super::status_screen::take_turn();
+        for unfinished in UNFINISHED {
+            for ended in [false, true] {
+                let (terminal, mut keyboard) = UnixStream::pair().expect("a socket pair");
+                std::io::Write::write_all(&mut keyboard, unfinished).expect("type");
+                if ended {
+                    keyboard
+                        .shutdown(std::net::Shutdown::Write)
+                        .expect("end the input");
+                }
+                let (done, finished) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut keys = ScreenKeys::unwatched();
+                    for _ in 0..3 {
+                        assert_eq!(
+                            read_screen_keys(&mut keys, terminal.as_fd(), |_| None),
+                            None
+                        );
+                    }
+                    drop(keys);
+                    let _ = done.send(());
+                });
+                finished
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap_or_else(|_| {
+                        panic!("a turn holding {unfinished:?} (ended {ended}) never returned")
+                    });
+                drop(crate::terminal_input::take_from_last_surface());
+            }
+        }
+    }
+}
+
 /// Keys around the fullscreen toggle, which hands input from the windowed
 /// interface's reader to the maximized pane's and back.
 mod maximize_and_back {
@@ -678,6 +857,35 @@ mod dialogs_and_take_over {
     }
 }
 
+/// The maximized pane's reader stopping for a reason other than a key it
+/// read, such as the agent's tab exiting.
+mod hand_overs_without_a_key {
+    use super::*;
+
+    /// The start of a key the maximized pane holds when its tab exits is
+    /// dropped with the rest of its typing state, and what follows reaches
+    /// the windowed interface on its own. That is what dux did before the
+    /// terminal UI read its own terminal, pinned so a change is deliberate:
+    /// handing it on instead would turn Alt-[ followed by a key, typed by
+    /// hand, into some other key.
+    #[test]
+    fn the_start_of_a_key_held_when_the_tab_exits_is_dropped() {
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.type_bytes(b"\x1b[");
+        rig.turn();
+        assert_eq!(rig.app.raw_input_parser.pending(), b"\x1b[");
+        rig.app.reset_raw_input_state();
+        rig.app.fullscreen_overlay = FullscreenOverlay::None;
+        rig.type_bytes(b"x");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(
+            outcome.received, "x",
+            "the windowed pane types into the program"
+        );
+    }
+}
+
 /// Mouse reports in the same read as a click that leaves the maximized pane.
 mod clicks {
     use super::*;
@@ -735,7 +943,7 @@ mod status_screen {
     /// pass bytes through it take turns.
     static BETWEEN_SURFACES: Mutex<()> = Mutex::new(());
 
-    fn take_turn() -> MutexGuard<'static, ()> {
+    pub(super) fn take_turn() -> MutexGuard<'static, ()> {
         let turn = BETWEEN_SURFACES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -820,6 +1028,27 @@ mod status_screen {
         rig.type_bytes(b"A");
         rig.settle();
         assert_eq!(rig.outcome().received, "\x1b[A");
+    }
+
+    /// When the status screen cannot take the terminal, what the interface
+    /// left unread at the flip waits for the interface that comes back, as
+    /// the keys crossterm had read and not handed out waited in its queue.
+    #[test]
+    fn keys_left_at_a_flip_with_no_status_screen_reach_the_interface_that_comes_back() {
+        let _turn = take_turn();
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.terminal_input.push_read(b"xy");
+        rig.app.leave_unread_input_for_next_surface();
+        drop(rig);
+
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.take_unread_input_from_last_surface();
+        rig.settle();
+        assert_eq!(
+            rig.outcome().received,
+            "xy",
+            "the windowed pane types into the program"
+        );
     }
 
     /// A flip and a return with nothing typed leave nothing behind.
@@ -914,6 +1143,21 @@ mod input_debugger {
         assert_eq!(outcome.debugger_lines, 2, "a key row and its bytes row");
     }
 
+    /// Keys still waiting on the terminal when the keys the debugger took
+    /// from the windowed interface close it reach the windowed interface,
+    /// after those keys.
+    #[test]
+    fn keys_waiting_behind_held_keys_that_close_the_debugger_arrive_in_order() {
+        let mut rig = Rig::new(WINDOWED);
+        rig.app.terminal_input.push_read(&[CLOSE, b"a"].concat());
+        open_debugger(&mut rig);
+        rig.type_bytes(b"b");
+        rig.settle();
+        let outcome = rig.outcome();
+        assert_eq!(outcome.received, "ab");
+        assert_eq!(outcome.prompt, "None");
+    }
+
     #[test]
     fn nothing_is_left_with_the_debugger_after_it_closes() {
         let mut rig = Rig::new(WINDOWED);
@@ -926,12 +1170,13 @@ mod input_debugger {
     }
 }
 
-/// What only a real terminal shows: the run loop reading its own stdin in raw
-/// mode, and the kernel's SIGWINCH when the window is resized. The child runs
-/// in a pseudo-terminal the test types into and resizes.
+/// What only a real terminal shows: the run loop reading its own terminal in
+/// raw mode, whatever its standard input is, and the kernel's SIGWINCH when
+/// the window is resized. The child runs in a pseudo-terminal the test types
+/// into and resizes.
 mod real_terminal {
     use super::*;
-    use crate::pty_child::{PtyChild, child_dir, wait_until};
+    use crate::pty_child::{ChildStdin, PtyChild, child_dir, wait_until};
 
     const CHILD: &str = "app::input_handover_tests::real_terminal::child_runs_the_run_loop_s_input";
 
@@ -950,13 +1195,17 @@ mod real_terminal {
         crossterm::terminal::enable_raw_mode().expect("raw mode on the child's terminal");
         std::fs::write(dir.join("ready"), b"").expect("ready marker");
         let mut resizes = 0;
+        let mut polls = 0u64;
+        let started = Instant::now();
         while !dir.join("done").exists() {
             screen.draw(|frame| app.render(frame)).expect("draw");
             assert!(!app.poll_run_input(), "the app asked to exit");
+            polls += 1;
             if app.sigwinch_flag.swap(false, Ordering::Relaxed) {
                 resizes += 1;
             }
         }
+        let polled_for = started.elapsed();
         // The resize was sent before the done marker was written, so it has
         // landed by now even when it landed after the last poll.
         if app.sigwinch_flag.swap(false, Ordering::Relaxed) {
@@ -964,18 +1213,21 @@ mod real_terminal {
         }
         let _ = crossterm::terminal::disable_raw_mode();
         let report = format!(
-            "resized {}\ntarget {:?}\nfullscreen {:?}",
+            "resized {}\ntarget {:?}\nfullscreen {:?}\npolls {polls} in {} ms",
             resizes > 0,
             app.input_target,
-            app.fullscreen_overlay
+            app.fullscreen_overlay,
+            polled_for.as_millis()
         );
         std::fs::write(dir.join("result.tmp"), report).expect("result file");
         std::fs::rename(dir.join("result.tmp"), dir.join("result")).expect("result file");
     }
 
-    #[test]
-    fn a_burst_across_the_maximize_key_and_a_resize_reach_the_run_loop_from_a_real_terminal() {
-        let child = PtyChild::start(CHILD, "");
+    /// Type a burst across the maximize key into a child whose standard
+    /// input is `stdin`, resize it, and check where it ended and that its
+    /// input poll waited. A poll that waits makes at most thirty a second.
+    fn a_burst_and_a_resize_reach_the_run_loop(stdin: ChildStdin) {
+        let child = PtyChild::start_with_stdin(CHILD, "", stdin);
         let received = child.dir.path().join("received");
         child.type_bytes(b"ab\x07cd");
         wait_until(
@@ -985,10 +1237,36 @@ mod real_terminal {
         );
         child.resize(30, 100);
         let report = child.finish();
+        let (ended, polls) = report.rsplit_once('\n').expect("a polls line");
         assert_eq!(
-            report, "resized true\ntarget Agent\nfullscreen Agent",
+            ended, "resized true\ntarget Agent\nfullscreen Agent",
             "{report}"
         );
+        let counts: Vec<u128> = polls
+            .split(' ')
+            .filter_map(|word| word.parse().ok())
+            .collect();
+        let [polls, millis] = counts[..] else {
+            panic!("{report}");
+        };
+        assert!(polls <= 30 * (millis / 1000 + 1), "{report}");
+    }
+
+    #[test]
+    fn a_burst_across_the_maximize_key_and_a_resize_reach_the_run_loop_from_a_real_terminal() {
+        a_burst_and_a_resize_reach_the_run_loop(ChildStdin::Terminal);
+    }
+
+    /// With standard input elsewhere, dux reads the controlling terminal, as
+    /// crossterm does.
+    #[test]
+    fn the_run_loop_reads_the_terminal_when_standard_input_is_dev_null() {
+        a_burst_and_a_resize_reach_the_run_loop(ChildStdin::DevNull);
+    }
+
+    #[test]
+    fn the_run_loop_reads_the_terminal_when_standard_input_is_a_closed_pipe() {
+        a_burst_and_a_resize_reach_the_run_loop(ChildStdin::ClosedPipe);
     }
 }
 

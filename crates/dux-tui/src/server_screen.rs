@@ -28,7 +28,7 @@
 use crate::numeric::usize_to_u16_wrapping;
 use std::collections::VecDeque;
 use std::io::{Stdout, Write, stdout};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -504,10 +504,10 @@ impl ServerStatusScreen {
     /// should take. Rendering errors are swallowed: a failed redraw must not
     /// crash the server or strand the user; the next tick retries.
     pub fn tick(&mut self) -> ServerScreenTick {
-        let stdin = std::io::stdin();
         let bindings = &self.bindings;
         let mut scrolls = Vec::new();
-        let exit = read_screen_keys(&mut self.keys, stdin.as_fd(), |key| {
+        let terminal = crate::terminal_input::terminal();
+        let exit = read_screen_keys(&mut self.keys, terminal, |key| {
             match screen_key(key, bindings) {
                 Some(ScreenKey::Exit(exit)) => Some(exit),
                 Some(ScreenKey::Scroll(action)) => {
@@ -566,10 +566,10 @@ impl ServerStatusScreen {
     /// resize, a scroll or when the log moved, and say whether a Ctrl-c asked to
     /// stop waiting and quit now.
     pub fn shutdown_tick(&mut self) -> bool {
-        let stdin = std::io::stdin();
+        let terminal = crate::terminal_input::terminal();
         let keys = &mut self.keys;
         let mut turn = shutdown_turn(
-            std::iter::from_fn(|| keys.next_event(stdin.as_fd())),
+            std::iter::from_fn(|| keys.next_event(terminal)),
             &self.bindings,
         );
         turn.redraw |= self.keys.take_resized();

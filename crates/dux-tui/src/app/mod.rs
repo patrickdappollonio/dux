@@ -841,6 +841,9 @@ pub(crate) struct App {
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     /// What dux has read from its terminal and no reader has taken yet.
     pub(crate) terminal_input: crate::terminal_input::TerminalInput,
+    /// Whether a read of the terminal returned nothing, which a raw-mode
+    /// terminal does only once hung up; it would then poll ready forever.
+    pub(crate) terminal_input_ended: bool,
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -5799,6 +5802,7 @@ impl App {
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             terminal_input: crate::terminal_input::TerminalInput::default(),
+            terminal_input_ended: false,
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
@@ -6062,11 +6066,7 @@ impl App {
         let kitty = (mode == dux_core::config::ExtendedKeysMode::Auto && !under_tmux).then(|| {
             let started = Instant::now();
             let query = host_keys::kitty_answer_once(&host_keys::KITTY_ANSWER, || {
-                host_keys::query_kitty(
-                    std::io::stdin(),
-                    &mut stdout(),
-                    host_keys::KITTY_QUERY_DEADLINE,
-                )
+                host_keys::query_kitty_on_stdin(&mut stdout(), host_keys::KITTY_QUERY_DEADLINE)
             });
             logger::debug(&format!(
                 "the Kitty keyboard query answered {:?} in {} ms",
@@ -6353,12 +6353,11 @@ impl App {
     }
 
     fn poll_run_input(&mut self) -> bool {
-        let stdin = std::io::stdin();
-        self.poll_run_input_from(stdin.as_fd())
+        self.poll_run_input_from(crate::terminal_input::terminal())
     }
 
-    /// One iteration's input, read from `terminal`: the run loop's stdin, or a
-    /// stand-in in a test.
+    /// One iteration's input, read from `terminal`: the run loop's terminal,
+    /// or a stand-in in a test.
     pub(crate) fn poll_run_input_from(&mut self, terminal: BorrowedFd<'_>) -> bool {
         let reader = self.run_input_reader();
         if reader != RunInputReader::Debugger {
@@ -6380,15 +6379,25 @@ impl App {
         }
     }
 
-    /// Wait up to `timeout` for `terminal` to have bytes to read, and say
-    /// whether it does. A resize ends the wait at once.
+    /// Wait up to `timeout` for `terminal` to have bytes, and say whether it
+    /// does; a resize ends the wait. Once its input has ended, the answer is no.
     pub(crate) fn wait_for_terminal(
         &self,
         terminal: BorrowedFd<'_>,
         timeout: Duration,
     ) -> rustix::io::Result<bool> {
         let wake = self.resize_wake.as_ref().map(AsFd::as_fd);
-        let waited = input::wait_for_input_or_wake(terminal, wake, timeout)?;
+        let waited = match (self.terminal_input_ended, wake) {
+            (false, _) => input::wait_for_input_or_wake(terminal, wake, timeout)?,
+            (true, Some(wake)) => input::Waited {
+                input: false,
+                woken: input::wait_for_input_or_wake(wake, None, timeout)?.input,
+            },
+            (true, None) => {
+                thread::sleep(timeout);
+                input::Waited::default()
+            }
+        };
         if waited.woken
             && let Some(wake) = &self.resize_wake
         {
@@ -6396,6 +6405,24 @@ impl App {
             self.sigwinch_flag.store(true, Ordering::Relaxed);
         }
         Ok(waited.input)
+    }
+
+    /// One read of `terminal` into `buf`, as much as it has ready. A read of
+    /// nothing means its input has ended, which every later wait remembers.
+    pub(crate) fn read_terminal(
+        &mut self,
+        terminal: BorrowedFd<'_>,
+        buf: &mut [u8],
+    ) -> rustix::io::Result<usize> {
+        let n = input::read_raw_chunk(terminal, buf)?;
+        if n == 0 && !buf.is_empty() && !self.terminal_input_ended {
+            self.terminal_input_ended = true;
+            logger::warn(
+                "the terminal's input has ended, so dux reads no more keys; it quits on the \
+                 terminal's hang-up signal",
+            );
+        }
+        Ok(n)
     }
 
     fn poll_raw_run_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
@@ -6441,7 +6468,7 @@ impl App {
             return Ok(false);
         }
         let mut buf = [0u8; crate::terminal_input::READ_SIZE];
-        let n = input::read_raw_chunk(terminal, &mut buf)?;
+        let n = self.read_terminal(terminal, &mut buf)?;
         self.terminal_input.push_read(&buf[..n]);
         Ok(n > 0)
     }

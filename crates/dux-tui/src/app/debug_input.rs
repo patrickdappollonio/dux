@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 
 use super::components::ellipsis::pad_to_width;
 use super::components::wrap_lines::display_width;
-use super::input::{ESC_AMBIGUITY_TIMEOUT, read_raw_chunk, trim_debug_input_lines};
+use super::input::{ESC_AMBIGUITY_TIMEOUT, trim_debug_input_lines};
 use super::{App, PromptState};
 use crate::host_keys::Host;
 use crate::keybindings::BindingScope;
@@ -300,9 +300,8 @@ fn undecodable_hint(seq: &[u8], host: Host) -> Option<&'static str> {
 
 impl App {
     /// One poll of the input debugger's own reader, run instead of either
-    /// input path while the debugger is open. On the first poll it takes the
-    /// bytes the other readers left unread first. Returns whether the app
-    /// should exit.
+    /// input path while it is open. The first poll reads what the other
+    /// readers left first, and nothing more if that closes the debugger.
     pub(super) fn poll_debug_raw_input(&mut self, fd: BorrowedFd<'_>) -> Result<bool> {
         if !self.debug_raw_input.reading {
             self.debug_raw_input = DebugRawInput {
@@ -315,6 +314,9 @@ impl App {
                 if self.record_debug_input_bytes(&held) {
                     return Ok(true);
                 }
+                if !self.input_debugger_open() {
+                    return Ok(false);
+                }
             }
         }
 
@@ -325,7 +327,7 @@ impl App {
         if !self.wait_for_terminal(fd, Duration::from_millis(poll_ms))? {
             return self.resolve_pending_debug_esc(fd, &mut buf);
         }
-        let n = read_raw_chunk(fd, &mut buf)?;
+        let n = self.read_terminal(fd, &mut buf)?;
         if n == 0 {
             return Ok(false);
         }
@@ -341,7 +343,7 @@ impl App {
             if !self.wait_for_terminal(fd, Duration::ZERO)? {
                 break;
             }
-            let n = read_raw_chunk(fd, &mut buf)?;
+            let n = self.read_terminal(fd, &mut buf)?;
             if n == 0 {
                 break;
             }
@@ -370,6 +372,9 @@ impl App {
         fd: BorrowedFd<'_>,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
+        if !self.input_debugger_open() {
+            return Ok(false);
+        }
         if let Some(exit) = self.expire_unfinished_debug_paste() {
             return Ok(exit);
         }
@@ -383,7 +388,7 @@ impl App {
         }
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
         if self.wait_for_terminal(fd, Duration::ZERO)? {
-            let n = read_raw_chunk(fd, buf)?;
+            let n = self.read_terminal(fd, buf)?;
             if n != 0 {
                 return Ok(self.record_debug_input_bytes(&buf[..n]));
             }

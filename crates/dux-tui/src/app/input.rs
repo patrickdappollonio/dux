@@ -3411,7 +3411,7 @@ impl App {
                 self.resolve_pending_bare_esc(terminal, &mut buf)?;
                 return Ok(false);
             }
-            let n = read_raw_chunk(terminal, &mut buf)?;
+            let n = self.read_terminal(terminal, &mut buf)?;
             if n == 0 {
                 return Ok(false);
             }
@@ -3511,7 +3511,7 @@ impl App {
             if !self.wait_for_terminal(terminal, Duration::ZERO)? {
                 break;
             }
-            let n2 = read_raw_chunk(terminal, buf)?;
+            let n2 = self.read_terminal(terminal, buf)?;
             if n2 == 0 {
                 break;
             }
@@ -3546,7 +3546,7 @@ impl App {
 
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
         if self.wait_for_terminal(terminal, Duration::ZERO)? {
-            let n = read_raw_chunk(terminal, buf)?;
+            let n = self.read_terminal(terminal, buf)?;
             if n != 0 {
                 return Ok(self.process_raw_input_bytes(&buf[..n]));
             }
@@ -36263,8 +36263,8 @@ cyan = "#00ffff"
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
-        let stdin = std::io::stdin();
-        let terminal = std::os::fd::AsFd::as_fd(&stdin);
+        let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let terminal = std::os::fd::AsFd::as_fd(&stand_in);
         assert!(
             !app.poll_and_forward_raw_input(terminal)
                 .expect("poll raw input")
@@ -36288,8 +36288,8 @@ cyan = "#00ffff"
         app.raw_input_buf = b"\x1b".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
-        let stdin = std::io::stdin();
-        let terminal = std::os::fd::AsFd::as_fd(&stdin);
+        let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let terminal = std::os::fd::AsFd::as_fd(&stand_in);
         assert!(
             !app.poll_and_forward_raw_input(terminal)
                 .expect("poll raw input")

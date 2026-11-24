@@ -8,7 +8,8 @@
 //! the events crossterm's own reader would make of them.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::sync::{Mutex, OnceLock};
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
@@ -39,11 +40,41 @@ enum Next {
 #[derive(Debug, Default)]
 pub(crate) struct TerminalInput {
     unread: VecDeque<u8>,
-    /// Whether the last read filled [`READ_SIZE`] and its last byte is still
-    /// unread, which tells a lone Escape there to wait for the next read.
-    unread_ends_full_read: bool,
+    /// Whether the last byte held, in `unread` or else in `partial`, ended a
+    /// read that filled [`READ_SIZE`]: a lone Escape there waits for the next.
+    ends_full_read: bool,
     /// The start of a sequence the event decoder has taken but not finished.
     partial: Vec<u8>,
+}
+
+/// Where dux reads its keys, chosen as crossterm chooses: standard input
+/// when it is a terminal, otherwise the controlling terminal.
+enum KeySource {
+    Stdin,
+    ControllingTerminal(OwnedFd),
+}
+
+/// The terminal every reader of dux's keys reads; standard input when neither
+/// it nor a controlling terminal can be had.
+pub(crate) fn terminal() -> BorrowedFd<'static> {
+    static SOURCE: OnceLock<KeySource> = OnceLock::new();
+    let stdin = rustix::stdio::stdin();
+    let source = SOURCE.get_or_init(|| {
+        if rustix::termios::isatty(stdin) {
+            return KeySource::Stdin;
+        }
+        std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .map_or(KeySource::Stdin, |tty| {
+                KeySource::ControllingTerminal(tty.into())
+            })
+    });
+    match source {
+        KeySource::Stdin => stdin,
+        KeySource::ControllingTerminal(tty) => tty.as_fd(),
+    }
 }
 
 /// What one surface of the terminal UI left unread when it handed the terminal
@@ -76,7 +107,7 @@ impl TerminalInput {
     pub(crate) const fn new() -> Self {
         Self {
             unread: VecDeque::new(),
-            unread_ends_full_read: false,
+            ends_full_read: false,
             partial: Vec::new(),
         }
     }
@@ -84,7 +115,7 @@ impl TerminalInput {
     /// Add one read's bytes.
     pub(crate) fn push_read(&mut self, bytes: &[u8]) {
         self.unread.extend(bytes);
-        self.unread_ends_full_read = bytes.len() == READ_SIZE;
+        self.ends_full_read = bytes.len() == READ_SIZE;
     }
 
     /// Whether bytes are waiting that no reader has looked at yet.
@@ -98,18 +129,27 @@ impl TerminalInput {
         self.unread.is_empty() && self.partial.is_empty()
     }
 
+    /// The start of a sequence the event decoder has taken but not finished.
+    #[cfg(test)]
+    pub(crate) fn begun_sequence(&self) -> &[u8] {
+        &self.partial
+    }
+
     /// Hand every byte held, a sequence the event decoder has begun included,
     /// to a reader that splits bytes itself.
     pub(crate) fn take_bytes(&mut self) -> Vec<u8> {
         let mut bytes = std::mem::take(&mut self.partial);
         bytes.extend(self.unread.drain(..));
-        self.unread_ends_full_read = false;
+        self.ends_full_read = false;
         bytes
     }
 
-    /// Put bytes a reader did not use back ahead of anything held, a sequence
-    /// the event decoder has begun included.
+    /// Put bytes a reader did not use back ahead of anything held, a begun
+    /// sequence included; giving back nothing leaves that sequence waiting.
     pub(crate) fn give_back(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         let begun = std::mem::take(&mut self.partial);
         for &byte in bytes.iter().chain(&begun).rev() {
             self.unread.push_front(byte);
@@ -120,22 +160,23 @@ impl TerminalInput {
     /// only that event's bytes. `None` when the bytes run out first.
     pub(crate) fn next_event(&mut self) -> Option<Event> {
         while let Some(byte) = self.unread.pop_front() {
-            let next = if !self.unread.is_empty() || self.unread_ends_full_read {
+            let last = self.unread.is_empty();
+            let next = if !last || self.ends_full_read {
                 Next::MayFollow
             } else {
                 Next::EndOfInput
             };
-            if self.unread.is_empty() {
-                self.unread_ends_full_read = false;
-            }
             self.partial.push(byte);
-            match crossterm_decode(&self.partial, next) {
-                Decoded::Incomplete => {}
-                Decoded::Event(event) => {
-                    self.partial.clear();
-                    return Some(event);
-                }
-                Decoded::Nothing => self.partial.clear(),
+            let decoded = crossterm_decode(&self.partial, next);
+            if decoded == Decoded::Incomplete {
+                continue;
+            }
+            self.partial.clear();
+            if last {
+                self.ends_full_read = false;
+            }
+            if let Decoded::Event(event) = decoded {
+                return Some(event);
             }
         }
         None

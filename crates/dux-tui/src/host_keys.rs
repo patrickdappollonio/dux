@@ -531,6 +531,12 @@ pub(crate) struct KittyQuery {
     pub(crate) keys: Vec<KeyEvent>,
 }
 
+/// [`query_kitty`] on standard input: redirected, it hears no answer and the
+/// key reader drops the answer as crossterm does.
+pub(crate) fn query_kitty_on_stdin(output: &mut impl Write, deadline: Duration) -> KittyQuery {
+    query_kitty(std::io::stdin(), output, deadline)
+}
+
 /// Ask the terminal on `input`/`output` whether it speaks the Kitty keyboard
 /// protocol: write `CSI ? u` and then the primary device-attributes query, and
 /// read until the attributes reply or `deadline`. A Kitty reply before the

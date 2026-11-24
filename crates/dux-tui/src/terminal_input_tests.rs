@@ -101,6 +101,40 @@ fn bytes_given_back_come_before_a_sequence_already_begun() {
     );
 }
 
+/// A begun sequence stays begun when a reader gives back nothing, so the next
+/// poll waits for the rest of it rather than decoding it again at once.
+#[test]
+fn giving_back_nothing_leaves_a_begun_sequence_waiting() {
+    let mut input = TerminalInput::default();
+    input.push_read(b"\x1bO");
+    assert_eq!(input.next_event(), None);
+    input.give_back(b"");
+    assert!(!input.has_unread());
+    assert_eq!(input.begun_sequence(), b"\x1bO");
+}
+
+/// The Escape that ends a full read still waits for the next read after a
+/// reader gives bytes back ahead of it.
+#[test]
+fn bytes_given_back_ahead_of_an_escape_ending_a_full_read_leave_it_waiting() {
+    let mut full = vec![b'a'; READ_SIZE - 1];
+    full.push(0x1b);
+    let mut input = TerminalInput::default();
+    input.push_read(&full);
+    while input.next_event().is_some() {}
+    input.give_back(b"x");
+    assert_eq!(
+        input.next_event(),
+        Some(key(KeyCode::Char('x'), KeyModifiers::NONE))
+    );
+    assert_eq!(input.next_event(), None);
+    input.push_read(b"y");
+    assert_eq!(
+        input.next_event(),
+        Some(key(KeyCode::Char('y'), KeyModifiers::ALT))
+    );
+}
+
 /// The files a guard reads, under this crate's `src`.
 fn source_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read the source folder") {
@@ -167,6 +201,37 @@ fn nothing_in_the_terminal_ui_reads_through_crossterm_s_event_reader() {
         ),
         "the guard no longer sees the one reader it allows"
     );
+}
+
+/// Every reader of dux's keys reads [`terminal`], which is what crossterm
+/// reads: a reader that named standard input would read nothing when it is
+/// redirected. `dux config` reads its own input; `host_keys.rs` asks the host
+/// about Kitty keys on standard input and names its tty there.
+#[test]
+fn every_reader_of_keys_reads_the_terminal_crossterm_reads() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    source_files(&src, &mut files);
+    let allowed = [
+        "config_cli.rs",
+        "host_keys.rs",
+        "terminal_input.rs",
+        "terminal_input_tests.rs",
+    ];
+    let named: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            !allowed
+                .iter()
+                .any(|name| path.file_name().is_some_and(|file| file == *name))
+        })
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .expect("read a source file")
+                .contains("stdin()")
+        })
+        .collect();
+    assert!(named.is_empty(), "names standard input: {named:#?}");
 }
 
 const CROSSTERM_CHILD: &str = "terminal_input::tests::child_records_crossterm_events";
