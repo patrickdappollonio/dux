@@ -103,6 +103,7 @@ describe("CreateAgentDialog", () => {
       screen.getByText("quacky-mallard", { selector: "code" }),
     ).toBeTruthy()
     expect(screen.getByPlaceholderText("Branch name")).toBeTruthy()
+    expect(screen.getByRole("textbox", { name: "Branch name" })).toBeTruthy()
     expect(
       (screen.getByRole("button", { name: "Fork agent" }) as HTMLButtonElement)
         .disabled,
@@ -127,8 +128,8 @@ describe("CreateAgentDialog", () => {
   it("names its one box for a screen reader and reads the branch rules with it", async () => {
     seed({ kind: "new", projectId: "p1" })
     render(<CreateAgentDialog />)
-    const name = screen.getByRole("textbox", { name: "Branch name" })
-    expect(screen.queryByText("Branch name")).toBeNull()
+    const name = screen.getByRole("textbox", { name: "Branch name (optional)" })
+    expect(screen.queryByText("Branch name (optional)")).toBeNull()
     expect(document.getElementById(name.getAttribute("aria-describedby")!)?.textContent).toBe(
       "Any name git accepts for a branch. This becomes the branch name.",
     )

@@ -2,7 +2,7 @@ import { useId, useState } from "react"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
-import { FormGroup } from "@/components/ui/form-group"
+import { FormGroup, HelpLine } from "@/components/ui/form-group"
 import { Textarea } from "@/components/ui/textarea"
 import {
   agentChangeBlockReason,
@@ -92,9 +92,7 @@ export function CommitDialog() {
         )}
       </FormGroup>
       {blocked ? (
-        <p id={reasonId} className="text-sm text-muted-foreground">
-          {reason}
-        </p>
+        <HelpLine id={reasonId}>{reason}</HelpLine>
       ) : null}
     </Modal>
   )

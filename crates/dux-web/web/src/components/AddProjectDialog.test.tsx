@@ -317,7 +317,12 @@ describe("AddProjectDialog picker", () => {
     const name = screen.getByRole("textbox", { name: "Project name (optional)" }) as HTMLInputElement
     expect((screen.getByText(/^Project name/, { selector: "label" }) as HTMLLabelElement).control).toBe(name)
     expect(name.placeholder).toBe("")
-    expect((screen.getByRole("textbox", { name: "Chosen folder" }) as HTMLInputElement).value).toBe("/home/u/notes")
+    const chosen = screen.getByRole("textbox", { name: "Chosen folder" }) as HTMLInputElement
+    expect(chosen.value).toBe("/home/u/notes")
+    // A read-out of the choice made above, announced as read only and out of the tab order,
+    // so the one box a person fills in is the project name.
+    expect(chosen.readOnly).toBe(true)
+    expect(chosen.tabIndex).toBe(-1)
     fireEvent.click(screen.getByRole("button", { name: /new folder/i }))
     expect(screen.getByRole("textbox", { name: "New folder name" })).toBeTruthy()
   })

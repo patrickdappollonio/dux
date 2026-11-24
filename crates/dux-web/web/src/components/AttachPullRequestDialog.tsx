@@ -2,7 +2,7 @@ import { useId } from "react"
 
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
-import { FormGroup } from "@/components/ui/form-group"
+import { FormGroup, HelpLine } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { formatRegularCount } from "@/lib/formatRegularCount"
@@ -58,13 +58,13 @@ export function AttachPullRequestDialog() {
         disabledReason: empty ? "Enter the pull request first." : null,
       }}
     >
-      <p id={countId} className="text-sm text-muted-foreground">
+      <HelpLine id={countId}>
         <InlineCode>{name}</InlineCode>{" "}
         {count === 0
           ? "has no pull requests yet."
           : `has ${formatRegularCount(count, "pull request")} now.`}{" "}
         One from another repository works too.
-      </p>
+      </HelpLine>
       <FormGroup layout="stacked" control="single" spokenName="Pull request URL or number" describedBy={countId}>
         {(field) => (
           <Input

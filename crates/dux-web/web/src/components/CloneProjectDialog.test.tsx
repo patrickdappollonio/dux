@@ -122,8 +122,8 @@ afterEach(() => {
 
 const address = () => screen.getByLabelText("Repository address") as HTMLInputElement
 const destination = () => screen.getByLabelText("Destination folder") as HTMLInputElement
-// "First agent" over a clone, "Agent" over a pull request's offer.
-const agentName = () => screen.getByLabelText(/^(First agent|Agent)$/) as HTMLInputElement
+// "First agent's name (optional)" over a clone, "Agent name" over a pull request's offer.
+const agentName = () => screen.getByLabelText(/^(First agent's name \(optional\)|Agent name)$/) as HTMLInputElement
 const type = (field: HTMLElement, value: string) =>
   fireEvent.change(field, { target: { value } })
 
@@ -297,7 +297,7 @@ describe("CloneProjectDialog", () => {
     await open()
     expect(address().id).toBe((screen.getByText("Repository address") as HTMLLabelElement).htmlFor)
     expect(destination().id).toBe((screen.getByText("Destination folder") as HTMLLabelElement).htmlFor)
-    const name = screen.getByRole("textbox", { name: "First agent" })
+    const name = screen.getByRole("textbox", { name: "First agent's name (optional)" })
     const read = (name.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)
     expect(read).toEqual(["Any name git accepts for a branch. This becomes the branch name."])
     type(name, "a..b")
@@ -358,6 +358,8 @@ describe("CloneProjectDialog for a pull request", () => {
   it("shows the pull request, the address and the folder, with no random-name box", async () => {
     await openPr()
     expect(screen.getByText("New agent from PR")).toBeTruthy()
+    // A name is required here, so its label says it is the agent's name and not that it is optional.
+    expect(screen.getByRole("textbox", { name: "Agent name" })).toBeTruthy()
     const chips = [...document.querySelectorAll("code")].map((c) => c.textContent)
     expect(chips).toEqual(["github.com/acme/widget", "#3", "Fix the thing", "fix-thing"])
     // The pull request's title and branch are part of the form, not what the

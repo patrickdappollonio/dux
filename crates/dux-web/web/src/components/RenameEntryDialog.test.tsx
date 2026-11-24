@@ -67,6 +67,7 @@ describe("RenameEntryDialog", () => {
     const input = screen.getByRole("textbox", { name: "New name" })
     const read = (input.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)
     expect(read).toEqual(["Save or discard changes in this file before renaming."])
+    expect(input.closest("[data-form-layout]")?.contains(document.getElementById(input.getAttribute("aria-describedby")!))).toBe(true)
   })
 
   it("reads a refused name with the box", () => {

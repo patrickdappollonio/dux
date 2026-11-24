@@ -7,7 +7,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
-import { FormGroup } from "@/components/ui/form-group"
+import { FormGroup, HelpLine } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
 import { rateLimitLead } from "@/lib/authErrors"
@@ -241,9 +241,9 @@ export function LoginPage({
         {/* A refusal that is not about what was typed (a wait, the network) leaves the box valid. */}
         <ErrorLine id={failureId}>{aboutField ? null : message}</ErrorLine>
         {failure?.kind === "rate_limited" ? (
-          <p id={countdownId} className="text-sm text-muted-foreground">
+          <HelpLine id={countdownId}>
             {countdownText(retryAt === null && secondsLeft === null ? null : secondsLeft)}
-          </p>
+          </HelpLine>
         ) : null}
         {/* Filled: committing the password is the page's one primary act. */}
         <Button type="submit" className="h-10" disabled={busy || waiting}>

@@ -143,7 +143,8 @@ function CloneProjectForm({ open, onClosed }: { open: boolean; onClosed: () => v
       <FormGroup
         layout="stacked"
         control="single"
-        label={pr ? "Agent" : "First agent"}
+        label={pr ? "Agent name" : "First agent's name"}
+        optional={pr === null || undefined}
         notes={[{ words: "Any name git accepts for a branch. This becomes the branch name." }]}
         invalid={invalidName}
       >

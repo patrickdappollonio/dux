@@ -115,6 +115,7 @@ describe("LoginPage", () => {
       "Try again in 3 seconds.",
     ])
     const countdown = screen.getByText("Try again in 3 seconds.")
+    expect(countdown.className).toContain("text-xs")
     expect(countdown.closest("[role=alert]")).toBeNull()
     expect(countdown.closest("[aria-live=polite],[aria-live=assertive]")).toBeNull()
     expect(screen.getByRole("button", { name: "Sign in" })).toHaveProperty("disabled", true)

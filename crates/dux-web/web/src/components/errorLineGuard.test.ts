@@ -65,7 +65,6 @@ const ALLOWED: Allowed[] = [
   { file: "components/SaveConflictDialog.tsx", line: 'className="text-sm text-destructive"', reason: `${STANDING} (the conflict is why the dialog opened)` },
   { file: "components/DeleteEntryDialog.tsx", line: 'className="text-sm text-destructive"', reason: "the line that holds the delete while a save is running, there when the dialog opens" },
   { file: "components/DeleteEntryDialog.tsx", line: 'className="text-sm text-destructive"', reason: STANDING },
-  { file: "components/RenameEntryDialog.tsx", line: "{dirtyRefusal}", reason: "the dirty-file refusal, there when the dialog opens on a dirty file: standing, as DeleteEntryDialog's save line" },
   { file: "components/MoveEntryDialog.tsx", line: "{dirtyRefusal}", reason: "the dirty-file refusal, there when the dialog opens on a dirty file: standing, as DeleteEntryDialog's save line" },
   { file: "components/DeleteSessionDialog.tsx", line: 'return <p className="text-sm text-destructive">', reason: BRANCH_WARNING },
   { file: "components/WorktreeFilesNote.tsx", line: '"text-destructive"', reason: `${STANDING} (what a delete would lose, once git has answered)` },

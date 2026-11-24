@@ -1,4 +1,4 @@
-import { useId, useState } from "react"
+import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
@@ -81,7 +81,6 @@ function RenameEntryDialogBody({
     !isDirty && name.trim().length > 0 && validation.ok && !submitting
   const refused = !isDirty && name.length > 0 && !validation.ok
   const dirtyRefusal = "Save or discard changes in this file before renaming."
-  const dirtyId = useId()
 
   function submit(): void {
     if (!canSubmit) return
@@ -115,8 +114,8 @@ function RenameEntryDialogBody({
         layout="stacked"
         control="single"
         spokenName="New name"
-        error={refused ? renderProse(validation.error) : null}
-        describedBy={isDirty ? dirtyId : undefined}
+        // Standing when the dialog opens on a dirty file, so silent rather than announced.
+        error={isDirty ? dirtyRefusal : refused ? renderProse(validation.error) : null}
       >
         {(field) => (
           <Input
@@ -134,10 +133,6 @@ function RenameEntryDialogBody({
           />
         )}
       </FormGroup>
-      {isDirty ? (
-        // There when the dialog opens on a dirty file: standing, not announced.
-        <p id={dirtyId} className="text-sm text-destructive">{dirtyRefusal}</p>
-      ) : null}
     </Modal>
   )
 }

@@ -168,7 +168,13 @@ function BranchNameField({
       {(field) => input(field)}
     </FormGroup>
   ) : (
-    <FormGroup layout="stacked" control="single" spokenName="Branch name" help={BRANCH_RULES} invalid={invalid}>
+    <FormGroup
+      layout="stacked"
+      control="single"
+      spokenName={dialog.nameOptional ? "Branch name (optional)" : "Branch name"}
+      help={BRANCH_RULES}
+      invalid={invalid}
+    >
       {(field) => input(field, dialog.nameOptional ? "Branch name (optional)" : "Branch name")}
     </FormGroup>
   )
