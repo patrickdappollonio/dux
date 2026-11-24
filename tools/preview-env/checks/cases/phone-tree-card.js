@@ -184,7 +184,11 @@ module.exports = {
     await H.drive(other)
     await H.waitFor(dev.page, () => document.body.innerText.includes("is active on"), `the editor to say the agent is active on ${OTHER}`, { timeout: 8000 })
 
-    finger = await holdOn(H, dev, rows[0])
+    // The read-only line the editor now shows moves the tree down, so the row is
+    // measured again rather than pressed where it was.
+    await H.sleep(300)
+    const moved = await treeRows(dev.page)
+    finger = await holdOn(H, dev, moved[0])
     const blocked = await waitForCard(H, dev, "the card to open while another device drives")
     await finger.end()
     H.expect(
