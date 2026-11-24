@@ -36,7 +36,6 @@ const OWNERS: Record<string, string> = {
  * labels each holds, and the step of the move that takes them. */
 const STILL_TO_MOVE: Record<string, { labels: number; step: string }> = {
   "components/CloneProjectDialog.tsx": { labels: 3, step: "3: dialog by dialog" },
-  "components/LoginPage.tsx": { labels: 1, step: "3: dialog by dialog" },
 }
 
 /** Text that matches the label's shape and is not one: how many such elements each

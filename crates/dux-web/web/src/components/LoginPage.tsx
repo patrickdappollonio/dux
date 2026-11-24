@@ -7,6 +7,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { ErrorLine } from "@/components/ErrorLine"
 import { Notice } from "@/components/Notice"
 import { renderInlineCode } from "@/lib/inlineMarkdown"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import type { AuthStatus, LoginAnswer } from "@/lib/authApi"
 import { rateLimitLead } from "@/lib/authErrors"
@@ -117,7 +118,8 @@ export function LoginPage({
   status: AuthStatus | null
   reason: SignOutReason
 }) {
-  const fieldId = useId()
+  const countdownId = useId()
+  const failureId = useId()
   const [password, setPassword] = useState("")
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<Failure | null>(null)
@@ -175,6 +177,7 @@ export function LoginPage({
   }
 
   const message = failure === null ? "" : failureText(failure)
+  const aboutField = failure?.kind === "wrong" || failure?.kind === "empty"
 
   return (
     <Shell title="Sign in to dux">
@@ -210,26 +213,35 @@ export function LoginPage({
           aria-hidden="true"
           className="sr-only"
         />
-        <label htmlFor={fieldId} className="text-sm font-medium">
-          Password
-        </label>
-        <Input
-          ref={fieldRef}
-          id={fieldId}
-          name="password"
-          type="password"
-          autoComplete="current-password"
-          autoFocus
-          value={password}
-          disabled={busy}
-          aria-invalid={failure?.kind === "wrong" || failure?.kind === "empty" ? true : undefined}
-          aria-describedby={message ? `${fieldId}-error` : undefined}
-          onChange={(e) => setPassword(e.target.value)}
-          className="h-10"
-        />
-        <ErrorLine id={`${fieldId}-error`}>{message}</ErrorLine>
+        <FormGroup
+          layout="stacked"
+          control="single"
+          label="Password"
+          error={aboutField ? message : null}
+          errorAnnounce="alert"
+          describedBy={[aboutField || message === "" ? null : failureId, failure?.kind === "rate_limited" ? countdownId : null]
+            .filter(Boolean)
+            .join(" ") || undefined}
+        >
+          {(field) => (
+            <Input
+              {...field}
+              ref={fieldRef}
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              autoFocus
+              value={password}
+              disabled={busy}
+              onChange={(e) => setPassword(e.target.value)}
+              className="h-10"
+            />
+          )}
+        </FormGroup>
+        {/* A refusal that is not about what was typed (a wait, the network) leaves the box valid. */}
+        <ErrorLine id={failureId}>{aboutField ? null : message}</ErrorLine>
         {failure?.kind === "rate_limited" ? (
-          <p className="text-sm text-muted-foreground">
+          <p id={countdownId} className="text-sm text-muted-foreground">
             {countdownText(retryAt === null && secondsLeft === null ? null : secondsLeft)}
           </p>
         ) : null}
