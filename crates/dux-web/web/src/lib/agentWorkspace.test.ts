@@ -221,9 +221,9 @@ describe("folderDisplayName", () => {
 
 describe("newTerminalLabel", () => {
   it("names the worktree for a managed agent and the folder for a standalone one", () => {
-    expect(newTerminalLabel(managed)).toBe("New terminal in the worktree")
+    expect(newTerminalLabel(managed)).toBe("New terminal tab in the worktree")
     expect(newTerminalLabel(folder("working_repo"))).toBe(
-      "New terminal in the folder",
+      "New terminal tab in the folder",
     )
   })
 

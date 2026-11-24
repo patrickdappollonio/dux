@@ -163,7 +163,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
     "Rename agent…",
     "Change agent provider…",
     "Delete agent…",
-    "New terminal in the worktree",
+    "New terminal tab in the worktree",
     "Rerun startup command",
   ]
   const enabledLabels = [
@@ -282,7 +282,7 @@ describe("AgentActionsMenu while the agent is active on another device", () => {
   // terminal alone, and the spine names it until the server's list refreshes.
   describe("with a pane of the row mounted", () => {
     const row = agentRowKey("s1")
-    const mutating = ["New agent tab…", "Rename agent…", "Delete agent…", "New terminal in the worktree"]
+    const mutating = ["New agent tab…", "Rename agent…", "Delete agent…", "New terminal tab in the worktree"]
     function seedStoppedWithTerminal() {
       const session = makeSession({ id: "s1", status: "detached" })
       seed(session, true)
@@ -470,7 +470,7 @@ describe("AgentActionsMenu for a standalone agent", () => {
       "Rename agent…",
       "Change agent provider…",
       "Agent info…",
-      "New terminal in the folder",
+      "New terminal tab in the folder",
     ]) {
       expect(screen.getByText(present)).toBeTruthy()
     }
@@ -512,16 +512,16 @@ describe("AgentActionsMenu terminal entry names where the shell opens", () => {
   it("says the worktree for a managed agent and the folder for a standalone one", async () => {
     seed(makeSession({ id: "s1" }), false)
     await openMenu(makeSession({ id: "s1" }))
-    expect(screen.getByText("New terminal in the worktree")).toBeTruthy()
+    expect(screen.getByText("New terminal tab in the worktree")).toBeTruthy()
     // A standalone agent has no worktree at all, so promising one here would
     // be a label about something that does not exist.
-    expect(screen.queryByText(/New terminal in the folder/)).toBeNull()
+    expect(screen.queryByText(/New terminal tab in the folder/)).toBeNull()
     cleanup()
 
     const standalone = makeStandaloneSession("sa1")
     seed(standalone, false)
     await openMenu(standalone)
-    expect(screen.getByText("New terminal in the folder")).toBeTruthy()
+    expect(screen.getByText("New terminal tab in the folder")).toBeTruthy()
     expect(screen.queryByText(/worktree/)).toBeNull()
   })
 
@@ -534,7 +534,7 @@ describe("AgentActionsMenu terminal entry names where the shell opens", () => {
     const session = makeSession({ id: "s1" })
     seed(session, false)
     await openMenu(session)
-    const text = screen.getByText("New terminal in the worktree")
+    const text = screen.getByText("New terminal tab in the worktree")
     const item = text.closest('[role="menuitem"]')
     expect(item).toBeTruthy()
     for (

@@ -304,8 +304,8 @@ export function workspaceDirectory(workspace: AgentWorkspaceWire): string {
  * standalone agent something it does not have. */
 export function newTerminalLabel(workspace: AgentWorkspaceWire): string {
   return matchWorkspace(workspace, {
-    managed: () => "New terminal in the worktree",
-    folder: () => "New terminal in the folder",
+    managed: () => "New terminal tab in the worktree",
+    folder: () => "New terminal tab in the folder",
   })
 }
 

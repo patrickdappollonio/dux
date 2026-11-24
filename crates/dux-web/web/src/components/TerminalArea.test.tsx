@@ -341,7 +341,7 @@ describe("TerminalArea terminal not-found route", () => {
     render(<TerminalArea />)
     expect(screen.getByText("Terminal not found")).toBeTruthy()
     expect(screen.getByText("t9")).toBeTruthy()
-    fireEvent.click(screen.getByRole("button", { name: "New terminal" }))
+    fireEvent.click(screen.getByRole("button", { name: "New terminal tab" }))
     expect(createTerminalMock).toHaveBeenCalledWith("s1")
   })
 
@@ -356,7 +356,7 @@ describe("TerminalArea terminal not-found route", () => {
     })
     registerPaneCover("s1-other-tab", "card", { row: agentRowKey("s1"), driver: "other" })
     render(<TerminalArea />)
-    const button = screen.getByRole("button", { name: "New terminal" })
+    const button = screen.getByRole("button", { name: "New terminal tab" })
     expect(button).toHaveProperty("disabled", true)
     expect(button.getAttribute("aria-describedby")).toBeTruthy()
     expect(screen.getByText(/Take over to add a tab or a terminal/)).toBeTruthy()
@@ -882,7 +882,7 @@ describe("TerminalArea dock", () => {
       mockState = dockState({ layout: "split", ...opts })
       render(<TerminalArea />)
       expect(await screen.findByLabelText("New tab")).toBeTruthy()
-      expect(screen.getByLabelText("New terminal")).toBeTruthy()
+      expect(screen.getByLabelText("New terminal tab")).toBeTruthy()
       expect(screen.queryByTestId("stack-layout-pill")).toBeNull()
       cleanup()
     }

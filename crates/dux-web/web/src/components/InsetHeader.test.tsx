@@ -731,7 +731,7 @@ describe("InsetHeader under the agent's take-over card", () => {
     ).toBeGreaterThan(0)
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
-    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
+    expect(item(items, "New terminal tab")!.getAttribute("aria-disabled")).toBe("true")
   })
 
   it("names no terminal and adds nothing while nobody drives it", async () => {
@@ -740,7 +740,7 @@ describe("InsetHeader under the agent's take-over card", () => {
     expect(screen.getByRole("button", { name: /new tab/i })).toHaveProperty("disabled", true)
     const items = await menuItems()
     expect(item(items, "Close…")).toBeUndefined()
-    expect(item(items, "New terminal")!.getAttribute("aria-disabled")).toBe("true")
+    expect(item(items, "New terminal tab")!.getAttribute("aria-disabled")).toBe("true")
     expect(screen.getByText(/Nobody is driving this agent/)).toBeTruthy()
   })
 
@@ -1010,11 +1010,13 @@ describe("InsetHeader new tab button", () => {
     const dialog = await screen.findByRole("dialog")
     // The provider is named as a chip, never in quotes.
     expect(dialog.querySelector("code")?.textContent).toBe("claude")
+    // The two rows are parallel: both are tabs of this agent.
+    expect(screen.getByText("New terminal tab")).toBeTruthy()
     fireEvent.click(screen.getByText("New agent tab"))
     expect(store.addTab).toHaveBeenCalledWith("s1")
 
     fireEvent.click(newTab()!)
-    fireEvent.click(await screen.findByText("New terminal"))
+    fireEvent.click(await screen.findByText("New terminal tab"))
     expect(store.createTerminal).toHaveBeenCalledWith("s1")
   })
 

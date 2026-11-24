@@ -50,7 +50,8 @@ import type { ChangesSliceView, TabBuffer } from "@/lib/editorBuffers"
 import { isAllDeleteDiff } from "@/lib/diffPresentation"
 import { diffHeadBanner } from "@/lib/diffHeadBanner"
 import { loadRootDrafts, storeRootDrafts } from "@/lib/editorDrafts"
-import { laneKey, useLaneBusy } from "@/lib/editorLane"
+import { laneKey, useLaneBusy, type LaneOp } from "@/lib/editorLane"
+import { assertNever } from "@/lib/assertNever"
 import {
   REOPEN_CHOICES,
   SAVE_CHOICES,
@@ -121,7 +122,7 @@ import { ACTIVE_ROW_RING } from "@/lib/focusRing"
 import { cn } from "@/lib/utils"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useMenuReason } from "@/hooks/use-menu-reason"
-import { MenuItemReason } from "@/components/MenuReason"
+import { MenuGroupReason, MenuItemReason } from "@/components/MenuReason"
 import { Spinner } from "@/components/Spinner"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { LanguagePickerList } from "@/components/LanguagePickerList"
@@ -828,16 +829,15 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     activeTab === null ? null : laneKey(key, activeTab.path),
   )
   const fileBusy = laneOp !== undefined
-  // Said beneath "Save with encoding" in the encoding menu, which both greys:
-  // the standing read-only line's sentence, or, for a writable file, the one
-  // saying a save is out. The read-only sentence wins when both hold, since it
-  // outlasts the save. Another operation on the lane (a reopen, a reload) greys
-  // the item too but is not a save, so it says nothing.
-  const saveEncodingReason = useMenuReason(
-    writeBlocked ??
-      (laneOp === "save" || laneOp === "convert" ? SAVE_IN_FLIGHT_REASON : null),
+  // The encoding menu's two rows are both greyed while the file is busy, so
+  // one line above them says what it is busy with. "Save with encoding" is
+  // greyed by a second cause of its own, the editor being read-only, which
+  // outlasts any operation and is said beneath that row alone. A row greyed by
+  // both names both lines.
+  const busyEncodingReason = useMenuReason(
+    laneOp === undefined ? null : encodingBusyReason(laneOp),
   )
-
+  const readOnlyEncodingReason = useMenuReason(writeBlocked)
   // The diff is cached per tab+path; ready when the loaded diff is for the
   // active tab's CURRENT path. While ready, a change-signal differing from the
   // one captured at load means the file changed underneath, surface a reload
@@ -1588,10 +1588,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
     }
     return (
       <>
+        <MenuGroupReason reasons={[busyEncodingReason]} />
         <DropdownMenuSub>
           {/* Not while this tab is saving: the save's answer is about the text
               it sent, and a reopen would put a different decoding under it. */}
-          <DropdownMenuSubTrigger disabled={fileBusy}>
+          <DropdownMenuSubTrigger
+            disabled={fileBusy}
+            aria-describedby={busyEncodingReason.describedBy}
+          >
             <RotateCw />
             Reopen with encoding
           </DropdownMenuSubTrigger>
@@ -1617,7 +1621,11 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           <DropdownMenuSub>
             <DropdownMenuSubTrigger
               disabled={fileBusy || writeBlocked !== null}
-              aria-describedby={saveEncodingReason.describedBy}
+              aria-describedby={
+                [busyEncodingReason.describedBy, readOnlyEncodingReason.describedBy]
+                  .filter(Boolean)
+                  .join(" ") || undefined
+              }
             >
               <SaveAll />
               Save with encoding
@@ -1652,7 +1660,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         )}
-        {!inDiff && !hardReadOnly && <MenuItemReason reason={saveEncodingReason} />}
+        {!inDiff && !hardReadOnly && <MenuItemReason reason={readOnlyEncodingReason} />}
       </>
     )
   }
@@ -2714,8 +2722,20 @@ function contentForPreview(
   return buffer?.draft ?? ""
 }
 
-const SAVE_IN_FLIGHT_REASON =
-  "This file is being saved. Choose an encoding once the save has finished."
+function encodingBusyReason(op: LaneOp): string {
+  switch (op) {
+    case "save":
+    case "convert":
+      return "This file is being saved. Choose an encoding once the save has finished."
+    case "reopen":
+      return "This file is being reopened in another encoding. Choose an encoding once it has finished."
+    case "reload":
+    case "freshness":
+      return "This file is being reloaded from disk. Choose an encoding once it has finished."
+    default:
+      return assertNever(op)
+  }
+}
 
 function tabIsSaving(savingTabId: string | null, tab: EditorTab | null): boolean {
   return savingTabId !== null && savingTabId === tab?.id

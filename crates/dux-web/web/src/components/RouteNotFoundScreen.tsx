@@ -81,7 +81,7 @@ export function TerminalNotFound({
               onClick={newTerminal}
             >
               <SquareTerminal />
-              New terminal
+              {owner.kind === "session" ? "New terminal tab" : "New terminal"}
             </Button>
           ) : null}
           <Button

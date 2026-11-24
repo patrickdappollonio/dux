@@ -104,7 +104,7 @@ export function StackNewDialog({
           title="New agent tab"
           excerpt={
             <>
-              Starts <InlineCode>{provider}</InlineCode> beside this agent&rsquo;s other tabs.
+              Starts <InlineCode>{provider}</InlineCode> beside this agent's other tabs.
             </>
           }
           disabled={tabDisabled}
@@ -112,7 +112,7 @@ export function StackNewDialog({
         />
         <NewRow
           icon={SquareTerminal}
-          title="New terminal"
+          title="New terminal tab"
           excerpt="Opens a shell in this agent's worktree, in its dock."
           disabled={changesBlocked}
           onActivate={() => run(() => createTerminal(session.id))}

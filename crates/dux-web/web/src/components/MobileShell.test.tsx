@@ -2048,7 +2048,7 @@ describe("MobileShell one part of an agent at a time", () => {
     render(<MobileShell />)
     fireEvent.click(screen.getByLabelText("Session actions"))
     expect(await screen.findByText("New agent tab…")).toBeTruthy()
-    expect(screen.getByText("New terminal in the worktree")).toBeTruthy()
+    expect(screen.getByText("New terminal tab in the worktree")).toBeTruthy()
   })
 
   it("carries the switch on the agent's screen and none on an agentless terminal's", () => {
