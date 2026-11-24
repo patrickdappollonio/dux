@@ -881,21 +881,21 @@ describe("InsetHeader show-Changes summary", () => {
     })
     render(<InsetHeader />)
     const button = screen.getByRole("button", { name: /show changes pane/i })
-    expect(button.textContent).toBe("3 changes")
+    expect(button.textContent).toBe("3 files")
     // The icon stays: the count is what the pane holds, the glyph is what the
     // press does.
     expect(button.querySelector("svg")).toBeTruthy()
     expect(button.getAttribute("aria-label")).toBe(
-      "Show Changes pane, 3 changes",
+      "Show Changes pane, 3 files",
     )
   })
 
   it("says the word with its count: singular only for exactly one", () => {
     const words: [number, string][] = [
-      [0, "0 changes"],
-      [1, "1 change"],
-      [2, "2 changes"],
-      [27, "27 changes"],
+      [0, "0 files"],
+      [1, "1 file"],
+      [2, "2 files"],
+      [27, "27 files"],
     ]
     for (const [n, text] of words) {
       mockState = hiddenWith({
@@ -925,7 +925,7 @@ describe("InsetHeader show-Changes summary", () => {
     render(<InsetHeader />)
     expect(
       screen.getByRole("button", { name: /show changes pane/i }).textContent,
-    ).toBe("0 changes")
+    ).toBe("0 files")
   })
 
   it("keeps the cluster's one height token when it carries the number", () => {
@@ -1405,8 +1405,8 @@ describe("InsetHeader folding one control at a time", () => {
           })),
         },
       }) as unknown as DuxState
-    // Room for all three beside "1 change" (80px) and not beside "27 changes" (100px).
-    room = NAMES + SLACK + 315 + 80
+    // Room for all three beside "1 file" (60px) and not beside "27 files" (80px).
+    room = NAMES + SLACK + 315 + 60
     mockState = hidden(1)
     const { rerender } = render(<InsetHeader />)
     expect(standing()).toEqual(["New tab…", "Theater", "Macros…"])

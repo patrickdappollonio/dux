@@ -113,12 +113,12 @@ export function InsetHeader() {
   // its word, as the control prints it. Null while no agent is in view, which
   // is also the state in which the phone draws no count control at all.
   const summary = changesSummary(dux.changes, session?.id)
-  const reopenWords = summary ? formatRegularCount(summary.count, "change") : undefined
+  const reopenWords = summary ? formatRegularCount(summary.count, "file") : undefined
   const { isFolded, settled, rowRef, itemRef, hold } = useFoldToFit({
     enabled: Boolean(paneSubject && selectedTarget),
     items: foldItems,
     // The reopen control stands beside the names and is as wide as its words,
-    // which change with the count ("9 changes" to "10 changes"), so a change in
+    // which change with the count ("9 files" to "10 files"), so a change in
     // them is re-measured as a change in the names is.
     watch: [...chips.map((c) => c.value), reopenWords ?? ""].join("\u0000"),
     focusOnFold: paneMenuRef,
@@ -150,107 +150,107 @@ export function InsetHeader() {
     // Whatever a control opens, and the pane's own menu, holds the fold while
     // it is open, so nothing leaves from under it.
     <FoldHoldContext.Provider value={hold}>
-    <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      {/* The upward continuation of the changes-panel divider. Absolutely
-          positioned so the offset resolves against the header's full box: a
-          border on the control cluster resolves against the header's padded
-          interior instead, and lands a few pixels left of the line it claims to
-          continue. Being outside the flex flow, it also collects no `gap-2` and
-          cannot push the pane's controls off the pane edge.
+      <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
+        {/* The upward continuation of the changes-panel divider. Absolutely
+            positioned so the offset resolves against the header's full box: a
+            border on the control cluster resolves against the header's padded
+            interior instead, and lands a few pixels left of the line it claims to
+            continue. Being outside the flex flow, it also collects no `gap-2` and
+            cannot push the pane's controls off the pane edge.
 
-          The calc's pixel term compensates for the panel handle: the group lays
-          out as terminal, a 1px handle, changes, so a pure percentage of the
-          full width lands spacer/100 px left of the real divider, which is a
-          visible one-pixel step under browser zoom. */}
-      {/* Not on a narrow window, where the cluster is wider than the pane and
-          the line would cross the app menu's button. */}
-      {!paneHidden && !narrow && (
-        <span
-          aria-hidden="true"
-          data-testid="changes-divider-continuation"
-          className="pointer-events-none absolute inset-y-0 w-px bg-border"
-          style={{ right: `calc(${spacer}% - ${spacer / 100}px)` }}
-        />
-      )}
-      {/* The chips share one shrink budget so the header clips instead of
-          pushing the right-hand controls off the edge. Once a chip's text is
-          cut off the pane's controls fold away to give them room, and past
-          that the chips yield all the way to nothing.
-
-          The gap is wider than the header's own `gap-2` because it replaces the
-          hairline dividers a field list would otherwise need; the glyphs
-          already say where one field stops. One font at one size throughout,
-          because the fields are peers. */}
-      <div
-        ref={rowRef}
-        className="flex min-w-0 flex-1 items-center gap-3.5 overflow-hidden"
-      >
-        {chips.map((chip) => (
-          <Chip key={chip.kind} chip={chip} />
-        ))}
-      </div>
-
-      {/* The pane's own controls, one outline family at the `h-8` token, 40px
-          under a finger, each a header child of its own so a folded one leaves
-          no gap behind. New tab… leads on an agent's pane, then Theater, then
-          the macro quick-picker, labelled because macros are a feature people
-          forget exists. */}
-      {selectedTarget && newTabSession && !folded.newTab ? (
-        <span ref={itemRef("new-tab")} className="flex shrink-0">
-          <NewTabButton session={newTabSession} />
-        </span>
-      ) : null}
-      {/* Only with the `⋯` its row folds into: a target is selected a moment
-          before its agent reaches the list, and Theater must not stand alone. */}
-      {selectedTarget && paneSubject && !folded.theater ? (
-        <span ref={itemRef("theater")} className="flex shrink-0">
-          <TheaterToggle settled={settled} />
-        </span>
-      ) : null}
-      {selectedTarget && paneSubject && !folded.macros ? (
-        <span ref={itemRef("macros")} className="flex shrink-0">
-          <MacroPopover target={selectedTarget} />
-        </span>
-      ) : null}
-      {/* The way back to a hidden or zero-width Changes pane, whose own menu is
-          gone with it, so it never folds into this `⋯`. It says how many changes
-          the pane holds, in words, since nothing else here says what the agent
-          changed. */}
-      {paneHidden && (
-        <SimpleTooltip content={reopenName}>
-          <HeaderButton
-            icon={<PanelRightOpen />}
-            label={reopenWords}
-            aria-label={reopenName}
-            onClick={() => showChangesPane()}
+            The calc's pixel term compensates for the panel handle: the group lays
+            out as terminal, a 1px handle, changes, so a pure percentage of the
+            full width lands spacer/100 px left of the real divider, which is a
+            visible one-pixel step under browser zoom. */}
+        {/* Not on a narrow window, where the cluster is wider than the pane and
+            the line would cross the app menu's button. */}
+        {!paneHidden && !narrow && (
+          <span
+            aria-hidden="true"
+            data-testid="changes-divider-continuation"
+            className="pointer-events-none absolute inset-y-0 w-px bg-border"
+            style={{ right: `calc(${spacer}% - ${spacer / 100}px)` }}
           />
-        </SimpleTooltip>
-      )}
-      {paneSubject && selectedTarget ? (
-        <HeaderPaneMenu
-          subject={paneSubject}
-          target={selectedTarget}
-          newTabSession={newTabSession}
-          folded={folded}
-          triggerRef={paneMenuRef}
-        />
-      ) : null}
+        )}
+        {/* The chips share one shrink budget so the header clips instead of
+            pushing the right-hand controls off the edge. Once a chip's text is
+            cut off the pane's controls fold away to give them room, and past
+            that the chips yield all the way to nothing.
 
-      {/* The spacer IS the cog's cluster, not an empty box in front of it:
-          sized to the Changes panel's percentage and right-aligned, it puts the
-          cog on the window's right edge and the pane's `⋯` on the terminal
-          pane's, out of one number and no measurement. `min-w-fit` keeps the
-          cog whole at 0% and in a pane dragged narrower than it. While the
-          reopen control shows, the pane is laid out at nothing, so the spacer is
-          the cog alone and the reopen control ahead of the `⋯` costs no edge. */}
-      <div
-        data-testid="changes-pane-spacer"
-        className={cn(HEADER_BUTTON_ROW, "min-w-fit justify-end")}
-        style={{ width: `${spacer}%` }}
-      >
-        <AppMenu />
-      </div>
-    </header>
+            The gap is wider than the header's own `gap-2` because it replaces the
+            hairline dividers a field list would otherwise need; the glyphs
+            already say where one field stops. One font at one size throughout,
+            because the fields are peers. */}
+        <div
+          ref={rowRef}
+          className="flex min-w-0 flex-1 items-center gap-3.5 overflow-hidden"
+        >
+          {chips.map((chip) => (
+            <Chip key={chip.kind} chip={chip} />
+          ))}
+        </div>
+
+        {/* The pane's own controls, one outline family at the `h-8` token, 40px
+            under a finger, each a header child of its own so a folded one leaves
+            no gap behind. New tab… leads on an agent's pane, then Theater, then
+            the macro quick-picker, labelled because macros are a feature people
+            forget exists. */}
+        {selectedTarget && newTabSession && !folded.newTab ? (
+          <span ref={itemRef("new-tab")} className="flex shrink-0">
+            <NewTabButton session={newTabSession} />
+          </span>
+        ) : null}
+        {/* Only with the `⋯` its row folds into: a target is selected a moment
+            before its agent reaches the list, and Theater must not stand alone. */}
+        {selectedTarget && paneSubject && !folded.theater ? (
+          <span ref={itemRef("theater")} className="flex shrink-0">
+            <TheaterToggle settled={settled} />
+          </span>
+        ) : null}
+        {selectedTarget && paneSubject && !folded.macros ? (
+          <span ref={itemRef("macros")} className="flex shrink-0">
+            <MacroPopover target={selectedTarget} />
+          </span>
+        ) : null}
+        {/* The way back to a hidden or zero-width Changes pane, whose own menu is
+            gone with it, so it never folds into this `⋯`. It says how many files
+            the pane holds, in words, since nothing else here says what the agent
+            changed. */}
+        {paneHidden && (
+          <SimpleTooltip content={reopenName}>
+            <HeaderButton
+              icon={<PanelRightOpen />}
+              label={reopenWords}
+              aria-label={reopenName}
+              onClick={() => showChangesPane()}
+            />
+          </SimpleTooltip>
+        )}
+        {paneSubject && selectedTarget ? (
+          <HeaderPaneMenu
+            subject={paneSubject}
+            target={selectedTarget}
+            newTabSession={newTabSession}
+            folded={folded}
+            triggerRef={paneMenuRef}
+          />
+        ) : null}
+
+        {/* The spacer IS the cog's cluster, not an empty box in front of it:
+            sized to the Changes panel's percentage and right-aligned, it puts the
+            cog on the window's right edge and the pane's `⋯` on the terminal
+            pane's, out of one number and no measurement. `min-w-fit` keeps the
+            cog whole at 0% and in a pane dragged narrower than it. While the
+            reopen control shows, the pane is laid out at nothing, so the spacer is
+            the cog alone and the reopen control ahead of the `⋯` costs no edge. */}
+        <div
+          data-testid="changes-pane-spacer"
+          className={cn(HEADER_BUTTON_ROW, "min-w-fit justify-end")}
+          style={{ width: `${spacer}%` }}
+        >
+          <AppMenu />
+        </div>
+      </header>
     </FoldHoldContext.Provider>
   )
 }
