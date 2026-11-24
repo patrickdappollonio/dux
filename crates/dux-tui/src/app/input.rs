@@ -3655,15 +3655,17 @@ impl App {
         let patterns = self.demoted_input_patterns();
         let mut plan = RawInputPlan {
             actions: Vec::with_capacity(sequences.len()),
+            origins: Vec::with_capacity(sequences.len()),
             normalized_paste_forwarded: false,
         };
-        for parsed in sequences {
+        for (index, parsed) in sequences.iter().enumerate() {
             if let Some(action) = self.classify_raw_input_sequence(
                 parsed,
                 &patterns,
                 &mut plan.normalized_paste_forwarded,
             ) {
                 plan.actions.push(action);
+                plan.origins.push(index);
             }
         }
         plan
@@ -4041,8 +4043,14 @@ impl App {
         &mut self,
         actions: Vec<RawSeqAction>,
         dispatch: &mut RawInputDispatch,
-    ) -> Option<bool> {
-        for action in actions {
+    ) -> Option<RawBatchEnd> {
+        let end = |should_exit, hand_on_after| {
+            Some(RawBatchEnd {
+                should_exit,
+                hand_on_after,
+            })
+        };
+        for (index, action) in actions.into_iter().enumerate() {
             match action {
                 RawSeqAction::Intercept(Action::OpenMacroBar, ..) => {
                     // Stamp now, before `input_target` moves below: this arm can
@@ -4055,7 +4063,7 @@ impl App {
                     self.open_macro_bar();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return Some(false);
+                    return end(false, Some(index));
                 }
                 // Only reachable while the take-over card covers this pane (see
                 // the match above), which is the one state where this key means
@@ -4065,7 +4073,7 @@ impl App {
                     self.take_over_focused_pty();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return Some(false);
+                    return end(false, None);
                 }
                 // Only reachable while another device drives the pty (see the
                 // match above); the prompt takes over input from here.
@@ -4074,7 +4082,7 @@ impl App {
                     self.open_command_palette();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return Some(false);
+                    return end(false, Some(index));
                 }
                 // In fullscreen the toggle means one thing: leave fullscreen.
                 RawSeqAction::Intercept(Action::ToggleFullscreen, ..) => {
@@ -4082,7 +4090,7 @@ impl App {
                     // `input_target`, which is what resolves the id.
                     dispatch.flush_and_stamp(self);
                     self.exit_interactive_mode();
-                    return Some(false);
+                    return end(false, Some(index));
                 }
                 RawSeqAction::Intercept(Action::ScrollPageUp, _, raw, key) => {
                     self.route_raw_page_scroll(ScrollDirection::Up, &raw, key.as_ref(), dispatch);
@@ -4117,7 +4125,7 @@ impl App {
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
                         RawInputFlow::Continue => {}
-                        RawInputFlow::Return(should_exit) => return Some(should_exit),
+                        RawInputFlow::Return(should_exit) => return end(should_exit, None),
                     }
                 }
                 RawSeqAction::Intercept(_, _, raw, key) => {
@@ -4137,14 +4145,37 @@ impl App {
         None
     }
 
+    /// Hand what followed a key that ended a raw-input batch early to whichever
+    /// reader takes input now. Returns whether the app should exit.
+    fn hand_on_rest_of_read(&mut self, rest: Vec<Vec<u8>>) -> bool {
+        let mut rest = rest.into_iter();
+        while let Some(seq) = rest.next() {
+            if self.run_input_reader() == RunInputReader::Forwarding {
+                let tail: Vec<u8> = std::iter::once(seq).chain(rest).flatten().collect();
+                return self.process_raw_input_bytes(&tail);
+            }
+            // A paste is one event to crossterm's reader, and its end may not be
+            // in this read, so it and what follows it are dropped.
+            if seq == crate::raw_input::BRACKET_PASTE_START {
+                return false;
+            }
+            if let Some(event) = super::debug_input::event_crossterm_makes_of(&seq)
+                && self.handle_terminal_event(event)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Process raw bytes that have already been read from stdin.
     ///
     /// `poll_and_forward_raw_input` reads the bytes and calls this; a test can
     /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
         let sequences = self.parse_raw_input_sequences(bytes);
-        let plan = self.classify_raw_input_sequences(&sequences);
-        let actions = plan.actions;
+        let mut plan = self.classify_raw_input_sequences(&sequences);
+        let actions = std::mem::take(&mut plan.actions);
         let paste = if plan.normalized_paste_forwarded {
             NormalizedPaste::Forwarded
         } else {
@@ -4163,8 +4194,18 @@ impl App {
             forwarded: ForwardedInput::default(),
         };
 
-        if let Some(should_exit) = self.execute_raw_input_actions(actions, &mut dispatch) {
-            return should_exit;
+        if let Some(end) = self.execute_raw_input_actions(actions, &mut dispatch) {
+            if end.should_exit {
+                return true;
+            }
+            return end.hand_on_after.is_some_and(|action| {
+                let rest = sequences
+                    .into_iter()
+                    .skip(plan.origins[action] + 1)
+                    .map(|parsed| parsed.bytes)
+                    .collect();
+                self.hand_on_rest_of_read(rest)
+            });
         }
         dispatch.finish(self, paste);
 
