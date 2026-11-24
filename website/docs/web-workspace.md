@@ -102,12 +102,12 @@ Three things can go wrong with a link:
 - **The agent you are watching is deleted out from under you.** dux moves you to the next
   active agent, or home when there is not one.
 - **The terminal has since closed.** You get a **Terminal not found** screen with a
-  **New terminal** button that opens a fresh one in the same place: in that agent's
-  worktree, at that project's root, or a new standalone terminal. It shows every time you
+  button that opens a fresh one in the same place: **New terminal tab** in that agent's
+  worktree, **New terminal** at that project's root, or a new standalone terminal. It shows every time you
   arrive at such a link, Back included, so close three terminals and walk back and you
   see it three times rather than landing somewhere the link never named.
 
-![The Terminal not found screen: a short explanation naming the terminal's id, a New terminal button, and Back to agents.](/screens/terminal-not-found.png)
+![The Terminal not found screen: a short explanation naming the terminal's id, a New terminal tab button, and Back to agents.](/screens/terminal-not-found.png)
 
 ## Adding projects
 
@@ -476,7 +476,7 @@ alike, on any terminal.
 There are three kinds of plain shell:
 
 - A **companion terminal** runs in an agent's worktree, for tests, git, or tailing a log while the agent works. It lives in the agent's **terminal dock**, under the agent, and has no row of its own in the sidebar: the agent's row stands for it. See [The terminal dock](#the-terminal-dock) below.
-  - Open one from the agent's `⋯` menu (**New terminal in the worktree**, or **in the folder** for a standalone agent), from the dock's **+**, from **New tab…** in the centre pane's header, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
+  - Open one from the agent's `⋯` menu (**New terminal tab in the worktree**, or **in the folder** for a standalone agent), from the dock's **+**, from **New tab…** in the centre pane's header, or from **New terminal for an agent…** in the launcher's **▾** menu, which asks which agent: every agent is listed under its project, standalone ones last, with a search box to narrow them down.
 - A **project terminal** opens at the project's repo root with no agent attached. It is a row of the sidebar's one list, sorted with your agents. It is the escape hatch when dux will not do something for you remotely, even over Tailscale with no local terminal in sight.
   - Spawn one from the project's `⋯` menu ("New terminal at the project root").
   - It shows up in the Task Manager and is destroyed on close.
@@ -604,7 +604,7 @@ It holds:
 - the changed-file count (agents only)
 - the terminal-keys button, which hides and shows the key row, while this device is typing into the terminal
 - the **agent/terminals switch**, on an agent with at least one terminal. Over the agent it shows the terminal icon and how many terminals there are; over a terminal, the agent icon. The icon tells you what the other part is doing: green and pulsing while it works, cyan and blinking when the agent needs you (needs-you wins), plain otherwise. Tap it to show that part and type into it.
-- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
+- the session's `⋯` menu, which carries the **Input** group, the agent's actions (**New agent tab…** and **New terminal tab in the worktree**, or **in the folder** for a standalone agent, among them) and a **Settings** drill into the app menu
 
 The flap takes no room from the terminal, so theater does not take it away: it lifts off the band and flies to the floating pill instead (see [Theater mode](#theater-mode-one-pane-no-chrome)).
 

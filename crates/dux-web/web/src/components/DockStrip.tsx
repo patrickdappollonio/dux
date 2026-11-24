@@ -120,14 +120,14 @@ function DockControls({
     <>
       <ExplainedWhenDisabled
         disabled={block !== null}
-        hint={block === null ? "New terminal" : addToAgentBlockHint(block, device)}
+        hint={block === null ? "New terminal tab" : addToAgentBlockHint(block, device)}
         // 2px more on a tablet keeps the +'s tap area off the last pill's ⋯,
         // whose own reaches 1px past its pill.
         className="md:pointer-coarse:ml-0.5"
         disabledClassName={TAB_STRIP_BUTTON_DISABLED_TAP_AREA}
       >
         <TabStripButton
-          aria-label="New terminal"
+          aria-label="New terminal tab"
           disabled={block !== null}
           onClick={() => createTerminal(sessionId)}
         >

@@ -139,7 +139,7 @@ describe("DockStrip", () => {
   // strip as tall as the agent's.
   it("keeps every control's 44px width at phone width while fitting the strip's height", () => {
     render(strip([terminal("t1", 1)]))
-    for (const label of ["New terminal", "Hide terminals", "Maximize terminal", "Terminal actions"]) {
+    for (const label of ["New terminal tab", "Hide terminals", "Maximize terminal", "Terminal actions"]) {
       const classes = Array.from(screen.getByLabelText(label).classList)
       expect(classes, label).toContain("max-md:w-11")
       expect(classes, label).not.toContain("max-md:pointer-coarse:size-10")
@@ -148,7 +148,7 @@ describe("DockStrip", () => {
 
   it("opens another terminal from its +", () => {
     render(strip([terminal("t1", 1)]))
-    fireEvent.click(screen.getByLabelText("New terminal"))
+    fireEvent.click(screen.getByLabelText("New terminal tab"))
     expect(createTerminalMock).toHaveBeenCalledWith("s1")
   })
 
@@ -186,7 +186,7 @@ describe("DockStrip on a row this device does not drive", () => {
         driver,
       })
       render(strip([terminal("t1", 1), terminal("t2", 2)]))
-      expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", true)
+      expect(screen.getByLabelText("New terminal tab")).toHaveProperty("disabled", true)
       expect(sortableProps?.disabled).toBe(true)
       fireEvent.click(screen.getAllByLabelText("Terminal actions")[1])
       const menu = within(await screen.findByRole("menu"))
@@ -199,24 +199,24 @@ describe("DockStrip on a row this device does not drive", () => {
   // control throughout, so the keyboard focus stays where it was.
   it("keeps the same +, and the focus, as the row's block appears and clears", () => {
     render(strip([terminal("t1", 1)]))
-    const plus = screen.getByLabelText("New terminal")
+    const plus = screen.getByLabelText("New terminal tab")
     act(() => plus.focus())
     let release = () => {}
     act(() => {
       release = registerPaneCover("s1", "card", { row: agentRowKey("s1"), driver: "other" })
     })
-    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", true)
-    expect(screen.getByLabelText("New terminal")).toBe(plus)
+    expect(screen.getByLabelText("New terminal tab")).toHaveProperty("disabled", true)
+    expect(screen.getByLabelText("New terminal tab")).toBe(plus)
     act(() => release())
-    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", false)
-    expect(screen.getByLabelText("New terminal")).toBe(plus)
+    expect(screen.getByLabelText("New terminal tab")).toHaveProperty("disabled", false)
+    expect(screen.getByLabelText("New terminal tab")).toBe(plus)
     expect(document.activeElement).toBe(plus)
   })
 
   it("keeps all of it on a row this device drives", () => {
     registerPaneCover("s1", "none", { row: agentRowKey("s1"), driver: "this" })
     render(strip([terminal("t1", 1), terminal("t2", 2)]))
-    expect(screen.getByLabelText("New terminal")).toHaveProperty("disabled", false)
+    expect(screen.getByLabelText("New terminal tab")).toHaveProperty("disabled", false)
     expect(sortableProps?.disabled).toBe(false)
   })
 })
@@ -293,7 +293,7 @@ describe("DockStrip on a touch tablet", () => {
       // 20px box, 10px a side.
       ["Terminal actions", "after:-inset-2.5"],
       // 24px boxes, 8px a side.
-      ["New terminal", "after:-inset-2"],
+      ["New terminal tab", "after:-inset-2"],
       ["Hide terminals", "after:-inset-2"],
       ["Maximize terminal", "after:-inset-2"],
     ]
@@ -322,7 +322,7 @@ describe("DockStrip on a touch tablet", () => {
   it("keeps the tap areas apart and the last one clear of the pane divider", () => {
     render(strip([terminal("t1", 1)]))
     // The + clear of the last pill's ⋯.
-    expect(screen.getByLabelText("New terminal").parentElement!.className).toContain(
+    expect(screen.getByLabelText("New terminal tab").parentElement!.className).toContain(
       "md:pointer-coarse:ml-0.5",
     )
     const group = screen.getByLabelText("Hide terminals").parentElement!
