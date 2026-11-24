@@ -1,11 +1,14 @@
 //! The bytes dux has read from its own terminal and not yet given to a reader.
 //!
-//! Every reader takes its input from here, so a key that hands input from one
-//! reader to another leaves what followed it for the next reader to take whole.
-//! The structured reader decodes these bytes the way crossterm's event reader
-//! does, byte for byte and with crossterm's own rule for a lone Escape.
+//! Every reader of the terminal (the windowed interface, the maximized pane,
+//! the input debugger, the start-web-server status screen) takes its input from
+//! here and gives back what it did not consume, so a key that hands input from
+//! one reader to another leaves what followed it for the next reader, whole and
+//! in order. The windowed interface and the status screen read these bytes as
+//! the events crossterm's own reader would make of them.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
@@ -36,17 +39,52 @@ enum Next {
 #[derive(Debug, Default)]
 pub(crate) struct TerminalInput {
     unread: VecDeque<u8>,
-    /// Whether the read `unread` came from filled [`READ_SIZE`].
-    unread_from_full_read: bool,
-    /// The start of a sequence the structured reader has taken but not finished.
+    /// Whether the last read filled [`READ_SIZE`] and its last byte is still
+    /// unread, which tells a lone Escape there to wait for the next read.
+    unread_ends_full_read: bool,
+    /// The start of a sequence the event decoder has taken but not finished.
     partial: Vec<u8>,
 }
 
+/// What one surface of the terminal UI left unread when it handed the terminal
+/// to the next: the windowed interface to the status screen on the flip, and
+/// the status screen back to a new interface on the resume.
+static BETWEEN_SURFACES: Mutex<TerminalInput> = Mutex::new(TerminalInput::new());
+
+/// Leave what `input` holds for the next surface to read, after anything an
+/// earlier surface left that nobody has taken yet.
+pub(crate) fn leave_for_next_surface(mut input: TerminalInput) {
+    if input.is_empty() {
+        return;
+    }
+    let mut slot = BETWEEN_SURFACES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let bytes = input.take_bytes();
+    slot.unread.extend(bytes);
+}
+
+/// Take what the last surface left unread.
+pub(crate) fn take_from_last_surface() -> TerminalInput {
+    let mut slot = BETWEEN_SURFACES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::mem::take(&mut *slot)
+}
+
 impl TerminalInput {
+    pub(crate) const fn new() -> Self {
+        Self {
+            unread: VecDeque::new(),
+            unread_ends_full_read: false,
+            partial: Vec::new(),
+        }
+    }
+
     /// Add one read's bytes.
     pub(crate) fn push_read(&mut self, bytes: &[u8]) {
         self.unread.extend(bytes);
-        self.unread_from_full_read = bytes.len() == READ_SIZE;
+        self.unread_ends_full_read = bytes.len() == READ_SIZE;
     }
 
     /// Whether bytes are waiting that no reader has looked at yet.
@@ -54,18 +92,25 @@ impl TerminalInput {
         !self.unread.is_empty()
     }
 
-    /// Hand every byte held, a sequence the structured reader has begun
-    /// included, to a reader that splits bytes itself.
+    /// Whether nothing is held at all, a begun sequence included.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.unread.is_empty() && self.partial.is_empty()
+    }
+
+    /// Hand every byte held, a sequence the event decoder has begun included,
+    /// to a reader that splits bytes itself.
     pub(crate) fn take_bytes(&mut self) -> Vec<u8> {
         let mut bytes = std::mem::take(&mut self.partial);
         bytes.extend(self.unread.drain(..));
-        self.unread_from_full_read = false;
+        self.unread_ends_full_read = false;
         bytes
     }
 
-    /// Put bytes a raw reader did not use back ahead of anything unread.
+    /// Put bytes a reader did not use back ahead of anything held, a sequence
+    /// the event decoder has begun included.
     pub(crate) fn give_back(&mut self, bytes: &[u8]) {
-        for &byte in bytes.iter().rev() {
+        let begun = std::mem::take(&mut self.partial);
+        for &byte in bytes.iter().chain(&begun).rev() {
             self.unread.push_front(byte);
         }
     }
@@ -74,11 +119,14 @@ impl TerminalInput {
     /// only that event's bytes. `None` when the bytes run out first.
     pub(crate) fn next_event(&mut self) -> Option<Event> {
         while let Some(byte) = self.unread.pop_front() {
-            let next = if !self.unread.is_empty() || self.unread_from_full_read {
+            let next = if !self.unread.is_empty() || self.unread_ends_full_read {
                 Next::MayFollow
             } else {
                 Next::EndOfInput
             };
+            if self.unread.is_empty() {
+                self.unread_ends_full_read = false;
+            }
             self.partial.push(byte);
             match crossterm_decode(&self.partial, next) {
                 Decoded::Incomplete => {}

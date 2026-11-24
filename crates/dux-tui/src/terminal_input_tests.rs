@@ -68,7 +68,40 @@ fn bytes_taken_by_a_raw_reader_and_given_back_decode_as_if_never_taken() {
     );
 }
 
-const CROSSTERM_CHILD: &str = "terminal_input::tests::child_records_crossterm_events";
+/// Once the bytes of a full read are all decoded, a lone Escape a raw reader
+/// gives back is the Escape key: the full read it no longer ends says nothing
+/// about it.
+#[test]
+fn a_full_read_decoded_to_its_end_leaves_no_wait_on_a_later_escape() {
+    let mut input = TerminalInput::default();
+    input.push_read(&[b'a'; READ_SIZE]);
+    while input.next_event().is_some() {}
+    input.give_back(b"\x1b");
+    assert_eq!(
+        input.next_event(),
+        Some(key(KeyCode::Esc, KeyModifiers::NONE))
+    );
+}
+
+/// Bytes given back were read before a sequence the decoder has begun since,
+/// so they come first.
+#[test]
+fn bytes_given_back_come_before_a_sequence_already_begun() {
+    let mut input = TerminalInput::default();
+    input.push_read(b"\x1b[");
+    assert_eq!(input.next_event(), None);
+    input.give_back(b"x");
+    input.push_read(b"A");
+    assert_eq!(
+        [input.next_event(), input.next_event()],
+        [
+            Some(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(key(KeyCode::Up, KeyModifiers::NONE))
+        ]
+    );
+}
+
+const CROSSTERM_CHILD:&str = "terminal_input::tests::child_records_crossterm_events";
 
 /// Not a test on its own: run as a child in a pseudo-terminal, it appends a
 /// line per event crossterm's own reader returns to `<dir>/events`.

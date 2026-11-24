@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::io::{Write as _, stdout};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -859,6 +860,9 @@ pub(crate) struct App {
     /// orphaned signal-hook registrations. `None` only in tests that build the
     /// App directly without registering a real handler.
     pub(crate) sigwinch_sig_id: Option<signal_hook::SigId>,
+    /// Readable once a resize lands, so a wait for input ends at once. `None`
+    /// only in tests that build the App without real handlers.
+    pub(crate) resize_wake: Option<crate::resize_wake::ResizeWake>,
     /// Set by the SIGTERM/SIGINT/SIGHUP handlers so the run loop can break with
     /// [`RunExit::Quit`] and wind the agents down gracefully (SIGTERM + grace)
     /// instead of letting the process die straight to the hard SIGKILL in
@@ -1529,6 +1533,7 @@ enum SessionRestore {
 struct SignalHandles {
     sigwinch_flag: Arc<AtomicBool>,
     sigwinch_sig_id: Option<signal_hook::SigId>,
+    resize_wake: Option<crate::resize_wake::ResizeWake>,
     shutdown_flag: Arc<AtomicBool>,
     shutdown_sig_ids: Vec<signal_hook::SigId>,
 }
@@ -1548,6 +1553,7 @@ fn register_signal_handles() -> Result<SignalHandles> {
     let sigwinch_flag = Arc::new(AtomicBool::new(false));
     let sigwinch_sig_id =
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+    let resize_wake = crate::resize_wake::ResizeWake::register()?;
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let mut shutdown_sig_ids = Vec::new();
@@ -1565,6 +1571,7 @@ fn register_signal_handles() -> Result<SignalHandles> {
     Ok(SignalHandles {
         sigwinch_flag,
         sigwinch_sig_id: Some(sigwinch_sig_id),
+        resize_wake: Some(resize_wake),
         shutdown_flag,
         shutdown_sig_ids,
     })
@@ -5372,6 +5379,8 @@ mod pull_requests;
 pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequestClone};
 #[cfg(test)]
 pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
+#[cfg(test)]
+mod input_handover_tests;
 mod project_actions;
 mod pty_ownership;
 #[cfg(test)]
@@ -5801,6 +5810,7 @@ impl App {
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
             sigwinch_sig_id: signals.sigwinch_sig_id,
+            resize_wake: signals.resize_wake,
             shutdown_flag: signals.shutdown_flag,
             shutdown_sig_ids: signals.shutdown_sig_ids,
             redraw: RedrawGate::default(),
@@ -5954,6 +5964,9 @@ impl App {
         // once the engine is handed over.
         if let Some(sig_id) = self.sigwinch_sig_id {
             signal_hook::low_level::unregister(sig_id);
+        }
+        if let Some(wake) = self.resize_wake.take() {
+            wake.unregister();
         }
         for sig_id in self.shutdown_sig_ids {
             signal_hook::low_level::unregister(sig_id);
@@ -6209,8 +6222,8 @@ impl App {
 
     fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
         if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
-            let (cols, rows) = crossterm::terminal::size().unwrap_or_default();
-            self.handle_terminal_event(Event::Resize(cols, rows));
+            self.mark_frame_dirty();
+            self.note_host_resized();
             if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize()) {
                 self.report_runtime_error("terminal resize failed", &err);
             }
@@ -6328,12 +6341,19 @@ impl App {
     }
 
     fn poll_run_input(&mut self) -> bool {
+        let stdin = std::io::stdin();
+        self.poll_run_input_from(stdin.as_fd())
+    }
+
+    /// One iteration's input, read from `terminal`: the run loop's stdin, or a
+    /// stand-in in a test.
+    pub(crate) fn poll_run_input_from(&mut self, terminal: BorrowedFd<'_>) -> bool {
         let reader = self.run_input_reader();
         if reader != RunInputReader::Debugger {
             self.end_debug_raw_input();
         }
         match reader {
-            RunInputReader::Debugger => match self.poll_debug_raw_input(std::io::stdin()) {
+            RunInputReader::Debugger => match self.poll_debug_raw_input(terminal) {
                 Ok(should_exit) => should_exit,
                 Err(err) => {
                     self.report_runtime_error(
@@ -6343,13 +6363,31 @@ impl App {
                     false
                 }
             },
-            RunInputReader::Forwarding => self.poll_raw_run_input(),
-            RunInputReader::Structured => self.poll_structured_run_input(),
+            RunInputReader::Forwarding => self.poll_raw_run_input(terminal),
+            RunInputReader::Structured => self.poll_structured_run_input(terminal),
         }
     }
 
-    fn poll_raw_run_input(&mut self) -> bool {
-        match self.poll_and_forward_raw_input() {
+    /// Wait up to `timeout` for `terminal` to have bytes to read, and say
+    /// whether it does. A resize ends the wait at once.
+    pub(crate) fn wait_for_terminal(
+        &self,
+        terminal: BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> rustix::io::Result<bool> {
+        let wake = self.resize_wake.as_ref().map(AsFd::as_fd);
+        let waited = input::wait_for_input_or_wake(terminal, wake, timeout)?;
+        if waited.woken
+            && let Some(wake) = &self.resize_wake
+        {
+            wake.clear();
+            self.sigwinch_flag.store(true, Ordering::Relaxed);
+        }
+        Ok(waited.input)
+    }
+
+    fn poll_raw_run_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
+        match self.poll_and_forward_raw_input(terminal) {
             Ok(should_exit) => should_exit,
             Err(err) => {
                 self.report_runtime_error(
@@ -6361,11 +6399,11 @@ impl App {
         }
     }
 
-    fn poll_structured_run_input(&mut self) -> bool {
+    fn poll_structured_run_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
         if !self.terminal_input.has_unread() {
             let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
             let poll_ms = idle_poll_ms.min(self.max_poll_ms());
-            match self.read_terminal_into_input(Duration::from_millis(poll_ms)) {
+            match self.read_terminal_into_input(terminal, Duration::from_millis(poll_ms)) {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(err) => {
@@ -6377,31 +6415,31 @@ impl App {
                 }
             }
         }
-        self.drain_terminal_input()
+        self.drain_terminal_input(terminal)
     }
 
-    /// Wait up to `timeout` for the terminal and add one read to
+    /// Wait up to `timeout` for `terminal` and add one read to
     /// `terminal_input`. Returns whether anything was read.
-    fn read_terminal_into_input(&mut self, timeout: Duration) -> std::io::Result<bool> {
-        use std::os::fd::AsFd;
-
-        let stdin = std::io::stdin();
-        let fd = stdin.as_fd();
-        if !input::wait_for_input(&fd, timeout)? {
+    fn read_terminal_into_input(
+        &mut self,
+        terminal: BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> std::io::Result<bool> {
+        if !self.wait_for_terminal(terminal, timeout)? {
             return Ok(false);
         }
         let mut buf = [0u8; crate::terminal_input::READ_SIZE];
-        let n = input::read_raw_chunk(fd, &mut buf)?;
+        let n = input::read_raw_chunk(terminal, &mut buf)?;
         self.terminal_input.push_read(&buf[..n]);
         Ok(n > 0)
     }
 
     /// Handle events while this reader still takes input. An event that hands
     /// input to another reader leaves every byte after it in `terminal_input`.
-    fn drain_terminal_input(&mut self) -> bool {
+    fn drain_terminal_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
         loop {
             let Some(event) = self.terminal_input.next_event() else {
-                match self.read_terminal_into_input(Duration::ZERO) {
+                match self.read_terminal_into_input(terminal, Duration::ZERO) {
                     Ok(true) => continue,
                     Ok(false) => return false,
                     Err(err) => {
@@ -6735,14 +6773,7 @@ impl App {
             },
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize(_, _) => {
-                // The grid the press was aimed at has reflowed, and so has the
-                // cell that carried its link.
-                self.retire_pending_link_click();
-                // The sidebar has reflowed too: the row the drag was aimed at is
-                // no longer under the pointer, so the gesture is retired rather
-                // than dropped somewhere the user did not choose.
-                self.row_drag = None;
-                self.tab_drag = None;
+                self.note_host_resized();
                 false
             }
             Event::FocusGained => {
@@ -6765,6 +6796,18 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Retire the gestures a resize of the host window invalidates.
+    fn note_host_resized(&mut self) {
+        // The grid the press was aimed at has reflowed, and so has the cell
+        // that carried its link.
+        self.retire_pending_link_click();
+        // The sidebar has reflowed too: the row the drag was aimed at is no
+        // longer under the pointer, so the gesture is retired rather than
+        // dropped somewhere the user did not choose.
+        self.row_drag = None;
+        self.tab_drag = None;
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {

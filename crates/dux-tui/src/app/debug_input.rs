@@ -7,7 +7,7 @@
 //! selected agent, live child or ownership, so it works from anywhere.
 
 use std::fmt::Write as _;
-use std::os::fd::AsFd;
+use std::os::fd::BorrowedFd;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 
 use super::components::ellipsis::pad_to_width;
 use super::components::wrap_lines::display_width;
-use super::input::{ESC_AMBIGUITY_TIMEOUT, read_raw_chunk, trim_debug_input_lines, wait_for_input};
+use super::input::{ESC_AMBIGUITY_TIMEOUT, read_raw_chunk, trim_debug_input_lines};
 use super::{App, PromptState};
 use crate::host_keys::Host;
 use crate::keybindings::BindingScope;
@@ -97,6 +97,11 @@ pub(crate) struct DebugRawInput {
 }
 
 impl DebugRawInput {
+    /// Whether the splitter holds the start of a sequence.
+    pub(super) fn holds_partial_sequence(&self) -> bool {
+        !self.parser.pending().is_empty()
+    }
+
     /// Whether this reader holds input meant for the main UI and must keep
     /// reading until it can hand it over: a paste that began after the
     /// debugger closed and is still arriving, or the unfinished start of a
@@ -333,7 +338,7 @@ impl App {
     /// read after it closed (an arriving paste, an unfinished sequence). On
     /// the first poll it takes the bytes the other readers left unread first.
     /// Returns whether the app should exit.
-    pub(super) fn poll_debug_raw_input(&mut self, stdin: impl AsFd) -> Result<bool> {
+    pub(super) fn poll_debug_raw_input(&mut self, terminal: BorrowedFd<'_>) -> Result<bool> {
         if !self.debug_raw_input.reading {
             if self.hand_debug_input_over(|| None) {
                 return Ok(true);
@@ -352,11 +357,11 @@ impl App {
 
         // The same capped wait as the forwarding poll: this loop is the
         // background web server's engine servicer too.
-        let fd = stdin.as_fd();
+        let fd = terminal;
         let mut buf = [0u8; 4096];
         let poll_ms = 100u64.min(self.max_poll_ms());
-        if !wait_for_input(&fd, Duration::from_millis(poll_ms))? {
-            return self.resolve_pending_debug_esc(&fd, &mut buf);
+        if !self.wait_for_terminal(fd, Duration::from_millis(poll_ms))? {
+            return self.resolve_pending_debug_esc(fd, &mut buf);
         }
         let n = read_raw_chunk(fd, &mut buf)?;
         if n == 0 {
@@ -373,7 +378,7 @@ impl App {
         while Instant::now() < drain_deadline
             && (self.input_debugger_open() || self.debug_raw_input.holds_input_for_main_ui())
         {
-            if !wait_for_input(&fd, Duration::ZERO)? {
+            if !self.wait_for_terminal(fd, Duration::ZERO)? {
                 break;
             }
             let n = read_raw_chunk(fd, &mut buf)?;
@@ -384,7 +389,7 @@ impl App {
                 return Ok(true);
             }
         }
-        self.resolve_pending_debug_esc(&fd, &mut buf)
+        self.resolve_pending_debug_esc(fd, &mut buf)
     }
 
     /// Take over reading from crossterm: start a fresh reader and handle every
@@ -423,7 +428,11 @@ impl App {
     /// Escape, a pair of them, or (while the debugger is open) a lone `ESC [`
     /// or `ESC O`, into the debugger or the main UI, never into a
     /// pty. Returns whether the app should exit.
-    fn resolve_pending_debug_esc(&mut self, fd: &impl AsFd, buf: &mut [u8; 4096]) -> Result<bool> {
+    fn resolve_pending_debug_esc(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8; 4096],
+    ) -> Result<bool> {
         if let Some(exit) = self.expire_unfinished_debug_paste() {
             return Ok(exit);
         }
@@ -438,7 +447,7 @@ impl App {
             return Ok(false);
         }
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        if wait_for_input(fd, Duration::ZERO)? {
+        if self.wait_for_terminal(fd, Duration::ZERO)? {
             let n = read_raw_chunk(fd, buf)?;
             if n != 0 {
                 return Ok(self.record_debug_input_bytes(&buf[..n]));
@@ -804,6 +813,7 @@ fn closes_input_debugger(key: &KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -1192,12 +1202,12 @@ mod tests {
         assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[108;6u").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         let rows = log_rows(&app);
         assert_eq!(rows.len(), 2, "{rows:#?}");
         assert!(rows[1].contains("1b 5b 31 30 38 3b 36 75"), "{rows:#?}");
         writer.write_all(b"\x1b").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
     }
 
@@ -1210,11 +1220,11 @@ mod tests {
         assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[200~abc").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         let paste = app.debug_raw_input.paste.as_mut().expect("a paste is open");
         assert_eq!(paste.len, 3);
         paste.last -= UNFINISHED_PASTE_WAIT;
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(app.debug_raw_input.paste.is_none());
         let rows = log_rows(&app);
         let last = rows.last().expect("a row");
@@ -1223,7 +1233,7 @@ mod tests {
             "{rows:#?}"
         );
         writer.write_all(b"\x1b").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
     }
 
@@ -1238,7 +1248,7 @@ mod tests {
         assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[27u\x1b[200~h\ni").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
         assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
         app.debug_raw_input
@@ -1246,7 +1256,7 @@ mod tests {
             .as_mut()
             .expect("a paste is open")
             .last -= UNFINISHED_PASTE_WAIT;
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert_eq!(
             app.agent_filter.as_ref().map(|f| f.text.as_str()),
             Some("h i")
@@ -1268,7 +1278,7 @@ mod tests {
         assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[27u\xe9").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
         // The reader lets go, so the main UI's own reader takes the next keys.
         assert!(!app.debug_raw_input.reading);
