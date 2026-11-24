@@ -123,6 +123,30 @@ describe.each([
 })
 
 describe("project settings", () => {
+  it("names each field by its label, and a press on a label reaches its control", async () => {
+    render(<ProjectSettingsDialog />)
+    const provider = screen.getByRole("combobox", { name: "Default provider" })
+    expect(screen.getByRole("combobox", { name: "Auto-reopen agents" })).toBeTruthy()
+    for (const name of ["Default provider", "Auto-reopen agents", "Startup command", "Environment"]) {
+      expect((screen.getByText(name) as HTMLLabelElement).control, name).toBe(
+        screen.getByRole(name.includes("agents") || name.includes("provider") ? "combobox" : "textbox", { name }),
+      )
+    }
+    await act(async () => {
+      fireEvent.click(screen.getByText("Default provider"))
+    })
+    expect(provider.getAttribute("aria-expanded")).toBe("true")
+  })
+
+  it("reads the note about lines Save leaves out with the environment", () => {
+    mockState = { ...mockState, spine: { ...mockState.spine!, projects: [{ ...project, env: {} }] } } as DuxState
+    render(<ProjectSettingsDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
+    expect(note?.textContent).toMatch(/Save leaves it out/)
+  })
+
   it("covers the screen and closes from its own button on a phone", async () => {
     phone = true
     coarsePointer()

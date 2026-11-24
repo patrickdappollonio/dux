@@ -28,6 +28,7 @@ import {
 import { unsavedChangesLabel } from "@/lib/unsavedChanges"
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ErrorLine } from "@/components/ErrorLine"
+import { FormGroup } from "@/components/ui/form-group"
 import { MatchHighlight } from "@/components/MatchHighlight"
 import {
   Modal,
@@ -937,21 +938,13 @@ function MacroFields({
   const confirming = useRef(false)
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="macro-name" className="text-sm font-medium text-muted-foreground">
-          Name
-        </label>
-        <div className="flex items-center gap-2">
-          <Input
-            id="macro-name"
-            ref={nameRef}
-            value={macro.name}
-            onChange={(e) => onChange({ name: e.target.value })}
-            placeholder="Review"
-            aria-invalid={problemField === "name"}
-            aria-describedby={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
-            className={CONTROL_HEIGHT}
-          />
+      <FormGroup
+        layout="stacked"
+        control="single"
+        label="Name"
+        invalid={problemField === "name"}
+        describedBy={problemField === "name" ? MACRO_PROBLEM_ID : undefined}
+        after={
           <DropdownMenu>
             <EllipsisMenuTrigger placement="header" aria-label={`Actions for ${name}`} />
             <DropdownMenuContent
@@ -987,44 +980,58 @@ function MacroFields({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
-      </div>
+        }
+      >
+        {(field) => (
+          <Input
+            {...field}
+            ref={nameRef}
+            value={macro.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+            placeholder="Review"
+            className={CONTROL_HEIGHT}
+          />
+        )}
+      </FormGroup>
 
-      <div className="flex flex-col gap-1.5">
-        <span id="macro-surface" className="text-sm font-medium text-muted-foreground">
-          Shown on
-        </span>
-        <SegmentedChoice
-          labelledBy="macro-surface"
-          describedBy="macro-surface-meaning"
-          value={macro.surface}
-          options={MACRO_SURFACE_OPTIONS}
-          onChange={(surface) => onChange({ surface })}
-          className={phone ? "w-full" : "w-fit"}
-        />
-        <p id="macro-surface-meaning" className="text-xs text-muted-foreground">
-          {MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description}
-        </p>
-      </div>
+      <FormGroup
+        layout="stacked"
+        control="group"
+        label="Shown on"
+        note={MACRO_SURFACE_OPTIONS.find((option) => option.value === macro.surface)?.description}
+      >
+        {(field) => (
+          <SegmentedChoice
+            label={field["aria-label"]}
+            labelledBy={field["aria-labelledby"]}
+            describedBy={field["aria-describedby"]}
+            value={macro.surface}
+            options={MACRO_SURFACE_OPTIONS}
+            onChange={(surface) => onChange({ surface })}
+            className={phone ? "w-full" : "w-fit"}
+          />
+        )}
+      </FormGroup>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-        <label htmlFor="macro-text" className="text-sm font-medium text-muted-foreground">
-          Text
-        </label>
-        <Textarea
-          id="macro-text"
-          value={macro.text}
-          onChange={(e) => onChange({ text: e.target.value })}
-          placeholder="review this code for bugs"
-          aria-invalid={problemField === "text"}
-          aria-describedby={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
-          className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
-        />
-        <p className="text-xs text-muted-foreground">
-          Each new line is sent as Alt+Enter, so the macro arrives as one
-          prompt; you press Enter to send it.
-        </p>
-      </div>
+      <FormGroup
+        layout="stacked"
+        height="fill"
+        control="single"
+        label="Text"
+        help="Each new line is sent as Alt+Enter, so the macro arrives as one prompt; you press Enter to send it."
+        invalid={problemField === "text"}
+        describedBy={problemField === "text" ? MACRO_PROBLEM_ID : undefined}
+      >
+        {(field) => (
+          <Textarea
+            {...field}
+            value={macro.text}
+            onChange={(e) => onChange({ text: e.target.value })}
+            placeholder="review this code for bugs"
+            className="min-h-30 flex-1 resize-none font-mono field-sizing-fixed"
+          />
+        )}
+      </FormGroup>
     </div>
   )
 }
