@@ -443,6 +443,34 @@ mod resize {
         longest
     }
 
+    /// Without its resize wake the terminal UI still starts: a resize is
+    /// noticed when the wait for input times out, and a resize storm still
+    /// cannot hold a poll past that timeout.
+    #[test]
+    fn the_terminal_ui_starts_without_its_resize_wake() {
+        let mut handles =
+            register_signal_handles_with(|| Err(std::io::Error::other("no socket pair")))
+                .expect("the signal handlers are registered");
+        assert!(handles.resize_wake.is_none());
+        let mut rig = Rig::new(MAXIMIZED);
+        rig.app.sigwinch_flag = Arc::clone(&handles.sigwinch_flag);
+        rig.app.resize_wake = handles.resize_wake.take();
+        let storm = resize_storm(Duration::from_millis(20), Duration::from_millis(600));
+        let mut longest = Duration::ZERO;
+        while !storm.is_finished() {
+            let started = Instant::now();
+            assert!(!rig.app.poll_run_input_from(rig.terminal.as_fd()));
+            longest = longest.max(started.elapsed());
+        }
+        storm.join().expect("the storm thread");
+        unregister(&mut rig.app, handles);
+        assert!(
+            rig.app.sigwinch_flag.load(Ordering::Relaxed),
+            "the resize was noted"
+        );
+        assert!(longest < WOKEN_WITHIN, "a poll lasted {longest:?}");
+    }
+
     /// The bound is generous: a woken poll returns within one resize's gap,
     /// and an unwoken one lasts the whole storm.
     const WOKEN_WITHIN: Duration = Duration::from_millis(300);

@@ -1553,10 +1553,25 @@ struct SignalHandles {
 /// the server does not reset the disposition to `SIG_DFL` on hand-back, which it
 /// does not (see the `ReturnToTui` branch of `serve_with_engine`).
 fn register_signal_handles() -> Result<SignalHandles> {
+    register_signal_handles_with(crate::resize_wake::ResizeWake::register)
+}
+
+/// [`register_signal_handles`] with the resize wake `wake` makes; without
+/// one, a resize ends no wait for input early.
+fn register_signal_handles_with(
+    wake: impl FnOnce() -> std::io::Result<crate::resize_wake::ResizeWake>,
+) -> Result<SignalHandles> {
     let sigwinch_flag = Arc::new(AtomicBool::new(false));
     let sigwinch_sig_id =
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
-    let resize_wake = crate::resize_wake::ResizeWake::register()?;
+    let resize_wake = wake()
+        .inspect_err(|err| {
+            logger::warn(&format!(
+                "could not watch for window resizes ({err}), so a resize is noticed when the \
+                 wait for input next times out"
+            ));
+        })
+        .ok();
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let mut shutdown_sig_ids = Vec::new();
@@ -1574,7 +1589,7 @@ fn register_signal_handles() -> Result<SignalHandles> {
     Ok(SignalHandles {
         sigwinch_flag,
         sigwinch_sig_id: Some(sigwinch_sig_id),
-        resize_wake: Some(resize_wake),
+        resize_wake,
         shutdown_flag,
         shutdown_sig_ids,
     })
