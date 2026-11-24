@@ -6073,8 +6073,9 @@ impl App {
                 query.answer,
                 started.elapsed().as_millis()
             ));
-            self.host_keys.startup_keys = query.keys;
-            query.answer
+            let answer = query.answer;
+            self.take_kitty_query_input(query);
+            answer
         });
         self.host_keys.kitty_answer = kitty;
         let plan = host_keys::plan(mode, host, kitty, None);
@@ -6089,6 +6090,12 @@ impl App {
         if under_tmux {
             self.start_tmux_probe(mode);
         }
+    }
+
+    /// Leave what was typed while dux asked the host about Kitty keys for the
+    /// first reader, ahead of anything read after it.
+    pub(crate) fn take_kitty_query_input(&mut self, query: crate::host_keys::KittyQuery) {
+        self.terminal_input.give_back(&query.typed);
     }
 
     /// Read tmux's extended-keys settings on a quiet job and apply what they
@@ -6166,13 +6173,6 @@ impl App {
                 return RunExit::Quit;
             }
 
-            // Keys typed while dux asked the host about Kitty keys, before the
-            // first frame.
-            for key in std::mem::take(&mut self.host_keys.startup_keys) {
-                if self.handle_terminal_event(Event::Key(key)) {
-                    return RunExit::Quit;
-                }
-            }
             self.prepare_run_tick();
             self.refresh_run_terminal(terminal);
             // The loop keeps polling at its own cadence; only the DRAW is gated.

@@ -1346,3 +1346,40 @@ mod host_replies {
         assert_eq!(want.fullscreen, FullscreenOverlay::Agent);
     }
 }
+
+/// Input typed while dux asks the host whether it speaks Kitty keys, before
+/// the first frame, arriving in the reads that carry the host's answer.
+mod startup_question {
+    use super::*;
+
+    const DEVICE_ATTRIBUTES_REPLY: &[u8] = b"\x1b[?62;22c";
+
+    /// What the question read besides the host's answer reaches the first
+    /// reader as it would had it been typed a moment later, a paste, a mouse
+    /// report and a key cut by the end of the question included.
+    #[test]
+    fn input_read_by_the_kitty_question_reaches_the_first_reader_whole() {
+        let cases: [(&[u8], &[u8]); 3] = [
+            (b"\x1b[200~a\nb\x1b[201~", b""),
+            (b"\x1b[<0;3;2M\x1b[<0;3;2m", b"z"),
+            (b"\x1b[", b"A"),
+        ];
+        for (with_reply, after) in cases {
+            let want = burst(WINDOWED, &[b"x", with_reply, after].concat());
+            let mut rig = Rig::new(WINDOWED);
+            let (question, mut host) = UnixStream::pair().expect("a socket pair");
+            std::io::Write::write_all(
+                &mut host,
+                &[b"x", DEVICE_ATTRIBUTES_REPLY, with_reply].concat(),
+            )
+            .expect("answer");
+            let query =
+                crate::host_keys::query_kitty(&question, &mut Vec::new(), Duration::from_secs(10));
+            assert_eq!(query.answer, crate::host_keys::KittyAnswer::No);
+            rig.app.take_kitty_query_input(query);
+            rig.type_bytes(after);
+            rig.settle();
+            assert_eq!(rig.outcome(), want, "{with_reply:?} then {after:?}");
+        }
+    }
+}
