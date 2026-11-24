@@ -1167,6 +1167,86 @@ mod status_screen {
         );
     }
 
+    const FLIP_CHILD: &str =
+        "app::input_handover_tests::status_screen::child_flips_to_the_status_screen_and_back";
+
+    /// Runs the flip as the binary does on a real terminal: the interface
+    /// reads half a key, flips, the status screen takes the terminal until its
+    /// return key, and the interface that comes back reads on. Serving is
+    /// left out: the screen's turn is what the serve loop calls.
+    #[test]
+    #[ignore = "runs only as the child of a test in this module, in a pseudo-terminal"]
+    fn child_flips_to_the_status_screen_and_back() {
+        use crate::pty_child::{child_dir, wait_until};
+
+        let Some(dir) = child_dir() else {
+            return;
+        };
+        let (mut app, _serving) = app_typing_into(&dir.join("received"), WINDOWED);
+        crossterm::terminal::enable_raw_mode().expect("raw mode on the child's terminal");
+        std::fs::write(dir.join("ready"), b"").expect("ready marker");
+        wait_until(Duration::from_secs(30), "half a key to be read", || {
+            assert!(!app.poll_run_input(), "the app asked to exit");
+            app.terminal_input.begun_sequence() == b"\x1b["
+        });
+
+        let exit = RunExit::FlipToServer {
+            listeners: Vec::new(),
+            urls: vec!["http://127.0.0.1:1".to_string()],
+            startup: dux_core::serve_log::StartupNotes::default(),
+        };
+        let crate::TuiExit::FlipToServer { engine, urls, .. } = crate::tui_exit(app, exit) else {
+            panic!("the flip did not flip");
+        };
+        let mut screen = crate::ServerStatusScreen::new(
+            &urls,
+            &engine.config.ui.theme,
+            &engine.paths,
+            &engine.config.keys,
+            dux_core::activity::ActivityRing::new(100),
+        )
+        .expect("the status screen takes the terminal");
+        std::fs::write(dir.join("screen"), b"").expect("screen marker");
+        wait_until(Duration::from_secs(30), "the return key", || {
+            matches!(screen.tick(), crate::ServerScreenTick::ReturnToTui)
+        });
+        drop(screen);
+
+        let mut app = crate::resumed_app(engine).expect("the interface comes back");
+        // As the interface was left: the agent selected, typing to its program.
+        app.center_mode = CenterMode::Agent;
+        app.session_surface = crate::model::SessionSurface::Agent;
+        app.focus = FocusPane::Center;
+        app.rebuild_left_items();
+        app.selected_left = 1;
+        crossterm::terminal::enable_raw_mode().expect("raw mode, as the run loop sets it");
+        while !dir.join("done").exists() {
+            assert!(!app.poll_run_input(), "the app asked to exit");
+        }
+        let _ = crossterm::terminal::disable_raw_mode();
+        std::fs::write(dir.join("result.tmp"), b"done").expect("result file");
+        std::fs::rename(dir.join("result.tmp"), dir.join("result")).expect("result file");
+    }
+
+    /// Half a key read before the flip completes on the status screen as its
+    /// return key, Escape in its extended form, and what was read with it
+    /// reaches the interface that comes back, through the functions the
+    /// binary calls. Lost at either hand-over, the case never ends.
+    #[test]
+    fn keys_cross_the_real_flip_and_return_on_a_real_terminal() {
+        use crate::pty_child::{PtyChild, wait_for_file, wait_until};
+
+        let child = PtyChild::start(FLIP_CHILD, "");
+        child.type_bytes(b"\x1b[");
+        wait_for_file(&child.dir.path().join("screen"), Duration::from_secs(30));
+        child.type_bytes(b"27uxy");
+        let received = child.dir.path().join("received");
+        wait_until(Duration::from_secs(30), "the program to receive xy", || {
+            std::fs::read(&received).unwrap_or_default() == b"xy"
+        });
+        assert_eq!(child.finish(), "done");
+    }
+
     /// A flip and a return with nothing typed leave nothing behind.
     #[test]
     fn a_flip_and_a_return_with_nothing_typed_carry_nothing() {
