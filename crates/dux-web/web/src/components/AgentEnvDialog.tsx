@@ -1,8 +1,10 @@
-import { useState } from "react"
+import { useId, useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup } from "@/components/ui/form-group"
 import { Textarea } from "@/components/ui/textarea"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { envEdit, envLeftOutNote, envToText } from "@/lib/env"
 import { chip, prose } from "@/lib/prose"
 import { closeAgentEnv, updateProjectSettings, useDux } from "@/lib/store"
@@ -43,6 +45,9 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
   const saving = useHeldWhileClosed(open, savingNow)
   const edit = envEdit(project?.env ?? {}, opened, text)
   const leftOutNote = envLeftOutNote(edit.leftOut)
+  const noteId = useId()
+  // On a phone the text takes the height the covering dialog leaves.
+  const phone = useIsMobile()
 
   async function handleSave() {
     if (project === undefined || edit.changed === 0 || saving) return
@@ -91,13 +96,28 @@ function AgentEnvForm({ open, onClosed }: { open: boolean; onClosed: () => void 
         leaves: prose`the environment of project ${chip(projectName)}`,
       }}
     >
-      <Textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="KEY=VALUE"
-        className="min-h-48 font-mono max-md:flex-1"
-      />
-      {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
+      <FormGroup
+        layout="stacked"
+        height={phone ? "fill" : "content"}
+        control="single"
+        spokenName="Environment variables"
+        describedBy={leftOutNote ? noteId : undefined}
+      >
+        {(field) => (
+          <Textarea
+            {...field}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="KEY=VALUE"
+            className="min-h-48 font-mono max-md:flex-1"
+          />
+        )}
+      </FormGroup>
+      {leftOutNote ? (
+        <p id={noteId} className="text-sm text-muted-foreground">
+          {leftOutNote}
+        </p>
+      ) : null}
     </Modal>
   )
 }

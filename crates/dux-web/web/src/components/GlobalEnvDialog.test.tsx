@@ -104,6 +104,14 @@ describe("GlobalEnvDialog", () => {
     )
   })
 
+  it("names its one box by what it takes and reads the note about lines Save leaves out with it", () => {
+    render(<GlobalEnvDialog />)
+    const env = screen.getByRole("textbox", { name: "Environment variables" })
+    fireEvent.change(env, { target: { value: "not a variable" } })
+    const note = document.getElementById(env.getAttribute("aria-describedby") ?? "")
+    expect(note?.textContent).toMatch(/Save leaves it out/)
+  })
+
   it("closes at once when nothing was changed", () => {
     render(<GlobalEnvDialog />)
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
