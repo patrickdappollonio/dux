@@ -96,11 +96,12 @@ export function useFoldHold(open: boolean): () => void {
 //
 // `count` is null until the first measurement, while every control is on
 // screen so its width can be read; the measurement runs before the browser
-// paints, so the row is never seen in that state. A new set of `items` goes
-// back to null, because the remembered widths are no longer theirs.
+// paints, so the row is never seen in that state. A new set of `items`, or
+// `enabled` turning on or off, goes back to null, because the remembered widths
+// are no longer theirs; while a hold is up that waits for it to end.
 export function useFoldToFit({
-  enabled,
-  items,
+  enabled: wantEnabled,
+  items: wantItems,
   watch,
   focusOnFold,
 }: {
@@ -122,27 +123,50 @@ export function useFoldToFit({
   /// Provide this to the header's controls, for `useFoldHold`.
   hold: FoldHold
 } {
-  const layout = items.join("\u0000")
+  const holds = useRef(0)
+  // Whether a hold is up, as state so that rendering can ask.
+  const [holding, setHolding] = useState(false)
+  // The set of controls and the on/off flag the fold works with. They follow
+  // what the caller passes, except while a hold is up: then the fold is
+  // measured and drawn for the set it had, so a control that joins stands and
+  // one that leaves is gone, and the rest keep their place until the last hold
+  // lets go and the new set is measured from scratch.
+  const [applied, setApplied] = useState({
+    items: wantItems,
+    enabled: wantEnabled,
+  })
+  const wantLayout = wantItems.join("\u0000")
   const [state, setState] = useState<{ layout: string; count: number | null }>(
-    { layout, count: null },
+    { layout: wantLayout, count: null },
   )
-  if (state.layout !== layout) setState({ layout, count: null })
+  if (
+    !holding &&
+    (applied.items.join("\u0000") !== wantLayout ||
+      applied.enabled !== wantEnabled)
+  ) {
+    setApplied({ items: wantItems, enabled: wantEnabled })
+    setState({ layout: wantLayout, count: null })
+  }
+  const items = applied.items
+  const enabled = applied.enabled
+  const layout = items.join("\u0000")
   const rowRef = useRef<HTMLDivElement | null>(null)
   const elements = useRef(new Map<string, HTMLElement>())
   const widths = useRef(new Map<string, number>())
   const focused = useRef<string | null>(null)
-  const holds = useRef(0)
   const [released, setReleased] = useState(0)
   const stale = useRef(false)
   const hold = useMemo<FoldHold>(
     () => ({
       acquire: () => {
         holds.current++
+        setHolding(true)
         let live = true
         return () => {
           if (!live) return
           live = false
           holds.current--
+          setHolding(holds.current > 0)
           setReleased((n) => n + 1)
         }
       },

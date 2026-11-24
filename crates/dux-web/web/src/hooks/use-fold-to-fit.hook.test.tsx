@@ -15,6 +15,8 @@ let widths: Record<string, number> = {}
 let resizeRow: (() => void)[] = []
 let fonts: EventTarget
 
+let probeItems: string[] = ITEMS
+let probeEnabled = true
 let setHeld: (open: boolean) => void = () => {}
 let setHolderMounted: (mounted: boolean) => void = () => {}
 // What the holder's popup does when its close has finished animating.
@@ -23,8 +25,8 @@ let settlesAtOnce = true
 
 function Probe() {
   const { isFolded, rowRef, itemRef, hold } = useFoldToFit({
-    enabled: true,
-    items: ITEMS,
+    enabled: probeEnabled,
+    items: probeItems,
     watch: "names",
   })
   const [holderMounted, setMounted] = useState(true)
@@ -39,7 +41,7 @@ function Probe() {
             names
           </span>
         </div>
-        {ITEMS.filter((i) => !isFolded(i)).map((i) => (
+        {probeItems.filter((i) => !isFolded(i)).map((i) => (
           <span key={i} ref={itemRef(i)} data-item={i} />
         ))}
         {holderMounted ? <Holder /> : null}
@@ -68,7 +70,9 @@ function rowWidth(): number {
 
 beforeEach(() => {
   room = 900
-  widths = { a: 118, b: 118 }
+  probeItems = ITEMS
+  probeEnabled = true
+  widths = { a: 118, b: 118, c: 118 }
   resizeRow = []
   settlesAtOnce = true
   fonts = new EventTarget()
@@ -213,6 +217,68 @@ describe("useFoldToFit while something a control opened is open", () => {
     act(() => setHeld(false))
     expect(standingItems()).toEqual(["a", "b"])
     await settled(settleHeld)
+    expect(standingItems()).toEqual([])
+  })
+
+  it("keeps two folded controls folded when a third control joins while held", async () => {
+    widths = { a: 108, b: 108, c: 108 }
+    const view = render(<Probe />)
+    resizeTo(300)
+    expect(standingItems()).toEqual([])
+    act(() => setHeld(true))
+    probeItems = ["a", "b", "c"]
+    view.rerender(<Probe />)
+    expect(standingItems().filter((i) => i !== "c")).toEqual([])
+    act(() => setHeld(false))
+    await act(() => new Promise((r) => setTimeout(r, 0)))
+    // Settled for the new set: nothing fits at 300px, so none stands.
+    expect(standingItems()).toEqual([])
+    resizeTo(900)
+    expect(standingItems()).toEqual(["a", "b", "c"])
+  })
+
+  it("does not leave a control that has left the set folded or standing", async () => {
+    widths = { a: 108, b: 108, c: 108 }
+    probeItems = ["a", "b", "c"]
+    const view = render(<Probe />)
+    resizeTo(300)
+    act(() => setHeld(true))
+    probeItems = ["a", "b"]
+    view.rerender(<Probe />)
+    expect(standingItems()).toEqual([])
+    act(() => setHeld(false))
+    await act(() => new Promise((r) => setTimeout(r, 0)))
+    resizeTo(900)
+    expect(standingItems()).toEqual(["a", "b"])
+  })
+
+  it("keeps the fold as it was when the flag turns off while held, and settles after", async () => {
+    widths = { a: 108, b: 108 }
+    const view = render(<Probe />)
+    resizeTo(300)
+    expect(standingItems()).toEqual([])
+    act(() => setHeld(true))
+    probeEnabled = false
+    view.rerender(<Probe />)
+    expect(standingItems()).toEqual([])
+    act(() => setHeld(false))
+    await act(() => new Promise((r) => setTimeout(r, 0)))
+    // Off: nothing is folded.
+    expect(standingItems()).toEqual(["a", "b"])
+  })
+
+  it("keeps the fold as it was when the flag turns on while held, and settles after", async () => {
+    widths = { a: 108, b: 108 }
+    probeEnabled = false
+    const view = render(<Probe />)
+    resizeTo(300)
+    expect(standingItems()).toEqual(["a", "b"])
+    act(() => setHeld(true))
+    probeEnabled = true
+    view.rerender(<Probe />)
+    expect(standingItems()).toEqual(["a", "b"])
+    act(() => setHeld(false))
+    await act(() => new Promise((r) => setTimeout(r, 0)))
     expect(standingItems()).toEqual([])
   })
 
