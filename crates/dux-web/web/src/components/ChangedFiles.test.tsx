@@ -1919,13 +1919,15 @@ describe("the Changes pane header's Editor button", () => {
     const button = editorButton()
     const ellipsis = actionsTrigger()
 
-    expect(button.parentElement).toBe(ellipsis.parentElement)
+    // Its fold wrapper adds no box of its own, so the cell is the closest
+    // card action, the `⋯`'s own parent.
+    expect(button.closest('[data-slot="card-action"]')).toBe(ellipsis.parentElement)
     expect(
       ellipsis.compareDocumentPosition(button) &
         Node.DOCUMENT_POSITION_PRECEDING,
     ).toBeTruthy()
     // The misclick spacing between two adjacent icon squares.
-    expect(button.parentElement!.className).toContain("gap-2")
+    expect(ellipsis.parentElement!.className).toContain("gap-2")
   })
 
   // One cluster, one look: the editor button wears the `⋯`'s outline variant, so
@@ -1952,8 +1954,9 @@ describe("the Changes pane header's Editor button", () => {
     expect(screen.getByText("Editor").className).toContain("max-md:sr-only")
   })
 
-  it("names itself for a screen reader and hints the same words on hover", () => {
+  it("is named Editor for a screen reader, and hints Open editor on hover", () => {
     render(<ChangedFiles />)
+    expect(screen.getByRole("button", { name: "Editor" })).toBe(editorButton())
     const cell = editorButton().parentElement!
     expect(
       within(cell)

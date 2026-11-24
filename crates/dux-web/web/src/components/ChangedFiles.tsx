@@ -41,7 +41,7 @@ import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { ConfirmDiscardFilesDialog } from "@/components/ConfirmDiscardFilesDialog"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
-import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
+import { FoldedAway, HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
 import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { StartTruncatedText } from "@/components/StartTruncatedText"
 import { matchCharRanges } from "@/lib/searchMatch"
@@ -894,7 +894,6 @@ function OpenEditorButton({
   buttonRef: (node: HTMLElement | null) => void
 }) {
   const root = agentRoot(sessionId)
-  const hide = folded ? "invisible absolute" : undefined
   const shared = {
     ref: buttonRef,
     icon: <FileCode2 />,
@@ -906,32 +905,35 @@ function OpenEditorButton({
     // A plain disabled button on both form factors: a disabled anchor is not
     // a thing, and there is no address worth keeping for a root that is gone.
     return (
-      <ExplainedWhenDisabled disabled hint={unavailable} className={cn("rounded-lg", hide)}>
-        <HeaderButton {...shared} disabled />
-      </ExplainedWhenDisabled>
+      <FoldedAway folded={folded}>
+        <ExplainedWhenDisabled disabled hint={unavailable} className="rounded-lg">
+          <HeaderButton {...shared} disabled />
+        </ExplainedWhenDisabled>
+      </FoldedAway>
     )
   }
   return (
-    <SimpleTooltip content="Open editor">
-      {isMobile ? (
-        <HeaderButton
-          {...shared}
-          className={hide}
-          // It really is an anchor, so the primitive is told not to expect a
-          // native <button>: a link keeps a link's own semantics and gestures.
-          nativeButton={false}
-          render={
-            <a
-              href={standaloneEditorHash(root)}
-              target="_blank"
-              rel={EDITOR_TAB_REL}
-            />
-          }
-        />
-      ) : (
-        <HeaderButton {...shared} className={hide} onClick={() => openEditor(root)} />
-      )}
-    </SimpleTooltip>
+    <FoldedAway folded={folded}>
+      <SimpleTooltip content="Open editor">
+        {isMobile ? (
+          <HeaderButton
+            {...shared}
+            // It really is an anchor, so the primitive is told not to expect a
+            // native <button>: a link keeps a link's own semantics and gestures.
+            nativeButton={false}
+            render={
+              <a
+                href={standaloneEditorHash(root)}
+                target="_blank"
+                rel={EDITOR_TAB_REL}
+              />
+            }
+          />
+        ) : (
+          <HeaderButton {...shared} onClick={() => openEditor(root)} />
+        )}
+      </SimpleTooltip>
+    </FoldedAway>
   )
 }
 

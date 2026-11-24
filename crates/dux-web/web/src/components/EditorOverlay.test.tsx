@@ -1697,8 +1697,10 @@ describe("editor header controls share one outline look", () => {
     for (const [control, label] of controls) {
       const words = within(control).getByText(label)
       expect(words.className, label).toContain("max-xl:sr-only")
-      // Square below xl: the padding shrinks to centre the lone icon.
-      expect(control.className, label).toContain("max-xl:px-2")
+      // Square below xl: the `⋯`'s width, with no padding to push the icon
+      // off the middle (HeaderButton.test.tsx reads the sizes from the box).
+      expect(control.className, label).toContain("max-xl:w-8")
+      expect(control.className, label).toContain("max-xl:px-0")
     }
     for (const [control, label] of controls) {
       fireEvent.focus(control)

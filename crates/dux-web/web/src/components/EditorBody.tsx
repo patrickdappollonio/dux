@@ -164,7 +164,7 @@ import { InlineCode } from "@/components/ui/inline-code"
 import { ImageZoomViewer } from "@/components/ImageZoomViewer"
 import { svgIntrinsicSize } from "@/lib/imageZoom"
 import { FileStatusIcon } from "@/components/FileStatusIcon"
-import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
+import { HeaderButton } from "@/components/HeaderButton"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
 import { ChunkBoundary } from "@/components/ChunkBoundary"
@@ -1702,7 +1702,8 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               icon={<CircleAlert />}
               label="Reload"
               words="wide"
-              className="text-dux-warning max-md:hidden"
+              tone="warning"
+              hide="phone"
               aria-label="Reload the diff. The file changed on disk"
               onClick={refreshDiff}
             />
@@ -1714,7 +1715,7 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
               icon={showPreview && activeTab?.mode === "file" ? <Pencil /> : <Eye />}
               label={previewLabel}
               words="wide"
-              className="max-md:hidden"
+              hide="phone"
               toggle
               aria-pressed={showPreview}
               onClick={togglePreview}
@@ -2050,14 +2051,14 @@ export function EditorBody({ root, standalone = false }: EditorBodyProps) {
           />
         </SimpleTooltip>
         {renderRootTitle()}
-        {/* The header's buttons, in the one row every header lays them out in;
-          * empty, as on a phone with no file open, it takes no gap. */}
-        <div className={cn(HEADER_BUTTON_ROW, "empty:hidden")}>
-          {renderDesktopViewActions()}
-          {renderSaveAction()}
-          {renderMobileActions()}
-          {renderStandaloneActions()}
-        </div>
+        {/* The header's buttons, straight in its own row, whose `gap-2` is the
+          * gap every header puts between its buttons: a wrapper of their own
+          * would add a gap after the title even when everything in it is
+          * hidden (a phone-only `⋯` on a computer). */}
+        {renderDesktopViewActions()}
+        {renderSaveAction()}
+        {renderMobileActions()}
+        {renderStandaloneActions()}
       </div>
       </>
     )

@@ -351,7 +351,6 @@ function TriggerButton({
       icon={<SquareSlash />}
       label="Macros…"
       aria-label="Run a macro"
-      className={className}
       {...props}
     />
   )

@@ -43,10 +43,11 @@ function tooNarrow(nodes: Record<Part, HTMLElement | null>): boolean | null {
 }
 
 /** Whether the Changes pane header folds its editor button into its `⋯`, with
- * the refs the header hangs on the parts it measures. It is measured when a part mounts and whenever one of them changes size (a divider
- * drag, the recap appearing or going, a pointer change resizing the buttons),
- * and at no other time, so scrolling and typing elsewhere cost nothing. A
- * missing `ResizeObserver` (jsdom) leaves the mount-time answer standing. */
+ * the refs the header hangs on the parts it measures. It is measured when a
+ * part mounts and whenever one of them changes size (a divider drag, the recap
+ * appearing or going, a pointer change resizing the buttons), and at no other
+ * time, so scrolling and typing elsewhere cost nothing. A missing
+ * `ResizeObserver` (jsdom) leaves the mount-time answer standing. */
 export function useChangesHeaderFold() {
   const [folded, setFolded] = useState(false)
   const nodes = useRef<Record<Part, HTMLElement | null>>({
