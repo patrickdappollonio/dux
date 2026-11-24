@@ -411,6 +411,19 @@ pub(crate) struct InactiveTailState {
     pub(crate) overridden: bool,
 }
 
+/// How reading the terminal is going.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TerminalReading {
+    #[default]
+    Reading,
+    /// The last read failed in a way that may pass, so the next read waits a
+    /// poll's length first.
+    Failed,
+    /// A read returned nothing or said the terminal is gone: a hung-up
+    /// terminal polls ready forever, so it is never read again.
+    Ended,
+}
+
 /// The bracketed paste being read from raw input, if any.
 #[derive(Default)]
 pub(crate) struct RawPaste {
@@ -841,12 +854,7 @@ pub(crate) struct App {
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
     /// What dux has read from its terminal and no reader has taken yet.
     pub(crate) terminal_input: crate::terminal_input::TerminalInput,
-    /// Whether a read of the terminal returned nothing, which a raw-mode
-    /// terminal does only once hung up; it would then poll ready forever.
-    pub(crate) terminal_input_ended: bool,
-    /// Whether the last read of the terminal failed in a way that may pass, so
-    /// the next read waits a poll's length first.
-    pub(crate) terminal_read_failed: bool,
+    pub(crate) terminal_reading: TerminalReading,
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -5820,8 +5828,7 @@ impl App {
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
             terminal_input: crate::terminal_input::TerminalInput::default(),
-            terminal_input_ended: false,
-            terminal_read_failed: false,
+            terminal_reading: TerminalReading::Reading,
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
@@ -6093,7 +6100,7 @@ impl App {
                 started.elapsed().as_millis()
             ));
             let answer = query.answer;
-            self.take_kitty_query_input(query);
+            self.take_kitty_query_input(&query.typed);
             answer
         });
         self.host_keys.kitty_answer = kitty;
@@ -6113,8 +6120,8 @@ impl App {
 
     /// Leave what was typed while dux asked the host about Kitty keys for the
     /// first reader, ahead of anything read after it.
-    pub(crate) fn take_kitty_query_input(&mut self, query: crate::host_keys::KittyQuery) {
-        self.terminal_input.give_back(&query.typed);
+    pub(crate) fn take_kitty_query_input(&mut self, typed: &[u8]) {
+        self.terminal_input.give_back(typed);
     }
 
     /// Read tmux's extended-keys settings on a quiet job and apply what they
@@ -6407,10 +6414,11 @@ impl App {
         terminal: BorrowedFd<'_>,
         timeout: Duration,
     ) -> rustix::io::Result<bool> {
-        if self.terminal_read_failed && timeout.is_zero() {
+        let reading = self.terminal_reading;
+        if reading == TerminalReading::Failed && timeout.is_zero() {
             return Ok(false);
         }
-        let resting = self.terminal_input_ended || self.terminal_read_failed;
+        let resting = reading != TerminalReading::Reading;
         let wake = self.resize_wake.as_ref().map(AsFd::as_fd);
         let waited = match (resting, wake) {
             (false, _) => input::wait_for_input_or_wake(terminal, wake, timeout)?,
@@ -6429,7 +6437,8 @@ impl App {
             wake.clear();
             self.sigwinch_flag.store(true, Ordering::Relaxed);
         }
-        if std::mem::take(&mut self.terminal_read_failed) && !self.terminal_input_ended {
+        if reading == TerminalReading::Failed {
+            self.terminal_reading = TerminalReading::Reading;
             return Ok(input::wait_for_input_or_wake(terminal, None, Duration::ZERO)?.input);
         }
         Ok(waited.input)
@@ -6447,12 +6456,12 @@ impl App {
             Ok(n) => (n, None),
             Err(err) if input::terminal_is_gone(err) => (0, Some(err)),
             Err(err) => {
-                self.terminal_read_failed = true;
+                self.terminal_reading = TerminalReading::Failed;
                 return Err(err);
             }
         };
-        if n == 0 && !buf.is_empty() && !self.terminal_input_ended {
-            self.terminal_input_ended = true;
+        if n == 0 && !buf.is_empty() && self.terminal_reading != TerminalReading::Ended {
+            self.terminal_reading = TerminalReading::Ended;
             let how = gone.map_or_else(|| "has ended".to_string(), |err| format!("failed: {err}"));
             logger::warn(&format!(
                 "the terminal's input {how}, so dux reads no more keys; it quits on the \

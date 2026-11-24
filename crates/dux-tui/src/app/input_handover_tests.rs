@@ -596,7 +596,11 @@ mod waiting {
             let mut rig = rig(reader);
             rig.swap_terminal(pty_reading_an_io_error());
             assert_waits(&mut rig, &format!("{reader:?}, reading an I/O error"));
-            assert!(rig.app.terminal_input_ended, "{reader:?}: the input ended");
+            assert_eq!(
+                rig.app.terminal_reading,
+                TerminalReading::Ended,
+                "{reader:?}: the input ended"
+            );
         }
     }
 
@@ -611,7 +615,7 @@ mod waiting {
             failing.swap_terminal(&unreadable);
             assert_waits(&mut failing, &format!("{reader:?}, failing reads"));
             assert!(
-                !failing.app.terminal_input_ended,
+                failing.app.terminal_reading != TerminalReading::Ended,
                 "{reader:?}: the input goes on"
             );
             let (terminal, keyboard) = UnixStream::pair().expect("a socket pair");
@@ -644,14 +648,9 @@ mod waiting {
         };
         assert_eq!(opened, 0, "openpty");
         // SAFETY: openpty just returned both descriptors, owned by nobody else.
-        let (leader, follower) = unsafe {
-            (
-                std::os::fd::OwnedFd::from_raw_fd(leader),
-                std::os::fd::OwnedFd::from_raw_fd(follower),
-            )
-        };
-        drop(follower);
-        leader
+        drop(unsafe { std::os::fd::OwnedFd::from_raw_fd(follower) });
+        // SAFETY: as above.
+        unsafe { std::os::fd::OwnedFd::from_raw_fd(leader) }
     }
 
     /// A lone Escape that ends a read of [`READ_SIZE`](crate::terminal_input::READ_SIZE)
@@ -1590,7 +1589,7 @@ mod startup_question {
             let query =
                 crate::host_keys::query_kitty(&question, &mut Vec::new(), Duration::from_secs(10));
             assert_eq!(query.answer, crate::host_keys::KittyAnswer::No);
-            rig.app.take_kitty_query_input(query);
+            rig.app.take_kitty_query_input(&query.typed);
             rig.type_bytes(after);
             rig.settle();
             assert_eq!(rig.outcome(), want, "{with_reply:?} then {after:?}");
