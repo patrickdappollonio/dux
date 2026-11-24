@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 use std::io::{Write as _, stdout};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
     MouseEvent, MouseEventKind,
 };
@@ -204,9 +205,9 @@ struct RawInputPlan {
 /// How a raw-input batch ended before its last action.
 struct RawBatchEnd {
     should_exit: bool,
-    /// The action after which the rest of the read is handed on to whichever
-    /// reader takes input now, or `None` when the rest is dropped.
-    hand_on_after: Option<usize>,
+    /// The action after which the rest of the read is left for whichever
+    /// reader takes input next.
+    hand_on_after: usize,
 }
 
 struct RawInputDispatch {
@@ -408,6 +409,19 @@ pub(crate) struct InactiveTailState {
     /// (so a wholly-dormant workspace is not hidden) and collapses when any agent
     /// is active. See `rebuild_left_items`.
     pub(crate) overridden: bool,
+}
+
+/// How reading the terminal is going.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TerminalReading {
+    #[default]
+    Reading,
+    /// The last read failed in a way that may pass, so the next read waits a
+    /// poll's length first.
+    Failed,
+    /// A read returned nothing or said the terminal is gone: a hung-up
+    /// terminal polls ready forever, so it is never read again.
+    Ended,
 }
 
 /// The bracketed paste being read from raw input, if any.
@@ -838,6 +852,9 @@ pub(crate) struct App {
     pub(crate) dormant_tab_press: Option<components::PressedButton>,
     pub(crate) interactive_patterns: InteractiveBytePatterns,
     pub(crate) raw_input_parser: crate::raw_input::RawInputParser,
+    /// What dux has read from its terminal and no reader has taken yet.
+    pub(crate) terminal_input: crate::terminal_input::TerminalInput,
+    pub(crate) terminal_reading: TerminalReading,
     /// The input debugger's own raw reader, apart from the forwarding path's.
     pub(crate) debug_raw_input: debug_input::DebugRawInput,
     pub(crate) raw_input_buf: Vec<u8>,
@@ -857,6 +874,9 @@ pub(crate) struct App {
     /// orphaned signal-hook registrations. `None` only in tests that build the
     /// App directly without registering a real handler.
     pub(crate) sigwinch_sig_id: Option<signal_hook::SigId>,
+    /// Readable once a resize lands, so a wait for input ends at once. `None`
+    /// only in tests that build the App without real handlers.
+    pub(crate) resize_wake: Option<crate::resize_wake::ResizeWake>,
     /// Set by the SIGTERM/SIGINT/SIGHUP handlers so the run loop can break with
     /// [`RunExit::Quit`] and wind the agents down gracefully (SIGTERM + grace)
     /// instead of letting the process die straight to the hard SIGKILL in
@@ -1527,6 +1547,7 @@ enum SessionRestore {
 struct SignalHandles {
     sigwinch_flag: Arc<AtomicBool>,
     sigwinch_sig_id: Option<signal_hook::SigId>,
+    resize_wake: Option<crate::resize_wake::ResizeWake>,
     shutdown_flag: Arc<AtomicBool>,
     shutdown_sig_ids: Vec<signal_hook::SigId>,
 }
@@ -1543,9 +1564,25 @@ struct SignalHandles {
 /// the server does not reset the disposition to `SIG_DFL` on hand-back, which it
 /// does not (see the `ReturnToTui` branch of `serve_with_engine`).
 fn register_signal_handles() -> Result<SignalHandles> {
+    register_signal_handles_with(crate::resize_wake::ResizeWake::register)
+}
+
+/// [`register_signal_handles`] with the resize wake `wake` makes; without
+/// one, a resize ends no wait for input early.
+fn register_signal_handles_with(
+    wake: impl FnOnce() -> std::io::Result<crate::resize_wake::ResizeWake>,
+) -> Result<SignalHandles> {
     let sigwinch_flag = Arc::new(AtomicBool::new(false));
     let sigwinch_sig_id =
         signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&sigwinch_flag))?;
+    let resize_wake = wake()
+        .inspect_err(|err| {
+            logger::warn(&format!(
+                "could not watch for window resizes ({err}), so a resize is noticed when the \
+                 wait for input next times out"
+            ));
+        })
+        .ok();
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let mut shutdown_sig_ids = Vec::new();
@@ -1563,6 +1600,7 @@ fn register_signal_handles() -> Result<SignalHandles> {
     Ok(SignalHandles {
         sigwinch_flag,
         sigwinch_sig_id: Some(sigwinch_sig_id),
+        resize_wake,
         shutdown_flag,
         shutdown_sig_ids,
     })
@@ -4420,7 +4458,7 @@ enum RunInputReader {
     Debugger,
     /// The raw path that forwards typing to a program.
     Forwarding,
-    /// crossterm's decoded events.
+    /// The windowed interface's, which reads events as crossterm decodes them.
     Structured,
 }
 
@@ -5370,10 +5408,10 @@ mod pull_requests;
 pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequestClone};
 #[cfg(test)]
 pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
+#[cfg(test)]
+mod input_handover_tests;
 mod project_actions;
 mod pty_ownership;
-#[cfg(test)]
-mod raw_input_handover_tests;
 mod redraw;
 pub(crate) use redraw::RedrawGate;
 #[cfg(test)]
@@ -5789,6 +5827,8 @@ impl App {
             dormant_tab_press: None,
             interactive_patterns,
             raw_input_parser: crate::raw_input::RawInputParser::default(),
+            terminal_input: crate::terminal_input::TerminalInput::default(),
+            terminal_reading: TerminalReading::Reading,
             debug_raw_input: debug_input::DebugRawInput::default(),
             raw_input_buf: Vec::new(),
             loading_input_buf: Vec::new(),
@@ -5796,6 +5836,7 @@ impl App {
             macro_bar: None,
             sigwinch_flag: signals.sigwinch_flag,
             sigwinch_sig_id: signals.sigwinch_sig_id,
+            resize_wake: signals.resize_wake,
             shutdown_flag: signals.shutdown_flag,
             shutdown_sig_ids: signals.shutdown_sig_ids,
             redraw: RedrawGate::default(),
@@ -5950,10 +5991,30 @@ impl App {
         if let Some(sig_id) = self.sigwinch_sig_id {
             signal_hook::low_level::unregister(sig_id);
         }
+        if let Some(wake) = self.resize_wake.take() {
+            wake.unregister();
+        }
         for sig_id in self.shutdown_sig_ids {
             signal_hook::low_level::unregister(sig_id);
         }
         self.engine
+    }
+
+    /// Leave every byte this interface has read and not acted on for the
+    /// surface that takes the terminal next, the start-web-server status screen.
+    pub(crate) fn leave_unread_input_for_next_surface(&mut self) {
+        let mut unread = self.raw_input_parser.pending().to_vec();
+        self.raw_input_parser.clear();
+        self.raw_input_buf.clear();
+        unread.extend(self.debug_raw_input.take_partial_sequence());
+        unread.extend(self.terminal_input.take_bytes());
+        crate::terminal_input::leave_for_next_surface(&unread);
+    }
+
+    /// Take what the surface before this interface left unread, to read first.
+    pub(crate) fn take_unread_input_from_last_surface(&mut self) {
+        let left = crate::terminal_input::take_from_last_surface().take_bytes();
+        self.terminal_input.give_back(&left);
     }
 
     pub(crate) fn run(&mut self) -> Result<RunExit> {
@@ -6031,19 +6092,16 @@ impl App {
         let kitty = (mode == dux_core::config::ExtendedKeysMode::Auto && !under_tmux).then(|| {
             let started = Instant::now();
             let query = host_keys::kitty_answer_once(&host_keys::KITTY_ANSWER, || {
-                host_keys::query_kitty(
-                    std::io::stdin(),
-                    &mut stdout(),
-                    host_keys::KITTY_QUERY_DEADLINE,
-                )
+                host_keys::query_kitty_on_stdin(&mut stdout(), host_keys::KITTY_QUERY_DEADLINE)
             });
             logger::debug(&format!(
                 "the Kitty keyboard query answered {:?} in {} ms",
                 query.answer,
                 started.elapsed().as_millis()
             ));
-            self.host_keys.startup_keys = query.keys;
-            query.answer
+            let answer = query.answer;
+            self.take_kitty_query_input(&query.typed);
+            answer
         });
         self.host_keys.kitty_answer = kitty;
         let plan = host_keys::plan(mode, host, kitty, None);
@@ -6058,6 +6116,12 @@ impl App {
         if under_tmux {
             self.start_tmux_probe(mode);
         }
+    }
+
+    /// Leave what was typed while dux asked the host about Kitty keys for the
+    /// first reader, ahead of anything read after it.
+    pub(crate) fn take_kitty_query_input(&mut self, typed: &[u8]) {
+        self.terminal_input.give_back(typed);
     }
 
     /// Read tmux's extended-keys settings on a quiet job and apply what they
@@ -6129,19 +6193,12 @@ impl App {
         self.start_background_server_from_config();
     }
 
-    fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> RunExit {
+    fn run_loop(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) -> RunExit {
         loop {
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 return RunExit::Quit;
             }
 
-            // Keys typed while dux asked the host about Kitty keys, before the
-            // first frame.
-            for key in std::mem::take(&mut self.host_keys.startup_keys) {
-                if self.handle_terminal_event(Event::Key(key)) {
-                    return RunExit::Quit;
-                }
-            }
             self.prepare_run_tick();
             self.refresh_run_terminal(terminal);
             // The loop keeps polling at its own cadence; only the DRAW is gated.
@@ -6202,10 +6259,10 @@ impl App {
         }
     }
 
-    fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+    fn refresh_run_terminal(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) {
         if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
             self.mark_frame_dirty();
-            self.retire_pending_link_click();
+            self.note_host_resized();
             if let Err(err) = crate::io_retry::retry_on_interrupt(|| terminal.autoresize()) {
                 self.report_runtime_error("terminal resize failed", &err);
             }
@@ -6216,7 +6273,7 @@ impl App {
         }
         self.notes.force_redraw = false;
         self.mark_frame_dirty();
-        if let Err(err) = terminal.clear() {
+        if let Err(err) = crate::screen_backend::clear_screen(terminal) {
             self.report_runtime_error("force redraw failed", &err);
         }
         let _ = execute!(
@@ -6236,7 +6293,7 @@ impl App {
         }
     }
 
-    fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+    fn draw_run_frame(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) {
         match terminal.draw(|frame| self.render(frame)) {
             Ok(_) => {
                 if self.note_draw_succeeded() {
@@ -6309,11 +6366,10 @@ impl App {
     }
 
     /// Which reader takes this iteration's input: the input debugger's own
-    /// while it is open, or while it still holds input read after it closed (a
-    /// paste still arriving, an unfinished sequence); else the forwarding path
-    /// when it is typing into a program; else crossterm's.
+    /// while it is open, else the forwarding path when it is typing into a
+    /// program, else the windowed interface's.
     fn run_input_reader(&self) -> RunInputReader {
-        if self.input_debugger_open() || self.debug_raw_input.holds_input_for_main_ui() {
+        if self.input_debugger_open() {
             RunInputReader::Debugger
         } else if self.should_poll_raw_input() {
             RunInputReader::Forwarding
@@ -6323,12 +6379,18 @@ impl App {
     }
 
     fn poll_run_input(&mut self) -> bool {
+        self.poll_run_input_from(crate::terminal_input::terminal())
+    }
+
+    /// One iteration's input, read from `terminal`: the run loop's terminal,
+    /// or a stand-in in a test.
+    pub(crate) fn poll_run_input_from(&mut self, terminal: BorrowedFd<'_>) -> bool {
         let reader = self.run_input_reader();
         if reader != RunInputReader::Debugger {
             self.end_debug_raw_input();
         }
         match reader {
-            RunInputReader::Debugger => match self.poll_debug_raw_input(std::io::stdin()) {
+            RunInputReader::Debugger => match self.poll_debug_raw_input(terminal) {
                 Ok(should_exit) => should_exit,
                 Err(err) => {
                     self.report_runtime_error(
@@ -6338,13 +6400,79 @@ impl App {
                     false
                 }
             },
-            RunInputReader::Forwarding => self.poll_raw_run_input(),
-            RunInputReader::Structured => self.poll_structured_run_input(),
+            RunInputReader::Forwarding => self.poll_raw_run_input(terminal),
+            RunInputReader::Structured => self.poll_structured_run_input(terminal),
         }
     }
 
-    fn poll_raw_run_input(&mut self) -> bool {
-        match self.poll_and_forward_raw_input() {
+    /// Wait up to `timeout` for `terminal` to have bytes, and say whether it
+    /// does; a resize ends the wait. Once its input has ended, the answer is no.
+    /// After a failed read, the terminal is looked at only once a wait with a
+    /// timeout has passed.
+    pub(crate) fn wait_for_terminal(
+        &mut self,
+        terminal: BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> rustix::io::Result<bool> {
+        let reading = self.terminal_reading;
+        if reading == TerminalReading::Failed && timeout.is_zero() {
+            return Ok(false);
+        }
+        let resting = reading != TerminalReading::Reading;
+        let wake = self.resize_wake.as_ref().map(AsFd::as_fd);
+        let waited = match (resting, wake) {
+            (false, _) => input::wait_for_input_or_wake(terminal, wake, timeout)?,
+            (true, Some(wake)) => input::Waited {
+                input: false,
+                woken: input::wait_for_input_or_wake(wake, None, timeout)?.input,
+            },
+            (true, None) => {
+                thread::sleep(timeout);
+                input::Waited::default()
+            }
+        };
+        if waited.woken
+            && let Some(wake) = &self.resize_wake
+        {
+            wake.clear();
+            self.sigwinch_flag.store(true, Ordering::Relaxed);
+        }
+        if reading == TerminalReading::Failed {
+            self.terminal_reading = TerminalReading::Reading;
+            return Ok(input::wait_for_input_or_wake(terminal, None, Duration::ZERO)?.input);
+        }
+        Ok(waited.input)
+    }
+
+    /// One read of `terminal` into `buf`, as much as it has ready. A read of
+    /// nothing, or an error saying the terminal has gone, means its input has
+    /// ended, which every later wait remembers; any other error is returned.
+    pub(crate) fn read_terminal(
+        &mut self,
+        terminal: BorrowedFd<'_>,
+        buf: &mut [u8],
+    ) -> rustix::io::Result<usize> {
+        let (n, gone) = match input::read_raw_chunk(terminal, buf) {
+            Ok(n) => (n, None),
+            Err(err) if input::terminal_is_gone(err) => (0, Some(err)),
+            Err(err) => {
+                self.terminal_reading = TerminalReading::Failed;
+                return Err(err);
+            }
+        };
+        if n == 0 && !buf.is_empty() && self.terminal_reading != TerminalReading::Ended {
+            self.terminal_reading = TerminalReading::Ended;
+            let how = gone.map_or_else(|| "has ended".to_string(), |err| format!("failed: {err}"));
+            logger::warn(&format!(
+                "the terminal's input {how}, so dux reads no more keys; it quits on the \
+                 terminal's hang-up signal"
+            ));
+        }
+        Ok(n)
+    }
+
+    fn poll_raw_run_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
+        match self.poll_and_forward_raw_input(terminal) {
             Ok(should_exit) => should_exit,
             Err(err) => {
                 self.report_runtime_error(
@@ -6356,50 +6484,62 @@ impl App {
         }
     }
 
-    fn poll_structured_run_input(&mut self) -> bool {
-        let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
-        let poll_ms = idle_poll_ms.min(self.max_poll_ms());
-        let ready = match crate::io_retry::retry_on_interrupt(|| {
-            event::poll(Duration::from_millis(poll_ms))
-        }) {
-            Ok(ready) => ready,
-            Err(err) => {
-                self.report_runtime_error("event polling failed; input handling was skipped", &err);
-                false
-            }
-        };
-        if !ready {
-            return false;
-        }
-        self.drain_terminal_input()
-    }
-
-    fn drain_terminal_input(&mut self) -> bool {
-        loop {
-            let event = match crate::io_retry::retry_on_interrupt(event::read) {
-                Ok(event) => event,
+    fn poll_structured_run_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
+        if !self.terminal_input.has_unread() {
+            let idle_poll_ms = if self.any_row_animating() { 33 } else { 100 };
+            let poll_ms = idle_poll_ms.min(self.max_poll_ms());
+            match self.read_terminal_into_input(terminal, Duration::from_millis(poll_ms)) {
+                Ok(true) => {}
+                Ok(false) => return false,
                 Err(err) => {
                     self.report_runtime_error(
-                        "event read failed; input handling was skipped",
+                        "event polling failed; input handling was skipped",
                         &err,
                     );
                     return false;
+                }
+            }
+        }
+        self.drain_terminal_input(terminal)
+    }
+
+    /// Wait up to `timeout` for `terminal` and add one read to
+    /// `terminal_input`. Returns whether anything was read.
+    fn read_terminal_into_input(
+        &mut self,
+        terminal: BorrowedFd<'_>,
+        timeout: Duration,
+    ) -> std::io::Result<bool> {
+        if !self.wait_for_terminal(terminal, timeout)? {
+            return Ok(false);
+        }
+        let mut buf = [0u8; crate::terminal_input::READ_SIZE];
+        let n = self.read_terminal(terminal, &mut buf)?;
+        self.terminal_input.push_read(&buf[..n]);
+        Ok(n > 0)
+    }
+
+    /// Handle events while this reader still takes input. An event that hands
+    /// input to another reader leaves every byte after it in `terminal_input`.
+    fn drain_terminal_input(&mut self, terminal: BorrowedFd<'_>) -> bool {
+        loop {
+            let Some(event) = self.terminal_input.next_event() else {
+                match self.read_terminal_into_input(terminal, Duration::ZERO) {
+                    Ok(true) => continue,
+                    Ok(false) => return false,
+                    Err(err) => {
+                        self.report_runtime_error(
+                            "event read failed; input handling was skipped",
+                            &err,
+                        );
+                        return false;
+                    }
                 }
             };
             if self.handle_terminal_event(event) {
                 return true;
             }
-            if matches!(
-                self.input_target,
-                InputTarget::Agent | InputTarget::Terminal
-            ) {
-                // Remaining stdin bytes now belong to the raw-input path.
-                return false;
-            }
-            if !matches!(
-                crate::io_retry::retry_on_interrupt(|| event::poll(Duration::ZERO)),
-                Ok(true)
-            ) {
+            if self.run_input_reader() != RunInputReader::Structured {
                 return false;
             }
         }
@@ -6718,14 +6858,7 @@ impl App {
             },
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize(_, _) => {
-                // The grid the press was aimed at has reflowed, and so has the
-                // cell that carried its link.
-                self.retire_pending_link_click();
-                // The sidebar has reflowed too: the row the drag was aimed at is
-                // no longer under the pointer, so the gesture is retired rather
-                // than dropped somewhere the user did not choose.
-                self.row_drag = None;
-                self.tab_drag = None;
+                self.note_host_resized();
                 false
             }
             Event::FocusGained => {
@@ -6748,6 +6881,18 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Retire the gestures a resize of the host window invalidates.
+    fn note_host_resized(&mut self) {
+        // The grid the press was aimed at has reflowed, and so has the cell
+        // that carried its link.
+        self.retire_pending_link_click();
+        // The sidebar has reflowed too: the row the drag was aimed at is no
+        // longer under the pointer, so the gesture is retired rather than
+        // dropped somewhere the user did not choose.
+        self.row_drag = None;
+        self.tab_drag = None;
     }
 
     pub(crate) fn set_info(&mut self, message: impl Into<String>) {
@@ -9891,14 +10036,14 @@ pub(crate) fn runtime_project_to_config(
 }
 
 /// Enter raw mode and the alternate screen and build the terminal on them:
-/// what `ratatui::init` does, without the panic hook it installs, which
+/// what ratatui's `init` does, without the panic hook it installs, which
 /// restores the host terminal on a panic on ANY thread, including a worker
 /// panic dux catches and keeps running after. A partial failure is undone by
 /// the unconditional teardown in [`App::run`].
-fn enter_tui_terminal() -> std::io::Result<ratatui::DefaultTerminal> {
+fn enter_tui_terminal() -> std::io::Result<crate::screen_backend::ScreenTerminal> {
     crossterm::terminal::enable_raw_mode()?;
     execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
-    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))
+    crate::screen_backend::screen_terminal()
 }
 
 /// Turn off the input modes [`App::run`] turns on beside raw mode and the

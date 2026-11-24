@@ -225,23 +225,53 @@ pub(super) fn read_raw_chunk(
     crate::io_retry::retry_on_interrupt_errno(|| rustix::io::read(&fd, &mut *buf))
 }
 
-/// Wait up to `timeout` for `fd` to have something to read, and say whether it
-/// does. A zero timeout only looks.
-pub(super) fn wait_for_input(
-    fd: &impl std::os::fd::AsFd,
+/// Whether a read failing with `err` says the terminal is gone for good: the
+/// device hung up or vanished, or the descriptor no longer names it.
+pub(super) fn terminal_is_gone(err: rustix::io::Errno) -> bool {
+    use rustix::io::Errno;
+    matches!(err, Errno::IO | Errno::NXIO | Errno::NODEV | Errno::BADF)
+}
+
+/// What a wait for the terminal ended on; neither when it timed out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Waited {
+    pub(super) input: bool,
+    pub(super) woken: bool,
+}
+
+/// Wait up to `timeout` for `fd` to have something to read or `wake` to become
+/// readable; a zero timeout only looks. A signal that interrupts the wait does
+/// not restart its timeout.
+pub(super) fn wait_for_input_or_wake(
+    fd: std::os::fd::BorrowedFd<'_>,
+    wake: Option<std::os::fd::BorrowedFd<'_>>,
     timeout: Duration,
-) -> rustix::io::Result<bool> {
+) -> rustix::io::Result<Waited> {
     use rustix::event::{PollFd, PollFlags, poll};
 
-    let timeout = rustix::time::Timespec {
-        tv_sec: i64::try_from(timeout.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: i64::from(timeout.subsec_nanos()),
-    };
-    let ready = crate::io_retry::retry_on_interrupt_errno(|| {
-        let mut pollfd = [PollFd::new(fd, PollFlags::IN)];
-        poll(&mut pollfd, Some(&timeout))
-    })?;
-    Ok(ready != 0)
+    let started = Instant::now();
+    loop {
+        let left = timeout.saturating_sub(started.elapsed());
+        let left = rustix::time::Timespec {
+            tv_sec: i64::try_from(left.as_secs()).unwrap_or(i64::MAX),
+            tv_nsec: i64::from(left.subsec_nanos()),
+        };
+        let mut fds = [
+            PollFd::new(&fd, PollFlags::IN),
+            PollFd::new(wake.as_ref().unwrap_or(&fd), PollFlags::IN),
+        ];
+        let watched = if wake.is_some() { 2 } else { 1 };
+        match poll(&mut fds[..watched], Some(&left)) {
+            Ok(_) => {
+                return Ok(Waited {
+                    input: !fds[0].revents().is_empty(),
+                    woken: watched == 2 && !fds[1].revents().is_empty(),
+                });
+            }
+            Err(rustix::io::Errno::INTR) => {}
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Treat both crossterm's `BackTab` and explicit `Tab + Shift` as reverse-tab.
@@ -3368,48 +3398,51 @@ impl App {
     /// `CSI … u` key as its classic bytes. This bypasses crossterm's event
     /// parser so every key combination (Shift+Tab, Alt+Backspace, Ctrl+Right,
     /// F-keys, etc.) reaches the child process.
-    pub(crate) fn poll_and_forward_raw_input(&mut self) -> Result<bool> {
-        use std::os::fd::AsFd;
-
+    pub(crate) fn poll_and_forward_raw_input(
+        &mut self,
+        terminal: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<bool> {
         if !self.raw_input_target_available() {
             return Ok(false);
         }
 
-        // Poll stdin with a 100ms timeout (matching the crossterm poll interval),
-        // capped while the background web server is on: this run loop is that
-        // server's engine servicer, so the wait here is a browser's request
-        // latency. The cap is the same one the structured-event branch applies;
-        // see `App::max_poll_ms`.
-        let stdin_handle = std::io::stdin();
+        // Poll with a 100ms timeout, capped while the background web server is
+        // on: this run loop is that server's engine servicer, so the wait here
+        // is a browser's request latency. The cap is the same one the
+        // structured-event branch applies; see `App::max_poll_ms`.
         let mut buf = [0u8; 4096];
         let poll_ms = 100u64.min(self.max_poll_ms());
-        let stdin_borrow = stdin_handle.as_fd();
-        if !wait_for_input(&stdin_borrow, Duration::from_millis(poll_ms))? {
-            self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
-            return Ok(false);
-        }
-
-        let n = read_raw_chunk(stdin_borrow, &mut buf)?;
-        if n == 0 {
-            return Ok(false);
-        }
+        let held = self.terminal_input.take_bytes();
+        let first: &[u8] = if held.is_empty() {
+            if !self.wait_for_terminal(terminal, Duration::from_millis(poll_ms))? {
+                self.resolve_pending_bare_esc(terminal, &mut buf)?;
+                return Ok(false);
+            }
+            let n = self.read_terminal(terminal, &mut buf)?;
+            if n == 0 {
+                return Ok(false);
+            }
+            &buf[..n]
+        } else {
+            &held
+        };
         // Raw bytes are input like any other: local state (scroll, selection,
         // the macro bar) can move before the child echoes anything.
         self.mark_frame_dirty();
 
-        if self.consume_loading_raw_input(&buf[..n]) {
+        if self.consume_loading_raw_input(first) {
             return Ok(false);
         }
 
-        if self.process_raw_input_bytes(&buf[..n]) {
+        if self.process_raw_input_bytes(first) {
             return Ok(true);
         }
 
-        if self.drain_ready_raw_input(&stdin_borrow, &mut buf)? {
+        if self.drain_ready_raw_input(terminal, &mut buf)? {
             return Ok(true);
         }
 
-        self.resolve_pending_bare_esc(&stdin_borrow, &mut buf)?;
+        self.resolve_pending_bare_esc(terminal, &mut buf)?;
         Ok(false)
     }
 
@@ -3463,7 +3496,7 @@ impl App {
     /// paste is not interrupted by intermediate renders.
     fn drain_ready_raw_input(
         &mut self,
-        stdin_borrow: &impl std::os::fd::AsFd,
+        terminal: std::os::fd::BorrowedFd<'_>,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
         let drain_deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
@@ -3471,18 +3504,19 @@ impl App {
             if std::time::Instant::now() >= drain_deadline {
                 break;
             }
-            // If we exited interactive mode during processing, stop draining.
-            if !matches!(
-                self.input_target,
-                InputTarget::Agent | InputTarget::Terminal
-            ) {
+            // A key that handed input to another reader left the rest for it.
+            if self.terminal_input.has_unread() {
                 break;
             }
-            // Look at stdin without waiting: stop if no data.
-            if !wait_for_input(stdin_borrow, Duration::ZERO)? {
+            // A key that opened a dialog leaves the next read to its reader.
+            if self.run_input_reader() != super::RunInputReader::Forwarding {
                 break;
             }
-            let n2 = read_raw_chunk(stdin_borrow, buf)?;
+            // Look without waiting: stop if no data.
+            if !self.wait_for_terminal(terminal, Duration::ZERO)? {
+                break;
+            }
+            let n2 = self.read_terminal(terminal, buf)?;
             if n2 == 0 {
                 break;
             }
@@ -3502,7 +3536,7 @@ impl App {
 
     fn resolve_pending_bare_esc(
         &mut self,
-        stdin_borrow: &impl std::os::fd::AsFd,
+        terminal: std::os::fd::BorrowedFd<'_>,
         buf: &mut [u8; 4096],
     ) -> Result<bool> {
         if self
@@ -3516,8 +3550,8 @@ impl App {
         }
 
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        if wait_for_input(stdin_borrow, Duration::ZERO)? {
-            let n = read_raw_chunk(stdin_borrow, buf)?;
+        if self.wait_for_terminal(terminal, Duration::ZERO)? {
+            let n = self.read_terminal(terminal, buf)?;
             if n != 0 {
                 return Ok(self.process_raw_input_bytes(&buf[..n]));
             }
@@ -3881,7 +3915,9 @@ impl App {
         raw: &[u8],
         dispatch: &mut RawInputDispatch,
     ) -> RawInputFlow {
-        dispatch.flush(self);
+        // Stamped here too: a click can leave the pane, which moves the target
+        // the stamp is resolved from.
+        dispatch.flush_and_stamp(self);
         if self.handle_takeover_card_mouse(mouse) || self.handle_dormant_card_mouse(mouse) {
             return RawInputFlow::Continue;
         }
@@ -4063,7 +4099,7 @@ impl App {
                     self.open_macro_bar();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 // Only reachable while the take-over card covers this pane (see
                 // the match above), which is the one state where this key means
@@ -4073,7 +4109,7 @@ impl App {
                     self.take_over_focused_pty();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, None);
+                    return end(false, index);
                 }
                 // Only reachable while another device drives the pty (see the
                 // match above); the prompt takes over input from here.
@@ -4082,7 +4118,7 @@ impl App {
                     self.open_command_palette();
                     self.raw_input_buf.clear();
                     self.raw_input_parser.clear();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 // In fullscreen the toggle means one thing: leave fullscreen.
                 RawSeqAction::Intercept(Action::ToggleFullscreen, ..) => {
@@ -4090,7 +4126,7 @@ impl App {
                     // `input_target`, which is what resolves the id.
                     dispatch.flush_and_stamp(self);
                     self.exit_interactive_mode();
-                    return end(false, Some(index));
+                    return end(false, index);
                 }
                 RawSeqAction::Intercept(Action::ScrollPageUp, _, raw, key) => {
                     self.route_raw_page_scroll(ScrollDirection::Up, &raw, key.as_ref(), dispatch);
@@ -4125,7 +4161,9 @@ impl App {
                 RawSeqAction::Mouse(mouse, raw) => {
                     match self.handle_raw_mouse(mouse, &raw, dispatch) {
                         RawInputFlow::Continue => {}
-                        RawInputFlow::Return(should_exit) => return end(should_exit, None),
+                        RawInputFlow::Return(should_exit) => {
+                            return end(should_exit, index);
+                        }
                     }
                 }
                 RawSeqAction::Intercept(_, _, raw, key) => {
@@ -4145,27 +4183,15 @@ impl App {
         None
     }
 
-    /// Hand what followed a key that ended a raw-input batch early to whichever
-    /// reader takes input now. Returns whether the app should exit.
-    fn hand_on_rest_of_read(&mut self, rest: Vec<Vec<u8>>) -> bool {
-        let mut rest = rest.into_iter();
-        while let Some(seq) = rest.next() {
-            if self.run_input_reader() == RunInputReader::Forwarding {
-                let tail: Vec<u8> = std::iter::once(seq).chain(rest).flatten().collect();
-                return self.process_raw_input_bytes(&tail);
-            }
-            // A paste is one event to crossterm's reader, and its end may not be
-            // in this read, so it and what follows it are dropped.
-            if seq == crate::raw_input::BRACKET_PASTE_START {
-                return false;
-            }
-            if let Some(event) = super::debug_input::event_crossterm_makes_of(&seq)
-                && self.handle_terminal_event(event)
-            {
-                return true;
-            }
-        }
-        false
+    /// Leave what followed a key that ended a raw-input batch early, the
+    /// parser's unfinished tail included, for whichever reader takes input next.
+    fn hand_on_rest_of_read(&mut self, rest: Vec<Vec<u8>>, tail: &[u8]) {
+        let mut bytes: Vec<u8> = rest.into_iter().flatten().collect();
+        bytes.extend_from_slice(tail);
+        self.raw_input_buf.clear();
+        self.raw_input_parser.clear();
+        self.raw_paste = super::RawPaste::default();
+        self.terminal_input.give_back(&bytes);
     }
 
     /// Process raw bytes that have already been read from stdin.
@@ -4174,6 +4200,7 @@ impl App {
     /// call it directly, without real stdin I/O.
     pub(crate) fn process_raw_input_bytes(&mut self, bytes: &[u8]) -> bool {
         let sequences = self.parse_raw_input_sequences(bytes);
+        let tail = self.raw_input_parser.pending().to_vec();
         let mut plan = self.classify_raw_input_sequences(&sequences);
         let actions = std::mem::take(&mut plan.actions);
         let paste = if plan.normalized_paste_forwarded {
@@ -4198,14 +4225,13 @@ impl App {
             if end.should_exit {
                 return true;
             }
-            return end.hand_on_after.is_some_and(|action| {
-                let rest = sequences
-                    .into_iter()
-                    .skip(plan.origins[action] + 1)
-                    .map(|parsed| parsed.bytes)
-                    .collect();
-                self.hand_on_rest_of_read(rest)
-            });
+            let rest = sequences
+                .into_iter()
+                .skip(plan.origins[end.hand_on_after] + 1)
+                .map(|parsed| parsed.bytes)
+                .collect();
+            self.hand_on_rest_of_read(rest, &tail);
+            return false;
         }
         dispatch.finish(self, paste);
 
@@ -36216,7 +36242,7 @@ cyan = "#00ffff"
             let (mut writer, reader) = std::os::unix::net::UnixStream::pair().expect("socket pair");
             writer.write_all(waiting).expect("write");
             let mut buf = [0u8; 4096];
-            app.resolve_pending_bare_esc(&reader, &mut buf)
+            app.resolve_pending_bare_esc(std::os::fd::AsFd::as_fd(&reader), &mut buf)
                 .expect("resolve");
 
             assert_eq!(app.input_target, target, "waiting {waiting:?}");
@@ -36242,7 +36268,12 @@ cyan = "#00ffff"
         app.raw_input_buf = b"pending".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
-        assert!(!app.poll_and_forward_raw_input().expect("poll raw input"));
+        let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let terminal = std::os::fd::AsFd::as_fd(&stand_in);
+        assert!(
+            !app.poll_and_forward_raw_input(terminal)
+                .expect("poll raw input")
+        );
 
         assert_eq!(app.input_target, InputTarget::None);
         assert!(app.terminal_selection.is_none());
@@ -36262,7 +36293,12 @@ cyan = "#00ffff"
         app.raw_input_buf = b"\x1b".to_vec();
         app.loading_input_buf = b"loading".to_vec();
 
-        assert!(!app.poll_and_forward_raw_input().expect("poll raw input"));
+        let (stand_in, _keyboard) = std::os::unix::net::UnixStream::pair().expect("a socket pair");
+        let terminal = std::os::fd::AsFd::as_fd(&stand_in);
+        assert!(
+            !app.poll_and_forward_raw_input(terminal)
+                .expect("poll raw input")
+        );
 
         assert_eq!(app.input_target, InputTarget::None);
         assert_eq!(app.raw_input_parser.pending(), b"");
@@ -42451,9 +42487,9 @@ cyan = "#00ffff"
     }
 
     /// The debugger reads the terminal's raw bytes itself, with no agent
-    /// selected: each key shows its label, its kind and its bytes, a key
-    /// crossterm held when the debugger took over shows first with its bytes
-    /// not seen, and only an unmodified Escape closes it.
+    /// selected: each key shows its label, its kind and its bytes, a key that
+    /// reaches it already decoded shows with its bytes not seen, and only an
+    /// unmodified Escape closes it.
     #[test]
     fn debug_input_records_a_key_then_escape_closes_it() {
         let mut app = test_app(default_bindings());
@@ -42461,12 +42497,12 @@ cyan = "#00ffff"
         assert!(app.selected_session().is_none());
         open_input_debugger(&mut app);
 
-        let mut held = vec![crossterm::event::Event::Key(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::NONE,
-        ))]
-        .into_iter();
-        assert!(!app.hand_debug_input_over(|| held.next()));
+        assert!(
+            !app.handle_terminal_event(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+            )))
+        );
         assert!(!app.record_debug_input_bytes(b"\x1b[108;6u"));
         let rows = debugger_rows(&app);
         assert_eq!(rows.len(), 4, "two entries of two rows each: {rows:#?}");
@@ -42537,7 +42573,6 @@ cyan = "#00ffff"
         assert!(matches!(app.prompt, PromptState::None));
 
         open_input_debugger(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         app.record_debug_input_bytes(b"\x1b[27u");
         assert!(matches!(app.prompt, PromptState::None));
     }
@@ -42549,7 +42584,6 @@ cyan = "#00ffff"
         let mut app = app_with_minimized_typeable_caret_child("");
         app.set_extended_keys(crate::keybindings::ExtendedKeys::On);
         open_input_debugger(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         app.record_debug_input_bytes(b"\x1b[108;6uab\x1b[13;2u\x1b[200~text\x1b[201~");
         app.record_debug_input_bytes(b"\x1b[27u");
         assert!(matches!(app.prompt, PromptState::None));

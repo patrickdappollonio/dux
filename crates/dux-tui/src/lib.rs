@@ -16,8 +16,13 @@ mod key_decode;
 mod key_encode;
 mod keybindings;
 mod numeric;
+#[cfg(test)]
+mod pty_child;
 mod raw_input;
+mod resize_wake;
+mod screen_backend;
 mod server_screen;
+mod terminal_input;
 mod theme;
 mod tui_color;
 
@@ -167,9 +172,15 @@ pub fn run(
 /// When the terminal cannot be taken back or the event loop stops on an
 /// error.
 pub fn resume_after_server(
-    mut engine: Box<Engine>,
+    engine: Box<Engine>,
     companion: Box<dyn dux_core::background_serve::BackgroundServeCompanion>,
 ) -> Result<TuiExit> {
+    run_app(resumed_app(engine)?, companion)
+}
+
+/// The App that takes the terminal back from the server, holding what the
+/// status screen left unread.
+fn resumed_app(mut engine: Box<Engine>) -> Result<app::App> {
     // Back under the TUI: `auto`/`mirror` identity resolves against the real host
     // terminal again. Already-running PTYs keep their spawn-time env until they
     // are relaunched.
@@ -178,8 +189,9 @@ pub fn resume_after_server(
     // so the resumed TUI does not replay a stale passthrough backlog to the host
     // terminal it is only now taking back.
     engine.discard_passthrough_backlog();
-    let app = app::App::resume(*engine)?;
-    run_app(app, companion)
+    let mut app = app::App::resume(*engine)?;
+    app.take_unread_input_from_last_surface();
+    Ok(app)
 }
 
 /// Run an App's event loop and translate its [`app::RunExit`] into a
@@ -194,13 +206,20 @@ fn run_app(
     // Installed here, before the loop, so `App::run` can honor
     // `[server] serve_while_tui` on its very first iteration.
     app.companion = Some(companion);
-    match app.run()? {
-        app::RunExit::Quit => Ok(TuiExit::Done),
+    let exit = app.run()?;
+    Ok(tui_exit(app, exit))
+}
+
+/// What the binary does next once `app`'s loop has ended with `exit`.
+fn tui_exit(mut app: app::App, exit: app::RunExit) -> TuiExit {
+    match exit {
+        app::RunExit::Quit => TuiExit::Done,
         app::RunExit::FlipToServer {
             listeners,
             urls,
             startup,
         } => {
+            app.leave_unread_input_for_next_surface();
             // Serving headless: `auto` identity now resolves to the forced
             // ghostty identity for agents launched under the server. Existing
             // PTYs keep their spawn-time env until relaunch.
@@ -209,12 +228,12 @@ fn run_app(
             // Drop any TUI-era passthrough backlog so the server does not inherit a
             // stale ring; capture continues under the server for the web bridge.
             engine.discard_passthrough_backlog();
-            Ok(TuiExit::FlipToServer {
+            TuiExit::FlipToServer {
                 engine: Box::new(engine),
                 listeners,
                 urls,
                 startup,
-            })
+            }
         }
     }
 }

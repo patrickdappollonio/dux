@@ -7,18 +7,18 @@
 //! selected agent, live child or ownership, so it works from anywhere.
 
 use std::fmt::Write as _;
-use std::os::fd::AsFd;
+use std::os::fd::BorrowedFd;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Local;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::components::ellipsis::pad_to_width;
 use super::components::wrap_lines::display_width;
-use super::input::{ESC_AMBIGUITY_TIMEOUT, read_raw_chunk, trim_debug_input_lines, wait_for_input};
+use super::input::{ESC_AMBIGUITY_TIMEOUT, trim_debug_input_lines};
 use super::{App, PromptState};
 use crate::host_keys::Host;
 use crate::keybindings::BindingScope;
@@ -60,29 +60,8 @@ const UNFINISHED_PASTE_WAIT: Duration = Duration::from_secs(1);
 struct DebugPaste {
     /// Content bytes so far.
     len: usize,
-    /// The content, kept only for a paste that began after the debugger
-    /// closed, which is handed to the main UI as a paste.
-    body: Option<Vec<u8>>,
     /// When the last content byte arrived.
     last: Instant,
-}
-
-/// The event crossterm makes of one complete raw sequence that is not a paste
-/// marker, or `None` for a device report or anything that is no key.
-pub(super) fn event_crossterm_makes_of(seq: &[u8]) -> Option<Event> {
-    if let Some(mouse) = crate::raw_input::parse_sgr_mouse(seq) {
-        Some(Event::Mouse(mouse))
-    } else if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
-        Some(if gained {
-            Event::FocusGained
-        } else {
-            Event::FocusLost
-        })
-    } else if crate::raw_input::is_device_report(seq) {
-        None
-    } else {
-        crate::key_decode::decode_key(seq).map(Event::Key)
-    }
 }
 
 /// The input debugger's raw reader: its own sequence splitter and the paste it
@@ -92,36 +71,39 @@ pub(super) fn event_crossterm_makes_of(seq: &[u8]) -> Option<Event> {
 pub(crate) struct DebugRawInput {
     parser: crate::raw_input::RawInputParser,
     paste: Option<DebugPaste>,
-    /// Whether the debugger has taken over reading stdin from crossterm.
+    /// Whether the debugger has taken the bytes the other readers left unread.
     reading: bool,
 }
 
 impl DebugRawInput {
-    /// Whether this reader holds input meant for the main UI and must keep
-    /// reading until it can hand it over: a paste that began after the
-    /// debugger closed and is still arriving, or the unfinished start of a
-    /// sequence read with the closing Escape.
-    pub(super) fn holds_input_for_main_ui(&self) -> bool {
-        self.paste
-            .as_ref()
-            .is_some_and(|paste| paste.body.is_some())
-            || !self.parser.pending().is_empty()
+    /// Whether the splitter holds the start of a sequence.
+    #[cfg(test)]
+    pub(super) fn holds_partial_sequence(&self) -> bool {
+        !self.parser.pending().is_empty()
+    }
+
+    /// The start of a sequence the splitter holds, which it lets go of.
+    pub(super) fn take_partial_sequence(&mut self) -> Vec<u8> {
+        let partial = self.parser.pending().to_vec();
+        self.parser.replace_pending(&[]);
+        partial
     }
 
     /// Split `bytes` into sequences. Empty input means the Escape ambiguity
-    /// timed out: a lone Escape or `ESC ]` held back is released as its own
-    /// sequence, and a lone `ESC [` or `ESC O` as `introducer` says. Two bare
+    /// timed out: a lone Escape, `ESC ]`, `ESC [` or `ESC O` held back is
+    /// released as its own sequence, so the debugger can show Alt-[ and
+    /// Alt-Shift-O. Two bare
     /// Escapes are one Alt-Esc, as a classic terminal sends it, when they
     /// arrive together with something after them or the timeout passes behind
     /// them; a second Escape that ends a read is held with the first, because
     /// it may start the next key. Inside a bracketed paste nothing is
     /// released: what is held is most likely the start of the end marker, and
     /// the paste's own quiet timeout settles it otherwise.
-    fn split(&mut self, bytes: &[u8], introducer: LoneIntroducer) -> Vec<ParsedSequence> {
+    fn split(&mut self, bytes: &[u8]) -> Vec<ParsedSequence> {
         let mut sequences = self.parser.feed_sequences(bytes);
         if bytes.is_empty() && !self.parser.in_bracket_paste() {
             sequences.extend(self.parser.resolve_pending_esc());
-            if introducer == LoneIntroducer::Release && is_lone_introducer(self.parser.pending()) {
+            if is_lone_introducer(self.parser.pending()) {
                 let held = self.parser.pending().to_vec();
                 self.parser.replace_pending(&[]);
                 sequences.push(ParsedSequence {
@@ -213,17 +195,6 @@ pub(super) fn debug_row_prefix(
 /// came.
 fn is_lone_introducer(pending: &[u8]) -> bool {
     pending == b"\x1b[" || pending == b"\x1bO"
-}
-
-/// What the ambiguity timeout does with a lone `ESC [` or `ESC O`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LoneIntroducer {
-    /// Release it as its own key, so the open debugger can show Alt-[ and
-    /// Alt-Shift-O.
-    Release,
-    /// Hold it until the rest arrives, as crossterm and the forwarding path
-    /// do once the debugger has closed.
-    Hold,
 }
 
 /// Two Escapes held at the end of a read: Alt-Esc once the ambiguity timeout
@@ -329,35 +300,34 @@ fn undecodable_hint(seq: &[u8], host: Host) -> Option<&'static str> {
 
 impl App {
     /// One poll of the input debugger's own reader, run instead of either
-    /// input path while the debugger is open, or while it still holds input
-    /// read after it closed (an arriving paste, an unfinished sequence). On
-    /// the first poll it hands over from crossterm: every event crossterm
-    /// already holds is handled first, because a poll of stdin cannot see
-    /// crossterm's queue. Returns whether the app should exit.
-    pub(super) fn poll_debug_raw_input(&mut self, stdin: impl AsFd) -> Result<bool> {
+    /// input path while it is open. The first poll reads what the other
+    /// readers left first, and nothing more if that closes the debugger.
+    pub(super) fn poll_debug_raw_input(&mut self, fd: BorrowedFd<'_>) -> Result<bool> {
         if !self.debug_raw_input.reading {
-            let held = || match crate::io_retry::retry_on_interrupt(|| event::poll(Duration::ZERO))
-            {
-                Ok(true) => crate::io_retry::retry_on_interrupt(event::read).ok(),
-                _ => None,
+            self.debug_raw_input = DebugRawInput {
+                reading: true,
+                ..DebugRawInput::default()
             };
-            if self.hand_debug_input_over(held) {
-                return Ok(true);
-            }
-            if !self.input_debugger_open() {
-                return Ok(false);
+            let held = self.terminal_input.take_bytes();
+            if !held.is_empty() {
+                self.mark_frame_dirty();
+                if self.record_debug_input_bytes(&held) {
+                    return Ok(true);
+                }
+                if !self.input_debugger_open() {
+                    return Ok(false);
+                }
             }
         }
 
         // The same capped wait as the forwarding poll: this loop is the
         // background web server's engine servicer too.
-        let fd = stdin.as_fd();
         let mut buf = [0u8; 4096];
         let poll_ms = 100u64.min(self.max_poll_ms());
-        if !wait_for_input(&fd, Duration::from_millis(poll_ms))? {
-            return self.resolve_pending_debug_esc(&fd, &mut buf);
+        if !self.wait_for_terminal(fd, Duration::from_millis(poll_ms))? {
+            return self.resolve_pending_debug_esc(fd, &mut buf);
         }
-        let n = read_raw_chunk(fd, &mut buf)?;
+        let n = self.read_terminal(fd, &mut buf)?;
         if n == 0 {
             return Ok(false);
         }
@@ -369,13 +339,11 @@ impl App {
         // Keep reading what is already there for one frame, so a paste is
         // counted whole before the next draw.
         let drain_deadline = Instant::now() + Duration::from_millis(16);
-        while Instant::now() < drain_deadline
-            && (self.input_debugger_open() || self.debug_raw_input.holds_input_for_main_ui())
-        {
-            if !wait_for_input(&fd, Duration::ZERO)? {
+        while Instant::now() < drain_deadline && self.input_debugger_open() {
+            if !self.wait_for_terminal(fd, Duration::ZERO)? {
                 break;
             }
-            let n = read_raw_chunk(fd, &mut buf)?;
+            let n = self.read_terminal(fd, &mut buf)?;
             if n == 0 {
                 break;
             }
@@ -383,62 +351,44 @@ impl App {
                 return Ok(true);
             }
         }
-        self.resolve_pending_debug_esc(&fd, &mut buf)
+        self.resolve_pending_debug_esc(fd, &mut buf)
     }
 
-    /// Take over reading from crossterm: start a fresh reader and handle every
-    /// event `next_held` still gives through the structured path, which
-    /// records them with their bytes not seen. Stops early when one of them
-    /// closes the debugger, leaving the rest to the structured path. Returns
-    /// whether the app should exit.
-    pub(super) fn hand_debug_input_over(
-        &mut self,
-        mut next_held: impl FnMut() -> Option<Event>,
-    ) -> bool {
-        self.debug_raw_input = DebugRawInput {
-            reading: true,
-            ..DebugRawInput::default()
-        };
-        while self.input_debugger_open() {
-            let Some(event) = next_held() else {
-                break;
-            };
-            if self.handle_terminal_event(event) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Forget the debugger's reader: its unfinished sequence and any paste it
-    /// was counting, which logs nothing.
+    /// End the debugger's reader: its unfinished sequence is left for the
+    /// next reader, and a paste it was counting ends unlogged.
     pub(super) fn end_debug_raw_input(&mut self) {
+        let partial = self.debug_raw_input.take_partial_sequence();
+        self.terminal_input.give_back(&partial);
         self.debug_raw_input = DebugRawInput::default();
     }
 
     /// Run on every idle poll and after every drain: finish a paste whose end
     /// marker has not come for [`UNFINISHED_PASTE_WAIT`], then wait out the
     /// Escape ambiguity the way the forwarding poll does and resolve a lone
-    /// Escape, a pair of them, or (while the debugger is open) a lone `ESC [`
-    /// or `ESC O`, into the debugger or the main UI, never into a
-    /// pty. Returns whether the app should exit.
-    fn resolve_pending_debug_esc(&mut self, fd: &impl AsFd, buf: &mut [u8; 4096]) -> Result<bool> {
+    /// Escape, a pair of them, or a lone `ESC [` or `ESC O` into the debugger.
+    /// Returns whether the app should exit.
+    fn resolve_pending_debug_esc(
+        &mut self,
+        fd: BorrowedFd<'_>,
+        buf: &mut [u8; 4096],
+    ) -> Result<bool> {
+        if !self.input_debugger_open() {
+            return Ok(false);
+        }
         if let Some(exit) = self.expire_unfinished_debug_paste() {
             return Ok(exit);
         }
-        let debugger_open = self.input_debugger_open();
         let parser = &mut self.debug_raw_input.parser;
         parser.expire_held_host_reply(Instant::now());
         let resolves = parser.pending_resolves_on_timeout()
             || parser.pending() == ESCAPE_PAIR
-            || (debugger_open && is_lone_introducer(parser.pending()))
-            || (!debugger_open && settles_after_close(parser.pending()));
+            || is_lone_introducer(parser.pending());
         if parser.in_bracket_paste() || !resolves {
             return Ok(false);
         }
         std::thread::sleep(ESC_AMBIGUITY_TIMEOUT);
-        if wait_for_input(fd, Duration::ZERO)? {
-            let n = read_raw_chunk(fd, buf)?;
+        if self.wait_for_terminal(fd, Duration::ZERO)? {
+            let n = self.read_terminal(fd, buf)?;
             if n != 0 {
                 return Ok(self.record_debug_input_bytes(&buf[..n]));
             }
@@ -447,10 +397,9 @@ impl App {
     }
 
     /// Finish a paste that has gone [`UNFINISHED_PASTE_WAIT`] without a byte,
-    /// with whatever the reader still holds as part of it: the debugger logs
-    /// it as a paste whose end never came, and a paste meant for the main UI
-    /// is handed over as it is, which also ends the reader. `None` when no
-    /// paste has waited that long; otherwise whether the app should exit.
+    /// with whatever the reader still holds as part of it, and log it as a
+    /// paste whose end never came. `None` when no paste has waited that long;
+    /// otherwise whether the app should exit.
     fn expire_unfinished_debug_paste(&mut self) -> Option<bool> {
         let mut paste = self
             .debug_raw_input
@@ -458,78 +407,35 @@ impl App {
             .take_if(|paste| paste.last.elapsed() >= UNFINISHED_PASTE_WAIT)?;
         let parser = &mut self.debug_raw_input.parser;
         paste.len += parser.pending().len();
-        if let Some(body) = paste.body.as_mut() {
-            body.extend_from_slice(parser.pending());
-        }
         parser.clear();
-        let exit = self.finish_debug_paste(paste, PasteEnd::Abandoned);
-        if !self.input_debugger_open() {
-            self.end_debug_raw_input();
-        }
-        Some(exit)
+        Some(self.finish_debug_paste(paste.len, PasteEnd::Abandoned))
     }
 
     /// Split raw input into sequences with the debugger's own splitter and
-    /// hand each one to whoever it belongs to: an open paste, the debugger,
-    /// or, once the debugger has closed, the reader that takes over from it.
-    /// Bytes that follow the closing Escape in the same read go on to the
-    /// forwarding path when it is next, and are otherwise replayed as the
-    /// events crossterm would have made of them. A paste still open, or a
-    /// sequence still unfinished, keeps this reader until it ends. Returns
-    /// whether the app should exit.
+    /// hand each one to the open paste or the debugger. Once a sequence closes
+    /// the debugger, every byte after it is left unread for the next reader,
+    /// and this reader ends. Returns whether the app should exit.
     pub(super) fn record_debug_input_bytes(&mut self, bytes: &[u8]) -> bool {
-        let introducer = if self.input_debugger_open() {
-            LoneIntroducer::Release
-        } else {
-            LoneIntroducer::Hold
-        };
-        let mut sequences = self.debug_raw_input.split(bytes, introducer);
-        let parser = &mut self.debug_raw_input.parser;
-        if bytes.is_empty()
-            && introducer == LoneIntroducer::Hold
-            && !parser.in_bracket_paste()
-            && settles_after_close(parser.pending())
-        {
-            // After the close only an escape fragment outlasts the timeout; a
-            // leftover that starts none (a lone UTF-8 lead byte nothing
-            // follows) is settled by it, replayed and dropped when no key.
-            sequences.push(ParsedSequence {
-                bytes: parser.pending().to_vec(),
-                in_bracket_paste: false,
-            });
-            parser.replace_pending(&[]);
-        }
-        let mut tail = Vec::new();
-        for sequence in sequences {
+        let sequences = self.debug_raw_input.split(bytes);
+        let mut sequences = sequences.into_iter();
+        while let Some(sequence) = sequences.next() {
             let seq = sequence.bytes.as_slice();
             let exit = if self.debug_raw_input.paste.is_some() {
                 self.feed_debug_paste(seq)
-            } else if self.input_debugger_open() {
-                self.record_debug_sequence(seq)
-            } else if self.should_poll_raw_input() {
-                tail.extend_from_slice(seq);
-                false
             } else {
-                self.replay_after_debugger_close(seq)
+                self.record_debug_sequence(seq)
             };
             if exit {
                 return true;
             }
+            if !self.input_debugger_open() {
+                let rest: Vec<u8> = sequences.flat_map(|sequence| sequence.bytes).collect();
+                self.end_debug_raw_input();
+                self.terminal_input.give_back(&rest);
+                return false;
+            }
         }
-        if self.input_debugger_open() || self.debug_raw_input.paste.is_some() {
-            return false;
-        }
-        if self.should_poll_raw_input() {
-            tail.extend_from_slice(self.debug_raw_input.parser.pending());
-        } else if !self.debug_raw_input.parser.pending().is_empty() {
-            // The unfinished start of a sequence read with the closing Escape:
-            // keep reading until the rest arrives, as crossterm would. What the
-            // ambiguity timeout settles (a lone Escape, an `ESC ]`) the split
-            // has already released, and a held host reply expires on its own.
-            return false;
-        }
-        self.end_debug_raw_input();
-        !tail.is_empty() && self.process_raw_input_bytes(&tail)
+        false
     }
 
     /// Record one complete raw sequence while the debugger is open. A paste
@@ -569,25 +475,10 @@ impl App {
         false
     }
 
-    /// One sequence read after the debugger closed, when crossterm reads
-    /// next: handled as the event crossterm would have made of it. A paste
-    /// start opens a paste this reader collects and hands over whole; a
-    /// device report, or anything that is no key, is dropped, as crossterm
-    /// drops it. Returns whether the app should exit.
-    fn replay_after_debugger_close(&mut self, seq: &[u8]) -> bool {
-        if seq == BRACKET_PASTE_START {
-            self.open_debug_paste();
-            return false;
-        }
-        event_crossterm_makes_of(seq).is_some_and(|event| self.handle_terminal_event(event))
-    }
-
-    /// Start a paste. While the debugger is open it is counted; one that
-    /// starts after the debugger closed keeps its content, for the main UI.
+    /// Start counting a paste.
     fn open_debug_paste(&mut self) {
         self.debug_raw_input.paste = Some(DebugPaste {
             len: 0,
-            body: (!self.input_debugger_open()).then(Vec::new),
             last: Instant::now(),
         });
     }
@@ -597,40 +488,31 @@ impl App {
     fn feed_debug_paste(&mut self, seq: &[u8]) -> bool {
         if seq == BRACKET_PASTE_END {
             return match self.debug_raw_input.paste.take() {
-                Some(paste) => self.finish_debug_paste(paste, PasteEnd::Marker),
+                Some(paste) => self.finish_debug_paste(paste.len, PasteEnd::Marker),
                 None => false,
             };
         }
         if let Some(paste) = self.debug_raw_input.paste.as_mut() {
             paste.len += seq.len();
-            if let Some(body) = paste.body.as_mut() {
-                body.extend_from_slice(seq);
-            }
             paste.last = Instant::now();
         }
         false
     }
 
-    /// A paste that is over, because its end marker came or because it
-    /// stopped arriving: a counted one is logged, one with content goes to
-    /// the main UI as a paste. Returns whether the app should exit.
-    fn finish_debug_paste(&mut self, paste: DebugPaste, end: PasteEnd) -> bool {
-        match paste.body {
-            Some(body) => self
-                .handle_terminal_event(Event::Paste(String::from_utf8_lossy(&body).into_owned())),
-            None if end == PasteEnd::Marker => {
-                self.record_debug_paste(paste.len);
-                false
-            }
-            None => {
+    /// Log a paste that is over, because its end marker came or because it
+    /// stopped arriving. Returns whether the app should exit.
+    fn finish_debug_paste(&mut self, len: usize, end: PasteEnd) -> bool {
+        match end {
+            PasteEnd::Marker => self.record_debug_paste(len),
+            PasteEnd::Abandoned => {
                 let row = self.debug_event_row(
                     "Paste",
-                    &format!("{} bytes (its end marker never arrived)", paste.len),
+                    &format!("{len} bytes (its end marker never arrived)"),
                 );
                 self.push_debug_rows(vec![row]);
-                false
             }
         }
+        false
     }
 
     /// Log a paste of `bytes` content bytes, which the debugger counts and
@@ -657,9 +539,8 @@ impl App {
         matches!(self.prompt, PromptState::DebugInput { .. })
     }
 
-    /// Close the debugger. Its reader is ended by whoever reads next: the end
-    /// of the read the closing key came in, which first hands the rest of
-    /// that read on, or the next poll.
+    /// Close the debugger. Its reader ends with the read the closing key came
+    /// in, which leaves the rest of that read for the next reader.
     fn close_input_debugger(&mut self) {
         self.prompt = PromptState::None;
     }
@@ -778,13 +659,6 @@ impl App {
     }
 }
 
-/// Whether a leftover held after the debugger closed is settled by the
-/// Escape ambiguity timeout rather than held until more bytes arrive: anything
-/// that does not start an escape sequence.
-fn settles_after_close(pending: &[u8]) -> bool {
-    pending.first().is_some_and(|&byte| byte != 0x1b)
-}
-
 /// A key's label as the bindings write it.
 fn key_label(key: KeyEvent) -> String {
     let combination = crokey::KeyCombination::from(key).normalized();
@@ -803,6 +677,7 @@ fn closes_input_debugger(key: &KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -810,8 +685,8 @@ mod tests {
     use ratatui::text::{Line, Span};
 
     use super::{
-        BYTES_ROW_GUTTER, DEBUG_TIME_FORMAT, DebugPaste, UNFINISHED_PASTE_WAIT, caret,
-        escape_label, hex, key_details, key_label, undecodable_hint,
+        BYTES_ROW_GUTTER, DEBUG_TIME_FORMAT, UNFINISHED_PASTE_WAIT, caret, escape_label, hex,
+        key_details, key_label, undecodable_hint,
     };
     use crate::app::components::wrap_lines::display_width;
     use crate::app::input::{DEBUG_INPUT_MAX_LINES, trim_debug_input_lines};
@@ -1033,6 +908,17 @@ mod tests {
         assert!(rows[2].contains("dux reads it as Esc: "), "{rows:#?}");
     }
 
+    /// Read what the debugger left unread the way the windowed interface reads
+    /// it, after `more` arrives.
+    fn read_on(app: &mut App, more: &[u8]) {
+        if !more.is_empty() {
+            app.terminal_input.push_read(more);
+        }
+        while let Some(event) = app.terminal_input.next_event() {
+            assert!(!app.handle_terminal_event(event));
+        }
+    }
+
     /// Bytes after the closing Escape in the same read reach the main UI: a
     /// focus report is applied, and a paste is a paste, not keys.
     #[test]
@@ -1045,6 +931,7 @@ mod tests {
         );
         app.record_debug_input_bytes(b"\x1b[27u\x1b[O");
         assert!(!app.input_debugger_open());
+        read_on(&mut app, b"");
         assert!(
             !app.terminal_focus
                 .should_stamp_viewed(Instant::now(), Duration::ZERO),
@@ -1057,6 +944,7 @@ mod tests {
         app.focus = FocusPane::Left;
         open(&mut app);
         app.record_debug_input_bytes(b"\x1b[27u\x1b[200~h\ni\x1b[201~");
+        read_on(&mut app, b"");
         assert_eq!(
             app.agent_filter.as_ref().map(|f| f.text.as_str()),
             Some("h i")
@@ -1066,8 +954,8 @@ mod tests {
         app.agent_filter = Some(TextInput::new());
         open(&mut app);
         app.record_debug_input_bytes(b"\x1b[27u\x1b[200~h\ni");
-        assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-        app.record_debug_input_bytes(b"\x1b[201~");
+        assert_eq!(app.run_input_reader(), RunInputReader::Structured);
+        read_on(&mut app, b"\x1b[201~");
         assert_eq!(
             app.agent_filter.as_ref().map(|f| f.text.as_str()),
             Some("h i")
@@ -1098,19 +986,6 @@ mod tests {
             app.record_debug_input_bytes(b"");
             assert!(!app.input_debugger_open());
         }
-
-        let mut app = test_app(default_bindings());
-        app.agent_filter = Some(TextInput::new());
-        app.focus = FocusPane::Left;
-        open(&mut app);
-        app.record_debug_input_bytes(b"\x1b[27u\x1b[200~hi\x1b[");
-        app.record_debug_input_bytes(b"");
-        app.record_debug_input_bytes(b"201~");
-        assert_eq!(
-            app.agent_filter.as_ref().map(|f| f.text.as_str()),
-            Some("hi")
-        );
-        assert!(app.debug_raw_input.paste.is_none());
     }
 
     /// A key split across reads right after the closing Escape reaches the
@@ -1123,26 +998,9 @@ mod tests {
         open(&mut app);
         app.record_debug_input_bytes(b"\x1b[27u\x1b[");
         assert!(!app.input_debugger_open());
-        assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-        app.record_debug_input_bytes(b"D");
-        let filter = app.agent_filter.as_ref().expect("the filter");
-        assert_eq!((filter.text.as_str(), filter.cursor), ("ab", 1));
+        assert_eq!(app.run_input_reader(), RunInputReader::Structured);
         assert!(!app.debug_raw_input.reading);
-    }
-
-    /// Once the debugger has closed, an unfinished `ESC [` is held through
-    /// the ambiguity timeout, as crossterm holds it, so the rest of the key
-    /// still completes it.
-    #[test]
-    fn an_unfinished_key_after_the_close_outlasts_the_timeout() {
-        let mut app = test_app(default_bindings());
-        app.agent_filter = Some(TextInput::with_text("ab".to_owned()));
-        app.focus = FocusPane::Left;
-        open(&mut app);
-        app.record_debug_input_bytes(b"\x1b[27u\x1b[");
-        app.record_debug_input_bytes(b"");
-        assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-        app.record_debug_input_bytes(b"D");
+        read_on(&mut app, b"D");
         let filter = app.agent_filter.as_ref().expect("the filter");
         assert_eq!((filter.text.as_str(), filter.cursor), ("ab", 1));
     }
@@ -1158,27 +1016,19 @@ mod tests {
         app.record_debug_input_bytes(b"\x1b\x1b");
         app.record_debug_input_bytes(b"[D");
         assert!(!app.input_debugger_open());
+        read_on(&mut app, b"");
         let filter = app.agent_filter.as_ref().expect("the filter");
         assert_eq!((filter.text.as_str(), filter.cursor), ("ab", 1));
     }
 
-    /// The debugger reads before the agent under it, and so does a paste
-    /// meant for the main UI that began after it closed.
+    /// The debugger reads before the agent under it, and only while it is open.
     #[test]
     fn the_debugger_s_reader_wins_over_the_agent_under_it() {
         let mut app = test_app(default_bindings());
         app.input_target = InputTarget::Agent;
         open(&mut app);
         assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-
         app.prompt = PromptState::None;
-        app.debug_raw_input.paste = Some(DebugPaste {
-            len: 0,
-            body: Some(Vec::new()),
-            last: Instant::now(),
-        });
-        assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-        app.debug_raw_input.paste = None;
         assert_eq!(app.run_input_reader(), RunInputReader::Forwarding);
     }
 
@@ -1188,15 +1038,14 @@ mod tests {
     fn the_reader_records_a_key_and_a_lone_escape_closes() {
         let mut app = test_app(default_bindings());
         open(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[108;6u").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         let rows = log_rows(&app);
         assert_eq!(rows.len(), 2, "{rows:#?}");
         assert!(rows[1].contains("1b 5b 31 30 38 3b 36 75"), "{rows:#?}");
         writer.write_all(b"\x1b").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
     }
 
@@ -1206,14 +1055,13 @@ mod tests {
     fn an_unfinished_paste_is_logged_after_a_quiet_second() {
         let mut app = test_app(default_bindings());
         open(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
         let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
         writer.write_all(b"\x1b[200~abc").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         let paste = app.debug_raw_input.paste.as_mut().expect("a paste is open");
         assert_eq!(paste.len, 3);
         paste.last -= UNFINISHED_PASTE_WAIT;
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(app.debug_raw_input.paste.is_none());
         let rows = log_rows(&app);
         let last = rows.last().expect("a row");
@@ -1222,63 +1070,28 @@ mod tests {
             "{rows:#?}"
         );
         writer.write_all(b"\x1b").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
+        assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
         assert!(!app.input_debugger_open());
     }
 
-    /// A paste that began after the closing Escape and never ends is still
-    /// handed to the main UI as a paste, and the reader then lets go.
+    /// What follows the closing Escape in its read, a paste that has not ended
+    /// or a lone UTF-8 lead byte included, is left whole for the next reader,
+    /// and the debugger's reader lets go at once.
     #[test]
-    fn an_unfinished_paste_after_the_close_is_delivered_as_a_paste() {
-        let mut app = test_app(default_bindings());
-        app.agent_filter = Some(TextInput::new());
-        app.focus = FocusPane::Left;
-        open(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
-        let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
-        writer.write_all(b"\x1b[27u\x1b[200~h\ni").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
-        assert!(!app.input_debugger_open());
-        assert_eq!(app.run_input_reader(), RunInputReader::Debugger);
-        app.debug_raw_input
-            .paste
-            .as_mut()
-            .expect("a paste is open")
-            .last -= UNFINISHED_PASTE_WAIT;
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
-        assert_eq!(
-            app.agent_filter.as_ref().map(|f| f.text.as_str()),
-            Some("h i")
-        );
-        assert!(app.debug_raw_input.paste.is_none());
-        assert!(!app.debug_raw_input.reading);
-    }
-
-    /// A leftover after the close that is no escape fragment (a lone UTF-8
-    /// lead byte no continuation follows) is settled by the ambiguity
-    /// timeout and the reader lets go, so the next keys are not swallowed
-    /// as its continuation bytes.
-    #[test]
-    fn a_stray_lead_byte_after_the_close_is_settled_by_the_timeout() {
-        let mut app = test_app(default_bindings());
-        app.agent_filter = Some(TextInput::new());
-        app.focus = FocusPane::Left;
-        open(&mut app);
-        assert!(!app.hand_debug_input_over(|| None));
-        let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
-        writer.write_all(b"\x1b[27u\xe9").expect("write");
-        assert!(!app.poll_debug_raw_input(&reader).expect("poll"));
-        assert!(!app.input_debugger_open());
-        // The reader lets go, so the main UI's own reader takes the next keys.
-        assert!(!app.debug_raw_input.reading);
-        assert_eq!(app.run_input_reader(), RunInputReader::Structured);
-        for c in ['a', 'b'] {
-            let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char(c));
-            assert!(!app.handle_terminal_event(crossterm::event::Event::Key(key)));
+    fn the_rest_of_the_closing_read_is_left_for_the_next_reader() {
+        for rest in [&b"\x1b[200~h\ni"[..], b"\xe9", b"\x1b["] {
+            let mut app = test_app(default_bindings());
+            open(&mut app);
+            let (reader, mut writer) = UnixStream::pair().expect("a socket pair");
+            writer
+                .write_all(&[&b"\x1b[27u"[..], rest].concat())
+                .expect("write");
+            assert!(!app.poll_debug_raw_input(reader.as_fd()).expect("poll"));
+            assert!(!app.input_debugger_open());
+            assert!(!app.debug_raw_input.reading);
+            assert!(app.debug_raw_input.paste.is_none());
+            assert_eq!(app.run_input_reader(), RunInputReader::Structured);
+            assert_eq!(app.terminal_input.take_bytes(), rest);
         }
-        assert_eq!(
-            app.agent_filter.as_ref().map(|f| f.text.as_str()),
-            Some("ab")
-        );
     }
 }

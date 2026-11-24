@@ -22,7 +22,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEvent;
 use dux_core::config::ExtendedKeysMode;
 
 /// Pushes the Kitty protocol's disambiguate level (crossterm's
@@ -524,19 +523,26 @@ fn run_tmux(
     }
 }
 
-/// The host's answer to the Kitty query, and the keys typed while dux waited.
+/// The host's answer to the Kitty query, and every other byte read while dux
+/// waited for it, in the order read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KittyQuery {
     pub(crate) answer: KittyAnswer,
-    pub(crate) keys: Vec<KeyEvent>,
+    pub(crate) typed: Vec<u8>,
+}
+
+/// [`query_kitty`] on standard input: redirected, it hears no answer and the
+/// key reader drops the answer as crossterm does.
+pub(crate) fn query_kitty_on_stdin(output: &mut impl Write, deadline: Duration) -> KittyQuery {
+    query_kitty(std::io::stdin(), output, deadline)
 }
 
 /// Ask the terminal on `input`/`output` whether it speaks the Kitty keyboard
 /// protocol: write `CSI ? u` and then the primary device-attributes query, and
 /// read until the attributes reply or `deadline`. A Kitty reply before the
 /// attributes reply is a yes; the attributes reply alone is a no; silence is
-/// no answer. Every other sequence read meanwhile is a key typed before the
-/// first frame: decoded and kept, or dropped with a debug line.
+/// no answer. Every other byte read meanwhile was typed before the first frame
+/// and is kept undecoded, a sequence the deadline cut included.
 pub(crate) fn query_kitty(
     input: impl AsFd,
     output: &mut impl Write,
@@ -546,7 +552,7 @@ pub(crate) fn query_kitty(
 
     let mut query = KittyQuery {
         answer: KittyAnswer::NoAnswer,
-        keys: Vec::new(),
+        typed: Vec::new(),
     };
     if write_all_and_flush(output, b"\x1b[?u\x1b[c").is_err() {
         return query;
@@ -578,7 +584,9 @@ pub(crate) fn query_kitty(
         };
         for parsed in parser.feed_sequences(&buf[..n]) {
             let seq = parsed.bytes.as_slice();
-            if is_kitty_reply(seq) {
+            if parsed.in_bracket_paste {
+                query.typed.extend_from_slice(seq);
+            } else if is_kitty_reply(seq) {
                 kitty_seen = true;
             } else if !answered && is_device_attributes_reply(seq) {
                 // The rest of this read is still walked: a key typed right
@@ -590,31 +598,15 @@ pub(crate) fn query_kitty(
                 };
                 answered = true;
             } else {
-                keep_typed_key(seq, &mut query.keys);
+                query.typed.extend_from_slice(seq);
             }
         }
     }
-    for parsed in parser
-        .feed_sequences(&[])
-        .into_iter()
-        .chain(parser.resolve_pending_esc())
-    {
-        keep_typed_key(&parsed.bytes, &mut query.keys);
-    }
+    query.typed.extend_from_slice(parser.pending());
     if query.answer == KittyAnswer::NoAnswer && kitty_seen {
         query.answer = KittyAnswer::Yes;
     }
     query
-}
-
-fn keep_typed_key(seq: &[u8], keys: &mut Vec<KeyEvent>) {
-    match crate::key_decode::decode_key(seq) {
-        Some(key) => keys.push(key),
-        None => dux_core::logger::debug(&format!(
-            "dropped a key typed during the Kitty keyboard query that dux cannot read: {:?}",
-            String::from_utf8_lossy(seq)
-        )),
-    }
 }
 
 /// `CSI ? flags u`, the Kitty query's reply.
@@ -646,7 +638,7 @@ pub(crate) fn kitty_answer_once(
     });
     asked.unwrap_or(KittyQuery {
         answer,
-        keys: Vec::new(),
+        typed: Vec::new(),
     })
 }
 
@@ -654,8 +646,7 @@ pub(crate) fn kitty_answer_once(
 pub(crate) static KITTY_ANSWER: OnceLock<KittyAnswer> = OnceLock::new();
 
 /// The App's part in the negotiation: the mode this run started with, its
-/// tmux probes, the host's Kitty answer and the last tmux report, and the keys
-/// typed during the Kitty query, which the first loop iteration handles.
+/// tmux probes, the host's Kitty answer and the last tmux report.
 #[derive(Debug)]
 pub(crate) struct HostKeysState {
     pub(crate) mode: ExtendedKeysMode,
@@ -667,7 +658,6 @@ pub(crate) struct HostKeysState {
     /// The host's answer to the Kitty query, when this run asked it.
     pub(crate) kitty_answer: Option<KittyAnswer>,
     pub(crate) last_tmux_report: Option<TmuxReport>,
-    pub(crate) startup_keys: Vec<KeyEvent>,
     /// The record this run switches extended keys on in: the process's own
     /// [`HOST_KEYS`], which the panic hook and the teardown also read. A test
     /// gives a run a record of its own.
@@ -682,7 +672,6 @@ impl Default for HostKeysState {
             probes: TmuxProbes::default(),
             kitty_answer: None,
             last_tmux_report: None,
-            startup_keys: Vec::new(),
             record: &HOST_KEYS,
         }
     }
@@ -1110,22 +1099,29 @@ mod tests {
         let (yes, written) = answered(b"\x1b[?1u\x1b[?62c", KITTY_QUERY_DEADLINE);
         assert_eq!(written, b"\x1b[?u\x1b[c");
         assert_eq!(yes.answer, KittyAnswer::Yes);
-        assert_eq!(yes.keys, Vec::<KeyEvent>::new());
+        assert_eq!(yes.typed, b"");
 
         let (no, _) = answered(b"\x1b[?62;22c", KITTY_QUERY_DEADLINE);
         assert_eq!(no.answer, KittyAnswer::No);
 
         let (typed, _) = answered(b"x\x1b[?1u\x1b[?62c", KITTY_QUERY_DEADLINE);
         assert_eq!(typed.answer, KittyAnswer::Yes);
-        assert_eq!(typed.keys.len(), 1);
-        assert_eq!(typed.keys[0].code, crossterm::event::KeyCode::Char('x'));
+        assert_eq!(typed.typed, b"x");
 
         let (after, _) = answered(b"\x1b[?1u\x1b[?62cx", KITTY_QUERY_DEADLINE);
         assert_eq!(after.answer, KittyAnswer::Yes);
         assert_eq!(
-            after.keys.iter().map(|key| key.code).collect::<Vec<_>>(),
-            [crossterm::event::KeyCode::Char('x')],
+            after.typed, b"x",
             "a key in the same read as the reply is kept"
+        );
+
+        let (pasted, _) = answered(
+            b"\x1b[?62c\x1b[200~\x1b[?62c\x1b[201~\x1b[",
+            KITTY_QUERY_DEADLINE,
+        );
+        assert_eq!(
+            pasted.typed, b"\x1b[200~\x1b[?62c\x1b[201~\x1b[",
+            "a paste is kept whatever it holds, and so is a key the question cut"
         );
 
         let started = Instant::now();
@@ -1148,7 +1144,7 @@ mod tests {
         late.join().expect("writer");
         drop(theirs);
         assert_eq!(query.answer, KittyAnswer::Yes);
-        assert_eq!(query.keys, Vec::<KeyEvent>::new());
+        assert_eq!(query.typed, b"");
     }
 
     #[test]
@@ -1245,20 +1241,20 @@ mod tests {
             asks += 1;
             KittyQuery {
                 answer: KittyAnswer::Yes,
-                keys: vec![KeyEvent::from(crossterm::event::KeyCode::Char('x'))],
+                typed: b"x".to_vec(),
             }
         });
-        assert_eq!(first.keys.len(), 1);
+        assert_eq!(first.typed, b"x");
         let second = kitty_answer_once(&cell, || {
             asks += 1;
             KittyQuery {
                 answer: KittyAnswer::No,
-                keys: Vec::new(),
+                typed: Vec::new(),
             }
         });
         assert_eq!(asks, 1);
         assert_eq!(second.answer, KittyAnswer::Yes);
-        assert_eq!(second.keys, Vec::<KeyEvent>::new());
+        assert_eq!(second.typed, b"");
     }
 
     #[test]
