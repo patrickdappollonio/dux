@@ -65,6 +65,20 @@ async function holdOn(H, dev, at) {
   return finger
 }
 
+// What a phone's browser may send after the lift, a mouse release and a click
+// on whatever lies under the finger. Headless Chromium's touch lift sends
+// neither (measured: only pointerup and touchend), so a check that merely lifted
+// the finger would pass whatever the card does with them; these are sent by
+// hand, as the page would receive them from a browser that does.
+function sendLiftClick(page, at) {
+  return page.evaluate(({ x, y }) => {
+    const target = document.elementFromPoint(x, y)
+    for (const type of ["mouseup", "click"]) {
+      target?.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }))
+    }
+  }, at)
+}
+
 async function closeCard(H, dev) {
   await dev.page.keyboard.press("Escape")
   await H.waitFor(dev.page, () => document.querySelector('[role="menu"]') === null, "the card to close on Escape")
@@ -124,6 +138,7 @@ module.exports = {
     )
     H.expect(over !== null, `the finger on ${under.name} should be over one of the card's items when the card opens; it is over something else`)
     await finger.end()
+    await sendLiftClick(dev.page, under)
     // Waiting for something NOT to happen: a click that chose the item under
     // the finger would open a dialog or move the page within this time.
     await H.sleep(AFTER_LIFT_MS)
