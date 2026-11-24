@@ -42,6 +42,7 @@ import {
 } from "@/lib/store"
 import type { DuxState } from "@/lib/store"
 import type { DirEntryView } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 // The inline "New folder" affordance beside the current path: a ghost button that
 // swaps for an input + Create/Cancel. On success it navigates INTO the new
@@ -147,7 +148,9 @@ function NewFolderControl({
 // change so the rightmost segment stays visible, and still scrollable and
 // selectable so the path can be copied. Shared by the current-directory header
 // and the selected-target line so the two render identically.
-function PathField({ value }: { value: string }) {
+// "row" shares a wrapping row with the New folder control; "column" sits in a
+// column, where a flex basis would be its height.
+function PathField({ value, place }: { value: string; place: "row" | "column" }) {
   const ref = useRef<HTMLInputElement>(null)
   // useLayoutEffect so the scroll-to-end happens before paint: otherwise the
   // browser paints the leading segment for one frame and snaps to the tail.
@@ -166,7 +169,10 @@ function PathField({ value }: { value: string }) {
       tabIndex={-1}
       value={value}
       aria-label="Path"
-      className="w-full min-w-0 flex-1 basis-56 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+      className={cn(
+        "w-full min-w-0 rounded-lg border border-input bg-input/30 px-2 py-1 font-mono text-xs text-muted-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
+        place === "row" && "flex-1 basis-56",
+      )}
     />
   )
 }
@@ -281,7 +287,7 @@ function SelectionDetails({
         onChange={(event) => setName(event.target.value)}
         placeholder="Project name (optional)"
       />
-      <PathField value={selected} />
+      <PathField value={selected} place="column" />
       {inspecting ? (
         <LoadingSentence spinner="glyph" size="xs">
           Checking the folder…
@@ -485,7 +491,7 @@ function AddProjectBrowser({ open, onClosed }: { open: boolean; onClosed: () => 
       // share a row while both fit and stack when they do not.
       toolbar={
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <PathField value={browsePath} />
+          <PathField value={browsePath} place="row" />
           <NewFolderControl browsePath={browsePath} buttonRef={newFolderRef} />
         </div>
       }

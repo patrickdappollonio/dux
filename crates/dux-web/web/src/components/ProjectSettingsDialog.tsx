@@ -1,6 +1,7 @@
 import { useState } from "react"
 
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
+import { FormGroup } from "@/components/ui/form-group"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   Select,
@@ -140,63 +141,68 @@ function ProjectSettingsForm({ open, onClosed }: { open: boolean; onClosed: () =
       }}
     >
       <div className="grid gap-4">
-        <div className="grid gap-2">
-          <label className="text-sm font-medium">Default provider</label>
-          <Select
-            value={provider}
-            onValueChange={(value) => setProvider(value ?? "")}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="">Inherit global default</SelectItem>
-              {providers.map((p) => (
-                <SelectItem key={p} value={p}>
-                  {p}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <FormGroup layout="stacked" control="single" label="Default provider">
+          {(field) => (
+            <Select
+              value={provider}
+              onValueChange={(value) => setProvider(value ?? "")}
+            >
+              <SelectTrigger {...field} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">Inherit global default</SelectItem>
+                {providers.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    {p}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </FormGroup>
 
-        <div className="grid gap-2">
-          <label className="text-sm font-medium">Auto-reopen agents</label>
-          <Select
-            value={autoReopen}
-            onValueChange={(value) => setAutoReopen(value ?? "inherit")}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="inherit">Inherit global default</SelectItem>
-              <SelectItem value="on">On</SelectItem>
-              <SelectItem value="off">Off</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <FormGroup layout="stacked" control="single" label="Auto-reopen agents">
+          {(field) => (
+            <Select
+              value={autoReopen}
+              onValueChange={(value) => setAutoReopen(value ?? "inherit")}
+            >
+              <SelectTrigger {...field} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="inherit">Inherit global default</SelectItem>
+                <SelectItem value="on">On</SelectItem>
+                <SelectItem value="off">Off</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        </FormGroup>
 
-        <div className="grid gap-2">
-          <label className="text-sm font-medium">Startup command</label>
-          <Textarea
-            value={startup}
-            onChange={(e) => setStartup(e.target.value)}
-            placeholder="npm run dev"
-            className="min-h-16 font-mono"
-          />
-        </div>
+        <FormGroup layout="stacked" control="single" label="Startup command">
+          {(field) => (
+            <Textarea
+              {...field}
+              value={startup}
+              onChange={(e) => setStartup(e.target.value)}
+              placeholder="npm run dev"
+              className="min-h-16 font-mono"
+            />
+          )}
+        </FormGroup>
 
-        <div className="grid gap-2">
-          <label className="text-sm font-medium">Environment</label>
-          <Textarea
-            value={envText}
-            onChange={(e) => setEnvText(e.target.value)}
-            placeholder="KEY=VALUE"
-            className="min-h-32 font-mono"
-          />
-          {leftOutNote ? <p className="text-sm text-muted-foreground">{leftOutNote}</p> : null}
-        </div>
+        <FormGroup layout="stacked" control="single" label="Environment" notes={[{ words: leftOutNote }]}>
+          {(field) => (
+            <Textarea
+              {...field}
+              value={envText}
+              onChange={(e) => setEnvText(e.target.value)}
+              placeholder="KEY=VALUE"
+              className="min-h-32 font-mono"
+            />
+          )}
+        </FormGroup>
       </div>
     </Modal>
   )

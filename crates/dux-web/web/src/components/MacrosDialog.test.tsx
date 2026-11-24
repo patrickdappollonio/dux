@@ -405,6 +405,29 @@ describe("MacrosDialog editor", () => {
     expect(row("Deploy").getAttribute("aria-selected")).toBe("true")
   })
 
+  it("names each field by its label, reads its help with it, and a press on a label reaches its control", async () => {
+    seed(seedMacros)
+    render(<MacrosDialog />)
+    const name = screen.getByRole("textbox", { name: "Name" })
+    const shownOn = screen.getByRole("radiogroup", { name: "Shown on" })
+    const text = screen.getByRole("textbox", { name: "Text" })
+    const said = (el: HTMLElement) =>
+      (el.getAttribute("aria-describedby") ?? "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent)
+    expect(said(shownOn)).toEqual(["Only shown when the agent pane is focused."])
+    expect(said(text)).toEqual([
+      "Each new line is sent as Alt+Enter, so the macro arrives as one prompt; you press Enter to send it.",
+    ])
+    expect((screen.getByText("Name") as HTMLLabelElement).control).toBe(name)
+    expect((screen.getByText("Text") as HTMLLabelElement).control).toBe(text)
+    // The modal puts focus where it opens first, so the press comes after that.
+    await waitFor(() => expect(document.activeElement).not.toBe(document.body))
+    await click(screen.getByText("Shown on"))
+    expect(document.activeElement).toBe(within(shownOn).getByRole("radio", { checked: true }))
+  })
+
   it("offers where a macro is shown as one choice of three, says what it means, and a press changes it", async () => {
     seed(seedMacros)
     render(<MacrosDialog />)
