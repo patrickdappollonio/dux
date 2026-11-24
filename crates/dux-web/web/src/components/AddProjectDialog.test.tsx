@@ -109,6 +109,19 @@ describe("AddProjectDialog picker", () => {
     expect(field.readOnly).toBe(true)
   })
 
+  // The chosen path's line sits in a column, where a flex basis is a height: a
+  // 14rem basis drew a one-line path as a box 224px tall. jsdom computes no
+  // Tailwind, so the classes that size it along the column are what is pinned.
+  it("draws the chosen path's line as tall as its text, while the browse path still shares its row", () => {
+    seed()
+    render(<AddProjectDialog />)
+    fireEvent.click(screen.getByText("Use this folder").closest("button")!)
+    const [browse, chosen] = screen.getAllByDisplayValue("/home/u/notes")
+    const sizing = (el: HTMLElement) => Array.from(el.classList).filter((c) => /^(basis-|flex-1$|grow)/.test(c))
+    expect(sizing(chosen)).toEqual([])
+    expect(sizing(browse)).toEqual(["flex-1", "basis-56"])
+  })
+
   it("names the target folder on the pinned row as the name chip", () => {
     // The commit action is a verb and the current folder's basename, a name
     // in a modal and so the shared chip, not the full path.
