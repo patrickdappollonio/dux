@@ -57,6 +57,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { usePrefersReducedMotion } from "@/hooks/use-reduced-motion"
 import { sessionLabel } from "@/lib/agentWorkspace"
 import { MOUSE_DRAG_ACTIVATION, TOUCH_DRAG_ACTIVATION } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import {
   prActivity,
   prIconClass,
@@ -358,6 +359,7 @@ function PullRequestsView({
     <div data-testid="pull-requests-list" className={LIST}>
       <DndContext
         sensors={sensors}
+        modifiers={SORT_MODIFIERS}
         collisionDetection={closestCenter}
         onDragEnd={handleDragEnd}
       >

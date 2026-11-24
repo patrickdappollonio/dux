@@ -881,16 +881,40 @@ describe("InsetHeader show-Changes summary", () => {
     })
     render(<InsetHeader />)
     const button = screen.getByRole("button", { name: /show changes pane/i })
-    expect(button.textContent).toBe("±3")
+    expect(button.textContent).toBe("3 files")
     // The icon stays: the count is what the pane holds, the glyph is what the
     // press does.
     expect(button.querySelector("svg")).toBeTruthy()
     expect(button.getAttribute("aria-label")).toBe(
-      "Show Changes pane, 3 changed files",
+      "Show Changes pane, 3 files",
     )
   })
 
-  it("shows the ±0 zero state, exactly as the phone does", () => {
+  it("says the word with its count: singular only for exactly one", () => {
+    const words: [number, string][] = [
+      [0, "0 files"],
+      [1, "1 file"],
+      [2, "2 files"],
+      [27, "27 files"],
+    ]
+    for (const [n, text] of words) {
+      mockState = hiddenWith({
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [],
+        unstaged: Array.from({ length: n }, (_, i) => changedFile(`f${i}.rs`, "M")),
+      })
+      const { unmount } = render(<InsetHeader />)
+      const button = screen.getByRole("button", { name: /show changes pane/i })
+      expect(button.textContent).toBe(text)
+      // The count is spoken once, and the name still contains the visible text.
+      expect(button.getAttribute("aria-label")).toBe(`Show Changes pane, ${text}`)
+      unmount()
+    }
+  })
+
+  it("shows the zero state with its word", () => {
     mockState = hiddenWith({
       sessionId: "s1",
       phase: "loaded",
@@ -901,7 +925,7 @@ describe("InsetHeader show-Changes summary", () => {
     render(<InsetHeader />)
     expect(
       screen.getByRole("button", { name: /show changes pane/i }).textContent,
-    ).toBe("±0")
+    ).toBe("0 files")
   })
 
   it("keeps the cluster's one height token when it carries the number", () => {
@@ -1051,11 +1075,11 @@ describe("InsetHeader new tab button", () => {
   })
 })
 
-// THE NAMES OUTRANK THE BUTTONS. While a chip's own text is cut off, New tab…,
-// Theater and Macros… leave the header together for rows in the `⋯`, and they
-// come back once the names fit beside them. jsdom computes no layout, so each
-// test states the widths it needs: an element reporting more scroll width than
-// client width is a cut-off name.
+// THE NAMES OUTRANK THE BUTTONS. While a chip's own text is cut off, the
+// header's controls leave one at a time for rows in the `⋯`, and they come back
+// once the names fit beside them. jsdom computes no layout, so each test states
+// the widths it needs: an element reporting more scroll width than client width
+// is a cut-off name.
 describe("InsetHeader folding the cluster into the pane menu", () => {
   const CLUSTER = ["New tab…", "Theater", "Macros…"]
 
@@ -1086,7 +1110,7 @@ describe("InsetHeader folding the cluster into the pane menu", () => {
     for (const label of CLUSTER) expect(items).not.toContain(label)
   })
 
-  it("moves all three into the menu, under a heading, when a name is cut off", async () => {
+  it("moves every control into the menu, under a heading, while a name stays cut off", async () => {
     cutOffNames()
     mockState = stateFor("main", "main")
     render(<InsetHeader />)
@@ -1228,5 +1252,411 @@ describe("InsetHeader folding the cluster into the pane menu", () => {
       }
       cleanup()
     }
+  })
+})
+
+// A header laid out by hand, since jsdom lays out nothing. The names need
+// NAMES in full; each control stands at its WIDTH; `room` is the row the names
+// have with every control folded, so the row shrinks by each control standing.
+describe("InsetHeader folding one control at a time", () => {
+  const NAMES = 300
+  const WIDTH: Record<string, number> = { "New tab…": 110, Theater: 100, "Macros…": 105 }
+  const SLACK = 8
+  let room = 1000
+  let observers: (() => void)[] = []
+
+  function standing(): string[] {
+    const header = document.querySelector("header")!
+    return Object.keys(WIDTH).filter((word) =>
+      [...header.querySelectorAll("button")].some((b) => b.textContent === word),
+    )
+  }
+  // The reopen control is as wide as its text, ten pixels a character.
+  function reopenWidth(): number {
+    const text = document.querySelector('header button[aria-label^="Show Changes pane"]')?.textContent
+    return (text?.length ?? 0) * 10
+  }
+  function rowWidth(): number {
+    return standing().reduce((w, word) => w - WIDTH[word], room) - reopenWidth()
+  }
+  function isRow(el: Element): boolean {
+    return el.tagName === "DIV" && el.querySelector(":scope > [data-chip]") !== null
+  }
+
+  beforeEach(() => {
+    observers = []
+    // Only the names' row is resized here; a menu's own observers are left out.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(private cb: () => void) {}
+        observe(el: Element) {
+          if (isRow(el)) observers.push(this.cb)
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.hasAttribute("data-fold-name") ? NAMES : 0
+    })
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.hasAttribute("data-fold-name")) return Math.min(NAMES, rowWidth())
+      return isRow(this) ? rowWidth() : 0
+    })
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      const word = this.querySelector("button")?.textContent ?? ""
+      if (this.getAttribute("aria-label")?.startsWith("Show Changes pane")) {
+        const w = (this.textContent?.length ?? 0) * 10
+        return { left: 0, right: w, width: w, top: 0, bottom: 0, height: 0, x: 0, y: 0 } as DOMRect
+      }
+      const parentIsHeader = this.parentElement?.tagName === "HEADER"
+      const width =
+        this.hasAttribute("data-chip")
+          ? Math.min(NAMES, rowWidth())
+          : parentIsHeader && this.tagName === "SPAN" && word in WIDTH
+            ? WIDTH[word]
+            : 0
+      return { left: 0, right: width, width, top: 0, bottom: 0, height: 0, x: 0, y: 0 } as DOMRect
+    })
+  })
+
+  function resizeTo(width: number) {
+    room = width
+    act(() => observers.forEach((cb) => cb()))
+  }
+
+  // What stands for each room, in the header's own order: New tab… outlasts
+  // Macros…, which outlasts Theater.
+  function expected(width: number, words = Object.keys(WIDTH)): string[] {
+    const order = ["New tab…", "Macros…", "Theater"].filter((w) => words.includes(w))
+    let keep = 0
+    let need = NAMES + SLACK
+    for (const word of order) {
+      need += WIDTH[word]
+      if (need > width) break
+      keep++
+    }
+    const kept = order.slice(0, keep)
+    return words.filter((w) => kept.includes(w))
+  }
+
+  // The fold is held until a task after what the header opened has closed.
+  async function afterClose() {
+    await act(() => new Promise((r) => setTimeout(r, 0)))
+  }
+
+  async function menuRows(): Promise<string[]> {
+    fireEvent.click(screen.getByRole("button", { name: /session actions|terminal actions/i }))
+    await screen.findByRole("menu")
+    const rows = screen
+      .getAllByRole("menuitem")
+      .map((el) => el.textContent ?? "")
+      .filter((label) => label in WIDTH)
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    await afterClose()
+    return rows
+  }
+
+  const WIDTHS = [800, 700, 623, 622, 560, 523, 522, 450, 418, 417, 350, 250]
+
+  it("folds Theater, then Macros…, then New tab…, and brings them back in reverse", async () => {
+    mockState = stateFor("main", "main")
+    room = 900
+    render(<InsetHeader />)
+    let last: string[] | null = null
+    for (const width of [...WIDTHS, ...[...WIDTHS].reverse()]) {
+      resizeTo(width)
+      const stand = standing()
+      expect(stand, `standing at ${width}`).toEqual(expected(width))
+      // The menu is opened once per state the header passes through.
+      if (last !== null && stand.join() === last.join()) continue
+      last = stand
+      const rows = await menuRows()
+      expect(rows.sort(), `menu rows at ${width}`).toEqual(
+        Object.keys(WIDTH).filter((w) => !stand.includes(w)).sort(),
+      )
+    }
+  }, 20_000)
+
+  it("folds earlier when the reopen control's word grows wider, with no resize", () => {
+    const hidden = (n: number) =>
+      ({
+        ...stateFor("main", "main"),
+        bootstrap: { show_changes_pane: false },
+        changes: {
+          sessionId: "s1",
+          phase: "loaded",
+          rev: 1,
+          staged: [],
+          unstaged: Array.from({ length: n }, (_, i) => ({
+            path: `f${i}.rs`,
+            status: "M",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+          })),
+        },
+      }) as unknown as DuxState
+    // Room for all three beside "1 file" (60px) and not beside "27 files" (80px).
+    room = NAMES + SLACK + 315 + 60
+    mockState = hidden(1)
+    const { rerender } = render(<InsetHeader />)
+    expect(standing()).toEqual(["New tab…", "Theater", "Macros…"])
+    mockState = hidden(27)
+    rerender(<InsetHeader />)
+    expect(standing()).toEqual(["New tab…", "Macros…"])
+  })
+
+  it("rests in the same state at a width whichever way it was reached", () => {
+    mockState = stateFor("main", "main")
+    room = 900
+    render(<InsetHeader />)
+    for (const width of WIDTHS) {
+      resizeTo(width)
+      const down = standing()
+      resizeTo(250)
+      resizeTo(width)
+      expect(standing(), `at ${width}`).toEqual(down)
+      resizeTo(900)
+      resizeTo(width)
+      expect(standing(), `at ${width}`).toEqual(down)
+    }
+  })
+
+  it("cuts no name off while a control still stands", () => {
+    mockState = stateFor("main", "main")
+    room = 900
+    render(<InsetHeader />)
+    for (let width = 900; width >= 200; width -= 7) {
+      resizeTo(width)
+      if (standing().length > 0) expect(rowWidth(), `at ${width}`).toBeGreaterThanOrEqual(NAMES)
+    }
+  })
+
+  it("folds Theater, then Macros… on a project terminal's pane, which has no New tab…", () => {
+    mockState = {
+      selectedSessionId: null,
+      changesPanePercent: 26,
+      selectedTarget: { kind: "terminal", terminalId: "pt-1", owner: { kind: "project", projectId: "p1" } },
+      spine: {
+        projects: [{ id: "p1", name: "Repo" }],
+        sessions: [],
+        terminals: [{ id: "pt-1", owner: { kind: "project", project_id: "p1" }, label: "Terminal 2" }],
+      },
+    } as unknown as DuxState
+    room = 900
+    render(<InsetHeader />)
+    for (const width of [900, 513, 512, 413, 412, 300]) {
+      resizeTo(width)
+      expect(standing(), `at ${width}`).toEqual(expected(width, ["Theater", "Macros…"]))
+    }
+  })
+
+  it("folds the same way on a row under the take-over card", () => {
+    const base = stateFor("main", "main")
+    mockState = {
+      ...base,
+      selectedTarget: { kind: "terminal", terminalId: "t1", owner: { kind: "session", sessionId: "s1" } },
+      spine: {
+        ...base.spine,
+        terminals: [
+          { id: "t1", owner: { kind: "session", session_id: "s1" }, label: "Terminal 1", has_output: true, foreground_cmd: null },
+        ],
+      },
+    } as unknown as DuxState
+    registerPaneCover("t1", "card", { row: agentRowKey("s1"), driver: "other" })
+    room = 900
+    render(<InsetHeader />)
+    for (const width of [900, 560, 450, 350]) {
+      resizeTo(width)
+      expect(standing(), `at ${width}`).toEqual(expected(width))
+    }
+  })
+
+  it("runs from a lone folded row what its button runs", async () => {
+    mockState = stateFor("main", "main")
+    room = 900
+    render(<InsetHeader />)
+    resizeTo(560)
+    expect(standing()).toEqual(["New tab…", "Macros…"])
+    fireEvent.click(screen.getByRole("button", { name: /session actions/i }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Theater" }))
+    expect(store.toggleTheater).toHaveBeenCalled()
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    await afterClose()
+
+    resizeTo(450)
+    fireEvent.click(screen.getByRole("button", { name: /session actions/i }))
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Macros…" }))
+    expect(await screen.findByText(/no macros found/i, undefined, { timeout: 3000 })).toBeTruthy()
+  }, 10_000)
+
+  // A control is never folded from under what it opened, and the pane's own
+  // menu keeps its rows while it is open; the fold settles once that is closed.
+  describe("while something the header opened is open", () => {
+    const FULL = ["New tab…", "Theater", "Macros…"]
+
+    function menuButton() {
+      return screen.getByRole("button", { name: /session actions/i })
+    }
+
+    it("keeps Macros… standing under its open picker, and folds when the picker closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(screen.getByRole("button", { name: /run a macro/i }))
+      await screen.findByText(/no macros found/i)
+      resizeTo(300)
+      resizeTo(900)
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(screen.getByText(/no macros found/i)).toBeTruthy()
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+      await waitFor(() => expect(standing()).toEqual([]))
+      // Focus came back to the picker's button as it closed, and went on to the
+      // `⋯` rather than down with the button that folded.
+      await waitFor(() => expect(document.activeElement).toBe(menuButton()))
+    }, 10_000)
+
+    it("keeps New tab… standing under its open dialog, and folds when the dialog closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(screen.getByRole("button", { name: "New tab…" }))
+      await screen.findByRole("dialog")
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(screen.getByRole("dialog")).toBeTruthy()
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+
+    it("keeps the dialog a folded New tab… row opened open as the room returns", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      resizeTo(300)
+      fireEvent.click(menuButton())
+      fireEvent.click(await screen.findByRole("menuitem", { name: "New tab…" }))
+      await screen.findByRole("dialog")
+      resizeTo(900)
+      expect(standing()).toEqual([])
+      expect(screen.getByRole("dialog")).toBeTruthy()
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+      await waitFor(() => expect(standing()).toEqual(FULL))
+    }, 10_000)
+
+    it("keeps the pane's menu rows while it is open, and settles when it closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(menuButton())
+      await screen.findByRole("menu")
+      const rows = () => screen.getAllByRole("menuitem").map((el) => el.textContent)
+      const before = rows()
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(rows()).toEqual(before)
+      resizeTo(900)
+      resizeTo(300)
+      expect(rows()).toEqual(before)
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+
+    it("does not hold the fold once a popup that was open has gone with its row", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      const { rerender } = render(<InsetHeader />)
+      fireEvent.click(menuButton())
+      await screen.findByRole("menu")
+      // The pane changes row while the menu is open: a terminal has no New tab….
+      mockState = {
+        selectedSessionId: null,
+        changesPanePercent: 26,
+        selectedTarget: { kind: "terminal", terminalId: "pt-1", owner: { kind: "project", projectId: "p1" } },
+        spine: {
+          projects: [{ id: "p1", name: "Repo" }],
+          sessions: [],
+          terminals: [{ id: "pt-1", owner: { kind: "project", project_id: "p1" }, label: "Terminal 2" }],
+        },
+      } as unknown as DuxState
+      rerender(<InsetHeader />)
+      fireEvent.keyDown(screen.queryByRole("menu") ?? document.body, { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+      resizeTo(300)
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+  })
+
+  it("draws no Theater button for a target whose agent is not in the list yet", () => {
+    mockState = {
+      ...stateFor("main", "main"),
+      spine: { projects: [], sessions: [], terminals: [] },
+    } as unknown as DuxState
+    room = 900
+    render(<InsetHeader />)
+    expect(screen.queryByRole("button", { name: /theater mode/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /run a macro/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /session actions/i })).toBeNull()
+  })
+})
+
+describe("InsetHeader order left to right", () => {
+  function order(): string[] {
+    const named = [
+      ["New tab…", /^New tab…$/],
+      ["Theater", /theater mode/i],
+      ["Macros…", /run a macro/i],
+      ["reopen", /show changes pane/i],
+      ["menu", /session actions/i],
+      ["cog", /^settings$/i],
+    ] as const
+    const found = named
+      .map(([key, name]) => [key, screen.queryByRole("button", { name })] as const)
+      .filter((pair): pair is readonly [string, HTMLElement] => pair[1] !== null)
+    found.sort(([, a], [, b]) =>
+      a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
+    )
+    return found.map(([key]) => key)
+  }
+
+  it("reads the controls, then the pane menu, then the cog, while the Changes pane shows", () => {
+    mockState = stateFor("main", "main")
+    render(<InsetHeader />)
+    expect(order()).toEqual(["New tab…", "Theater", "Macros…", "menu", "cog"])
+  })
+
+  it("puts the reopen control between the controls and the pane menu while the pane is hidden", () => {
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(order()).toEqual(["New tab…", "Theater", "Macros…", "reopen", "menu", "cog"])
+    // The cog alone stays in the spacer that lands it on the window's edge.
+    const spacer = screen.getByTestId("changes-pane-spacer")
+    expect(spacer.contains(screen.getByRole("button", { name: /show changes pane/i }))).toBe(false)
+  })
+
+  it("keeps the reopen control in the header when every control has folded", () => {
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(400)
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(40)
+    mockState = {
+      ...stateFor("main", "main"),
+      bootstrap: { show_changes_pane: false },
+    } as unknown as DuxState
+    render(<InsetHeader />)
+    expect(order()).toEqual(["reopen", "menu", "cog"])
   })
 })

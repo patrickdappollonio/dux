@@ -6,6 +6,7 @@ import { IconTile } from "@/components/IconTile"
 import { ExplainedWhenDisabled } from "@/components/ExplainedWhenDisabled"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
 import { HeaderButton } from "@/components/HeaderButton"
+import { useFoldHold } from "@/hooks/use-fold-to-fit"
 import { InlineCode } from "@/components/ui/inline-code"
 import {
   addToAgentBlockHint,
@@ -67,6 +68,9 @@ export function StackNewDialog({
   onClose: () => void
 }) {
   const { spine, bootstrap, createTabInFlight } = useDux()
+  // The header's controls stay as they are while this is open and until its
+  // close has finished, so it is never taken from under a person.
+  const settleFold = useFoldHold(open)
   // The take-over card coming up closes the dialog for good; a device still
   // waiting to hear who drives keeps it open with its rows disabled.
   const block = useAgentChangeBlock(session)
@@ -90,6 +94,7 @@ export function StackNewDialog({
       open={open}
       vanished={open && underCard}
       onClose={() => onClose()}
+      onClosed={settleFold}
       size="md"
       title="Add to this agent"
       description={

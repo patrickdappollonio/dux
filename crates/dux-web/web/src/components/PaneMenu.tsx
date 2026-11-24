@@ -1,9 +1,10 @@
 import { Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
-import { type ReactNode, type Ref } from "react"
+import { useState, type ReactNode, type Ref } from "react"
 
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
+import { useFoldHold } from "@/hooks/use-fold-to-fit"
 import { useAgentChangeReason } from "@/hooks/use-agent-change-reason"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MenuItemReason } from "@/components/MenuReason"
@@ -71,16 +72,16 @@ export type PaneMenuSettingsDrill = {
   settingsDrill: boolean
 }
 
-/// The computer header's own controls while they are folded into its `⋯`: each
-/// row runs what its button runs. `newTab` is absent where the pane has no New
-/// tab…, and `newTabBlocked` and `macrosBlocked` are the reasons the New tab…
-/// and Macros… buttons would be disabled.
+/// The computer header's controls that are folded into its `⋯` now: each row
+/// runs what its button runs, and a control still in the header is absent.
+/// `newTabBlocked` and `macrosBlocked` are the reasons those buttons would be
+/// disabled.
 export type FoldedHeaderControls = {
   newTab?: () => void
   newTabBlocked?: string | null
-  theater: () => void
-  macros: () => void
-  macrosBlocked: string | null
+  theater?: () => void
+  macros?: () => void
+  macrosBlocked?: string | null
 }
 
 function paneMenuLabel(subject: PaneMenuSubject): string {
@@ -123,10 +124,19 @@ export function PaneMenu({
 } & PaneMenuSettingsDrill) {
   const cluster = appearance === "cluster"
   const label = paneMenuLabel(subject)
+  // The computer header does not fold or unfold a control while this menu is
+  // open, so no row is removed from under the pointer or the keyboard, and the
+  // fold settles once the menu has finished closing.
+  const [menuOpen, setMenuOpen] = useState(false)
+  const settleFold = useFoldHold(menuOpen)
   return (
     <DropdownMenu
+      onOpenChange={setMenuOpen}
       onOpenChangeComplete={(open) => {
+        // The row's dialog or picker opens, and holds the fold itself, before
+        // this menu lets go.
         if (!open) onCloseComplete?.()
+        if (!open) settleFold()
       }}
     >
       <SimpleTooltip content={label}>
@@ -261,8 +271,11 @@ function FoldedHeaderGroup({
   controls: FoldedHeaderControls
   theater: boolean
 }) {
-  const macrosReason = useMenuReason(controls.macrosBlocked)
+  const macrosReason = useMenuReason(controls.macrosBlocked ?? null)
   const newTabReason = useMenuReason(controls.newTabBlocked ?? null)
+  const theaterRow = controls.theater && !theater ? controls.theater : null
+  // Theater folded alone while the mode is on leaves nothing to head.
+  if (!controls.newTab && !theaterRow && !controls.macros) return null
   return (
     <>
       <DropdownMenuGroup>
@@ -280,22 +293,26 @@ function FoldedHeaderGroup({
             <MenuItemReason reason={newTabReason} />
           </>
         ) : null}
-        {theater ? null : (
-          <DropdownMenuItem onClick={controls.theater}>
+        {theaterRow ? (
+          <DropdownMenuItem onClick={theaterRow}>
             <Maximize2 />
             Theater
           </DropdownMenuItem>
-        )}
+        ) : null}
         {/* The reason the Macros… button's tooltip gives, said beneath the row. */}
-        <DropdownMenuItem
-          disabled={macrosReason.text !== null}
-          aria-describedby={macrosReason.describedBy}
-          onClick={controls.macros}
-        >
-          <SquareSlash />
-          Macros…
-        </DropdownMenuItem>
-        <MenuItemReason reason={macrosReason} />
+        {controls.macros ? (
+          <>
+            <DropdownMenuItem
+              disabled={macrosReason.text !== null}
+              aria-describedby={macrosReason.describedBy}
+              onClick={controls.macros}
+            >
+              <SquareSlash />
+              Macros…
+            </DropdownMenuItem>
+            <MenuItemReason reason={macrosReason} />
+          </>
+        ) : null}
       </DropdownMenuGroup>
       <DropdownMenuSeparator />
     </>

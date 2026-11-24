@@ -1,5 +1,5 @@
 // The changed-files summary a control carries while the list itself is off screen: the phone's
-// ±N header button and the desktop header's reopen button. One helper, so the two cannot say
+// count button and the desktop header's reopen button. One helper, so the two cannot say
 // different numbers. It rides the `session.changes` broadcast, so both update with no polling.
 
 import { changesCountFor } from "@/lib/agentVitals"
@@ -9,9 +9,6 @@ import type { ChangesSlice } from "@/lib/store"
 export interface ChangesSummary {
   // Staged plus unstaged files, every status weighted the same.
   count: number
-  // What the control prints: a count, which is data, so it survives on
-  // surfaces that otherwise prefer icon-only controls.
-  label: string
   // What a screen reader is told the number means.
   countLabel: string
 }
@@ -36,7 +33,6 @@ export function changesSummary(
   const count = changesCountFor(changes, sessionId) ?? 0
   return {
     count,
-    label: `±${count}`,
     countLabel: formatRegularCount(count, "changed file"),
   }
 }
