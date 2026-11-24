@@ -67,6 +67,24 @@ struct DebugPaste {
     last: Instant,
 }
 
+/// The event crossterm makes of one complete raw sequence that is not a paste
+/// marker, or `None` for a device report or anything that is no key.
+pub(super) fn event_crossterm_makes_of(seq: &[u8]) -> Option<Event> {
+    if let Some(mouse) = crate::raw_input::parse_sgr_mouse(seq) {
+        Some(Event::Mouse(mouse))
+    } else if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
+        Some(if gained {
+            Event::FocusGained
+        } else {
+            Event::FocusLost
+        })
+    } else if crate::raw_input::is_device_report(seq) {
+        None
+    } else {
+        crate::key_decode::decode_key(seq).map(Event::Key)
+    }
+}
+
 /// The input debugger's raw reader: its own sequence splitter and the paste it
 /// is counting, kept apart from the forwarding path's so an unfinished paste
 /// or sequence never leaks from one to the other.
@@ -561,22 +579,7 @@ impl App {
             self.open_debug_paste();
             return false;
         }
-        let event = if let Some(mouse) = crate::raw_input::parse_sgr_mouse(seq) {
-            Event::Mouse(mouse)
-        } else if let Some(gained) = crate::raw_input::parse_focus_event(seq) {
-            if gained {
-                Event::FocusGained
-            } else {
-                Event::FocusLost
-            }
-        } else if crate::raw_input::is_device_report(seq) {
-            return false;
-        } else if let Some(key) = crate::key_decode::decode_key(seq) {
-            Event::Key(key)
-        } else {
-            return false;
-        };
-        self.handle_terminal_event(event)
+        event_crossterm_makes_of(seq).is_some_and(|event| self.handle_terminal_event(event))
     }
 
     /// Start a paste. While the debugger is open it is counted; one that

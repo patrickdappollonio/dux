@@ -196,7 +196,17 @@ enum NormalizedPaste {
 
 struct RawInputPlan {
     actions: Vec<RawSeqAction>,
+    /// For each action, the index of the sequence it was classified from.
+    origins: Vec<usize>,
     normalized_paste_forwarded: bool,
+}
+
+/// How a raw-input batch ended before its last action.
+struct RawBatchEnd {
+    should_exit: bool,
+    /// The action after which the rest of the read is handed on to whichever
+    /// reader takes input now, or `None` when the rest is dropped.
+    hand_on_after: Option<usize>,
 }
 
 struct RawInputDispatch {
@@ -5362,6 +5372,8 @@ pub(crate) use pr_clone::{PrCloneAwaiting, PrCloneFolderAnswer, PrEdit, PullRequ
 pub(crate) use pr_clone::{PrFolder, PrReviewQuestion};
 mod project_actions;
 mod pty_ownership;
+#[cfg(test)]
+mod raw_input_handover_tests;
 mod redraw;
 pub(crate) use redraw::RedrawGate;
 #[cfg(test)]

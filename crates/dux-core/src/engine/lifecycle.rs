@@ -7967,6 +7967,100 @@ mod tests {
         }
     }
 
+    /// Input to a program that has stopped reading fills its write queue, and
+    /// what does not fit is dropped. That loss is said on the worker lane both
+    /// surfaces drain, once while its warning is on screen, and never for input
+    /// that arrived.
+    #[test]
+    fn dropped_input_is_said_once_per_episode() {
+        let (mut engine, _tmp) = test_engine();
+        let worktree = tempfile::tempdir().expect("worktree dir");
+        engine.projects.push(sample_project(
+            "p1",
+            worktree.path().to_string_lossy().as_ref(),
+        ));
+        let mut session = sample_session("s1", "p1", "feat");
+        session
+            .workspace
+            .as_managed_mut()
+            .expect("managed test session")
+            .worktree_path = worktree.path().to_string_lossy().to_string();
+        engine.sessions.push(session);
+        engine.config.terminal.command = "sh".to_string();
+        // In line-by-line mode Linux discards input past its line buffer
+        // instead of blocking the writer, so the queue would never fill: the
+        // flood waits for the program to say its terminal is raw.
+        engine.config.terminal.args = vec![
+            "-c".to_string(),
+            "stty raw -echo; printf ready; sleep 30".to_string(),
+        ];
+        let (tid, _) = engine
+            .create_companion_terminal("s1", 24, 80)
+            .expect("create companion terminal");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !engine
+            .companion_terminals
+            .get(&tid)
+            .expect("live")
+            .client
+            .has_output()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the program never said its terminal is raw"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let drop_statuses = |engine: &mut Engine| {
+            let mut found = Vec::new();
+            while let Ok(event) = engine.worker_rx.try_recv() {
+                if let crate::worker::WorkerEvent::PollerStatus(status) = event
+                    && status.key.as_deref() == Some(&format!("pty-input-dropped:{tid}"))
+                {
+                    found.push(status);
+                }
+            }
+            found
+        };
+
+        let client = &engine.companion_terminals.get(&tid).expect("live").client;
+        assert!(client.enqueue_bytes(b"hello"), "a short write fits");
+        engine.poll_pty_activity();
+        assert!(drop_statuses(&mut engine).is_empty(), "nothing was dropped");
+
+        let client = &engine.companion_terminals.get(&tid).expect("live").client;
+        let chunk = [b'x'; 64];
+        let dropped = (0..4 * crate::pty::PTY_WRITE_QUEUE_CAP)
+            .filter(|_| !client.enqueue_bytes(&chunk))
+            .count();
+        assert!(
+            dropped > 0,
+            "test premise: the queue filled and dropped input"
+        );
+        engine.poll_pty_activity();
+        let said = drop_statuses(&mut engine);
+        assert_eq!(said.len(), 1, "one warning for the episode");
+        assert_eq!(said[0].tone, crate::statusline::StatusTone::Warning);
+        assert!(
+            said[0].message.contains("was dropped"),
+            "{}",
+            said[0].message
+        );
+
+        // The kernel may still be moving earlier input into the program's own
+        // buffer, which frees a little room, so type until the queue is full.
+        let client = &engine.companion_terminals.get(&tid).expect("live").client;
+        assert!(
+            (0..crate::pty::PTY_WRITE_QUEUE_CAP).any(|_| !client.enqueue_bytes(&chunk)),
+            "the program is still not reading"
+        );
+        engine.poll_pty_activity();
+        assert!(
+            drop_statuses(&mut engine).is_empty(),
+            "a drop inside the same episode is not said again"
+        );
+    }
+
     #[test]
     fn closing_a_terminal_clears_its_activity_and_input_entries() {
         let (mut engine, _tmp) = test_engine();

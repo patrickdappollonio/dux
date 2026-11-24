@@ -13,7 +13,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -630,7 +630,7 @@ fn clamp_replay_top(full_top: i32, bottom: i32) -> i32 {
 /// thread. When a child stops reading its input the writer thread blocks and the
 /// queue fills; past this cap, new chunks are dropped rather than blocking the
 /// caller: a child that is not reading would discard the input anyway.
-const PTY_WRITE_QUEUE_CAP: usize = 1024;
+pub(crate) const PTY_WRITE_QUEUE_CAP: usize = 1024;
 
 /// How long `PtyWriter::drop` will wait for the writer thread to acknowledge its
 /// shutdown signal before abandoning the join. A well-behaved teardown (child
@@ -693,12 +693,82 @@ struct PtyWriter {
     /// been sent and before the join completes.
     tx: Option<std::sync::mpsc::SyncSender<PtyWriteMsg>>,
     thread: Option<thread::JoinHandle<()>>,
+    input_drops: Arc<InputDropEpisode>,
+}
+
+/// Input dropped by a full write queue, reported once per episode: an episode
+/// opens at the first dropped chunk and closes when the writer drains the queue.
+/// A drop that comes once the episode's last report has had its time on screen
+/// is reported again, so a program stuck for an hour does not swallow typing
+/// in silence after the first warning has cleared.
+///
+/// Two losses are never reported. On Linux a program whose terminal is in
+/// line-by-line (canonical) mode never blocks the writer: the kernel discards
+/// what does not fit in its line buffer, so the queue never fills. And a drop while the last
+/// report is still on screen is not said again, so a stuck program does not
+/// warn on every keystroke.
+#[derive(Default)]
+struct InputDropEpisode {
+    /// Cleared by the writer thread each time it finds the queue empty.
+    open: AtomicBool,
+    /// Set by a drop, taken by [`InputDropEpisode::take_report`].
+    dropped: AtomicBool,
+    times: Mutex<InputDropTimes>,
+}
+
+#[derive(Default)]
+struct InputDropTimes {
+    /// The episode's first drop has not been reported yet.
+    new_episode: bool,
+    last_drop: Option<Instant>,
+    last_report: Option<Instant>,
+}
+
+impl InputDropEpisode {
+    fn note_drop(&self) {
+        let opened = !self.open.swap(true, Ordering::AcqRel);
+        {
+            let mut times = self.times.lock().unwrap_or_else(PoisonError::into_inner);
+            times.new_episode |= opened;
+            times.last_drop = Some(Instant::now());
+        }
+        self.dropped.store(true, Ordering::Release);
+    }
+
+    /// Whether to report the drops since the last call: always for a new
+    /// episode, and again for a drop that came at least `repeat_after` after
+    /// the last report. `None` never reports an episode twice.
+    fn take_report(&self, now: Instant, repeat_after: Option<Duration>) -> bool {
+        if !self.dropped.swap(false, Ordering::AcqRel) {
+            return false;
+        }
+        let mut times = self.times.lock().unwrap_or_else(PoisonError::into_inner);
+        let repeat = match (repeat_after, times.last_drop, times.last_report) {
+            (Some(after), Some(dropped), Some(reported)) => {
+                dropped.saturating_duration_since(reported) >= after
+            }
+            _ => false,
+        };
+        let report = std::mem::take(&mut times.new_episode) || repeat;
+        if report {
+            times.last_report = Some(now);
+        }
+        report
+    }
 }
 
 impl PtyWriter {
     /// Spawn the writer thread around the PTY master `writer`.
     fn spawn(mut writer: Box<dyn Write + Send>) -> Self {
         let (tx, rx) = std::sync::mpsc::sync_channel::<PtyWriteMsg>(PTY_WRITE_QUEUE_CAP);
+        let input_drops = Arc::new(InputDropEpisode::default());
+        let episode = Arc::clone(&input_drops);
+        let next_message = move || {
+            rx.try_recv().or_else(|_| {
+                episode.open.store(false, Ordering::Release);
+                rx.recv()
+            })
+        };
         let thread = thread::spawn(move || {
             // A blocking write here only ever stalls THIS thread. On teardown the
             // child's process group is killed first, which closes the PTY and makes
@@ -708,7 +778,7 @@ impl PtyWriter {
             // reader thread holds one) can never prevent the thread from stopping.
             // Loop exits on `Shutdown` or a channel error (the pattern stops
             // matching), or on a write error (explicit break below).
-            while let Ok(PtyWriteMsg::Bytes(chunk)) = rx.recv() {
+            while let Ok(PtyWriteMsg::Bytes(chunk)) = next_message() {
                 if writer.write_all(&chunk).is_err() {
                     break;
                 }
@@ -718,6 +788,7 @@ impl PtyWriter {
         Self {
             tx: Some(tx),
             thread: Some(thread),
+            input_drops,
         }
     }
 
@@ -734,10 +805,19 @@ impl PtyWriter {
     /// blocks: a full queue (child not draining) drops the chunk, and a gone
     /// writer thread (child exited) is a no-op.
     fn send(&self, bytes: Vec<u8>) -> bool {
-        match self.tx.as_ref() {
+        let queued = match self.tx.as_ref() {
             Some(tx) => pty_queue_send(tx, bytes),
             None => true,
+        };
+        if !queued {
+            self.input_drops.note_drop();
         }
+        queued
+    }
+
+    /// See [`InputDropEpisode::take_report`].
+    fn take_input_drop_report(&self, repeat_after: Option<Duration>) -> bool {
+        self.input_drops.take_report(Instant::now(), repeat_after)
     }
 }
 
@@ -1557,6 +1637,14 @@ impl PtyClient {
         let queued = self.writer.send(bytes.to_vec());
         self.dirty.store(true, Ordering::Release);
         queued
+    }
+
+    /// Whether input written to this pty was dropped by a full write queue since
+    /// the last call and should be said. Answers `true` once per episode of
+    /// drops, and again for a drop at least `repeat_after` after the last `true`;
+    /// an episode ends when the program has read everything queued for it.
+    pub fn take_input_drop_report(&self, repeat_after: Option<Duration>) -> bool {
+        self.writer.take_input_drop_report(repeat_after)
     }
 
     /// Get an owned snapshot of the currently visible terminal viewport.
@@ -7774,12 +7862,37 @@ mod tests {
 
         // Release the stalled write so the writer thread can drain and exit, then
         // drop the writer (its Drop joins the thread) once observed.
-        {
+        let set_gate = |open: bool| {
             let (lock, cvar) = &*gate;
-            *lock.lock().unwrap() = true;
+            *lock.lock().unwrap() = open;
             cvar.notify_all();
-        }
+        };
+        set_gate(true);
         let writer = flooder.join().expect("flooder thread panicked");
+        assert!(
+            writer.take_input_drop_report(None),
+            "the drops are reported"
+        );
+        assert!(!writer.take_input_drop_report(None), "once per episode");
+
+        // Draining the queue ends the episode, so the next flood is a new one.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while writer.input_drops.open.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queue never drained"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        set_gate(false);
+        for _ in 0..(PTY_WRITE_QUEUE_CAP * 2) {
+            writer.send(vec![b'x'; 64]);
+        }
+        assert!(
+            writer.take_input_drop_report(None),
+            "a new episode is reported"
+        );
+        set_gate(true);
         drop(writer);
 
         assert!(
@@ -7787,6 +7900,39 @@ mod tests {
             "PtyWriter::send blocked while the underlying write was stalled; it must \
              queue-or-drop and never block the calling thread"
         );
+    }
+
+    #[test]
+    fn a_drop_once_the_warning_has_cleared_is_reported_again() {
+        let episode = InputDropEpisode::default();
+        let window = Some(Duration::from_secs(10));
+        let long_ago = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .expect("a minute-old instant");
+
+        assert!(
+            !episode.take_report(Instant::now(), window),
+            "nothing dropped"
+        );
+        episode.note_drop();
+        assert!(episode.take_report(long_ago, window), "a new episode");
+        episode.note_drop();
+        assert!(
+            episode.take_report(Instant::now(), window),
+            "a drop after the last warning cleared"
+        );
+        episode.note_drop();
+        assert!(
+            !episode.take_report(Instant::now(), window),
+            "a drop while the warning is up"
+        );
+        assert!(!episode.take_report(Instant::now(), window), "no new drop");
+
+        let without_auto_clear = InputDropEpisode::default();
+        without_auto_clear.note_drop();
+        assert!(without_auto_clear.take_report(long_ago, None));
+        without_auto_clear.note_drop();
+        assert!(!without_auto_clear.take_report(Instant::now(), None));
     }
 
     #[test]
