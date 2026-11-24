@@ -1268,6 +1268,52 @@ mod real_terminal {
     fn the_run_loop_reads_the_terminal_when_standard_input_is_a_closed_pipe() {
         a_burst_and_a_resize_reach_the_run_loop(ChildStdin::ClosedPipe);
     }
+
+    const FORCE_REDRAW_CHILD: &str =
+        "app::input_handover_tests::real_terminal::child_force_redraws_with_keys_waiting";
+
+    /// Runs the run loop on the screen dux draws on, and once keys are waiting
+    /// in the terminal, forces a redraw before reading them.
+    #[test]
+    #[ignore = "runs only as the child of a test in this module, in a pseudo-terminal"]
+    fn child_force_redraws_with_keys_waiting() {
+        let Some(dir) = child_dir() else {
+            return;
+        };
+        let (mut app, _serving) = app_typing_into(&dir.join("received"), WINDOWED);
+        let mut screen = enter_tui_terminal().expect("the screen dux draws on");
+        std::fs::write(dir.join("ready"), b"").expect("ready marker");
+        let terminal = crate::terminal_input::terminal();
+        wait_until(Duration::from_secs(30), "keys to be typed", || {
+            input::wait_for_input_or_wake(terminal, None, Duration::ZERO)
+                .expect("look at the terminal")
+                .input
+        });
+        app.notes.force_redraw = true;
+        app.refresh_run_terminal(&mut screen);
+        while !dir.join("done").exists() {
+            app.draw_run_frame(&mut screen);
+            assert!(!app.poll_run_input(), "the app asked to exit");
+        }
+        ratatui::restore();
+        std::fs::write(dir.join("result.tmp"), b"done").expect("result file");
+        std::fs::rename(dir.join("result.tmp"), dir.join("result")).expect("result file");
+    }
+
+    /// Keys waiting in the terminal when a redraw is forced reach the reader
+    /// after it, and a cursor-position report among them types nothing.
+    #[test]
+    fn keys_waiting_at_a_force_redraw_reach_the_interface() {
+        let child = PtyChild::start(FORCE_REDRAW_CHILD, "");
+        let received = child.dir.path().join("received");
+        child.type_bytes(b"abc\x1b[1;1R");
+        wait_until(
+            Duration::from_secs(20),
+            "the program to receive abc",
+            || std::fs::read(&received).unwrap_or_default() == b"abc",
+        );
+        assert_eq!(child.finish(), "done");
+    }
 }
 
 /// A terminal's late answer to a question dux asked, such as its background

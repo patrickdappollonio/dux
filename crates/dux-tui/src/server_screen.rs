@@ -27,7 +27,7 @@
 
 use crate::numeric::usize_to_u16_wrapping;
 use std::collections::VecDeque;
-use std::io::{Stdout, Write, stdout};
+use std::io::{Write, stdout};
 use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,8 +36,6 @@ use std::time::Instant;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::{cursor, execute, terminal};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -405,7 +403,7 @@ static TERMINAL_GATE: TerminalGate = TerminalGate::new();
 /// The interactive server status screen. Owns the terminal raw/alt-screen
 /// lifecycle for as long as it lives and restores everything in `Drop`.
 pub struct ServerStatusScreen {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: crate::screen_backend::ScreenTerminal,
     theme: Theme,
     bindings: RuntimeBindings,
     /// Every bound URL, shown in the header so the user can pick one.
@@ -889,13 +887,13 @@ fn place_log(
 /// Enable raw mode, enter the alternate screen, hide the cursor, and build the
 /// ratatui terminal. On any failure after raw mode is enabled, undo the partial
 /// setup before returning the error.
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+fn enter_terminal() -> Result<crate::screen_backend::ScreenTerminal> {
     terminal::enable_raw_mode()?;
     if let Err(err) = execute!(stdout(), terminal::EnterAlternateScreen, cursor::Hide) {
         let _ = terminal::disable_raw_mode();
         return Err(err.into());
     }
-    match Terminal::new(CrosstermBackend::new(stdout())) {
+    match crate::screen_backend::screen_terminal() {
         Ok(terminal) => Ok(terminal),
         Err(err) => {
             let _ = execute!(stdout(), terminal::LeaveAlternateScreen, cursor::Show);

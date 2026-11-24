@@ -20,6 +20,7 @@ mod numeric;
 mod pty_child;
 mod raw_input;
 mod resize_wake;
+mod screen_backend;
 mod server_screen;
 mod terminal_input;
 mod theme;

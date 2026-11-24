@@ -6160,7 +6160,7 @@ impl App {
         self.start_background_server_from_config();
     }
 
-    fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> RunExit {
+    fn run_loop(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) -> RunExit {
         loop {
             if self.shutdown_flag.load(Ordering::Relaxed) {
                 return RunExit::Quit;
@@ -6233,7 +6233,7 @@ impl App {
         }
     }
 
-    fn refresh_run_terminal(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+    fn refresh_run_terminal(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) {
         if self.sigwinch_flag.swap(false, Ordering::Relaxed) {
             self.mark_frame_dirty();
             self.note_host_resized();
@@ -6247,7 +6247,7 @@ impl App {
         }
         self.notes.force_redraw = false;
         self.mark_frame_dirty();
-        if let Err(err) = terminal.clear() {
+        if let Err(err) = crate::screen_backend::clear_screen(terminal) {
             self.report_runtime_error("force redraw failed", &err);
         }
         let _ = execute!(
@@ -6267,7 +6267,7 @@ impl App {
         }
     }
 
-    fn draw_run_frame(&mut self, terminal: &mut ratatui::DefaultTerminal) {
+    fn draw_run_frame(&mut self, terminal: &mut crate::screen_backend::ScreenTerminal) {
         match terminal.draw(|frame| self.render(frame)) {
             Ok(_) => {
                 if self.note_draw_succeeded() {
@@ -9994,10 +9994,10 @@ pub(crate) fn runtime_project_to_config(
 /// restores the host terminal on a panic on ANY thread, including a worker
 /// panic dux catches and keeps running after. A partial failure is undone by
 /// the unconditional teardown in [`App::run`].
-fn enter_tui_terminal() -> std::io::Result<ratatui::DefaultTerminal> {
+fn enter_tui_terminal() -> std::io::Result<crate::screen_backend::ScreenTerminal> {
     crossterm::terminal::enable_raw_mode()?;
     execute!(stdout(), crossterm::terminal::EnterAlternateScreen)?;
-    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))
+    crate::screen_backend::screen_terminal()
 }
 
 /// Turn off the input modes [`App::run`] turns on beside raw mode and the
