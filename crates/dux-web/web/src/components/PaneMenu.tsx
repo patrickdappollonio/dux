@@ -1,9 +1,10 @@
 import { Maximize2, Plus, Settings, SquareSlash } from "lucide-react"
-import { type ReactNode, type Ref } from "react"
+import { useState, type ReactNode, type Ref } from "react"
 
 import { EllipsisMenuTrigger } from "@/components/EllipsisMenuTrigger"
 import { AppMenuBody } from "@/components/AppMenu"
 import { AgentActionsMenu } from "@/components/AgentActionsMenu"
+import { useFoldHold } from "@/hooks/use-fold-to-fit"
 import { useAgentChangeReason } from "@/hooks/use-agent-change-reason"
 import { InputMenuItems } from "@/components/InputMenuItems"
 import { MenuItemReason } from "@/components/MenuReason"
@@ -123,10 +124,19 @@ export function PaneMenu({
 } & PaneMenuSettingsDrill) {
   const cluster = appearance === "cluster"
   const label = paneMenuLabel(subject)
+  // The computer header does not fold or unfold a control while this menu is
+  // open, so no row is removed from under the pointer or the keyboard, and the
+  // fold settles once the menu has finished closing.
+  const [menuOpen, setMenuOpen] = useState(false)
+  const settleFold = useFoldHold(menuOpen)
   return (
     <DropdownMenu
+      onOpenChange={setMenuOpen}
       onOpenChangeComplete={(open) => {
+        // The row's dialog or picker opens, and holds the fold itself, before
+        // this menu lets go.
         if (!open) onCloseComplete?.()
+        if (!open) settleFold()
       }}
     >
       <SimpleTooltip content={label}>

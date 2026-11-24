@@ -1347,6 +1347,11 @@ describe("InsetHeader folding one control at a time", () => {
     return words.filter((w) => kept.includes(w))
   }
 
+  // The fold is held until a task after what the header opened has closed.
+  async function afterClose() {
+    await act(() => new Promise((r) => setTimeout(r, 0)))
+  }
+
   async function menuRows(): Promise<string[]> {
     fireEvent.click(screen.getByRole("button", { name: /session actions|terminal actions/i }))
     await screen.findByRole("menu")
@@ -1356,6 +1361,7 @@ describe("InsetHeader folding one control at a time", () => {
       .filter((label) => label in WIDTH)
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    await afterClose()
     return rows
   }
 
@@ -1485,12 +1491,125 @@ describe("InsetHeader folding one control at a time", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Theater" }))
     expect(store.toggleTheater).toHaveBeenCalled()
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+    await afterClose()
 
     resizeTo(450)
     fireEvent.click(screen.getByRole("button", { name: /session actions/i }))
     fireEvent.click(await screen.findByRole("menuitem", { name: "Macros…" }))
     expect(await screen.findByText(/no macros found/i, undefined, { timeout: 3000 })).toBeTruthy()
   }, 10_000)
+
+  // A control is never folded from under what it opened, and the pane's own
+  // menu keeps its rows while it is open; the fold settles once that is closed.
+  describe("while something the header opened is open", () => {
+    const FULL = ["New tab…", "Theater", "Macros…"]
+
+    function menuButton() {
+      return screen.getByRole("button", { name: /session actions/i })
+    }
+
+    it("keeps Macros… standing under its open picker, and folds when the picker closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(screen.getByRole("button", { name: /run a macro/i }))
+      await screen.findByText(/no macros found/i)
+      resizeTo(300)
+      resizeTo(900)
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(screen.getByText(/no macros found/i)).toBeTruthy()
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" })
+      await waitFor(() => expect(standing()).toEqual([]))
+      // Focus came back to the picker's button as it closed, and went on to the
+      // `⋯` rather than down with the button that folded.
+      await waitFor(() => expect(document.activeElement).toBe(menuButton()))
+    }, 10_000)
+
+    it("keeps New tab… standing under its open dialog, and folds when the dialog closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(screen.getByRole("button", { name: "New tab…" }))
+      await screen.findByRole("dialog")
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(screen.getByRole("dialog")).toBeTruthy()
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+
+    it("keeps the dialog a folded New tab… row opened open as the room returns", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      resizeTo(300)
+      fireEvent.click(menuButton())
+      fireEvent.click(await screen.findByRole("menuitem", { name: "New tab…" }))
+      await screen.findByRole("dialog")
+      resizeTo(900)
+      expect(standing()).toEqual([])
+      expect(screen.getByRole("dialog")).toBeTruthy()
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" })
+      await waitFor(() => expect(standing()).toEqual(FULL))
+    }, 10_000)
+
+    it("keeps the pane's menu rows while it is open, and settles when it closes", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      render(<InsetHeader />)
+      fireEvent.click(menuButton())
+      await screen.findByRole("menu")
+      const rows = () => screen.getAllByRole("menuitem").map((el) => el.textContent)
+      const before = rows()
+      resizeTo(300)
+      expect(standing()).toEqual(FULL)
+      expect(rows()).toEqual(before)
+      resizeTo(900)
+      resizeTo(300)
+      expect(rows()).toEqual(before)
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+
+    it("does not hold the fold once a popup that was open has gone with its row", async () => {
+      mockState = stateFor("main", "main")
+      room = 900
+      const { rerender } = render(<InsetHeader />)
+      fireEvent.click(menuButton())
+      await screen.findByRole("menu")
+      // The pane changes row while the menu is open: a terminal has no New tab….
+      mockState = {
+        selectedSessionId: null,
+        changesPanePercent: 26,
+        selectedTarget: { kind: "terminal", terminalId: "pt-1", owner: { kind: "project", projectId: "p1" } },
+        spine: {
+          projects: [{ id: "p1", name: "Repo" }],
+          sessions: [],
+          terminals: [{ id: "pt-1", owner: { kind: "project", project_id: "p1" }, label: "Terminal 2" }],
+        },
+      } as unknown as DuxState
+      rerender(<InsetHeader />)
+      fireEvent.keyDown(screen.queryByRole("menu") ?? document.body, { key: "Escape" })
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull())
+      resizeTo(300)
+      await waitFor(() => expect(standing()).toEqual([]))
+    }, 10_000)
+  })
+
+  it("draws no Theater button for a target whose agent is not in the list yet", () => {
+    mockState = {
+      ...stateFor("main", "main"),
+      spine: { projects: [], sessions: [], terminals: [] },
+    } as unknown as DuxState
+    room = 900
+    render(<InsetHeader />)
+    expect(screen.queryByRole("button", { name: /theater mode/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /run a macro/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /session actions/i })).toBeNull()
+  })
 })
 
 describe("InsetHeader order left to right", () => {

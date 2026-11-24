@@ -14,7 +14,7 @@ import { SimpleTooltip } from "@/components/SimpleTooltip"
 import { NewTabButton, StackNewDialog } from "@/components/StackNewDialog"
 import { TheaterToggle } from "@/components/TheaterToggle"
 import { HEADER_BUTTON_ROW, HeaderButton } from "@/components/HeaderButton"
-import { useFoldToFit } from "@/hooks/use-fold-to-fit"
+import { FoldHoldContext, useFoldToFit } from "@/hooks/use-fold-to-fit"
 import { useMacrosBlockedHint } from "@/hooks/use-macros-blocked"
 import { useTheaterToggleFocusWhen } from "@/hooks/use-theater"
 import {
@@ -114,7 +114,7 @@ export function InsetHeader() {
   // is also the state in which the phone draws no count control at all.
   const summary = changesSummary(dux.changes, session?.id)
   const reopenWords = summary ? formatRegularCount(summary.count, "change") : undefined
-  const { isFolded, settled, rowRef, itemRef } = useFoldToFit({
+  const { isFolded, settled, rowRef, itemRef, hold } = useFoldToFit({
     enabled: Boolean(paneSubject && selectedTarget),
     items: foldItems,
     // The reopen control stands beside the names and is as wide as its words,
@@ -147,6 +147,9 @@ export function InsetHeader() {
     : "Show Changes pane"
 
   return (
+    // Whatever a control opens, and the pane's own menu, holds the fold while
+    // it is open, so nothing leaves from under it.
+    <FoldHoldContext.Provider value={hold}>
     <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
       {/* The upward continuation of the changes-panel divider. Absolutely
           positioned so the offset resolves against the header's full box: a
@@ -197,7 +200,9 @@ export function InsetHeader() {
           <NewTabButton session={newTabSession} />
         </span>
       ) : null}
-      {selectedTarget && !folded.theater ? (
+      {/* Only with the `⋯` its row folds into: a target is selected a moment
+          before its agent reaches the list, and Theater must not stand alone. */}
+      {selectedTarget && paneSubject && !folded.theater ? (
         <span ref={itemRef("theater")} className="flex shrink-0">
           <TheaterToggle settled={settled} />
         </span>
@@ -246,6 +251,7 @@ export function InsetHeader() {
         <AppMenu />
       </div>
     </header>
+    </FoldHoldContext.Provider>
   )
 }
 
