@@ -2,6 +2,7 @@ import { useId, useState } from "react"
 import { notifyError, notifySuccess } from "@/lib/notify"
 import { git } from "@/lib/git"
 import { Modal, useHeldWhileClosed } from "@/components/modal"
+import { FormGroup } from "@/components/ui/form-group"
 import { Textarea } from "@/components/ui/textarea"
 import {
   agentChangeBlockReason,
@@ -72,20 +73,24 @@ export function CommitDialog() {
         disabledReason: reason ?? (commitDraft.trim() ? null : "Write a commit message first."),
       }}
     >
-      <Textarea
-        placeholder="Commit message…"
-        value={commitDraft}
-        onChange={(e) => setCommitDraft(e.target.value)}
-        className="min-h-24 resize-none"
-        readOnly={blocked}
-        aria-describedby={blocked ? reasonId : undefined}
-        onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-            e.preventDefault()
-            void handleCommit()
-          }
-        }}
-      />
+      <FormGroup layout="stacked" control="single" spokenName="Commit message" describedBy={blocked ? reasonId : undefined}>
+        {(field) => (
+          <Textarea
+            {...field}
+            placeholder="Commit message…"
+            value={commitDraft}
+            onChange={(e) => setCommitDraft(e.target.value)}
+            className="min-h-24 resize-none"
+            readOnly={blocked}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault()
+                void handleCommit()
+              }
+            }}
+          />
+        )}
+      </FormGroup>
       {blocked ? (
         <p id={reasonId} className="text-sm text-muted-foreground">
           {reason}

@@ -116,6 +116,9 @@ describe("CommitDialog while this page does not drive the agent", () => {
         "This agent is active on another device, so actions that modify it are disabled. Take over the agent to use them here.",
       ),
     ).toBeTruthy()
+    // The box is named for what it takes, and the reason is read with it.
+    expect(screen.getByRole("textbox", { name: "Commit message" })).toBe(box)
+    expect(document.getElementById(box.getAttribute("aria-describedby")!)?.textContent).toMatch(/active on another device/)
     fireEvent.keyDown(box, { key: "Enter", ctrlKey: true })
     expect(commit).not.toHaveBeenCalled()
 
