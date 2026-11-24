@@ -4,6 +4,8 @@ import { ContextMenu as ContextMenuPrimitive } from "@base-ui/react/context-menu
 import { cn } from "@/lib/utils"
 import { useBackDismiss } from "@/hooks/use-back-dismiss"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { guardOpeningTouch, trackTouches } from "@/lib/openingTouch"
+import { usePopupFinalFocus } from "@/lib/popupFinalFocus"
 import {
   SHEET_BACKDROP_CLASS,
   SHEET_POPUP_CLASS,
@@ -15,6 +17,9 @@ import { ChevronRightIcon, CheckIcon } from "lucide-react"
 // (`useBackDismiss`).
 function ContextMenu({ ...props }: ContextMenuPrimitive.Root.Props) {
   const back = useBackDismiss(props)
+  // Whether a finger is down is only knowable from before the menu opens, so
+  // the watch starts with the first menu on the page (`lib/openingTouch.ts`).
+  React.useEffect(() => trackTouches(), [])
   return <ContextMenuPrimitive.Root data-slot="context-menu" {...props} {...back} />
 }
 
@@ -37,6 +42,12 @@ function ContextMenuTrigger({
   )
 }
 
+// Mounted inside the portal, so it exists exactly while the card is open.
+function OpeningTouchGuard() {
+  React.useEffect(() => guardOpeningTouch(), [])
+  return null
+}
+
 function ContextMenuContent({
   className,
   align = "start",
@@ -44,6 +55,7 @@ function ContextMenuContent({
   side = "right",
   sideOffset = 0,
   anchor,
+  finalFocus,
   ...props
 }: ContextMenuPrimitive.Popup.Props &
   Pick<
@@ -51,12 +63,18 @@ function ContextMenuContent({
     "align" | "alignOffset" | "side" | "sideOffset" | "anchor"
   >) {
   const isMobile = useIsMobile()
+  // The same close-focus rule as the dropdown: a dialog that an item opened
+  // keeps the focus it took. Inert until a caller names a `finalFocus`, so a
+  // menu that names none closes exactly as it did.
+  const [attachPopup, closeFocus] = usePopupFinalFocus(finalFocus)
   if (isMobile) {
     // On a phone a long press opens the menu as the same bottom sheet every
     // dropdown becomes there (ui/popupSheet.ts), rather than a popup floating
     // where the finger was. Only the geometry differs: the root is modal on
     // every device already, so the backdrop is where a tap outside lands, as
-    // the invisible one was before, and focus and Back are unchanged.
+    // the invisible one was before, and focus and Back are unchanged. The
+    // finger that opened it is often still over an item, so the guard makes
+    // that touch choose nothing (`lib/openingTouch.ts`).
     return (
       <ContextMenuPrimitive.Portal>
         <ContextMenuPrimitive.Backdrop
@@ -75,9 +93,12 @@ function ContextMenuContent({
           <ContextMenuPrimitive.Popup
             data-slot="context-menu-content"
             className={cn(SHEET_POPUP_CLASS, className)}
+            ref={attachPopup}
+            finalFocus={closeFocus}
             {...props}
           />
         </ContextMenuPrimitive.Positioner>
+        <OpeningTouchGuard />
       </ContextMenuPrimitive.Portal>
     )
   }
@@ -94,6 +115,8 @@ function ContextMenuContent({
         <ContextMenuPrimitive.Popup
           data-slot="context-menu-content"
           className={cn("z-50 max-h-(--available-height) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover p-1 text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 outline-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95", className )}
+          ref={attachPopup}
+          finalFocus={closeFocus}
           {...props}
         />
       </ContextMenuPrimitive.Positioner>
