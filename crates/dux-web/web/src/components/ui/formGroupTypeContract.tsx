@@ -2,6 +2,10 @@
 // each line under a directive is a compile error, and a directive with no error
 // under it is one. Nothing imports this file, so none of it reaches the bundle.
 import { FormGroup, FormSection } from "./form-group"
+import { Input } from "./input"
+import { Switch } from "./switch"
+import { Textarea } from "./textarea"
+import { SETTINGS } from "@/lib/settingsDescriptors"
 
 export function FormGroupTypeContract({ name }: { name: string | undefined }) {
   const words: string | false | null = name === undefined ? null : name
@@ -19,8 +23,30 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       <FormGroup layout="stacked" height="fill" control="single" label="Text">
         {(field) => <textarea {...field} />}
       </FormGroup>
-      <FormGroup layout="side" control="inert" label="Copy" notes={[{ words: "ui.copy", code: true }]}>
+      <FormGroup layout="side" control="named" label="Copy" notes={[{ setting: SETTINGS[0], lit: ["copy"] }]}>
         {(field) => <button type="button" {...field} />}
+      </FormGroup>
+      <FormGroup layout="side" control="named" label="Copy">
+        {(field) => <Switch {...field} />}
+      </FormGroup>
+      <FormGroup layout="stacked" control="single" label="Project name" optional>
+        {(field) => <Input {...field} />}
+      </FormGroup>
+      <FormGroup layout="side" control="named" label="Size">
+        {/* @ts-expect-error a text box is a single control, so a press on its label reaches it */}
+        {(field) => <input type="number" {...field} />}
+      </FormGroup>
+      <FormGroup layout="side" control="named" label="Size">
+        {/* @ts-expect-error a text box is a single control, so a press on its label reaches it */}
+        {(field) => <Input {...field} />}
+      </FormGroup>
+      <FormGroup layout="side" control="named" label="Text">
+        {/* @ts-expect-error a text area is a single control, so a press on its label reaches it */}
+        {(field) => <Textarea {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error a field with no visible label has no "(optional)" to draw */}
+      <FormGroup layout="stacked" control="single" spokenName="Name" optional>
+        {(field) => <input {...field} />}
       </FormGroup>
       <FormGroup layout="stacked" density="compact" control="single" label="New password">
         {(field) => <input {...field} />}
@@ -32,8 +58,12 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       <FormGroup layout="side" density="compact" control="single" label="Name">
         {(field) => <input {...field} />}
       </FormGroup>
-      {/* @ts-expect-error a code note has no tone of its own */}
-      <FormGroup layout="side" control="single" label="Name" notes={[{ words: "x", code: true, tone: "warning" }]}>
+      {/* @ts-expect-error a config key's note has no tone of its own */}
+      <FormGroup layout="side" control="single" label="Name" notes={[{ setting: SETTINGS[0], tone: "warning" }]}>
+        {(field) => <input {...field} />}
+      </FormGroup>
+      {/* @ts-expect-error only a setting's key is drawn in monospace, never words that may hold a name */}
+      <FormGroup layout="side" control="single" label="Name" notes={[{ words: name, code: true }]}>
         {(field) => <input {...field} />}
       </FormGroup>
       {/* @ts-expect-error a section has a title */}
@@ -80,7 +110,7 @@ export function FormGroupTypeContract({ name }: { name: string | undefined }) {
       </FormGroup>
       {/* @ts-expect-error a field says whether its control is one or a group */}
       <FormGroup layout="stacked" label="Name">
-        {(field) => <input {...field} />}
+        {(field) => <button type="button" {...field} />}
       </FormGroup>
       {/* @ts-expect-error a width is a side field's choice */}
       <FormGroup layout="stacked" width="wide" control="single" label="Name">

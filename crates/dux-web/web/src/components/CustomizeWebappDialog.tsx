@@ -118,33 +118,12 @@ const SWATCHES: { value: string; label: string; href: string }[] = [
   })),
 ]
 
-// A config key wraps after a dot or an underscore, never inside a word.
-function ConfigKey({ text, words }: { text: string; words: string[] }) {
-  const ranges = matchCharRanges(text, words)
-  const pieces = text.match(/[^._]+[._]?|[._]/g) ?? [""]
-  let offset = 0
-  return pieces.map((piece, i) => {
-    const at = offset
-    offset += Array.from(piece).length
-    const own = ranges
-      .map((r) => ({ start: r.start - at, end: r.end - at }))
-      .filter((r) => r.end > 0)
-      .map((r) => ({ start: Math.max(0, r.start), end: r.end }))
-    return (
-      <Fragment key={at}>
-        {i > 0 ? <wbr /> : null}
-        <MatchHighlight text={piece} ranges={own} />
-      </Fragment>
-    )
-  })
-}
-
 // A row's last lines: its config key while a search runs, so a key typed from
 // `config.toml` shows why the row matched, then where the setting applies.
 // Only what the search reads is lit.
 function footerNotes(d: SettingDescriptor, words: string[], meta: ReturnType<typeof rowMeta>): NoteLine[] {
   return [
-    ...(words.length > 0 ? [{ words: <ConfigKey text={d.key} words={words} />, code: true } as const] : []),
+    ...(words.length > 0 ? [{ setting: d, lit: words }] : []),
     {
       words: meta.map((part, i) => (
         <Fragment key={part.text}>
@@ -539,7 +518,7 @@ function SettingRow({
 }) {
   const zero = zeroText(d)
   // A field or the swatches take the row's whole width below its words on a
-  // phone; a press on a switch's, a select's or a number's words does nothing.
+  // phone; a press on a switch's or a select's words does nothing.
   const wide = d.control.kind === "text" || d.control.kind === "favicon"
   const notes: NoteLine[] = [
     { words: zero ? <MatchHighlight text={zero} ranges={matchCharRanges(zero, words)} /> : null },
@@ -558,7 +537,7 @@ function SettingRow({
       <FormGroup
         layout="side"
         width={wide ? "wide" : "compact"}
-        control={d.control.kind === "favicon" ? "group" : d.control.kind === "text" ? "single" : "inert"}
+        control={d.control.kind === "favicon" ? "group" : d.control.kind === "text" || d.control.kind === "number" ? "single" : "named"}
         label={<MatchHighlight text={d.label} ranges={matchCharRanges(d.label, words)} />}
         changed={changed ? "Changed from default:" : null}
         help={renderInlineCode(lock ?? d.description, words)}

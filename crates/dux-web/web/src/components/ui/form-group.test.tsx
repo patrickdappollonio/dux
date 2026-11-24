@@ -8,6 +8,7 @@ import { Input } from "./input"
 import { Switch } from "./switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./select"
 import { Textarea } from "./textarea"
+import { SETTINGS } from "@/lib/settingsDescriptors"
 
 let phone = false
 vi.mock("@/hooks/use-mobile", () => ({
@@ -372,9 +373,9 @@ describe("FormGroup", () => {
     expect(follows(stack, screen.getByText("Stack error."))).toBe(true)
   })
 
-  it("names an inert control by its words, and a press on the words leaves it alone", () => {
+  it("names a control by its words alone, and a press on the words leaves it alone", () => {
     render(
-      <FormGroup layout="side" control="inert" label="Copy on select" help="Help.">
+      <FormGroup layout="side" control="named" label="Copy on select" help="Help.">
         {(field) => <Switch {...field} defaultChecked />}
       </FormGroup>,
     )
@@ -384,14 +385,56 @@ describe("FormGroup", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("true")
   })
 
-  it("draws a code note in monospace and reads it with the field", () => {
+  it("says so when a control named by its words alone is a text box, which a press on its label must reach", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const boxes: React.ReactElement[] = [
+      <FormGroup key="input" layout="side" control="named" label="Size">
+        {(field) => <input type="number" {...(field as Record<string, unknown>)} />}
+      </FormGroup>,
+      <FormGroup key="textarea" layout="side" control="named" label="Text">
+        {(field) => <textarea {...(field as Record<string, unknown>)} />}
+      </FormGroup>,
+    ]
+    for (const group of boxes) {
+      error.mockClear()
+      const { unmount } = render(group)
+      expect(error, String(group.key)).toHaveBeenCalledWith(expect.stringContaining("text box"))
+      unmount()
+    }
+  })
+
+  it("draws a setting's config key in monospace, its searched words lit, and reads it with the field", () => {
+    const setting = SETTINGS.find((d) => d.key === "ui.copy_on_select")!
     render(
-      <FormGroup layout="side" control="single" label="Port" notes={[{ words: "server.port", code: true }]}>
+      <FormGroup layout="side" control="single" label="Port" notes={[{ setting, lit: ["copy"] }]}>
         {(field) => <Input {...field} />}
       </FormGroup>,
     )
-    expect(descriptions(screen.getByRole("textbox", { name: "Port" }))).toEqual(["server.port"])
-    expect(screen.getByText("server.port").className).toContain("font-mono")
+    expect(descriptions(screen.getByRole("textbox", { name: "Port" }))).toEqual(["ui.copy_on_select"])
+    expect(screen.getByText("copy").tagName).toBe("MARK")
+    expect(screen.getByText("copy").closest("[id]")!.className).toContain("font-mono")
+  })
+
+  it("draws a field with no visible label with its help under the control, where a label would not sit above it", () => {
+    render(
+      <FormGroup layout="stacked" control="single" spokenName="File name" help="Help words." error="Bad.">
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+    )
+    const box = screen.getByRole("textbox", { name: "File name" })
+    const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(follows(box, screen.getByText("Help words."))).toBe(true)
+    expect(follows(screen.getByText("Help words."), screen.getByText("Bad."))).toBe(true)
+    expect(descriptions(box)).toEqual(["Help words.", "Bad."])
+  })
+
+  it("says a field may be left empty in its label, which the field's name carries", () => {
+    render(
+      <FormGroup layout="stacked" control="single" label="Project name" optional>
+        {(field) => <Input {...field} />}
+      </FormGroup>,
+    )
+    expect(screen.getByRole("textbox", { name: "Project name (optional)" })).toBeTruthy()
   })
 
   it("sets a compact stacked field's label closer to its control than a regular one's", () => {
@@ -455,5 +498,25 @@ describe("FormSection", () => {
     render(<FormSection title="Password" help="Set from the command line." />)
     expect(screen.queryByRole("group")).toBeNull()
     expect(screen.getByText("Set from the command line.")).toBeTruthy()
+  })
+
+  it("says so when its title is empty, or its group holds no field", () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    const cases: [string, React.ReactElement][] = [
+      ["has no title", <FormSection key="title" title=" " help="Help." />],
+      ["has no title", <FormSection key="element" title={<></>} help="Help." />],
+      [
+        "holds no field",
+        <FormSection key="empty" title="Password">
+          <p>Words, no field.</p>
+        </FormSection>,
+      ],
+    ]
+    for (const [part, section] of cases) {
+      error.mockClear()
+      const { unmount } = render(section)
+      expect(error, String(section.key)).toHaveBeenCalledWith(expect.stringContaining(part))
+      unmount()
+    }
   })
 })

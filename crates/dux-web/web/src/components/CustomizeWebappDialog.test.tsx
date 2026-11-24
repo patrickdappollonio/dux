@@ -1705,7 +1705,7 @@ describe("CustomizeWebappDialog rows as fields", () => {
     expect([...label.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["font"])
   })
 
-  it("leaves a switch, a select and a number alone when their words are pressed, and puts a text field's words on the field", () => {
+  it("leaves a switch and a select alone when their words are pressed, and puts a text or number field's words on the field", () => {
     seed()
     render(<CustomizeWebappDialog />)
     const words = (label: string) => {
@@ -1717,7 +1717,8 @@ describe("CustomizeWebappDialog rows as fields", () => {
     fireEvent.click(words("Copy on select"))
     expect(copy.getAttribute("aria-checked")).toBe("true")
     topic("Attention and messages")
-    expect((words("Status message auto-clear") as HTMLLabelElement).control ?? null).toBeNull()
+    const seconds = screen.getByLabelText("Status message auto-clear")
+    expect((words("Status message auto-clear") as HTMLLabelElement).control).toBe(seconds)
     topic("Sign-in and network")
     fireEvent.click(words("Bind your Tailscale address"))
     expect(screen.getByLabelText("Bind your Tailscale address").getAttribute("aria-expanded")).toBe("false")

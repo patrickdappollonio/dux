@@ -1,8 +1,17 @@
-import { useEffect, useId, useRef, type ReactElement, type ReactNode } from "react"
+import { Fragment, useEffect, useId, useRef, type ReactElement, type ReactNode } from "react"
 
 import { ErrorLine, type ErrorLineAnnounce } from "@/components/ErrorLine"
-import { FIELD_CODE_TEXT, FIELD_HELP_TEXT, FIELD_LABEL_TEXT, FIELD_WARNING_TEXT } from "@/components/ui/form-text"
+import { MatchHighlight } from "@/components/MatchHighlight"
+import {
+  FIELD_CODE_TEXT,
+  FIELD_HELP_TEXT,
+  FIELD_LABEL_TEXT,
+  FIELD_OPTIONAL_TEXT,
+  FIELD_WARNING_TEXT,
+} from "@/components/ui/form-text"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { matchCharRanges } from "@/lib/searchMatch"
+import type { SettingDescriptor } from "@/lib/settingsDescriptors"
 import { cn } from "@/lib/utils"
 
 /** What the control spreads onto itself, so it is named and described by the group. */
@@ -14,33 +23,51 @@ export interface FieldWiring {
   "aria-invalid"?: true
 }
 
+/** The wiring of a control its words name but a press on them leaves alone.
+ * An `<input>` or a `<textarea>` refuses it: their `capture` and `rows` take
+ * other types, so a text box, which a press on its label must reach, does not compile. */
+export interface NamedWiring extends FieldWiring {
+  capture?: "a named control is not a text box"
+  rows?: "a named control is not a text box"
+}
+
+// "single" is one control a `<label>` points at, so a press on the words
+// reaches it; "named" is one control named by the words' id, which a press
+// leaves alone; "group" is a set of controls (a radio group) named by that id.
+export type FieldControl = "single" | "named" | "group"
+type WiringFor<C extends FieldControl> = C extends "named" ? NamedWiring : FieldWiring
+
 // A field is named by words drawn above or beside it, or, with none drawn, by a
 // name only a screen reader says. Neither may be missing: a label is a string or
 // an element, so a value that may be undefined, null or false does not compile.
 // The compiler cannot see an empty string, so the group reports one when drawn.
-type FieldName = { label: ReactElement | string; spokenName?: never } | { spokenName: string; label?: never }
+// `optional` says after the label, and in the name, that the field may be left empty.
+type FieldName =
+  | { label: ReactElement | string; optional?: true; spokenName?: never }
+  | { spokenName: string; label?: never; optional?: never }
 
 // One line about the current value. A "warning" one reads as the warning it is;
-// a "code" one is a config key, monospace and broken anywhere it must wrap.
-export type NoteLine = { words: ReactNode; tone?: "warning"; code?: never } | { words: ReactNode; code: true; tone?: never }
+// a `setting` one is that setting's config key in monospace, `lit` marking the
+// searched words in it. Only a setting's key is drawn so, never a name.
+export type NoteLine =
+  | { words: ReactNode; tone?: "warning"; setting?: never; lit?: never }
+  | { setting: SettingDescriptor; lit?: readonly string[]; words?: never; tone?: never }
 
 // The layout decides where the note lines and the error go, never the width of
 // the screen. "side" keeps all of a field's words (label, help, notes, error)
 // in one block beside the control, and on a phone a "wide" control goes under
 // that whole block, so the notes are above it. "stacked" draws the label and
-// help, then the control, then the notes and the error under it; "fill" makes
+// help, then the control, then the notes and the error under it (the help too
+// when no label is drawn to sit with); "fill" makes
 // the group and its control take the height left in a column, and "compact"
 // sets the label 4px above its control instead of 8px, for the fields of a `FormSection`.
 type FieldLayout =
   | { layout: "side"; width?: "compact" | "wide"; height?: never; density?: never }
   | { layout: "stacked"; height?: "content" | "fill"; density?: "regular" | "compact"; width?: never }
 
-export type FormGroupProps = FieldName &
+export type FormGroupProps<C extends FieldControl = FieldControl> = FieldName &
   FieldLayout & {
-    // "single" is one control a `<label>` points at, so a press on the words
-    // reaches it; "inert" is one control named by the words' id, which a press
-    // leaves alone; "group" is a set of controls (a radio group) named by that id.
-    control: "single" | "inert" | "group"
+    control: C
     help?: ReactNode
     // About the current value (a scope, what the chosen option means), a line
     // each, in order, after the help. A line with no words is not drawn.
@@ -56,11 +83,11 @@ export type FormGroupProps = FieldName &
     // undo) and `after` it (a `⋯`).
     before?: ReactNode
     after?: ReactNode
-    children: (field: FieldWiring) => ReactNode
+    children: (field: WiringFor<C>) => ReactNode
   }
 
 /** One labelled field: its words, its control and how the two are tied, in one of two layouts. */
-export function FormGroup(props: FormGroupProps) {
+export function FormGroup<C extends FieldControl>(props: FormGroupProps<C>) {
   const { control, help, notes, error, errorAnnounce = "silent", describedBy, invalid, changed, before, after, children } =
     props
   const phone = useIsMobile()
@@ -74,7 +101,7 @@ export function FormGroup(props: FormGroupProps) {
   const spoken = props.spokenName !== undefined
   const box = useRef<HTMLDivElement>(null)
 
-  const field: FieldWiring = {
+  const field: WiringFor<C> = {
     id: control === "single" ? id : undefined,
     "aria-label": spoken ? props.spokenName : undefined,
     "aria-labelledby": control !== "single" && !spoken ? labelId : undefined,
@@ -91,6 +118,9 @@ export function FormGroup(props: FormGroupProps) {
       console.error("FormGroup: the field has no name; give it a label or a spokenName that is not empty.")
     }
     const missing = unwired(box.current, field)
+    if (control === "named" && missing.length === 0 && namedTextBox(box.current, field)) {
+      console.error("FormGroup: a text box is named by its words alone; make it a \"single\" control, so a press on its label reaches it.")
+    }
     if (missing.length > 0) {
       console.error(
         `FormGroup: the control does not carry ${missing.join(", ")} of the wiring it was handed; spread all of it onto the control.`,
@@ -110,10 +140,12 @@ export function FormGroup(props: FormGroupProps) {
   const labelEl = spoken ? null : control === "single" ? (
     <label id={labelId} htmlFor={id} className={cn(FIELD_LABEL_TEXT, "min-w-0")}>
       {props.label}
+      {props.optional ? <> <span className={FIELD_OPTIONAL_TEXT}>(optional)</span></> : null}
     </label>
   ) : (
     <span id={labelId} onClick={control === "group" ? focusGroup : undefined} className={cn(FIELD_LABEL_TEXT, "min-w-0")}>
       {props.label}
+      {props.optional ? <> <span className={FIELD_OPTIONAL_TEXT}>(optional)</span></> : null}
     </span>
   )
   // Not `UnsavedDot` (the editor's glyph, with a tooltip): this dot says in words the value
@@ -138,8 +170,10 @@ export function FormGroup(props: FormGroupProps) {
     </div>
   ) : null
   const noteEl = <NoteLines lines={noteLines} />
+  // A stacked field's error is the size of a dialog's sentences, a side or compact one's that of its help.
+  const errorSize = props.layout === "stacked" && props.density !== "compact" ? "sm" : "xs"
   const errorEl = (
-    <ErrorLine announce={errorAnnounce} size="xs" id={errorId}>
+    <ErrorLine announce={errorAnnounce} size={errorSize} id={errorId}>
       {hasError ? error : null}
     </ErrorLine>
   )
@@ -176,7 +210,7 @@ export function FormGroup(props: FormGroupProps) {
         {helpEl}
       </div>
     ) : (
-      (labelLine ?? helpEl)
+      labelLine
     )
   // With nothing on its row and no height to take, the control is a direct
   // child of the column, so its own width classes behave as they would alone.
@@ -202,6 +236,7 @@ export function FormGroup(props: FormGroupProps) {
       {header}
       <div className={cn("flex flex-col gap-1.5", fill && "flex-1")}>
         {row}
+        {labelLine === null ? helpEl : null}
         {noteEl}
         {errorEl}
       </div>
@@ -234,13 +269,24 @@ export function FormSection({
   const hasError = error != null && error !== false && error !== ""
   const errorId = hasError ? `${base}error` : undefined
   const fields = children != null && children !== false
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!import.meta.env.DEV || box.current === null) return
+    if (!box.current.ownerDocument.getElementById(titleId)?.textContent?.trim()) {
+      console.error("FormSection: the section has no title; give it a title that is not empty.")
+    }
+    const group = box.current.querySelector('[role="group"]')
+    if (group !== null && group.querySelector("[data-form-layout]") === null) {
+      console.error("FormSection: the group holds no field; draw each field with FormGroup, or leave the children out.")
+    }
+  })
   const errorEl = (
     <ErrorLine announce={errorAnnounce} size="xs" id={errorId}>
       {hasError ? error : null}
     </ErrorLine>
   )
   return (
-    <div className="flex flex-col gap-3">
+    <div ref={box} className="flex flex-col gap-3">
       <div className="flex flex-col gap-1">
         <span id={titleId} className={FIELD_LABEL_TEXT}>
           {title}
@@ -271,7 +317,9 @@ export function FormSection({
 // The note lines that have words, each with the id that describes a control by it.
 function drawnNotes(notes: readonly NoteLine[] | undefined, base: string) {
   return (notes ?? []).flatMap((line, i) =>
-    line.words == null || line.words === false || line.words === "" ? [] : [{ ...line, id: `${base}note${i}` }],
+    line.setting === undefined && (line.words == null || line.words === false || line.words === "")
+      ? []
+      : [{ ...line, id: `${base}note${i}` }],
   )
 }
 
@@ -280,11 +328,32 @@ function NoteLines({ lines }: { lines: ReturnType<typeof drawnNotes> }) {
     <div
       key={line.id}
       id={line.id}
-      className={line.code ? FIELD_CODE_TEXT : line.tone === "warning" ? FIELD_WARNING_TEXT : FIELD_HELP_TEXT}
+      className={line.setting ? FIELD_CODE_TEXT : line.tone === "warning" ? FIELD_WARNING_TEXT : FIELD_HELP_TEXT}
     >
-      {line.words}
+      {line.setting ? <ConfigKey text={line.setting.key} lit={line.lit ?? []} /> : line.words}
     </div>
   ))
+}
+
+// A config key wraps after a dot or an underscore, never inside a word.
+function ConfigKey({ text, lit }: { text: string; lit: readonly string[] }) {
+  const ranges = matchCharRanges(text, lit)
+  const pieces = text.match(/[^._]+[._]?|[._]/g) ?? [""]
+  let offset = 0
+  return pieces.map((piece, i) => {
+    const at = offset
+    offset += Array.from(piece).length
+    const own = ranges
+      .map((r) => ({ start: r.start - at, end: r.end - at }))
+      .filter((r) => r.end > 0)
+      .map((r) => ({ start: Math.max(0, r.start), end: r.end }))
+    return (
+      <Fragment key={at}>
+        {i > 0 ? <wbr /> : null}
+        <MatchHighlight text={piece} ranges={own} />
+      </Fragment>
+    )
+  })
 }
 
 // The parts of the wiring the control under `root` does not carry. It is found
@@ -304,4 +373,11 @@ function unwired(root: HTMLElement, field: FieldWiring): string[] {
   }
   if (field["aria-invalid"] !== undefined && el.getAttribute("aria-invalid") !== "true") missing.push("aria-invalid")
   return missing
+}
+
+// Whether the control a "named" field wired is a box text is typed into.
+function namedTextBox(root: HTMLElement, field: FieldWiring): boolean {
+  const attr = field["aria-label"] !== undefined ? "aria-label" : "aria-labelledby"
+  const el = Array.from(root.querySelectorAll(`[${attr}]`)).find((e) => e.getAttribute(attr) === field[attr])
+  return el?.matches("textarea, input:not([type=checkbox], [type=radio], [type=range], [type=color])") ?? false
 }
