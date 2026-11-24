@@ -55,6 +55,35 @@ describe("RenameEntryDialog", () => {
     expect(confirm.hasAttribute("disabled")).toBe(true)
   })
 
+  it("names its one box by what to type and reads the dirty-file refusal with it", () => {
+    render(
+      <RenameEntryDialog
+        target={{ path: "src/a/old.ts", isDir: false }}
+        isDirty
+        onClose={() => {}}
+        onSubmit={() => Promise.resolve()}
+      />,
+    )
+    const input = screen.getByRole("textbox", { name: "New name" })
+    const read = (input.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent)
+    expect(read).toEqual(["Save or discard changes in this file before renaming."])
+  })
+
+  it("reads a refused name with the box", () => {
+    render(
+      <RenameEntryDialog
+        target={{ path: "old.ts", isDir: false }}
+        isDirty={false}
+        onClose={() => {}}
+        onSubmit={() => Promise.resolve()}
+      />,
+    )
+    const input = screen.getByRole("textbox", { name: "New name" })
+    fireEvent.change(input, { target: { value: "a/b" } })
+    expect(input.getAttribute("aria-invalid")).toBe("true")
+    expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toMatch(/slash/)
+  })
+
   it("a clean target with a valid new name submits on Enter", () => {
     const onSubmit = vi.fn(() => Promise.resolve())
     render(

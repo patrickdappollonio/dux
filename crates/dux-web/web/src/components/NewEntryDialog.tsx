@@ -1,8 +1,8 @@
 import { useState } from "react"
 
-import { ErrorLine } from "@/components/ErrorLine"
 import { Modal, useHeldWhileClosed, useModalLifetime } from "@/components/modal"
 import { InlineCode } from "@/components/ui/inline-code"
+import { FormGroup } from "@/components/ui/form-group"
 import { Input } from "@/components/ui/input"
 import { validateEntryName } from "@/lib/fileTreeOps"
 import { renderProse } from "@/lib/prose"
@@ -103,24 +103,27 @@ function NewEntryDialogBody({
       }}
       writeBlocked={writeBlocked}
     >
-      <Input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder={place.kind === "file" ? "example.ts" : "components"}
-        aria-invalid={refused}
-        aria-describedby={refused ? "new-entry-error" : undefined}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault()
-            submit()
-          }
-        }}
-      />
-      {refused && (
-        <ErrorLine announce="silent" id="new-entry-error">
-          {renderProse(validation.error)}
-        </ErrorLine>
-      )}
+      <FormGroup
+        layout="stacked"
+        control="single"
+        spokenName={place.kind === "file" ? "File name" : "Folder name"}
+        error={refused ? renderProse(validation.error) : null}
+      >
+        {(field) => (
+          <Input
+            {...field}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={place.kind === "file" ? "example.ts" : "components"}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault()
+                submit()
+              }
+            }}
+          />
+        )}
+      </FormGroup>
     </Modal>
   )
 }
