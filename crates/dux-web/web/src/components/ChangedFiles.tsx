@@ -950,8 +950,7 @@ interface ChangesHeaderProps {
   // Why the pane's own git items are greyed out (the pane is quiet), or null
   // when they work.
   gitBlocked: string | null
-  // Why the editor cannot open the agent's directory, and so why no terminal
-  // can start in it either, or null when both can.
+  // Why the editor cannot open the agent's directory, or null when it can.
   editorBlocked: string | null
   // Why this page may not change the agent, or null when it may.
   changeBlock: RowBlock | null
@@ -1049,9 +1048,9 @@ function ChangesHeader({
             {folded ? (
               <>
                 {gitReasonShared ? null : <MenuGroupReason reasons={[editorLine]} />}
-                {/* The header's two buttons, doing what they do there: the
+                {/* The header's Editor button, doing what it does there: the
                   * in-page editor on a computer, the standalone editor's
-                  * address on a phone, and neither for a directory that is
+                  * address on a phone, and nothing for a directory that is
                   * gone. */}
                 <DropdownMenuItem
                   disabled={editorReason !== null}
