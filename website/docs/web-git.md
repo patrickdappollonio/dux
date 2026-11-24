@@ -147,7 +147,7 @@ The changes pane's header carries two controls: an **Editor** button that takes 
 
 **Hiding and bringing the pane back.** Dragging the split all the way closed does the same as **Hide Changes pane**, though only when you let go: drag past the snap and back out before releasing and the pane stays. Either way:
 
-- A button appears on the right of the header to bring it back at a sensible width, carrying the agent's changed-file count so you can still see at a glance how much has moved.
+- A button appears on the right of the header to bring it back at a sensible width, reading the agent's count and the word, such as "1 change" or "27 changes", so you can still see at a glance how much has moved.
 - The **Show the Changes pane** row in **Preferences** is the other way in, since hiding the pane takes this menu with it.
 
 **The header stays in every state the pane can be in:** while the changes load, when they fail to, and when the pane has nothing to show because a standalone agent's folder has no repository or an agent's directory is gone.

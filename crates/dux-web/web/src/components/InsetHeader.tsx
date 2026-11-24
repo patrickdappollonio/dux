@@ -28,6 +28,7 @@ import { useIsNarrowComputerLayout } from "@/hooks/use-mobile"
 import { headerChipTooltip, type HeaderChip } from "@/lib/headerSubject"
 import type { SessionView } from "@/lib/types"
 import { changesSummary } from "@/lib/changesSummary"
+import { formatRegularCount } from "@/lib/formatRegularCount"
 import {
   changesPaneEffectivelyHidden,
   changesSpacerPercent,
@@ -108,10 +109,18 @@ export function InsetHeader() {
     () => FOLD_ORDER.filter((item) => item !== "new-tab" || hasNewTab),
     [hasNewTab],
   )
+  // What the reopen control says about the pane it brings back: the count and
+  // its word, as the control prints it. Null while no agent is in view, which
+  // is also the state in which the phone draws no count control at all.
+  const summary = changesSummary(dux.changes, session?.id)
+  const reopenWords = summary ? formatRegularCount(summary.count, "change") : undefined
   const { isFolded, settled, rowRef, itemRef } = useFoldToFit({
     enabled: Boolean(paneSubject && selectedTarget),
     items: foldItems,
-    watch: chips.map((c) => c.value).join("\u0000"),
+    // The reopen control stands beside the names and is as wide as its words,
+    // which change with the count ("9 changes" to "10 changes"), so a change in
+    // them is re-measured as a change in the names is.
+    watch: [...chips.map((c) => c.value), reopenWords ?? ""].join("\u0000"),
     focusOnFold: paneMenuRef,
   })
   const folded = {
@@ -131,10 +140,11 @@ export function InsetHeader() {
   const spacer = changesSpacerPercent(dux, narrow)
   const paneHidden = changesPaneEffectivelyHidden(dux, narrow)
 
-  // What the reopen control says about the pane it brings back. Null while no
-  // agent is in view, which is also the state in which the phone draws no ±N
-  // control at all.
-  const summary = changesSummary(dux.changes, session?.id)
+  // The same sentence names the control and fills its tooltip. It holds the
+  // visible words, so the count is said once and the name contains the label.
+  const reopenName = reopenWords
+    ? `Show Changes pane, ${reopenWords}`
+    : "Show Changes pane"
 
   return (
     <header className="relative flex h-12 shrink-0 items-center gap-2 border-b px-3">
@@ -198,18 +208,15 @@ export function InsetHeader() {
         </span>
       ) : null}
       {/* The way back to a hidden or zero-width Changes pane, whose own menu is
-          gone with it, so it never folds into this `⋯`. It carries the phone's
-          ±N summary, since nothing else here says what the agent changed. */}
+          gone with it, so it never folds into this `⋯`. It says how many changes
+          the pane holds, in words, since nothing else here says what the agent
+          changed. */}
       {paneHidden && (
-        <SimpleTooltip content="Show Changes pane">
+        <SimpleTooltip content={reopenName}>
           <HeaderButton
             icon={<PanelRightOpen />}
-            label={summary?.label}
-            aria-label={
-              summary
-                ? `Show Changes pane, ${summary.countLabel}`
-                : "Show Changes pane"
-            }
+            label={reopenWords}
+            aria-label={reopenName}
             onClick={() => showChangesPane()}
           />
         </SimpleTooltip>

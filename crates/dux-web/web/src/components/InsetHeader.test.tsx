@@ -881,16 +881,40 @@ describe("InsetHeader show-Changes summary", () => {
     })
     render(<InsetHeader />)
     const button = screen.getByRole("button", { name: /show changes pane/i })
-    expect(button.textContent).toBe("±3")
+    expect(button.textContent).toBe("3 changes")
     // The icon stays: the count is what the pane holds, the glyph is what the
     // press does.
     expect(button.querySelector("svg")).toBeTruthy()
     expect(button.getAttribute("aria-label")).toBe(
-      "Show Changes pane, 3 changed files",
+      "Show Changes pane, 3 changes",
     )
   })
 
-  it("shows the ±0 zero state, exactly as the phone does", () => {
+  it("says the word with its count: singular only for exactly one", () => {
+    const words: [number, string][] = [
+      [0, "0 changes"],
+      [1, "1 change"],
+      [2, "2 changes"],
+      [27, "27 changes"],
+    ]
+    for (const [n, text] of words) {
+      mockState = hiddenWith({
+        sessionId: "s1",
+        phase: "loaded",
+        rev: 1,
+        staged: [],
+        unstaged: Array.from({ length: n }, (_, i) => changedFile(`f${i}.rs`, "M")),
+      })
+      const { unmount } = render(<InsetHeader />)
+      const button = screen.getByRole("button", { name: /show changes pane/i })
+      expect(button.textContent).toBe(text)
+      // The count is spoken once, and the name still contains the visible text.
+      expect(button.getAttribute("aria-label")).toBe(`Show Changes pane, ${text}`)
+      unmount()
+    }
+  })
+
+  it("shows the zero state with its word", () => {
     mockState = hiddenWith({
       sessionId: "s1",
       phase: "loaded",
@@ -901,7 +925,7 @@ describe("InsetHeader show-Changes summary", () => {
     render(<InsetHeader />)
     expect(
       screen.getByRole("button", { name: /show changes pane/i }).textContent,
-    ).toBe("±0")
+    ).toBe("0 changes")
   })
 
   it("keeps the cluster's one height token when it carries the number", () => {
@@ -1247,8 +1271,13 @@ describe("InsetHeader folding one control at a time", () => {
       [...header.querySelectorAll("button")].some((b) => b.textContent === word),
     )
   }
+  // The reopen control is as wide as its text, ten pixels a character.
+  function reopenWidth(): number {
+    const text = document.querySelector('header button[aria-label^="Show Changes pane"]')?.textContent
+    return (text?.length ?? 0) * 10
+  }
   function rowWidth(): number {
-    return standing().reduce((w, word) => w - WIDTH[word], room)
+    return standing().reduce((w, word) => w - WIDTH[word], room) - reopenWidth()
   }
   function isRow(el: Element): boolean {
     return el.tagName === "DIV" && el.querySelector(":scope > [data-chip]") !== null
@@ -1283,6 +1312,10 @@ describe("InsetHeader folding one control at a time", () => {
       this: Element,
     ) {
       const word = this.querySelector("button")?.textContent ?? ""
+      if (this.getAttribute("aria-label")?.startsWith("Show Changes pane")) {
+        const w = (this.textContent?.length ?? 0) * 10
+        return { left: 0, right: w, width: w, top: 0, bottom: 0, height: 0, x: 0, y: 0 } as DOMRect
+      }
       const parentIsHeader = this.parentElement?.tagName === "HEADER"
       const width =
         this.hasAttribute("data-chip")
@@ -1346,6 +1379,35 @@ describe("InsetHeader folding one control at a time", () => {
       )
     }
   }, 20_000)
+
+  it("folds earlier when the reopen control's word grows wider, with no resize", () => {
+    const hidden = (n: number) =>
+      ({
+        ...stateFor("main", "main"),
+        bootstrap: { show_changes_pane: false },
+        changes: {
+          sessionId: "s1",
+          phase: "loaded",
+          rev: 1,
+          staged: [],
+          unstaged: Array.from({ length: n }, (_, i) => ({
+            path: `f${i}.rs`,
+            status: "M",
+            additions: 0,
+            deletions: 0,
+            binary: false,
+          })),
+        },
+      }) as unknown as DuxState
+    // Room for all three beside "1 change" (80px) and not beside "27 changes" (100px).
+    room = NAMES + SLACK + 315 + 80
+    mockState = hidden(1)
+    const { rerender } = render(<InsetHeader />)
+    expect(standing()).toEqual(["New tab…", "Theater", "Macros…"])
+    mockState = hidden(27)
+    rerender(<InsetHeader />)
+    expect(standing()).toEqual(["New tab…", "Macros…"])
+  })
 
   it("rests in the same state at a width whichever way it was reached", () => {
     mockState = stateFor("main", "main")
