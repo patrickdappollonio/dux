@@ -78,6 +78,7 @@ import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import { FOCUS_RING } from "@/lib/focusRing"
 import {
   MACRO_SURFACE_OPTIONS,
@@ -777,7 +778,7 @@ function MacroList({
   const tabStop = items.some((item) => item.key === selectedKey) ? selectedKey : items[0].key
 
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} modifiers={SORT_MODIFIERS} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
       <SortableContext items={items.map((item) => dragId(item.key))} strategy={verticalListSortingStrategy}>
         <ScrollListRows
           gap="tight"

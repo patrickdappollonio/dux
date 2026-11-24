@@ -73,6 +73,7 @@ import {
   MOUSE_DRAG_ACTIVATION,
   TOUCH_DRAG_ACTIVATION,
 } from "@/lib/dragActivation"
+import { SORT_MODIFIERS } from "@/lib/dragBounds"
 import {
   FLAT_SORT_LABELS,
   flatRowKey,
@@ -1017,6 +1018,7 @@ export function FlatAgentList({ handlers }: { handlers: FlatSelectHandlers }) {
                 terminals alike: they sort together, so they drag together. */}
             <DndContext
               sensors={sensors}
+              modifiers={SORT_MODIFIERS}
               collisionDetection={closestCenter}
               onDragEnd={handleDragEnd}
             >
