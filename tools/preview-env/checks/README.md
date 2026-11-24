@@ -114,6 +114,7 @@ once the workspace is seeded.
 | `phone-preferences-back` | phone | On a phone, from both "/" and "#/", the browser's Back from an edited Preferences topic returns to the topic list, and a second Back sets the dialog aside with a "Restore" toast without leaving the app. |
 | `computer-dock-appears` | computer | On a computer, moving from an agent with no terminal to one whose terminal was last left folded away or alone on screen, and opening the first terminal on the agent on screen, each show the agent with its dock and no error card. |
 | `one-driver` | two computers | With a second device having taken over an agent, a confirm that was open on the first device has its action disabled with a reason naming that device, and the agent menu's changing entries are disabled under a reason naming it. |
+| `phone-tree-card` | phone, computer | On a phone a long press on a file in the editor's tree opens its menu as a card over the bottom of the screen that its own opening touch chooses nothing from, a tap outside it and the browser's Back close it without moving the page, a tap on an item chooses it, and while another device drives the agent the card says why its writes are greyed. |
 
 The last column is each check's own `protects` sentence, word for word:
 `run.sh --list` prints those sentences, and the runner (and `--list`) refuses
